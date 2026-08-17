@@ -11,7 +11,7 @@ KT_JAR="$HOME/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-com
 KT_STDLIB=$(find ~/.gradle/caches/modules-2 -name 'kotlin-stdlib-2.1.20.jar' | head -1)
 [ -z "$KT_STDLIB" ] && KT_STDLIB=$(find ~/.gradle/caches/modules-2 -name 'kotlin-stdlib-2.1*.jar' | head -1)
 COROUTINES=$(find ~/.gradle/caches/modules-2 -name 'kotlinx-coroutines-core-jvm-1.9.0.jar' | grep -v sources | head -1)
-TROVE=$(find ~/.gradle/caches/modules-2 -name 'trove4j-20160824.jar' | head -1)
+TROVE=$(find ~/.gradle/caches/modules-2 -name 'trove4j-*.jar' | head -1)
 ANNOTATIONS=$(find ~/.gradle/caches/modules-2 -path '*org.jetbrains/annotations/23.0.0*' -name 'annotations-23.0.0.jar' | head -1)
 OUT=build/apk
 MANIFEST=apps/viewer-android/android/app/src/main/AndroidManifest.xml
@@ -47,11 +47,10 @@ java -cp "$KT_JAR:$KT_STDLIB:$COROUTINES:$TROVE:$ANNOTATIONS" org.jetbrains.kotl
 
 echo "[3/6] d8 -> classes.dex"
 find "$OUT/classes" -name '*.class' > "$OUT/classlist.txt"
-# d8 needs all classes at once; use the directory form
 "$BT/d8" --release --min-api 29 \
   --lib "$PLATFORM" \
-  --classpath "$OUT/classes" \
   --output "$OUT/obj" \
+  "$KT_STDLIB" \
   $(cat "$OUT/classlist.txt")
 
 echo "[4/6] package native lib + dex into APK"

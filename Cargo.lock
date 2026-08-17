@@ -7,7 +7,9 @@ name = "android-viewer"
 version = "0.1.0"
 dependencies = [
  "domain",
+ "libc",
  "viewer-core",
+ "viewer-decoder",
 ]
 
 [[package]]

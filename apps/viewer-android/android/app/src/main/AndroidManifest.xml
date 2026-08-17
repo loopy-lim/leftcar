@@ -3,6 +3,9 @@
      document tasks. Actual behavior verified on Galaxy XR in H05 (E5). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.leftcar.viewer">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="Leftcar"
         android:resizeableActivity="true">
@@ -23,8 +26,8 @@
 
         <activity
             android:name=".shim.StreamActivity"
-            android:exported="false"
-            android:launchMode="singleInstance"
+            android:exported="true"
+            android:launchMode="standard"
             android:documentLaunchMode="always"
             android:taskAffinity="" />
     </application>

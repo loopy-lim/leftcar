@@ -10,4 +10,6 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 viewer-core = { path = "../../crates/viewer-core" }
+viewer-decoder = { path = "../../crates/viewer-decoder" }
 domain = { path = "../../crates/domain" }
+libc = "0.2"

@@ -63,6 +63,7 @@ pub extern "C" fn leftcar_rustra_contract_hash() -> *mut c_char {
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn leftcar_rustra_free(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(CString::from_raw(s)) };
@@ -89,11 +90,11 @@ mod jni {
     use std::ffi::c_void;
 
     #[repr(C)]
-    struct JString(c_void);
+    pub struct JString(c_void);
     #[repr(C)]
-    struct JNIEnv(c_void);
+    pub struct JNIEnv(c_void);
     #[repr(C)]
-    struct JClass(c_void);
+    pub struct JClass(c_void);
 
     // JNIEnv vtable access identical to native/android-viewer (verified there):
     // GetStringUTFChars idx 169, ReleaseStringUTFChars idx 170, NewStringUTF idx 167

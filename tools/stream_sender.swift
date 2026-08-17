@@ -106,16 +106,16 @@ func packetize(_ sample: CMSampleBuffer) {
     }
     // fragment large AUs across datagrams: [F][fragIdx:u8][fragCnt:u8][auId:u16][payload]
     let MTU = 1400
+    let auId = UInt16(sentFrames & 0xFFFF)
     if pkt.count <= MTU {
         var p2 = pkt
-        p2.insert(contentsOf: [0x46, 0, 1, UInt8(sentFrames & 0xFF)], at: 0)
+        p2.insert(contentsOf: [0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)], at: 0)
         send(p2)
         sentFrames += 1
         sentBytes += pkt.count
     } else {
         let payload = pkt
         let fragCnt = UInt8((payload.count + MTU - 1) / MTU)
-        let auId = UInt16(sentFrames & 0xFFFF)
         var idx = 0
         var frag = 0
         while idx < payload.count {

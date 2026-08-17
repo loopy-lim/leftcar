@@ -43,6 +43,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         fl.addView(label, android.widget.FrameLayout.LayoutParams(
             400, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+        android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId idx=$idx")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            window.attributes.preferredRefreshRate = 90.0f
+        }
         setContentView(fl)
         nativeState = ViewerNative.start()
         ViewerNative.updateWindowEvent(nativeState, instanceId, 1, 0) // ACTIVITY_CREATE
@@ -50,10 +54,13 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        ViewerNative.attachSurface(nativeState, instanceId, holder.surface)
+        android.util.Log.i("LeftcarStream", "surfaceCreated: instanceId=$instanceId surface=${holder.surface}")
+        val res = ViewerNative.attachSurface(nativeState, instanceId, holder.surface)
+        android.util.Log.i("LeftcarStream", "attachSurface returned $res")
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        android.util.Log.i("LeftcarStream", "surfaceChanged: width=$width height=$height")
         ViewerNative.surfaceChanged(nativeState, instanceId, width, height)
     }
 
