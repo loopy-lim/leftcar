@@ -3,7 +3,7 @@
 //! undecided (Q-004) until version/fuzz/size evidence exists.
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+
 
 pub const PROTOCOL_MIN: u32 = 1;
 pub const PROTOCOL_MAX: u32 = 1;
@@ -296,6 +296,6 @@ mod fuzz_smoke {
         };
         let framed = frame_control(&env).unwrap();
         assert!(framed.len() < 1024);
-        let _ = Duration::from_millis(0); // Duration retained for future RTT types
+
     }
 }

@@ -121,7 +121,7 @@ fn inmemory_loopback_one_source_end_to_end() {
 fn inmemory_loopback_four_sources_without_cross_talk() {
     let session = SessionId::from_raw("sess").unwrap();
     let sources: Vec<SourceId> = (0..4)
-        .map(|i| SourceId::from_raw(&format!("m{i}")).unwrap())
+        .map(|i| SourceId::from_raw(format!("m{i}")).unwrap())
         .collect();
     let mut transport = InMemoryTransport::new();
     let mut enc = FakeEncoder::new();

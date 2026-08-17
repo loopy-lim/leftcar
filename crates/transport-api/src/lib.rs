@@ -169,11 +169,11 @@ impl SimulatedLink {
     pub fn advance(&mut self, dt: Duration) -> Vec<TransportEvent> {
         self.now += dt;
         let mut out = Vec::new();
-        while let Some((deliver_at, event)) = self.in_flight.front() {
+        while let Some((deliver_at, _pending)) = self.in_flight.front() {
             if *deliver_at <= self.now {
                 let (_, event) = self.in_flight.pop_front().expect("front exists");
                 // reorder: with probability reorder_rate, hold back one event
-                if self.rng.next_f64() < self.profile.reorder_rate && self.in_flight.len() >= 1 {
+                if self.rng.next_f64() < self.profile.reorder_rate && !self.in_flight.is_empty() {
                     // swap with the next in-flight event
                     let next = self.in_flight.pop_front().expect("len checked");
                     self.ready.push_back(next.1);
