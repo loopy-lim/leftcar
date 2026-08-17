@@ -4,5 +4,14 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[lib]
+name = "architecture_check"
+path = "src/lib.rs"
+
+[[bin]]
+name = "architecture-check"
+path = "src/main.rs"
+
 [dependencies]
 serde_json = { workspace = true }
+toml = "0.8"
