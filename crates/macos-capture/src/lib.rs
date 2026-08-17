@@ -59,7 +59,7 @@ pub enum Ost {
 /// network I/O or heavy allocation — frames cross a bounded channel and the
 /// handler returns immediately.
 pub fn start_capture(
-    source: &ApprovedMacSource,
+    _source: &ApprovedMacSource,
     _config: &CaptureConfig,
     _sink: &dyn FrameSink,
 ) -> Result<ActiveStream, CaptureStartError> {
