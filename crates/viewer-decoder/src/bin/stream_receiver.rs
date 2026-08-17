@@ -21,7 +21,8 @@ fn main() {
     let seconds: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let sock = UdpSocket::bind(format!("0.0.0.0:{port}")).expect("bind");
-    sock.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+    sock.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
     println!("LISTENING udp/{port}");
 
     let mut sps: Vec<u8> = Vec::new();
@@ -36,11 +37,11 @@ fn main() {
                 // parse: [C][F][G][len:u32BE][nal...]* where each nal has 00 00 00 01 prefix
                 let mut off = 3usize;
                 while off + 4 <= n {
-                    let len = u32::from_be_bytes(
-                        buf[off..off + 4].try_into().unwrap(),
-                    ) as usize;
+                    let len = u32::from_be_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                     off += 4;
-                    if off + len > n { break; }
+                    if off + len > n {
+                        break;
+                    }
                     let nal = &buf[off..off + len];
                     // strip the 4-byte start code for csd
                     if nal.len() > 4 {

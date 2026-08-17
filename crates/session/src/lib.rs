@@ -281,8 +281,7 @@ impl PairingService {
 
     pub fn cancel(&mut self, offer_id: &str) {
         self.offers.remove(offer_id);
-        self.offer_secrets
-            .remove(offer_id); // associated OfferSecret drops -> zeroized
+        self.offer_secrets.remove(offer_id); // associated OfferSecret drops -> zeroized
     }
 }
 
@@ -496,7 +495,6 @@ impl ReconnectController {
 mod tests {
     use super::*;
 
-
     /// Test helper: fetch the offer's secret + code for a legitimate approve.
     fn legit(svc: &mut PairingService, offer: &PairingOffer) -> ([u8; 32], String) {
         let secret = svc
@@ -531,7 +529,12 @@ mod tests {
         let offer = svc.begin_offer("fp".into());
         svc.clock = Box::new(clock(121));
         let (secret, code) = legit(&mut svc, &offer);
-        let err = svc.approve(&offer.ephemeral_offer_id, DeviceId::generate(), &secret, &code);
+        let err = svc.approve(
+            &offer.ephemeral_offer_id,
+            DeviceId::generate(),
+            &secret,
+            &code,
+        );
         assert!(matches!(err, Err(PairingError::Expired)));
     }
 
@@ -544,7 +547,12 @@ mod tests {
         svc.approve(&offer.ephemeral_offer_id, viewer.clone(), &secret, &code)
             .unwrap();
         // replay: same offer cannot approve a second device
-        let err = svc.approve(&offer.ephemeral_offer_id, DeviceId::generate(), &secret, &code);
+        let err = svc.approve(
+            &offer.ephemeral_offer_id,
+            DeviceId::generate(),
+            &secret,
+            &code,
+        );
         assert!(matches!(err, Err(PairingError::AlreadyUsed)));
     }
 
@@ -580,8 +588,7 @@ mod tests {
         let b = DeviceId::generate();
         let (secret, code) = legit(&mut svc, &offer);
         let first = svc.approve(&offer.ephemeral_offer_id, a, &secret, &code);
-        let second =
-            svc.approve(&offer.ephemeral_offer_id, b.clone(), &secret, &code);
+        let second = svc.approve(&offer.ephemeral_offer_id, b.clone(), &secret, &code);
         assert!(first.is_ok());
         assert!(matches!(second, Err(PairingError::AlreadyUsed)));
         assert!(!svc.is_approved(&b));
@@ -798,10 +805,7 @@ mod tests {
     fn approve_with_wrong_human_code_is_rejected() {
         let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
         let offer = svc.begin_offer("fp".into());
-        let secret = svc
-            .take_secret_for_qr(&offer.ephemeral_offer_id)
-            .unwrap()
-            .0;
+        let secret = svc.take_secret_for_qr(&offer.ephemeral_offer_id).unwrap().0;
         let err = svc.approve(
             &offer.ephemeral_offer_id,
             DeviceId::generate(),
@@ -816,8 +820,13 @@ mod tests {
         let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
         let offer = svc.begin_offer("fp".into());
         let (secret, code) = legit(&mut svc, &offer);
-        svc.approve(&offer.ephemeral_offer_id, DeviceId::generate(), &secret, &code)
-            .unwrap();
+        svc.approve(
+            &offer.ephemeral_offer_id,
+            DeviceId::generate(),
+            &secret,
+            &code,
+        )
+        .unwrap();
         // the same secret can never approve anything again
         let err = svc.approve(
             &offer.ephemeral_offer_id,
@@ -825,7 +834,10 @@ mod tests {
             &secret,
             &code,
         );
-        assert!(matches!(err, Err(PairingError::AlreadyUsed | PairingError::Expired)));
+        assert!(matches!(
+            err,
+            Err(PairingError::AlreadyUsed | PairingError::Expired)
+        ));
     }
 
     #[test]
@@ -833,9 +845,7 @@ mod tests {
         let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
         let offer = svc.begin_offer("fp".into());
         let digest = svc.offer_secret_digest(&offer.ephemeral_offer_id).unwrap();
-        let secret = svc
-            .take_secret_for_qr(&offer.ephemeral_offer_id)
-            .unwrap();
+        let secret = svc.take_secret_for_qr(&offer.ephemeral_offer_id).unwrap();
         // digest is a hash: raw bytes do not appear in it
         let raw_hex: String = secret.0.iter().map(|b| format!("{b:02x}")).collect();
         assert!(!digest.contains(&raw_hex[..8]));
@@ -852,7 +862,13 @@ mod tests {
         let source = SourceId::generate();
         auth.approve_source(source.clone(), 1);
         auth.approve_source(source.clone(), 2); // catalog advanced
-        let err = auth.issue(device, SessionId::generate(), source, 1, Duration::from_secs(60));
+        let err = auth.issue(
+            device,
+            SessionId::generate(),
+            source,
+            1,
+            Duration::from_secs(60),
+        );
         assert!(
             matches!(err, Err(CapabilityError::StaleRevision)),
             "issue() must require the exact current revision"

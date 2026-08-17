@@ -10,7 +10,6 @@ pub mod viewer;
 pub use host::host_package;
 pub use viewer::viewer_package;
 
-
 /// Generate TypeScript + schema for both packages and write to `out_dir`.
 ///
 /// Layout: `<out_dir>/host/` and `<out_dir>/viewer/` (rustra writes

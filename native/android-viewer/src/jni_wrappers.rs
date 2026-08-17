@@ -52,14 +52,24 @@ unsafe fn exception_pending(env: *mut JNIEnv) -> bool {
     check(env) != 0
 }
 
-
 extern "C" {
     fn ANativeWindow_fromSurface(env: *mut JNIEnv, surface: *mut jobject) -> *mut c_void;
     fn leftcar_jni_start() -> *mut c_void;
-    fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void) -> i32;
-    fn leftcar_jni_surface_changed(state: *mut c_void, instance: *const c_char, w: u32, h: u32) -> i32;
+    fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
+        -> i32;
+    fn leftcar_jni_surface_changed(
+        state: *mut c_void,
+        instance: *const c_char,
+        w: u32,
+        h: u32,
+    ) -> i32;
     fn leftcar_jni_detach(state: *mut c_void, instance: *const c_char) -> i32;
-    fn leftcar_jni_update_window(state: *mut c_void, instance: *const c_char, e: u32, t: u64) -> i32;
+    fn leftcar_jni_update_window(
+        state: *mut c_void,
+        instance: *const c_char,
+        e: u32,
+        t: u64,
+    ) -> i32;
     fn leftcar_jni_release(state: *mut c_void, instance: *const c_char) -> i32;
     fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool);
 }

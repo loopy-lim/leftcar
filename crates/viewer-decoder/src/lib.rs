@@ -24,7 +24,10 @@ extern "C" {
     #[link_name = "AMediaFormat_toString"]
     pub fn AMediaFormat_toString_pub(format: *const AMediaFormat) -> *mut std::ffi::c_char;
     #[link_name = "AMediaCodec_getName"]
-    pub fn AMediaCodec_getName_pub(codec: *mut AMediaCodec, out_name: *mut *mut std::ffi::c_char) -> media_status_t;
+    pub fn AMediaCodec_getName_pub(
+        codec: *mut AMediaCodec,
+        out_name: *mut *mut std::ffi::c_char,
+    ) -> media_status_t;
     #[link_name = "AMediaFormat_setString"]
     pub fn AMediaFormat_setString_pub(
         format: *mut AMediaFormat,
@@ -51,10 +54,7 @@ extern "C" {
         time_us: i64,
         flags: u32,
     ) -> media_status_t;
-    fn AMediaCodec_dequeueInputBuffer(
-        codec: *mut AMediaCodec,
-        timeout_us: i64,
-    ) -> ssize_t;
+    fn AMediaCodec_dequeueInputBuffer(codec: *mut AMediaCodec, timeout_us: i64) -> ssize_t;
     fn AMediaCodec_dequeueOutputBuffer(
         codec: *mut AMediaCodec,
         info: *mut AMediaCodecBufferInfo,
@@ -78,11 +78,7 @@ extern "C" {
         data: *const std::ffi::c_void,
         size: usize,
     );
-    fn AMediaFormat_setInt32(
-        format: *mut AMediaFormat,
-        name: *const std::ffi::c_char,
-        value: i32,
-    );
+    fn AMediaFormat_setInt32(format: *mut AMediaFormat, name: *const std::ffi::c_char, value: i32);
 }
 
 #[cfg(not(target_os = "android"))]
@@ -90,7 +86,10 @@ extern "C" {
     #[link_name = "AMediaFormat_toString"]
     pub fn AMediaFormat_toString_pub(format: *const AMediaFormat) -> *mut std::ffi::c_char;
     #[link_name = "AMediaCodec_getName"]
-    pub fn AMediaCodec_getName_pub(codec: *mut AMediaCodec, out_name: *mut *mut std::ffi::c_char) -> media_status_t;
+    pub fn AMediaCodec_getName_pub(
+        codec: *mut AMediaCodec,
+        out_name: *mut *mut std::ffi::c_char,
+    ) -> media_status_t;
     // Host builds never call these; stubs keep the lib linking for tests.
     #[allow(clippy::missing_safety_doc)]
     pub fn AMediaCodec_createDecoderByType(mime: *const std::ffi::c_char) -> *mut AMediaCodec;
@@ -106,26 +105,41 @@ extern "C" {
     pub fn AMediaCodec_stop(codec: *mut AMediaCodec) -> media_status_t;
     pub fn AMediaCodec_flush(codec: *mut AMediaCodec) -> media_status_t;
     pub fn AMediaCodec_queueInputBuffer(
-        codec: *mut AMediaCodec, idx: usize, offset: usize, size: usize, time_us: i64, flags: u32,
+        codec: *mut AMediaCodec,
+        idx: usize,
+        offset: usize,
+        size: usize,
+        time_us: i64,
+        flags: u32,
     ) -> media_status_t;
     pub fn AMediaCodec_dequeueInputBuffer(codec: *mut AMediaCodec, timeout_us: i64) -> ssize_t;
     pub fn AMediaCodec_dequeueOutputBuffer(
-        codec: *mut AMediaCodec, info: *mut AMediaCodecBufferInfo, timeout_us: i64,
+        codec: *mut AMediaCodec,
+        info: *mut AMediaCodecBufferInfo,
+        timeout_us: i64,
     ) -> ssize_t;
     pub fn AMediaCodec_releaseOutputBuffer(
-        codec: *mut AMediaCodec, idx: usize, render: bool,
+        codec: *mut AMediaCodec,
+        idx: usize,
+        render: bool,
     ) -> media_status_t;
     pub fn AMediaCodec_getInputBuffer(
-        codec: *mut AMediaCodec, idx: usize, out_size: *mut usize,
+        codec: *mut AMediaCodec,
+        idx: usize,
+        out_size: *mut usize,
     ) -> *mut u8;
     pub fn AMediaFormat_new() -> *mut AMediaFormat;
     pub fn AMediaFormat_delete(format: *mut AMediaFormat) -> media_status_t;
     pub fn AMediaFormat_setBuffer(
-        format: *mut AMediaFormat, name: *const std::ffi::c_char,
-        data: *const std::ffi::c_void, size: usize,
+        format: *mut AMediaFormat,
+        name: *const std::ffi::c_char,
+        data: *const std::ffi::c_void,
+        size: usize,
     );
     pub fn AMediaFormat_setInt32(
-        format: *mut AMediaFormat, name: *const std::ffi::c_char, value: i32,
+        format: *mut AMediaFormat,
+        name: *const std::ffi::c_char,
+        value: i32,
     );
     #[link_name = "AMediaFormat_setString"]
     pub fn AMediaFormat_setString_pub(
@@ -183,7 +197,9 @@ pub fn split_annexb(au: &[u8]) -> Vec<NalView<'_>> {
             au.len()
         };
         if start <= end && end > start {
-            nals.push(NalView { bytes: &au[start..end] });
+            nals.push(NalView {
+                bytes: &au[start..end],
+            });
         }
     }
     nals
@@ -223,7 +239,6 @@ fn with_start_code(nal: &[u8]) -> Vec<u8> {
     v
 }
 
-
 /// Parse width/height from a raw SPS NAL (no start code). Baseline profile:
 /// enough Exp-Golomb to reach pic_width_in_mbs/pic_height_in_map_units.
 pub fn parse_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
@@ -233,15 +248,28 @@ pub fn parse_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         Some(b) if b & 0x1f == NAL_SPS => &sps[1..],
         _ => sps,
     };
-    if data.len() < 4 { return None; }
+    if data.len() < 4 {
+        return None;
+    }
     let mut br = BitReader { data, pos: 0 };
     let _profile = br.bits(8)? as u32;
     let _constraints = br.bits(8)?;
     let _level = br.bits(8)?;
     let _seq_id = br.golomb()?;
-    if _profile == 100 || _profile == 110 || _profile == 122 || _profile == 244 || _profile == 44 || _profile == 83 || _profile == 86 || _profile == 118 || _profile == 128 {
+    if _profile == 100
+        || _profile == 110
+        || _profile == 122
+        || _profile == 244
+        || _profile == 44
+        || _profile == 83
+        || _profile == 86
+        || _profile == 118
+        || _profile == 128
+    {
         let chroma = br.golomb()?;
-        if chroma == 3 { let _ = br.bits(1)?; }
+        if chroma == 3 {
+            let _ = br.bits(1)?;
+        }
         let _ = br.golomb()?;
         let _ = br.golomb()?;
         let _ = br.bits(1)?;
@@ -249,8 +277,12 @@ pub fn parse_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         if seq_scaling == 1 {
             for _ in 0..8 {
                 let cnt = br.golomb()?;
-                if cnt > 15 { return None; }
-                if cnt != 0 { return None; } // scaling lists unsupported here
+                if cnt > 15 {
+                    return None;
+                }
+                if cnt != 0 {
+                    return None;
+                } // scaling lists unsupported here
             }
         }
     }
@@ -263,37 +295,55 @@ pub fn parse_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         let _ = br.golomb()?;
         let _ = br.golomb()?;
         let n: u64 = br.golomb()?;
-        if n > 256 { return None; }
-        for _ in 0..n { let _ = br.golomb()?; }
+        if n > 256 {
+            return None;
+        }
+        for _ in 0..n {
+            let _ = br.golomb()?;
+        }
     }
-    if poc_type > 2 { return None; }
+    if poc_type > 2 {
+        return None;
+    }
     let _ref_frames = br.golomb()?;
     let _gaps = br.bits(1)?;
     let pic_width_mbs = br.golomb()?;
     let pic_height_units = br.golomb()?;
     let frame_mbs_only = br.bits(1)?;
     let height_mul = if frame_mbs_only == 1 { 1 } else { 2 };
-    if frame_mbs_only == 0 { let _ = br.bits(1)?; }
+    if frame_mbs_only == 0 {
+        let _ = br.bits(1)?;
+    }
     let _direct = br.bits(1)?;
     let _crop = br.bits(1)?;
     let (mut crop_w, mut crop_h) = (0u32, 0u32);
     if _crop == 1 {
-        let l = br.golomb()? as u32; let r = br.golomb()? as u32;
-        let t = br.golomb()? as u32; let b = br.golomb()? as u32;
-        crop_w = (l + r) * 2; crop_h = (t + b) * 2 * height_mul;
+        let l = br.golomb()? as u32;
+        let r = br.golomb()? as u32;
+        let t = br.golomb()? as u32;
+        let b = br.golomb()? as u32;
+        crop_w = (l + r) * 2;
+        crop_h = (t + b) * 2 * height_mul;
     }
     let width = (pic_width_mbs as u32 + 1) * 16 - crop_w;
     let height = (pic_height_units as u32 + 1) * 16 * height_mul - crop_h;
     let _ = log2_frame;
-    if width == 0 || height == 0 || width > 8192 || height > 8192 { return None; }
+    if width == 0 || height == 0 || width > 8192 || height > 8192 {
+        return None;
+    }
     Some((width, height))
 }
 
-struct BitReader<'a> { data: &'a [u8], pos: usize }
+struct BitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
 
 impl<'a> BitReader<'a> {
     fn bit(&mut self) -> Option<u32> {
-        if self.pos >= self.data.len() * 8 { return None; }
+        if self.pos >= self.data.len() * 8 {
+            return None;
+        }
         let byte = self.data[self.pos / 8];
         let b = (byte >> (7 - (self.pos % 8))) & 1;
         self.pos += 1;
@@ -301,17 +351,23 @@ impl<'a> BitReader<'a> {
     }
     fn bits(&mut self, n: usize) -> Option<u32> {
         let mut v = 0u32;
-        for _ in 0..n { v = (v << 1) | self.bit()?; }
+        for _ in 0..n {
+            v = (v << 1) | self.bit()?;
+        }
         Some(v)
     }
     fn golomb(&mut self) -> Option<u64> {
         let mut zeros = 0usize;
         while self.bit()? == 0 {
             zeros += 1;
-            if zeros > 63 { return None; }
+            if zeros > 63 {
+                return None;
+            }
         }
         let mut v = 1u64;
-        for _ in 0..zeros { v = (v << 1) | self.bit()? as u64; }
+        for _ in 0..zeros {
+            v = (v << 1) | self.bit()? as u64;
+        }
         Some(v - 1)
     }
 }
@@ -381,15 +437,27 @@ impl AndroidDecoder {
         let mime = b"video/avc\0".as_ptr().cast();
         let codec = unsafe { AMediaCodec_createDecoderByType(mime) };
         if codec.is_null() {
-            return Err(DecoderError::CreateFailed { mime: "video/avc".into() });
+            return Err(DecoderError::CreateFailed {
+                mime: "video/avc".into(),
+            });
         }
         let format = unsafe { AMediaFormat_new() };
         unsafe {
             // NDK samples set the mime key on the format even for decoders
             // created by type; some vendors reject without it.
             AMediaFormat_setString_pub(format, b"mime\0".as_ptr().cast(), mime);
-            AMediaFormat_setBuffer(format, b"csd-0\0".as_ptr().cast(), sps.as_ptr().cast(), sps.len());
-            AMediaFormat_setBuffer(format, b"csd-1\0".as_ptr().cast(), pps.as_ptr().cast(), pps.len());
+            AMediaFormat_setBuffer(
+                format,
+                b"csd-0\0".as_ptr().cast(),
+                sps.as_ptr().cast(),
+                sps.len(),
+            );
+            AMediaFormat_setBuffer(
+                format,
+                b"csd-1\0".as_ptr().cast(),
+                pps.as_ptr().cast(),
+                pps.len(),
+            );
             AMediaFormat_setInt32(format, b"width\0".as_ptr().cast(), sw as i32);
             AMediaFormat_setInt32(format, b"height\0".as_ptr().cast(), sh as i32);
             let surface = if window == 0 {
@@ -403,14 +471,18 @@ impl AndroidDecoder {
                 let fmt_cstr = if fmt_str.is_null() {
                     "<null>".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(fmt_str).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(fmt_str)
+                        .to_string_lossy()
+                        .into_owned()
                 };
                 let mut name_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
                 let name = if AMediaCodec_getName_pub(codec, &mut name_ptr) == AMEDIA_OK
                     && !name_ptr.is_null()
                 {
                     // leak the small name buffer: no delete API in this NDK
-                    std::ffi::CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(name_ptr)
+                        .to_string_lossy()
+                        .into_owned()
                 } else {
                     "<unknown>".to_string()
                 };
@@ -445,7 +517,12 @@ impl AndroidDecoder {
 
     /// Feed one Annex-B access unit; returns whether an output buffer was
     /// dequeued and rendered this call.
-    pub fn feed_au(&mut self, au: &[u8], pts_us: i64, timeout_us: i64) -> Result<bool, DecoderError> {
+    pub fn feed_au(
+        &mut self,
+        au: &[u8],
+        pts_us: i64,
+        timeout_us: i64,
+    ) -> Result<bool, DecoderError> {
         if !self.started {
             return Err(DecoderError::NotStarted);
         }
@@ -459,9 +536,7 @@ impl AndroidDecoder {
         if buf.is_null() || au.len() > capacity {
             // drop oversized AU rather than corrupt the codec
             unsafe {
-                AMediaCodec_queueInputBuffer(
-                    self.codec, idx, 0, 0, pts_us, 0,
-                );
+                AMediaCodec_queueInputBuffer(self.codec, idx, 0, 0, pts_us, 0);
             }
             return Ok(false);
         }
@@ -485,7 +560,8 @@ impl AndroidDecoder {
         };
         let idx = unsafe { AMediaCodec_dequeueOutputBuffer(self.codec, &mut info, timeout_us) };
         match idx {
-            AMEDIACODEC_INFO_TRY_AGAIN_LATER | AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED
+            AMEDIACODEC_INFO_TRY_AGAIN_LATER
+            | AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED
             | AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED => Ok(false),
             i if i >= 0 => {
                 let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, i as usize, true) };
@@ -593,7 +669,11 @@ mod tests {
         // start codes as boundaries — documented behavior.
         let buf = au(&[&[0x65, 0x00, 0x00, 0x01, 0x99]]);
         let nals = split_annexb(&buf);
-        assert_eq!(nals.len(), 2, "start-code-looking payload splits (documented)");
+        assert_eq!(
+            nals.len(),
+            2,
+            "start-code-looking payload splits (documented)"
+        );
     }
 }
 
@@ -617,7 +697,9 @@ mod sps_tests {
     /// full NAL with header byte 0x27, as split_annexb yields it.
     const VT_SPS_320X240: &[u8] = &[0x27, 0x42, 0x00, 0x14, 0xab, 0x40, 0xa0, 0xfc];
     /// Same SPS with an Annex-B start code, as the harness passes it.
-    const VT_SPS_WITH_SC: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x27, 0x42, 0x00, 0x14, 0xab, 0x40, 0xa0, 0xfc];
+    const VT_SPS_WITH_SC: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, 0x27, 0x42, 0x00, 0x14, 0xab, 0x40, 0xa0, 0xfc,
+    ];
 
     #[test]
     fn parses_videotoolbox_320x240() {

@@ -714,7 +714,10 @@ mod tests {
         c_abi::stream_attach_surface(&mut state, &a, 0x1).unwrap();
         let before = state.decoder.surface_attaches;
         c_abi::stream_release(&mut state, &a);
-        assert_eq!(state.decoder.surface_detaches, before, "release balanced the attach");
+        assert_eq!(
+            state.decoder.surface_detaches, before,
+            "release balanced the attach"
+        );
         assert_eq!(state.attached_count(), 0);
         // release is idempotent
         c_abi::stream_release(&mut state, &a);

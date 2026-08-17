@@ -217,7 +217,5 @@ pub extern "C" fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool) {
 fn unused(_: *mut JNIEnv, _: *mut JavaVM, _: *const JNINativeMethod) {
     let _ = instance_from_jstring as unsafe fn(*mut JNIEnv, *mut jobject) -> _;
     let _ = METHODS;
-    let _ = [
-        (&b"start\0"[..], b"()J\0".as_ptr()),
-    ];
+    let _ = [(&b"start\0"[..], b"()J\0".as_ptr())];
 }
