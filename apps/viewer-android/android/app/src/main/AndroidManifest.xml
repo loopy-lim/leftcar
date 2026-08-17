@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- docs/02 §2.2 manifest hypothesis: multi-instance system UI opt-in +
+     document tasks. Actual behavior verified on Galaxy XR in H05 (E5). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:label="Leftcar"
+        android:resizeableActivity="true">
+
+        <property
+            android:name="android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI"
+            android:value="true" />
+
+        <activity
+            android:name=".shim.HubActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".shim.StreamActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:documentLaunchMode="always" />
+    </application>
+</manifest>
