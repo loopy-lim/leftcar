@@ -16,6 +16,7 @@ members = [
     "crates/control-contract",
     "tools/architecture-check",
     "native/android-viewer",
+    "native/leftcar-rustra",
 ]
 
 [workspace.package]

@@ -1,0 +1,14 @@
+[package]
+name = "leftcar-rustra"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "leftcar_rustra"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+control-contract = { path = "../../crates/control-contract" }
+rustra = { git = "https://github.com/loopy-lim/rustra", rev = "11ff71f5e2b5a0c563d50525eef82b0a05768c1f" }
+serde_json = { workspace = true }

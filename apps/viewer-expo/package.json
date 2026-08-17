@@ -1,0 +1,21 @@
+{
+  "name": "@leftcar/viewer-expo",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start": "expo start --dev-client",
+    "android": "expo run:android"
+  },
+  "dependencies": {
+    "expo": "~57.0.0",
+    "expo-router": "*",
+    "react": "19.1.0",
+    "react-native": "0.86.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "typescript": "^5.7.0"
+  }
+}

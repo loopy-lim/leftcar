@@ -106,7 +106,9 @@ fn main() {
                 let idx = buf[1];
                 let cnt = buf[2];
                 let au_id = u16::from_le_bytes([buf[3], buf[4]]);
-                let entry = frags.entry(au_id).or_insert_with(|| (cnt, vec![Vec::new(); cnt as usize]));
+                let entry = frags
+                    .entry(au_id)
+                    .or_insert_with(|| (cnt, vec![Vec::new(); cnt as usize]));
                 if (idx as usize) < entry.1.len() {
                     entry.1[idx as usize] = buf[5..n].to_vec();
                 }
