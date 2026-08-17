@@ -12,3 +12,4 @@ apps/viewer-android/.watchmanconfig
 artifacts/
 *.tsbuildinfo
 .vitest/
+build/apk/
