@@ -10,3 +10,8 @@ serde = { workspace = true }
 bytes = { workspace = true }
 domain = { workspace = true }
 media-model = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+network-protocol = { workspace = true }
+serde_json = { workspace = true }

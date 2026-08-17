@@ -38,3 +38,5 @@ zeroize = "1"
 
 [profile.release]
 lto = "thin"
+
+# integration tests live in crates/transport-api/tests (L5 loopback)

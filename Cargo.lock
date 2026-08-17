@@ -615,7 +615,10 @@ dependencies = [
  "bytes",
  "domain",
  "media-model",
+ "network-protocol",
+ "proptest",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
