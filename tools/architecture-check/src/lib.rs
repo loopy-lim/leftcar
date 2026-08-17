@@ -82,7 +82,7 @@ impl std::fmt::Display for Violation {
 /// External dependency allowlists per docs/03 §4.1 (domain <- ...; domain may
 /// not depend on platform SDKs; core crates stay pure).
 const DOMAIN_EXTERNAL_ALLOWLIST: &[&str] = &[
-    "serde", "serde_json", "thiserror", "uuid", "bytes",
+    "serde", "serde_json", "thiserror", "uuid", "bytes", "proptest",
 ];
 
 const FORBIDDEN_PLATFORM_DEPS: &[&str] = &[

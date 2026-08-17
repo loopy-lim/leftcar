@@ -8,4 +8,8 @@ license.workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
+uuid = { workspace = true }
 
+
+[dev-dependencies]
+proptest = { workspace = true }
