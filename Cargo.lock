@@ -751,8 +751,10 @@ dependencies = [
  "bytes",
  "domain",
  "media-model",
+ "proptest",
  "serde",
  "thiserror",
+ "uuid",
  "zeroize",
 ]
 

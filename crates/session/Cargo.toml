@@ -11,3 +11,7 @@ bytes = { workspace = true }
 domain = { workspace = true }
 media-model = { workspace = true }
 zeroize = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
