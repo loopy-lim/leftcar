@@ -29,7 +29,10 @@ pub fn parse_metadata(json: &str) -> Workspace {
         // dependencies from manifest fields; cargo metadata "dependencies" includes
         // resolved names for path deps in a workspace only with --deps, so read
         // the manifest tables directly instead.
-        let manifest_path = pkg["manifest_path"].as_str().unwrap_or_default().to_string();
+        let manifest_path = pkg["manifest_path"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         if let Some(info) = read_manifest_deps(&manifest_path) {
             internal_deps = info.0;
             external_deps = info.1;
@@ -56,7 +59,10 @@ fn read_manifest_deps(manifest_path: &str) -> Option<Deps> {
     let mut external = Vec::new();
     if let Some(obj) = deps.as_table() {
         for (dep_name, spec) in obj {
-            let is_path = spec.as_table().map(|t| t.contains_key("path")).unwrap_or(false);
+            let is_path = spec
+                .as_table()
+                .map(|t| t.contains_key("path"))
+                .unwrap_or(false);
             if is_path {
                 internal.push(dep_name.clone());
             } else if spec.as_str().is_some() || spec.as_table().is_some() {
@@ -82,12 +88,27 @@ impl std::fmt::Display for Violation {
 /// External dependency allowlists per docs/03 §4.1 (domain <- ...; domain may
 /// not depend on platform SDKs; core crates stay pure).
 const DOMAIN_EXTERNAL_ALLOWLIST: &[&str] = &[
-    "serde", "serde_json", "thiserror", "uuid", "bytes", "proptest",
+    "serde",
+    "serde_json",
+    "thiserror",
+    "uuid",
+    "bytes",
+    "proptest",
 ];
 
 const FORBIDDEN_PLATFORM_DEPS: &[&str] = &[
-    "tauri", "wry", "winit", "objc2", "cocoa", "windows", "jni",
-    "ndk", "android-activity", "screencapturekit", "objc", "core-video",
+    "tauri",
+    "wry",
+    "winit",
+    "objc2",
+    "cocoa",
+    "windows",
+    "jni",
+    "ndk",
+    "android-activity",
+    "screencapturekit",
+    "objc",
+    "core-video",
     "video-toolbox",
 ];
 
@@ -103,9 +124,24 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("control-contract", &["domain", "media-model"]),
         ("session", &["domain", "media-model"]),
         ("transport-api", &["domain", "media-model"]),
-        ("transport-quic", &["domain", "media-model", "transport-api"]),
-        ("host-core", &["domain", "media-model", "network-protocol", "transport-api", "session"]),
-        ("viewer-core", &["domain", "media-model", "transport-api", "session"]),
+        (
+            "transport-quic",
+            &["domain", "media-model", "transport-api"],
+        ),
+        (
+            "host-core",
+            &[
+                "domain",
+                "media-model",
+                "network-protocol",
+                "transport-api",
+                "session",
+            ],
+        ),
+        (
+            "viewer-core",
+            &["domain", "media-model", "transport-api", "session"],
+        ),
         ("diagnostics", &["domain"]),
         ("macos-capture", &["domain", "media-model"]),
         ("macos-encode", &["domain", "media-model"]),
@@ -141,8 +177,10 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         }
         // Video hot path: crates in the video plane must not depend on the
         // control contract, and the contract must not appear in media-model.
-        if matches!(crate_name.as_str(), "media-model" | "transport-api" | "transport-quic")
-            && info.internal_deps.iter().any(|d| d == "control-contract")
+        if matches!(
+            crate_name.as_str(),
+            "media-model" | "transport-api" | "transport-quic"
+        ) && info.internal_deps.iter().any(|d| d == "control-contract")
         {
             out.push(Violation {
                 rule: "video-plane-has-no-control-contract".into(),
@@ -150,12 +188,17 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
             });
         }
         // No crate except platform facades and apps may touch platform SDKs.
-        if !matches!(crate_name.as_str(), "macos-capture" | "macos-encode" | "control-contract") {
+        if !matches!(
+            crate_name.as_str(),
+            "macos-capture" | "macos-encode" | "control-contract"
+        ) {
             for dep in &info.external_deps {
                 if FORBIDDEN_PLATFORM_DEPS.contains(&dep.as_str()) {
                     out.push(Violation {
                         rule: "platform-dep-isolation".into(),
-                        detail: format!("{crate_name} depends on platform crate `{dep}`; only facades may"),
+                        detail: format!(
+                            "{crate_name} depends on platform crate `{dep}`; only facades may"
+                        ),
                     });
                 }
             }

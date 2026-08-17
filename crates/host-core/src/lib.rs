@@ -7,8 +7,8 @@ use domain::ids::{SessionId, SourceId};
 use domain::lease::{LeaseEvent, LeaseTable};
 use domain::source::{SourceDescriptor, SourceKind, SourceRegistry};
 use media_model::backpressure::{BoundedAuQueue, LatestFrameSlot};
-use media_model::frame::{EncodedFrame, FrameKind};
 use media_model::fragment::packetize;
+use media_model::frame::{EncodedFrame, FrameKind};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -35,7 +35,11 @@ pub struct FakeCapture {
 
 impl FakeCapture {
     pub fn new(script: CaptureScript) -> Self {
-        Self { script, running: false, frame_count: 0 }
+        Self {
+            script,
+            running: false,
+            frame_count: 0,
+        }
     }
 
     pub fn start(&mut self) {
@@ -55,7 +59,9 @@ impl FakeCapture {
         self.frame_count += 1;
         match &self.script {
             CaptureScript::FixedColor(c) => Some((64, 64, vec![*c; 64])),
-            CaptureScript::MovingPattern { .. } => Some((64, 64, vec![(self.frame_count % 256) as u8; 64])),
+            CaptureScript::MovingPattern { .. } => {
+                Some((64, 64, vec![(self.frame_count % 256) as u8; 64]))
+            }
             CaptureScript::ResizeSequence(sizes) => {
                 let (w, h) = sizes[self.frame_count % sizes.len()];
                 Some((w, h, vec![0u8; (w * h) as usize / 16]))
@@ -85,10 +91,20 @@ pub struct FakeEncoder {
 
 impl FakeEncoder {
     pub fn new() -> Self {
-        Self { epoch: 1, next_frame_id: 1, config_emitted: false }
+        Self {
+            epoch: 1,
+            next_frame_id: 1,
+            config_emitted: false,
+        }
     }
 
-    pub fn encode(&mut self, source: &SourceId, session: &SessionId, kind: FrameKind, raw: &[u8]) -> EncodedFrame {
+    pub fn encode(
+        &mut self,
+        source: &SourceId,
+        session: &SessionId,
+        kind: FrameKind,
+        raw: &[u8],
+    ) -> EncodedFrame {
         let id = self.next_frame_id;
         self.next_frame_id += 1;
         EncodedFrame {
@@ -193,7 +209,10 @@ impl Orchestrator {
 
     /// One pipeline tick for a source: capture -> slot -> encode -> AU queue
     /// -> fragments. Returns fragments ready for the transport.
-    pub fn pump_source(&mut self, source: &SourceId) -> Result<&[media_model::Fragment], OrchestratorError> {
+    pub fn pump_source(
+        &mut self,
+        source: &SourceId,
+    ) -> Result<&[media_model::Fragment], OrchestratorError> {
         if self.closed {
             return Ok(&[]);
         }
@@ -204,7 +223,11 @@ impl Orchestrator {
         // capture -> encoder boundary: latest-frame policy
         if let Some((w, h, data)) = pipeline.capture.next_frame() {
             let _ = (w, h);
-            let kind = if pipeline.capture.frame_count == 1 { FrameKind::Key } else { FrameKind::Delta };
+            let kind = if pipeline.capture.frame_count == 1 {
+                FrameKind::Key
+            } else {
+                FrameKind::Delta
+            };
             let frame = pipeline.encoder.encode(source, &session, kind, &data);
             let evicted = pipeline.au_queue.push(frame);
             // evicted deltas are dropped (oldest delta); keys handled upstream
@@ -319,15 +342,16 @@ mod tests {
         // second viewer lease on same source: no duplicate capture
         let (second, _) = orch.open_window(&a, CaptureScript::FixedColor(1)).unwrap();
         assert!(second.is_none(), "no duplicate capture for second lease");
-        assert_eq!(orch.active_source_count(), 1, "H25: policy reuse without duplicate capture");
+        assert_eq!(
+            orch.active_source_count(),
+            1,
+            "H25: policy reuse without duplicate capture"
+        );
     }
 
     #[test]
     fn one_capture_failure_does_not_stop_other_sources() {
-        let mut orch = Orchestrator::new(
-            SessionId::generate(),
-            vec![approved("a"), approved("b")],
-        );
+        let mut orch = Orchestrator::new(SessionId::generate(), vec![approved("a"), approved("b")]);
         let a = SourceId::from_raw("a").unwrap();
         let b = SourceId::from_raw("b").unwrap();
         orch.open_window(&a, CaptureScript::FixedColor(1)).unwrap();
@@ -353,10 +377,14 @@ mod tests {
     fn pump_produces_keyframe_first() {
         let mut orch = Orchestrator::new(SessionId::generate(), vec![approved("a")]);
         let a = SourceId::from_raw("a").unwrap();
-        orch.open_window(&a, CaptureScript::MovingPattern { frames: 10 }).unwrap();
+        orch.open_window(&a, CaptureScript::MovingPattern { frames: 10 })
+            .unwrap();
         let frags = orch.pump_source(&a).unwrap();
         assert!(!frags.is_empty());
-        assert!(matches!(frags[0].header.kind, FrameKind::Key), "first frame is a keyframe");
+        assert!(
+            matches!(frags[0].header.kind, FrameKind::Key),
+            "first frame is a keyframe"
+        );
         // second pump produces a delta
         let frags = orch.pump_source(&a).unwrap();
         assert!(matches!(frags[0].header.kind, FrameKind::Delta));
@@ -401,7 +429,12 @@ mod tests {
         orch.close_window(&a, &first_instance, Duration::ZERO, Duration::ZERO);
         assert_eq!(orch.leases.lease_count(&a), 1, "one release = one lease");
         // releasing an unknown instance is a no-op
-        orch.close_window(&a, &StreamInstanceId::generate(), Duration::ZERO, Duration::ZERO);
+        orch.close_window(
+            &a,
+            &StreamInstanceId::generate(),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
         assert_eq!(orch.leases.lease_count(&a), 1);
     }
 }

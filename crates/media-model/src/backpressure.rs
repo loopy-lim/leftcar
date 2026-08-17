@@ -44,7 +44,10 @@ pub struct BoundedAuQueue {
 
 impl BoundedAuQueue {
     pub fn new(cap: usize) -> Self {
-        Self { items: VecDeque::new(), cap: cap.max(1) }
+        Self {
+            items: VecDeque::new(),
+            cap: cap.max(1),
+        }
     }
 
     /// Push; returns evicted frames (oldest deltas first) when over cap.
@@ -53,7 +56,11 @@ impl BoundedAuQueue {
         self.items.push_back(frame);
         while self.items.len() > self.cap {
             // evict the oldest delta; keys are preserved for recovery
-            if let Some(pos) = self.items.iter().position(|f| matches!(f.kind, FrameKind::Delta)) {
+            if let Some(pos) = self
+                .items
+                .iter()
+                .position(|f| matches!(f.kind, FrameKind::Delta))
+            {
                 let removed = self.items.remove(pos).expect("position exists");
                 evicted.push(removed);
             } else {
@@ -106,7 +113,10 @@ mod tests {
         let dropped = slot.offer(frame(1, FrameKind::Delta));
         assert!(dropped.is_none());
         let dropped = slot.offer(frame(2, FrameKind::Delta));
-        assert!(matches!(dropped, Some(f) if f.kind == FrameKind::Delta), "older unconsumed delta is dropped");
+        assert!(
+            matches!(dropped, Some(f) if f.kind == FrameKind::Delta),
+            "older unconsumed delta is dropped"
+        );
         assert_eq!(slot.take().unwrap().frame_id, 2, "newest survives");
     }
 

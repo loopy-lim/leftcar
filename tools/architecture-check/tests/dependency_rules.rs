@@ -43,23 +43,18 @@ serde = "1"
 "#,
     );
     // point the fixture json at the temp manifest
-    let json = r#"{"packages":[{"name":"domain","manifest_path":""}]}"#;
-    let _ = json;
-    let ws = architecture_check::Workspace::new();
-    let mut ws = ws;
     let manifest = fixture_dir.join("Cargo.toml");
-    // Directly exercise parse of one manifest through parse_metadata via a shim:
-    // simpler — build CrateInfo through the public parse of a crafted metadata.
     let crafted = format!(
         r#"{{"packages":[{{"name":"domain","manifest_path":"{}"}}]}}"#,
         manifest.display()
     );
     let _ = violating_manifest();
-    ws = parse_metadata(&crafted);
+    let ws = parse_metadata(&crafted);
     let violations = check_workspace(&ws);
     assert!(
-        violations.iter().any(|v| v.rule == "platform-dep-isolation"
-            || v.rule == "domain-purity"),
+        violations
+            .iter()
+            .any(|v| v.rule == "platform-dep-isolation" || v.rule == "domain-purity"),
         "expected domain platform-dep violation, got: {violations:?}"
     );
 }
@@ -71,7 +66,11 @@ fn real_workspace_has_no_violations() {
     assert!(
         violations.is_empty(),
         "architecture violations:\n{}",
-        violations.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")
+        violations
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -79,7 +78,10 @@ fn real_workspace_has_no_violations() {
 fn domain_declares_no_internal_deps() {
     let ws = load_workspace();
     let domain = ws.get("domain").expect("domain crate exists");
-    assert!(domain.internal_deps.is_empty(), "domain must not depend upward");
+    assert!(
+        domain.internal_deps.is_empty(),
+        "domain must not depend upward"
+    );
 }
 
 #[test]

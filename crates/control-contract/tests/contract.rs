@@ -30,7 +30,10 @@ fn unknown_command_is_rejected() {
     let package = host_package();
     let result: rustra::Result<AddNumbersOutput> =
         package.invoke("sendKeyboard", AddNumbersInput { a: 1, b: 2 });
-    assert!(result.is_err(), "unknown/input-like commands must be denied (T-06)");
+    assert!(
+        result.is_err(),
+        "unknown/input-like commands must be denied (T-06)"
+    );
 }
 
 #[test]
@@ -39,8 +42,13 @@ fn viewer_contract_does_not_expose_input_commands() {
     let generated = viewer_package().generate_typescript().expect("generates");
     let surface = format!("{}{}", generated.commands_ts, generated.types_ts);
     for banned in [
-        "sendKeyboard", "sendMouse", "injectInput", "clipboard",
-        "sendkeyboard", "sendmouse", "injectinput",
+        "sendKeyboard",
+        "sendMouse",
+        "injectInput",
+        "clipboard",
+        "sendkeyboard",
+        "sendmouse",
+        "injectinput",
     ] {
         assert!(
             !surface.contains(banned),
@@ -55,7 +63,12 @@ fn video_payload_type_is_absent_from_generated_typescript() {
     let viewer = viewer_package().generate_typescript().expect("generates");
     for generated in [host, viewer] {
         let surface = format!("{}{}", generated.types_ts, generated.commands_ts);
-        for banned in ["EncodedFrame", "NalUnit", "VideoPacket", "payload: number[]"] {
+        for banned in [
+            "EncodedFrame",
+            "NalUnit",
+            "VideoPacket",
+            "payload: number[]",
+        ] {
             assert!(
                 !surface.contains(banned),
                 "generated TS leaked video type {banned}"
@@ -77,7 +90,10 @@ fn pairing_offer_view_never_contains_private_key() {
     };
     let json = serde_json::to_string(&view).unwrap().to_lowercase();
     for banned in ["privatekey", "private_key", "secret", "token"] {
-        assert!(!json.contains(banned), "pairing view leaked {banned}: {json}");
+        assert!(
+            !json.contains(banned),
+            "pairing view leaked {banned}: {json}"
+        );
     }
 }
 

@@ -41,11 +41,7 @@ impl LeaseTable {
     }
 
     /// Acquire a lease. Returns SourceStarted when this is the first lease.
-    pub fn acquire(
-        &mut self,
-        source: SourceId,
-        instance: StreamInstanceId,
-    ) -> Option<LeaseEvent> {
+    pub fn acquire(&mut self, source: SourceId, instance: StreamInstanceId) -> Option<LeaseEvent> {
         // A re-acquire of a pending-stop source cancels the stop.
         self.pending_stops.remove(&source);
         let set = self.leases.entry(source.clone()).or_default();
@@ -117,7 +113,10 @@ mod tests {
     #[test]
     fn first_lease_starts_source() {
         let mut t = LeaseTable::new();
-        assert_eq!(t.acquire(sid("s1"), iid("i1")), Some(LeaseEvent::SourceStarted(sid("s1"))));
+        assert_eq!(
+            t.acquire(sid("s1"), iid("i1")),
+            Some(LeaseEvent::SourceStarted(sid("s1")))
+        );
         assert_eq!(t.acquire(sid("s1"), iid("i2")), None);
     }
 
@@ -125,7 +124,13 @@ mod tests {
     fn last_lease_stops_after_debounce() {
         let mut t = LeaseTable::new();
         t.acquire(sid("s1"), iid("i1"));
-        let pending = t.release(&sid("s1"), &iid("i1"), Duration::from_secs(0), Duration::from_secs(5))
+        let pending = t
+            .release(
+                &sid("s1"),
+                &iid("i1"),
+                Duration::from_secs(0),
+                Duration::from_secs(5),
+            )
             .unwrap()
             .expect("pending stop");
         assert_eq!(pending.deadline, Duration::from_secs(5));
@@ -140,8 +145,20 @@ mod tests {
     fn double_release_is_noop() {
         let mut t = LeaseTable::new();
         t.acquire(sid("s1"), iid("i1"));
-        t.release(&sid("s1"), &iid("i1"), Duration::ZERO, Duration::from_secs(5)).unwrap();
-        assert!(t.release(&sid("s1"), &iid("i1"), Duration::ZERO, Duration::from_secs(5))
+        t.release(
+            &sid("s1"),
+            &iid("i1"),
+            Duration::ZERO,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(t
+            .release(
+                &sid("s1"),
+                &iid("i1"),
+                Duration::ZERO,
+                Duration::from_secs(5)
+            )
             .is_ok());
         assert_eq!(t.lease_count(&sid("s1")), 0);
     }
@@ -149,7 +166,9 @@ mod tests {
     #[test]
     fn release_unknown_source_is_noop() {
         let mut t = LeaseTable::new();
-        assert!(t.release(&sid("nope"), &iid("i1"), Duration::ZERO, Duration::ZERO).is_ok());
+        assert!(t
+            .release(&sid("nope"), &iid("i1"), Duration::ZERO, Duration::ZERO)
+            .is_ok());
         assert_eq!(t.total_leases(), 0);
     }
 
@@ -157,7 +176,13 @@ mod tests {
     fn reacquire_cancels_pending_stop() {
         let mut t = LeaseTable::new();
         t.acquire(sid("s1"), iid("i1"));
-        t.release(&sid("s1"), &iid("i1"), Duration::ZERO, Duration::from_secs(5)).unwrap();
+        t.release(
+            &sid("s1"),
+            &iid("i1"),
+            Duration::ZERO,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         t.acquire(sid("s1"), iid("i2"));
         assert_eq!(t.stop_elapsed(&sid("s1"), Duration::from_secs(60)), None);
     }

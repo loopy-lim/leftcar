@@ -76,7 +76,10 @@ impl VtEncoderSession {
 
     /// Property summary for diagnostics (identity, not bytes).
     pub fn describe(&self) -> String {
-        format!("{:?} realtime={} reorder={}", self.backend, self.tuning.realtime, self.tuning.allow_frame_reordering)
+        format!(
+            "{:?} realtime={} reorder={}",
+            self.backend, self.tuning.realtime, self.tuning.allow_frame_reordering
+        )
     }
 }
 
@@ -111,7 +114,10 @@ mod tests {
     #[test]
     fn b_frames_are_rejected_by_validation() {
         assert!(validate_no_b_frames(&config(false)));
-        assert!(!validate_no_b_frames(&config(true)), "latency budget forbids B-frames");
+        assert!(
+            !validate_no_b_frames(&config(true)),
+            "latency budget forbids B-frames"
+        );
     }
 
     #[test]

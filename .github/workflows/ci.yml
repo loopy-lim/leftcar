@@ -1,0 +1,82 @@
+name: CI
+
+# H03 skeleton: PR fast lane + main lane. Device jobs are placeholders that
+# surface E-level evidence gaps in job summaries (never green-washed).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-fast:
+    name: Rust (fmt, clippy, tests)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Architecture tests (H01)
+        run: cargo test -p architecture-check
+      - name: Workspace tests
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --tests -- -D warnings
+
+  ts:
+    name: TypeScript (typecheck, tests, contract, architecture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Unit + contract tests
+        run: pnpm test && pnpm test:contract
+      - name: TS/Kotlin architecture rules
+        run: pnpm test:architecture
+      - name: Regeneration is clean (H26)
+        run: |
+          cargo run -p control-contract --bin generate
+          git diff --exit-code -- packages/control-generated
+
+  android-compile:
+    name: Android native (aarch64 check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check viewer native for Android
+        run: cargo check -p android-viewer --target aarch64-linux-android
+
+  device-evidence-placeholder:
+    name: Device evidence (E5-E7) — pending
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Surface evidence gaps
+        run: |
+          echo "## Evidence level summary" >> $GITHUB_STEP_SUMMARY
+          echo "- E1 unit/property: covered by rust-fast + ts jobs" >> $GITHUB_STEP_SUMMARY
+          echo "- E2 integration: L5 loopback in transport-api tests" >> $GITHUB_STEP_SUMMARY
+          echo "- E3 build: android-compile job" >> $GITHUB_STEP_SUMMARY
+          echo "- E4 emulator: NOT WIRED (H05/H08 device phase)" >> $GITHUB_STEP_SUMMARY
+          echo "- E5 Galaxy XR real device: PENDING — requires device lab (G1 gate)" >> $GITHUB_STEP_SUMMARY
+          echo "- E6 real host ↔ device end-to-end: PENDING (G3/G5 gates)" >> $GITHUB_STEP_SUMMARY
+          echo "- E7 instrumented long-run: PENDING (H51)" >> $GITHUB_STEP_SUMMARY
+          echo "Device-gated evidence intentionally NOT claimed by CI. See docs/EVIDENCE.md."

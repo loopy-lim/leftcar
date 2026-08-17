@@ -32,7 +32,12 @@ impl SourceDemux {
     }
 
     /// Feed one video event for a source; returns decoder-ready frames.
-    pub fn feed(&mut self, source: &SourceId, frag: media_model::Fragment, now: Duration) -> Vec<EncodedFrame> {
+    pub fn feed(
+        &mut self,
+        source: &SourceId,
+        frag: media_model::Fragment,
+        now: Duration,
+    ) -> Vec<EncodedFrame> {
         let assembler = self
             .assemblers
             .entry(source.clone())
@@ -76,7 +81,11 @@ pub struct WindowRegistry {
 
 impl WindowRegistry {
     pub fn new() -> Self {
-        Self { leases: LeaseTable::new(), documents: HashMap::new(), per_source_policy_one_window: true }
+        Self {
+            leases: LeaseTable::new(),
+            documents: HashMap::new(),
+            per_source_policy_one_window: true,
+        }
     }
 
     /// Open (or focus) a window for a source. Returns the event and the
@@ -87,7 +96,8 @@ impl WindowRegistry {
         instance: StreamInstanceId,
     ) -> (Option<LeaseEvent>, String) {
         let doc = format!("leftcar://stream/{}?instance={}", source.0, instance.0);
-        self.documents.insert(instance.clone(), (source.clone(), doc.clone()));
+        self.documents
+            .insert(instance.clone(), (source.clone(), doc.clone()));
         let event = self.leases.acquire(source, instance);
         (event, doc)
     }
@@ -101,7 +111,13 @@ impl WindowRegistry {
             .map(|(instance, _)| instance.clone())
     }
 
-    pub fn close(&mut self, source: &SourceId, instance: &StreamInstanceId, now: Duration, debounce: Duration) {
+    pub fn close(
+        &mut self,
+        source: &SourceId,
+        instance: &StreamInstanceId,
+        now: Duration,
+        debounce: Duration,
+    ) {
         let _ = self.leases.release(source, instance, now, debounce);
         self.documents.remove(instance);
     }
@@ -218,7 +234,10 @@ impl WindowStateMachine {
     pub fn tick(&mut self, now: Duration) {
         if let Some(stopped_at) = self.stop_seen_at {
             if now.saturating_sub(stopped_at) >= self.grace_period
-                && !matches!(self.phase, StreamPhase::Stopped | StreamPhase::SourceUnavailable)
+                && !matches!(
+                    self.phase,
+                    StreamPhase::Stopped | StreamPhase::SourceUnavailable
+                )
             {
                 self.phase = StreamPhase::Suspended;
             }
@@ -281,7 +300,8 @@ impl FakeDecoder {
         if frame.kind == FrameKind::Key {
             self.keyframe_required = false;
         }
-        self.input_frames.push((frame.frame_id, frame.stream_epoch.0));
+        self.input_frames
+            .push((frame.frame_id, frame.stream_epoch.0));
         true
     }
 }
@@ -348,7 +368,12 @@ pub mod c_abi {
         Ok(())
     }
 
-    pub fn stream_surface_changed(state: &mut ProcessState, _instance: &StreamInstanceId, _w: u32, _h: u32) {
+    pub fn stream_surface_changed(
+        state: &mut ProcessState,
+        _instance: &StreamInstanceId,
+        _w: u32,
+        _h: u32,
+    ) {
         let _ = state;
     }
 
@@ -517,7 +542,11 @@ mod tests {
         m.apply(LifecycleEvent::TaskRemove, Duration::ZERO);
         m.apply(LifecycleEvent::TaskRemove, Duration::ZERO);
         let (attach, detach) = m.surface_balance();
-        assert_eq!((attach, detach), (1, 2), "events counted; no double free occurs");
+        assert_eq!(
+            (attach, detach),
+            (1, 2),
+            "events counted; no double free occurs"
+        );
     }
 
     // demux identity (docs/06 §4.5)
@@ -615,7 +644,10 @@ mod tests {
 
     #[test]
     fn decoder_resource_exhaustion_is_reported_not_fatal() {
-        let mut dec = FakeDecoder { resource_exhausted: true, ..Default::default() };
+        let mut dec = FakeDecoder {
+            resource_exhausted: true,
+            ..Default::default()
+        };
         assert!(!dec.feed(&frame(1, FrameKind::Key, 1)));
         // and malformed oversized payloads are rejected without panic
         dec.resource_exhausted = false;

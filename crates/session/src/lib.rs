@@ -56,12 +56,18 @@ pub struct IdentityManager<'a> {
 
 impl<'a> IdentityManager<'a> {
     pub fn new(store: &'a dyn SecureStore) -> Self {
-        Self { store, identity: None }
+        Self {
+            store,
+            identity: None,
+        }
     }
 
     /// Create (or load) this install's identity. Cryptographic material lives
     /// only in the platform store behind `handle`.
-    pub fn ensure_identity(&mut self, fingerprint: impl Into<String>) -> Result<DeviceIdentity, SecureStoreError> {
+    pub fn ensure_identity(
+        &mut self,
+        fingerprint: impl Into<String>,
+    ) -> Result<DeviceIdentity, SecureStoreError> {
         if let Some(existing) = &self.identity {
             return Ok(existing.clone());
         }
@@ -160,7 +166,12 @@ pub struct PairingService {
 
 impl PairingService {
     pub fn new(clock: Box<dyn Clock>) -> Self {
-        Self { clock, offers: HashMap::new(), approved: Vec::new(), rejected_offers: Vec::new() }
+        Self {
+            clock,
+            offers: HashMap::new(),
+            approved: Vec::new(),
+            rejected_offers: Vec::new(),
+        }
     }
 
     pub fn begin_offer(&mut self, host_fingerprint: String) -> PairingOffer {
@@ -170,15 +181,23 @@ impl PairingService {
             ephemeral_offer_id: format!("offer-{}", uuid::Uuid::new_v4()),
             expires_at: self.clock.monotonic() + PAIRING_TTL,
             address_hints: Vec::new(),
-            human_verification_code: format!("{:06}", uuid::Uuid::new_v4().as_bytes()[0] as u32 % 1_000_000),
+            human_verification_code: format!(
+                "{:06}",
+                uuid::Uuid::new_v4().as_bytes()[0] as u32 % 1_000_000
+            ),
             used: false,
         };
-        self.offers.insert(offer.ephemeral_offer_id.clone(), offer.clone());
+        self.offers
+            .insert(offer.ephemeral_offer_id.clone(), offer.clone());
         offer
     }
 
     /// Viewer consumed the offer and the Host user approved.
-    pub fn approve(&mut self, offer_id: &str, viewer_device: DeviceId) -> Result<DeviceId, PairingError> {
+    pub fn approve(
+        &mut self,
+        offer_id: &str,
+        viewer_device: DeviceId,
+    ) -> Result<DeviceId, PairingError> {
         let now = self.clock.monotonic();
         let offer = self.offers.get_mut(offer_id).ok_or(PairingError::Expired)?;
         if offer.used {
@@ -241,7 +260,12 @@ pub struct CapabilityAuthority {
 
 impl CapabilityAuthority {
     pub fn new(clock: Box<dyn Clock>) -> Self {
-        Self { clock, approved_sources: HashMap::new(), paired: Default::default(), capabilities: Vec::new() }
+        Self {
+            clock,
+            approved_sources: HashMap::new(),
+            paired: Default::default(),
+            capabilities: Vec::new(),
+        }
     }
 
     pub fn pair(&mut self, device: DeviceId) {
@@ -348,12 +372,20 @@ pub struct ReconnectController {
 
 impl ReconnectController {
     pub fn new(policy: BackoffPolicy) -> Self {
-        Self { policy, attempt: 0, spent: Duration::ZERO, seen_request_ids: Default::default() }
+        Self {
+            policy,
+            attempt: 0,
+            spent: Duration::ZERO,
+            seen_request_ids: Default::default(),
+        }
     }
 
     /// Next backoff delay (exponential with deterministic jitter by attempt).
     pub fn next_delay(&mut self) -> Result<Duration, BackoffError> {
-        let delay = self.policy.initial.mul_f64(2f64.powi(self.attempt as i32).min(64.0));
+        let delay = self
+            .policy
+            .initial
+            .mul_f64(2f64.powi(self.attempt as i32).min(64.0));
         let delay = delay.min(self.policy.max);
         let next_spent = self.spent + delay;
         if next_spent > self.policy.total_budget {
@@ -391,7 +423,9 @@ mod tests {
         let viewer = DeviceId::generate();
         // at 119s it still works
         svc.clock = Box::new(clock(119));
-        assert!(svc.approve(&offer.ephemeral_offer_id, viewer.clone()).is_ok());
+        assert!(svc
+            .approve(&offer.ephemeral_offer_id, viewer.clone())
+            .is_ok());
     }
 
     #[test]
@@ -408,7 +442,8 @@ mod tests {
         let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
         let offer = svc.begin_offer("fp".into());
         let viewer = DeviceId::generate();
-        svc.approve(&offer.ephemeral_offer_id, viewer.clone()).unwrap();
+        svc.approve(&offer.ephemeral_offer_id, viewer.clone())
+            .unwrap();
         // replay: same offer cannot approve a second device
         let err = svc.approve(&offer.ephemeral_offer_id, DeviceId::generate());
         assert!(matches!(err, Err(PairingError::AlreadyUsed)));
@@ -466,7 +501,10 @@ mod tests {
             revision: 1,
             expires_at: Duration::from_secs(999),
         };
-        assert!(matches!(auth.authorize(&cap), Err(CapabilityError::NotApproved)));
+        assert!(matches!(
+            auth.authorize(&cap),
+            Err(CapabilityError::NotApproved)
+        ));
     }
 
     #[test]
@@ -483,7 +521,10 @@ mod tests {
             revision: 1,
             expires_at: Duration::from_secs(999),
         };
-        assert!(matches!(auth.authorize(&guessed), Err(CapabilityError::NotApproved)));
+        assert!(matches!(
+            auth.authorize(&guessed),
+            Err(CapabilityError::NotApproved)
+        ));
     }
 
     #[test]
@@ -494,11 +535,20 @@ mod tests {
         let source = SourceId::generate();
         auth.approve_source(source.clone(), 1);
         let cap = auth
-            .issue(device, SessionId::generate(), source, 1, Duration::from_secs(10))
+            .issue(
+                device,
+                SessionId::generate(),
+                source,
+                1,
+                Duration::from_secs(10),
+            )
             .unwrap();
         // time passes
         auth.clock = Box::new(VirtualClock(Duration::from_secs(11)));
-        assert!(matches!(auth.authorize(&cap), Err(CapabilityError::Expired)));
+        assert!(matches!(
+            auth.authorize(&cap),
+            Err(CapabilityError::Expired)
+        ));
     }
 
     #[test]
@@ -509,12 +559,21 @@ mod tests {
         let source = SourceId::generate();
         auth.approve_source(source.clone(), 1);
         let cap = auth
-            .issue(device, SessionId::generate(), source.clone(), 1, Duration::from_secs(60))
+            .issue(
+                device,
+                SessionId::generate(),
+                source.clone(),
+                1,
+                Duration::from_secs(60),
+            )
             .unwrap();
         assert!(auth.authorize(&cap).is_ok());
         // catalog moves to revision 2; old capability is stale
         auth.approve_source(source, 2);
-        assert!(matches!(auth.authorize(&cap), Err(CapabilityError::StaleRevision)));
+        assert!(matches!(
+            auth.authorize(&cap),
+            Err(CapabilityError::StaleRevision)
+        ));
     }
 
     // revocation (H24)
@@ -525,11 +584,21 @@ mod tests {
         auth.pair(device.clone());
         let source = SourceId::generate();
         auth.approve_source(source.clone(), 1);
-        auth.issue(device, SessionId::generate(), source.clone(), 1, Duration::from_secs(60))
-            .unwrap();
+        auth.issue(
+            device,
+            SessionId::generate(),
+            source.clone(),
+            1,
+            Duration::from_secs(60),
+        )
+        .unwrap();
         assert_eq!(auth.active_capabilities().len(), 1);
         auth.revoke_source(&source);
-        assert_eq!(auth.active_capabilities().len(), 0, "source revoke closes its streams");
+        assert_eq!(
+            auth.active_capabilities().len(),
+            0,
+            "source revoke closes its streams"
+        );
     }
 
     #[test]
@@ -540,10 +609,19 @@ mod tests {
         let source = SourceId::generate();
         auth.approve_source(source.clone(), 1);
         let cap = auth
-            .issue(device.clone(), SessionId::generate(), source, 1, Duration::from_secs(60))
+            .issue(
+                device.clone(),
+                SessionId::generate(),
+                source,
+                1,
+                Duration::from_secs(60),
+            )
             .unwrap();
         auth.revoke_device(&device);
-        assert!(matches!(auth.authorize(&cap), Err(CapabilityError::NotPaired)));
+        assert!(matches!(
+            auth.authorize(&cap),
+            Err(CapabilityError::NotPaired)
+        ));
     }
 
     // backoff (H27)
@@ -559,7 +637,10 @@ mod tests {
             delays.push(d);
         }
         assert!(!delays.is_empty());
-        assert!(delays.iter().all(|d| *d <= Duration::from_millis(800)), "max respected");
+        assert!(
+            delays.iter().all(|d| *d <= Duration::from_millis(800)),
+            "max respected"
+        );
         let total: Duration = delays.iter().sum();
         assert!(total <= Duration::from_millis(2_000) + Duration::from_millis(800));
         assert!(matches!(c.next_delay(), Err(BackoffError::BudgetExhausted)));

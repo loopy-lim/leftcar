@@ -53,7 +53,9 @@ fn map_lifecycle(code: u32) -> Option<viewer_core::LifecycleEvent> {
 
 /// # Safety
 /// `instance_json` must be a valid NUL-terminated UTF-8 string.
-unsafe fn parse_instance(instance_json: *const c_char) -> Result<domain::ids::StreamInstanceId, i32> {
+unsafe fn parse_instance(
+    instance_json: *const c_char,
+) -> Result<domain::ids::StreamInstanceId, i32> {
     if instance_json.is_null() {
         return Err(LEFTCAR_ERR_NULL);
     }
@@ -61,7 +63,6 @@ unsafe fn parse_instance(instance_json: *const c_char) -> Result<domain::ids::St
     let s = cstr.to_str().map_err(|_| LEFTCAR_ERR_INVALID)?;
     domain::ids::StreamInstanceId::from_raw(s).map_err(|_| LEFTCAR_ERR_INVALID)
 }
-
 
 /// Raw-pointer logic lives in an unsafe impl block so the extern "C" entry
 /// points stay safe functions (clippy not_unsafe_ptr_arg_deref) while the
@@ -77,11 +78,10 @@ impl Abi {
     ) -> Result<(), i32> {
         let state = state.as_mut().ok_or(LEFTCAR_ERR_NULL)?;
         let instance = parse_instance(instance_json)?;
-        viewer_core::c_abi::stream_attach_surface(state, &instance, surface)
-            .map_err(|e| match e {
-                viewer_core::CAbiError::NullSurface => LEFTCAR_ERR_INVALID,
-                _ => LEFTCAR_ERR_STATE,
-            })
+        viewer_core::c_abi::stream_attach_surface(state, &instance, surface).map_err(|e| match e {
+            viewer_core::CAbiError::NullSurface => LEFTCAR_ERR_INVALID,
+            _ => LEFTCAR_ERR_STATE,
+        })
     }
 
     /// # Safety
@@ -106,12 +106,11 @@ impl Abi {
     ) -> Result<(), i32> {
         let state = state.as_mut().ok_or(LEFTCAR_ERR_NULL)?;
         let instance = parse_instance(instance_json)?;
-        viewer_core::c_abi::stream_detach_surface(state, &instance)
-            .map_err(|e| match e {
-                viewer_core::CAbiError::DetachWithoutAttach
-                | viewer_core::CAbiError::InstanceCrossing => LEFTCAR_ERR_STATE,
-                _ => LEFTCAR_ERR_INVALID,
-            })
+        viewer_core::c_abi::stream_detach_surface(state, &instance).map_err(|e| match e {
+            viewer_core::CAbiError::DetachWithoutAttach
+            | viewer_core::CAbiError::InstanceCrossing => LEFTCAR_ERR_STATE,
+            _ => LEFTCAR_ERR_INVALID,
+        })
     }
 
     /// # Safety
@@ -269,7 +268,10 @@ mod tests {
         let ip = instance.as_ptr();
 
         assert_eq!(leftcar_stream_attach_surface(state, ip, 0x1234), LEFTCAR_OK);
-        assert_eq!(leftcar_stream_surface_changed(state, ip, 1920, 1080), LEFTCAR_OK);
+        assert_eq!(
+            leftcar_stream_surface_changed(state, ip, 1920, 1080),
+            LEFTCAR_OK
+        );
         assert_eq!(
             leftcar_stream_update_window_state(state, ip, lifecycle::SURFACE_CREATE, 0),
             LEFTCAR_OK
@@ -295,9 +297,15 @@ mod tests {
     fn null_pointers_return_null_error() {
         let instance = CString::new("i").unwrap();
         let ip = instance.as_ptr();
-        assert_eq!(leftcar_stream_attach_surface(std::ptr::null_mut(), ip, 1), LEFTCAR_ERR_NULL);
+        assert_eq!(
+            leftcar_stream_attach_surface(std::ptr::null_mut(), ip, 1),
+            LEFTCAR_ERR_NULL
+        );
         let state = leftcar_viewer_process_start();
-        assert_eq!(leftcar_stream_attach_surface(state, std::ptr::null(), 1), LEFTCAR_ERR_NULL);
+        assert_eq!(
+            leftcar_stream_attach_surface(state, std::ptr::null(), 1),
+            LEFTCAR_ERR_NULL
+        );
         unsafe { drop(Box::from_raw(state)) };
     }
 

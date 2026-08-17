@@ -86,8 +86,17 @@ impl QualityAllocator {
     }
 
     /// Compute allocations; `tick` advances hysteresis bookkeeping.
-    pub fn allocate(&mut self, signals: &[WindowSignal], budget: &Budget, tick: u64) -> Vec<Allocation> {
-        let cap_multiplier = if budget.thermal_severe { budget.thermal_cap_fraction } else { 1.0 };
+    pub fn allocate(
+        &mut self,
+        signals: &[WindowSignal],
+        budget: &Budget,
+        tick: u64,
+    ) -> Vec<Allocation> {
+        let cap_multiplier = if budget.thermal_severe {
+            budget.thermal_cap_fraction
+        } else {
+            1.0
+        };
         let pixel_cap = (budget.max_total_pixel_rate as f64 * cap_multiplier as f64) as u64;
         let bitrate_cap = (budget.max_total_bitrate_bps as f64 * cap_multiplier as f64) as u64;
 
@@ -97,7 +106,8 @@ impl QualityAllocator {
             .map(|s| {
                 let visibility = if s.visible { 1.0 } else { 0.0 };
                 let focus = if s.focused { 1.0 } else { 0.6 };
-                (visibility * focus * s.requested_quality as f64 * (1.0 - s.health_penalty as f64)).max(0.0)
+                (visibility * focus * s.requested_quality as f64 * (1.0 - s.health_penalty as f64))
+                    .max(0.0)
             })
             .collect();
 
@@ -124,7 +134,12 @@ impl QualityAllocator {
 
         let mut used_pixels: u64 = 0;
         let mut used_bitrate: u64 = 0;
-        let mut out = vec![Allocation { profile: QualityProfile::Suspended }; signals.len()];
+        let mut out = vec![
+            Allocation {
+                profile: QualityProfile::Suspended
+            };
+            signals.len()
+        ];
 
         for &i in &order {
             if !signals[i].visible {
@@ -184,8 +199,15 @@ impl QualityAllocator {
     pub fn total_load(allocations: &[Allocation], budget: &Budget) -> (u64, u64) {
         let px: u64 = allocations.iter().map(|a| a.profile.pixel_rate()).sum();
         let br: u64 = allocations.iter().map(|a| a.profile.bitrate_bps()).sum();
-        let cap = if budget.thermal_severe { budget.thermal_cap_fraction } else { 1.0 };
-        ((px as f64 * cap as f64) as u64, (br as f64 * cap as f64) as u64)
+        let cap = if budget.thermal_severe {
+            budget.thermal_cap_fraction
+        } else {
+            1.0
+        };
+        (
+            (px as f64 * cap as f64) as u64,
+            (br as f64 * cap as f64) as u64,
+        )
     }
 }
 
@@ -203,7 +225,13 @@ mod tests {
     }
 
     fn signal(visible: bool, focused: bool, area: f32) -> WindowSignal {
-        WindowSignal { visible, focused, area, requested_quality: 1.0, health_penalty: 0.0 }
+        WindowSignal {
+            visible,
+            focused,
+            area,
+            requested_quality: 1.0,
+            health_penalty: 0.0,
+        }
     }
 
     #[test]
@@ -228,7 +256,11 @@ mod tests {
     #[test]
     fn hidden_stream_can_suspend() {
         let mut a = QualityAllocator::new();
-        let out = a.allocate(&[signal(false, false, 0.0), signal(true, true, 1.0)], &generous(), 0);
+        let out = a.allocate(
+            &[signal(false, false, 0.0), signal(true, true, 1.0)],
+            &generous(),
+            0,
+        );
         assert_eq!(out[0].profile, QualityProfile::Suspended);
         assert_eq!(out[1].profile, QualityProfile::Focus);
     }
@@ -246,7 +278,11 @@ mod tests {
         let out3 = a.allocate(&[signal(true, true, 0.05)], &generous(), 3);
         assert_eq!(out3[0].profile, QualityProfile::Focus);
         let out4 = a.allocate(&[signal(true, true, 0.05)], &generous(), 4);
-        assert_eq!(out4[0].profile, QualityProfile::BackgroundVisible, "downgrade applies after hysteresis");
+        assert_eq!(
+            out4[0].profile,
+            QualityProfile::BackgroundVisible,
+            "downgrade applies after hysteresis"
+        );
     }
 
     #[test]
@@ -294,7 +330,12 @@ mod tests {
             thermal_severe: true,
         };
         let out = a.allocate(
-            &[signal(true, true, 1.0), signal(true, false, 0.9), signal(true, false, 0.9), signal(true, false, 0.9)],
+            &[
+                signal(true, true, 1.0),
+                signal(true, false, 0.9),
+                signal(true, false, 0.9),
+                signal(true, false, 0.9),
+            ],
             &budget,
             0,
         );
@@ -317,8 +358,16 @@ mod tests {
             thermal_cap_fraction: 1.0,
             thermal_severe: false,
         };
-        let out = a.allocate(&[signal(true, false, 0.3), signal(true, false, 0.3)], &budget, 0);
-        assert_ne!(out[0].profile, QualityProfile::Suspended, "visible stream must not be starved to suspend");
+        let out = a.allocate(
+            &[signal(true, false, 0.3), signal(true, false, 0.3)],
+            &budget,
+            0,
+        );
+        assert_ne!(
+            out[0].profile,
+            QualityProfile::Suspended,
+            "visible stream must not be starved to suspend"
+        );
         assert_ne!(out[1].profile, QualityProfile::Suspended);
     }
 

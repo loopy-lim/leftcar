@@ -170,7 +170,9 @@ pub struct ViewerAddNumbersOutput {
 
 #[command]
 fn viewer_add_numbers(input: ViewerAddNumbersInput) -> rustra::Result<ViewerAddNumbersOutput> {
-    Ok(ViewerAddNumbersOutput { value: input.a + input.b })
+    Ok(ViewerAddNumbersOutput {
+        value: input.a + input.b,
+    })
 }
 
 /// Events (docs/04 §7).
@@ -178,10 +180,21 @@ fn viewer_add_numbers(input: ViewerAddNumbersInput) -> rustra::Result<ViewerAddN
 #[serde(rename_all = "camelCase")]
 #[serde(tag = "kind", content = "payload")]
 pub enum ViewerEvent {
-    HostStateChanged { state: PairingState },
-    SourceCatalogChanged { host_id: HostId, revision: u64 },
-    StreamWindowChanged { instance_id: StreamInstanceId, phase: StreamPhase },
-    SessionAlert { error_code: String, retryable: bool },
+    HostStateChanged {
+        state: PairingState,
+    },
+    SourceCatalogChanged {
+        host_id: HostId,
+        revision: u64,
+    },
+    StreamWindowChanged {
+        instance_id: StreamInstanceId,
+        phase: StreamPhase,
+    },
+    SessionAlert {
+        error_code: String,
+        retryable: bool,
+    },
 }
 
 pub fn viewer_package() -> Package {

@@ -91,7 +91,9 @@ impl LinkProfile {
     }
 
     pub fn is_in_outage(&self, now: Duration) -> bool {
-        self.outage_schedule.iter().any(|(s, e)| now >= *s && now < *e)
+        self.outage_schedule
+            .iter()
+            .any(|(s, e)| now >= *s && now < *e)
     }
 }
 
@@ -218,11 +220,17 @@ pub struct SimulatedSender {
 
 impl SimulatedSender {
     pub fn send_control(&mut self, bytes: Bytes) {
-        self.link.lock().expect("link mutex").enqueue(TransportEvent::Control(bytes));
+        self.link
+            .lock()
+            .expect("link mutex")
+            .enqueue(TransportEvent::Control(bytes));
     }
 
     pub fn send_video(&mut self, source: SourceId, bytes: Bytes) {
-        self.link.lock().expect("link mutex").enqueue(TransportEvent::Video(source, bytes));
+        self.link
+            .lock()
+            .expect("link mutex")
+            .enqueue(TransportEvent::Video(source, bytes));
     }
 }
 
@@ -237,10 +245,7 @@ impl SimulatedReceiver {
     }
 }
 
-pub fn simulated_pair(
-    profile: LinkProfile,
-    seed: u64,
-) -> (SimulatedSender, SimulatedReceiver) {
+pub fn simulated_pair(profile: LinkProfile, seed: u64) -> (SimulatedSender, SimulatedReceiver) {
     let link = std::sync::Arc::new(std::sync::Mutex::new(SimulatedLink::new(profile, seed)));
     (
         SimulatedSender { link: link.clone() },

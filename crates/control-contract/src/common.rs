@@ -4,7 +4,6 @@
 
 use rustra::prelude::*;
 
-
 #[bridge_type]
 #[derive(Clone)]
 pub struct HostId(pub String);

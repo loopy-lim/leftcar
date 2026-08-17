@@ -127,7 +127,10 @@ mod tests {
         let result = start_capture(&approved, &config, &NoopSink);
         // E3 scope: without the real feature, starting fails loudly (never a
         // silent software fallback — docs/01 출시 중단 조건).
-        assert!(matches!(result, Err(CaptureStartError::RealBackendNotLinked { .. })));
+        assert!(matches!(
+            result,
+            Err(CaptureStartError::RealBackendNotLinked { .. })
+        ));
     }
 
     #[test]

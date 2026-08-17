@@ -37,7 +37,9 @@ pub enum PacketizeError {
 pub fn packetize(frame: &EncodedFrame, mtu: usize) -> Result<Vec<Fragment>, PacketizeError> {
     let mtu = mtu.max(64);
     if frame.payload.len() > MAX_FRAME_BYTES {
-        return Err(PacketizeError::FrameTooLarge { len: frame.payload.len() });
+        return Err(PacketizeError::FrameTooLarge {
+            len: frame.payload.len(),
+        });
     }
     let payload_len = frame.payload.len();
     let frag_count = if payload_len == 0 {
@@ -45,7 +47,8 @@ pub fn packetize(frame: &EncodedFrame, mtu: usize) -> Result<Vec<Fragment>, Pack
     } else {
         payload_len.div_ceil(mtu)
     };
-    let frag_count = u16::try_from(frag_count).map_err(|_| PacketizeError::FrameTooLarge { len: payload_len })?;
+    let frag_count = u16::try_from(frag_count)
+        .map_err(|_| PacketizeError::FrameTooLarge { len: payload_len })?;
     let mut out = Vec::with_capacity(frag_count as usize);
     for i in 0..frag_count {
         let start = i as usize * mtu;
@@ -112,7 +115,10 @@ mod tests {
 
     #[test]
     fn oversized_frame_rejected_before_framing() {
-        let err = packetize(&frame_with_payload(MAX_FRAME_BYTES + 1, FrameKind::Key, 1), 1200);
+        let err = packetize(
+            &frame_with_payload(MAX_FRAME_BYTES + 1, FrameKind::Key, 1),
+            1200,
+        );
         assert!(matches!(err, Err(PacketizeError::FrameTooLarge { .. })));
     }
 }

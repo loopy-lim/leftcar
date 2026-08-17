@@ -140,7 +140,8 @@ impl LeftcarError {
     /// Errors with conditional retryability must resolve their action at
     /// runtime; the static table maps them to a diagnostic-first action.
     pub fn is_user_recoverable(&self) -> bool {
-        !matches!(self.action, RecoveryAction::OpenDiagnostics) || self.retryable != Retryability::Never
+        !matches!(self.action, RecoveryAction::OpenDiagnostics)
+            || self.retryable != Retryability::Never
     }
 }
 
@@ -157,14 +158,17 @@ mod tests {
                 !e.code.is_empty(),
                 "error code must be stable non-empty string"
             );
-            assert!(matches!(e.action, RecoveryAction::Retry
-                | RecoveryAction::RePair
-                | RecoveryAction::ReSelectSource
-                | RecoveryAction::GrantScreenRecording
-                | RecoveryAction::CloseStreamWindow
-                | RecoveryAction::UpdateHost
-                | RecoveryAction::UpdateViewer
-                | RecoveryAction::OpenDiagnostics));
+            assert!(matches!(
+                e.action,
+                RecoveryAction::Retry
+                    | RecoveryAction::RePair
+                    | RecoveryAction::ReSelectSource
+                    | RecoveryAction::GrantScreenRecording
+                    | RecoveryAction::CloseStreamWindow
+                    | RecoveryAction::UpdateHost
+                    | RecoveryAction::UpdateViewer
+                    | RecoveryAction::OpenDiagnostics
+            ));
         }
     }
 

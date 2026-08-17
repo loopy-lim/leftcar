@@ -109,9 +109,18 @@ mod tests {
             StreamPhase::Playing,
             StreamPhase::Suspended,
         ] {
-            assert!(from.can_transition_to(StreamPhase::SourceUnavailable), "{from:?}");
-            assert!(from.can_transition_to(StreamPhase::PermissionRevoked), "{from:?}");
-            assert!(from.can_transition_to(StreamPhase::DecoderFailed), "{from:?}");
+            assert!(
+                from.can_transition_to(StreamPhase::SourceUnavailable),
+                "{from:?}"
+            );
+            assert!(
+                from.can_transition_to(StreamPhase::PermissionRevoked),
+                "{from:?}"
+            );
+            assert!(
+                from.can_transition_to(StreamPhase::DecoderFailed),
+                "{from:?}"
+            );
             assert!(from.can_transition_to(StreamPhase::Stopped), "{from:?}");
         }
         // forbidden

@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 pub const PROTOCOL_MIN: u32 = 1;
 pub const PROTOCOL_MAX: u32 = 1;
 /// docs/07 §13: control message initial cap.
@@ -55,7 +54,9 @@ pub enum ControlKind {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    #[error("version mismatch: client {client_min}-{client_max}, server {server_min}-{server_max}")]
+    #[error(
+        "version mismatch: client {client_min}-{client_max}, server {server_min}-{server_max}"
+    )]
     VersionMismatch {
         client_min: u32,
         client_max: u32,
@@ -69,7 +70,12 @@ pub enum ProtocolError {
 }
 
 /// Negotiate the protocol version: highest common in both ranges (docs/04 §10).
-pub fn negotiate(client_min: u32, client_max: u32, server_min: u32, server_max: u32) -> Result<u32, ProtocolError> {
+pub fn negotiate(
+    client_min: u32,
+    client_max: u32,
+    server_min: u32,
+    server_max: u32,
+) -> Result<u32, ProtocolError> {
     let lo = client_min.max(server_min);
     let hi = client_max.min(server_max);
     if lo > hi {
@@ -196,23 +202,32 @@ mod tests {
         ];
         for allowed in ALLOWED {
             // exhaustive match: adding a new variant requires updating this test
-            matches!(allowed, ControlKind::ListSources
-                | ControlKind::StartSource
-                | ControlKind::StopSource
-                | ControlKind::SetStreamProfile
-                | ControlKind::RequestIdr
-                | ControlKind::SessionPing
-                | ControlKind::SessionPong
-                | ControlKind::CatalogChanged
-                | ControlKind::StreamStateChanged
-                | ControlKind::ErrorResponse);
+            matches!(
+                allowed,
+                ControlKind::ListSources
+                    | ControlKind::StartSource
+                    | ControlKind::StopSource
+                    | ControlKind::SetStreamProfile
+                    | ControlKind::RequestIdr
+                    | ControlKind::SessionPing
+                    | ControlKind::SessionPong
+                    | ControlKind::CatalogChanged
+                    | ControlKind::StreamStateChanged
+                    | ControlKind::ErrorResponse
+            );
         }
         // serialized names must never contain input-like tokens
         for kind in [
-            ControlKind::ListSources, ControlKind::StartSource, ControlKind::StopSource,
-            ControlKind::SetStreamProfile, ControlKind::RequestIdr, ControlKind::SessionPing,
-            ControlKind::SessionPong, ControlKind::CatalogChanged,
-            ControlKind::StreamStateChanged, ControlKind::ErrorResponse,
+            ControlKind::ListSources,
+            ControlKind::StartSource,
+            ControlKind::StopSource,
+            ControlKind::SetStreamProfile,
+            ControlKind::RequestIdr,
+            ControlKind::SessionPing,
+            ControlKind::SessionPong,
+            ControlKind::CatalogChanged,
+            ControlKind::StreamStateChanged,
+            ControlKind::ErrorResponse,
         ] {
             let env = ControlEnvelope {
                 protocol_version: 1,
@@ -223,8 +238,19 @@ mod tests {
                 payload: vec![],
             };
             let json = serde_json::to_string(&env).unwrap().to_lowercase();
-            for banned in ["keyboard", "pointer", "mouse", "touch", "inject", "clipboard", "input"] {
-                assert!(!json.contains(banned), "{kind:?} serialized form leaked {banned}: {json}");
+            for banned in [
+                "keyboard",
+                "pointer",
+                "mouse",
+                "touch",
+                "inject",
+                "clipboard",
+                "input",
+            ] {
+                assert!(
+                    !json.contains(banned),
+                    "{kind:?} serialized form leaked {banned}: {json}"
+                );
             }
         }
     }
@@ -232,7 +258,10 @@ mod tests {
     #[test]
     fn truncated_and_garbage_inputs_are_malformed() {
         assert!(matches!(parse_control(&[]), Err(ProtocolError::Malformed)));
-        assert!(matches!(parse_control(&[0; 4]), Err(ProtocolError::Malformed)));
+        assert!(matches!(
+            parse_control(&[0; 4]),
+            Err(ProtocolError::Malformed)
+        ));
         let mut buf = 8u64.to_be_bytes().to_vec();
         buf.extend_from_slice(b"not json!");
         assert!(matches!(parse_control(&buf), Err(ProtocolError::Malformed)));
@@ -296,6 +325,5 @@ mod fuzz_smoke {
         };
         let framed = frame_control(&env).unwrap();
         assert!(framed.len() < 1024);
-
     }
 }

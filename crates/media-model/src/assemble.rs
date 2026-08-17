@@ -24,7 +24,9 @@ pub enum AssembleError {
 pub enum AssembledOutput {
     Frame(EncodedFrame),
     /// decoder cannot reference the missing frame; request IDR (rate-limited)
-    RequestIdr { source_id: SourceId },
+    RequestIdr {
+        source_id: SourceId,
+    },
     /// fragment dropped silently (stale epoch, superseded, late)
     Dropped,
 }
@@ -68,14 +70,21 @@ impl FragmentAssembler {
     }
 
     /// Feed one fragment. `now` drives incomplete-frame expiry.
-    pub fn feed(&mut self, frag: Fragment, now: Duration) -> Result<AssembledOutput, AssembleError> {
+    pub fn feed(
+        &mut self,
+        frag: Fragment,
+        now: Duration,
+    ) -> Result<AssembledOutput, AssembleError> {
         // epoch gate: frames from an older epoch than the newest seen are dropped
-        let state = self.states.entry(frag.header.source_id.clone()).or_insert(StreamState {
-            epoch: frag.header.stream_epoch,
-            decodable: false,
-            last_delivered_frame_id: None,
-            last_idr_request_frame: None,
-        });
+        let state = self
+            .states
+            .entry(frag.header.source_id.clone())
+            .or_insert(StreamState {
+                epoch: frag.header.stream_epoch,
+                decodable: false,
+                last_delivered_frame_id: None,
+                last_idr_request_frame: None,
+            });
         if frag.header.stream_epoch < state.epoch {
             return Ok(AssembledOutput::Dropped); // old epoch after resize
         }
@@ -109,11 +118,15 @@ impl FragmentAssembler {
                     // with rate limiting (docs/03 6.2)
                     let should_request = state
                         .last_idr_request_frame
-                        .map(|last| frag.header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64)
+                        .map(|last| {
+                            frag.header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64
+                        })
                         .unwrap_or(true);
                     if should_request {
                         state.last_idr_request_frame = Some(frag.header.frame_id);
-                        return Ok(AssembledOutput::RequestIdr { source_id: frag.header.source_id.clone() });
+                        return Ok(AssembledOutput::RequestIdr {
+                            source_id: frag.header.source_id.clone(),
+                        });
                     }
                     return Ok(AssembledOutput::Dropped);
                 }
@@ -121,7 +134,10 @@ impl FragmentAssembler {
         }
 
         // supersede: a newer complete frame can replace older incomplete deltas
-        let source_partials = self.partials.entry(frag.header.source_id.clone()).or_default();
+        let source_partials = self
+            .partials
+            .entry(frag.header.source_id.clone())
+            .or_default();
         Self::evict_overflow(source_partials, frag.header.frame_id, now)?;
 
         // duplicate detection
@@ -190,7 +206,10 @@ impl FragmentAssembler {
         // Newer incomplete frame supersedes older incomplete deltas: drop the
         // oldest incomplete frames when the incoming frame is newer.
         while total > MAX_ASSEMBLY_BYTES_PER_SOURCE {
-            let oldest = *partials.keys().next().ok_or(AssembleError::MemoryBoundExceeded)?;
+            let oldest = *partials
+                .keys()
+                .next()
+                .ok_or(AssembleError::MemoryBoundExceeded)?;
             if oldest >= incoming_frame_id {
                 return Err(AssembleError::MemoryBoundExceeded);
             }
@@ -201,8 +220,15 @@ impl FragmentAssembler {
         Ok(())
     }
 
-    fn deliver(&mut self, header: FragmentHeader, payload: Bytes) -> Result<AssembledOutput, AssembleError> {
-        let state = self.states.get_mut(&header.source_id).expect("state exists");
+    fn deliver(
+        &mut self,
+        header: FragmentHeader,
+        payload: Bytes,
+    ) -> Result<AssembledOutput, AssembleError> {
+        let state = self
+            .states
+            .get_mut(&header.source_id)
+            .expect("state exists");
         let out = match header.kind {
             FrameKind::Config => AssembledOutput::Dropped, // config delivered via key delivery bookkeeping
             FrameKind::Key => {
@@ -219,11 +245,15 @@ impl FragmentAssembler {
                     // request IDR with rate limit
                     let should_request = state
                         .last_idr_request_frame
-                        .map(|last| header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64)
+                        .map(|last| {
+                            header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64
+                        })
                         .unwrap_or(true);
                     if should_request {
                         state.last_idr_request_frame = Some(header.frame_id);
-                        AssembledOutput::RequestIdr { source_id: header.source_id.clone() }
+                        AssembledOutput::RequestIdr {
+                            source_id: header.source_id.clone(),
+                        }
                     } else {
                         AssembledOutput::Dropped
                     }
@@ -252,7 +282,9 @@ impl FragmentAssembler {
 
 impl PartialFrame {
     fn recovery_iter(&self) -> impl Iterator<Item = Bytes> + '_ {
-        self.received.iter().map(|s| s.clone().expect("complete frame"))
+        self.received
+            .iter()
+            .map(|s| s.clone().expect("complete frame"))
     }
 }
 
@@ -265,7 +297,10 @@ pub struct BoundedQueue<T> {
 
 impl<T> BoundedQueue<T> {
     pub fn new(cap: usize) -> Self {
-        Self { items: VecDeque::new(), cap }
+        Self {
+            items: VecDeque::new(),
+            cap,
+        }
     }
     pub fn len(&self) -> usize {
         self.items.len()
@@ -275,7 +310,11 @@ impl<T> BoundedQueue<T> {
     }
     /// Push, dropping the oldest item if over cap. Returns the dropped item.
     pub fn push_evict(&mut self, item: T) -> Option<T> {
-        let dropped = if self.items.len() == self.cap { self.items.pop_front() } else { None };
+        let dropped = if self.items.len() == self.cap {
+            self.items.pop_front()
+        } else {
+            None
+        };
         self.items.push_back(item);
         dropped
     }
@@ -309,7 +348,11 @@ mod tests {
         }
     }
 
-    fn feed_all(asm: &mut FragmentAssembler, frame: &EncodedFrame, now: Duration) -> Vec<AssembledOutput> {
+    fn feed_all(
+        asm: &mut FragmentAssembler,
+        frame: &EncodedFrame,
+        now: Duration,
+    ) -> Vec<AssembledOutput> {
         packetize(frame, 512)
             .unwrap()
             .into_iter()
@@ -327,10 +370,17 @@ mod tests {
     #[test]
     fn delta_before_keyframe_is_dropped() {
         let mut asm = assembled(crate::frame::CodecProfile::AvcBaseline);
-        let out = feed_all(&mut asm, &frame(100, FrameKind::Delta, 1, 1), Duration::ZERO);
+        let out = feed_all(
+            &mut asm,
+            &frame(100, FrameKind::Delta, 1, 1),
+            Duration::ZERO,
+        );
         // never a Frame; an IDR request is the correct recovery signal
         assert!(
-            out.iter().all(|o| matches!(o, AssembledOutput::Dropped | AssembledOutput::RequestIdr { .. })),
+            out.iter().all(|o| matches!(
+                o,
+                AssembledOutput::Dropped | AssembledOutput::RequestIdr { .. }
+            )),
             "delta must not deliver before a keyframe: {out:?}"
         );
     }
@@ -338,11 +388,22 @@ mod tests {
     #[test]
     fn delta_before_config_is_dropped() {
         let mut asm = assembled(crate::frame::CodecProfile::AvcBaseline);
-        feed_all(&mut asm, &frame(50, FrameKind::Config, 1, 1), Duration::ZERO);
+        feed_all(
+            &mut asm,
+            &frame(50, FrameKind::Config, 1, 1),
+            Duration::ZERO,
+        );
         // config alone does not make the stream decodable for deltas
-        let out = feed_all(&mut asm, &frame(100, FrameKind::Delta, 2, 1), Duration::ZERO);
+        let out = feed_all(
+            &mut asm,
+            &frame(100, FrameKind::Delta, 2, 1),
+            Duration::ZERO,
+        );
         assert!(
-            out.iter().all(|o| matches!(o, AssembledOutput::Dropped | AssembledOutput::RequestIdr { .. })),
+            out.iter().all(|o| matches!(
+                o,
+                AssembledOutput::Dropped | AssembledOutput::RequestIdr { .. }
+            )),
             "delta must not deliver after config only: {out:?}"
         );
     }
@@ -354,7 +415,11 @@ mod tests {
         // epoch bump (resize)
         feed_all(&mut asm, &frame(100, FrameKind::Key, 2, 2), Duration::ZERO);
         // late delta from epoch 1
-        let out = feed_all(&mut asm, &frame(100, FrameKind::Delta, 3, 1), Duration::ZERO);
+        let out = feed_all(
+            &mut asm,
+            &frame(100, FrameKind::Delta, 3, 1),
+            Duration::ZERO,
+        );
         assert!(out.iter().all(|o| matches!(o, AssembledOutput::Dropped)));
     }
 
@@ -385,7 +450,10 @@ mod tests {
         asm.feed(frags[0].clone(), Duration::ZERO).unwrap();
         // after ttl the incomplete frame is gone
         asm.expire_incomplete_all(Duration::from_millis(100), Duration::from_millis(200));
-        let state = asm.partials.get(&SourceId::from_raw("src").unwrap()).unwrap();
+        let state = asm
+            .partials
+            .get(&SourceId::from_raw("src").unwrap())
+            .unwrap();
         assert!(state.is_empty(), "incomplete frame should have expired");
     }
 
@@ -398,13 +466,22 @@ mod tests {
         let frags = packetize(&delta, 512).unwrap();
         asm.feed(frags[0].clone(), Duration::ZERO).unwrap();
         // newer complete delta frame 3
-        let out = feed_all(&mut asm, &frame(100, FrameKind::Delta, 3, 1), Duration::ZERO);
+        let out = feed_all(
+            &mut asm,
+            &frame(100, FrameKind::Delta, 3, 1),
+            Duration::ZERO,
+        );
         assert!(matches!(out.last(), Some(AssembledOutput::Frame(_))));
         // and the old incomplete delta 2 is superseded (was evicted or expired):
         // feeding its remaining fragments late must not deliver stale frame
-        let late = frags[1..].iter().map(|f| asm.feed(f.clone(), Duration::from_millis(1)).unwrap());
+        let late = frags[1..]
+            .iter()
+            .map(|f| asm.feed(f.clone(), Duration::from_millis(1)).unwrap());
         for o in late {
-            assert!(matches!(o, AssembledOutput::Dropped), "stale frame must not deliver: {o:?}");
+            assert!(
+                matches!(o, AssembledOutput::Dropped),
+                "stale frame must not deliver: {o:?}"
+            );
         }
     }
 
@@ -419,11 +496,18 @@ mod tests {
         // decodable flag is false. We force it by feeding delta after eviction
         // of all keys — the flag stays true, so this models via rate limit path.
         // Direct unit: request IDR when delta arrives undecodable.
-        let state = asm.states.get_mut(&SourceId::from_raw("src").unwrap()).unwrap();
+        let state = asm
+            .states
+            .get_mut(&SourceId::from_raw("src").unwrap())
+            .unwrap();
         state.decodable = false;
         let mut idr_count = 0;
         for frame_id in 2..20u64 {
-            let outs = feed_all(&mut asm, &frame(10, FrameKind::Delta, frame_id, 1), Duration::ZERO);
+            let outs = feed_all(
+                &mut asm,
+                &frame(10, FrameKind::Delta, frame_id, 1),
+                Duration::ZERO,
+            );
             for o in outs {
                 if matches!(o, AssembledOutput::RequestIdr { .. }) {
                     idr_count += 1;
@@ -431,7 +515,10 @@ mod tests {
             }
         }
         assert!(idr_count >= 1, "IDR must be requested");
-        assert!(idr_count <= 3, "IDR requests must be rate limited, got {idr_count}");
+        assert!(
+            idr_count <= 3,
+            "IDR requests must be rate limited, got {idr_count}"
+        );
     }
 
     #[test]

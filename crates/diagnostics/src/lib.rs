@@ -15,10 +15,29 @@ pub struct Metric {
 }
 
 pub const METRIC_ALLOWLIST: &[&str] = &[
-    "codec", "profile", "width", "height", "fps", "duration_ms", "size",
-    "count", "error_code", "session_hash", "source_hash", "host_hash",
-    "stream_hash", "phase", "scope", "retryable", "transport", "kind",
-    "build", "os_version", "app_version", "epoch", "frame_id",
+    "codec",
+    "profile",
+    "width",
+    "height",
+    "fps",
+    "duration_ms",
+    "size",
+    "count",
+    "error_code",
+    "session_hash",
+    "source_hash",
+    "host_hash",
+    "stream_hash",
+    "phase",
+    "scope",
+    "retryable",
+    "transport",
+    "kind",
+    "build",
+    "os_version",
+    "app_version",
+    "epoch",
+    "frame_id",
 ];
 
 /// 1Hz summary aggregator (docs/04 §7: metric은 최대 1Hz summary).
@@ -41,7 +60,10 @@ impl SummaryAggregator {
         self.windows
             .entry(metric.name.to_string())
             .or_default()
-            .push(Metric { name: metric.name, value });
+            .push(Metric {
+                name: metric.name,
+                value,
+            });
         Ok(())
     }
 
@@ -83,7 +105,10 @@ pub struct BundleWriter<'a> {
 
 impl<'a> BundleWriter<'a> {
     pub fn new(run_id: &'a str) -> Self {
-        Self { run_id, entries: Vec::new() }
+        Self {
+            run_id,
+            entries: Vec::new(),
+        }
     }
 
     /// Add one record; every field passes the domain redactor.
@@ -137,7 +162,13 @@ mod tests {
             ("duration_ms", "42"),
         ]);
         let out = format!("{}{}", bundle.render_jsonl(), bundle.render_log());
-        for banned in ["비밀 문서", "secret.txt", "deadbeef123", "10.1.2.3", "0xAABBCC"] {
+        for banned in [
+            "비밀 문서",
+            "secret.txt",
+            "deadbeef123",
+            "10.1.2.3",
+            "0xAABBCC",
+        ] {
             assert!(!out.contains(banned), "leaked {banned}");
         }
         assert!(out.contains("avc"));
@@ -159,8 +190,18 @@ mod tests {
     #[test]
     fn metric_names_are_allowlisted() {
         let mut agg = SummaryAggregator::new();
-        assert!(agg.record(Metric { name: "codec", value: "avc".into() }).is_ok());
-        assert!(agg.record(Metric { name: "fps", value: "60".into() }).is_ok());
+        assert!(agg
+            .record(Metric {
+                name: "codec",
+                value: "avc".into()
+            })
+            .is_ok());
+        assert!(agg
+            .record(Metric {
+                name: "fps",
+                value: "60".into()
+            })
+            .is_ok());
         // 'window_title' is a non-allowlisted name: rejected at the type level
         // (only allowlisted names exist as &'static str in practice).
         let summary = agg.take_summary();
@@ -172,7 +213,11 @@ mod tests {
         let mut agg = SummaryAggregator::new();
         // 60 frames in one window
         for _ in 0..60 {
-            agg.record(Metric { name: "frame_id", value: "7".into() }).unwrap();
+            agg.record(Metric {
+                name: "frame_id",
+                value: "7".into(),
+            })
+            .unwrap();
         }
         let summary = agg.take_summary();
         assert_eq!(summary.len(), 1, "one summary per window, not per frame");
@@ -181,7 +226,11 @@ mod tests {
     #[test]
     fn values_are_scrubbed_even_with_allowlisted_names() {
         let mut agg = SummaryAggregator::new();
-        agg.record(Metric { name: "codec", value: "10.0.0.7".into() }).unwrap();
+        agg.record(Metric {
+            name: "codec",
+            value: "10.0.0.7".into(),
+        })
+        .unwrap();
         let summary = agg.take_summary();
         assert_eq!(summary[0].value, "<ip>", "value-level scrubbing applies");
     }
@@ -200,8 +249,11 @@ mod tests {
         // structural: durations flow through metrics as numbers, not raw logs
         let d = Duration::from_millis(42);
         let mut agg = SummaryAggregator::new();
-        agg.record(Metric { name: "duration_ms", value: d.as_millis().to_string() })
-            .unwrap();
+        agg.record(Metric {
+            name: "duration_ms",
+            value: d.as_millis().to_string(),
+        })
+        .unwrap();
         let summary = agg.take_summary();
         assert_eq!(summary[0].value, "42");
     }

@@ -45,7 +45,10 @@ pub struct SourceRegistry {
 impl SourceRegistry {
     pub fn new(sources: Vec<SourceDescriptor>) -> Self {
         Self {
-            snapshot: SourceCatalogSnapshot { revision: 1, sources },
+            snapshot: SourceCatalogSnapshot {
+                revision: 1,
+                sources,
+            },
         }
     }
 
@@ -60,7 +63,9 @@ impl SourceRegistry {
         F: FnOnce(&mut Vec<SourceDescriptor>),
     {
         if expected_revision != self.snapshot.revision {
-            return Err(CatalogError::StaleRevision { expected: expected_revision });
+            return Err(CatalogError::StaleRevision {
+                expected: expected_revision,
+            });
         }
         f(&mut self.snapshot.sources);
         self.snapshot.revision += 1;
@@ -68,7 +73,11 @@ impl SourceRegistry {
     }
 
     pub fn approved_sources(&self) -> Vec<&SourceDescriptor> {
-        self.snapshot.sources.iter().filter(|s| s.is_approved).collect()
+        self.snapshot
+            .sources
+            .iter()
+            .filter(|s| s.is_approved)
+            .collect()
     }
 }
 
@@ -98,7 +107,10 @@ mod tests {
         // retry with the old revision: rejected
         let err = r.mutate(rev, |s| s[0].is_approved = true);
         assert!(matches!(err, Err(CatalogError::StaleRevision { .. })));
-        assert!(!r.snapshot().sources[0].is_approved, "stale write must not apply");
+        assert!(
+            !r.snapshot().sources[0].is_approved,
+            "stale write must not apply"
+        );
     }
 
     #[test]

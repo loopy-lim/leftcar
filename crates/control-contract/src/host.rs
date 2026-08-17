@@ -200,7 +200,9 @@ pub struct AddNumbersOutput {
 
 #[command]
 fn add_numbers(input: AddNumbersInput) -> rustra::Result<AddNumbersOutput> {
-    Ok(AddNumbersOutput { value: input.a + input.b })
+    Ok(AddNumbersOutput {
+        value: input.a + input.b,
+    })
 }
 
 /// Events (docs/04 §7) — low-frequency only, never per-frame.

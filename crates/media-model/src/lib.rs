@@ -7,8 +7,8 @@ pub mod fragment;
 pub mod frame;
 
 pub use assemble::{
-    AssembledOutput, AssembleError, BoundedQueue, FragmentAssembler,
-    MAX_ASSEMBLY_BYTES_PER_SOURCE, MAX_INCOMPLETE_PER_SOURCE,
+    AssembleError, AssembledOutput, BoundedQueue, FragmentAssembler, MAX_ASSEMBLY_BYTES_PER_SOURCE,
+    MAX_INCOMPLETE_PER_SOURCE,
 };
 pub use backpressure::{BoundedAuQueue, LatestFrameSlot};
 pub use fragment::{packetize, Fragment, FragmentHeader, DEFAULT_MTU, MAX_FRAME_BYTES};

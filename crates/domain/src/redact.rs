@@ -4,7 +4,12 @@
 
 /// Sensitive substrings that must never survive into diagnostics.
 const SENSITIVE_PATTERN_HINTS: &[&str] = &[
-    "token", "secret", "password", "key=", "privatekey", "private_key",
+    "token",
+    "secret",
+    "password",
+    "key=",
+    "privatekey",
+    "private_key",
 ];
 
 /// A redaction verdict for one line/field.
@@ -19,10 +24,29 @@ pub enum FieldKind {
 /// Classify a diagnostic field by its allowlisted name.
 pub fn classify_field(name: &str) -> FieldKind {
     const ALLOWED: &[&str] = &[
-        "codec", "profile", "width", "height", "fps", "duration_ms", "size",
-        "count", "error_code", "session_hash", "source_hash", "host_hash",
-        "stream_hash", "phase", "scope", "retryable", "transport", "kind",
-        "build", "os_version", "app_version", "epoch", "frame_id",
+        "codec",
+        "profile",
+        "width",
+        "height",
+        "fps",
+        "duration_ms",
+        "size",
+        "count",
+        "error_code",
+        "session_hash",
+        "source_hash",
+        "host_hash",
+        "stream_hash",
+        "phase",
+        "scope",
+        "retryable",
+        "transport",
+        "kind",
+        "build",
+        "os_version",
+        "app_version",
+        "epoch",
+        "frame_id",
     ];
     if ALLOWED.contains(&name) {
         // name is allowlisted, but value still passes value_filter
@@ -94,7 +118,12 @@ fn ipv4_parts(s: &str) -> Option<(usize, &str, &str, &str, &str)> {
 fn split_ipv4(token: &str) -> Option<(&str, &str, &str, &str)> {
     let mut it = token.split('.');
     let (a, b, c, d) = (it.next()?, it.next()?, it.next()?, it.next()?);
-    let octet = |p: &str| !p.is_empty() && p.len() <= 3 && p.chars().all(|ch| ch.is_ascii_digit()) && p.parse::<u16>().map(|v| v <= 255).unwrap_or(false);
+    let octet = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 3
+            && p.chars().all(|ch| ch.is_ascii_digit())
+            && p.parse::<u16>().map(|v| v <= 255).unwrap_or(false)
+    };
     if octet(a) && octet(b) && octet(c) && octet(d) && it.next().is_none() {
         Some((a, b, c, d))
     } else {
@@ -139,7 +168,9 @@ pub fn redact_field(name: &str, value: &str) -> String {
 }
 
 /// Redact a structured record (pairs of name/value).
-pub fn redact_record<'a>(record: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<(String, String)> {
+pub fn redact_record<'a>(
+    record: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<(String, String)> {
     record
         .into_iter()
         .map(|(k, v)| (k.to_string(), redact_field(k, v)))

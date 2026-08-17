@@ -33,12 +33,25 @@ Leftcar는 macOS와 Windows의 화면 또는 애플리케이션 창을 Galaxy XR
 - [24주 구현 계획](docs/08-implementation-roadmap.md)
 - [위험과 미결정 사항](docs/09-risk-register.md)
 - [공식 근거 자료](docs/10-references.md)
+- [구현 증거 문서](docs/EVIDENCE.md)
+- [구현 계획](docs/plans/2026-08-17-leftcar-v1-implementation.md)
 
 ## 현재 상태
 
 - 조사 기준일: 2026-08-17
-- 상태: 계획 승인 전, 구현 시작 전
+- 상태: 구현 진행 중 — 자동 검증 가능 범위(E1–E3) 구현 완료, 실기기 증거(E4–E7) 대기 중. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
+- 구현: Rust workspace 12 crate + native/android-viewer(C ABI) + TypeScript 앱(host-desktop, viewer-android) + CI
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows
 - 선택적 후속 대상: Linux
 - 우선 대상 뷰어: Samsung Galaxy XR 실기기
+
+### 로컬 검증 명령
+
+```text
+cargo test --workspace          # E1: 전 crate 단위/property 테스트
+cargo clippy --workspace --tests -- -D warnings
+pnpm test && pnpm test:contract # TS 단위 + 계약 테스트
+pnpm test:architecture          # ADR-0002 의존성/TS/Kotlin 규칙
+pnpm rustra:generate            # 생성 코드 재생성 (diff 없어야 함)
+```

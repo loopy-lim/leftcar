@@ -21,10 +21,19 @@ struct FakeEncoder {
 
 impl FakeEncoder {
     fn new() -> Self {
-        Self { epoch: 1, next_frame_id: 1 }
+        Self {
+            epoch: 1,
+            next_frame_id: 1,
+        }
     }
 
-    fn encode(&mut self, source: &SourceId, session: &SessionId, kind: FrameKind, content: &[u8]) -> EncodedFrame {
+    fn encode(
+        &mut self,
+        source: &SourceId,
+        session: &SessionId,
+        kind: FrameKind,
+        content: &[u8],
+    ) -> EncodedFrame {
         let id = self.next_frame_id;
         self.next_frame_id += 1;
         EncodedFrame {
@@ -50,7 +59,8 @@ struct FakeDecoder {
 
 impl FakeDecoder {
     fn feed(&mut self, frame: &EncodedFrame) {
-        self.decoded.push((frame.source_id.clone(), frame.frame_id, frame.kind));
+        self.decoded
+            .push((frame.source_id.clone(), frame.frame_id, frame.kind));
     }
 }
 
@@ -86,7 +96,9 @@ fn inmemory_loopback_one_source_end_to_end() {
         kind: network_protocol::ControlKind::SessionPing,
         payload: vec![],
     };
-    transport.send_control(Bytes::from(network_protocol::frame_control(&hello).unwrap()));
+    transport.send_control(Bytes::from(
+        network_protocol::frame_control(&hello).unwrap(),
+    ));
     match transport.recv().unwrap() {
         TransportEvent::Control(b) => {
             let (parsed, _) = network_protocol::parse_control(&b).unwrap();
@@ -96,7 +108,11 @@ fn inmemory_loopback_one_source_end_to_end() {
     }
 
     for round in 0..5u64 {
-        let kind = if round == 0 { FrameKind::Key } else { FrameKind::Delta };
+        let kind = if round == 0 {
+            FrameKind::Key
+        } else {
+            FrameKind::Delta
+        };
         let frame = enc.encode(&source, &session, kind, &[7u8; 700]);
         for frag in packetize(&frame, 512).unwrap() {
             transport.send_video(source.clone(), frag_wire(&frag.header, &frag.payload));
@@ -105,7 +121,10 @@ fn inmemory_loopback_one_source_end_to_end() {
             if let TransportEvent::Video(_, bytes) = event {
                 let (header, payload) = frag_unwire(&bytes);
                 let out = asm
-                    .feed(media_model::Fragment { header, payload }, Duration::from_millis(round * 10))
+                    .feed(
+                        media_model::Fragment { header, payload },
+                        Duration::from_millis(round * 10),
+                    )
                     .unwrap();
                 if let AssembledOutput::Frame(f) = out {
                     dec.feed(&f);
@@ -133,7 +152,11 @@ fn inmemory_loopback_four_sources_without_cross_talk() {
 
     for round in 0..3 {
         for source in &sources {
-            let kind = if round == 0 { FrameKind::Key } else { FrameKind::Delta };
+            let kind = if round == 0 {
+                FrameKind::Key
+            } else {
+                FrameKind::Delta
+            };
             let frame = enc.encode(source, &session, kind, &[0xAB; 700]);
             for frag in packetize(&frame, 512).unwrap() {
                 transport.send_video(source.clone(), frag_wire(&frag.header, &frag.payload));
@@ -142,7 +165,10 @@ fn inmemory_loopback_four_sources_without_cross_talk() {
     }
     while let Some(event) = transport.recv() {
         if let TransportEvent::Video(src, bytes) = event {
-            let idx = sources.iter().position(|s| *s == src).expect("known source");
+            let idx = sources
+                .iter()
+                .position(|s| *s == src)
+                .expect("known source");
             let (header, payload) = frag_unwire(&bytes);
             let out = asms[idx]
                 .feed(media_model::Fragment { header, payload }, Duration::ZERO)
@@ -154,7 +180,11 @@ fn inmemory_loopback_four_sources_without_cross_talk() {
     }
     for (i, dec) in decs.iter().enumerate() {
         assert_eq!(dec.decoded.len(), 3, "source {i} decoded all frames");
-        assert_eq!(dec.decoded[0].2, FrameKind::Key, "source {i} starts with key");
+        assert_eq!(
+            dec.decoded[0].2,
+            FrameKind::Key,
+            "source {i} starts with key"
+        );
         // no cross talk: every decoded frame belongs to this source
         assert!(dec.decoded.iter().all(|(s, _, _)| *s == sources[i]));
     }
@@ -171,7 +201,11 @@ fn simulated_bad_wifi_delivers_nearly_all_frames() {
     let mut idr_requests = 0;
 
     for round in 0..40u64 {
-        let kind = if round == 0 { FrameKind::Key } else { FrameKind::Delta };
+        let kind = if round == 0 {
+            FrameKind::Key
+        } else {
+            FrameKind::Delta
+        };
         let frame = enc.encode(&source, &session, kind, &[round as u8; 300]);
         for frag in packetize(&frame, 512).unwrap() {
             tx.send_video(source.clone(), frag_wire(&frag.header, &frag.payload));
@@ -180,7 +214,10 @@ fn simulated_bad_wifi_delivers_nearly_all_frames() {
     for event in rx.advance(Duration::from_millis(3_000)) {
         if let TransportEvent::Video(_, bytes) = event {
             let (header, payload) = frag_unwire(&bytes);
-            match asm.feed(media_model::Fragment { header, payload }, Duration::ZERO).unwrap() {
+            match asm
+                .feed(media_model::Fragment { header, payload }, Duration::ZERO)
+                .unwrap()
+            {
                 AssembledOutput::Frame(f) => dec.feed(&f),
                 AssembledOutput::RequestIdr { .. } => idr_requests += 1,
                 AssembledOutput::Dropped => {}
@@ -199,7 +236,10 @@ fn simulated_bad_wifi_delivers_nearly_all_frames() {
 fn outage_then_recovery_resumes_with_keyframe() {
     let session = SessionId::from_raw("sess").unwrap();
     let source = SourceId::from_raw("outage").unwrap();
-    let (mut tx, mut rx) = simulated_pair(LinkProfile::outage(Duration::ZERO, Duration::from_secs(5)), 1);
+    let (mut tx, mut rx) = simulated_pair(
+        LinkProfile::outage(Duration::ZERO, Duration::from_secs(5)),
+        1,
+    );
     let mut enc = FakeEncoder::new();
     let mut asm = FragmentAssembler::new(session.clone(), CodecProfile::AvcBaseline);
     let mut dec = FakeDecoder::default();
@@ -208,7 +248,10 @@ fn outage_then_recovery_resumes_with_keyframe() {
     for frag in packetize(&during, 512).unwrap() {
         tx.send_video(source.clone(), frag_wire(&frag.header, &frag.payload));
     }
-    assert!(rx.advance(Duration::from_millis(100)).is_empty(), "outage blocks all");
+    assert!(
+        rx.advance(Duration::from_millis(100)).is_empty(),
+        "outage blocks all"
+    );
 
     // advance past the outage window, then resend a keyframe
     let _ = rx.advance(Duration::from_secs(6));
@@ -221,15 +264,20 @@ fn outage_then_recovery_resumes_with_keyframe() {
     for event in events {
         if let TransportEvent::Video(_, bytes) = event {
             let (header, payload) = frag_unwire(&bytes);
-            if let AssembledOutput::Frame(f) =
-                asm.feed(media_model::Fragment { header, payload }, Duration::ZERO).unwrap()
+            if let AssembledOutput::Frame(f) = asm
+                .feed(media_model::Fragment { header, payload }, Duration::ZERO)
+                .unwrap()
             {
                 dec.feed(&f);
             }
         }
     }
     assert_eq!(dec.decoded.len(), 1);
-    assert_eq!(dec.decoded[0].2, FrameKind::Key, "recovery starts from IDR (NFR-004)");
+    assert_eq!(
+        dec.decoded[0].2,
+        FrameKind::Key,
+        "recovery starts from IDR (NFR-004)"
+    );
 }
 
 #[test]
@@ -242,9 +290,17 @@ fn source_close_isolation_via_leases() {
     leases.acquire(a.clone(), i1.clone());
     leases.acquire(b.clone(), i2.clone());
 
-    let pending = leases.release(&a, &i1, Duration::ZERO, Duration::from_secs(1)).unwrap();
+    let pending = leases
+        .release(&a, &i1, Duration::ZERO, Duration::from_secs(1))
+        .unwrap();
     assert!(pending.is_some(), "source A schedules stop");
-    assert!(leases.stop_elapsed(&a, Duration::from_secs(2)).is_some(), "A stops after debounce");
-    assert!(leases.stop_elapsed(&b, Duration::from_secs(2)).is_none(), "B unaffected");
+    assert!(
+        leases.stop_elapsed(&a, Duration::from_secs(2)).is_some(),
+        "A stops after debounce"
+    );
+    assert!(
+        leases.stop_elapsed(&b, Duration::from_secs(2)).is_none(),
+        "B unaffected"
+    );
     assert_eq!(leases.lease_count(&b), 1);
 }
