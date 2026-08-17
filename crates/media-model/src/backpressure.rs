@@ -28,6 +28,10 @@ impl LatestFrameSlot {
     pub fn len(&self) -> usize {
         usize::from(self.pending.is_some())
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_none()
+    }
 }
 
 /// encoder -> packetizer boundary: at most 2 access units; when full, evict the
@@ -66,6 +70,10 @@ impl BoundedAuQueue {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 

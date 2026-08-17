@@ -43,7 +43,7 @@ pub fn packetize(frame: &EncodedFrame, mtu: usize) -> Result<Vec<Fragment>, Pack
     let frag_count = if payload_len == 0 {
         1
     } else {
-        (payload_len + mtu - 1) / mtu
+        payload_len.div_ceil(mtu)
     };
     let frag_count = u16::try_from(frag_count).map_err(|_| PacketizeError::FrameTooLarge { len: payload_len })?;
     let mut out = Vec::with_capacity(frag_count as usize);
