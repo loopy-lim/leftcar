@@ -187,13 +187,10 @@ fn multi_decode(path: &str, count: usize) {
             }
         }
         // round-robin feed all instances concurrently
-        let mut total = 0u64;
-        for round in 0..aus.len() {
+        for (round, au) in aus.iter().enumerate() {
             for d in decoders.iter_mut() {
                 let pts = round as i64 * 33_333;
-                if d.feed_au(&aus[round], pts, 200_000).unwrap_or(false) {
-                    total += 1;
-                }
+                let _ = d.feed_au(au, pts, 200_000);
             }
         }
         // drain all
@@ -203,7 +200,6 @@ fn multi_decode(path: &str, count: usize) {
                     break;
                 }
             }
-            total += 0;
         }
         let sum: u64 = decoders.iter().map(|d| d.frames_rendered).sum();
         println!(
@@ -225,7 +221,9 @@ fn multi_decode(path: &str, count: usize) {
 }
 
 /// Shared AU extraction used by both run() and multi_decode().
-fn frame_stream(data: &[u8]) -> Option<((Vec<u8>, Vec<u8>), Vec<Vec<u8>>)> {
+type ConfigAndAus = ((Vec<u8>, Vec<u8>), Vec<Vec<u8>>);
+
+fn frame_stream(data: &[u8]) -> Option<ConfigAndAus> {
     let nals = viewer_decoder::split_annexb(data);
     if nals.is_empty() {
         return None;

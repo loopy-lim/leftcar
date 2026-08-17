@@ -97,7 +97,7 @@ fn main() {
             // feed; ignore late-input for pacing
             let _ = decoder.feed_au(au, (aus * 33333) as i64, 0);
             let _ = decoder.pump_output(0);
-            if aus % 30 == 0 {
+            if aus.is_multiple_of(30) {
                 println!(
                     "RX aus={} rendered={} rate={:.1}fps",
                     aus,

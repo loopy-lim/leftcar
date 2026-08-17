@@ -242,17 +242,23 @@ fn with_start_code(nal: &[u8]) -> Vec<u8> {
 /// Parse width/height from a raw SPS NAL (no start code). Baseline profile:
 /// enough Exp-Golomb to reach pic_width_in_mbs/pic_height_in_map_units.
 pub fn parse_sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
-    // accept either a raw SPS RBSP payload or a full NAL (header byte with
-    // nal_unit_type == 7 first)
-    let data: &[u8] = match sps.first() {
-        Some(b) if b & 0x1f == NAL_SPS => &sps[1..],
-        _ => sps,
+    // accept a raw SPS RBSP payload, a full NAL (header byte with
+    // nal_unit_type == 7), or a NAL with an Annex-B start code
+    let mut data: &[u8] = sps;
+    if data.len() >= 4 && data[..4] == [0, 0, 0, 1] {
+        data = &data[4..];
+    } else if data.len() >= 3 && data[..3] == [0, 0, 1] {
+        data = &data[3..];
+    }
+    let data: &[u8] = match data.first() {
+        Some(b) if b & 0x1f == NAL_SPS => &data[1..],
+        _ => data,
     };
     if data.len() < 4 {
         return None;
     }
     let mut br = BitReader { data, pos: 0 };
-    let _profile = br.bits(8)? as u32;
+    let _profile = br.bits(8)?;
     let _constraints = br.bits(8)?;
     let _level = br.bits(8)?;
     let _seq_id = br.golomb()?;
@@ -434,7 +440,7 @@ impl AndroidDecoder {
         }
         let sps_nal = strip_sc(sps);
         let (sw, sh) = parse_sps_dimensions(sps_nal).unwrap_or((width, height));
-        let mime = b"video/avc\0".as_ptr().cast();
+        let mime = c"video/avc".as_ptr();
         let codec = unsafe { AMediaCodec_createDecoderByType(mime) };
         if codec.is_null() {
             return Err(DecoderError::CreateFailed {
@@ -445,21 +451,11 @@ impl AndroidDecoder {
         unsafe {
             // NDK samples set the mime key on the format even for decoders
             // created by type; some vendors reject without it.
-            AMediaFormat_setString_pub(format, b"mime\0".as_ptr().cast(), mime);
-            AMediaFormat_setBuffer(
-                format,
-                b"csd-0\0".as_ptr().cast(),
-                sps.as_ptr().cast(),
-                sps.len(),
-            );
-            AMediaFormat_setBuffer(
-                format,
-                b"csd-1\0".as_ptr().cast(),
-                pps.as_ptr().cast(),
-                pps.len(),
-            );
-            AMediaFormat_setInt32(format, b"width\0".as_ptr().cast(), sw as i32);
-            AMediaFormat_setInt32(format, b"height\0".as_ptr().cast(), sh as i32);
+            AMediaFormat_setString_pub(format, c"mime".as_ptr(), mime);
+            AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
+            AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
+            AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
+            AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
             let surface = if window == 0 {
                 std::ptr::null_mut()
             } else {
@@ -700,6 +696,14 @@ mod sps_tests {
     const VT_SPS_WITH_SC: &[u8] = &[
         0x00, 0x00, 0x00, 0x01, 0x27, 0x42, 0x00, 0x14, 0xab, 0x40, 0xa0, 0xfc,
     ];
+
+    #[test]
+    fn parses_videotoolbox_320x240_with_start_code() {
+        // regression: the device run showed 32x1280 when the header byte was
+        // parsed as profile_idc — this is the exact on-device input shape
+        let (w, h) = parse_sps_dimensions(VT_SPS_WITH_SC).expect("parses");
+        assert_eq!((w, h), (320, 240));
+    }
 
     #[test]
     fn parses_videotoolbox_320x240() {
