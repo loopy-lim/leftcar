@@ -12,3 +12,6 @@ domain = { workspace = true }
 media-model = { workspace = true }
 network-protocol = { workspace = true }
 transport-api = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -9,4 +9,5 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
 domain = { workspace = true }
+async-trait = "0.1"
 media-model = { workspace = true }

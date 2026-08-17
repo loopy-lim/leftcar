@@ -321,6 +321,7 @@ dependencies = [
  "domain",
  "media-model",
  "network-protocol",
+ "proptest",
  "serde",
  "thiserror",
  "transport-api",
@@ -389,6 +390,7 @@ dependencies = [
 name = "macos-capture"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "domain",
  "media-model",
@@ -400,6 +402,7 @@ dependencies = [
 name = "macos-encode"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "domain",
  "media-model",
