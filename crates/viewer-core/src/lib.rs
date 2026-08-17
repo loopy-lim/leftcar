@@ -316,8 +316,10 @@ pub type SurfaceHandle = u64;
 pub struct ProcessState {
     pub windows: HashMap<StreamInstanceId, WindowStateMachine>,
     pub decoder: FakeDecoder,
-    /// instance the last attach targeted, for crossing checks
-    last_attach_instance: Option<StreamInstanceId>,
+    /// per-instance surface ownership: an instance may hold at most one
+    /// attached surface handle. Cross-instance interference is impossible by
+    /// construction (docs/05 §8.2: 다른 instance로 callback 교차 금지).
+    surfaces: HashMap<StreamInstanceId, SurfaceHandle>,
 }
 
 impl ProcessState {
@@ -325,8 +327,16 @@ impl ProcessState {
         Self {
             windows: HashMap::new(),
             decoder: FakeDecoder::default(),
-            last_attach_instance: None,
+            surfaces: HashMap::new(),
         }
+    }
+
+    pub fn attached_surface(&self, instance: &StreamInstanceId) -> Option<SurfaceHandle> {
+        self.surfaces.get(instance).copied()
+    }
+
+    pub fn attached_count(&self) -> usize {
+        self.surfaces.len()
     }
 }
 
@@ -354,7 +364,9 @@ pub mod c_abi {
         }
     }
 
-    /// attach a Surface; null surfaces are rejected.
+    /// attach a Surface; null surfaces are rejected. Attaching while the
+    /// instance already holds a surface is an error (detach first) — a
+    /// replacement attach would leak the previous ANativeWindow ref.
     pub fn stream_attach_surface(
         state: &mut ProcessState,
         instance: &StreamInstanceId,
@@ -363,18 +375,25 @@ pub mod c_abi {
         if surface == 0 {
             return Err(CAbiError::NullSurface);
         }
+        if state.surfaces.contains_key(instance) {
+            return Err(CAbiError::AlreadyAttached);
+        }
         state.decoder.attach_surface();
-        state.last_attach_instance = Some(instance.clone());
+        state.surfaces.insert(instance.clone(), surface);
         Ok(())
     }
 
     pub fn stream_surface_changed(
         state: &mut ProcessState,
-        _instance: &StreamInstanceId,
-        _w: u32,
-        _h: u32,
+        instance: &StreamInstanceId,
+        w: u32,
+        h: u32,
     ) {
-        let _ = state;
+        // geometry change is informational; ownership unchanged
+        if let Some(machine) = state.windows.get_mut(instance) {
+            let _ = machine.apply(LifecycleEvent::SurfaceChange, Duration::ZERO);
+        }
+        let _ = (w, h);
     }
 
     /// detach must never exceed one per attach for the instance.
@@ -382,12 +401,11 @@ pub mod c_abi {
         state: &mut ProcessState,
         instance: &StreamInstanceId,
     ) -> Result<(), CAbiError> {
-        match state.last_attach_instance.take() {
-            Some(last) if &last == instance => {
+        match state.surfaces.remove(instance) {
+            Some(_) => {
                 state.decoder.detach_surface();
                 Ok(())
             }
-            Some(_) => Err(CAbiError::InstanceCrossing),
             None => Err(CAbiError::DetachWithoutAttach),
         }
     }
@@ -405,7 +423,13 @@ pub mod c_abi {
         machine.apply(event, now)
     }
 
+    /// Release one instance: dropping its surface first is the caller's
+    /// contract violation, not ours — we detach it ourselves so the native
+    /// window reference cannot leak (idempotent, per-instance).
     pub fn stream_release(state: &mut ProcessState, instance: &StreamInstanceId) {
+        if state.surfaces.remove(instance).is_some() {
+            state.decoder.detach_surface();
+        }
         state.windows.remove(instance);
     }
 }
@@ -418,6 +442,8 @@ pub enum CAbiError {
     DetachWithoutAttach,
     #[error("instance crossing")]
     InstanceCrossing,
+    #[error("instance already holds a surface; detach first")]
+    AlreadyAttached,
 }
 
 #[cfg(test)]
@@ -632,14 +658,65 @@ mod tests {
 
     #[test]
     fn callback_crossing_instances_rejected() {
+        // cross-instance interference is now impossible by construction:
+        // surfaces are tracked per instance, so a detach can never consume
+        // another instance's attach.
         let mut state = ProcessState::new();
         let i1 = StreamInstanceId::from_raw("i1").unwrap();
         let i2 = StreamInstanceId::from_raw("i2").unwrap();
         c_abi::stream_attach_surface(&mut state, &i1, 0x1).unwrap();
+        // detaching a never-attached instance does NOT touch i1
         assert!(matches!(
             c_abi::stream_detach_surface(&mut state, &i2),
-            Err(CAbiError::InstanceCrossing)
+            Err(CAbiError::DetachWithoutAttach)
         ));
+        // i1 still holds its surface
+        assert_eq!(state.attached_surface(&i1), Some(0x1));
+    }
+
+    #[test]
+    fn interleaved_instances_never_interfere() {
+        // A2 regression: attach A, attach B, detach A, detach B all succeed —
+        // the old single-slot tracking made A's detach fail after B attached.
+        let mut state = ProcessState::new();
+        let a = StreamInstanceId::from_raw("a").unwrap();
+        let b = StreamInstanceId::from_raw("b").unwrap();
+        c_abi::stream_attach_surface(&mut state, &a, 0x11).unwrap();
+        c_abi::stream_attach_surface(&mut state, &b, 0x22).unwrap();
+        assert_eq!(state.attached_count(), 2);
+        c_abi::stream_detach_surface(&mut state, &a).unwrap();
+        assert_eq!(state.attached_surface(&b), Some(0x22), "B unaffected");
+        c_abi::stream_detach_surface(&mut state, &b).unwrap();
+        assert_eq!(state.attached_count(), 0);
+    }
+
+    #[test]
+    fn double_attach_is_rejected_not_leaked() {
+        let mut state = ProcessState::new();
+        let a = StreamInstanceId::from_raw("a").unwrap();
+        c_abi::stream_attach_surface(&mut state, &a, 0x1).unwrap();
+        // re-attach without detach must fail so the old handle cannot leak
+        assert!(matches!(
+            c_abi::stream_attach_surface(&mut state, &a, 0x2),
+            Err(CAbiError::AlreadyAttached)
+        ));
+        assert_eq!(state.attached_surface(&a), Some(0x1), "first handle kept");
+    }
+
+    #[test]
+    fn stream_release_detaches_orphan_surface() {
+        // A2 regression: releasing an instance that still holds a surface
+        // detaches it, so the native window ref cannot leak.
+        let mut state = ProcessState::new();
+        let a = StreamInstanceId::from_raw("a").unwrap();
+        c_abi::stream_attach_surface(&mut state, &a, 0x1).unwrap();
+        let before = state.decoder.surface_attaches;
+        c_abi::stream_release(&mut state, &a);
+        assert_eq!(state.decoder.surface_detaches, before, "release balanced the attach");
+        assert_eq!(state.attached_count(), 0);
+        // release is idempotent
+        c_abi::stream_release(&mut state, &a);
+        assert_eq!(state.decoder.surface_detaches, before);
     }
 
     #[test]
