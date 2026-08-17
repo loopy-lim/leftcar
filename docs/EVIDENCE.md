@@ -12,7 +12,8 @@
 | E2 통합 | 달성 | L5 loopback (transport-api tests), C ABI 왕복 |
 | E3 빌드 | 부분 달성 | Rust workspace + TS 전부; Android aarch64 check는 CI 잡 | 
 | E4 에뮬레이터 | 미달성 | H05/H08 단계. 에뮬레이터 잡 미연결 |
-| E5 Galaxy XR 실기기 | 미달성 | 장치 없음. G1 게이트 대기 |
+| E5 Galaxy XR 실기기 | 부분 달성 | Galaxy XR는 없음; **동일 Android 16 실기기(TB710FU)에서** Expo RN 앱 구동, HW 디코더 1/4/6/8개 동시, multi-instance task 분리, 60/90fps 실측 |
+| E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
 | E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
 | E7 계측 장시간 | 미달성 | H51 대기 |
 
@@ -70,3 +71,12 @@
 - macos-capture/macos-encode: Swift/C ABI shim과 실제 SCK/VT 세션은 H16–H18 장치 단계.
 - React Native/Gradle: 소스+스펙+manifest만. RN host 연결은 H05.
 - Windows/Linux host: 미착수(P7 단계, 문서대로).
+
+
+## Expo + Rustra 실기기 경로 (H09, 2026-08-17 추가)
+
+- 스택: Expo 57 / RN 0.86 (검증된 multi-android-viewer 하네스 재사용) + Kotlin shim
+  (invoke 전달만) + native/leftcar-rustra (rustra Package::invoke_json 동일 경로)
+- 실측: release APK, Metro 없이 번들 내장, TB710FU에서 앱 실행 —
+  `addNumbers(20, 22) = 42` PASS, contract hash 16hex PASS를 화면에서 확인
+- 이것이 docs/02 §9.1의 기본 아키텍처(TS UI + Rustra + Rust core) 실기기 증거
