@@ -9,3 +9,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
 domain = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+proptest = { workspace = true }
