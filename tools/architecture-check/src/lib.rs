@@ -109,6 +109,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("diagnostics", &["domain"]),
         ("macos-capture", &["domain", "media-model"]),
         ("macos-encode", &["domain", "media-model"]),
+        ("android-viewer", &["domain", "viewer-core"]),
         ("architecture-check", &[]),
     ];
 

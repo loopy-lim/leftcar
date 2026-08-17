@@ -14,6 +14,7 @@ members = [
     "crates/diagnostics",
     "crates/control-contract",
     "tools/architecture-check",
+    "native/android-viewer",
 ]
 
 [workspace.package]

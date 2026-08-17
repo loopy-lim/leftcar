@@ -1,0 +1,12 @@
+[package]
+name = "android-viewer"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+viewer-core = { path = "../../crates/viewer-core" }
+domain = { path = "../../crates/domain" }

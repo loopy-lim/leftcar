@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "android-viewer"
+version = "0.1.0"
+dependencies = [
+ "domain",
+ "viewer-core",
+]
+
+[[package]]
 name = "architecture-check"
 version = "0.1.0"
 dependencies = [
@@ -957,6 +965,7 @@ dependencies = [
  "bytes",
  "domain",
  "media-model",
+ "proptest",
  "serde",
  "thiserror",
  "transport-api",

@@ -11,3 +11,6 @@ bytes = { workspace = true }
 domain = { workspace = true }
 media-model = { workspace = true }
 transport-api = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
