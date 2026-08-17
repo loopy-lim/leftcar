@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/media-model",
+    "crates/network-protocol",
+    "crates/session",
+    "crates/transport-api",
+    "crates/transport-quic",
+    "crates/host-core",
+    "crates/macos-capture",
+    "crates/macos-encode",
+    "crates/viewer-core",
+    "crates/diagnostics",
+    "crates/control-contract",
+    "tools/architecture-check",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Proprietary"
+repository = "leftcar"
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+media-model = { path = "crates/media-model" }
+network-protocol = { path = "crates/network-protocol" }
+transport-api = { path = "crates/transport-api" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+proptest = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+
+[profile.release]
+lto = "thin"

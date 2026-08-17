@@ -1,0 +1,12 @@
+[package]
+name = "transport-api"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+bytes = { workspace = true }
+domain = { workspace = true }
+media-model = { workspace = true }

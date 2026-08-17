@@ -1,0 +1,1 @@
+//! Leftcar control-contract crate.

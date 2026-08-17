@@ -1,0 +1,1 @@
+//! Leftcar macos-encode crate.

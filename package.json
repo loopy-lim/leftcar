@@ -1,0 +1,17 @@
+{
+  "name": "leftcar",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:contract": "vitest run -c vitest.contract.config.ts",
+    "test:architecture": "tsx tools/architecture-check/ts.ts",
+    "rustra:generate": "cargo run -p control-contract --bin generate"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0",
+    "tsx": "^4.19.0"
+  }
+}

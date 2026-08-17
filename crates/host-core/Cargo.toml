@@ -1,0 +1,14 @@
+[package]
+name = "host-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+bytes = { workspace = true }
+domain = { workspace = true }
+media-model = { workspace = true }
+network-protocol = { workspace = true }
+transport-api = { workspace = true }

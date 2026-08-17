@@ -1,0 +1,1 @@
+//! Leftcar domain crate.
