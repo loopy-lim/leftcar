@@ -11,6 +11,9 @@ media-model = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "decode_harness"
 path = "src/bin/decode_harness.rs"
