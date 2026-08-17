@@ -1,0 +1,43 @@
+{
+  "packageId": "leftcar.host.control",
+  "commands": [
+    {
+      "name": "addNumbers",
+      "commandId": 1,
+      "inputType": "AddNumbersInput",
+      "outputType": "AddNumbersOutput",
+      "inputSchema": {
+        "title": "AddNumbersInput",
+        "description": "The canonical H02 proof command: invoked through the real Rustra package invocation path, 20 + 22 must equal 42 (docs/08 H02 수용 기준).",
+        "type": "object",
+        "required": [
+          "a",
+          "b"
+        ],
+        "properties": {
+          "a": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "b": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "outputSchema": {
+        "title": "AddNumbersOutput",
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      }
+    }
+  ]
+}

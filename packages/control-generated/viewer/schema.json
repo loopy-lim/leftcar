@@ -1,0 +1,43 @@
+{
+  "packageId": "leftcar.viewer.control",
+  "commands": [
+    {
+      "name": "viewerAddNumbers",
+      "commandId": 1,
+      "inputType": "ViewerAddNumbersInput",
+      "outputType": "ViewerAddNumbersOutput",
+      "inputSchema": {
+        "title": "ViewerAddNumbersInput",
+        "description": "H02/H09 proof command on the viewer path too.",
+        "type": "object",
+        "required": [
+          "a",
+          "b"
+        ],
+        "properties": {
+          "a": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "b": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "outputSchema": {
+        "title": "ViewerAddNumbersOutput",
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      }
+    }
+  ]
+}

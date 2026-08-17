@@ -7,5 +7,12 @@ license.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 bytes = { workspace = true }
 domain = { workspace = true }
+schemars = "0.8"
+# Rustra pin (H02): vetted public main commit. Do not track branches.
+rustra = { git = "https://github.com/loopy-lim/rustra", rev = "11ff71f5e2b5a0c563d50525eef82b0a05768c1f" }
+
+[dev-dependencies]
+proptest = { workspace = true }
