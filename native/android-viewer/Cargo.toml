@@ -5,6 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [lib]
+name = "leftcar_viewer"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]

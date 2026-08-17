@@ -1,0 +1,3 @@
+build/apk/classes/dev/leftcar/viewer/shim/ViewerNative.class
+build/apk/classes/dev/leftcar/viewer/shim/HubActivity.class
+build/apk/classes/dev/leftcar/viewer/shim/StreamActivity.class

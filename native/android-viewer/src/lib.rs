@@ -7,6 +7,11 @@
 //! a stable error code (docs/07 §14).
 
 use std::ffi::{c_char, CStr};
+
+#[cfg(target_os = "android")]
+pub mod jni_wrappers;
+#[cfg(target_os = "android")]
+pub mod jni;
 use std::time::Duration;
 
 pub const LEFTCAR_OK: i32 = 0;

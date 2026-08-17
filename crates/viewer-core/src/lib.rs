@@ -1,7 +1,9 @@
 //! Viewer core: demux, lease registry, window lifecycle, decoder fakes, C ABI
 //! (H05–H09 logic, H29; docs/03 §8, docs/05 §5.3/§6/§8).
 
-use domain::ids::{SourceId, StreamInstanceId};
+use domain::ids::SourceId;
+// Re-exported for the native JNI/C-ABI layer.
+pub use domain::ids::StreamInstanceId;
 use domain::lease::{LeaseEvent, LeaseTable};
 use domain::phase::StreamPhase;
 use media_model::frame::{EncodedFrame, FrameKind};

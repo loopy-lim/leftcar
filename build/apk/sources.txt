@@ -1,0 +1,3 @@
+apps/viewer-android/android/app/src/main/java/dev/leftcar/viewer/shim/ViewerNative.kt
+apps/viewer-android/android/app/src/main/java/dev/leftcar/viewer/shim/StreamActivity.kt
+apps/viewer-android/android/app/src/main/java/dev/leftcar/viewer/shim/HubActivity.kt
