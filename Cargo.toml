@@ -11,6 +11,7 @@ members = [
     "crates/macos-capture",
     "crates/macos-encode",
     "crates/viewer-core",
+    "crates/viewer-decoder",
     "crates/diagnostics",
     "crates/control-contract",
     "tools/architecture-check",

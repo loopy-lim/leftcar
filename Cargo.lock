@@ -972,6 +972,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "viewer-decoder"
+version = "0.1.0"
+dependencies = [
+ "media-model",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "wait-timeout"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

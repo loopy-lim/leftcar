@@ -1,0 +1,19 @@
+[package]
+name = "viewer-decoder"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+media-model = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[[bin]]
+name = "decode_harness"
+path = "src/bin/decode_harness.rs"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# host builds link nothing from mediandk
