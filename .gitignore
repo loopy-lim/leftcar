@@ -15,3 +15,6 @@ artifacts/
 build/apk/
 apps/host-mac/
 native/macos-capture-shim/libleftcar_capture.dylib
+apps/host-desktop/src-tauri/target/
+apps/host-desktop/dist/
+apps/host-desktop/node_modules/
