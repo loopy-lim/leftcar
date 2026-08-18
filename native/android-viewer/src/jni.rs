@@ -122,17 +122,7 @@ fn feed_and_render(dec: &mut viewer_decoder::AndroidDecoder, au: &[u8], aus: &mu
     }
 }
 
-fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void) {
-    let port = if instance_str.contains("src-1") || instance_str.contains("idx=1") {
-        5001
-    } else if instance_str.contains("src-2") || instance_str.contains("idx=2") {
-        5002
-    } else if instance_str.contains("src-3") || instance_str.contains("idx=3") {
-        5003
-    } else {
-        5000
-    };
-
+fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void, port: u16) {
     log_info!(
         "spawn_live_stream_renderer: instance={} window={:?} port={}",
         instance_str,
@@ -340,6 +330,18 @@ pub extern "C" fn leftcar_jni_attach(
     instance_c: *const c_char,
     surface: *mut c_void, // ANativeWindow*, already acquired
 ) -> i32 {
+    leftcar_jni_attach_port(state, instance_c, surface, 5000)
+}
+
+/// Port-explicit attach: each stream window listens on its own TCP port
+/// (5000+n), so multiple instances receive independent pushes.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_attach_port(
+    state: StatePtr,
+    instance_c: *const c_char,
+    surface: *mut c_void,
+    port: u16,
+) -> i32 {
     let guard = std::panic::catch_unwind(|| {
         let Some(state) = (unsafe { state.as_mut() }) else {
             return LEFTCAR_ERR_NULL;
@@ -348,7 +350,7 @@ pub extern "C" fn leftcar_jni_attach(
             return LEFTCAR_ERR_NULL;
         };
         let instance_str = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy().into_owned();
-        spawn_live_stream_renderer(instance_str, surface);
+        spawn_live_stream_renderer(instance_str, surface, port);
         viewer_core::c_abi::stream_attach_surface(
             state,
             &instance,
