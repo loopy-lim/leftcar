@@ -14,6 +14,7 @@
 | E4 에뮬레이터 | 미달성 | H05/H08 단계. 에뮬레이터 잡 미연결 |
 | E5 Galaxy XR 실기기 | 부분 달성 | Galaxy XR는 없음; **동일 Android 16 실기기(TB710FU)에서** Expo RN 앱 구동, HW 디코더 1/4/6/8개 동시, multi-instance task 분리, 60/90fps 실측 |
 | E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
+| E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
 | E7 계측 장시간 | 미달성 | H51 대기 |
 
@@ -80,3 +81,19 @@
 - 실측: release APK, Metro 없이 번들 내장, TB710FU에서 앱 실행 —
   `addNumbers(20, 22) = 42` PASS, contract hash 16hex PASS를 화면에서 확인
 - 이것이 docs/02 §9.1의 기본 아키텍처(TS UI + Rustra + Rust core) 실기기 증거
+
+## RN 뷰어 + Tauri 호스트 재구축 (E10, 2026-08-18 추가)
+
+- **설계 및 계획 문서**: `docs/plans/2026-08-18-rn-tauri-rebuild-design.md`, `docs/plans/2026-08-18-rn-tauri-rebuild.md`
+- **구현 영역**:
+  1. **호스트 (`apps/host-desktop`)**: Tauri v2 기반 데스크톱 앱. TCP 7777 제어 서버 (pull 방식 `getCatalog`, `startStream`, `stopStream`, `getStatus` + Rustra `addNumbers` 위임) + mDNS `_leftcar._tcp.local.` 자동 광고 + 실시간 세션 상태 UI (fps, kbps, 활성 세션 표).
+  2. **캡처 심 (`native/macos-capture-shim`)**: HandleTable 기반 멀티 인스턴스 C ABI (`leftcar_capture_start_v2`, `stop_v2`, `stats_v2`, `list_displays`, `free_string`, `last_error_v2`), ScreenCaptureKit + VideoToolbox H.264 하드웨어 인코딩, 90fps 기본 / 120fps 상한, 비트레이트 dynamic clamp, 연결 끊김 시 자동 세션 정지.
+  3. **뷰어 렌더러 (`native/android-viewer`)**: `leftcar_jni_attach_port`로 포트 파라미터화(5000+n), TCP 수신 -> AMediaCodec 하드웨어 디코딩 -> Surface 렌더링.
+  4. **RN 뷰어 (`apps/viewer-expo`)**: Expo 57 / RN 0.86, Android OS 멀티윈도우 지원 (`android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI`, `documentLaunchMode="always"`, `resizeableActivity="true"`), NsdModule (mDNS NSD 자동 호스트 발견), StreamLauncherModule (인스턴스별 독립 OS 창 생성), TCP 제어 클라이언트(`control.ts`) 및 UI(`host.tsx`, `catalog.tsx`).
+- **검증**:
+  - `cargo test --workspace`: 통과
+  - `cargo test` (`apps/host-desktop/src-tauri` - 단위 + e2e): 9 tests 전부 통과
+  - `pnpm test` & `pnpm test:architecture` & `pnpm test:contract`: 통과
+  - Swift shim dylib 컴파일 & `swift tools/capture_host.swift --list`: 디스플레이 목록 정상 반환
+  - 단일 스트림 90fps/1080p 및 다중 스트림 독립 창 수명주기/자동 stop 검증.
+
