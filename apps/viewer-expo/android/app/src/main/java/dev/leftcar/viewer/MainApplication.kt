@@ -25,6 +25,8 @@ class MainApplication : Application(), ReactApplication {
           add(RustraPackage())
           // Multi-window stream launcher (one OS window per source)
           add(dev.leftcar.viewer.stream.StreamLauncherPackage())
+          // NSD host discovery (_leftcar._tcp)
+          add(dev.leftcar.viewer.nsd.NsdPackage())
         }
     )
   }
