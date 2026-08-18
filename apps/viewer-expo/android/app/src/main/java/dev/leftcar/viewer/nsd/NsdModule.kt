@@ -80,6 +80,12 @@ class NsdModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun addListener(eventName: String) {}
+
+    @ReactMethod
+    fun removeListeners(count: Int) {}
+
     private fun emit(event: String, data: Any) {
         // only WritableMap/String survive the RN bridge — plain Kotlin maps crash it
         val payload: Any = if (data is String) data else data

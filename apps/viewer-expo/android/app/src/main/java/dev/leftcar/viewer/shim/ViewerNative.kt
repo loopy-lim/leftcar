@@ -1,4 +1,4 @@
-package dev.leftcar.viewer.stream
+package dev.leftcar.viewer.shim
 
 import android.view.Surface
 

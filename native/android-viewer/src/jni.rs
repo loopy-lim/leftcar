@@ -189,14 +189,26 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                     sock = Some(s);
                     pending.clear();
                 } else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                     continue;
                 }
             }
             let stream = sock.as_mut().unwrap();
             let n = match std::io::Read::read(stream, &mut buf) {
-                Ok(0) | Err(_) => {
+                Ok(0) => {
                     // sender disconnected — wait for reconnect
-                    log_info!("TCP sender disconnected");
+                    log_info!("TCP sender disconnected (EOF)");
+                    sock = None;
+                    continue;
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(e) => {
+                    log_info!("TCP sender read error: {e}");
                     sock = None;
                     continue;
                 }

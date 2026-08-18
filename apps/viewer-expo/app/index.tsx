@@ -26,6 +26,12 @@ const native = NativeModules.Rustra as RustraNativeModule | undefined;
 async function rustraInvoke<T>(command: string, args: unknown): Promise<T> {
   if (!native) throw new Error("NativeModules.Rustra 미연결 (dev build 필요)");
   const out = await native.invoke(command, JSON.stringify(args ?? {}));
+  if (out.startsWith("OK")) {
+    return JSON.parse(out.slice(2)) as T;
+  }
+  if (out.startsWith("ER")) {
+    throw new Error(out.slice(2));
+  }
   return JSON.parse(out) as T;
 }
 

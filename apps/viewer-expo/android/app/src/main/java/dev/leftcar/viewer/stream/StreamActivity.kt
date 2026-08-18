@@ -7,6 +7,7 @@ import android.view.SurfaceView
 import android.widget.TextView
 import android.graphics.Color
 import android.view.Gravity
+import dev.leftcar.viewer.shim.ViewerNative
 
 /**
  * Stream window (docs/03 §3.2): one remote source per OS window.
@@ -25,14 +26,18 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     private fun acquireNetworkLocks() {
-        val wifi = applicationContext.getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager
-        wifiLock = wifi.createWifiLock(
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
-                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-            else
-                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-            "leftcar-stream-$port"
-        ).apply { acquire() }
+        try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? android.net.wifi.WifiManager
+            wifiLock = wifi?.createWifiLock(
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                else
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "leftcar-stream-$port"
+            )?.apply { acquire() }
+        } catch (e: Throwable) {
+            android.util.Log.w("LeftcarStream", "Failed to acquire wifiLock", e)
+        }
     }
 
     private fun releaseNetworkLocks() {
