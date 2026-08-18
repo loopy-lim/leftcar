@@ -205,6 +205,75 @@ fn add_numbers(input: AddNumbersInput) -> rustra::Result<AddNumbersOutput> {
     })
 }
 
+// -- v1 stream control (docs/plans/2026-08-18-rn-tauri-rebuild-design.md) -----
+// Stateful commands dispatched by the Tauri control server (not the pure
+// rustra Package) — types live here so the contract stays in one place.
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogView {
+    pub displays: Vec<DisplayInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayInfo {
+    pub index: u32,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsInfo {
+    pub frames: i64,
+    pub bytes: i64,
+    pub state: String,
+    pub fps: u32,
+    pub kbps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartStreamInput {
+    pub source_index: u32,
+    pub viewer_port: u16,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartStreamOutput {
+    pub session: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StopStreamInput {
+    pub session: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusView {
+    pub sessions: Vec<SessionView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionView {
+    pub session: u32,
+    pub source_index: u32,
+    pub source_name: String,
+    pub viewer_addr: String,
+    pub state: String,
+    pub fps: u32,
+    pub kbps: u32,
+}
+
 /// Events (docs/04 §7) — low-frequency only, never per-frame.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -222,4 +291,50 @@ pub fn host_package() -> Package {
     Package::builder("leftcar.host.control")
         .command_fn(add_numbers)
         .build()
+}
+
+#[cfg(test)]
+mod stream_control_tests {
+    use super::*;
+
+    #[test]
+    fn start_stream_input_roundtrips_camel_case() {
+        let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#;
+        let v: StartStreamInput = serde_json::from_str(json).unwrap();
+        assert_eq!(v.source_index, 0);
+        assert_eq!(v.viewer_port, 5001);
+        assert_eq!(v.fps, 90);
+        let back = serde_json::to_string(&v).unwrap();
+        assert!(back.contains("\"sourceIndex\""));
+    }
+
+    #[test]
+    fn status_view_serializes() {
+        let v = StatusView {
+            sessions: vec![SessionView {
+                session: 1,
+                source_index: 0,
+                source_name: "Main Display".into(),
+                viewer_addr: "192.168.0.18:5001".into(),
+                state: "running".into(),
+                fps: 90,
+                kbps: 12000,
+            }],
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(s.contains("\"sourceName\""));
+    }
+
+    #[test]
+    fn stats_info_serializes_keys() {
+        let s = serde_json::to_string(&StatsInfo {
+            frames: 1,
+            bytes: 2,
+            state: "running".into(),
+            fps: 90,
+            kbps: 12000,
+        })
+        .unwrap();
+        assert!(s.contains("\"frames\"") && s.contains("\"kbps\""));
+    }
 }
