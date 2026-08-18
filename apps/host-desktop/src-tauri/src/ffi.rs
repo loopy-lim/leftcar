@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 pub struct FfiBackend {
     _lib: Library,
-    path: PathBuf,
+    _path: PathBuf,
 }
 
 unsafe impl Send for FfiBackend {}
@@ -45,7 +45,7 @@ impl FfiBackend {
             }
             match unsafe { Library::new(&path) } {
                 Ok(lib) => {
-                    let backend = Self { _lib: lib, path };
+                    let backend = Self { _lib: lib, _path: path };
                     backend.verify_symbols()?;
                     return Ok(backend);
                 }
