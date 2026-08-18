@@ -13,3 +13,5 @@ artifacts/
 *.tsbuildinfo
 .vitest/
 build/apk/
+apps/host-mac/
+native/macos-capture-shim/libleftcar_capture.dylib
