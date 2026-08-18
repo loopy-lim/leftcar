@@ -38,6 +38,10 @@ pub fn run() {
                     Err(e) => eprintln!("control bind failed: {e}"),
                 }
             });
+            // advertise _leftcar._tcp so NSD viewers can find us (design §발견)
+            if let Err(e) = advertise_mdns() {
+                eprintln!("mDNS advertise failed: {e}");
+            }
             app.manage(server);
             Ok(())
         })
@@ -50,4 +54,35 @@ fn get_status(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> control::StatusViewPublic {
     state.snapshot()
+}
+
+/// Register `_leftcar._tcp.local.` pointing at this host's LAN IP:7777.
+/// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
+fn advertise_mdns() -> Result<(), String> {
+    use std::collections::HashMap;
+    let daemon =
+        mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
+    let ip = local_lan_ip().ok_or("no LAN interface found")?;
+    let info = mdns_sd::ServiceInfo::new(
+        "_leftcar._tcp.local.",
+        "leftcar-host",
+        "leftcar-host.local.",
+        &ip,
+        7777,
+        None::<HashMap<String, String>>,
+    )
+    .map_err(|e| format!("mdns service info: {e:?}"))?;
+    daemon
+        .register(info)
+        .map_err(|e| format!("mdns register: {e:?}"))?;
+    println!("mDNS: leftcar-host._leftcar._tcp.local. at {ip}:7777");
+    std::mem::forget(daemon);
+    Ok(())
+}
+
+/// Best-effort local interface address (UDP connect trick — no packets sent).
+fn local_lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    Some(sock.local_addr().ok()?.ip().to_string())
 }
