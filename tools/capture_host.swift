@@ -1,19 +1,55 @@
-// Host-side launcher for the macOS capture shim (H16–H18 real path).
+// Host-side launcher for the macOS capture shim (v2 handle-based ABI).
 //
-// Loads libleftcar_capture.dylib (Swift SCK+VT shim), points it at the
-// viewer's UDP endpoint, starts capture, and prints live frame/byte stats.
-// Usage: swift tools/capture_host.swift <viewer_ip> <port> [seconds]
+// Loads libleftcar_capture.dylib (Swift SCK+VT shim), starts a capture
+// session toward the viewer's TCP endpoint, prints live stats JSON.
+//
+// Usage:
+//   swift tools/capture_host.swift --list
+//   swift tools/capture_host.swift <viewer_ip> <port> [secs] [--display N] [--size WxH] [--fps F]
 
 import Foundation
 
 let args = CommandLine.arguments
+
+if args.contains("--list") {
+    let dylibPath = "native/macos-capture-shim/libleftcar_capture.dylib"
+    guard let handle = dlopen(dylibPath, RTLD_NOW) else { exit(1) }
+    typealias ListDisplays = @convention(c) () -> UnsafeMutablePointer<CChar>
+    typealias FreeString = @convention(c) (UnsafeMutablePointer<CChar>) -> Void
+    guard
+        let list = dlsym(handle, "leftcar_capture_list_displays").map({ unsafeBitCast($0, to: ListDisplays.self) }),
+        let freeStr = dlsym(handle, "leftcar_capture_free_string").map({ unsafeBitCast($0, to: FreeString.self) })
+    else { exit(1) }
+    let raw = list()
+    print(String(cString: raw))
+    freeStr(raw)
+    exit(0)
+}
+
 guard args.count >= 3 else {
-    FileHandle.standardError.write("usage: capture_host.swift <viewer_ip> <port> [secs]\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: capture_host.swift <viewer_ip> <port> [secs] [--display N] [--size WxH] [--fps F] | --list\n".data(using: .utf8)!)
     exit(2)
 }
 let host = args[1]
 let port = UInt16(args[2]) ?? 5000
-let seconds = args.count > 3 ? Double(args[3])! : 60.0
+var seconds = 60.0
+var display: UInt32 = 0
+var width: UInt32 = 1920
+var height: UInt32 = 1080
+var fps: UInt32 = 90
+
+var i = 3
+while i < args.count {
+    switch args[i] {
+    case "--display": display = UInt32(args[i + 1]) ?? 0; i += 2
+    case "--size":
+        let parts = args[i + 1].split(separator: "x").compactMap { UInt32($0) }
+        if parts.count == 2 { width = parts[0]; height = parts[1] }
+        i += 2
+    case "--fps": fps = UInt32(args[i + 1]) ?? 90; i += 2
+    default: seconds = Double(args[i]) ?? 60.0; i += 1
+    }
+}
 
 let dylibPath = "native/macos-capture-shim/libleftcar_capture.dylib"
 
@@ -25,52 +61,39 @@ guard let handle = dlopen(dylibPath, RTLD_NOW) else {
 }
 print("loaded \(dylibPath)")
 
-typealias SetTarget = @convention(c) (UnsafePointer<CChar>, UInt16) -> Int32
-typealias Start = @convention(c) (UInt16) -> Int32
-typealias Stop = @convention(c) () -> Int32
-typealias Frames = @convention(c) () -> Int64
-typealias Bytes = @convention(c) () -> Int64
+typealias StartV2 = @convention(c) (UnsafePointer<CChar>, UInt16, UInt32, UInt32, UInt32, UInt32) -> UInt32
+typealias StopV2 = @convention(c) (UInt32) -> Int32
+typealias StatsV2 = @convention(c) (UInt32) -> UnsafeMutablePointer<CChar>
+typealias FreeString = @convention(c) (UnsafeMutablePointer<CChar>) -> Void
 typealias LastError = @convention(c) () -> UnsafePointer<CChar>
 
 guard
-    let setTarget = dlsym(handle, "leftcar_capture_set_target").map({ unsafeBitCast($0, to: SetTarget.self) }),
-    let start = dlsym(handle, "leftcar_capture_start").map({ unsafeBitCast($0, to: Start.self) }),
-    let stop = dlsym(handle, "leftcar_capture_stop").map({ unsafeBitCast($0, to: Stop.self) }),
-    let frames = dlsym(handle, "leftcar_capture_frames").map({ unsafeBitCast($0, to: Frames.self) }),
-    let bytes = dlsym(handle, "leftcar_capture_bytes").map({ unsafeBitCast($0, to: Bytes.self) }),
-    let lastError = dlsym(handle, "leftcar_capture_last_error").map({ unsafeBitCast($0, to: LastError.self) })
+    let start = dlsym(handle, "leftcar_capture_start_v2").map({ unsafeBitCast($0, to: StartV2.self) }),
+    let stop = dlsym(handle, "leftcar_capture_stop_v2").map({ unsafeBitCast($0, to: StopV2.self) }),
+    let stats = dlsym(handle, "leftcar_capture_stats_v2").map({ unsafeBitCast($0, to: StatsV2.self) }),
+    let freeStr = dlsym(handle, "leftcar_capture_free_string").map({ unsafeBitCast($0, to: FreeString.self) }),
+    let lastError = dlsym(handle, "leftcar_capture_last_error_v2").map({ unsafeBitCast($0, to: LastError.self) })
 else {
-    FileHandle.standardError.write("missing C ABI symbols in shim\n".data(using: .utf8)!)
+    FileHandle.standardError.write("missing v2 C ABI symbols in shim\n".data(using: .utf8)!)
     exit(1)
 }
 
-_ = setTarget(host, port)
-print("target \(host):\(port) — starting capture (needs Screen Recording permission)...")
-let rc = start(port)
-if rc != 0 {
+print("target \(host):\(port) display=\(display) size=\(width)x\(height) fps=\(fps) — starting (needs Screen Recording permission)...")
+let h = start(host, port, display, width, height, fps)
+if h == 0 {
     FileHandle.standardError.write("capture start FAILED: \(String(cString: lastError()))\n".data(using: .utf8)!)
     exit(1)
 }
 
 let t0 = Date()
-var lastFrames: Int64 = 0
 while Date().timeIntervalSince(t0) < seconds {
     Thread.sleep(forTimeInterval: 2.0)
-    let f = frames()
-    let b = bytes()
-    print(String(format: "t=%4.0fs frames=%6d (+%d) bytes=%9d rate=%.1ffps",
-                 Date().timeIntervalSince(t0), f, f - lastFrames, b,
-                 Double(f - lastFrames) / 2.0))
-    lastFrames = f
-    if f == 0 && Date().timeIntervalSince(t0) > 8.0 {
-        let err = String(cString: lastError())
-        if !err.isEmpty {
-            FileHandle.standardError.write("no frames — last error: \(err)\n".data(using: .utf8)!)
-        }
-    }
+    let raw = stats(h)
+    print(String(format: "t=%4.0fs %@", Date().timeIntervalSince(t0), String(cString: raw)))
+    freeStr(raw)
 }
 
 print("stopping…")
-_ = stop()
+_ = stop(h)
 dlclose(handle)
 print("done")
