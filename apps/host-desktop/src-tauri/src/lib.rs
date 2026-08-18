@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod control;
+pub mod ffi;
 
 use backend::SharedBackend;
 use std::sync::Arc;
@@ -11,7 +12,17 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let backend: SharedBackend = Arc::new(backend::FakeBackend { displays: vec![] }); // FFI backend lands in Task 5
+    // Real shim FFI when the dylib is available; FakeBackend otherwise (UI dev).
+    let backend: SharedBackend = match ffi::FfiBackend::new() {
+        Ok(b) => {
+            println!("{}", ffi::dylib_report());
+            Arc::new(b)
+        }
+        Err(e) => {
+            eprintln!("FFI backend unavailable ({e}) — falling back to FakeBackend");
+            Arc::new(backend::FakeBackend { displays: vec![] })
+        }
+    };
     let server = std::sync::Arc::new(control::ControlServer::new(backend.clone()));
 
     tauri::Builder::default()
