@@ -57,6 +57,12 @@ extern "C" {
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
+    fn leftcar_jni_attach_port(
+        state: *mut c_void,
+        instance: *const c_char,
+        surface: *mut c_void,
+        port: u16,
+    ) -> i32;
     fn leftcar_jni_surface_changed(
         state: *mut c_void,
         instance: *const c_char,
@@ -125,6 +131,33 @@ fn attach_body(env: *mut JNIEnv, state: i64, jstr: *mut jobject, surface: *mut j
     r
 }
 
+fn attach_port_body(
+    env: *mut JNIEnv,
+    state: i64,
+    jstr: *mut jobject,
+    surface: *mut jobject,
+    port: i32,
+) -> i32 {
+    if unsafe { exception_pending(env) } {
+        return 3;
+    }
+    let c = match unsafe { get_utf(env, jstr) } {
+        Some(c) => c,
+        None => return 1,
+    };
+    let window = unsafe { ANativeWindow_fromSurface(env, surface) };
+    if window.is_null() {
+        return 4;
+    }
+    let r = unsafe {
+        leftcar_jni_attach_port(state as *mut c_void, c.as_ptr(), window, port as u16)
+    };
+    if r != 0 {
+        unsafe { leftcar_jni_surface_ref(window, false) };
+    }
+    r
+}
+
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface(
@@ -135,6 +168,19 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
     surface: *mut jobject,
 ) -> i32 {
     std::panic::catch_unwind(|| attach_body(env, state, instance, surface)).unwrap_or(3)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurfacePort(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    surface: *mut jobject,
+    port: i32,
+) -> i32 {
+    std::panic::catch_unwind(|| attach_port_body(env, state, instance, surface, port)).unwrap_or(3)
 }
 
 #[no_mangle]

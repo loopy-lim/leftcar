@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { router } from "expo-router";
 
 /**
  * Leftcar XR Viewer Hub (docs/03 §3.2, Expo/RN 구현).
@@ -102,6 +103,13 @@ export default function Hub() {
           <Text style={styles.badgeText}>● {sessionState}</Text>
         </View>
       </View>
+
+      <TouchableOpacity
+        onPress={() => router.push("/host")}
+        style={styles.actionBtn}
+      >
+        <Text style={styles.actionBtnText}>호스트 연결 (화면 공유 시작)</Text>
+      </TouchableOpacity>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Rustra Control Plane Contract (JNI ⇄ Rust)</Text>

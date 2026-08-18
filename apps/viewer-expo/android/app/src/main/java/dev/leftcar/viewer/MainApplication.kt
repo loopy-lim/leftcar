@@ -23,6 +23,8 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Leftcar rustra native module (docs/02 §9 shim)
           add(RustraPackage())
+          // Multi-window stream launcher (one OS window per source)
+          add(dev.leftcar.viewer.stream.StreamLauncherPackage())
         }
     )
   }

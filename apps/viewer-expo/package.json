@@ -12,7 +12,8 @@
     "expo": "~57.0.0",
     "expo-router": "*",
     "react": "19.1.0",
-    "react-native": "0.86.0"
+    "react-native": "0.86.0",
+    "react-native-tcp-socket": "^6.4.2"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
