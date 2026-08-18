@@ -103,7 +103,21 @@ final class Shim {
         csdSent = false
         framesEncoded = 0
         bytesSent = 0
-        sock = socket(AF_INET, SOCK_DGRAM, 0)
+        sock = socket(AF_INET, SOCK_STREAM, 0)
+
+        // connect to the viewer's TCP listener (framed stream, scrcpy-style)
+        var noDelay: Int32 = 1
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+        var connectResult: Int32 = -1
+        withUnsafePointer(to: &targetAddr) { ap in
+            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connectResult = connect(sock, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if connectResult != 0 {
+            _ = fail("TCP connect to viewer failed (errno \(errno)) — is the stream window open?")
+            return 1
+        }
 
         let sem = DispatchSemaphore(value: 0)
         var setupSuccess = false
@@ -226,9 +240,11 @@ final class Shim {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: true as CFBoolean)
         VTSessionSetProperty(s, key: kVTProfileLevel_H264_Baseline_AutoLevel, value: true as CFBoolean)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false as CFBoolean)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 4_000_000 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [6_000_000, 1] as CFArray)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 2_000_000 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [3_000_000, 1] as CFArray)
+        // short GOP: a lost keyframe stalls the stream until the next IDR —
+        // 15 frames (0.5s) bounds worst-case freeze instead of 2s
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 15 as CFNumber)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFNumber)
 
         VTCompressionSessionPrepareToEncodeFrames(s)
@@ -238,8 +254,12 @@ final class Shim {
     // MARK: Packetization & UDP Transmission
 
     private func handleEncoded(_ sample: CMSampleBuffer) {
-        // Send parameter sets (csd: SPS/PPS) upon first encoded frame or keyframe
-        if !csdSent, let fd = sample.formatDescription {
+        // Send parameter sets (csd: SPS/PPS) periodically so a viewer that
+        // joins late (or restarted its decoder) can configure before the
+        // next keyframe.
+        let notSync = CMGetAttachment(sample, key: "NotSync" as CFString, attachmentModeOut: nil)
+        let isKeyframe = notSync == nil
+        if !csdSent || isKeyframe, let fd = sample.formatDescription {
             var cfg = Data([0x43, 0x46, 0x47]) // "CFG"
             var idx = 0
             while true {
@@ -263,7 +283,12 @@ final class Shim {
                 idx += 1
             }
             if idx > 0 {
-                sendUDP(cfg)
+                // never block the encoder callback: a short burst without
+                // sleeps still covers a late joiner, and the periodic resend
+                // (every keyframe) guarantees recovery.
+                for _ in 0..<3 {
+                    sendUDP(cfg)
+                }
                 csdSent = true
             }
         }
@@ -298,35 +323,27 @@ final class Shim {
             offset += 4 + length
         }
 
-        let MTU = 1400
+        // TCP mode: no MTU fragmentation — the length-prefix framing carries
+        // the whole AU in one logical packet; the kernel segments the stream.
         let auId = UInt16(framesEncoded & 0xFFFF)
-        if pkt.count <= MTU {
-            var p2 = pkt
-            p2.insert(contentsOf: [0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)], at: 0)
-            sendUDP(p2)
-        } else {
-            let cnt = UInt8((pkt.count + MTU - 1) / MTU)
-            var idx = 0
-            var frag = 0
-            while idx < pkt.count {
-                let end = min(idx + MTU, pkt.count)
-                var p2 = Data([0x46, UInt8(frag), cnt, UInt8(auId & 0xFF), UInt8(auId >> 8)])
-                p2.append(contentsOf: pkt[idx..<end])
-                sendUDP(p2)
-                idx = end
-                frag += 1
-            }
-        }
+        var p2 = Data([0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)])
+        p2.append(pkt)
+        sendUDP(p2)
     }
 
+    /// Send one framed packet: [u32 BE length][payload] over the TCP stream.
     private func sendUDP(_ data: Data) {
         guard sock >= 0 else { return }
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            var addr = targetAddr
-            withUnsafePointer(to: &addr) { ap in
-                ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    _ = sendto(sock, raw.baseAddress, raw.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+        var framed = Data()
+        var lenBE = UInt32(data.count).bigEndian
+        withUnsafeBytes(of: &lenBE) { framed.append(contentsOf: $0) }
+        framed.append(data)
+        framed.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var off = 0
+            while off < raw.count {
+                let n = send(sock, raw.baseAddress!.advanced(by: off), raw.count - off, 0)
+                if n <= 0 { return } // connection lost; stop sending
+                off += n
             }
         }
         bytesSent &+= Int64(data.count)

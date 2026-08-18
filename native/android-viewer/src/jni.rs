@@ -86,6 +86,33 @@ use std::sync::{Arc, Mutex};
 
 static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
 
+/// Stop any renderer still holding the UDP port and wait (bounded) for its
+/// thread to release the socket. Without this, a re-attached surface races
+/// the old thread and `bind` fails with Address-in-use.
+fn reclaim_udp_port(port: u16) {
+    let running: Vec<Arc<AtomicBool>> = {
+        let mut map = ACTIVE_RENDERERS.lock().unwrap();
+        map.get_or_insert_with(HashMap::new).values().cloned().collect()
+    };
+    for stop in running {
+        stop.store(true, Ordering::SeqCst);
+    }
+    // renderer polls stop every <=300ms (read timeout); 2s is ample
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let any = ACTIVE_RENDERERS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|m| !m.is_empty())
+            .unwrap_or(false);
+        if !any {
+            return;
+        }
+    }
+    let _ = port;
+}
+
 fn feed_and_render(dec: &mut viewer_decoder::AndroidDecoder, au: &[u8], aus: &mut u64) {
     *aus += 1;
     let _ = dec.feed_au(au, (*aus * 11_111) as i64, 1000);
@@ -113,6 +140,9 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void)
         port
     );
 
+    // evict any previous renderer still bound to this port before spawning
+    reclaim_udp_port(port);
+
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_clone = stop_flag.clone();
 
@@ -126,144 +156,163 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void)
 
     let window_handle = surface_window as usize;
     std::thread::spawn(move || {
-        let sock = match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
+        let listener = match std::net::TcpListener::bind(format!("0.0.0.0:{port}")) {
             Ok(s) => s,
             Err(e) => {
-                log_info!("FAILED to bind UDP socket on 0.0.0.0:{}: {}", port, e);
+                log_info!("FAILED to bind TCP listener on 0.0.0.0:{}: {}", port, e);
                 return;
             }
         };
-        use std::os::fd::AsRawFd;
-        let buf_size: libc::c_int = 4 * 1024 * 1024;
-        let opt_on: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &opt_on as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &buf_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-        }
-        let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(300)));
-        log_info!("UDP socket listening on port {}", port);
+        log_info!("TCP listening on port {}", port);
+        // accept one sender (reconnect allowed after disconnect)
+        let mut sock: Option<std::net::TcpStream> = None;
 
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; 1 << 20]; // 1MB read buffer for framed packets
+        let mut pending: Vec<u8> = Vec::with_capacity(1 << 20); // stream reassembly
         let mut sps = Vec::new();
         let mut pps = Vec::new();
         let mut decoder: Option<viewer_decoder::AndroidDecoder> = None;
         let mut aus = 0u64;
-
-        // In-progress AU reassembly keyed by auId (u16 wraparound, sender
-        // orders auId monotonically; stale ids are evicted when a new AU
-        // starts). Fragments of one AU arrive back-to-back so a single
-        // partial at a time suffices; on loss the AU is dropped whole —
-        // partial H.264 AUs must never reach the decoder.
-        let mut partial_au: Option<(u16, Vec<u8>)> = None; // (auId, bytes)
-        let mut frag_received: u8 = 0;
+        let mut last_frame_ms = std::time::Instant::now();
 
         while !stop_clone.load(Ordering::Relaxed) {
-            let (n, _) = match sock.recv_from(&mut buf) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if n >= 3 && &buf[..3] == b"CFG" {
-                log_info!("Received CFG packet ({} bytes)", n);
-                let mut off = 3usize;
-                while off + 4 <= n {
-                    let len = u32::from_be_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-                    off += 4;
-                    if off + len > n {
-                        break;
-                    }
-                    let nal = &buf[off..off + len];
-                    log_info!("NAL chunk len={}: {:02x?}", len, &nal[..std::cmp::min(8, nal.len())]);
-                    if nal.len() > 4 {
-                        let t = viewer_decoder::nal_type(&nal[4..]);
-                        log_info!("NAL type: {:?}", t);
-                        if t == Some(viewer_decoder::NAL_SPS) {
-                            sps = nal.to_vec();
-                        } else if t == Some(viewer_decoder::NAL_PPS) {
-                            pps = nal.to_vec();
-                        }
-                    }
-                    off += len;
-                }
-                log_info!("Current sps={}B pps={}B decoder_is_none={}", sps.len(), pps.len(), decoder.is_none());
-                if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
+            // (re)connect: wait for a sender when no stream is attached
+            if sock.is_none() {
+                let _ = listener.set_nonblocking(true);
+                // poll accept briefly so the stop flag stays responsive
+                if let Ok((s, _)) = listener.accept() {
+                    let _ = s.set_nodelay(true);
+                    // accepted sockets inherit O_NONBLOCK from the listener on
+                    // Linux — clear it so read_timeout (blocking poll) works;
+                    // otherwise read returns EAGAIN instantly and we treat it
+                    // as a disconnect
+                    use std::os::fd::AsRawFd;
                     unsafe {
-                        log_info!(
-                            "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
-                            window_handle,
-                            sps.len(),
-                            pps.len()
-                        );
-                        match viewer_decoder::AndroidDecoder::new_h264(
-                            &sps,
-                            &pps,
-                            320,
-                            240,
-                            window_handle,
-                        ) {
-                            Ok(d) => {
-                                log_info!("AndroidDecoder created successfully!");
-                                decoder = Some(d);
-                            }
-                            Err(e) => {
-                                log_info!("AndroidDecoder creation FAILED: {}", e);
-                            }
+                        let fd = s.as_raw_fd();
+                        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+                        if flags >= 0 {
+                            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
                         }
                     }
+                    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                    log_info!("TCP sender connected");
+                    sock = Some(s);
+                    pending.clear();
+                } else {
+                    continue;
                 }
-                continue;
             }
+            let stream = sock.as_mut().unwrap();
+            let n = match std::io::Read::read(stream, &mut buf) {
+                Ok(0) | Err(_) => {
+                    // sender disconnected — wait for reconnect
+                    log_info!("TCP sender disconnected");
+                    sock = None;
+                    continue;
+                }
+                Ok(n) => n,
+            };
+            pending.extend_from_slice(&buf[..n]);
 
-            if decoder.is_some() {
-                if n >= 5 && buf[0] == 0x46 {
-                    // [F][fragIdx:u8][fragCnt:u8][auId:u16 LE][payload]
-                    let frag_idx = buf[1];
-                    let frag_cnt = buf[2];
-                    let au_id = u16::from_le_bytes([buf[3], buf[4]]);
-                    let payload = &buf[5..n];
-                    match partial_au.take() {
-                        Some((cur_id, mut bytes)) if cur_id == au_id => {
-                            if frag_idx == frag_received + 1 {
-                                bytes.extend_from_slice(payload);
-                                frag_received = frag_idx;
-                                if frag_idx + 1 == frag_cnt {
-                                    feed_and_render(&mut decoder.as_mut().unwrap(), &bytes, &mut aus);
-                                } else {
-                                    partial_au = Some((cur_id, bytes));
-                                }
-                            }
-                            // out-of-order or duplicate fragment: AU is
-                            // unrecoverable over UDP — drop the whole AU
+            // extract complete [u32 len][payload] frames from the stream
+            loop {
+                if pending.len() < 4 {
+                    break;
+                }
+                let len = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+                if len > 4 * 1024 * 1024 {
+                    // framing corrupted — hard reset the connection
+                    log_info!("frame len {} exceeds cap — resetting connection", len);
+                    sock = None;
+                    pending.clear();
+                    break;
+                }
+                if pending.len() < 4 + len {
+                    break; // need more bytes
+                }
+                let pkt: Vec<u8> = pending[4..4 + len].to_vec();
+                pending.drain(..4 + len);
+
+                if pkt.len() >= 3 && &pkt[..3] == b"CFG" {
+                    log_info!("Received CFG packet ({} bytes)", pkt.len());
+                    let mut off = 3usize;
+                    while off + 4 <= pkt.len() {
+                        let l = u32::from_be_bytes(pkt[off..off + 4].try_into().unwrap()) as usize;
+                        off += 4;
+                        if off + l > pkt.len() {
+                            break;
                         }
-                        _ => {
-                            // new AU (or stale leftover): restart from frag 0
-                            if frag_idx == 0 {
-                                if frag_cnt == 1 {
-                                    feed_and_render(&mut decoder.as_mut().unwrap(), payload, &mut aus);
-                                } else {
-                                    partial_au = Some((au_id, payload.to_vec()));
-                                    frag_received = 0;
+                        let nal = &pkt[off..off + l];
+                        if nal.len() > 4 {
+                            let t = viewer_decoder::nal_type(&nal[4..]);
+                            if t == Some(viewer_decoder::NAL_SPS) {
+                                sps = nal.to_vec();
+                            } else if t == Some(viewer_decoder::NAL_PPS) {
+                                pps = nal.to_vec();
+                            }
+                        }
+                        off += l;
+                    }
+                    if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
+                        last_frame_ms = std::time::Instant::now();
+                        unsafe {
+                            log_info!(
+                                "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
+                                window_handle,
+                                sps.len(),
+                                pps.len()
+                            );
+                            match viewer_decoder::AndroidDecoder::new_h264(
+                                &sps,
+                                &pps,
+                                320,
+                                240,
+                                window_handle,
+                            ) {
+                                Ok(d) => {
+                                    log_info!("AndroidDecoder created successfully!");
+                                    decoder = Some(d);
+                                }
+                                Err(e) => {
+                                    log_info!("AndroidDecoder creation FAILED: {}", e);
                                 }
                             }
                         }
                     }
-                } else if n >= 10 && &buf[..2] == b"AU" {
-                    let au = &buf[10..n];
-                    feed_and_render(&mut decoder.as_mut().unwrap(), au, &mut aus);
+                    continue;
+                }
+
+                // stream-stall watchdog: if no complete AU landed for >3s the
+                // sender is gone — drop the decoder so CFG rebuilds it
+                if decoder.is_some() && last_frame_ms.elapsed() > std::time::Duration::from_millis(3000) {
+                    if let Some(d) = decoder.as_mut() {
+                        d.stop();
+                    }
+                    decoder = None;
+                    log_info!("stream stalled >3s — decoder dropped, awaiting CFG");
+                }
+
+                if decoder.is_some() {
+                    if pkt.len() >= 10 && &pkt[..2] == b"AU" {
+                        let au = &pkt[10..];
+                        feed_and_render(&mut decoder.as_mut().unwrap(), au, &mut aus);
+                        last_frame_ms = std::time::Instant::now();
+                    } else if pkt.len() >= 5 && pkt[0] == 0x46 {
+                        // single whole-AU "F" frame (TCP needs no fragmentation)
+                        let au = &pkt[5..];
+                        feed_and_render(&mut decoder.as_mut().unwrap(), au, &mut aus);
+                        last_frame_ms = std::time::Instant::now();
+                    }
                 }
             }
         }
+        // deregister BEFORE the socket drops so a rebinding spawn never sees
+        // us in the map (the socket itself closes when `sock` leaves scope)
+        ACTIVE_RENDERERS
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map(|m| m.remove(&instance_str));
         log_info!("Live stream renderer exiting for instance");
     });
 }

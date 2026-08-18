@@ -19,6 +19,25 @@ import android.view.Gravity
 class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var instanceId: String = ""
     private var nativeState: Long = 0
+    // UDP 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
+    private fun acquireNetworkLocks() {
+        val wifi = applicationContext.getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager
+        wifiLock = wifi.createWifiLock(
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            else android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "leftcar-stream"
+        ).apply { acquire() }
+        multicastLock = wifi.createMulticastLock("leftcar-mcast").apply { acquire() }
+    }
+
+    private fun releaseNetworkLocks() {
+        wifiLock?.takeIf { it.isHeld }?.release()
+        multicastLock?.takeIf { it.isHeld }?.release()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,6 +67,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             window.attributes.preferredRefreshRate = 90.0f
         }
         setContentView(fl)
+        acquireNetworkLocks()
         nativeState = ViewerNative.start()
         ViewerNative.updateWindowEvent(nativeState, instanceId, 1, 0) // ACTIVITY_CREATE
         ViewerNative.updateWindowEvent(nativeState, instanceId, 6, 0) // SURFACE_CREATE
@@ -69,6 +89,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        releaseNetworkLocks()
         ViewerNative.updateWindowEvent(nativeState, instanceId, 12, 0) // TASK_REMOVE
         ViewerNative.release(nativeState, instanceId)
         super.onDestroy()

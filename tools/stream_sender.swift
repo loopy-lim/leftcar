@@ -4,6 +4,7 @@
 // sends: CONFIG packet (csd), then one UDP datagram per access unit.
 
 import Foundation
+import Darwin
 import VideoToolbox
 import CoreVideo
 import CoreMedia
@@ -21,19 +22,45 @@ let W = args.count > 4 ? Int(args[4])! : 320
 let H = args.count > 5 ? Int(args[5])! : 240
 let FPS = args.count > 6 ? Int(args[6])! : 30
 
-let sock = socket(AF_INET, SOCK_DGRAM, 0)
+let sock = socket(AF_INET, SOCK_STREAM, 0)
 var dest = sockaddr_in()
 dest.sin_family = sa_family_t(AF_INET)
 dest.sin_port = port.bigEndian
 inet_pton(AF_INET, host, &dest.sin_addr)
 
+// TCP NODELAY: scrcpy-style — small frames must not sit in Nagle buffers
+var noDelay: Int32 = 1
+setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+
+// connect with timeout guard
+var connectResult: Int32 = -1
+withUnsafePointer(to: &dest) { ap in
+    ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+        connectResult = connect(sock, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+    }
+}
+if connectResult != 0 {
+    FileHandle.standardError.write("connect to \(host):\(port) failed: errno=\(errno)\n".data(using: .utf8)!)
+    exit(1)
+}
+print("TCP connected to \(host):\(port)")
+
+/// Send one framed packet: [u32 BE length][payload]. TCP is a byte stream —
+/// the length prefix recovers packet boundaries (scrcpy does the same).
 func send(_ data: Data) {
-    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-        var addr = dest
-        withUnsafePointer(to: &addr) { ap in
-            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                _ = sendto(sock, raw.baseAddress, raw.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+    var lenBE = UInt32(data.count).bigEndian
+    var framed = Data()
+    withUnsafeBytes(of: &lenBE) { framed.append(contentsOf: $0) }
+    framed.append(data)
+    framed.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+        var off = 0
+        while off < raw.count {
+            let n = send(sock, raw.baseAddress!.advanced(by: off), raw.count - off, 0)
+            if n <= 0 {
+                FileHandle.standardError.write("send failed errno=\(errno)\n".data(using: .utf8)!)
+                exit(1)
             }
+            off += n
         }
     }
 }
@@ -104,31 +131,16 @@ func packetize(_ sample: CMSampleBuffer) {
         pkt.append(contentsOf: bytes[(offset+4)..<(offset+4+length)])
         offset += 4 + length
     }
-    // fragment large AUs across datagrams: [F][fragIdx:u8][fragCnt:u8][auId:u16][payload]
-    let MTU = 1400
+    // TCP mode: no MTU fragmentation — the length-prefix framing carries the
+    // whole AU in one logical packet; the kernel segments the byte stream.
+    // Header [0x46][fragIdx=0][fragCnt=1][auId:u16 LE] is kept for the
+    // receiver's dispatch, followed by the complete AU payload.
     let auId = UInt16(sentFrames & 0xFFFF)
-    if pkt.count <= MTU {
-        var p2 = pkt
-        p2.insert(contentsOf: [0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)], at: 0)
-        send(p2)
-        sentFrames += 1
-        sentBytes += pkt.count
-    } else {
-        let payload = pkt
-        let fragCnt = UInt8((payload.count + MTU - 1) / MTU)
-        var idx = 0
-        var frag = 0
-        while idx < payload.count {
-            let end = min(idx + MTU, payload.count)
-            var p2 = Data([0x46, UInt8(frag), fragCnt, UInt8(auId & 0xFF), UInt8(auId >> 8)])
-            p2.append(contentsOf: payload[idx..<end])
-            send(p2)
-            idx = end
-            frag += 1
-        }
-        sentFrames += 1
-        sentBytes += payload.count
-    }
+    var p2 = Data([0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)])
+    p2.append(pkt)
+    send(p2)
+    sentFrames += 1
+    sentBytes += pkt.count
 }
 
 let frames = Int(seconds * Double(FPS))
