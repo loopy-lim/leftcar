@@ -4,9 +4,11 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.WritableMap
 
 /**
  * NSD discovery for `_leftcar._tcp.` hosts advertised by the Tauri host app.
@@ -46,14 +48,11 @@ class NsdModule(reactContext: ReactApplicationContext) :
                     override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
                     override fun onServiceResolved(info: NsdServiceInfo) {
                         val host = info.host?.hostAddress ?: return
-                        emit(
-                            "host-found",
-                            mapOf(
-                                "name" to (info.serviceName ?: service.serviceName),
-                                "host" to host,
-                                "port" to (info.port ?: 7777),
-                            )
-                        )
+                        val map: WritableMap = Arguments.createMap()
+                        map.putString("name", info.serviceName ?: service.serviceName)
+                        map.putString("host", host)
+                        map.putInt("port", if (info.port != 0) info.port else 7777)
+                        emit("host-found", map)
                     }
                 }
                 try {
@@ -64,7 +63,7 @@ class NsdModule(reactContext: ReactApplicationContext) :
             }
 
             override fun onServiceLost(service: NsdServiceInfo) {
-                emit("host-lost", mapOf("name" to (service.serviceName ?: "")))
+                emit("host-lost", service.serviceName ?: "")
             }
         }
         discoveryListener = listener
@@ -82,8 +81,10 @@ class NsdModule(reactContext: ReactApplicationContext) :
     }
 
     private fun emit(event: String, data: Any) {
+        // only WritableMap/String survive the RN bridge — plain Kotlin maps crash it
+        val payload: Any = if (data is String) data else data
         reactApplicationContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit("leftcar:$event", data)
+            .emit("leftcar:$event", payload)
     }
 }
