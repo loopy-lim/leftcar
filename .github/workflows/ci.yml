@@ -36,8 +36,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -60,6 +58,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+      - name: Ensure Android Rust target is installed
+        run: rustup target add aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
       - name: cargo check viewer native for Android
         run: cargo check -p android-viewer --target aarch64-linux-android
