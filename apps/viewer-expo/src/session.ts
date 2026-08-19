@@ -7,7 +7,10 @@ import { connect, type ControlClient } from "./control";
 
 let client: ControlClient | null = null;
 let hostAddr = "";
+let hostTarget = "";
+let hostPort = 7777;
 let nextPort = 5001;
+let reconnectInFlight: Promise<ControlClient> | null = null;
 
 export function controlClient(): ControlClient | null {
   return client;
@@ -19,15 +22,33 @@ export function controlHost(): string {
 
 export async function connectHost(host: string, port = 7777): Promise<ControlClient> {
   const c = await connect(host, port);
+  // Keep the previous connection alive until the replacement succeeds, then
+  // release it so switching between multiple computers does not leak sockets.
+  if (client && client !== c) client.close();
   client = c;
   hostAddr = `${host}:${port}`;
+  hostTarget = host;
+  hostPort = port;
   return c;
 }
 
-export function disconnectHost(): void {
-  client?.close();
-  client = null;
-  hostAddr = "";
+/** Reopen the control socket after the host app was restarted. */
+export async function reconnectHost(): Promise<ControlClient> {
+  if (!hostTarget) throw new Error("호스트 주소가 없습니다");
+  if (reconnectInFlight) return reconnectInFlight;
+
+  reconnectInFlight = (async () => {
+    const previous = client;
+    const c = await connect(hostTarget, hostPort);
+    if (previous && previous !== c) previous.close();
+    client = c;
+    return c;
+  })();
+  try {
+    return await reconnectInFlight;
+  } finally {
+    reconnectInFlight = null;
+  }
 }
 
 /** Allocate the next viewer-side TCP port for a new stream window. */

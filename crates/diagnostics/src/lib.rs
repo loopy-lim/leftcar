@@ -5,7 +5,6 @@
 
 use domain::redact::{redact_record, scrub_value};
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 /// One metric sample with an allowlisted name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +146,7 @@ impl<'a> BundleWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn export_contains_no_title_path_token_ip_frame() {

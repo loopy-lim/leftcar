@@ -1,8 +1,8 @@
 # Leftcar
 
-Leftcar는 macOS와 Windows의 화면 또는 애플리케이션 창을 Galaxy XR에서 빠르게 보는 것을 목표로 하는 읽기 전용 다중 화면 뷰어 프로젝트다.
+Leftcar는 macOS 화면을 Galaxy XR과 Android 기기에서 빠르게 보는 읽기 전용 다중 화면 뷰어다. macOS Host는 ScreenCaptureKit으로 화면을 캡처하고, Android Viewer는 네이티브 MediaCodec 파이프라인으로 영상을 표시한다.
 
-이 저장소는 현재 **설계와 검증 계획만 포함**한다. 제품 코드는 아직 구현하지 않는다. 구현자는 [문서 인덱스](docs/README.md)부터 읽고, 검증 게이트를 통과한 뒤 기술 선택을 확정해야 한다.
+설치 가능한 macOS Host와 Android Viewer는 [GitHub Releases](https://github.com/loopy-lim/leftcar/releases)에서 받을 수 있다. 현재 릴리스는 Apple Silicon macOS와 arm64 Android 기기를 대상으로 한다.
 
 ## 한 문장 정의
 
@@ -38,13 +38,13 @@ Leftcar는 macOS와 Windows의 화면 또는 애플리케이션 창을 Galaxy XR
 
 ## 현재 상태
 
-- 조사 기준일: 2026-08-17
-- 상태: 구현 진행 중 — 자동 검증 가능 범위(E1–E3) 구현 완료, 실기기 증거(E4–E7) 대기 중. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
-- 구현: Rust workspace 12 crate + native/android-viewer(C ABI) + TypeScript 앱(host-desktop, viewer-android) + CI
+- 검증 기준일: 2026-08-19
+- 상태: macOS Host와 Android Viewer v0.1.0 구현 및 실기기 스트리밍 검증 완료. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
+- 구현: Rust workspace + Tauri 2 macOS Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows
 - 선택적 후속 대상: Linux
-- 우선 대상 뷰어: Samsung Galaxy XR 실기기
+- 우선 대상 뷰어: Galaxy XR 및 arm64 Android 기기
 
 ### 로컬 검증 명령
 

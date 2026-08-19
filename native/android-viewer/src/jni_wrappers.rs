@@ -62,6 +62,9 @@ extern "C" {
         instance: *const c_char,
         surface: *mut c_void,
         port: u16,
+        width: u32,
+        height: u32,
+        fps: u32,
     ) -> i32;
     fn leftcar_jni_surface_changed(
         state: *mut c_void,
@@ -137,6 +140,9 @@ fn attach_port_body(
     jstr: *mut jobject,
     surface: *mut jobject,
     port: i32,
+    width: i32,
+    height: i32,
+    fps: i32,
 ) -> i32 {
     if unsafe { exception_pending(env) } {
         return 3;
@@ -150,7 +156,15 @@ fn attach_port_body(
         return 4;
     }
     let r = unsafe {
-        leftcar_jni_attach_port(state as *mut c_void, c.as_ptr(), window, port as u16)
+        leftcar_jni_attach_port(
+            state as *mut c_void,
+            c.as_ptr(),
+            window,
+            port as u16,
+            width.max(1) as u32,
+            height.max(1) as u32,
+            fps.clamp(1, 60) as u32,
+        )
     };
     if r != 0 {
         unsafe { leftcar_jni_surface_ref(window, false) };
@@ -179,8 +193,14 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
     instance: *mut jobject,
     surface: *mut jobject,
     port: i32,
+    width: i32,
+    height: i32,
+    fps: i32,
 ) -> i32 {
-    std::panic::catch_unwind(|| attach_port_body(env, state, instance, surface, port)).unwrap_or(3)
+    std::panic::catch_unwind(|| {
+        attach_port_body(env, state, instance, surface, port, width, height, fps)
+    })
+    .unwrap_or(3)
 }
 
 #[no_mangle]

@@ -9,6 +9,7 @@
     "android": "expo run:android"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
     "expo": "~57.0.0",
     "expo-constants": "^57.0.12",
     "expo-linking": "^57.0.6",

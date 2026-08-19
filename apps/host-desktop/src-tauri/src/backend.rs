@@ -59,6 +59,20 @@ impl CaptureBackend for FakeBackend {
             state: "running".into(),
             fps: 90,
             kbps: 12000,
+            fps_target: 60,
+            dropped: 0,
+            network_dropped: 0,
+            capture_queue_dropped: 0,
+            capture_to_encode_us: 0,
+            max_capture_to_encode_us: 0,
+            capture_queue_wait_us: 0,
+            max_capture_queue_wait_us: 0,
+            encode_output_us: 0,
+            max_encode_output_us: 0,
+            send_block_us: 0,
+            max_send_block_us: 0,
+            pending_frame: 0,
+            error: None,
         })
     }
 }

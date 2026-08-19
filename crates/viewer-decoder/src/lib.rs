@@ -215,6 +215,14 @@ pub const NAL_PPS: u8 = 8;
 pub const NAL_IDR: u8 = 5;
 pub const NAL_NON_IDR: u8 = 1;
 
+/// Return whether an encoded access-unit id immediately follows the previous
+/// one. The wire id is intentionally u16 to keep the hot packet header small,
+/// so normal wrap-around is contiguous and any other jump means that at least
+/// one H.264 reference frame was dropped before reaching the decoder.
+pub fn frame_id_is_next(previous: u16, current: u16) -> bool {
+    current == previous.wrapping_add(1)
+}
+
 /// Extract csd-0 (SPS) and csd-1 (PPS) from an access unit chain for
 /// `AMediaFormat_setBuffer("csd-0"/"csd-1", ...)`.
 pub fn extract_config(aus: &[&[u8]]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -402,6 +410,15 @@ pub enum DecoderError {
     NotStarted,
 }
 
+/// Result of a non-blocking input submission. A missing codec input buffer is
+/// a normal real-time condition: the caller should drop this AU rather than
+/// wait behind older video and increase interaction latency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedStatus {
+    Queued { rendered: bool },
+    InputUnavailable,
+}
+
 /// A live hardware decoder session bound to one Surface.
 pub struct AndroidDecoder {
     codec: *mut AMediaCodec,
@@ -427,6 +444,7 @@ impl AndroidDecoder {
         width: u32,
         height: u32,
         window: usize,
+        fps: u32,
     ) -> Result<Self, DecoderError> {
         // strip optional Annex-B start codes so both conventions work
         fn strip_sc(b: &[u8]) -> &[u8] {
@@ -456,6 +474,14 @@ impl AndroidDecoder {
             AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
             AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
             AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
+            // Tell platform decoders this is an interactive, real-time
+            // stream. These are optional MediaFormat keys, so older/vendor
+            // codecs can ignore them while modern codecs avoid extra queueing.
+            let fps = fps.clamp(1, 60) as i32;
+            AMediaFormat_setInt32(format, c"frame-rate".as_ptr(), fps);
+            AMediaFormat_setInt32(format, c"operating-rate".as_ptr(), fps);
+            AMediaFormat_setInt32(format, c"priority".as_ptr(), 0);
+            AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
             let surface = if window == 0 {
                 std::ptr::null_mut()
             } else {
@@ -519,12 +545,26 @@ impl AndroidDecoder {
         pts_us: i64,
         timeout_us: i64,
     ) -> Result<bool, DecoderError> {
+        match self.feed_au_status(au, pts_us, timeout_us)? {
+            FeedStatus::Queued { rendered } => Ok(rendered),
+            FeedStatus::InputUnavailable => Ok(false),
+        }
+    }
+
+    /// Non-blocking variant used by the live renderer so decoder backpressure
+    /// becomes an explicit frame drop instead of stale-video accumulation.
+    pub fn feed_au_status(
+        &mut self,
+        au: &[u8],
+        pts_us: i64,
+        timeout_us: i64,
+    ) -> Result<FeedStatus, DecoderError> {
         if !self.started {
             return Err(DecoderError::NotStarted);
         }
         let idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, timeout_us) };
         if idx < 0 {
-            return Ok(false); // try-again: caller retries with next pump
+            return Ok(FeedStatus::InputUnavailable);
         }
         let idx = idx as usize;
         let mut capacity = 0usize;
@@ -534,7 +574,7 @@ impl AndroidDecoder {
             unsafe {
                 AMediaCodec_queueInputBuffer(self.codec, idx, 0, 0, pts_us, 0);
             }
-            return Ok(false);
+            return Ok(FeedStatus::InputUnavailable);
         }
         unsafe {
             std::ptr::copy_nonoverlapping(au.as_ptr(), buf, au.len());
@@ -543,7 +583,9 @@ impl AndroidDecoder {
                 return Err(DecoderError::OpFailed { status: q });
             }
         }
-        self.pump_output(timeout_us)
+        Ok(FeedStatus::Queued {
+            rendered: self.pump_output(timeout_us)?,
+        })
     }
 
     /// Dequeue and render any ready output buffers.
@@ -656,6 +698,14 @@ mod tests {
         // 0x65 = IDR with ref/idc bits; 0x41 = non-IDR slice
         assert_eq!(nal_type(&[0x65]), Some(NAL_IDR));
         assert_eq!(nal_type(&[0x41]), Some(NAL_NON_IDR));
+    }
+
+    #[test]
+    fn frame_id_gap_requires_decoder_resync() {
+        assert!(frame_id_is_next(41, 42));
+        assert!(frame_id_is_next(u16::MAX, 0));
+        assert!(!frame_id_is_next(41, 43));
+        assert!(!frame_id_is_next(41, 41));
     }
 
     #[test]

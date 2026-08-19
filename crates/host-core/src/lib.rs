@@ -5,7 +5,7 @@
 
 use domain::ids::{SessionId, SourceId};
 use domain::lease::{LeaseEvent, LeaseTable};
-use domain::source::{SourceDescriptor, SourceKind, SourceRegistry};
+use domain::source::{SourceDescriptor, SourceRegistry};
 use media_model::backpressure::{BoundedAuQueue, LatestFrameSlot};
 use media_model::fragment::packetize;
 use media_model::frame::{EncodedFrame, FrameKind};
@@ -306,6 +306,7 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use domain::ids::StreamInstanceId;
+    use domain::source::SourceKind;
 
     fn approved(n: &str) -> SourceDescriptor {
         SourceDescriptor {

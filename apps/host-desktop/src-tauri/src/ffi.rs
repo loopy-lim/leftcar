@@ -22,11 +22,25 @@ unsafe impl Send for FfiBackend {}
 unsafe impl Sync for FfiBackend {}
 
 fn dylib_candidates() -> Vec<PathBuf> {
-    let mut v = Vec::new();
     if let Ok(env) = std::env::var("LEFTCAR_CAPTURE_DYLIB") {
-        v.push(PathBuf::from(env));
+        // An explicit override is authoritative. Falling back to a bundled
+        // or checkout-relative dylib here makes missing-path tests pass or
+        // fail depending on unrelated build artifacts, and can load a stale
+        // shim when the caller selected a different one.
+        return vec![PathBuf::from(env)];
     }
-    // cargo tauri dev runs from src-tauri; repo root is ../../..
+    let mut v = Vec::new();
+    // A bundled Tauri app is commonly launched with `/` as its cwd. Walk up
+    // from the executable so the dev checkout still works in that case.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+            v.push(contents.join("Resources/libleftcar_capture.dylib"));
+        }
+        for ancestor in exe.ancestors() {
+            v.push(ancestor.join("native/macos-capture-shim/libleftcar_capture.dylib"));
+        }
+    }
+    // cargo tauri dev normally runs from src-tauri; repo root is ../../..
     if let Ok(cwd) = std::env::current_dir() {
         let repo_root = cwd.join("../../..").join("native/macos-capture-shim/libleftcar_capture.dylib");
         v.push(repo_root);
@@ -112,7 +126,21 @@ impl CaptureBackend for FfiBackend {
                 lib.get(b"leftcar_capture_list_displays").map_err(|e| e.to_string())?;
             let ptr = f();
             let json = Self::take_string(ptr).ok_or("list_displays returned null")?;
-            serde_json::from_str(&json).map_err(|e| format!("bad display json: {e}"))
+            let displays: Vec<DisplayInfo> =
+                serde_json::from_str(&json).map_err(|e| format!("bad display json: {e}"))?;
+            if displays.is_empty() {
+                let last_error: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
+                    .get(b"leftcar_capture_last_error_v2")
+                    .map_err(|e| e.to_string())?;
+                let message = last_error();
+                if !message.is_null() {
+                    let message = CStr::from_ptr(message).to_string_lossy();
+                    if !message.is_empty() {
+                        return Err(message.into_owned());
+                    }
+                }
+            }
+            Ok(displays)
         }
     }
 
@@ -175,6 +203,20 @@ impl CaptureBackend for FfiBackend {
                 state: v["state"].as_str().unwrap_or("unknown").into(),
                 fps: v["fps"].as_u64().unwrap_or(0) as u32,
                 kbps: v["kbps"].as_u64().unwrap_or(0) as u32,
+                fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
+                dropped: v["dropped"].as_i64().unwrap_or(0),
+                network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
+                capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
+                capture_to_encode_us: v["captureToEncodeUs"].as_u64().unwrap_or(0),
+                max_capture_to_encode_us: v["maxCaptureToEncodeUs"].as_u64().unwrap_or(0),
+                capture_queue_wait_us: v["captureQueueWaitUs"].as_u64().unwrap_or(0),
+                max_capture_queue_wait_us: v["maxCaptureQueueWaitUs"].as_u64().unwrap_or(0),
+                encode_output_us: v["encodeOutputUs"].as_u64().unwrap_or(0),
+                max_encode_output_us: v["maxEncodeOutputUs"].as_u64().unwrap_or(0),
+                send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
+                max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
+                pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
+                error: v["error"].as_str().filter(|s| !s.is_empty()).map(str::to_owned),
             })
         }
     }

@@ -232,6 +232,21 @@ pub struct StatsInfo {
     pub state: String,
     pub fps: u32,
     pub kbps: u32,
+    pub fps_target: u32,
+    pub dropped: i64,
+    pub network_dropped: i64,
+    pub capture_queue_dropped: i64,
+    pub capture_to_encode_us: u64,
+    pub max_capture_to_encode_us: u64,
+    pub capture_queue_wait_us: u64,
+    pub max_capture_queue_wait_us: u64,
+    pub encode_output_us: u64,
+    pub max_encode_output_us: u64,
+    pub send_block_us: u64,
+    pub max_send_block_us: u64,
+    pub pending_frame: u32,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -242,6 +257,11 @@ pub struct StartStreamInput {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// All viewer addresses on which the stream listener is bound. This is
+    /// needed when the control connection crosses a VPN or NAT and the peer
+    /// address is not usable for the reverse media connection.
+    #[serde(default)]
+    pub viewer_ips: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -272,6 +292,21 @@ pub struct SessionView {
     pub state: String,
     pub fps: u32,
     pub kbps: u32,
+    pub fps_target: u32,
+    pub dropped: i64,
+    pub network_dropped: i64,
+    pub capture_queue_dropped: i64,
+    pub capture_to_encode_us: u64,
+    pub max_capture_to_encode_us: u64,
+    pub capture_queue_wait_us: u64,
+    pub max_capture_queue_wait_us: u64,
+    pub encode_output_us: u64,
+    pub max_encode_output_us: u64,
+    pub send_block_us: u64,
+    pub max_send_block_us: u64,
+    pub pending_frame: u32,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Events (docs/04 §7) — low-frequency only, never per-frame.
@@ -319,6 +354,20 @@ mod stream_control_tests {
                 state: "running".into(),
                 fps: 90,
                 kbps: 12000,
+                fps_target: 60,
+                dropped: 0,
+                network_dropped: 0,
+                capture_queue_dropped: 0,
+                capture_to_encode_us: 0,
+                max_capture_to_encode_us: 0,
+                capture_queue_wait_us: 0,
+                max_capture_queue_wait_us: 0,
+                encode_output_us: 0,
+                max_encode_output_us: 0,
+                send_block_us: 0,
+                max_send_block_us: 0,
+                pending_frame: 0,
+                error: None,
             }],
         };
         let s = serde_json::to_string(&v).unwrap();
@@ -333,6 +382,20 @@ mod stream_control_tests {
             state: "running".into(),
             fps: 90,
             kbps: 12000,
+            fps_target: 60,
+            dropped: 0,
+            network_dropped: 0,
+            capture_queue_dropped: 0,
+            capture_to_encode_us: 0,
+            max_capture_to_encode_us: 0,
+            capture_queue_wait_us: 0,
+            max_capture_queue_wait_us: 0,
+            encode_output_us: 0,
+            max_encode_output_us: 0,
+            send_block_us: 0,
+            max_send_block_us: 0,
+            pending_frame: 0,
+            error: None,
         })
         .unwrap();
         assert!(s.contains("\"frames\"") && s.contains("\"kbps\""));

@@ -17,7 +17,7 @@
 //! Permission model: screen-recording TCC consent; deny/revoke/expiry are
 //! normal states surfaced as `CapturePermissionState` (docs/02 §4.2).
 
-use media_model::ports::{ApprovedSource, CaptureConfig, FrameSink, RawFrame};
+use media_model::ports::{ApprovedSource, CaptureConfig, FrameSink};
 
 /// Which ScreenCaptureKit entity to capture.
 #[derive(Debug, Clone)]
@@ -106,6 +106,7 @@ pub fn to_approved_source(approved: &ApprovedMacSource, id: domain::SourceId) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use media_model::ports::RawFrame;
 
     #[test]
     fn facade_compiles_and_reports_unlinked_backend() {

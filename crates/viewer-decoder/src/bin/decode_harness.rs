@@ -106,7 +106,7 @@ fn run(data: &[u8]) {
 
     unsafe {
         let mut decoder =
-            match viewer_decoder::AndroidDecoder::new_h264(&config.0, &config.1, 64, 64, 0) {
+            match viewer_decoder::AndroidDecoder::new_h264(&config.0, &config.1, 64, 64, 0, 60) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("DECODER_CREATE_FAIL {e}");
@@ -175,7 +175,7 @@ fn multi_decode(path: &str, count: usize) {
     unsafe {
         let mut decoders = Vec::new();
         for i in 0..count {
-            match viewer_decoder::AndroidDecoder::new_h264(&config.0, &config.1, 320, 240, 0) {
+            match viewer_decoder::AndroidDecoder::new_h264(&config.0, &config.1, 320, 240, 0, 60) {
                 Ok(d) => {
                     println!("INSTANCE {i} CREATED");
                     decoders.push(d);

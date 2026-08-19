@@ -83,7 +83,7 @@ fn main() {
     }
 
     unsafe {
-        let mut decoder = match viewer_decoder::AndroidDecoder::new_h264(&sps, &pps, w, h, 0) {
+        let mut decoder = match viewer_decoder::AndroidDecoder::new_h264(&sps, &pps, w, h, 0, 60) {
             Ok(d) => d,
             Err(e) => {
                 println!("DECODER_FAIL {e}");

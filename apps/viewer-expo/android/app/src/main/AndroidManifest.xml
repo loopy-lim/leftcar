@@ -29,10 +29,10 @@
         <action android:name="android.intent.action.VIEW"/>
         <category android:name="android.intent.category.DEFAULT"/>
         <category android:name="android.intent.category.BROWSABLE"/>
-        <data android:scheme="devicehub"/>
-        <data android:scheme="exp+android-device-hub"/>
+        <data android:scheme="leftcar"/>
+        <data android:scheme="exp+leftcar-viewer"/>
       </intent-filter>
     </activity>
-    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="always" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false"/>
+    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="always" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths"/>
   </application>
 </manifest>

@@ -15,7 +15,7 @@
 //! Note: property-set success is NOT proof of hardware encode; session
 //! properties and Instruments/logs are checked together (docs/02 §4.3 주의).
 
-use media_model::frame::{CodecProfile, EncodedFrame, FrameKind};
+use media_model::frame::CodecProfile;
 use media_model::ports::EncoderConfig;
 
 /// Hardware vs software encoder identity, surfaced per session (no silent
@@ -98,6 +98,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use domain::ids::{SessionId, SourceId};
+    use media_model::frame::{EncodedFrame, FrameKind};
     use media_model::StreamEpoch;
 
     fn config(b_frames: bool) -> EncoderConfig {

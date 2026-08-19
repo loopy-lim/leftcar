@@ -3,7 +3,7 @@
  * Rendered by HubActivity. Pure presentational + command wiring; the real
  * Rustra client is injected so tests run without React Native.
  */
-import React from "react";
+import type { RemoteSurfaceNativeComponentProps } from "../specs/RemoteSurfaceNativeComponent";
 import type { StreamWindowLauncherSpec } from "../specs/StreamWindowLauncherSpec";
 
 export interface SourceRow {
@@ -23,6 +23,7 @@ export interface HubState {
   sources: SourceRow[];
   launching: string | null;
   error: string | null;
+  activeSurface: RemoteSurfaceNativeComponentProps | null;
 }
 
 /** Choose what open does for a source (same-source policy, docs/05 §5.3). */
@@ -34,12 +35,6 @@ export function decideOpenAction(
   if (!source.available) return { action: "disabled", reason: "unavailable" };
   if (openSources.has(source.sourceId)) return { action: "focus" };
   return { action: "launch" };
-}
-
-export function HubApp(_: { __unused?: never }) {
-  // Presentational shell; actual wiring lands with the RN host (H05 device
-  // phase). Kept as a typed placeholder so Codegen has a stable target.
-  return null;
 }
 
 export async function openSourceWindow(

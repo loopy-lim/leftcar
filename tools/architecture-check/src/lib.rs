@@ -145,7 +145,10 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("diagnostics", &["domain"]),
         ("macos-capture", &["domain", "media-model"]),
         ("macos-encode", &["domain", "media-model"]),
-        ("android-viewer", &["domain", "viewer-core", "viewer-decoder", "libc"]),
+        (
+            "android-viewer",
+            &["domain", "viewer-core", "viewer-decoder", "libc"],
+        ),
         ("leftcar-rustra", &["control-contract"]),
         ("viewer-decoder", &["media-model", "libc"]),
         ("architecture-check", &[]),

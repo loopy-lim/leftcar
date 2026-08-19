@@ -93,7 +93,7 @@ mdns-sd = "0.11"
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Leftcar Host",
   "version": "0.1.0",
-  "identifier": "dev.leftcar.host",
+  "identifier": "leftcar.ll3.kr",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

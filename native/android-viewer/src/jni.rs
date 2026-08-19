@@ -6,7 +6,7 @@
 //! - exceptions checked/cleared, never leaked across the boundary
 //! - panics never cross JNI (catch_unwind everywhere)
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr};
 
 #[repr(C)]
 struct jobject;
@@ -84,63 +84,275 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
+struct RendererControl {
+    port: u16,
+    stop: AtomicBool,
+    // Surface destruction is not always the end of the Activity. During an
+    // XR/freeform resize, release MediaCodec's ANativeWindow promptly but keep
+    // the TCP connection alive until either a replacement Surface attaches or
+    // the Activity performs its final release.
+    suspend: AtomicBool,
+    suspended: AtomicBool,
+    // A surface can disappear briefly during an XR resize/reconfiguration.
+    // In that case the host must see EOF and use its existing reconnect path,
+    // rather than receiving BYE and permanently stopping capture.
+    send_bye: AtomicBool,
+    // SurfaceHolder.surfaceDestroyed must not return while MediaCodec still
+    // owns the ANativeWindow. The callback waits on this bounded flag before
+    // releasing the native window reference.
+    finished: AtomicBool,
+}
+
+static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<RendererControl>>>> = Mutex::new(None);
+
+fn remove_renderer_if_current(instance: &str, control: &Arc<RendererControl>) {
+    let mut map = ACTIVE_RENDERERS.lock().unwrap();
+    if let Some(map) = map.as_mut() {
+        let is_current = map
+            .get(instance)
+            .map(|current| Arc::ptr_eq(current, control))
+            .unwrap_or(false);
+        if is_current {
+            map.remove(instance);
+        }
+    }
+}
+
+fn wait_for_renderer(control: &RendererControl) {
+    // Accepted socket reads are bounded to 300 ms. Leave additional margin
+    // for MediaCodec_stop/delete without hanging the Android UI indefinitely.
+    for _ in 0..40 {
+        if control.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
 
 /// Stop any renderer still holding the UDP port and wait (bounded) for its
 /// thread to release the socket. Without this, a re-attached surface races
 /// the old thread and `bind` fails with Address-in-use.
 fn reclaim_udp_port(port: u16) {
-    let running: Vec<Arc<AtomicBool>> = {
+    let running: Vec<Arc<RendererControl>> = {
         let mut map = ACTIVE_RENDERERS.lock().unwrap();
-        map.get_or_insert_with(HashMap::new).values().cloned().collect()
+        map.get_or_insert_with(HashMap::new)
+            .values()
+            .filter(|control| control.port == port)
+            .cloned()
+            .collect()
     };
-    for stop in running {
-        stop.store(true, Ordering::SeqCst);
+    for control in running {
+        control.send_bye.store(false, Ordering::SeqCst);
+        control.suspend.store(false, Ordering::SeqCst);
+        control.stop.store(true, Ordering::SeqCst);
+        wait_for_renderer(&control);
     }
-    // renderer polls stop every <=300ms (read timeout); 2s is ample
-    for _ in 0..20 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let any = ACTIVE_RENDERERS
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|m| !m.is_empty())
-            .unwrap_or(false);
-        if !any {
-            return;
+}
+
+#[derive(Clone)]
+struct FramePacket {
+    id: u16,
+    au: Vec<u8>,
+    host_wall_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct RendererStats {
+    queued: u64,
+    input_drops: u64,
+    frame_gaps: u64,
+    max_feed_us: u64,
+    // Host and Android wall clocks are not guaranteed to be synchronized.
+    // Calibrate their fixed offset from the first received frame so the
+    // diagnostic age is useful instead of reporting a large negative value.
+    host_clock_offset_ms: Option<i128>,
+}
+
+fn parse_frame_packet(pkt: &[u8]) -> Option<FramePacket> {
+    if pkt.len() < 5 || pkt[0] != 0x46 {
+        return None;
+    }
+    let id = u16::from_le_bytes([pkt[3], pkt[4]]);
+    let mut offset = 5usize;
+    let host_wall_ms = if pkt.len() >= 15 && pkt[5..7] == [0x4c, 0x54] {
+        offset = 15;
+        Some(u64::from_be_bytes(pkt[7..15].try_into().ok()?))
+    } else {
+        None
+    };
+    let payload = pkt.get(offset..)?;
+    // Older hosts nested the AU+PTS envelope inside F. Keep compatibility
+    // while the current host sends raw Annex-B after the F header.
+    let au = if payload.len() >= 10 && &payload[..2] == b"AU" {
+        &payload[10..]
+    } else {
+        payload
+    };
+    if au.is_empty() {
+        return None;
+    }
+    Some(FramePacket {
+        id,
+        au: au.to_vec(),
+        host_wall_ms,
+    })
+}
+
+fn parse_legacy_au_packet(pkt: &[u8]) -> Option<FramePacket> {
+    if pkt.len() < 10 || &pkt[..2] != b"AU" {
+        return None;
+    }
+    let au = &pkt[10..];
+    if au.is_empty() {
+        return None;
+    }
+    Some(FramePacket {
+        id: 0,
+        au: au.to_vec(),
+        host_wall_ms: None,
+    })
+}
+
+fn is_keyframe(au: &[u8]) -> bool {
+    viewer_decoder::split_annexb(au)
+        .iter()
+        .any(|nal| viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR))
+}
+
+fn reset_decoder(
+    decoder: &mut Option<viewer_decoder::AndroidDecoder>,
+    sps: &mut Vec<u8>,
+    pps: &mut Vec<u8>,
+    awaiting_keyframe: &mut bool,
+) {
+    if let Some(d) = decoder.as_mut() {
+        d.stop();
+    }
+    *decoder = None;
+    sps.clear();
+    pps.clear();
+    *awaiting_keyframe = true;
+}
+
+/// A missing encoded AU can invalidate the reference chain of every later
+/// H.264 delta frame. Flush the existing codec but retain SPS/PPS so the next
+/// IDR can recover immediately without waiting for a full reconnect. If a
+/// vendor codec rejects flush, drop it and let the next CFG recreate it.
+fn resync_decoder_after_frame_gap(
+    decoder: &mut Option<viewer_decoder::AndroidDecoder>,
+    awaiting_keyframe: &mut bool,
+) {
+    if *awaiting_keyframe {
+        return;
+    }
+    let flush_error = decoder.as_mut().and_then(|decoder| decoder.flush().err());
+    if let Some(error) = flush_error {
+        log_info!("decoder flush after frame gap failed: {error}");
+        if let Some(decoder) = decoder.as_mut() {
+            decoder.stop();
         }
+        *decoder = None;
     }
-    let _ = port;
+    *awaiting_keyframe = true;
 }
 
-fn feed_and_render(dec: &mut viewer_decoder::AndroidDecoder, au: &[u8], aus: &mut u64) {
+fn feed_and_render(
+    dec: &mut viewer_decoder::AndroidDecoder,
+    frame: &FramePacket,
+    aus: &mut u64,
+    fps: u32,
+    stats: &mut RendererStats,
+) -> bool {
     *aus += 1;
-    let _ = dec.feed_au(au, (*aus * 11_111) as i64, 1000);
-    while dec.pump_output(0).unwrap_or(false) {}
-    if *aus % 30 == 0 {
-        log_info!("Rendered {} frames to surface", dec.frames_rendered);
+    let frame_us = 1_000_000u64 / u64::from(fps.max(1));
+    let pts_us = aus.saturating_mul(frame_us) as i64;
+    let started = std::time::Instant::now();
+    let result = dec.feed_au_status(&frame.au, pts_us, 0);
+    let feed_us = started.elapsed().as_micros() as u64;
+    stats.max_feed_us = stats.max_feed_us.max(feed_us);
+
+    let queued = match result {
+        Ok(viewer_decoder::FeedStatus::Queued { .. }) => {
+            stats.queued += 1;
+            while dec.pump_output(0).unwrap_or(false) {}
+            true
+        }
+        Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
+            stats.input_drops += 1;
+            false
+        }
+        Err(e) => {
+            log_info!("decoder feed failed: {}", e);
+            false
+        }
+    };
+
+    let wire_age_ms = frame.host_wall_ms.and_then(|sent| {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|now| now.as_millis() as i128)?;
+        let raw_age = now_ms - sent as i128;
+        let offset = stats.host_clock_offset_ms.get_or_insert(raw_age);
+        Some(raw_age - *offset)
+    });
+
+    if dec.frames_rendered % 30 == 0 && dec.frames_rendered > 0 {
+        log_info!(
+            "Rendered {} frames; queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} wireAgeMs={:?}",
+            dec.frames_rendered,
+            stats.queued,
+            stats.input_drops,
+            stats.frame_gaps,
+            feed_us,
+            stats.max_feed_us,
+            wire_age_ms
+        );
     }
+    queued
 }
 
-fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void, port: u16) {
+fn spawn_live_stream_renderer(
+    instance_str: String,
+    surface_window: *mut c_void,
+    port: u16,
+    width: u32,
+    height: u32,
+    fps: u32,
+) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let fps = fps.clamp(1, 60);
     log_info!(
-        "spawn_live_stream_renderer: instance={} window={:?} port={}",
+        "spawn_live_stream_renderer: instance={} window={:?} port={} size={}x{} fps={}",
         instance_str,
         surface_window,
-        port
+        port,
+        width,
+        height,
+        fps
     );
 
-    // evict any previous renderer still bound to this port before spawning
+    // A replacement Surface owns the same logical instance. Stop its suspended
+    // renderer as EOF (not BYE), then evict any other renderer on the port.
+    stop_live_stream_renderer(&instance_str, false);
     reclaim_udp_port(port);
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_clone = stop_flag.clone();
+    let control = Arc::new(RendererControl {
+        port,
+        stop: AtomicBool::new(false),
+        suspend: AtomicBool::new(false),
+        suspended: AtomicBool::new(false),
+        send_bye: AtomicBool::new(true),
+        finished: AtomicBool::new(false),
+    });
+    let control_clone = Arc::clone(&control);
 
     {
         let mut map = ACTIVE_RENDERERS.lock().unwrap();
         let map = map.get_or_insert_with(HashMap::new);
-        if let Some(old_stop) = map.insert(instance_str.clone(), stop_flag) {
-            old_stop.store(true, Ordering::SeqCst);
+        if let Some(old_control) = map.insert(instance_str.clone(), control) {
+            old_control.stop.store(true, Ordering::SeqCst);
         }
     }
 
@@ -150,6 +362,8 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
             Ok(s) => s,
             Err(e) => {
                 log_info!("FAILED to bind TCP listener on 0.0.0.0:{}: {}", port, e);
+                control_clone.finished.store(true, Ordering::SeqCst);
+                remove_renderer_if_current(&instance_str, &control_clone);
                 return;
             }
         };
@@ -164,8 +378,33 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
         let mut decoder: Option<viewer_decoder::AndroidDecoder> = None;
         let mut aus = 0u64;
         let mut last_frame_ms = std::time::Instant::now();
+        let mut awaiting_keyframe = true;
+        let mut last_frame_id: Option<u16> = None;
+        let mut latest_frame: Option<FramePacket> = None;
+        let mut latest_keyframe: Option<FramePacket> = None;
+        let mut renderer_stats = RendererStats::default();
 
-        while !stop_clone.load(Ordering::Relaxed) {
+        while !control_clone.stop.load(Ordering::Relaxed) {
+            if control_clone.suspend.load(Ordering::SeqCst) {
+                // MediaCodec must let go of the old ANativeWindow before
+                // SurfaceHolder.surfaceDestroyed returns. Keep the accepted
+                // socket around so a subsequent final release can still send
+                // BYE and the host does not leave a phantom running session.
+                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                pending.clear();
+                last_frame_id = None;
+                latest_frame = None;
+                latest_keyframe = None;
+                control_clone.suspended.store(true, Ordering::SeqCst);
+                while control_clone.suspend.load(Ordering::SeqCst)
+                    && !control_clone.stop.load(Ordering::SeqCst)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                control_clone.suspended.store(false, Ordering::SeqCst);
+                continue;
+            }
+
             // (re)connect: wait for a sender when no stream is attached
             if sock.is_none() {
                 let _ = listener.set_nonblocking(true);
@@ -188,6 +427,11 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                     log_info!("TCP sender connected");
                     sock = Some(s);
                     pending.clear();
+                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                    last_frame_id = None;
+                    latest_frame = None;
+                    latest_keyframe = None;
+                    aus = 0;
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     continue;
@@ -199,6 +443,10 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                     // sender disconnected — wait for reconnect
                     log_info!("TCP sender disconnected (EOF)");
                     sock = None;
+                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                    last_frame_id = None;
+                    latest_frame = None;
+                    latest_keyframe = None;
                     continue;
                 }
                 Err(ref e)
@@ -210,11 +458,30 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                 Err(e) => {
                     log_info!("TCP sender read error: {e}");
                     sock = None;
+                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                    last_frame_id = None;
+                    latest_frame = None;
+                    latest_keyframe = None;
                     continue;
                 }
                 Ok(n) => n,
             };
             pending.extend_from_slice(&buf[..n]);
+            if pending.len() > 8 * 1024 * 1024 {
+                log_info!("pending TCP bytes exceeded 8MB — dropping stale stream data");
+                pending.clear();
+                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                last_frame_id = None;
+                latest_frame = None;
+                latest_keyframe = None;
+                continue;
+            }
+
+            // Keep only the newest complete AU from this read batch. This is
+            // the viewer-side drop boundary: if decode falls behind, old
+            // frames are discarded before they become interaction latency.
+            latest_frame = None;
+            latest_keyframe = None;
 
             // extract complete [u32 len][payload] frames from the stream
             loop {
@@ -227,6 +494,8 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                     log_info!("frame len {} exceeds cap — resetting connection", len);
                     sock = None;
                     pending.clear();
+                    last_frame_id = None;
+                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
                     break;
                 }
                 if pending.len() < 4 + len {
@@ -267,9 +536,10 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                             match viewer_decoder::AndroidDecoder::new_h264(
                                 &sps,
                                 &pps,
-                                320,
-                                240,
+                                width,
+                                height,
                                 window_handle,
+                                fps,
                             ) {
                                 Ok(d) => {
                                     log_info!("AndroidDecoder created successfully!");
@@ -281,50 +551,133 @@ fn spawn_live_stream_renderer(instance_str: String, surface_window: *mut c_void,
                             }
                         }
                     }
+                    // CFG is emitted with an IDR on the host. Do not feed
+                    // delta frames until that recovery keyframe arrives.
+                    awaiting_keyframe = true;
                     continue;
                 }
 
-                // stream-stall watchdog: if no complete AU landed for >3s the
-                // sender is gone — drop the decoder so CFG rebuilds it
-                if decoder.is_some() && last_frame_ms.elapsed() > std::time::Duration::from_millis(3000) {
-                    if let Some(d) = decoder.as_mut() {
-                        d.stop();
-                    }
-                    decoder = None;
-                    log_info!("stream stalled >3s — decoder dropped, awaiting CFG");
-                }
+                let frame = parse_legacy_au_packet(&pkt).or_else(|| parse_frame_packet(&pkt));
+                if let Some(frame) = frame {
+                    let keyframe = is_keyframe(&frame.au);
+                    let frame_gap = last_frame_id
+                        .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
+                        .unwrap_or(false);
+                    last_frame_id = Some(frame.id);
 
-                if decoder.is_some() {
-                    if pkt.len() >= 10 && &pkt[..2] == b"AU" {
-                        let au = &pkt[10..];
-                        feed_and_render(&mut decoder.as_mut().unwrap(), au, &mut aus);
-                        last_frame_ms = std::time::Instant::now();
-                    } else if pkt.len() >= 5 && pkt[0] == 0x46 {
-                        // single whole-AU "F" frame (TCP needs no fragmentation)
-                        let au = &pkt[5..];
-                        feed_and_render(&mut decoder.as_mut().unwrap(), au, &mut aus);
-                        last_frame_ms = std::time::Instant::now();
+                    if frame_gap {
+                        renderer_stats.frame_gaps += 1;
+                        log_info!(
+                            "encoded frame gap detected at id={}; awaiting next IDR",
+                            frame.id
+                        );
+                        resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
+                        latest_frame = None;
+                        latest_keyframe = None;
+                    }
+
+                    if keyframe {
+                        latest_keyframe = Some(frame.clone());
+                    }
+                    if !frame_gap {
+                        latest_frame = Some(frame);
+                    }
+                }
+            }
+
+            // stream-stall watchdog: if no AU was accepted for >3s, rebuild
+            // the codec rather than displaying a stale decoder state.
+            if decoder.is_some() && last_frame_ms.elapsed() > std::time::Duration::from_millis(3000)
+            {
+                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                latest_frame = None;
+                latest_keyframe = None;
+                log_info!("stream stalled >3s — decoder dropped, awaiting CFG");
+            }
+
+            if let Some(dec) = decoder.as_mut() {
+                if awaiting_keyframe {
+                    if let Some(frame) = latest_keyframe.take() {
+                        if feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
+                            awaiting_keyframe = false;
+                            last_frame_ms = std::time::Instant::now();
+                            if latest_frame.as_ref().map(|f| f.id) == Some(frame.id) {
+                                latest_frame = None;
+                            }
+                        }
+                    }
+                }
+                if !awaiting_keyframe {
+                    if let Some(frame) = latest_frame.take() {
+                        if feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
+                            last_frame_ms = std::time::Instant::now();
+                        }
                     }
                 }
             }
         }
-        // deregister BEFORE the socket drops so a rebinding spawn never sees
-        // us in the map (the socket itself closes when `sock` leaves scope)
-        ACTIVE_RENDERERS
-            .lock()
-            .unwrap()
-            .as_mut()
-            .map(|m| m.remove(&instance_str));
+        // A transient Surface destruction is deliberately an EOF only. The
+        // host's heartbeat reconnect then attaches to the next Surface. BYE
+        // is reserved for final Activity release.
+        if control_clone.send_bye.load(Ordering::SeqCst) {
+            if let Some(mut stream) = sock.take() {
+                let payload = b"BYE";
+                let len = (payload.len() as u32).to_be_bytes();
+                let mut goodbye = Vec::with_capacity(4 + payload.len());
+                goodbye.extend_from_slice(&len);
+                goodbye.extend_from_slice(payload);
+                let _ = std::io::Write::write_all(&mut stream, &goodbye);
+                log_info!("Sent stream close signal for instance {}", instance_str);
+            }
+        } else {
+            log_info!(
+                "Transient Surface detach for instance {}; host will reconnect",
+                instance_str
+            );
+        }
+        if let Some(decoder) = decoder.as_mut() {
+            decoder.stop();
+        }
+        drop(decoder);
+        drop(sock);
+        drop(listener);
+        control_clone.suspended.store(false, Ordering::SeqCst);
+        control_clone.finished.store(true, Ordering::SeqCst);
+        remove_renderer_if_current(&instance_str, &control_clone);
         log_info!("Live stream renderer exiting for instance");
     });
 }
 
-fn stop_live_stream_renderer(instance_str: &str) {
-    let mut map = ACTIVE_RENDERERS.lock().unwrap();
-    if let Some(ref mut map) = *map {
-        if let Some(stop) = map.remove(instance_str) {
-            stop.store(true, Ordering::SeqCst);
+fn suspend_live_stream_renderer(instance_str: &str) {
+    let control = ACTIVE_RENDERERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(instance_str).cloned());
+    if let Some(control) = control {
+        control.suspend.store(true, Ordering::SeqCst);
+        // The socket read timeout is 300 ms. Wait until the decoder has been
+        // dropped before releasing the native window reference.
+        for _ in 0..40 {
+            if control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+}
+
+fn stop_live_stream_renderer(instance_str: &str, send_bye: bool) {
+    let control = ACTIVE_RENDERERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(instance_str).cloned());
+    if let Some(control) = control {
+        control.send_bye.store(send_bye, Ordering::SeqCst);
+        control.suspend.store(false, Ordering::SeqCst);
+        control.stop.store(true, Ordering::SeqCst);
+        wait_for_renderer(&control);
     }
 }
 
@@ -342,7 +695,7 @@ pub extern "C" fn leftcar_jni_attach(
     instance_c: *const c_char,
     surface: *mut c_void, // ANativeWindow*, already acquired
 ) -> i32 {
-    leftcar_jni_attach_port(state, instance_c, surface, 5000)
+    leftcar_jni_attach_port(state, instance_c, surface, 5000, 1920, 1080, 60)
 }
 
 /// Port-explicit attach: each stream window listens on its own TCP port
@@ -353,6 +706,9 @@ pub extern "C" fn leftcar_jni_attach_port(
     instance_c: *const c_char,
     surface: *mut c_void,
     port: u16,
+    width: u32,
+    height: u32,
+    fps: u32,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
         let Some(state) = (unsafe { state.as_mut() }) else {
@@ -361,15 +717,20 @@ pub extern "C" fn leftcar_jni_attach_port(
         let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
             return LEFTCAR_ERR_NULL;
         };
-        let instance_str = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy().into_owned();
-        spawn_live_stream_renderer(instance_str, surface, port);
-        viewer_core::c_abi::stream_attach_surface(
+        if viewer_core::c_abi::stream_attach_surface(
             state,
             &instance,
             surface as viewer_core::SurfaceHandle,
         )
-        .map(|_| 0i32)
-        .unwrap_or(LEFTCAR_ERR_STATE)
+        .is_err()
+        {
+            return LEFTCAR_ERR_STATE;
+        }
+        let instance_str = unsafe { CStr::from_ptr(instance_c) }
+            .to_string_lossy()
+            .into_owned();
+        spawn_live_stream_renderer(instance_str, surface, port, width, height, fps);
+        0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
@@ -404,10 +765,17 @@ pub extern "C" fn leftcar_jni_detach(state: StatePtr, instance_c: *const c_char)
             return LEFTCAR_ERR_NULL;
         };
         let instance_str = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy();
-        stop_live_stream_renderer(&instance_str);
-        viewer_core::c_abi::stream_detach_surface(state, &instance)
-            .map(|_| 0i32)
-            .unwrap_or(LEFTCAR_ERR_STATE)
+        suspend_live_stream_renderer(&instance_str);
+        let surface = state.attached_surface(&instance);
+        match viewer_core::c_abi::stream_detach_surface(state, &instance) {
+            Ok(()) => {
+                if let Some(surface) = surface {
+                    unsafe { ANativeWindow_release(surface as *mut c_void) };
+                }
+                0
+            }
+            Err(_) => LEFTCAR_ERR_STATE,
+        }
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
@@ -449,7 +817,15 @@ pub extern "C" fn leftcar_jni_release(state: StatePtr, instance_c: *const c_char
         let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
             return LEFTCAR_ERR_NULL;
         };
+        let instance_str = unsafe { CStr::from_ptr(instance_c) }
+            .to_string_lossy()
+            .into_owned();
+        stop_live_stream_renderer(&instance_str, true);
+        let surface = state.attached_surface(&instance);
         viewer_core::c_abi::stream_release(state, &instance);
+        if let Some(surface) = surface {
+            unsafe { ANativeWindow_release(surface as *mut c_void) };
+        }
         0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)

@@ -134,10 +134,10 @@ func packetize(_ sample: CMSampleBuffer) {
     // TCP mode: no MTU fragmentation — the length-prefix framing carries the
     // whole AU in one logical packet; the kernel segments the byte stream.
     // Header [0x46][fragIdx=0][fragCnt=1][auId:u16 LE] is kept for the
-    // receiver's dispatch, followed by the complete AU payload.
+    // receiver's dispatch, followed by the raw Annex-B AU payload.
     let auId = UInt16(sentFrames & 0xFFFF)
     var p2 = Data([0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8)])
-    p2.append(pkt)
+    p2.append(pkt.dropFirst(10))
     send(p2)
     sentFrames += 1
     sentBytes += pkt.count
