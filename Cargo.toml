@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "Proprietary"
+license = "MIT"
 repository = "leftcar"
 
 [workspace.dependencies]

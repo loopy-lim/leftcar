@@ -1,6 +1,7 @@
 {
   "name": "leftcar",
   "private": true,
+  "license": "MIT",
   "packageManager": "pnpm@10.33.2",
   "scripts": {
     "typecheck": "tsc -b",

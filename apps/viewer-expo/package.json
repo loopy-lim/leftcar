@@ -2,6 +2,7 @@
   "name": "@leftcar/viewer-expo",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "main": "expo-router/entry",
   "scripts": {
     "typecheck": "tsc --noEmit",

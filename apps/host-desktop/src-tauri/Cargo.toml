@@ -2,6 +2,7 @@
 name = "leftcar-host-desktop"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # Deliberately NOT a member of the repo root workspace: tauri pulls a large
 # dependency graph that conflicts with the lean workspace lockfile.
