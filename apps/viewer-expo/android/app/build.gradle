@@ -188,10 +188,17 @@ dependencies {
     }
 }
 
-// Rust viewer core (cargo build -p android-viewer --target aarch64-linux-android --release)
+// Rust native libs (cargo build -p android-viewer -p leftcar-rustra
+// --target aarch64-linux-android --release). The prebuilts are untracked;
+// these tasks keep libs/arm64-v8a reproducible from the local Rust build.
 task copyViewerSo(type: Copy) {
     from rootProject.file("../../../target/aarch64-linux-android/release/libleftcar_viewer.so")
     into "libs/arm64-v8a"
 }
 
-preBuild.dependsOn copyViewerSo
+task copyRustraSo(type: Copy) {
+    from rootProject.file("../../../target/aarch64-linux-android/release/libleftcar_rustra.so")
+    into "libs/arm64-v8a"
+}
+
+preBuild.dependsOn copyViewerSo, copyRustraSo
