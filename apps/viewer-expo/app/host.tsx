@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   NativeEventEmitter,
   NativeModules,
   Pressable,
@@ -11,7 +12,8 @@ import {
   View,
 } from "react-native";
 import { router } from "expo-router";
-import { connectHost, controlHost } from "../src/session";
+import { connectHost, controlClient, controlHost } from "../src/session";
+import { isUnauthorizedError, type CatalogView } from "../src/control";
 
 /**
  * Host connection screen: NSD auto-discovery list + manual IP entry.
@@ -80,6 +82,21 @@ export default function Host() {
         }
       }
       if (lastError) throw lastError;
+      // Pairing gate: the host closes the connection on tokenless requests,
+      // so probe a real command before declaring the connection usable.
+      try {
+        await controlClient()?.request<CatalogView>("getCatalog");
+      } catch (e) {
+        if (isUnauthorizedError(e)) {
+          Alert.alert(
+            "페어링이 필요합니다",
+            "호스트에서 QR 코드와 인증 코드를 확인한 뒤 페어링을 진행하세요.",
+          );
+          router.push("/pairing");
+          return;
+        }
+        throw e;
+      }
       router.push("/catalog");
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));

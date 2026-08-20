@@ -2,6 +2,7 @@
 name = "leftcar-host-desktop"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # Deliberately NOT a member of the repo root workspace: tauri pulls a large
 # dependency graph that conflicts with the lean workspace lockfile.
@@ -18,6 +19,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 libloading = "0.8"
 mdns-sd = "0.11"
 control-contract = { path = "../../../crates/control-contract" }
+session = { path = "../../../crates/session" }
+domain = { path = "../../../crates/domain" }
+base64 = "0.22"
+dirs = "5"
+thiserror = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"

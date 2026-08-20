@@ -12,6 +12,9 @@ use std::ffi::{c_char, CStr};
 pub mod jni;
 #[cfg(target_os = "android")]
 pub mod jni_wrappers;
+/// Host-testable media-plane peer admission check. Not android-gated so
+/// `cargo test --workspace` (host target only in CI) exercises it.
+pub mod net_guard;
 use std::time::Duration;
 
 pub const LEFTCAR_OK: i32 = 0;

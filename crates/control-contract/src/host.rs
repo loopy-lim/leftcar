@@ -257,10 +257,12 @@ pub struct StartStreamInput {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// All viewer addresses on which the stream listener is bound. This is
-    /// needed when the control connection crosses a VPN or NAT and the peer
-    /// address is not usable for the reverse media connection.
+    /// Legacy redirection hint from early viewers. Kept for wire
+    /// compatibility (the server still deserializes it) but ignored: the
+    /// viewer's claimed IPs are untrusted on an authenticated-but-unverified
+    /// channel, so the server pushes only to the control connection peer.
     #[serde(default)]
+    #[deprecated(note = "server pushes only to the control connection peer; ignored")]
     pub viewer_ips: Vec<String>,
 }
 

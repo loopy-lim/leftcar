@@ -8,6 +8,8 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
+use crate::net_guard::{host_is_valid, peer_allowed};
+
 #[repr(C)]
 struct jobject;
 #[repr(C)]
@@ -316,6 +318,7 @@ fn spawn_live_stream_renderer(
     instance_str: String,
     surface_window: *mut c_void,
     port: u16,
+    expected_host: String,
     width: u32,
     height: u32,
     fps: u32,
@@ -324,13 +327,14 @@ fn spawn_live_stream_renderer(
     let height = height.max(1);
     let fps = fps.clamp(1, 60);
     log_info!(
-        "spawn_live_stream_renderer: instance={} window={:?} port={} size={}x{} fps={}",
+        "spawn_live_stream_renderer: instance={} window={:?} port={} size={}x{} fps={} host={}",
         instance_str,
         surface_window,
         port,
         width,
         height,
-        fps
+        fps,
+        expected_host
     );
 
     // A replacement Surface owns the same logical instance. Stop its suspended
@@ -367,7 +371,10 @@ fn spawn_live_stream_renderer(
                 return;
             }
         };
-        log_info!("TCP listening on port {}", port);
+        log_info!(
+            "TCP listening on port {} (accepting media only from {expected_host})",
+            port
+        );
         // accept one sender (reconnect allowed after disconnect)
         let mut sock: Option<std::net::TcpStream> = None;
 
@@ -409,7 +416,16 @@ fn spawn_live_stream_renderer(
             if sock.is_none() {
                 let _ = listener.set_nonblocking(true);
                 // poll accept briefly so the stop flag stays responsive
-                if let Ok((s, _)) = listener.accept() {
+                if let Ok((s, peer)) = listener.accept() {
+                    if !peer_allowed(Some(peer), &expected_host) {
+                        // Drop the socket (never assign it) and keep waiting
+                        // for the paired host: a LAN attacker must not be able
+                        // to push forged H.264 into the decoder surface.
+                        log_info!("rejected media connection from {peer}: not the paired host");
+                        drop(s);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
                     let _ = s.set_nodelay(true);
                     // accepted sockets inherit O_NONBLOCK from the listener on
                     // Linux — clear it so read_timeout (blocking poll) works;
@@ -695,17 +711,24 @@ pub extern "C" fn leftcar_jni_attach(
     instance_c: *const c_char,
     surface: *mut c_void, // ANativeWindow*, already acquired
 ) -> i32 {
-    leftcar_jni_attach_port(state, instance_c, surface, 5000, 1920, 1080, 60)
+    // Legacy no-host entry: the media listener must never be reachable
+    // without a paired host IP — an unpaired window would accept video from
+    // any LAN sender. Fail loudly instead of attaching a dead surface.
+    let _ = (state, instance_c, surface);
+    log_info!("leftcar_jni_attach: rejected — no paired host IP (use attach_port)");
+    LEFTCAR_ERR_INVALID
 }
 
 /// Port-explicit attach: each stream window listens on its own TCP port
-/// (5000+n), so multiple instances receive independent pushes.
+/// (5000+n), so multiple instances receive independent pushes. `host_c` is
+/// the control-plane host IP; the media listener accepts only that peer.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_attach_port(
     state: StatePtr,
     instance_c: *const c_char,
     surface: *mut c_void,
     port: u16,
+    host_c: *const c_char,
     width: u32,
     height: u32,
     fps: u32,
@@ -717,6 +740,20 @@ pub extern "C" fn leftcar_jni_attach_port(
         let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
             return LEFTCAR_ERR_NULL;
         };
+        // No paired host = no stream. Validate BEFORE attaching the surface:
+        // on this error path the wrapper releases its ANativeWindow ref and
+        // the core must not still hold a registered handle (double release).
+        let host = if host_c.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(host_c) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if !host_is_valid(&host) {
+            log_info!("leftcar_jni_attach_port: invalid paired host {host:?} — refusing");
+            return LEFTCAR_ERR_INVALID;
+        }
         if viewer_core::c_abi::stream_attach_surface(
             state,
             &instance,
@@ -729,7 +766,7 @@ pub extern "C" fn leftcar_jni_attach_port(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        spawn_live_stream_renderer(instance_str, surface, port, width, height, fps);
+        spawn_live_stream_renderer(instance_str, surface, port, host, width, height, fps);
         0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)

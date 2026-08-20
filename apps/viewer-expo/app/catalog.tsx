@@ -22,14 +22,15 @@ import { router } from "expo-router";
 import { allocPort, controlClient, controlHost, reconnectHost } from "../src/session";
 import {
   isControlTransportError,
+  isUnauthorizedError,
   type CatalogView,
   type DisplayInfo,
   type StatusView,
 } from "../src/control";
+import { clearToken } from "../src/pairing";
 
 type StreamLauncherNative = {
-  openStream(port: number, width: number, height: number, fps: number): Promise<string>;
-  getLocalAddresses(): Promise<string[]>;
+  openStream(port: number, host: string, width: number, height: number, fps: number): Promise<string>;
 };
 
 const launcher = NativeModules.StreamLauncher as StreamLauncherNative | undefined;
@@ -42,8 +43,18 @@ interface ActiveStream {
   width: number;
   height: number;
   fps: number;
-  viewerIps: string[];
   startedAt: number;
+}
+
+const HIDABLE_DISPLAY_LABELS = ["leftcar hub", "leftcarhub"];
+
+function isHubDisplay(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return HIDABLE_DISPLAY_LABELS.some((label) => normalized.includes(label));
+}
+
+function catalogDisplayHost(catalogHost: string): string {
+  return catalogHost.split(":")[0] ?? "";
 }
 
 const STREAM_PROFILES = [
@@ -432,7 +443,6 @@ function useStreamController(
         width: active.width,
         height: active.height,
         fps: active.fps,
-        viewerIps: active.viewerIps,
       });
       return { active, restarted };
     },
@@ -516,9 +526,18 @@ export default function Catalog() {
     staleTime: 30_000,
   });
   const { refetch: refetchCatalog } = catalogQuery;
-  const displays = catalogQuery.data?.displays ?? [];
+  const displays = (catalogQuery.data?.displays ?? []).filter(
+    (display) => !isHubDisplay(display.name),
+  );
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
+  // Revoked/expired token: drop it and start the pairing flow again.
+  useEffect(() => {
+    if (!catalogQuery.error || !isUnauthorizedError(catalogQuery.error)) return;
+    void clearToken();
+    setError("페어링이 만료되었습니다. 호스트와 다시 페어링해 주세요.");
+    router.replace("/pairing");
+  }, [catalogQuery.error]);
   const visibleError = error ?? (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null);
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === profileId) ?? STREAM_PROFILES[0];
@@ -545,7 +564,6 @@ export default function Catalog() {
       const port = allocPort();
       const selectedSize = fitProfileToDisplay(d, selectedProfile);
       const { width, height, fps } = selectedSize;
-      const viewerIps = await launcher.getLocalAddresses();
 
       const startArgs = {
         sourceIndex: d.index,
@@ -553,7 +571,6 @@ export default function Catalog() {
         width,
         height,
         fps,
-        viewerIps,
       };
 
       // Send the control request while the catalog Activity is still active.
@@ -566,7 +583,7 @@ export default function Catalog() {
       try {
         // The Activity and its Rust TCP listener now start in parallel with
         // the host's bounded connect retry, removing the fixed 1.5s guess.
-        await launcher.openStream(port, width, height, fps);
+        await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
         out = await startPromise;
       } catch (e) {
         lastError = e;
@@ -596,7 +613,6 @@ export default function Catalog() {
         width,
         height,
         fps,
-        viewerIps,
         startedAt: Date.now(),
       });
     } catch (e) {

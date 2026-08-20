@@ -2,6 +2,7 @@
   "name": "@leftcar/viewer-expo",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "main": "expo-router/entry",
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -11,9 +12,11 @@
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
     "expo": "~57.0.0",
+    "expo-camera": "^57.0.3",
     "expo-constants": "^57.0.12",
     "expo-linking": "^57.0.6",
     "expo-router": "*",
+    "expo-secure-store": "^57.0.1",
     "expo-status-bar": "^57.0.1",
     "react": "19.1.0",
     "react-native": "0.86.0",

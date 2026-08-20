@@ -29,6 +29,7 @@ const TERMINAL_SESSION_RETENTION: Duration = Duration::from_secs(5);
 
 pub struct ControlServer {
     backend: SharedBackend,
+    pairing: std::sync::Arc<crate::pairing::PairingServer>,
     sessions: Mutex<State>,
 }
 
@@ -38,16 +39,22 @@ struct State {
 }
 
 impl ControlServer {
-    pub fn new(backend: SharedBackend) -> Self {
+    pub fn new(
+        backend: SharedBackend,
+        pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    ) -> Self {
         Self {
             backend,
-            sessions: Mutex::new(State { next: 1, live: HashMap::new() }),
+            pairing,
+            sessions: Mutex::new(State {
+                next: 1,
+                live: HashMap::new(),
+            }),
         }
     }
 
     pub async fn bind(&self, addr: &str) -> std::io::Result<std::net::SocketAddr> {
-        let listener = TcpListener::bind(addr).await?;
-        Ok(listener.local_addr()?)
+        TcpListener::bind(addr).await?.local_addr()
     }
 
     /// Accept loop — runs until the process exits.
@@ -57,8 +64,10 @@ impl ControlServer {
                 Ok((sock, _)) => {
                     let server = self.clone();
                     tokio::spawn(async move {
-                        let peer =
-                            sock.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+                        let peer = sock
+                            .peer_addr()
+                            .map(|a| a.ip().to_string())
+                            .unwrap_or_default();
                         handle_conn(sock, &server, &peer).await;
                     });
                 }
@@ -145,7 +154,10 @@ impl ControlServer {
 
         for session in expired {
             if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!("failed to release terminal session {}: {error}", session.handle);
+                eprintln!(
+                    "failed to release terminal session {}: {error}",
+                    session.handle
+                );
             }
         }
 
@@ -162,9 +174,7 @@ impl ControlServer {
             let ids: Vec<u32> = state
                 .live
                 .iter()
-                .filter_map(|(id, session)| {
-                    (session.viewer_addr == viewer_addr).then_some(*id)
-                })
+                .filter_map(|(id, session)| (session.viewer_addr == viewer_addr).then_some(*id))
                 .collect();
             ids.into_iter()
                 .filter_map(|id| state.live.remove(&id))
@@ -173,19 +183,53 @@ impl ControlServer {
 
         for session in stale {
             if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!("failed to stop stale viewer session {}: {error}", session.handle);
+                eprintln!(
+                    "failed to stop stale viewer session {}: {error}",
+                    session.handle
+                );
             }
         }
     }
 
-    async fn dispatch(&self, command: &str, args: serde_json::Value, viewer_ip: &str) -> serde_json::Value {
+    async fn dispatch(
+        &self,
+        command: &str,
+        args: serde_json::Value,
+        viewer_ip: &str,
+    ) -> serde_json::Value {
         match command {
-            "getCatalog" => {
-                match self.backend.list_displays() {
-                    Ok(displays) => ok(CatalogView { displays }),
-                    Err(e) => err(&e),
+            "pair" => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct PairArgs {
+                    offer_id: String,
+                    secret: String,
+                    code: String,
+                    device_id: String,
+                    #[serde(default)]
+                    device_name: String,
+                }
+                let input: PairArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(e) => return err(&format!("bad args: {e}")),
+                };
+                // The error is deliberately generic: never reveal whether the
+                // secret or the human code was the wrong factor.
+                match self.pairing.pair(
+                    &input.offer_id,
+                    &input.secret,
+                    &input.code,
+                    &input.device_id,
+                    &input.device_name,
+                ) {
+                    Ok(token) => ok(json!({ "token": token })),
+                    Err(_) => err("pairing failed"),
                 }
             }
+            "getCatalog" => match self.backend.list_displays() {
+                Ok(displays) => ok(CatalogView { displays }),
+                Err(e) => err(&e),
+            },
             "startStream" => {
                 let input: StartStreamInput = match serde_json::from_value(args) {
                     Ok(v) => v,
@@ -198,11 +242,11 @@ impl ControlServer {
                     .and_then(|d| d.get(input.source_index as usize).cloned())
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
-                let candidates = if input.viewer_ips.is_empty() {
-                    vec![viewer_ip.to_owned()]
-                } else {
-                    input.viewer_ips
-                };
+                // The viewer's claimed IPs are untrusted input on an
+                // authenticated-but-unverified channel: a paired viewer must
+                // not redirect the media stream to an arbitrary host. Only
+                // the connection's actual peer address is used.
+                let candidates = vec![viewer_ip.to_owned()];
                 let mut last_error = None;
                 let mut started = None;
                 for candidate in candidates {
@@ -242,7 +286,9 @@ impl ControlServer {
                             );
                             id
                         };
-                        ok(StartStreamOutput { session: session_id })
+                        ok(StartStreamOutput {
+                            session: session_id,
+                        })
                     }
                     None => err(&format!(
                         "all viewer addresses failed: {}",
@@ -286,22 +332,38 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: Result<(String, serde_json::Value), String> = serde_json::from_str(&line)
-            .map(|v: Envelope| (v.command, v.args))
-            .map_err(|e| format!("bad request: {e}"));
+        let parsed: Result<(String, serde_json::Value, Option<String>), String> =
+            serde_json::from_str(&line)
+                .map(|v: Envelope| (v.command, v.args, v.token))
+                .map_err(|e| format!("bad request: {e}"));
         let resp = match parsed {
-            Ok((cmd, args)) => {
+            Ok((cmd, args, token)) => {
+                // Auth gate: `pair` is the only command reachable without a
+                // token. Anything else requires a token issued by a completed
+                // pairing; on failure the connection is closed, not just the
+                // request rejected (design §2).
+                if cmd != "pair" && !server.pairing.authorize(token.as_deref().unwrap_or("")) {
+                    write_line(
+                        &mut wr,
+                        &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
+                    )
+                    .await;
+                    break;
+                }
                 let out = server.dispatch(&cmd, args, peer).await;
                 serde_json::to_string(&out).unwrap_or_else(|_| "{\"ok\":false}".into())
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
         };
-        if wr.write_all(resp.as_bytes()).await.is_err()
-            || wr.write_all(b"\n").await.is_err()
-        {
+        if wr.write_all(resp.as_bytes()).await.is_err() || wr.write_all(b"\n").await.is_err() {
             break;
         }
     }
+}
+
+async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
+    let _ = wr.write_all(body.as_bytes()).await;
+    let _ = wr.write_all(b"\n").await;
 }
 
 #[derive(serde::Deserialize)]
@@ -309,6 +371,8 @@ struct Envelope {
     command: String,
     #[serde(default)]
     args: serde_json::Value,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 fn ok<T: serde::Serialize>(result: T) -> serde_json::Value {
@@ -392,18 +456,38 @@ mod tests {
     }
 
     async fn spawn_server() -> std::net::SocketAddr {
-        let server = std::sync::Arc::new(ControlServer::new(backend()));
+        spawn_server_with_pairing(test_pairing()).await
+    }
+
+    fn test_pairing() -> std::sync::Arc<crate::pairing::PairingServer> {
+        std::sync::Arc::new(crate::pairing::PairingServer::new(
+            "leftcar-host".into(),
+            None,
+        ))
+    }
+
+    async fn spawn_server_with_pairing(
+        pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    ) -> std::net::SocketAddr {
+        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { server.run(listener).await });
         addr
     }
 
-    async fn request(sock: &mut tokio::net::TcpStream, cmd: &str, args: &str) -> String {
+    async fn request(
+        sock: &mut tokio::net::TcpStream,
+        cmd: &str,
+        args: &str,
+        token: &str,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        sock.write_all(format!("{{\"command\":\"{cmd}\",\"args\":{args}}}\n").as_bytes())
-            .await
-            .unwrap();
+        sock.write_all(
+            format!("{{\"command\":\"{cmd}\",\"args\":{args},\"token\":\"{token}\"}}\n").as_bytes(),
+        )
+        .await
+        .unwrap();
         let mut buf = Vec::new();
         let mut byte = [0u8; 1];
         loop {
@@ -416,43 +500,69 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    /// Pair via the real pairing flow and return the issued token.
+    async fn pair_token(
+        sock: &mut tokio::net::TcpStream,
+        pairing: &crate::pairing::PairingServer,
+    ) -> String {
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
+        let args = json!({
+            "offerId": payload["id"],
+            "secret": payload["s"],
+            "code": view.code,
+            "deviceId": "test-viewer",
+            "deviceName": "Test Viewer",
+        });
+        let line = request(sock, "pair", &args.to_string(), "").await;
+        let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+        resp["result"]["token"].as_str().unwrap().to_owned()
+    }
+
     #[tokio::test]
     async fn catalog_start_status_stop_roundtrip() {
-        let addr = spawn_server().await;
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let token = pair_token(&mut sock, &pairing).await;
 
-        let line = request(&mut sock, "getCatalog", "{}").await;
+        let line = request(&mut sock, "getCatalog", "{}", &token).await;
         assert!(line.contains("\"displays\""), "{line}");
 
         let line = request(
             &mut sock,
             "startStream",
             r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
+            &token,
         )
         .await;
         assert!(line.contains("\"session\":1"), "{line}");
 
-        let line = request(&mut sock, "getStatus", "{}").await;
+        let line = request(&mut sock, "getStatus", "{}", &token).await;
         assert!(line.contains("\"state\":\"running\""), "{line}");
 
-        let line = request(&mut sock, "stopStream", r#"{"session":1}"#).await;
+        let line = request(&mut sock, "stopStream", r#"{"session":1}"#, &token).await;
         assert!(line.contains("\"ok\":true"), "{line}");
     }
 
     #[tokio::test]
     async fn add_numbers_delegates_to_rustra() {
-        let addr = spawn_server().await;
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let line = request(&mut sock, "addNumbers", r#"{"a":20,"b":22}"#).await;
+        let token = pair_token(&mut sock, &pairing).await;
+        let line = request(&mut sock, "addNumbers", r#"{"a":20,"b":22}"#, &token).await;
         assert!(line.contains("\"value\":42"), "{line}");
     }
 
     #[tokio::test]
     async fn unknown_command_and_restart_session_ids() {
-        let addr = spawn_server().await;
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let token = pair_token(&mut sock, &pairing).await;
 
-        let line = request(&mut sock, "nope", "{}").await;
+        let line = request(&mut sock, "nope", "{}", &token).await;
         assert!(line.contains("\"ok\":false"), "{line}");
 
         for i in 1..=2 {
@@ -460,20 +570,58 @@ mod tests {
                 &mut sock,
                 "startStream",
                 r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
+                &token,
             )
             .await;
             assert!(line.contains(&format!("\"session\":{i}")), "{line}");
-            let line = request(&mut sock, "stopStream", &format!("{{\"session\":{i}}}")).await;
+            let line = request(
+                &mut sock,
+                "stopStream",
+                &format!("{{\"session\":{i}}}"),
+                &token,
+            )
+            .await;
             assert!(line.contains("\"ok\":true"), "{line}");
         }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_getcatalog_is_rejected() {
+        let addr = spawn_server().await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        let line = request(&mut sock, "getCatalog", "{}", "").await;
+        assert!(line.contains("\"error\":\"unauthorized\""), "{line}");
+        assert!(line.contains("\"ok\":false"), "{line}");
+
+        // connection is closed: the next request hits EOF
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let n = sock.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0, "connection must be closed after unauthorized");
+    }
+
+    #[tokio::test]
+    async fn wrong_token_is_rejected() {
+        let addr = spawn_server().await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        let line = request(&mut sock, "getCatalog", "{}", "deadbeef").await;
+        assert!(line.contains("\"error\":\"unauthorized\""), "{line}");
     }
 
     #[test]
     fn terminal_sessions_are_retained_briefly_then_released() {
         let stopped = Arc::new(AtomicUsize::new(0));
-        let server = ControlServer::new(Arc::new(TerminalBackend {
-            stopped: stopped.clone(),
-        }));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+        );
         server.sessions.lock().unwrap().live.insert(
             1,
             Session {
@@ -487,9 +635,19 @@ mod tests {
 
         let first = server.snapshot();
         assert_eq!(first.sessions.len(), 1);
-        assert_eq!(first.sessions[0].error.as_deref(), Some("viewer closed stream"));
+        assert_eq!(
+            first.sessions[0].error.as_deref(),
+            Some("viewer closed stream")
+        );
 
-        server.sessions.lock().unwrap().live.get_mut(&1).unwrap().terminal_since =
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get_mut(&1)
+            .unwrap()
+            .terminal_since =
             Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
 
         let second = server.snapshot();

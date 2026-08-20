@@ -49,7 +49,7 @@ export interface ControlClient {
   close(): void;
 }
 
-export type ControlErrorKind = "remote" | "timeout" | "transport";
+export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized";
 
 export class ControlRequestError extends Error {
   constructor(
@@ -65,7 +65,23 @@ export function isControlTransportError(error: unknown): boolean {
   return error instanceof ControlRequestError && error.kind === "transport";
 }
 
-export function connect(host: string, port = 7777, timeoutMs = 5000): Promise<ControlClient> {
+/** The host rejected our token (or we never paired) — pairing is required. */
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ControlRequestError && error.kind === "unauthorized";
+}
+
+/**
+ * Supplies the pairing token injected into every request envelope. Polled
+ * per-request so a freshly completed pairing is picked up without a reconnect.
+ */
+export type TokenProvider = () => Promise<string | null>;
+
+export function connect(
+  host: string,
+  port = 7777,
+  timeoutMs = 5000,
+  tokenProvider?: TokenProvider,
+): Promise<ControlClient> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const pending = new Map<
@@ -78,22 +94,23 @@ export function connect(host: string, port = 7777, timeoutMs = 5000): Promise<Co
     >();
     let terminalError: ControlRequestError | null = null;
     let nextId = 1;
-    // Line buffering: responses are matched in order (server processes
-    // requests sequentially per connection).
-    const queue: Array<(v: unknown) => void | Promise<void>> = [];
 
     const socket = TcpSocket.createConnection({ host, port }, () => {
       if (settled) return;
       settled = true;
       resolve({
-        request<T>(command: string, args?: unknown): Promise<T> {
+        async request<T>(command: string, args?: unknown): Promise<T> {
+          // Resolve the token first: a rejection here fails the request
+          // before an id is allocated, so no pending entry leaks.
+          const token = tokenProvider ? await tokenProvider() : null;
           return new Promise<T>((res, rej) => {
             if (terminalError) {
               rej(terminalError);
               return;
             }
             const id = nextId++;
-            const payload = JSON.stringify({ command, args: args ?? {} }) + "\n";
+            const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
+            const payload = JSON.stringify(envelope) + "\n";
             const requestTimeout =
               command === "getCatalog" || command === "startStream" ? 15_000 : 5_000;
             const timer = setTimeout(() => {
@@ -160,7 +177,15 @@ export function connect(host: string, port = 7777, timeoutMs = 5000): Promise<Co
         if (parsed.ok) {
           handlers.resolve(parsed.result);
         } else {
-          handlers.reject(new ControlRequestError(parsed.error ?? "control error", "remote"));
+          // The host closes the connection right after "unauthorized"; this
+          // rejection is registered (and pending cleared) before the close
+          // handler runs, so the specific error wins over the generic one.
+          handlers.reject(
+            new ControlRequestError(
+              parsed.error ?? "control error",
+              parsed.error === "unauthorized" ? "unauthorized" : "remote",
+            ),
+          );
         }
       }
     });

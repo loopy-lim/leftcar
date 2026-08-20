@@ -27,7 +27,17 @@ const config: LeftcarExpoConfig = {
   android: {
     package: "dev.leftcar.viewer",
   },
-  plugins: ["expo-router"],
+  plugins: [
+    "expo-router",
+    [
+      "expo-camera",
+      {
+        cameraPermission: "호스트와 페어링하기 위한 QR 코드 스캔에 카메라를 사용합니다.",
+        recordAudioAndroid: false,
+        barcodeScannerEnabled: true,
+      },
+    ],
+  ],
   experiments: { typedRoutes: false },
 };
 

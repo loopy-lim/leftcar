@@ -5,12 +5,17 @@
 pub mod backend;
 pub mod control;
 pub mod ffi;
+pub mod pairing;
 
 use backend::SharedBackend;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::WebviewUrl;
 use tauri::{Manager, WindowEvent};
+
+/// Control plane port — must match the TCP listener and the mDNS record.
+const CONTROL_PORT: u16 = 7777;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,7 +31,11 @@ pub fn run() {
         }
     };
     let warmup_backend = backend.clone();
-    let server = std::sync::Arc::new(control::ControlServer::new(backend.clone()));
+    let pairing = Arc::new(pairing::PairingServer::new(
+        "leftcar-host".into(),
+        pairing::PairingServer::default_store_path(),
+    ));
+    let server = Arc::new(control::ControlServer::new(backend.clone(), pairing.clone()));
     start_control_server(server.clone());
     // Advertise independently from the Tauri window so a viewer can connect
     // while WebView/AppKit initialization is still in progress.
@@ -35,14 +44,25 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_status])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            begin_pairing,
+            cancel_pairing,
+            list_paired_devices,
+            revoke_device
+        ])
         .setup(move |app| {
             app.manage(server);
+            app.manage(pairing);
             warm_display_catalog(warmup_backend);
 
-            let show_item = MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let show_item =
+                MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
+            let pairing_item =
+                MenuItem::with_id(app, "pairing", "기기 페어링…", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &pairing_item, &quit_item])?;
             let icon = app
                 .default_window_icon()
                 .cloned()
@@ -60,6 +80,7 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
+                    "pairing" => show_pairing_window(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -68,15 +89,49 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the dashboard hides it; the control server, mDNS
-                // advertisement, and active capture sessions keep running.
-                api.prevent_close();
-                let _ = window.hide();
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    // Closing the dashboard hides it; the control server, mDNS
+                    // advertisement, and active capture sessions keep running.
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            } else if window.label() == "pairing" {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    // The pairing window is a plain closable window (close is
+                    // NOT prevented). The QR secret lives until canceled and
+                    // webview teardown cannot run React cleanup, so burn every
+                    // live offer here (pairing.rs cancel_active).
+                    window
+                        .app_handle()
+                        .state::<Arc<pairing::PairingServer>>()
+                        .cancel_active();
+                }
             }
         })
         .run(tauri::generate_context!())
         .expect("tauri run");
+}
+
+/// Create the pairing window on first open; show+focus on later opens.
+fn show_pairing_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("pairing") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    if let Err(e) = tauri::WebviewWindowBuilder::new(
+        app,
+        "pairing",
+        WebviewUrl::App("index.html#/pairing".into()),
+    )
+    .title("기기 페어링")
+    .inner_size(420.0, 560.0)
+    .resizable(false)
+    .build()
+    {
+        eprintln!("failed to open pairing window: {e}");
+    }
 }
 
 /// Prime ScreenCaptureKit before the first viewer opens the source catalog.
@@ -110,7 +165,7 @@ fn start_control_server(server: std::sync::Arc<control::ControlServer>) {
                 .build()
                 .expect("control runtime");
             runtime.block_on(async move {
-                match tokio::net::TcpListener::bind("0.0.0.0:7777").await {
+                match tokio::net::TcpListener::bind(("0.0.0.0", CONTROL_PORT)).await {
                     Ok(listener) => {
                         println!("control server on {}", listener.local_addr().unwrap());
                         server.run(listener).await;
@@ -129,19 +184,46 @@ fn get_status(
     state.snapshot()
 }
 
+#[tauri::command]
+fn begin_pairing(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+) -> Result<pairing::PairingSessionView, String> {
+    let ip = local_lan_ip().ok_or("no LAN interface found")?;
+    Ok(state.begin_pairing(&ip, CONTROL_PORT))
+}
+
+#[tauri::command]
+fn cancel_pairing(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) {
+    state.cancel_active();
+}
+
+#[tauri::command]
+fn list_paired_devices(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+) -> Vec<pairing::PairedDevice> {
+    state.list_devices()
+}
+
+#[tauri::command]
+fn revoke_device(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    device_id: String,
+) -> bool {
+    state.revoke(&device_id)
+}
+
 /// Register `_leftcar._tcp.local.` pointing at this host's LAN IP:7777.
 /// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
 fn advertise_mdns() -> Result<(), String> {
     use std::collections::HashMap;
-    let daemon =
-        mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
     let info = mdns_sd::ServiceInfo::new(
         "_leftcar._tcp.local.",
         "leftcar-host",
         "leftcar-host.local.",
         &ip,
-        7777,
+        CONTROL_PORT,
         // Android's NSD resolver rejects an empty TXT property set on some
         // vendor builds ("Key cannot be empty"). Keep one stable property so
         // multiple hosts can still be resolved and listed independently.
@@ -151,7 +233,7 @@ fn advertise_mdns() -> Result<(), String> {
     daemon
         .register(info)
         .map_err(|e| format!("mdns register: {e:?}"))?;
-    println!("mDNS: leftcar-host._leftcar._tcp.local. at {ip}:7777");
+    println!("mDNS: leftcar-host._leftcar._tcp.local. at {ip}:{CONTROL_PORT}");
     std::mem::forget(daemon);
     Ok(())
 }

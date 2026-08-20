@@ -68,7 +68,7 @@ checkFiles(
   "generated-no-video-types",
 );
 
-// 2. viewer app: no input commands anywhere (P-01, T-06)
+// 2. viewer apps: no input commands anywhere (P-01, T-06)
 checkFiles(
   join(ROOT, "apps/viewer-android"),
   [
@@ -77,21 +77,34 @@ checkFiles(
   ],
   "viewer-no-input-commands",
 );
+checkFiles(
+  join(ROOT, "apps/viewer-expo"),
+  [
+    [/sendKey|sendMouse|injectInput|sendTouch/i, "input-injection symbol in viewer"],
+    [/readClipboard|writeClipboard|readFile|writeFile/, "file/clipboard access in viewer"],
+  ],
+  "viewer-no-input-commands",
+);
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
-const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.react\.|java\.lang\.|java\.util\.|kotlin\.)/;
-for (const file of walk(join(ROOT, "apps/viewer-android/android"))) {
-  if (!file.endsWith(".kt")) continue;
-  const text = readFileSync(file, "utf8");
-  for (const line of text.split("\n")) {
-    const m = line.match(/^import\s+(.+)$/);
-    if (m && !KOTLIN_ALLOW.test(line)) {
-      fail("kotlin-import-allowlist", `${file}: ${line}`);
+const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
+for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "apps/viewer-expo/android")]) {
+  for (const file of walk(folder)) {
+    if (!file.endsWith(".kt")) continue;
+    const text = readFileSync(file, "utf8");
+    for (const line of text.split("\n")) {
+      const m = line.match(/^import\s+(.+)$/);
+      if (m && !KOTLIN_ALLOW.test(line)) {
+        fail(
+          "kotlin-import-allowlist",
+          `${file}: ${line}`,
+        );
+      }
     }
-  }
-  // no codec/network policy in the shim (docs/09 §9 금지 타협)
-  if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text)) {
-    fail("kotlin-no-policy", `${file}: codec/network symbols belong to the Rust core`);
+    // no codec/network policy in the shim (docs/09 §14 금지 타협)
+    if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text)) {
+      fail("kotlin-no-policy", `${file}: codec/network symbols belong to the Rust core`);
+    }
   }
 }
 

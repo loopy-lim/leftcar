@@ -48,6 +48,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,11 +638,32 @@ dependencies = [
 
 [[package]]
 name = "dirs"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
+dependencies = [
+ "dirs-sys 0.4.1",
+]
+
+[[package]]
+name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
 dependencies = [
- "dirs-sys",
+ "dirs-sys 0.5.0",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users 0.4.6",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -642,7 +674,7 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users",
+ "redox_users 0.5.2",
  "windows-sys 0.61.2",
 ]
 
@@ -1790,13 +1822,18 @@ dependencies = [
 name = "leftcar-host-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "control-contract",
+ "dirs 5.0.1",
+ "domain",
  "libloading 0.8.9",
  "mdns-sd",
  "serde",
  "serde_json",
+ "session",
  "tauri",
  "tauri-build",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-test",
 ]
@@ -1912,6 +1949,17 @@ dependencies = [
  "log",
  "polling",
  "socket2 0.5.10",
+]
+
+[[package]]
+name = "media-model"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "domain",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2583,6 +2631,17 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+dependencies = [
+ "getrandom 0.2.17",
+ "libredox",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "redox_users"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
@@ -2976,6 +3035,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "domain",
+ "media-model",
+ "serde",
+ "thiserror 2.0.20",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3271,7 +3343,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cookie",
- "dirs",
+ "dirs 6.0.0",
  "dunce",
  "embed_plist",
  "getrandom 0.3.4",
@@ -3321,7 +3393,7 @@ checksum = "bc9ce40b16101cb6ea63d3e221567affd1c3a9205f95d7bc574941a10636b632"
 dependencies = [
  "anyhow",
  "cargo_toml",
- "dirs",
+ "dirs 6.0.0",
  "glob",
  "heck 0.5.0",
  "json-patch",
@@ -3831,7 +3903,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "045979e3f037cd18ad1cb2a419dfda133c5c29c9f3453370079f2255d46c257e"
 dependencies = [
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "libappindicator",
  "muda",
  "objc2",
@@ -4678,7 +4750,7 @@ dependencies = [
  "block2",
  "cookie",
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "dom_query",
  "dpi",
  "dunce",
@@ -4776,6 +4848,12 @@ dependencies = [
  "syn 2.0.119",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"

@@ -108,8 +108,9 @@ pub struct OfferSecret(pub [u8; 32]);
 
 impl OfferSecret {
     pub fn from_random() -> Self {
-        // uuid v4 x2 as entropy stand-in for tests; production uses the
-        // platform RNG inside the secure store adapter.
+        // Two uuid v4s = 244 CSPRNG bits (uuid v4 draws its 122 random bits
+        // from the OS RNG per call). This is the production pairing-token
+        // mint, not a test stand-in.
         let mut bytes = [0u8; 32];
         let a = uuid::Uuid::new_v4();
         let b = uuid::Uuid::new_v4();
@@ -188,10 +189,16 @@ impl PairingService {
             ephemeral_offer_id: format!("offer-{}", uuid::Uuid::new_v4()),
             expires_at: self.clock.monotonic() + PAIRING_TTL,
             address_hints: Vec::new(),
-            human_verification_code: format!(
-                "{:06}",
-                uuid::Uuid::new_v4().as_bytes()[0] as u32 % 1_000_000
-            ),
+            human_verification_code: {
+                // fold 4 uuid bytes into a u32 before the modulo: a single
+                // byte modulo 1_000_000 is a no-op (only 000000-000255)
+                let uuid = uuid::Uuid::new_v4();
+                let b = uuid.as_bytes();
+                format!(
+                    "{:06}",
+                    u32::from_be_bytes([b[0], b[1], b[2], b[3]]) % 1_000_000
+                )
+            },
             used: false,
         };
         let secret = OfferSecret::from_random();
@@ -884,6 +891,28 @@ mod tests {
         // bounded, not 10k entries
         let seen_len = c.seen_request_ids.len();
         assert!(seen_len <= 4096, "dedupe set grew to {seen_len}");
+    }
+
+    #[test]
+    fn human_code_uses_full_six_digit_range() {
+        // The code is a second factor; it must not be predictable from a
+        // small subset. Drawing from a single uuid byte yielded only 256
+        // distinct values (000000-000255) — 8 effective bits.
+        let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
+        let mut codes = std::collections::HashSet::new();
+        for _ in 0..1_000 {
+            let offer = svc.begin_offer("fp".into());
+            codes.insert(offer.human_verification_code);
+        }
+        assert!(
+            codes.len() >= 900,
+            "expected ≥900 distinct codes, got {}",
+            codes.len()
+        );
+        assert!(
+            codes.iter().any(|c| c.parse::<u32>().unwrap() > 255),
+            "codes must span beyond 000255: {codes:?}"
+        );
     }
 }
 

@@ -7,7 +7,7 @@
 
 1. 페어링되지 않은 장치는 Host 존재를 최소 정보 이상 알 수 없고 화면을 받을 수 없다.
 2. 페어링된 Viewer도 Host 사용자가 승인한 source만 볼 수 있다.
-3. 네트워크에서 영상과 제어 메시지가 인증 및 암호화된다.
+3. 페어링된 장치만 제어 연결을 획득하고, 제어 채널의 토큰/승인 정보가 유효해야 한다.
 4. 보기 전용 capability만 존재하고 원격 입력 경로가 없다.
 5. 창 제목, 화면 pixel, token, private key가 log/telemetry에 남지 않는다.
 6. 세션 종료 또는 권한 철회가 빠르고 완전하게 반영된다.
@@ -49,7 +49,7 @@ Host user approval
   └─ Viewer pairing approval
 
 Untrusted LAN
-  └─ authenticated encrypted transport
+  └─ authenticated control channel with explicit remaining plaintext transport risk
 
 Viewer app
   ├─ TypeScript UI: untrusted for secrets and media bytes
@@ -78,6 +78,9 @@ Platform codec
 | T-12 | downgrade attack | protocol/crypto minimum, negotiated version transcript binding |
 | T-13 | malicious update/dependency | lockfile, checksum, signed release, SBOM/audit |
 | T-14 | protected content 우회 | blank/protected error를 정상 처리, bypass 시도 금지 |
+
+v0.1.0 범위에서는 LAN 내 짧은 범위 사용을 가정하며 미디어/제어 모두 동일 TCP 평문에서 운용한다.
+공개 인터넷 노출이 필요한 경우 TLS + PAKE + certificate/pinning 기반의 추가 상호인증/암호화가 요구된다.
 
 ## 6. 장치 identity
 
@@ -265,6 +268,7 @@ source catalog에는 UI에 필요한 정보만 담는다.
 - network socket 생성 금지
 - codec policy 금지
 - Surface jobject와 Activity lifecycle만 Rust에 전달
+- transport-layer TLS/PAKE 협상은 수행하지 않고, 제어 채널 토큰/역방향 피어 검증으로만 제한
 
 ### Rust/JNI
 
@@ -367,4 +371,3 @@ stream_task_restore_requires_reauthentication
 - [ ] debug secret/frame dump 제거
 - [ ] revoke/stop all 실기기 확인
 - [ ] protected content 비우회 확인
-

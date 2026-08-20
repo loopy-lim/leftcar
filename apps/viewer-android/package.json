@@ -2,6 +2,7 @@
   "name": "@leftcar/viewer-android",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
