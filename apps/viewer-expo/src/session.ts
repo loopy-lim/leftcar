@@ -1,4 +1,5 @@
 import { connect, type ControlClient } from "./control";
+import { getStoredToken } from "./pairing";
 
 /**
  * App-wide control session singleton: the hub screen connects once, catalog
@@ -21,7 +22,7 @@ export function controlHost(): string {
 }
 
 export async function connectHost(host: string, port = 7777): Promise<ControlClient> {
-  const c = await connect(host, port);
+  const c = await connect(host, port, 5000, () => getStoredToken());
   // Keep the previous connection alive until the replacement succeeds, then
   // release it so switching between multiple computers does not leak sockets.
   if (client && client !== c) client.close();
@@ -39,7 +40,7 @@ export async function reconnectHost(): Promise<ControlClient> {
 
   reconnectInFlight = (async () => {
     const previous = client;
-    const c = await connect(hostTarget, hostPort);
+    const c = await connect(hostTarget, hostPort, 5000, () => getStoredToken());
     if (previous && previous !== c) previous.close();
     client = c;
     return c;
