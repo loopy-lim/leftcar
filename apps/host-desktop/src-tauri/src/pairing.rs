@@ -25,9 +25,7 @@ struct WallClock {
 
 impl session::Clock for WallClock {
     fn monotonic(&self) -> Duration {
-        self.epoch
-            .get_or_init(Instant::now)
-            .elapsed()
+        self.epoch.get_or_init(Instant::now).elapsed()
     }
 }
 
@@ -79,7 +77,10 @@ impl PairingServer {
     /// unreadable file is logged and ignored — pairing state is rebuildable,
     /// the host must not refuse to start.
     pub fn new(fingerprint: String, store_path: Option<PathBuf>) -> Self {
-        let paired = store_path.as_deref().and_then(load_devices).unwrap_or_default();
+        let paired = store_path
+            .as_deref()
+            .and_then(load_devices)
+            .unwrap_or_default();
         Self {
             inner: Mutex::new(Inner {
                 service: session::PairingService::new(Box::new(WallClock {
@@ -168,7 +169,7 @@ impl PairingServer {
                     device_id: device_id.to_owned(),
                     name: name.to_owned(),
                     token_hex: token_hex.clone(),
-                    paired_at: unix_seconds_rfc3339_utc(),
+                    paired_at: unix_timestamp_utc(),
                 };
                 inner.paired.push(paired.clone());
                 inner.live_offers.remove(offer_id); // single-use: offer consumed
@@ -202,10 +203,9 @@ impl PairingServer {
         let Ok(bytes) = hex_decode32(token_hex) else {
             return false;
         };
-        inner
-            .paired
-            .iter()
-            .any(|d| session::constant_time_eq(&hex_decode32(&d.token_hex).unwrap_or([0u8; 32]), &bytes))
+        inner.paired.iter().any(|d| {
+            session::constant_time_eq(&hex_decode32(&d.token_hex).unwrap_or([0u8; 32]), &bytes)
+        })
     }
 
     /// Remove a device and its token; persists the change. False when the
@@ -242,18 +242,26 @@ impl PairingServer {
                 PairingServerError::PersistenceFailed
             })?;
         }
-        std::fs::write(path, body).map_err(|e| {
+        // Mode applies at creation: fs::write would create the file 0644 and
+        // leave it world-readable until a follow-up chmod lands.
+        #[cfg(unix)]
+        let file = {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .and_then(|mut f| f.write_all(body.as_bytes()))
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::write(path, &body);
+        file.map_err(|e| {
             eprintln!("leftcar: write store: {e}");
             PairingServerError::PersistenceFailed
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(path, perms) {
-                eprintln!("leftcar: chmod 0600 on store failed: {e}");
-            }
-        }
         Ok(())
     }
 }
@@ -282,7 +290,7 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// UTC timestamp without pulling in a date crate: `unix:<seconds>` is
 /// unambiguous, trivially parseable, and stable across platforms.
-fn unix_seconds_rfc3339_utc() -> String {
+fn unix_timestamp_utc() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -344,7 +352,11 @@ mod tests {
         assert!(view.expires_in_secs > 0 && view.expires_in_secs <= 120);
 
         assert_eq!(view.code.len(), 6);
-        assert!(view.code.bytes().all(|b| b.is_ascii_digit()), "{}", view.code);
+        assert!(
+            view.code.bytes().all(|b| b.is_ascii_digit()),
+            "{}",
+            view.code
+        );
     }
 
     #[test]
@@ -364,7 +376,9 @@ mod tests {
             .pair(&offer_id, &secret_b64, &view.code, "viewer-1", "Quest 3")
             .unwrap();
         assert_eq!(token.len(), 64);
-        assert!(token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
 
         let devices = server.list_devices();
         assert_eq!(devices.len(), 1);

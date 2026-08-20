@@ -42,7 +42,9 @@ fn dylib_candidates() -> Vec<PathBuf> {
     }
     // cargo tauri dev normally runs from src-tauri; repo root is ../../..
     if let Ok(cwd) = std::env::current_dir() {
-        let repo_root = cwd.join("../../..").join("native/macos-capture-shim/libleftcar_capture.dylib");
+        let repo_root = cwd
+            .join("../../..")
+            .join("native/macos-capture-shim/libleftcar_capture.dylib");
         v.push(repo_root);
         v.push(cwd.join("native/macos-capture-shim/libleftcar_capture.dylib"));
     }
@@ -59,7 +61,10 @@ impl FfiBackend {
             }
             match unsafe { Library::new(&path) } {
                 Ok(lib) => {
-                    let backend = Self { _lib: lib, _path: path };
+                    let backend = Self {
+                        _lib: lib,
+                        _path: path,
+                    };
                     backend.verify_symbols()?;
                     return Ok(backend);
                 }
@@ -74,7 +79,9 @@ impl FfiBackend {
             let lib = self.lib()?;
             type CPtr = *mut std::ffi::c_char;
             let _ = lib
-                .get::<unsafe extern "C" fn(CPtr, u16, u32, u32, u32, u32) -> u32>(b"leftcar_capture_start_v2")
+                .get::<unsafe extern "C" fn(CPtr, u16, u32, u32, u32, u32) -> u32>(
+                    b"leftcar_capture_start_v2",
+                )
                 .map_err(|e| e.to_string())?;
             let _ = lib
                 .get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_capture_stop_v2")
@@ -102,7 +109,9 @@ impl FfiBackend {
         if ptr.is_null() {
             return None;
         }
-        let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        let s = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { libc_free_string(ptr) };
         Some(s)
     }
@@ -122,8 +131,9 @@ impl CaptureBackend for FfiBackend {
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
         let lib = self.lib()?;
         unsafe {
-            let f: Symbol<unsafe extern "C" fn() -> *mut std::ffi::c_char> =
-                lib.get(b"leftcar_capture_list_displays").map_err(|e| e.to_string())?;
+            let f: Symbol<unsafe extern "C" fn() -> *mut std::ffi::c_char> = lib
+                .get(b"leftcar_capture_list_displays")
+                .map_err(|e| e.to_string())?;
             let ptr = f();
             let json = Self::take_string(ptr).ok_or("list_displays returned null")?;
             let displays: Vec<DisplayInfo> =
@@ -158,7 +168,9 @@ impl CaptureBackend for FfiBackend {
         unsafe {
             let f: Symbol<
                 unsafe extern "C" fn(*const std::ffi::c_char, u16, u32, u32, u32, u32) -> u32,
-            > = lib.get(b"leftcar_capture_start_v2").map_err(|e| e.to_string())?;
+            > = lib
+                .get(b"leftcar_capture_start_v2")
+                .map_err(|e| e.to_string())?;
             let handle = f(c_ip.as_ptr(), port, source_index, w, h, fps);
             if handle == 0 {
                 let err_f: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
@@ -178,8 +190,9 @@ impl CaptureBackend for FfiBackend {
     fn stop(&self, handle: u32) -> Result<(), String> {
         let lib = self.lib()?;
         unsafe {
-            let f: Symbol<unsafe extern "C" fn(u32) -> i32> =
-                lib.get(b"leftcar_capture_stop_v2").map_err(|e| e.to_string())?;
+            let f: Symbol<unsafe extern "C" fn(u32) -> i32> = lib
+                .get(b"leftcar_capture_stop_v2")
+                .map_err(|e| e.to_string())?;
             let rc = f(handle);
             if rc != 0 {
                 return Err(format!("stop({handle}) rc={rc}"));
@@ -191,8 +204,9 @@ impl CaptureBackend for FfiBackend {
     fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
         let lib = self.lib()?;
         unsafe {
-            let f: Symbol<unsafe extern "C" fn(u32) -> *mut std::ffi::c_char> =
-                lib.get(b"leftcar_capture_stats_v2").map_err(|e| e.to_string())?;
+            let f: Symbol<unsafe extern "C" fn(u32) -> *mut std::ffi::c_char> = lib
+                .get(b"leftcar_capture_stats_v2")
+                .map_err(|e| e.to_string())?;
             let ptr = f(handle);
             let json = Self::take_string(ptr).ok_or("stats returned null")?;
             let v: serde_json::Value =
@@ -216,7 +230,10 @@ impl CaptureBackend for FfiBackend {
                 send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
                 max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
                 pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
-                error: v["error"].as_str().filter(|s| !s.is_empty()).map(str::to_owned),
+                error: v["error"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
             })
         }
     }

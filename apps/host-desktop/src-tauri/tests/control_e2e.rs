@@ -168,9 +168,15 @@ async fn test_full_stream_lifecycle() {
     // 2. Query status while stream is running
     let status_resp = send_request(&mut sock, "getStatus", "{}", &token).await;
     assert!(status_resp.contains("\"ok\":true"), "{status_resp}");
-    assert!(status_resp.contains("\"state\":\"running\""), "{status_resp}");
+    assert!(
+        status_resp.contains("\"state\":\"running\""),
+        "{status_resp}"
+    );
     assert!(status_resp.contains("\"fps\":90"), "{status_resp}");
-    assert!(status_resp.contains("\"sourceName\":\"Main Display\""), "{status_resp}");
+    assert!(
+        status_resp.contains("\"sourceName\":\"Main Display\""),
+        "{status_resp}"
+    );
 
     // 3. Stop stream
     let stop_resp = send_request(&mut sock, "stopStream", r#"{"session":1}"#, &token).await;
@@ -219,16 +225,13 @@ async fn test_error_handling() {
     // Stop non-existent session
     let stop_err_resp = send_request(&mut sock, "stopStream", r#"{"session":999}"#, &token).await;
     assert!(stop_err_resp.contains("\"ok\":false"), "{stop_err_resp}");
-    assert!(stop_err_resp.contains("no such session 999"), "{stop_err_resp}");
+    assert!(
+        stop_err_resp.contains("no such session 999"),
+        "{stop_err_resp}"
+    );
 
     // Bad args for startStream
-    let bad_args_resp = send_request(
-        &mut sock,
-        "startStream",
-        r#"{"wrongKey":123}"#,
-        &token,
-    )
-    .await;
+    let bad_args_resp = send_request(&mut sock, "startStream", r#"{"wrongKey":123}"#, &token).await;
     assert!(bad_args_resp.contains("\"ok\":false"), "{bad_args_resp}");
     assert!(bad_args_resp.contains("bad args"), "{bad_args_resp}");
 }

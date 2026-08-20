@@ -46,13 +46,15 @@ impl ControlServer {
         Self {
             backend,
             pairing,
-            sessions: Mutex::new(State { next: 1, live: HashMap::new() }),
+            sessions: Mutex::new(State {
+                next: 1,
+                live: HashMap::new(),
+            }),
         }
     }
 
     pub async fn bind(&self, addr: &str) -> std::io::Result<std::net::SocketAddr> {
-        let listener = TcpListener::bind(addr).await?;
-        Ok(listener.local_addr()?)
+        TcpListener::bind(addr).await?.local_addr()
     }
 
     /// Accept loop — runs until the process exits.
@@ -62,8 +64,10 @@ impl ControlServer {
                 Ok((sock, _)) => {
                     let server = self.clone();
                     tokio::spawn(async move {
-                        let peer =
-                            sock.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+                        let peer = sock
+                            .peer_addr()
+                            .map(|a| a.ip().to_string())
+                            .unwrap_or_default();
                         handle_conn(sock, &server, &peer).await;
                     });
                 }
@@ -150,7 +154,10 @@ impl ControlServer {
 
         for session in expired {
             if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!("failed to release terminal session {}: {error}", session.handle);
+                eprintln!(
+                    "failed to release terminal session {}: {error}",
+                    session.handle
+                );
             }
         }
 
@@ -167,9 +174,7 @@ impl ControlServer {
             let ids: Vec<u32> = state
                 .live
                 .iter()
-                .filter_map(|(id, session)| {
-                    (session.viewer_addr == viewer_addr).then_some(*id)
-                })
+                .filter_map(|(id, session)| (session.viewer_addr == viewer_addr).then_some(*id))
                 .collect();
             ids.into_iter()
                 .filter_map(|id| state.live.remove(&id))
@@ -178,12 +183,20 @@ impl ControlServer {
 
         for session in stale {
             if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!("failed to stop stale viewer session {}: {error}", session.handle);
+                eprintln!(
+                    "failed to stop stale viewer session {}: {error}",
+                    session.handle
+                );
             }
         }
     }
 
-    async fn dispatch(&self, command: &str, args: serde_json::Value, viewer_ip: &str) -> serde_json::Value {
+    async fn dispatch(
+        &self,
+        command: &str,
+        args: serde_json::Value,
+        viewer_ip: &str,
+    ) -> serde_json::Value {
         match command {
             "pair" => {
                 #[derive(serde::Deserialize)]
@@ -213,12 +226,10 @@ impl ControlServer {
                     Err(_) => err("pairing failed"),
                 }
             }
-            "getCatalog" => {
-                match self.backend.list_displays() {
-                    Ok(displays) => ok(CatalogView { displays }),
-                    Err(e) => err(&e),
-                }
-            }
+            "getCatalog" => match self.backend.list_displays() {
+                Ok(displays) => ok(CatalogView { displays }),
+                Err(e) => err(&e),
+            },
             "startStream" => {
                 let input: StartStreamInput = match serde_json::from_value(args) {
                     Ok(v) => v,
@@ -276,7 +287,9 @@ impl ControlServer {
                             );
                             id
                         };
-                        ok(StartStreamOutput { session: session_id })
+                        ok(StartStreamOutput {
+                            session: session_id,
+                        })
                     }
                     None => err(&format!(
                         "all viewer addresses failed: {}",
@@ -343,15 +356,13 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
         };
-        if wr.write_all(resp.as_bytes()).await.is_err()
-            || wr.write_all(b"\n").await.is_err()
-        {
+        if wr.write_all(resp.as_bytes()).await.is_err() || wr.write_all(b"\n").await.is_err() {
             break;
         }
     }
 }
 
-async fn write_line<'a>(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &'a str) {
+async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
     let _ = wr.write_all(body.as_bytes()).await;
     let _ = wr.write_all(b"\n").await;
 }
@@ -450,7 +461,10 @@ mod tests {
     }
 
     fn test_pairing() -> std::sync::Arc<crate::pairing::PairingServer> {
-        std::sync::Arc::new(crate::pairing::PairingServer::new("leftcar-host".into(), None))
+        std::sync::Arc::new(crate::pairing::PairingServer::new(
+            "leftcar-host".into(),
+            None,
+        ))
     }
 
     async fn spawn_server_with_pairing(
@@ -463,7 +477,12 @@ mod tests {
         addr
     }
 
-    async fn request(sock: &mut tokio::net::TcpStream, cmd: &str, args: &str, token: &str) -> String {
+    async fn request(
+        sock: &mut tokio::net::TcpStream,
+        cmd: &str,
+        args: &str,
+        token: &str,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         sock.write_all(
             format!("{{\"command\":\"{cmd}\",\"args\":{args},\"token\":\"{token}\"}}\n").as_bytes(),
@@ -483,7 +502,10 @@ mod tests {
     }
 
     /// Pair via the real pairing flow and return the issued token.
-    async fn pair_token(sock: &mut tokio::net::TcpStream, pairing: &crate::pairing::PairingServer) -> String {
+    async fn pair_token(
+        sock: &mut tokio::net::TcpStream,
+        pairing: &crate::pairing::PairingServer,
+    ) -> String {
         let view = pairing.begin_pairing("127.0.0.1", 7777);
         let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
         let args = json!({
@@ -553,7 +575,13 @@ mod tests {
             )
             .await;
             assert!(line.contains(&format!("\"session\":{i}")), "{line}");
-            let line = request(&mut sock, "stopStream", &format!("{{\"session\":{i}}}"), &token).await;
+            let line = request(
+                &mut sock,
+                "stopStream",
+                &format!("{{\"session\":{i}}}"),
+                &token,
+            )
+            .await;
             assert!(line.contains("\"ok\":true"), "{line}");
         }
     }
@@ -569,7 +597,9 @@ mod tests {
 
         // connection is closed: the next request hits EOF
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n").await.unwrap();
+        sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
+            .await
+            .unwrap();
         let mut buf = [0u8; 16];
         let n = sock.read(&mut buf).await.unwrap();
         assert_eq!(n, 0, "connection must be closed after unauthorized");
@@ -606,9 +636,19 @@ mod tests {
 
         let first = server.snapshot();
         assert_eq!(first.sessions.len(), 1);
-        assert_eq!(first.sessions[0].error.as_deref(), Some("viewer closed stream"));
+        assert_eq!(
+            first.sessions[0].error.as_deref(),
+            Some("viewer closed stream")
+        );
 
-        server.sessions.lock().unwrap().live.get_mut(&1).unwrap().terminal_since =
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get_mut(&1)
+            .unwrap()
+            .terminal_since =
             Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
 
         let second = server.snapshot();

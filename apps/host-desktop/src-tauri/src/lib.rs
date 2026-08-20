@@ -45,8 +45,10 @@ pub fn run() {
             app.manage(server);
             warm_display_catalog(warmup_backend);
 
-            let show_item = MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
+            let show_item =
+                MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
             let icon = app
                 .default_window_icon()
@@ -138,8 +140,7 @@ fn get_status(
 /// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
 fn advertise_mdns() -> Result<(), String> {
     use std::collections::HashMap;
-    let daemon =
-        mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
     let info = mdns_sd::ServiceInfo::new(
         "_leftcar._tcp.local.",
