@@ -208,6 +208,18 @@ impl PairingServer {
         })
     }
 
+    /// Cancel every live offer (zeroizing each secret via the service) and
+    /// reset failure counters. Closing the pairing window or restarting a
+    /// session must not leave scannable offers behind.
+    pub fn cancel_active(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let offer_ids: Vec<String> = inner.live_offers.drain().collect();
+        for offer_id in offer_ids {
+            inner.service.cancel(&offer_id);
+        }
+        inner.fail_counts.clear();
+    }
+
     /// Remove a device and its token; persists the change. False when the
     /// device was not paired.
     pub fn revoke(&self, device_id: &str) -> bool {
@@ -513,6 +525,49 @@ mod tests {
         assert!(!restarted.authorize(&token));
         assert!(restarted.list_devices().is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancel_active_burns_all_live_offers_but_keeps_paired_devices() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let first = server.begin_pairing("192.168.0.10", 7777);
+        let second = server.begin_pairing("192.168.0.10", 7777);
+        // accumulate a failure count on the first offer
+        let payload = serde_json::from_str::<serde_json::Value>(&first.qr_payload).unwrap();
+        let offer_id = payload["id"].as_str().unwrap();
+        let secret_b64 = payload["s"].as_str().unwrap();
+        let _ = server.pair(offer_id, secret_b64, "000000", "viewer-1", "Quest 3");
+        // pair one device successfully via the second offer
+        let payload2 = serde_json::from_str::<serde_json::Value>(&second.qr_payload).unwrap();
+        server
+            .pair(
+                payload2["id"].as_str().unwrap(),
+                payload2["s"].as_str().unwrap(),
+                &second.code,
+                "viewer-2",
+                "Quest 3",
+            )
+            .unwrap();
+        assert_eq!(server.list_devices().len(), 1);
+
+        server.cancel_active();
+
+        // both offers are dead: correct secret+code can no longer pair
+        assert!(server
+            .pair(offer_id, secret_b64, &first.code, "viewer-1", "Quest 3")
+            .is_err());
+        assert!(server
+            .pair(
+                payload2["id"].as_str().unwrap(),
+                payload2["s"].as_str().unwrap(),
+                &second.code,
+                "viewer-3",
+                "Quest 3",
+            )
+            .is_err());
+        // already-paired devices survive cancellation
+        assert_eq!(server.list_devices().len(), 1);
+        assert_eq!(server.list_devices()[0].device_id, "viewer-2");
     }
 
     #[test]

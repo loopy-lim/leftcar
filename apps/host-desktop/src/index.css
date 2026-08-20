@@ -561,3 +561,117 @@ body {
   color: var(--text-primary);
   border-color: var(--border-card);
 }
+
+/* Pairing Window */
+.pairing-container {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pairing-header h1 {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pairing-header p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.pairing-idle {
+  padding: 36px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+}
+
+.pairing-active {
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.pairing-qr {
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: #ffffff;
+}
+
+.pairing-code {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--text-primary);
+}
+
+.pairing-countdown {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.pairing-device-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.pairing-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pairing-device-row:last-child {
+  border-bottom: none;
+}
+
+.pairing-device-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pairing-device-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pairing-device-date {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.pairing-revoke {
+  color: #fca5a5;
+}
+
+.pairing-revoke:hover {
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

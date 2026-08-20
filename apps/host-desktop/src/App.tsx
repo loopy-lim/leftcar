@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { trayStatus, type HostSnapshotView } from "./hostState";
+import PairingPanel from "./PairingPanel";
 
 interface SessionRow {
   session: number;
@@ -31,6 +32,15 @@ interface StatusView {
 }
 
 export default function App() {
+  // The pairing window loads the same bundle at #/pairing (see lib.rs).
+  if (window.location.hash === "#/pairing") {
+    return <PairingPanel />;
+  }
+
+  return <Dashboard />;
+}
+
+function Dashboard() {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [error, setError] = useState<string | null>(null);
