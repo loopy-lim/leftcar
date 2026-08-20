@@ -55,6 +55,7 @@ private class AspectRatioSurfaceView(context: android.content.Context) : Surface
 
 class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var instanceId: String = ""
+    private var host: String = ""
     private var port: Int = 5000
     private var fps: Int = 60
     private var sourceWidth: Int = 1920
@@ -121,6 +122,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         instanceId = intent?.getStringExtra("instance")
             ?: savedInstanceState?.getString("instance")
             ?: "instance-${System.nanoTime()}"
+        host = intent?.getStringExtra("host") ?: savedInstanceState?.getString("host") ?: ""
         port = intent?.getIntExtra("port", 5000) ?: 5000
         fps = (intent?.getIntExtra("fps", 60) ?: 60).coerceIn(1, 60)
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
@@ -148,7 +150,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
             android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER))
-        android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId port=$port")
+        android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId port=$port host=$host")
+        if (host.isEmpty()) {
+            // No paired host = no stream. Fail loudly instead of rendering a
+            // silently black window the user cannot diagnose.
+            android.util.Log.e("LeftcarStream", "Missing host extra — refusing to attach stream")
+            setResult(1, android.content.Intent().putExtra("error", "missing host"))
+            finish()
+            return
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
@@ -189,6 +199,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             instanceId,
             holder.surface,
             port,
+            host,
             sourceWidth,
             sourceHeight,
             fps,
@@ -196,7 +207,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         surfaceAttached = res == 0
         android.util.Log.i(
             "LeftcarStream",
-            "attachSurfacePort returned $res, source=${sourceWidth}x${sourceHeight}, fps=$fps",
+            "attachSurfacePort returned $res, host=$host, source=${sourceWidth}x${sourceHeight}, fps=$fps",
         )
         lifecycleEvent(6) // SURFACE_CREATE
     }

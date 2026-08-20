@@ -18,6 +18,8 @@ import android.view.Gravity
  */
 class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var instanceId: String = ""
+    private var host: String = ""
+    private var port: Int = 5000
     private var nativeState: Long = 0
     // UDP 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
@@ -45,6 +47,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             ?: savedInstanceState?.getString("instance")
             ?: "instance-${System.nanoTime()}"
         val idx = intent?.data?.getQueryParameter("idx")?.toIntOrNull() ?: 0
+        host = intent?.data?.getQueryParameter("host")
+            ?: savedInstanceState?.getString("host")
+            ?: ""
+        port = intent?.data?.getQueryParameter("port")?.toIntOrNull() ?: 5000
         val colors = intArrayOf(0xFFE53935.toInt(), 0xFF43A047.toInt(), 0xFF1E88E5.toInt(), 0xFFFB8C00.toInt())
         val sv = SurfaceView(this)
         sv.holder.addCallback(this)
@@ -62,7 +68,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         fl.addView(label, android.widget.FrameLayout.LayoutParams(
             400, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
-        android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId idx=$idx")
+        android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId idx=$idx host=$host port=$port")
+        if (host.isEmpty()) {
+            // No paired host = no stream (the Rust media listener would
+            // reject every sender anyway). Fail loudly instead of attaching
+            // a dead surface.
+            android.util.Log.e("LeftcarStream", "Missing host query parameter — refusing to attach")
+            finish()
+            return
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.attributes.preferredRefreshRate = 90.0f
         }
@@ -75,8 +89,17 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         android.util.Log.i("LeftcarStream", "surfaceCreated: instanceId=$instanceId surface=${holder.surface}")
-        val res = ViewerNative.attachSurface(nativeState, instanceId, holder.surface)
-        android.util.Log.i("LeftcarStream", "attachSurface returned $res")
+        val res = ViewerNative.attachSurfacePort(
+            nativeState,
+            instanceId,
+            holder.surface,
+            port,
+            host,
+            1920,
+            1080,
+            60,
+        )
+        android.util.Log.i("LeftcarStream", "attachSurfacePort returned $res (host=$host port=$port)")
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {

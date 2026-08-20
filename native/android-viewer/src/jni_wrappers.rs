@@ -62,6 +62,7 @@ extern "C" {
         instance: *const c_char,
         surface: *mut c_void,
         port: u16,
+        host: *const c_char,
         width: u32,
         height: u32,
         fps: u32,
@@ -140,6 +141,7 @@ fn attach_port_body(
     jstr: *mut jobject,
     surface: *mut jobject,
     port: i32,
+    host: *mut jobject,
     width: i32,
     height: i32,
     fps: i32,
@@ -149,6 +151,10 @@ fn attach_port_body(
     }
     let c = match unsafe { get_utf(env, jstr) } {
         Some(c) => c,
+        None => return 1,
+    };
+    let host = match unsafe { get_utf(env, host) } {
+        Some(h) => h,
         None => return 1,
     };
     let window = unsafe { ANativeWindow_fromSurface(env, surface) };
@@ -161,6 +167,7 @@ fn attach_port_body(
             c.as_ptr(),
             window,
             port as u16,
+            host.as_ptr(),
             width.max(1) as u32,
             height.max(1) as u32,
             fps.clamp(1, 60) as u32,
@@ -193,12 +200,13 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
     instance: *mut jobject,
     surface: *mut jobject,
     port: i32,
+    host: *mut jobject,
     width: i32,
     height: i32,
     fps: i32,
 ) -> i32 {
     std::panic::catch_unwind(|| {
-        attach_port_body(env, state, instance, surface, port, width, height, fps)
+        attach_port_body(env, state, instance, surface, port, host, width, height, fps)
     })
     .unwrap_or(3)
 }

@@ -32,17 +32,30 @@ class HubActivity : Activity() {
             setPadding(0, 32, 0, 32)
         })
         val status = TextView(this).apply { text = "no windows yet"; gravity = Gravity.CENTER }
+        // The Rust media listener accepts senders only from the paired host
+        // IP typed here (the machine that runs stream_sender.swift).
+        val hostInput = android.widget.EditText(this).apply {
+            hint = "host IP (예: 192.168.0.10)"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            setSingleLine()
+        }
         fun openWindow() {
+            val host = hostInput.text.toString().trim()
+            if (host.isEmpty()) {
+                status.text = "host IP를 입력하세요 (페어링된 호스트만 수신 허용)"
+                return
+            }
             val idx = windowCount++
             val instance = "instance-$idx-${System.nanoTime()}"
             val intent = Intent(this, StreamActivity::class.java).apply {
-                data = Uri.parse("leftcar://stream/src-$idx?instance=$instance&idx=$idx")
+                data = Uri.parse("leftcar://stream/src-$idx?instance=$instance&idx=$idx&host=$host&port=${5000 + idx}")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
                 addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
             }
             startActivity(intent)
             status.text = "opened $windowCount windows"
         }
+        root.addView(hostInput)
         root.addView(Button(this).apply {
             text = "Open stream window"
             setOnClickListener { openWindow() }
