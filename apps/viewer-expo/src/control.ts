@@ -78,9 +78,6 @@ export function connect(host: string, port = 7777, timeoutMs = 5000): Promise<Co
     >();
     let terminalError: ControlRequestError | null = null;
     let nextId = 1;
-    // Line buffering: responses are matched in order (server processes
-    // requests sequentially per connection).
-    const queue: Array<(v: unknown) => void | Promise<void>> = [];
 
     const socket = TcpSocket.createConnection({ host, port }, () => {
       if (settled) return;
