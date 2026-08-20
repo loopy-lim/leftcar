@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -36,6 +36,20 @@ export default function Pairing() {
   // Once a valid offer is captured, stop reacting to further camera frames.
   const scannedRef = useRef(false);
   const invalidHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guards post-pair navigation: the async pair call can settle after the
+  // screen was unmounted (the token is already stored either way).
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (invalidHintTimer.current) {
+        clearTimeout(invalidHintTimer.current);
+        invalidHintTimer.current = null;
+      }
+    };
+  }, []);
 
   const handleBarcode = useCallback(({ data }: { data: string }) => {
     if (scannedRef.current) return;
@@ -63,9 +77,11 @@ export default function Pairing() {
     setError(null);
     try {
       await pairWithHost(payload, code);
-      Alert.alert("페어링 완료", "호스트와 연결되었습니다.", [
-        { text: "확인", onPress: () => router.back() },
-      ]);
+      if (mountedRef.current) {
+        Alert.alert("페어링 완료", "호스트와 연결되었습니다.", [
+          { text: "확인", onPress: () => router.back() },
+        ]);
+      }
     } catch {
       const next = failCount + 1;
       setFailCount(next);
@@ -75,7 +91,7 @@ export default function Pairing() {
           : "페어링 실패. 코드를 확인하세요",
       );
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }, [busy, code, failCount, payload]);
 

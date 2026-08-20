@@ -42,7 +42,10 @@ export function parseQrPayload(text: string): QrPayload | null {
     !raw.s ||
     typeof raw.h !== "string" ||
     !raw.h ||
-    typeof raw.p !== "number"
+    typeof raw.p !== "number" ||
+    !Number.isInteger(raw.p) ||
+    raw.p <= 0 ||
+    raw.p >= 65536
   ) {
     return null;
   }
@@ -76,8 +79,8 @@ export function deviceName(): string {
  * persisted; on any failure nothing is kept (a stale token is dropped too).
  */
 export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
+  const client = await connect(p.host, p.port);
   try {
-    const client = await connect(p.host, p.port);
     const { token } = await client.request<{ token: string }>("pair", {
       offerId: p.id,
       secret: p.secret,
@@ -91,5 +94,9 @@ export async function pairWithHost(p: QrPayload, code: string): Promise<string> 
   } catch (e) {
     await clearToken();
     throw e;
+  } finally {
+    // The pairing connection is single-purpose; the token travels via secure
+    // storage into the main control session, so always release the socket.
+    client.close();
   }
 }

@@ -25,11 +25,12 @@ vi.mock("expo-secure-store", () => {
 });
 
 const requestMock = vi.fn();
+const closeMock = vi.fn();
 
 vi.mock("./control", () => ({
   connect: vi.fn(async () => ({
     request: requestMock,
-    close: vi.fn(),
+    close: closeMock,
   })),
   isUnauthorizedError: vi.fn(
     (e: unknown) =>
@@ -89,6 +90,9 @@ describe("parseQrPayload", () => {
     ).toBeNull(); // missing h
     expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4"}')).toBeNull(); // missing p
     expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":"7777"}')).toBeNull(); // port not number
+    expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":7777.5}')).toBeNull(); // non-integer
+    expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":0}')).toBeNull(); // out of range (low)
+    expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":70000}')).toBeNull(); // out of range (high)
     expect(parseQrPayload("not json")).toBeNull();
   });
 });
@@ -118,12 +122,14 @@ describe("pairWithHost", () => {
       deviceName: deviceName(),
     });
     expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(closeMock).toHaveBeenCalledTimes(1); // no leaked connection
   });
 
   it("failure: throws and stores nothing", async () => {
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
     expect(store.get("leftcar.token")).toBeUndefined();
+    expect(closeMock).toHaveBeenCalledTimes(1); // closed even on failure
   });
 
   it("failure clears any previously stored token (defensive)", async () => {
