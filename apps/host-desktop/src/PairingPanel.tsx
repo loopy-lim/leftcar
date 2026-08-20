@@ -44,7 +44,9 @@ export default function PairingPanel() {
   const [now, setNow] = useState(Date.now());
   // latest device count, readable by the poll callback without re-subscribing
   const deviceCountRef = useRef(devices.length);
-  deviceCountRef.current = devices.length;
+  useEffect(() => {
+    deviceCountRef.current = devices.length;
+  }, [devices.length]);
 
   const refreshDevices = useCallback(async () => {
     try {

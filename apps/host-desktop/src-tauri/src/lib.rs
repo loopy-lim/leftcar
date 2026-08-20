@@ -93,9 +93,19 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     // Closing the dashboard hides it; the control server, mDNS
                     // advertisement, and active capture sessions keep running.
-                    // (The pairing window is a plain closable window.)
                     api.prevent_close();
                     let _ = window.hide();
+                }
+            } else if window.label() == "pairing" {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    // The pairing window is a plain closable window (close is
+                    // NOT prevented). The QR secret lives until canceled and
+                    // webview teardown cannot run React cleanup, so burn every
+                    // live offer here (pairing.rs cancel_active).
+                    window
+                        .app_handle()
+                        .state::<Arc<pairing::PairingServer>>()
+                        .cancel_active();
                 }
             }
         })
