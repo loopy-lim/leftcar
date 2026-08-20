@@ -206,7 +206,9 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
     fps: i32,
 ) -> i32 {
     std::panic::catch_unwind(|| {
-        attach_port_body(env, state, instance, surface, port, host, width, height, fps)
+        attach_port_body(
+            env, state, instance, surface, port, host, width, height, fps,
+        )
     })
     .unwrap_or(3)
 }

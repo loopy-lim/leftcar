@@ -104,8 +104,10 @@
   - Viewer에서 `openStream` 호출 시 연결된 control host IP를 네이티브로 전달해 Native에서 사용.
   - Kotlin `StreamLauncher`/`StreamActivity`는 host를 intent로 전달 후 `ViewerNative.attachSurfacePort` 호출 시 넘김.
   - JNI 수신 루프는 `accept()` peer의 IP와 control host를 비교해 불일치 시 드롭.
-  - `StartStreamInput.viewer_ips`는 호환성을 위해 `viewer_ips` alias를 유지하되 폐기(deprecated) 처리.
+  - `StartStreamInput.viewer_ips`는 폐기(deprecated) 처리. serde `default`로 역직렬화만 유지(구형 viewer wire compat)하며 서버는 완전 무시.
 
 - **검증**:
-  - `pnpm test:contract`: 통과
-  - `cargo test --workspace`, `cargo test -p control-contract`: 통과
+  - `cargo test --workspace`, `cargo test -p control-contract`: 통과 (net_guard 단위 테스트 포함).
+  - `cargo test` (`apps/host-desktop/src-tauri`): `startstream_ignores_viewer_ips_uses_peer` e2e 통과.
+  - JNI 입장 허용 경로는 `cargo check --target aarch64-linux-android -p android-viewer`로 컴파일 검증만 수행(기기 실행 검증 아님).
+  - `pnpm test` / `pnpm typecheck` / `pnpm test:contract` / `pnpm test:architecture`: 통과.

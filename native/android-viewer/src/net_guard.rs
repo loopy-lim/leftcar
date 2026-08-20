@@ -12,11 +12,21 @@ use std::net::{IpAddr, SocketAddr};
 /// equality — the viewer dials the host for control, so the media connection
 /// must come back from that exact address). An unparseable or missing
 /// expectation denies everything: no paired host, no stream.
+///
+/// The listener binds 0.0.0.0 (IPv4-only), so accept() peers are plain IPv4;
+/// if the bind ever goes dual-stack, to_canonical() normalization would be
+/// needed before comparing against a v4 expectation.
 pub fn peer_allowed(peer: Option<SocketAddr>, expected_host: &str) -> bool {
     match (peer, expected_host.parse::<IpAddr>()) {
         (Some(addr), Ok(expected)) => addr.ip() == expected,
         _ => false,
     }
+}
+
+/// True when expected_host is a bare IP literal the accept loop can compare
+/// against. Hostnames are rejected — the control plane supplies a dialed IP.
+pub fn host_is_valid(expected_host: &str) -> bool {
+    expected_host.parse::<IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -63,5 +73,16 @@ mod tests {
         ));
         // v4 peer against v6 expectation (and vice versa) denied.
         assert!(!peer_allowed(Some(v4("192.168.0.10", 5001)), "::1"));
+    }
+
+    #[test]
+    fn host_is_valid_accepts_bare_ip_literals_only() {
+        // Valid IPv4 / IPv6.
+        assert!(host_is_valid("192.168.0.10"));
+        assert!(host_is_valid("fd00::1"));
+        // Empty, hostname, addr:port all rejected.
+        assert!(!host_is_valid(""));
+        assert!(!host_is_valid("foo.local"));
+        assert!(!host_is_valid("1.2.3.4:5000"));
     }
 }

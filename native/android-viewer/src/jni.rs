@@ -8,7 +8,7 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
-use crate::net_guard::peer_allowed;
+use crate::net_guard::{host_is_valid, peer_allowed};
 
 #[repr(C)]
 struct jobject;
@@ -740,6 +740,20 @@ pub extern "C" fn leftcar_jni_attach_port(
         let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
             return LEFTCAR_ERR_NULL;
         };
+        // No paired host = no stream. Validate BEFORE attaching the surface:
+        // on this error path the wrapper releases its ANativeWindow ref and
+        // the core must not still hold a registered handle (double release).
+        let host = if host_c.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(host_c) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if !host_is_valid(&host) {
+            log_info!("leftcar_jni_attach_port: invalid paired host {host:?} — refusing");
+            return LEFTCAR_ERR_INVALID;
+        }
         if viewer_core::c_abi::stream_attach_surface(
             state,
             &instance,
@@ -749,29 +763,10 @@ pub extern "C" fn leftcar_jni_attach_port(
         {
             return LEFTCAR_ERR_STATE;
         }
-        // No paired host = no stream. Validate before spawning the renderer
-        // so the caller sees the failure instead of a silently black window.
-        let host = if host_c.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(host_c) }.to_string_lossy().into_owned()
-        };
-        if !peer_allowed(None, &host) {
-            log_info!("leftcar_jni_attach_port: invalid paired host {host:?} — refusing");
-            return LEFTCAR_ERR_INVALID;
-        }
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        spawn_live_stream_renderer(
-            instance_str,
-            surface,
-            port,
-            host,
-            width,
-            height,
-            fps,
-        );
+        spawn_live_stream_renderer(instance_str, surface, port, host, width, height, fps);
         0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
