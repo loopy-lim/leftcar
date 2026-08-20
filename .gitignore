@@ -21,3 +21,6 @@ apps/host-desktop/node_modules/
 *.keystore
 **/package-lock.json
 *.orig
+
+# stale prebuilt viewer core — rebuilt from Rust by gradle copyViewerSo; never commit binaries
+apps/viewer-expo/android/app/libs/arm64-v8a/libleftcar_viewer.so
