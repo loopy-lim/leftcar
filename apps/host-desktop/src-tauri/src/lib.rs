@@ -27,7 +27,11 @@ pub fn run() {
         }
     };
     let warmup_backend = backend.clone();
-    let server = std::sync::Arc::new(control::ControlServer::new(backend.clone()));
+    let pairing = std::sync::Arc::new(pairing::PairingServer::new(
+        "leftcar-host".into(),
+        pairing::PairingServer::default_store_path(),
+    ));
+    let server = std::sync::Arc::new(control::ControlServer::new(backend.clone(), pairing));
     start_control_server(server.clone());
     // Advertise independently from the Tauri window so a viewer can connect
     // while WebView/AppKit initialization is still in progress.
