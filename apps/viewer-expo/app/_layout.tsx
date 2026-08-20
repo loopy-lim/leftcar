@@ -50,6 +50,13 @@ export default function RootLayout() {
             headerBackTitle: "뒤로",
           }}
         />
+        <Stack.Screen
+          name="pairing"
+          options={{
+            title: "호스트 페어링",
+            headerBackTitle: "뒤로",
+          }}
+        />
       </Stack>
     </QueryClientProvider>
   );

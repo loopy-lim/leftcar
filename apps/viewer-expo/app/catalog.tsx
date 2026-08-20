@@ -22,10 +22,12 @@ import { router } from "expo-router";
 import { allocPort, controlClient, controlHost, reconnectHost } from "../src/session";
 import {
   isControlTransportError,
+  isUnauthorizedError,
   type CatalogView,
   type DisplayInfo,
   type StatusView,
 } from "../src/control";
+import { clearToken } from "../src/pairing";
 
 type StreamLauncherNative = {
   openStream(port: number, width: number, height: number, fps: number): Promise<string>;
@@ -519,6 +521,13 @@ export default function Catalog() {
   const displays = catalogQuery.data?.displays ?? [];
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
+  // Revoked/expired token: drop it and start the pairing flow again.
+  useEffect(() => {
+    if (!catalogQuery.error || !isUnauthorizedError(catalogQuery.error)) return;
+    void clearToken();
+    setError("페어링이 만료되었습니다. 호스트와 다시 페어링해 주세요.");
+    router.replace("/pairing");
+  }, [catalogQuery.error]);
   const visibleError = error ?? (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null);
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === profileId) ?? STREAM_PROFILES[0];
