@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod control;
 pub mod ffi;
+pub mod pairing;
 
 use backend::SharedBackend;
 use std::sync::Arc;
