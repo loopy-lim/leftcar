@@ -60,6 +60,10 @@ jobs:
           targets: aarch64-linux-android
       - name: Ensure Android Rust target is installed
         run: rustup target add aarch64-linux-android
+      - name: Install Android NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" >/dev/null
+      - name: Put NDK toolchain on PATH
+        run: echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
       - name: cargo check viewer native for Android
         run: cargo check -p android-viewer --target aarch64-linux-android
