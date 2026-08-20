@@ -43,6 +43,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Unit + contract tests
         run: pnpm test && pnpm test:contract
+      - name: Typecheck
+        run: pnpm typecheck
       - name: TS/Kotlin architecture rules
         run: pnpm test:architecture
       - name: Regeneration is clean (H26)

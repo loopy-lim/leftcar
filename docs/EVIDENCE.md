@@ -13,6 +13,7 @@
 | E3 빌드 | 부분 달성 | Rust workspace + TS 전부; Android aarch64 check는 CI 잡 | 
 | E4 에뮬레이터 | 미달성 | H05/H08 단계. 에뮬레이터 잡 미연결 |
 | E5 Galaxy XR 실기기 | 부분 달성 | Galaxy XR는 없음; **동일 Android 16 실기기(TB710FU)에서** Expo RN 앱 구동, HW 디코더 1/4/6/8개 동시, multi-instance task 분리, 60/90fps 실측 |
+| E11(신규) 페어링 + 미디어 출발지 검증 | 달성 | QR 페어링 + 토큰 인증 경로 유지, 미디어 역방향 peer 일치 검사 |
 | E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
@@ -97,3 +98,14 @@
   - Swift shim dylib 컴파일 & `swift tools/capture_host.swift --list`: 디스플레이 목록 정상 반환
   - 단일 스트림 90fps/1080p 및 다중 스트림 독립 창 수명주기/자동 stop 검증.
 
+## 페어링 + 미디어 출발지 검증 (E11, 2026-08-20 추가)
+
+- **구현 상세**:
+  - Viewer에서 `openStream` 호출 시 연결된 control host IP를 네이티브로 전달해 Native에서 사용.
+  - Kotlin `StreamLauncher`/`StreamActivity`는 host를 intent로 전달 후 `ViewerNative.attachSurfacePort` 호출 시 넘김.
+  - JNI 수신 루프는 `accept()` peer의 IP와 control host를 비교해 불일치 시 드롭.
+  - `StartStreamInput.viewer_ips`는 호환성을 위해 `viewer_ips` alias를 유지하되 폐기(deprecated) 처리.
+
+- **검증**:
+  - `pnpm test:contract`: 통과
+  - `cargo test --workspace`, `cargo test -p control-contract`: 통과
