@@ -247,7 +247,6 @@ impl ControlServer {
                 // not redirect the media stream to an arbitrary host. Only
                 // the connection's actual peer address is used.
                 let candidates = vec![viewer_ip.to_owned()];
-                let _ = &input.viewer_ips;
                 let mut last_error = None;
                 let mut started = None;
                 for candidate in candidates {
