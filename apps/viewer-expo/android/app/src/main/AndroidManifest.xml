@@ -33,6 +33,6 @@
         <data android:scheme="exp+leftcar-viewer"/>
       </intent-filter>
     </activity>
-    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="always" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths"/>
+    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths"/>
   </application>
 </manifest>

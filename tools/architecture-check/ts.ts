@@ -107,6 +107,42 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
   }
 }
 
+// 4. The Expo viewer keeps one document task per unique host/port. Using
+//    documentLaunchMode="always" here makes every reconnect add another
+//    Recents entry even though Android still has only one installed package.
+const expoManifest = readFileSync(
+  join(ROOT, "apps/viewer-expo/android/app/src/main/AndroidManifest.xml"),
+  "utf8",
+);
+const streamLauncher = readFileSync(
+  join(
+    ROOT,
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamLauncherModule.kt",
+  ),
+  "utf8",
+);
+const streamActivity = readFileSync(
+  join(
+    ROOT,
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamActivity.kt",
+  ),
+  "utf8",
+);
+if (!/StreamActivity[^>]+documentLaunchMode="intoExisting"/.test(expoManifest)) {
+  fail("stream-task-reuse", "Expo StreamActivity must reuse an existing document task");
+}
+for (const [pattern, detail] of [
+  [/\.scheme\("leftcar-stream"\)/, "stream intent has no stable document scheme"],
+  [/\.appendPath\(host\)/, "stream intent identity does not include the host"],
+  [/\.appendPath\(port\.toString\(\)\)/, "stream intent identity does not include the port"],
+  [/FLAG_ACTIVITY_NEW_DOCUMENT/, "stream intent is not launched as a document"],
+] as Array<[RegExp, string]>) {
+  if (!pattern.test(streamLauncher)) fail("stream-task-reuse", detail);
+}
+if (!/override fun onNewIntent\(newIntent: Intent\)/.test(streamActivity)) {
+  fail("stream-task-reuse", "reused StreamActivity does not accept the refreshed intent");
+}
+
 if (failures > 0) {
   console.error(`architecture-check: ${failures} violation(s)`);
   process.exit(1);

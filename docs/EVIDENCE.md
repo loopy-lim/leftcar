@@ -94,7 +94,7 @@
   1. **호스트 (`apps/host-desktop`)**: Tauri v2 기반 데스크톱 앱. TCP 7777 제어 서버 (pull 방식 `getCatalog`, `startStream`, `stopStream`, `getStatus` + Rustra `addNumbers` 위임) + mDNS `_leftcar._tcp.local.` 자동 광고 + 실시간 세션 상태 UI (fps, kbps, 활성 세션 표).
   2. **캡처 심 (`native/macos-capture-shim`)**: HandleTable 기반 멀티 인스턴스 C ABI (`leftcar_capture_start_v2`, `stop_v2`, `stats_v2`, `list_displays`, `free_string`, `last_error_v2`), ScreenCaptureKit + VideoToolbox H.264 하드웨어 인코딩, 90fps 기본 / 120fps 상한, 비트레이트 dynamic clamp, 연결 끊김 시 자동 세션 정지.
   3. **뷰어 렌더러 (`native/android-viewer`)**: `leftcar_jni_attach_port`로 포트 파라미터화(5000+n), MTU 단위 UDP H.264 AU 재조립 -> AMediaCodec 하드웨어 디코딩 -> Surface 렌더링. 유실 감지 시 즉시 IDR를 요청한다.
-  4. **RN 뷰어 (`apps/viewer-expo`)**: Expo 57 / RN 0.86, Android OS 멀티윈도우 지원 (`android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI`, `documentLaunchMode="always"`, `resizeableActivity="true"`), NsdModule (mDNS NSD 자동 호스트 발견), StreamLauncherModule (인스턴스별 독립 OS 창 생성), TCP 제어 클라이언트(`control.ts`) 및 UI(`host.tsx`, `catalog.tsx`).
+  4. **RN 뷰어 (`apps/viewer-expo`)**: Expo 57 / RN 0.86, Android OS 멀티윈도우 지원 (`android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI`, `documentLaunchMode="intoExisting"`, `resizeableActivity="true"`), NsdModule (mDNS NSD 자동 호스트 발견), StreamLauncherModule (서로 다른 `host:port`는 독립 OS 창, 동일 스트림 재접속은 기존 task 재사용), TCP 제어 클라이언트(`control.ts`) 및 UI(`host.tsx`, `catalog.tsx`).
 - **검증**:
   - `cargo test --workspace`: 통과
   - `cargo test` (`apps/host-desktop/src-tauri` - 단위 + e2e): 9 tests 전부 통과

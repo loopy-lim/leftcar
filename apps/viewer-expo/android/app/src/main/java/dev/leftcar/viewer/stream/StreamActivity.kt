@@ -1,6 +1,7 @@
 package dev.leftcar.viewer.stream
 
 import android.app.Activity
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Bundle
@@ -21,10 +22,10 @@ import dev.leftcar.viewer.shim.ViewerNative
 /**
  * Stream window (docs/03 §3.2): one remote source per OS window.
  *
- * Multi-instance: launched with documentLaunchMode="always" so each stream
- * becomes its own task/window (H05-proven manifest recipe). The decode loop
- * runs entirely in Rust (libleftcar_viewer) — Kotlin only forwards
- * lifecycle + Surface, plus the per-window UDP port from intent extras.
+ * Multi-instance: each unique host/port is a document task, while reopening
+ * the same stream routes back into its existing task. The decode loop runs
+ * entirely in Rust (libleftcar_viewer) — Kotlin only forwards lifecycle +
+ * Surface, plus the per-window UDP port from intent extras.
  */
 private class AspectRatioSurfaceView(context: android.content.Context) : SurfaceView(context) {
     private var videoWidth = 16
@@ -259,6 +260,28 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
         lifecycleEvent(1) // ACTIVITY_CREATE
+    }
+
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        val nextHost = newIntent.getStringExtra("host") ?: host
+        val nextPort = newIntent.getIntExtra("port", port)
+        val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
+        val nextWidth = newIntent.getIntExtra("width", sourceWidth)
+        val nextHeight = newIntent.getIntExtra("height", sourceHeight)
+        val streamConfigurationChanged =
+            nextHost != host || nextPort != port || nextFps != fps ||
+                nextWidth != sourceWidth || nextHeight != sourceHeight
+
+        setIntent(newIntent)
+        if (streamConfigurationChanged) {
+            // Recreate inside the same document task so the native decoder and
+            // Surface are rebuilt with the new stream configuration.
+            recreate()
+        } else {
+            streamSurface?.requestFocus()
+            window.decorView.post { hideSystemBars() }
+        }
     }
 
     override fun onStart() {
