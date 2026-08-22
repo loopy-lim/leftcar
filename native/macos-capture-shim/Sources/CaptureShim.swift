@@ -458,6 +458,7 @@ private final class LegacyCGDisplayStreamAPI {
     let create: CGStreamCreateFn
     let start: CGStreamStartFn
     let stop: CGStreamStopFn
+    let showCursorKey: NSString
 
     init?() {
         guard let library = dlopen(
@@ -466,13 +467,18 @@ private final class LegacyCGDisplayStreamAPI {
         ),
         let createSymbol = dlsym(library, "CGDisplayStreamCreateWithDispatchQueue"),
         let startSymbol = dlsym(library, "CGDisplayStreamStart"),
-        let stopSymbol = dlsym(library, "CGDisplayStreamStop") else {
+        let stopSymbol = dlsym(library, "CGDisplayStreamStop"),
+        let showCursorSymbol = dlsym(library, "kCGDisplayStreamShowCursor"),
+        let showCursorKey = showCursorSymbol
+            .assumingMemoryBound(to: Optional<CFString>.self)
+            .pointee else {
             return nil
         }
         self.library = library
         self.create = unsafeBitCast(createSymbol, to: CGStreamCreateFn.self)
         self.start = unsafeBitCast(startSymbol, to: CGStreamStartFn.self)
         self.stop = unsafeBitCast(stopSymbol, to: CGStreamStopFn.self)
+        self.showCursorKey = unsafeBitCast(showCursorKey, to: NSString.self)
     }
 
     deinit {
@@ -551,10 +557,10 @@ final class CaptureSession {
     private let networkQueue = DispatchQueue(label: "leftcar.network", qos: .userInteractive)
     private let networkLock = NSLock()
     private var pendingConfig: Data?
-    // Absorb short UDP scheduler stalls without dropping an H.264
-    // reference frame. Four 60-fps frames bound queueing to about 67 ms; a
-    // sustained overload still flushes the queue and resumes from a fresh IDR.
-    private let maxPendingNetworkFrames = 4
+    // Remote control favors the newest screen state over preserving every
+    // encoded frame. Keep only one unsent AU; if the socket cannot keep up,
+    // discard the dependency chain and resume immediately from a fresh IDR.
+    private let maxPendingNetworkFrames = 1
     private var pendingFrames: [PendingEncodedFrame] = []
     private var networkAwaitingKeyframe = false
     private var networkDrainScheduled = false
@@ -735,6 +741,7 @@ final class CaptureSession {
         lastPointerInputSequence = 0
         inputLock.unlock()
         startInputReceiver(fd: sock)
+        sendInputStatus(fd: sock)
 
         stateLock.lock()
         if stopRequested {
@@ -762,6 +769,12 @@ final class CaptureSession {
         if changed && !enabled {
             inputQueue.async { [weak self] in
                 self?.releaseInjectedInput()
+            }
+        }
+        if changed, sock >= 0 {
+            inputQueue.async { [weak self] in
+                guard let self, self.sock >= 0 else { return }
+                self.sendInputStatus(fd: self.sock)
             }
         }
         return true
@@ -956,12 +969,20 @@ final class CaptureSession {
                 duration: CMTime(value: 1, timescale: CMTimeScale(self.fps))
             )
         }
+        // The current SDK header documents a false default even though older
+        // online documentation described the cursor as visible by default.
+        // Resolve the obsoleted key dynamically alongside CGDisplayStream and
+        // opt in explicitly so the Host cursor remains part of the video.
+        let properties = NSDictionary(
+            object: kCFBooleanTrue!,
+            forKey: api.showCursorKey
+        ) as CFDictionary
         guard let cgStream = api.create(
             displayID,
             Int(outWidth),
             Int(outHeight),
             Int32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-            nil,
+            properties,
             queue,
             handler
         )?.takeRetainedValue() else {
@@ -1318,8 +1339,12 @@ final class CaptureSession {
         stateLock.unlock()
 
         guard current > 0 else { return }
-        let floorBitrate = 6_000_000
-        let ceilingBitrate = 32_000_000
+        let pixelsPerSecond = Double(outWidth) * Double(outHeight) * Double(fps)
+        let floorBitrate = Int(min(max(pixelsPerSecond * 0.05, 8_000_000), 24_000_000))
+        // Apple recommends roughly 75 Mbps for one 4K High Performance
+        // screen. Keep enough Wi-Fi headroom for UDP/IP overhead while still
+        // allowing a 4K60 desktop to reach that quality range on a fast LAN.
+        let ceilingBitrate = Int(min(max(pixelsPerSecond * 0.16, 24_000_000), 72_000_000))
         let target: Int
         if congested {
             target = max(floorBitrate, Int(Double(current) * 0.85))
@@ -1335,7 +1360,7 @@ final class CaptureSession {
             value: target as CFNumber
         )
         guard status == noErr else { return }
-        let hardLimitBytes = max(1, Int(Double(target) / 8.0 * 1.5))
+        let hardLimitBytes = max(1, Int(Double(target) / 8.0 * 1.25))
         _ = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_DataRateLimits,
@@ -1368,8 +1393,10 @@ final class CaptureSession {
         // Bitrate budget: favor motion quality on a local LAN while keeping a
         // bounded ceiling. This is a target, not a forced rate: static desktop
         // content will still use less data.
-        let idealBits = Double(w) * Double(h) * Double(fps) * 0.10
-        let avgBitrate = min(max(idealBits, 8_000_000), 24_000_000)
+        // 4K60 starts at roughly 60 Mbps. Static desktop regions remain much
+        // smaller because AverageBitRate is a VBR target, not forced padding.
+        let idealBits = Double(w) * Double(h) * Double(fps) * 0.12
+        let avgBitrate = min(max(idealBits, 12_000_000), 72_000_000)
 
         // A software fallback is much slower for an interactive remote
         // display and would otherwise be invisible behind the same API.
@@ -1436,7 +1463,7 @@ final class CaptureSession {
         // DataRateLimits is expressed as [bytes, seconds], while
         // AverageBitRate is expressed in bits per second. Keep a small
         // 1-second headroom without allowing multi-second bursts.
-        let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.5))
+        let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
         // A 0.5s GOP caused a visible periodic keyframe burst. TCP is
         // reliable, so use a roughly 1s nominal GOP while retaining bounded
@@ -1704,6 +1731,11 @@ final class CaptureSession {
                 requestRecoveryKeyframe()
                 continue
             }
+            if message.count == 16,
+               message.prefix(4) == Data("LCP1".utf8) {
+                sendLatencyProbeResponse(message, fd: fd)
+                continue
+            }
             handleInputMessage(message, fd: fd)
         }
     }
@@ -1719,12 +1751,57 @@ final class CaptureSession {
             | UInt32(data[offset + 3])
     }
 
+    private func readUInt64BE(_ data: Data, at offset: Int) -> UInt64 {
+        var value: UInt64 = 0
+        for byte in data[offset..<(offset + 8)] {
+            value = (value << 8) | UInt64(byte)
+        }
+        return value
+    }
+
+    /// NTP-style authenticated probe. Echoing the Android send time together
+    /// with Host receive/send wall times lets the viewer separate LAN RTT from
+    /// Host-to-device media delivery without assuming synchronized clocks.
+    private func sendLatencyProbeResponse(_ message: Data, fd: Int32) {
+        let sequence = readUInt32BE(message, at: 4)
+        let viewerSendMs = readUInt64BE(message, at: 8)
+        let hostReceiveMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
+        var response = Data("LCP2".utf8)
+        var sequenceBE = sequence.bigEndian
+        var viewerSendBE = viewerSendMs.bigEndian
+        var hostReceiveBE = hostReceiveMs.bigEndian
+        withUnsafeBytes(of: &sequenceBE) { response.append(contentsOf: $0) }
+        withUnsafeBytes(of: &viewerSendBE) { response.append(contentsOf: $0) }
+        withUnsafeBytes(of: &hostReceiveBE) { response.append(contentsOf: $0) }
+        var hostSendBE = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
+        withUnsafeBytes(of: &hostSendBE) { response.append(contentsOf: $0) }
+        response.append(viewerControlToken)
+        _ = sendToViewer(response, fd: fd)
+    }
+
     private func sendInputAck(sequence: UInt32, fd: Int32) {
         var ack = Data("LCA1".utf8)
         var sequenceBE = sequence.bigEndian
         withUnsafeBytes(of: &sequenceBE) { ack.append(contentsOf: $0) }
+        inputLock.lock()
+        let enabled = inputEnabled
+        inputLock.unlock()
+        ack.append(enabled ? 1 : 0)
         ack.append(viewerControlToken)
         _ = sendToViewer(ack, fd: fd)
+    }
+
+    /// Authenticated state packet for the viewer's lock indicator. It is sent
+    /// after the UDP proof and whenever the per-session opt-in changes. ACKs
+    /// carry the same bit so a later click also repairs a lost status packet.
+    private func sendInputStatus(fd: Int32) {
+        inputLock.lock()
+        let enabled = inputEnabled
+        inputLock.unlock()
+        var status = Data("LCS1".utf8)
+        status.append(enabled ? 1 : 0)
+        status.append(viewerControlToken)
+        _ = sendToViewer(status, fd: fd)
     }
 
     private func handleInputMessage(_ message: Data, fd: Int32) {

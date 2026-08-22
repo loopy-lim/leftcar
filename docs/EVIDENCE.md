@@ -41,7 +41,7 @@
 | 아키텍처 | `tools/architecture-check` + `ts.ts` | ADR-0002 의존성 방향, domain 순도, Kotlin import allowlist, video-plane-no-contract | docs/03 §4.1 |
 | UI(TS) | `apps/*/src` | 상태 그래프, launch-handle 정책, 한글 상태 문구(오류 코드 미노출), Hub open/focus 정책 | docs/01 §6, docs/08 H04 |
 
-실행: `cargo test --workspace && pnpm test && pnpm test:contract`
+실행: `cargo test --workspace && bun run test && bun run test:contract`
 
 ### E2 — 통합
 
@@ -53,7 +53,7 @@
 
 - `cargo check --workspace` 전 crate green, clippy `-D warnings` 0.
 - `apps/host-desktop/src-tauri`는 `x86_64-pc-windows-msvc` 교차 `cargo check --lib`를 통과했다. 이 결과는 Windows API 타입/cfg의 E3 소스 검증이며 Windows 실행 또는 installer 생성 증거가 아니다.
-- TS typecheck 2앱 green, `pnpm test:architecture` TS/Kotlin 규칙 green.
+- TS typecheck 2앱 green, `bun run test:architecture` TS/Kotlin 규칙 green.
 - Kotlin shim은 `android/.../shim/` 경로 + manifest(documentLaunchMode=always, PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI)만 존재. Gradle 빌드는 E4+ 단계.
 - macOS 파사드(macos-capture/macos-encode): 실API 링크 없이 구조만. 시작 시 `RealBackendNotLinked` 명시 실패(무인 소프트웨어 fallback 금지).
 
@@ -98,7 +98,7 @@
 - **검증**:
   - `cargo test --workspace`: 통과
   - `cargo test` (`apps/host-desktop/src-tauri` - 단위 + e2e): 9 tests 전부 통과
-  - `pnpm test` & `pnpm test:architecture` & `pnpm test:contract`: 통과
+  - `bun run test` & `bun run test:architecture` & `bun run test:contract`: 통과
   - Swift shim dylib 컴파일 & `swift tools/capture_host.swift --list`: 디스플레이 목록 정상 반환
   - 단일 스트림 90fps/1080p 및 다중 스트림 독립 창 수명주기/자동 stop 검증.
 
@@ -115,7 +115,7 @@
   - `cargo test --workspace`, `cargo test -p control-contract`: 통과 (net_guard 단위 테스트 포함).
   - `cargo test` (`apps/host-desktop/src-tauri`): 관련 없는 `viewer_ips`를 거부하고 제어 peer로 폴백하는 e2e 통과.
   - JNI 입장 허용 경로는 `cargo check --target aarch64-linux-android -p android-viewer`로 컴파일 검증만 수행(기기 실행 검증 아님).
-- `pnpm test` / `pnpm typecheck` / `pnpm test:contract` / `pnpm test:architecture`: 통과.
+- `bun run test` / `bun run typecheck` / `bun run test:contract` / `bun run test:architecture`: 통과.
 
 ## 네이티브 원격 입력 (E12, 2026-08-22 추가)
 
@@ -127,8 +127,9 @@
   - Host Tauri Rust 단위 23개 + e2e 8개 통과, `cargo clippy --workspace --tests -- -D warnings` 통과.
   - Android arm64 Rust release 빌드와 `:app:assembleDebug` 통과. 완성 APK의 dynamic symbol table에서 `sendPointer`, `sendKey`, `releaseInput` JNI 3개를 확인했다.
   - macOS Swift shim을 ScreenCaptureKit, VideoToolbox, CoreGraphics에 링크하여 dylib 컴파일 통과.
-  - `pnpm typecheck`, TS/계약/아키텍처 테스트, React Doctor 통과.
-- **아직 증명하지 않은 항목**: 현재 ADB 연결 장치가 없어 실제 120/180Hz wire rate, Mac에 대한 실입력, 키보드 레이아웃·수식키·멀티모니터 좌표, 유실/재연결 복구, Apple 화면 공유와의 동일망 비교는 실행하지 못했다. 이 항목은 E6/E7 실기기 게이트로 유지한다.
+  - `bun run typecheck`, TS/계약/아키텍처 테스트, React Doctor 통과.
+- **2026-08-23 실기기 확인**: Lenovo TB710FU에 release APK를 기존 `leftcar.ll3.kr` 패키지로 덮어 설치했다. 1080p60 세션에서 네이티브 디코더가 지속 렌더링했고 `inputDrops=0`을 확인했다. 인증된 `LCP1/LCP2` 프로브로 `NET` 왕복 네트워크 지연과 `M→A` Mac 전송→Android 수신 지연을 분리했으며, 실제 화면에서 `NET 11 ms · M→A 7 ms · 54 FPS · DEC 4 ms · SKIP 59 LOSS 2`를 관찰했다. 상단 HUD와 작은 잠금 벡터 아이콘은 입력 시 나타나고 easing으로 사라졌으며, 약 7초 뒤 두 표시가 모두 제거된 화면도 확인했다. APK 업데이트 뒤 `firstInstallTime=2026-08-22 11:27:19`가 유지돼 별도 앱 설치가 아닌 기존 패키지 갱신임을 확인했다.
+- **아직 증명하지 않은 항목**: Host 입력 잠금 해제 후 Mac에 대한 실제 포인터·키보드 적용, 120/180Hz wire rate 측정, 키보드 레이아웃·수식키·멀티모니터 좌표, 장시간 유실/재연결 복구, 실제 4K 소스의 4K60 스트림, Apple 화면 공유와의 동일망 비교는 E6/E7 실기기 게이트로 유지한다.
 
 ## Windows 원격 Host (E13, 2026-08-22 추가)
 

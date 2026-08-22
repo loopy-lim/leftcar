@@ -15,7 +15,10 @@ pub const FRAME_MARKER: u8 = b'G';
 pub const FRAME_HEADER_LEN: usize = 17;
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const MAX_FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM_BYTES - FRAME_HEADER_LEN;
-const MAX_IN_FLIGHT_AUS: usize = 8;
+// Two AUs tolerate normal cross-frame UDP reordering without allowing an
+// incomplete old frame to occupy the receiver for more than roughly one
+// display interval. Recovery then proceeds from a fresh IDR.
+const MAX_IN_FLIGHT_AUS: usize = 2;
 const MAX_FRAGMENTS_PER_AU: usize = 16_384;
 const MAX_AU_BYTES: usize = 16 * 1024 * 1024;
 

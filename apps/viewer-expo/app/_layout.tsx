@@ -13,20 +13,20 @@ const queryClient = new QueryClient({
 export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <Stack
         screenOptions={{
           headerStyle: {
-            backgroundColor: "#0F172A",
+            backgroundColor: "#FFFFFF",
           },
-          headerTintColor: "#F8FAFC",
+          headerTintColor: "#0F172A",
           headerTitleStyle: {
-            fontWeight: "700",
-            fontSize: 17,
+            fontWeight: "600",
+            fontSize: 16,
           },
           headerShadowVisible: false,
           contentStyle: {
-            backgroundColor: "#080B11",
+            backgroundColor: "#F8FAFC",
           },
         }}
       >
@@ -46,14 +46,14 @@ export default function RootLayout() {
         <Stack.Screen
           name="catalog"
           options={{
-            title: "소스 카탈로그",
+            title: "화면 선택",
             headerBackTitle: "뒤로",
           }}
         />
         <Stack.Screen
           name="pairing"
           options={{
-            title: "호스트 페어링",
+            title: "기기 페어링",
             headerBackTitle: "뒤로",
           }}
         />

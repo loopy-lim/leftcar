@@ -8,7 +8,10 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
-use crate::input_protocol::{encode_input, normalized_axis, parse_ack, InputEvent, InputScheduler};
+use crate::input_protocol::{
+    encode_input, encode_latency_probe, estimate_latency, normalized_axis, parse_ack,
+    parse_input_status, parse_latency_probe_response, InputEvent, InputScheduler,
+};
 use crate::media_datagram::{parse_fragment, FrameReassembler};
 use crate::net_guard::{host_is_valid, peer_allowed};
 
@@ -85,12 +88,21 @@ macro_rules! log_info {
 }
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct RendererControl {
     port: u16,
     input: Mutex<InputScheduler>,
+    // -1 = waiting for authenticated Host state, 0 = locked, 1 = enabled.
+    input_enabled: AtomicI8,
+    rendered_frames: AtomicU64,
+    stale_outputs: AtomicU64,
+    decoder_input_drops: AtomicU64,
+    frame_gaps: AtomicU64,
+    last_feed_us: AtomicU64,
+    network_rtt_ms: AtomicU64,
+    mac_to_android_ms: AtomicU64,
     stop: AtomicBool,
     // Surface destruction is not always the end of the Activity. During an
     // XR/freeform resize, release MediaCodec's ANativeWindow promptly but keep
@@ -167,11 +179,14 @@ struct RendererStats {
     input_drops: u64,
     frame_gaps: u64,
     max_feed_us: u64,
-    // Host and Android wall clocks are not guaranteed to be synchronized.
-    // Calibrate their fixed offset from the first received frame so the
-    // diagnostic age is useful instead of reporting a large negative value.
+    // NTP-style authenticated probes estimate Host clock minus Android clock.
+    // Do not infer this from the first video frame: that would erase the very
+    // one-way delivery latency the HUD is intended to show.
     host_clock_offset_ms: Option<i128>,
 }
+
+const LATENCY_UNKNOWN: u64 = u64::MAX;
+const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn is_keyframe(au: &[u8]) -> bool {
     viewer_decoder::split_annexb(au)
@@ -247,6 +262,38 @@ fn monotonic_us() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|now| now.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn send_latency_probe(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    sequence: u32,
+) {
+    if token.is_empty() {
+        return;
+    }
+    let probe = encode_latency_probe(sequence, wall_clock_ms(), token);
+    if let Err(error) = socket.send_to(&probe, peer) {
+        log_info!("failed to send latency probe: {error}");
+    }
+}
+
+fn store_smoothed_latency(target: &AtomicU64, sample: u64) {
+    let previous = target.load(Ordering::Relaxed);
+    let next = if previous == LATENCY_UNKNOWN {
+        sample
+    } else {
+        previous.saturating_mul(3).saturating_add(sample) / 4
+    };
+    target.store(next, Ordering::Relaxed);
+}
+
 fn flush_input(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
@@ -279,6 +326,7 @@ fn feed_and_render(
     aus: &mut u64,
     fps: u32,
     stats: &mut RendererStats,
+    control: &RendererControl,
 ) -> FeedOutcome {
     *aus += 1;
     let frame_us = 1_000_000u64 / u64::from(fps.max(1));
@@ -290,11 +338,12 @@ fn feed_and_render(
     let result = dec.feed_au_status(&frame.au, pts_us, 1_000);
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
+    control.last_feed_us.store(feed_us, Ordering::Relaxed);
 
     let queued = match result {
         Ok(viewer_decoder::FeedStatus::Queued { .. }) => {
             stats.queued += 1;
-            while dec.pump_output(0).unwrap_or(false) {}
+            let _ = dec.pump_latest_output(0);
             FeedOutcome::Queued
         }
         Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
@@ -317,19 +366,19 @@ fn feed_and_render(
     };
 
     let wire_age_ms = frame.host_wall_ms.and_then(|sent| {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|now| now.as_millis() as i128)?;
-        let raw_age = now_ms - sent as i128;
-        let offset = stats.host_clock_offset_ms.get_or_insert(raw_age);
-        Some(raw_age - *offset)
+        let offset = stats.host_clock_offset_ms?;
+        let age = i128::from(wall_clock_ms()) - i128::from(sent) + offset;
+        (0..=60_000).contains(&age).then_some(age as u64)
     });
+    if let Some(age) = wire_age_ms {
+        store_smoothed_latency(&control.mac_to_android_ms, age);
+    }
 
     if dec.frames_rendered % 30 == 0 && dec.frames_rendered > 0 {
         log_info!(
-            "Rendered {} frames; queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} wireAgeMs={:?}",
             dec.frames_rendered,
+            dec.frames_discarded,
             stats.queued,
             stats.input_drops,
             stats.frame_gaps,
@@ -338,6 +387,18 @@ fn feed_and_render(
             wire_age_ms
         );
     }
+    control
+        .rendered_frames
+        .store(dec.frames_rendered, Ordering::Relaxed);
+    control
+        .stale_outputs
+        .store(dec.frames_discarded, Ordering::Relaxed);
+    control
+        .decoder_input_drops
+        .store(stats.input_drops, Ordering::Relaxed);
+    control
+        .frame_gaps
+        .store(stats.frame_gaps, Ordering::Relaxed);
     queued
 }
 
@@ -372,6 +433,14 @@ fn spawn_live_stream_renderer(
     let control = Arc::new(RendererControl {
         port,
         input: Mutex::new(InputScheduler::new(fps)),
+        input_enabled: AtomicI8::new(-1),
+        rendered_frames: AtomicU64::new(0),
+        stale_outputs: AtomicU64::new(0),
+        decoder_input_drops: AtomicU64::new(0),
+        frame_gaps: AtomicU64::new(0),
+        last_feed_us: AtomicU64::new(0),
+        network_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        mac_to_android_ms: AtomicU64::new(LATENCY_UNKNOWN),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),
         suspended: AtomicBool::new(false),
@@ -430,6 +499,8 @@ fn spawn_live_stream_renderer(
         let mut awaiting_keyframe = true;
         let mut last_frame_id: Option<u16> = None;
         let mut renderer_stats = RendererStats::default();
+        let mut latency_probe_sequence = 0u32;
+        let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
 
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
@@ -454,6 +525,18 @@ fn spawn_live_stream_renderer(
 
             if let Some(peer) = host_peer {
                 flush_input(&socket, peer, &viewer_control_token, &control_clone);
+                if !viewer_control_token.is_empty()
+                    && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL
+                {
+                    latency_probe_sequence = latency_probe_sequence.wrapping_add(1);
+                    send_latency_probe(
+                        &socket,
+                        peer,
+                        &viewer_control_token,
+                        latency_probe_sequence,
+                    );
+                    last_latency_probe = std::time::Instant::now();
+                }
             }
 
             let (received, peer) = match socket.recv_from(&mut buf) {
@@ -481,6 +564,14 @@ fn spawn_live_stream_renderer(
                 reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
                 last_frame_id = None;
                 aus = 0;
+                control_clone.input_enabled.store(-1, Ordering::SeqCst);
+                control_clone
+                    .network_rtt_ms
+                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                control_clone
+                    .mac_to_android_ms
+                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                renderer_stats.host_clock_offset_ms = None;
             }
 
             let packet = &buf[..received];
@@ -495,8 +586,35 @@ fn spawn_live_stream_renderer(
                 }
                 continue;
             }
-            if let Some(sequence) = parse_ack(packet, &viewer_control_token) {
-                control_clone.input.lock().unwrap().acknowledge(sequence);
+            if let Some(response) = parse_latency_probe_response(packet, &viewer_control_token) {
+                if response.sequence == latency_probe_sequence {
+                    if let Some(estimate) = estimate_latency(response, wall_clock_ms()) {
+                        store_smoothed_latency(
+                            &control_clone.network_rtt_ms,
+                            estimate.network_rtt_ms,
+                        );
+                        renderer_stats.host_clock_offset_ms = Some(estimate.host_clock_offset_ms);
+                    }
+                }
+                continue;
+            }
+            if let Some(ack) = parse_ack(packet, &viewer_control_token) {
+                control_clone
+                    .input
+                    .lock()
+                    .unwrap()
+                    .acknowledge(ack.sequence);
+                if let Some(enabled) = ack.enabled {
+                    control_clone
+                        .input_enabled
+                        .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
+                }
+                continue;
+            }
+            if let Some(enabled) = parse_input_status(packet, &viewer_control_token) {
+                control_clone
+                    .input_enabled
+                    .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
                 continue;
             }
             if packet.len() >= 3 && &packet[..3] == b"CFG" {
@@ -570,6 +688,9 @@ fn spawn_live_stream_renderer(
 
             if frame_gap {
                 renderer_stats.frame_gaps += 1;
+                control_clone
+                    .frame_gaps
+                    .store(renderer_stats.frame_gaps, Ordering::Relaxed);
                 log_info!(
                     "UDP access-unit gap detected at id={}; awaiting next IDR",
                     frame.id
@@ -587,7 +708,14 @@ fn spawn_live_stream_renderer(
                 if awaiting_keyframe && !keyframe {
                     continue;
                 }
-                match feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
+                match feed_and_render(
+                    dec,
+                    &frame,
+                    &mut aus,
+                    fps,
+                    &mut renderer_stats,
+                    &control_clone,
+                ) {
                     FeedOutcome::Queued => {
                         awaiting_keyframe = false;
                     }
@@ -823,6 +951,80 @@ fn active_input_control(instance_c: *const c_char) -> Result<Arc<RendererControl
         .as_ref()
         .and_then(|map| map.get(instance).cloned())
         .ok_or(LEFTCAR_ERR_STATE)
+}
+
+/// Return the authenticated Host input state for the in-stream lock badge.
+/// -1 means the status packet has not arrived yet; 0/1 are locked/enabled.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_input_status(instance_c: *const c_char) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return -1,
+        };
+        i32::from(control.input_enabled.load(Ordering::SeqCst))
+    });
+    guard.unwrap_or(-1)
+}
+
+fn pack_stream_stats(control: &RendererControl) -> i64 {
+    const FRAME_MASK: u64 = (1 << 28) - 1;
+    let rendered = control
+        .rendered_frames
+        .load(Ordering::Relaxed)
+        .min(FRAME_MASK);
+    let stale = control.stale_outputs.load(Ordering::Relaxed).min(0x0fff);
+    let input_drops = control
+        .decoder_input_drops
+        .load(Ordering::Relaxed)
+        .min(0xff);
+    let gaps = control.frame_gaps.load(Ordering::Relaxed).min(0xff);
+    let feed_ms = control
+        .last_feed_us
+        .load(Ordering::Relaxed)
+        .saturating_add(500)
+        / 1_000;
+    (rendered | (stale << 28) | (input_drops << 40) | (gaps << 48) | (feed_ms.min(0xff) << 56))
+        as i64
+}
+
+/// Compact native diagnostics for the in-stream HUD.
+/// bits 0..27 rendered, 28..39 stale skips, 40..47 decoder input drops,
+/// 48..55 frame gaps, 56..63 latest decoder feed milliseconds.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_stream_stats(instance_c: *const c_char) -> i64 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return -1,
+        };
+        pack_stream_stats(&control)
+    });
+    guard.unwrap_or(-1)
+}
+
+/// Authenticated latency diagnostics for the HUD. The low 16 bits are LAN
+/// round-trip milliseconds and the next 16 bits are Host-send to Android-feed
+/// milliseconds. `0xffff` means the NTP-style probe has not converged yet.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return -1,
+        };
+        let encode = |value: u64| {
+            if value == LATENCY_UNKNOWN {
+                0xffff
+            } else {
+                value.min(0xfffe)
+            }
+        };
+        let network = encode(control.network_rtt_ms.load(Ordering::Relaxed));
+        let mac_to_android = encode(control.mac_to_android_ms.load(Ordering::Relaxed));
+        (network | (mac_to_android << 16)) as i64
+    });
+    guard.unwrap_or(-1)
 }
 
 /// Queue a native Android pointer event. `x` and `y` are normalized to the

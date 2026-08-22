@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 
 pub const INPUT_MAGIC: &[u8; 4] = b"LCI1";
 pub const ACK_MAGIC: &[u8; 4] = b"LCA1";
+pub const STATUS_MAGIC: &[u8; 4] = b"LCS1";
+pub const LATENCY_PROBE_MAGIC: &[u8; 4] = b"LCP1";
+pub const LATENCY_RESPONSE_MAGIC: &[u8; 4] = b"LCP2";
 pub const INPUT_HEADER_LEN: usize = 10;
 pub const INPUT_FLAG_RELIABLE: u8 = 1;
 pub const MAX_RELIABLE_QUEUE: usize = 256;
@@ -124,14 +127,101 @@ pub fn encode_input(outbound: &OutboundInput, token: &[u8]) -> Vec<u8> {
     bytes
 }
 
-pub fn parse_ack(packet: &[u8], token: &[u8]) -> Option<u32> {
-    if token.is_empty() || packet.len() != 8 + token.len() || &packet[..4] != ACK_MAGIC {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputAck {
+    pub sequence: u32,
+    pub enabled: Option<bool>,
+}
+
+pub fn parse_ack(packet: &[u8], token: &[u8]) -> Option<InputAck> {
+    if token.is_empty() || packet.get(..4)? != ACK_MAGIC {
         return None;
     }
-    if packet[8..] != *token {
+    let (token_offset, enabled) = match packet.len().checked_sub(token.len())? {
+        8 => (8, None),
+        9 => (9, Some(*packet.get(8)? != 0)),
+        _ => return None,
+    };
+    if packet[token_offset..] != *token {
         return None;
     }
-    Some(u32::from_be_bytes(packet[4..8].try_into().ok()?))
+    Some(InputAck {
+        sequence: u32::from_be_bytes(packet[4..8].try_into().ok()?),
+        enabled,
+    })
+}
+
+pub fn parse_input_status(packet: &[u8], token: &[u8]) -> Option<bool> {
+    if token.is_empty()
+        || packet.len() != 5 + token.len()
+        || &packet[..4] != STATUS_MAGIC
+        || packet[5..] != *token
+    {
+        return None;
+    }
+    match packet[4] {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64, token: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16 + token.len());
+    bytes.extend_from_slice(LATENCY_PROBE_MAGIC);
+    bytes.extend_from_slice(&sequence.to_be_bytes());
+    bytes.extend_from_slice(&viewer_send_ms.to_be_bytes());
+    bytes.extend_from_slice(token);
+    bytes
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencyProbeResponse {
+    pub sequence: u32,
+    pub viewer_send_ms: u64,
+    pub host_receive_ms: u64,
+    pub host_send_ms: u64,
+}
+
+pub fn parse_latency_probe_response(packet: &[u8], token: &[u8]) -> Option<LatencyProbeResponse> {
+    if token.is_empty()
+        || packet.len() != 32 + token.len()
+        || &packet[..4] != LATENCY_RESPONSE_MAGIC
+        || packet[32..] != *token
+    {
+        return None;
+    }
+    Some(LatencyProbeResponse {
+        sequence: u32::from_be_bytes(packet[4..8].try_into().ok()?),
+        viewer_send_ms: u64::from_be_bytes(packet[8..16].try_into().ok()?),
+        host_receive_ms: u64::from_be_bytes(packet[16..24].try_into().ok()?),
+        host_send_ms: u64::from_be_bytes(packet[24..32].try_into().ok()?),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencyEstimate {
+    pub network_rtt_ms: u64,
+    /// Host wall clock minus Android wall clock.
+    pub host_clock_offset_ms: i128,
+}
+
+pub fn estimate_latency(
+    response: LatencyProbeResponse,
+    viewer_receive_ms: u64,
+) -> Option<LatencyEstimate> {
+    let t0 = i128::from(response.viewer_send_ms);
+    let t1 = i128::from(response.host_receive_ms);
+    let t2 = i128::from(response.host_send_ms);
+    let t3 = i128::from(viewer_receive_ms);
+    let network_rtt = t3 - t0 - (t2 - t1);
+    if !(0..=60_000).contains(&network_rtt) {
+        return None;
+    }
+    Some(LatencyEstimate {
+        network_rtt_ms: network_rtt as u64,
+        host_clock_offset_ms: (t1 - t0 + t2 - t3) / 2,
+    })
 }
 
 pub fn normalized_axis(value: f32) -> u16 {
@@ -299,6 +389,34 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_latency_probe_separates_rtt_and_clock_offset() {
+        let token = b"session-token";
+        let request = encode_latency_probe(7, 1_000, token);
+        assert_eq!(&request[..4], LATENCY_PROBE_MAGIC);
+        assert_eq!(&request[4..8], &7u32.to_be_bytes());
+        assert_eq!(&request[8..16], &1_000u64.to_be_bytes());
+        assert_eq!(&request[16..], token);
+
+        // Android clock t0=1000/t3=1010, Host clock is +100 ms. The LAN adds
+        // 5 ms each way and Host spends 1 ms constructing the response.
+        let mut packet = LATENCY_RESPONSE_MAGIC.to_vec();
+        packet.extend_from_slice(&7u32.to_be_bytes());
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&1_105u64.to_be_bytes());
+        packet.extend_from_slice(&1_106u64.to_be_bytes());
+        packet.extend_from_slice(token);
+        let response = parse_latency_probe_response(&packet, token).unwrap();
+        assert_eq!(
+            estimate_latency(response, 1_011),
+            Some(LatencyEstimate {
+                network_rtt_ms: 10,
+                host_clock_offset_ms: 100,
+            })
+        );
+        assert!(parse_latency_probe_response(&packet, b"wrong-token").is_none());
+    }
+
+    #[test]
     fn pointer_updates_are_coalesced_at_target_rate() {
         let mut scheduler = InputScheduler::new(60);
         scheduler.push(InputEvent::PointerMove {
@@ -408,8 +526,33 @@ mod tests {
         let mut ack = ACK_MAGIC.to_vec();
         ack.extend_from_slice(&7u32.to_be_bytes());
         ack.extend_from_slice(token);
-        assert_eq!(parse_ack(&ack, token), Some(7));
+        assert_eq!(
+            parse_ack(&ack, token),
+            Some(InputAck {
+                sequence: 7,
+                enabled: None,
+            })
+        );
         assert_eq!(parse_ack(&ack, b"other-token"), None);
+
+        let mut stateful_ack = ACK_MAGIC.to_vec();
+        stateful_ack.extend_from_slice(&7u32.to_be_bytes());
+        stateful_ack.push(1);
+        stateful_ack.extend_from_slice(token);
+        assert_eq!(
+            parse_ack(&stateful_ack, token),
+            Some(InputAck {
+                sequence: 7,
+                enabled: Some(true),
+            })
+        );
+
+        let mut status = STATUS_MAGIC.to_vec();
+        status.push(0);
+        status.extend_from_slice(token);
+        assert_eq!(parse_input_status(&status, token), Some(false));
+        status[4] = 1;
+        assert_eq!(parse_input_status(&status, token), Some(true));
     }
 
     #[test]

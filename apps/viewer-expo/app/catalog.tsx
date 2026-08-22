@@ -18,29 +18,23 @@ import {
   View,
 } from "react-native";
 import { NativeModules } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { allocPort, controlClient, controlHost, reconnectHost } from "../src/session";
 import {
   isControlTransportError,
-  isUnauthorizedError,
   preferredCaptureBackend,
   type CaptureBackendInfo,
   type CatalogView,
   type DisplayInfo,
   type StatusView,
 } from "../src/control";
-import { clearToken } from "../src/pairing";
 
 type StreamLauncherNative = {
   openStream(port: number, host: string, width: number, height: number, fps: number): Promise<string>;
 };
 
-type NetworkInfoNative = {
-  getWifiIpv4(): Promise<string>;
-};
-
 const launcher = NativeModules.StreamLauncher as StreamLauncherNative | undefined;
-const networkInfo = NativeModules.NsdDiscovery as NetworkInfoNative | undefined;
 
 interface ActiveStream {
   port: number;
@@ -50,7 +44,7 @@ interface ActiveStream {
   width: number;
   height: number;
   fps: number;
-  captureBackend: CaptureBackendId;
+  captureBackend: string;
   startedAt: number;
 }
 
@@ -69,43 +63,34 @@ const STREAM_PROFILES = [
   {
     id: "latency",
     label: "낮은 지연",
-    detail: "1080p · 60fps",
+    detail: "1080p 60fps",
     maxWidth: 1920,
     maxHeight: 1080,
     fps: 60,
-    hint: "마우스·키보드 조작에 가장 적합",
+    hint: "마우스·키보드 조작에 최적",
   },
   {
     id: "balanced",
     label: "균형",
-    detail: "1440p · 60fps",
+    detail: "1440p 60fps",
     maxWidth: 2560,
     maxHeight: 1440,
     fps: 60,
-    hint: "글자 가독성과 지연의 균형",
+    hint: "글자 가독성과 반응속도 균형",
   },
   {
     id: "clarity",
     label: "고화질",
-    detail: "4K · 30fps",
+    detail: "4K 60fps",
     maxWidth: 3840,
     maxHeight: 2160,
-    fps: 30,
-    hint: "4K 디스플레이와 안정적인 LAN에서 사용",
+    fps: 60,
+    hint: "Wi-Fi 7 또는 100Mbps급 LAN",
   },
 ] as const;
 
 type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
 type StreamProfile = (typeof STREAM_PROFILES)[number];
-
-const FALLBACK_CAPTURE_BACKENDS: CaptureBackendInfo[] = [
-  {
-    id: "cgDisplayStream",
-    label: "자동 화면 공유",
-    hint: "화면 선택기 없이 바로 연결",
-  },
-];
-type CaptureBackendId = string;
 
 function fitProfileToDisplay(
   display: DisplayInfo,
@@ -126,13 +111,13 @@ function fitProfileToDisplay(
 function catalogErrorMessage(error: unknown): string {
   const message = String(error instanceof Error ? error.message : error);
   if (message.includes("SCShareableContent timed out")) {
-    return "macOS 화면 소스 조회가 지연되고 있습니다. 잠시 후 소스 새로고침을 눌러 주세요.";
+    return "macOS 화면 소스 조회가 지연되고 있습니다. 잠시 후 새로고침을 눌러 주세요.";
   }
   if (message.includes("screen-recording permission")) {
-    return "Leftcar Host의 화면 기록 권한이 없습니다. Mac 시스템 설정에서 권한을 허용해 주세요.";
+    return "Leftcar Host의 화면 기록 권한이 없습니다. Mac 시스템 설정에서 허용해 주세요.";
   }
   if (message.includes("control request timeout")) {
-    return "호스트 응답이 지연되고 있습니다. 연결은 유지되며, 소스 새로고침으로 다시 조회할 수 있습니다.";
+    return "호스트 응답이 지연되고 있습니다. 새로고침으로 다시 조회할 수 있습니다.";
   }
   return message;
 }
@@ -147,31 +132,6 @@ async function requestWithReconnect<T>(command: string, args?: unknown): Promise
     client = await reconnectHost();
     return client.request<T>(command, args);
   }
-}
-
-function formatStatus(statusView: StatusView | undefined, streams: ActiveStream[]): string {
-  if (!statusView) return "텔레메트리 수집 중…";
-  const trackedSessions = new Set(streams.map((stream) => stream.session));
-  const currentSessions = statusView.sessions.filter((session) =>
-    trackedSessions.has(session.session),
-  );
-  if (!currentSessions.length) return "활성 스트림 세션 없음";
-  return currentSessions
-    .map(
-      (session) =>
-        `#${session.session} ${session.sourceName}: ${session.fps}/${session.fpsTarget || 60}fps · ${session.kbps}kbps ` +
-        `· ${session.captureBackend}/${session.mediaTransport.toUpperCase()} · first=${session.firstSendMs}ms ` +
-        `· drop=${session.dropped} · cap-p95=${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms ` +
-        (session.captureQueueWaitUs !== undefined
-          ? `· q=${(session.captureQueueWaitUs / 1000).toFixed(1)}ms `
-          : "") +
-        (session.encodeOutputUs !== undefined
-          ? `· enc=${(session.encodeOutputUs / 1000).toFixed(1)}ms `
-          : "") +
-        `· send-p95=${(session.sendBlockP95Us / 1000).toFixed(1)}ms` +
-        (session.error ? ` · ${session.error}` : ""),
-    )
-    .join("\n");
 }
 
 function navigateToHostPicker() {
@@ -195,10 +155,10 @@ function ProfileButton({ profile, selected, onSelect }: ProfileButtonProps) {
       style={[styles.profileButton, selected && styles.profileButtonSelected]}
       onPress={handlePress}
     >
-      <Text style={[styles.profileLabel, selected && styles.profileLabelSelected]}>
+      <Text style={[styles.profileLabel, selected && styles.profileLabelSelected]} numberOfLines={1}>
         {profile.label}
       </Text>
-      <Text style={[styles.profileDetail, selected && styles.profileDetailSelected]}>
+      <Text style={[styles.profileDetail, selected && styles.profileDetailSelected]} numberOfLines={1}>
         {profile.detail}
       </Text>
     </Pressable>
@@ -210,13 +170,10 @@ interface CatalogHeaderProps {
   host: string;
   loading: boolean;
   profileId: StreamProfileId;
-  captureBackend: CaptureBackendId;
-  captureBackends: CaptureBackendInfo[];
   refreshing: boolean;
   selectedProfile: StreamProfile;
   onRefresh: () => void;
   onSelectProfile: (id: StreamProfileId) => void;
-  onSelectCaptureBackend: (id: CaptureBackendId) => void;
 }
 
 function CatalogHeader({
@@ -224,23 +181,20 @@ function CatalogHeader({
   host,
   loading,
   profileId,
-  captureBackend,
-  captureBackends,
   refreshing,
   selectedProfile,
   onRefresh,
   onSelectProfile,
-  onSelectCaptureBackend,
 }: CatalogHeaderProps) {
   const refreshDisabled = loading || refreshing;
   return (
-    <>
+    <View style={styles.headerContainer}>
       <View style={styles.hostHeader}>
         <View style={styles.hostHeaderLeft}>
           <View style={styles.statusDot} />
-          <View>
+          <View style={styles.hostHeaderTextGroup}>
             <Text style={styles.hostTitle}>호스트 연결됨</Text>
-            <Text style={styles.hostChipText}>{host}</Text>
+            <Text style={styles.hostChipText} numberOfLines={1}>{host}</Text>
           </View>
         </View>
         <Pressable onPress={navigateToHostPicker} style={styles.disconnectBtn}>
@@ -269,31 +223,10 @@ function CatalogHeader({
         </View>
       ) : null}
 
-      <View style={styles.sourceSectionHeader}>
-        <View style={styles.sectionHeaderText}>
-          <Text style={styles.sectionTitle}>사용 가능한 디스플레이</Text>
-          <Text style={styles.sectionSub}>XR 윈도우로 독립 스트리밍할 디스플레이를 선택하세요</Text>
-        </View>
-        <Pressable
-          onPress={onRefresh}
-          style={[styles.sourceRefreshBtn, refreshDisabled && styles.btnDisabled]}
-          disabled={refreshDisabled}
-        >
-          {refreshDisabled ? (
-            <ActivityIndicator color="#c7d2fe" size="small" />
-          ) : (
-            <Text style={styles.sourceRefreshText}>소스 새로고침</Text>
-          )}
-        </Pressable>
-      </View>
-
       <View style={styles.qualityCard}>
         <View style={styles.qualityHeader}>
-          <View>
-            <Text style={styles.qualityTitle}>스트림 품질</Text>
-            <Text style={styles.qualitySub}>{selectedProfile.hint}</Text>
-          </View>
-          <Text style={styles.qualitySelected}>{selectedProfile.detail}</Text>
+          <Text style={styles.qualityTitle}>스트림 품질</Text>
+          <Text style={styles.qualitySub}>{selectedProfile.hint}</Text>
         </View>
         <View style={styles.profileRow}>
           {STREAM_PROFILES.map((profile) => (
@@ -305,37 +238,23 @@ function CatalogHeader({
             />
           ))}
         </View>
-        <View style={styles.profileRow}>
-          {captureBackends.map((backend) => (
-            <Pressable
-              key={backend.id}
-              style={[
-                styles.profileButton,
-                backend.id === captureBackend && styles.profileButtonSelected,
-              ]}
-              onPress={() => onSelectCaptureBackend(backend.id)}
-            >
-              <Text
-                style={[
-                  styles.profileLabel,
-                  backend.id === captureBackend && styles.profileLabelSelected,
-                ]}
-              >
-                {backend.label}
-              </Text>
-              <Text
-                style={[
-                  styles.profileDetail,
-                  backend.id === captureBackend && styles.profileDetailSelected,
-                ]}
-              >
-                {backend.hint}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
       </View>
-    </>
+
+      <View style={styles.sourceSectionHeader}>
+        <Text style={styles.sectionTitle}>사용 가능한 화면 목록</Text>
+        <Pressable
+          onPress={onRefresh}
+          style={[styles.sourceRefreshBtn, refreshDisabled && styles.btnDisabled]}
+          disabled={refreshDisabled}
+        >
+          {refreshDisabled ? (
+            <ActivityIndicator color="#2563EB" size="small" />
+          ) : (
+            <Text style={styles.sourceRefreshText}>새로고침</Text>
+          )}
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -362,7 +281,16 @@ function DisplayListItem({
         <Text style={styles.displayIcon}>🖥️</Text>
       </View>
       <View style={styles.displayInfo}>
-        <Text style={styles.displayName}>{display.name}</Text>
+        <View style={styles.displayNameRow}>
+          <Text style={styles.displayName} numberOfLines={1}>
+            {display.name}
+          </Text>
+          {display.index === 0 && (
+            <View style={styles.primaryBadge}>
+              <Text style={styles.primaryBadgeText}>메인</Text>
+            </View>
+          )}
+        </View>
         <View style={styles.chipsRow}>
           <View style={styles.chip}>
             <Text style={styles.chipText}>
@@ -376,7 +304,7 @@ function DisplayListItem({
       </View>
       <View style={[styles.openBtn, isLaunching && styles.btnDisabled]}>
         {isLaunching ? (
-          <ActivityIndicator color="#ffffff" size="small" />
+          <ActivityIndicator color="#FFFFFF" size="small" />
         ) : (
           <Text style={styles.openBtnText}>XR 창 열기 →</Text>
         )}
@@ -390,8 +318,8 @@ function EmptyDisplayList({ loading }: { loading: boolean }) {
     <View style={styles.emptyCard}>
       {loading ? (
         <>
-          <ActivityIndicator size="large" color="#6366f1" />
-          <Text style={styles.loadingText}>호스트 화면 소스를 조회하는 중…</Text>
+          <ActivityIndicator size="large" color="#2563EB" />
+          <Text style={styles.loadingText}>화면 소스를 조회하는 중…</Text>
         </>
       ) : (
         <Text style={styles.emptyText}>사용 가능한 디스플레이가 없습니다.</Text>
@@ -413,12 +341,12 @@ function ActiveStreamItem({
       <View style={styles.streamInfo}>
         <View style={styles.streamNameRow}>
           <View style={styles.liveDot} />
-          <Text style={styles.streamName}>
+          <Text style={styles.streamName} numberOfLines={1}>
             #{stream.session} {stream.sourceName}
           </Text>
         </View>
-        <Text style={styles.streamPort}>
-          {stream.width} × {stream.height} · {stream.fps}fps · Port :{stream.port}
+        <Text style={styles.streamPort} numberOfLines={1}>
+          {stream.width} × {stream.height} · {stream.fps}fps
         </Text>
       </View>
       <Pressable style={styles.stopBtn} onPress={handleStop}>
@@ -430,49 +358,30 @@ function ActiveStreamItem({
 
 function CatalogFooter({
   streams,
-  status,
   onStop,
 }: {
   streams: ActiveStream[];
-  status: string;
   onStop: (stream: ActiveStream) => void;
 }) {
+  if (streams.length === 0) return null;
   return (
-    <>
-      {streams.length > 0 ? (
-        <View style={styles.activeSection}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.activeTitleRow}>
-              <Text style={styles.sectionTitle}>활성 XR 스트림</Text>
-              <View style={styles.activeCountBadge}>
-                <Text style={styles.activeCountText}>{streams.length}</Text>
-              </View>
-            </View>
-          </View>
-          {streams.map((stream) => (
-            <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} />
-          ))}
+    <View style={styles.activeSection}>
+      <View style={styles.activeSectionHeader}>
+        <Text style={styles.activeSectionTitle}>활성 XR 스트림</Text>
+        <View style={styles.activeCountBadge}>
+          <Text style={styles.activeCountText}>{streams.length}</Text>
         </View>
-      ) : null}
-
-      <View style={styles.telemetryCard}>
-        <Text style={styles.telemetryTitle}>📊 실시간 파이프라인 텔레메트리</Text>
-        <Text style={styles.telemetryText}>{status || "텔레메트리 수집 중…"}</Text>
       </View>
-    </>
+      {streams.map((stream) => (
+        <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} />
+      ))}
+    </View>
   );
-}
-
-interface StreamController {
-  addStream: (stream: ActiveStream) => void;
-  removeStream: (session: number) => void;
-  status: string;
-  streams: ActiveStream[];
 }
 
 function useStreamController(
   setError: Dispatch<SetStateAction<string | null>>,
-): StreamController {
+) {
   const [streams, setStreams] = useState<ActiveStream[]>([]);
   const heartbeatInFlight = useRef(new Set<number>());
   const lastRestartAt = useRef(new Map<number, number>());
@@ -513,7 +422,7 @@ function useStreamController(
     },
     onError: (error, active) => {
       setError(
-        `스트림 heartbeat 재연결 실패: ${String(error instanceof Error ? error.message : error)}`,
+        `스트림 재연결 실패: ${String(error instanceof Error ? error.message : error)}`,
       );
       heartbeatInFlight.current.delete(active.session);
     },
@@ -560,23 +469,13 @@ function useStreamController(
   const removeStream = useCallback((session: number) => {
     setStreams((previous) => previous.filter((stream) => stream.session !== session));
   }, []);
-  const status = statusQuery.error
-    ? "상태 조회 실패 · 자동 재연결 대기 중"
-    : formatStatus(statusView, streams);
-  return { addStream, removeStream, status, streams };
+  return { addStream, removeStream, streams };
 }
 
-/**
- * Source catalog: list displays from the host, open each in its own OS
- * window after the control socket confirms its startStream write. Waiting for
- * that write callback prevents XR Activity pause from stranding the request,
- * while the host's bounded connect retry covers native listener startup.
- */
 export default function Catalog() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [profileId, setProfileId] = useState<StreamProfileId>("latency");
-  const [captureBackend, setCaptureBackend] = useState<CaptureBackendId>("");
   const host = controlHost();
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
@@ -589,120 +488,102 @@ export default function Catalog() {
   );
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
-  const captureBackends = catalogQuery.data?.captureBackends?.length
-    ? catalogQuery.data.captureBackends
-    : FALLBACK_CAPTURE_BACKENDS;
   const effectiveCaptureBackend = preferredCaptureBackend(
     catalogQuery.data,
-    captureBackend,
+    "",
   );
-  useEffect(() => {
-    if (effectiveCaptureBackend !== captureBackend) {
-      setCaptureBackend(effectiveCaptureBackend);
-    }
-  }, [captureBackend, effectiveCaptureBackend]);
-  // Revoked/expired token: drop it and start the pairing flow again.
-  useEffect(() => {
-    if (!catalogQuery.error || !isUnauthorizedError(catalogQuery.error)) return;
-    void clearToken();
-    setError("페어링이 만료되었습니다. 호스트와 다시 페어링해 주세요.");
-    router.replace("/pairing");
-  }, [catalogQuery.error]);
-  const visibleError = error ?? (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null);
+
+  const { addStream, removeStream, streams } = useStreamController(setError);
+
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === profileId) ?? STREAM_PROFILES[0];
-  const { addStream, removeStream, status, streams } = useStreamController(setError);
 
-  const openDisplay = useCallback(async (d: DisplayInfo) => {
-    let client = controlClient();
-    if (!client || !launcher) {
-      setError(launcher ? "제어 연결 없음" : "네이티브 모듈 없음 (Galaxy XR dev build 필요)");
-      return;
-    }
-    setLaunchingIndex(d.index);
+  const handleRefresh = useCallback(() => {
     setError(null);
-    try {
-      // Verify the existing control socket before opening StreamActivity. If
-      // the host was restarted, reconnect while the catalog JS Activity is
-      // still active so we never leave an orphan black native window behind.
-      try {
-        await client.request<StatusView>("getStatus");
-      } catch (connectionError) {
-        if (!isControlTransportError(connectionError)) throw connectionError;
-        client = await reconnectHost();
+    void refetchCatalog();
+  }, [refetchCatalog]);
+
+  const handleSelectProfile = useCallback((id: StreamProfileId) => {
+    setProfileId(id);
+  }, []);
+
+  const openDisplay = useCallback(
+    async (d: DisplayInfo) => {
+      const client = controlClient();
+      if (!client) {
+        setError("호스트 연결이 끊어졌습니다. 다시 연결해 주세요.");
+        return;
       }
-      const port = allocPort();
-      const selectedSize = fitProfileToDisplay(d, selectedProfile);
-      const { width, height, fps } = selectedSize;
-      const viewerIps = await networkInfo?.getWifiIpv4().then((address) => [address]).catch(() => []);
+      if (!launcher) {
+        setError("네이티브 스트림 런처를 사용할 수 없습니다.");
+        return;
+      }
+      setLaunchingIndex(d.index);
+      setError(null);
+      try {
+        const port = allocPort();
+        const { width, height, fps } = fitProfileToDisplay(d, selectedProfile);
+        const startArgs = {
+          sourceIndex: d.index,
+          viewerPort: port,
+          width,
+          height,
+          fps,
+          captureBackend: effectiveCaptureBackend,
+        };
+        let confirmWritten!: () => void;
+        let rejectWritten!: (error: unknown) => void;
+        const written = new Promise<void>((resolve, reject) => {
+          confirmWritten = resolve;
+          rejectWritten = reject;
+        });
+        const startPromise = client.request<{ session: number }>(
+          "startStream",
+          startArgs,
+          confirmWritten,
+        );
+        void startPromise.catch(rejectWritten);
 
-      const startArgs = {
-        sourceIndex: d.index,
-        viewerPort: port,
-        width,
-        height,
-        fps,
-        captureBackend: effectiveCaptureBackend,
-        viewerIps: viewerIps ?? [],
-      };
-
-      let confirmWritten!: () => void;
-      let rejectWritten!: (error: unknown) => void;
-      const written = new Promise<void>((resolve, reject) => {
-        confirmWritten = resolve;
-        rejectWritten = reject;
-      });
-      const startPromise = client.request<{ session: number }>(
-        "startStream",
-        startArgs,
-        confirmWritten,
-      );
-      void startPromise.catch(rejectWritten);
-
-      // The react-native-tcp-socket callback confirms the native write has
-      // completed. Only then may StreamActivity pause the catalog Activity.
-      await written;
-      await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
-      const { session } = await startPromise;
-      addStream({
-        port,
-        session,
-        sourceIndex: d.index,
-        sourceName: d.name,
-        width,
-        height,
-        fps,
-        captureBackend: effectiveCaptureBackend,
-        startedAt: Date.now(),
-      });
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
-    } finally {
-      setLaunchingIndex(null);
-    }
-  }, [addStream, effectiveCaptureBackend, host, selectedProfile]);
+        await written;
+        await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
+        const { session } = await startPromise;
+        addStream({
+          port,
+          session,
+          sourceIndex: d.index,
+          sourceName: d.name,
+          width,
+          height,
+          fps,
+          captureBackend: effectiveCaptureBackend,
+          startedAt: Date.now(),
+        });
+      } catch (e) {
+        setError(String(e instanceof Error ? e.message : e));
+      } finally {
+        setLaunchingIndex(null);
+      }
+    },
+    [addStream, effectiveCaptureBackend, host, selectedProfile],
+  );
 
   const stopStream = useCallback(async (a: ActiveStream) => {
     const client = controlClient();
     if (!client) return;
     try {
       await client.request("stopStream", { session: a.session });
-      removeStream(a.session);
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+    } catch {
+      // best-effort stop
     }
+    removeStream(a.session);
   }, [removeStream]);
 
-  const handleRefresh = useCallback(() => {
-    setError(null);
-    void refetchCatalog();
-  }, [refetchCatalog]);
-  const handleSelectProfile = useCallback((id: StreamProfileId) => {
-    setProfileId(id);
-  }, []);
-  const handleSelectCaptureBackend = useCallback((id: CaptureBackendId) => {
-    setCaptureBackend(id);
-  }, []);
+  const visibleError = error
+    ? error
+    : catalogQuery.error
+    ? catalogErrorMessage(catalogQuery.error)
+    : null;
+
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
       <DisplayListItem
@@ -717,15 +598,12 @@ export default function Catalog() {
   );
 
   return (
-    <View style={styles.root}>
+    <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
       <FlatList
+        style={styles.root}
         contentContainerStyle={styles.content}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor="#a5b4fc"
-          />
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#2563EB" />
         }
         ListHeaderComponent={
           <CatalogHeader
@@ -733,13 +611,10 @@ export default function Catalog() {
             host={host || "localhost:7777"}
             loading={loading}
             profileId={profileId}
-            captureBackend={effectiveCaptureBackend}
-            captureBackends={captureBackends}
             refreshing={refreshing}
             selectedProfile={selectedProfile}
             onRefresh={handleRefresh}
             onSelectProfile={handleSelectProfile}
-            onSelectCaptureBackend={handleSelectCaptureBackend}
           />
         }
         data={displays}
@@ -747,348 +622,379 @@ export default function Catalog() {
         renderItem={renderDisplay}
         ListEmptyComponent={<EmptyDisplayList loading={loading} />}
         ListFooterComponent={
-          <CatalogFooter streams={streams} status={status} onStop={stopStream} />
+          <CatalogFooter streams={streams} onStop={stopStream} />
         }
       />
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: "#F8FAFC",
+  },
   root: {
     flex: 1,
-    backgroundColor: "#080b11",
-  },
-  loadingText: {
-    color: "#94a3b8",
-    fontSize: 13,
+    backgroundColor: "#F8FAFC",
   },
   content: {
-    padding: 20,
-    gap: 14,
-    paddingBottom: 40,
+    padding: 16,
+    gap: 10,
+    paddingBottom: 36,
+  },
+  headerContainer: {
+    gap: 12,
+    marginBottom: 4,
   },
   hostHeader: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 12,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  hostHeaderLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#10b981",
-  },
-  hostTitle: {
-    color: "#f8fafc",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  hostChipText: {
-    color: "#38bdf8",
-    fontSize: 11,
-    fontFamily: "monospace",
-    marginTop: 2,
-  },
-  disconnectBtn: {
-    backgroundColor: "#1e293b",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  disconnectBtnText: {
-    color: "#94a3b8",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  errorCard: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
-    borderWidth: 1,
-    borderColor: "rgba(239, 68, 68, 0.35)",
+    borderColor: "#E2E8F0",
     borderRadius: 12,
     padding: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    marginTop: 8,
+    justifyContent: "space-between",
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  hostHeaderLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
+  statusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: "#059669",
+    flexShrink: 0,
+  },
+  hostHeaderTextGroup: {
+    flex: 1,
+    minWidth: 0,
+  },
+  hostTitle: {
+    color: "#0F172A",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  hostChipText: {
+    color: "#64748B",
+    fontSize: 11,
+    fontFamily: "monospace",
+  },
+  disconnectBtn: {
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  disconnectBtnText: {
+    color: "#475569",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  errorCard: {
+    backgroundColor: "#FEF2F2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    borderRadius: 10,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   errorIcon: {
-    fontSize: 16,
+    fontSize: 14,
   },
   errorText: {
-    color: "#fca5a5",
-    fontSize: 13,
-    lineHeight: 18,
+    color: "#DC2626",
+    fontSize: 12,
+    lineHeight: 16,
   },
   errorBody: {
     flex: 1,
-    gap: 10,
+    gap: 6,
   },
   errorActions: {
     flexDirection: "row",
     gap: 8,
   },
   errorRetryBtn: {
-    backgroundColor: "#dc2626",
+    backgroundColor: "#DC2626",
     borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   errorRetryText: {
-    color: "#ffffff",
+    color: "#FFFFFF",
     fontSize: 11,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   errorHostBtn: {
-    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    backgroundColor: "#F1F5F9",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
+    borderColor: "#E2E8F0",
     borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   errorHostText: {
-    color: "#cbd5e1",
+    color: "#475569",
     fontSize: 11,
-    fontWeight: "700",
-  },
-  sectionHeader: {
-    gap: 4,
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  sectionTitle: {
-    color: "#f8fafc",
-    fontSize: 16,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  sectionSub: {
-    color: "#94a3b8",
-    fontSize: 12,
-  },
-  sourceSectionHeader: {
-    marginTop: 10,
-    marginBottom: 4,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-  },
-  sectionHeaderText: {
-    flex: 1,
-    gap: 4,
-  },
-  sourceRefreshBtn: {
-    minWidth: 96,
-    minHeight: 34,
-    backgroundColor: "rgba(99, 102, 241, 0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(129, 140, 248, 0.55)",
-    borderRadius: 8,
-    paddingHorizontal: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sourceRefreshText: {
-    color: "#c7d2fe",
-    fontSize: 11,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   qualityCard: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.35)",
+    borderColor: "#E2E8F0",
     borderRadius: 12,
-    padding: 14,
-    gap: 12,
+    padding: 12,
+    gap: 8,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
   },
   qualityHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
   },
   qualityTitle: {
-    color: "#f8fafc",
+    color: "#0F172A",
     fontSize: 13,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   qualitySub: {
-    color: "#94a3b8",
+    color: "#64748B",
     fontSize: 11,
-    marginTop: 3,
-  },
-  qualitySelected: {
-    color: "#a5b4fc",
-    fontSize: 11,
-    fontFamily: "monospace",
-    fontWeight: "700",
   },
   profileRow: {
     flexDirection: "row",
-    gap: 8,
+    gap: 6,
   },
   profileButton: {
     flex: 1,
-    minHeight: 54,
-    backgroundColor: "#161f33",
+    minHeight: 46,
+    backgroundColor: "#F8FAFC",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
+    borderColor: "#E2E8F0",
+    borderRadius: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
     justifyContent: "center",
+    alignItems: "center",
   },
   profileButtonSelected: {
-    backgroundColor: "rgba(99, 102, 241, 0.22)",
-    borderColor: "#818cf8",
+    backgroundColor: "#EFF6FF",
+    borderColor: "#3B82F6",
   },
   profileLabel: {
-    color: "#cbd5e1",
+    color: "#475569",
     fontSize: 11,
-    fontWeight: "700",
-    textAlign: "center",
+    fontWeight: "600",
   },
   profileLabelSelected: {
-    color: "#ffffff",
+    color: "#1D4ED8",
+    fontWeight: "700",
   },
   profileDetail: {
-    color: "#64748b",
+    color: "#94A3B8",
     fontSize: 9,
     fontFamily: "monospace",
-    textAlign: "center",
-    marginTop: 3,
+    marginTop: 1,
   },
   profileDetailSelected: {
-    color: "#c7d2fe",
+    color: "#2563EB",
   },
-  displayCard: {
-    backgroundColor: "#0f172a",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 12,
-    padding: 14,
+  sourceSectionHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    marginBottom: 10,
+    justifyContent: "space-between",
+    marginTop: 4,
+  },
+  sectionTitle: {
+    color: "#0F172A",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  sourceRefreshBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  sourceRefreshText: {
+    color: "#2563EB",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  displayCard: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    borderRadius: 10,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
   },
   displayIconBox: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    backgroundColor: "#161f33",
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: "#EFF6FF",
     alignItems: "center",
     justifyContent: "center",
+    flexShrink: 0,
   },
   displayIcon: {
-    fontSize: 20,
+    fontSize: 18,
   },
   displayInfo: {
     flex: 1,
-    gap: 4,
+    minWidth: 0,
+    gap: 3,
+  },
+  displayNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   displayName: {
-    color: "#f8fafc",
-    fontSize: 14,
+    color: "#0F172A",
+    fontSize: 13,
     fontWeight: "600",
+    flex: 1,
+  },
+  primaryBadge: {
+    backgroundColor: "#EFF6FF",
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  primaryBadgeText: {
+    color: "#1D4ED8",
+    fontSize: 9,
+    fontWeight: "700",
   },
   chipsRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 6,
   },
   chip: {
-    backgroundColor: "#161f33",
+    backgroundColor: "#F1F5F9",
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
+    borderColor: "#E2E8F0",
   },
   chipText: {
-    color: "#94a3b8",
+    color: "#64748B",
     fontSize: 10,
     fontFamily: "monospace",
   },
   chipTextSuccess: {
-    color: "#34d399",
+    color: "#059669",
     fontSize: 10,
     fontFamily: "monospace",
   },
   openBtn: {
-    backgroundColor: "#6366f1",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    minWidth: 90,
+    backgroundColor: "#2563EB",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
+    flexShrink: 0,
   },
   btnDisabled: {
     opacity: 0.6,
   },
   openBtnText: {
-    color: "#ffffff",
+    color: "#FFFFFF",
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   emptyCard: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     padding: 24,
-    borderRadius: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
+  },
+  loadingText: {
+    color: "#64748B",
+    fontSize: 12,
   },
   emptyText: {
-    color: "#64748b",
-    fontSize: 13,
+    color: "#64748B",
+    fontSize: 12,
   },
   activeSection: {
-    marginTop: 12,
+    marginTop: 10,
     gap: 8,
   },
-  activeTitleRow: {
+  activeSectionHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
+  },
+  activeSectionTitle: {
+    color: "#0F172A",
+    fontSize: 13,
+    fontWeight: "600",
   },
   activeCountBadge: {
-    backgroundColor: "#10b981",
+    backgroundColor: "#059669",
     paddingHorizontal: 6,
     paddingVertical: 1,
     borderRadius: 10,
   },
   activeCountText: {
-    color: "#ffffff",
-    fontSize: 11,
+    color: "#FFFFFF",
+    fontSize: 10,
     fontWeight: "700",
     fontFamily: "monospace",
   },
   streamCard: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 12,
-    padding: 12,
+    borderColor: "#A7F3D0",
+    borderRadius: 8,
+    padding: 10,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 8,
   },
   streamInfo: {
-    gap: 3,
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
   },
   streamNameRow: {
     flexDirection: "row",
@@ -1099,49 +1005,31 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#10b981",
+    backgroundColor: "#059669",
+    flexShrink: 0,
   },
   streamName: {
-    color: "#f8fafc",
-    fontSize: 13,
+    color: "#0F172A",
+    fontSize: 12,
     fontWeight: "600",
   },
   streamPort: {
-    color: "#38bdf8",
-    fontSize: 11,
+    color: "#64748B",
+    fontSize: 10,
     fontFamily: "monospace",
   },
   stopBtn: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    backgroundColor: "#FEF2F2",
     borderWidth: 1,
-    borderColor: "rgba(239, 68, 68, 0.35)",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    borderColor: "#FECACA",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 6,
+    flexShrink: 0,
   },
   stopBtnText: {
-    color: "#fca5a5",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  telemetryCard: {
-    backgroundColor: "rgba(15, 23, 42, 0.5)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
-    borderRadius: 12,
-    padding: 14,
-    gap: 8,
-    marginTop: 14,
-  },
-  telemetryTitle: {
-    color: "#f8fafc",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  telemetryText: {
-    color: "#94a3b8",
+    color: "#DC2626",
     fontSize: 11,
-    fontFamily: "monospace",
-    lineHeight: 18,
+    fontWeight: "600",
   },
 });

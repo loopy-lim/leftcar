@@ -428,6 +428,7 @@ pub struct AndroidDecoder {
     width: i32,
     height: i32,
     pub frames_rendered: u64,
+    pub frames_discarded: u64,
 }
 
 unsafe impl Send for AndroidDecoder {}
@@ -537,6 +538,7 @@ impl AndroidDecoder {
             width: sw as i32,
             height: sh as i32,
             frames_rendered: 0,
+            frames_discarded: 0,
         })
     }
 
@@ -573,10 +575,7 @@ impl AndroidDecoder {
         // another input slot. Some vendor codecs stop returning input buffers
         // while a renderable output remains queued, which otherwise turns one
         // transient miss into a permanent black-screen/drop cascade.
-        let mut rendered = false;
-        while self.pump_output(0)? {
-            rendered = true;
-        }
+        let rendered = self.pump_latest_output(0)?;
         let idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, timeout_us) };
         if idx < 0 {
             return Ok(FeedStatus::InputUnavailable);
@@ -610,8 +609,55 @@ impl AndroidDecoder {
             }
         }
         Ok(FeedStatus::Queued {
-            rendered: self.pump_output(timeout_us)? || rendered,
+            rendered: self.pump_latest_output(timeout_us)? || rendered,
         })
+    }
+
+    /// Drain all currently ready decoder outputs, discard stale images, and
+    /// render only the newest one. MediaCodec has already consumed every
+    /// reference frame, so skipping Surface presentation is safe and prevents
+    /// compositor backlog from turning a short stall into visible latency.
+    pub fn pump_latest_output(&mut self, timeout_us: i64) -> Result<bool, DecoderError> {
+        let mut latest: Option<usize> = None;
+        let mut next_timeout = timeout_us;
+        let mut attempts = 0usize;
+        while attempts < 64 {
+            attempts += 1;
+            let mut info = AMediaCodecBufferInfo {
+                offset: 0,
+                size: 0,
+                presentation_time_us: 0,
+                flags: 0,
+            };
+            let idx =
+                unsafe { AMediaCodec_dequeueOutputBuffer(self.codec, &mut info, next_timeout) };
+            next_timeout = 0;
+            match idx {
+                AMEDIACODEC_INFO_TRY_AGAIN_LATER => break,
+                AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED
+                | AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED => continue,
+                i if i >= 0 => {
+                    if let Some(stale) = latest.replace(i as usize) {
+                        let r =
+                            unsafe { AMediaCodec_releaseOutputBuffer(self.codec, stale, false) };
+                        if r != AMEDIA_OK {
+                            return Err(DecoderError::OpFailed { status: r });
+                        }
+                        self.frames_discarded += 1;
+                    }
+                }
+                err => return Err(DecoderError::OpFailed { status: err as i32 }),
+            }
+        }
+        let Some(latest) = latest else {
+            return Ok(false);
+        };
+        let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, latest, true) };
+        if r != AMEDIA_OK {
+            return Err(DecoderError::OpFailed { status: r });
+        }
+        self.frames_rendered += 1;
+        Ok(true)
     }
 
     /// Dequeue and render any ready output buffers.

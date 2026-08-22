@@ -53,5 +53,11 @@ object ViewerNative {
         repeat: Int,
     ): Int
     external fun releaseInput(instanceId: String): Int
+    /** -1 waiting/unknown, 0 Host-locked, 1 remote input enabled. */
+    external fun inputStatus(instanceId: String): Int
+    /** Compact native renderer diagnostics; -1 when the stream is unavailable. */
+    external fun streamStats(instanceId: String): Long
+    /** LAN RTT + clock-corrected Host-to-Android delivery latency. */
+    external fun streamLatency(instanceId: String): Long
     external fun release(state: Long, instanceId: String): Int
 }

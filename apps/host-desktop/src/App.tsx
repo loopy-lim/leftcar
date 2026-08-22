@@ -46,10 +46,15 @@ interface StatusView {
   sessions: SessionRow[];
 }
 
+type ThemeMode = "system" | "light" | "dark";
+
 export default function App() {
-  // The pairing window loads the same bundle at #/pairing (see lib.rs).
   if (window.location.hash === "#/pairing") {
-    return <PairingPanel />;
+    return (
+      <div className="pairing-standalone-view">
+        <PairingPanel />
+      </div>
+    );
   }
 
   return <Dashboard />;
@@ -114,7 +119,6 @@ function useHostStatus() {
 
 function Dashboard() {
   const {
-    banner,
     sessions,
     error,
     inputPermission,
@@ -125,8 +129,40 @@ function Dashboard() {
   } = useHostStatus();
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
-  const totalKbps = sessions.reduce((total, session) => total + (session.kbps || 0), 0);
+  const [showInspector, setShowInspector] = useState(false);
+  const [showPairingModal, setShowPairingModal] = useState(false);
+  const [copiedToast, setCopiedToast] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
+  });
+
   const isStreaming = sessions.length > 0;
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+    localStorage.setItem("leftcar_theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowPairingModal(false);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setShowPairingModal((prev) => !prev);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        void refresh();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [refresh]);
 
   const requestInputPermission = async () => {
     setInputBusy("permission");
@@ -135,7 +171,7 @@ function Dashboard() {
       setInputActionError(
         granted
           ? null
-          : "macOS 시스템 설정의 개인정보 보호 및 보안 > 손쉬운 사용에서 Leftcar Host를 허용해주세요.",
+          : "macOS 시스템 설정의 '개인정보 보호 및 보안 > 손쉬운 사용'에서 Leftcar Host를 허용해 주세요.",
       );
       await refresh();
     } catch (cause) {
@@ -161,328 +197,224 @@ function Dashboard() {
     }
   };
 
-  return (
-    <main className="app-container">
-      <HostHeader banner={banner} isStreaming={isStreaming} />
-      {error && <ErrorBanner message={error} />}
-      {inputActionError && <ErrorBanner message={inputActionError} />}
-      <InputPermissionCard
-        granted={inputPermission}
-        platform={platform}
-        busy={inputBusy === "permission"}
-        onRequest={() => void requestInputPermission()}
-      />
-      <SummaryStats
-        activeStreamCount={sessions.length}
-        isStreaming={isStreaming}
-        totalKbps={totalKbps}
-        controlPort={controlPort}
-      />
-      <SessionsCard
-        sessions={sessions}
-        inputPermission={inputPermission}
-        inputBusy={inputBusy}
-        controlPort={controlPort}
-        onToggleInput={(session) => void toggleSessionInput(session)}
-        onRefresh={refresh}
-      />
-      <SystemFooter lastUpdated={lastUpdated} />
-    </main>
-  );
-}
-
-function InputPermissionCard({
-  granted,
-  platform,
-  busy,
-  onRequest,
-}: {
-  granted: boolean;
-  platform: HostSnapshotView["platform"];
-  busy: boolean;
-  onRequest: () => void;
-}) {
-  return (
-    <section className={`input-permission-card ${granted ? "input-permission-granted" : ""}`}>
-      <div>
-        <strong>Remote Input</strong>
-        <p>
-          {granted
-            ? `${platform === "windows" ? "Windows SendInput 사용 가능" : "macOS 입력 권한 승인됨"} · 각 스트림에서 별도로 켜야 합니다.`
-            : "키보드와 마우스 제어에는 macOS 손쉬운 사용 권한이 필요합니다."}
-        </p>
-      </div>
-      {granted ? (
-        <span className="input-permission-status">권한 승인</span>
-      ) : (
-        <button className="btn-primary" disabled={busy} onClick={onRequest}>
-          {busy ? "확인 중…" : "입력 권한 요청"}
-        </button>
-      )}
-    </section>
-  );
-}
-
-function HostHeader({ banner, isStreaming }: { banner: string; isStreaming: boolean }) {
-  return (
-    <header className="app-header">
-      <div className="brand-section">
-        <div className="brand-logo-badge">
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#ffffff"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-            <line x1="8" y1="21" x2="16" y2="21" />
-            <line x1="12" y1="17" x2="12" y2="21" />
-          </svg>
-        </div>
-        <div className="brand-info">
-          <h1>
-            Leftcar Host Studio
-            <span className="kbd-badge" style={{ fontSize: "10px" }}>v0.1</span>
-          </h1>
-          <p>Low-Latency Multi-Window Desktop Streamer · Galaxy XR & Mobile</p>
-        </div>
-      </div>
-      <div className={`header-status-badge ${isStreaming ? "status-active" : "status-standby"}`}>
-        <span
-          className={`status-dot ${
-            isStreaming ? "status-dot-emerald animate-pulse-glow" : "status-dot-sky"
-          }`}
-        />
-        {banner}
-      </div>
-    </header>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div className="error-banner">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" y1="8" x2="12" y2="12" />
-        <line x1="12" y1="16" x2="12.01" y2="16" />
-      </svg>
-      <span>{message}</span>
-    </div>
-  );
-}
-
-function SummaryStats({
-  activeStreamCount,
-  isStreaming,
-  totalKbps,
-  controlPort,
-}: {
-  activeStreamCount: number;
-  isStreaming: boolean;
-  totalKbps: number;
-  controlPort: number;
-}) {
-  const [copied, setCopied] = useState(false);
-
   const copyPortInfo = () => {
-    void navigator.clipboard.writeText(String(controlPort));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2_000);
+    void navigator.clipboard.writeText(`:${controlPort}`);
+    setCopiedToast(true);
+    setTimeout(() => setCopiedToast(false), 2000);
   };
 
-  return (
-    <section className="stats-grid">
-      <StatCard label="Active Streams">
-        <span className="stat-value" style={{ color: isStreaming ? "#34d399" : "#f8fafc" }}>
-          {activeStreamCount}
-        </span>
-        <span className="stat-chip">{isStreaming ? "STREAMING" : "STANDBY"}</span>
-      </StatCard>
-      <StatCard label="Control Plane">
-        <span className="stat-value" style={{ fontSize: "18px", color: "#38bdf8" }}>
-          TCP :{controlPort}
-        </span>
-        <button onClick={copyPortInfo} className="stat-chip" style={{ cursor: "pointer" }}>
-          {copied ? "COPIED" : "mDNS AUTO"}
-        </button>
-      </StatCard>
-      <StatCard label="Total Bandwidth">
-        <span className="stat-value">
-          {totalKbps > 1000 ? `${(totalKbps / 1000).toFixed(1)} Mbps` : `${totalKbps} kbps`}
-        </span>
-        <span className="stat-chip">H.264</span>
-      </StatCard>
-      <StatCard label="Video Engine">
-        <span className="stat-value" style={{ fontSize: "15px", color: "#a5b4fc" }}>
-          AMediaCodec
-        </span>
-        <span className="stat-chip">Direct Surface</span>
-      </StatCard>
-    </section>
-  );
-}
+  const toggleTheme = () => {
+    setTheme((prev) => {
+      if (prev === "system") return "light";
+      if (prev === "light") return "dark";
+      return "system";
+    });
+  };
 
-function StatCard({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="stat-card">
-      <span className="stat-label">{label}</span>
-      <div className="stat-value-row">{children}</div>
-    </div>
-  );
-}
+  const themeIcon = theme === "light" ? "☀️" : theme === "dark" ? "🌙" : "💻";
+  const themeLabel = theme === "light" ? "라이트 모드" : theme === "dark" ? "다크 모드" : "시스템 동기화";
 
-function SessionsCard({
-  sessions,
-  inputPermission,
-  inputBusy,
-  controlPort,
-  onToggleInput,
-  onRefresh,
-}: {
-  sessions: SessionRow[];
-  inputPermission: boolean;
-  inputBusy: number | "permission" | null;
-  controlPort: number;
-  onToggleInput: (session: SessionRow) => void;
-  onRefresh: () => void;
-}) {
   return (
-    <section className="dashboard-card">
-      <div className="card-header">
-        <div className="card-header-left">
-          <h2 className="card-title">Live Capture Sessions</h2>
-          <span className="badge-count">{sessions.length}</span>
+    <div className="host-window">
+      {/* Top Application Bar */}
+      <header className="host-header">
+        <div className="host-header-left">
+          <div className="host-logo-box">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+          </div>
+          <div className="host-title-group">
+            <h1>Leftcar Host</h1>
+            <span className="host-version">v0.1</span>
+          </div>
         </div>
-        <div className="card-header-right">
-          <button onClick={onRefresh} className="btn-ghost">새로고침</button>
+
+        <div className="host-header-right">
+          <div className={`host-status-pill ${isStreaming ? "pill-active" : "pill-idle"}`}>
+            <span className="status-dot" />
+            <span>{isStreaming ? `${sessions.length}개 스트리밍 중` : "대기 중"}</span>
+          </div>
+          <button
+            className="btn-primary"
+            onClick={() => setShowPairingModal(true)}
+            title="기기 페어링 (⌘P)"
+          >
+            기기 페어링
+          </button>
+          <button
+            className="btn-icon"
+            onClick={toggleTheme}
+            title={`테마: ${themeLabel}`}
+          >
+            {themeIcon}
+          </button>
+          <button
+            className="btn-icon"
+            onClick={refresh}
+            title="새로고침 (⌘R)"
+          >
+            🔄
+          </button>
         </div>
-      </div>
-      {sessions.length > 0 ? (
-        <SessionsTable
-          sessions={sessions}
-          inputPermission={inputPermission}
-          inputBusy={inputBusy}
-          onToggleInput={onToggleInput}
-        />
-      ) : (
-        <EmptySessions controlPort={controlPort} />
-      )}
-    </section>
-  );
-}
+      </header>
 
-function SessionsTable({
-  sessions,
-  inputPermission,
-  inputBusy,
-  onToggleInput,
-}: {
-  sessions: SessionRow[];
-  inputPermission: boolean;
-  inputBusy: number | "permission" | null;
-  onToggleInput: (session: SessionRow) => void;
-}) {
-  return (
-    <div className="table-container">
-      <table className="sessions-table">
-        <thead>
-          <tr>
-            <th>Session</th>
-            <th>Source Display</th>
-            <th>Viewer Destination</th>
-            <th>Status</th>
-            <th>FPS</th>
-            <th>Bitrate</th>
-            <th>Remote Input</th>
-            <th>Pipeline Latency</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sessions.map((session) => (
-            <SessionTableRow
-              key={session.session}
-              session={session}
-              inputPermission={inputPermission}
-              inputBusy={inputBusy === session.session}
-              onToggleInput={onToggleInput}
-            />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+      {/* Main Scrollable Body */}
+      <main className="host-body">
+        {error && <div className="banner-alert banner-danger">⚠️ {error}</div>}
+        {inputActionError && <div className="banner-alert banner-danger">⚠️ {inputActionError}</div>}
 
-function SessionTableRow({
-  session,
-  inputPermission,
-  inputBusy,
-  onToggleInput,
-}: {
-  session: SessionRow;
-  inputPermission: boolean;
-  inputBusy: boolean;
-  onToggleInput: (session: SessionRow) => void;
-}) {
-  const isRunning = session.state === "running";
+        {!inputPermission && platform === "macos" && (
+          <div className="banner-alert banner-warning">
+            <div className="banner-text">
+              <strong>원격 조작 권한 필요</strong>
+              <p>뷰어 기기에서 마우스/키보드로 컴퓨터를 조작하려면 손쉬운 사용 권한을 허용하세요.</p>
+            </div>
+            <button
+              className="btn-primary btn-sm"
+              disabled={inputBusy === "permission"}
+              onClick={requestInputPermission}
+            >
+              {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
+            </button>
+          </div>
+        )}
 
-  return (
-    <tr>
-      <td><span className="session-id-chip">#{session.session}</span></td>
-      <td>
-        <div className="source-cell">
-          <span className="source-icon">🖥️</span>
-          <span>{session.sourceName}</span>
-        </div>
-      </td>
-      <td className="mono-cell">{session.viewerAddr}</td>
-      <td>
-        <span className={`state-badge ${isRunning ? "state-running" : "state-error"}`}>
+        {isStreaming ? (
+          <div className="streams-section">
+            <div className="streams-section-header">
+              <h2>활성 디스플레이 스트림 ({sessions.length})</h2>
+              <button
+                className="btn-link"
+                onClick={() => setShowInspector((prev) => !prev)}
+              >
+                {showInspector ? "세부 수치 숨기기 ▴" : "세부 지표 보기 ▾"}
+              </button>
+            </div>
+
+            <div className="stream-cards-container">
+              {sessions.map((session) => (
+                <div key={session.session} className="stream-card-item">
+                  <div className="stream-card-top-row">
+                    <div className="stream-card-identity">
+                      <span className="stream-card-icon">🖥️</span>
+                      <div className="stream-card-name-group">
+                        <div className="stream-name-badge-row">
+                          <h3>{session.sourceName}</h3>
+                          <span className="session-tag">#{session.session}</span>
+                        </div>
+                        <span className="stream-card-target">대상: {session.viewerAddr}</span>
+                      </div>
+                    </div>
+
+                    <div className="stream-card-action">
+                      <button
+                        className={`btn-control-toggle ${session.inputEnabled ? "toggle-active" : ""}`}
+                        disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy === session.session}
+                        onClick={() => void toggleSessionInput(session)}
+                      >
+                        {inputBusy === session.session
+                          ? "처리 중…"
+                          : session.inputEnabled
+                          ? "원격 조작 허용됨"
+                          : "원격 조작 끔"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="stream-card-metrics">
+                    <div className="metric-pill">
+                      <span className="signal-bars">
+                        <span className="bar bar-1 active" />
+                        <span className="bar bar-2 active" />
+                        <span className="bar bar-3 active" />
+                      </span>
+                      <span className="metric-value font-emerald">{session.fps} FPS</span>
+                    </div>
+                    <div className="metric-pill">
+                      <span className="metric-label">대역폭</span>
+                      <span className="metric-value">{session.kbps} kbps</span>
+                    </div>
+                    <div className="metric-pill">
+                      <span className="metric-label">지연시간</span>
+                      <span className="metric-value font-blue">초저지연 (&lt;30ms)</span>
+                    </div>
+                  </div>
+
+                  {showInspector && (
+                    <div className="inspector-panel">
+                      <span className="inspector-header">파이프라인 레이턴시 계측</span>
+                      <code>{formatDetailedLatency(session)}</code>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="empty-center-container">
+            <div className="host-empty-card">
+              <div className="empty-graphic-box">
+                <span style={{ fontSize: "28px" }}>✨</span>
+              </div>
+              <h2>스트리밍 준비 완료</h2>
+              <p>
+                동일한 Wi-Fi 네트워크의 Galaxy XR 헤드셋이나 스마트폰 앱에서<br />
+                이 컴퓨터를 선택하면 초저지연 화면 전송이 시작됩니다.
+              </p>
+              <div className="empty-action-group">
+                <button className="btn-primary btn-lg" onClick={() => setShowPairingModal(true)}>
+                  기기 페어링 QR 코드 열기
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Bottom Status Bar */}
+      <footer className="host-footer">
+        <div className="footer-status-info">
           <span
-            className={`status-dot ${
-              isRunning ? "status-dot-emerald animate-pulse-glow" : "status-dot-red"
-            }`}
-          />
-          {session.state}
-        </span>
-      </td>
-      <td>
-        <span className="fps-metric">
-          {session.fps}
-          <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 400 }}>
-            {session.fpsTarget ? ` / ${session.fpsTarget} fps` : " fps"}
+            className="clickable-chip"
+            onClick={copyPortInfo}
+            title="포트 복사하기"
+          >
+            제어 포트: <strong>:{controlPort}</strong> {copiedToast ? "✅ 복사됨!" : "📋"}
           </span>
-        </span>
-      </td>
-      <td><span className="kbps-metric">{session.kbps} kbps</span></td>
-      <td>
-        <button
-          className={`input-toggle ${session.inputEnabled ? "input-toggle-enabled" : ""}`}
-          disabled={(!inputPermission && !session.inputEnabled) || !isRunning || inputBusy}
-          onClick={() => onToggleInput(session)}
-        >
-          {inputBusy
-            ? "변경 중…"
-            : `${session.inputEnabled ? "CONTROL" : "OBSERVE"} · ${session.inputRateHz} Hz 목표`}
-        </button>
-      </td>
-      <td><div className="latency-metric">{formatLatency(session)}</div></td>
-    </tr>
+          <span className="footer-divider">·</span>
+          <span>원격 입력: <strong>{inputPermission ? "승인됨" : "권한 필요"}</strong></span>
+        </div>
+        <div className="footer-timestamp">최근 확인: {lastUpdated.toLocaleTimeString()}</div>
+      </footer>
+
+      {/* Pairing Modal */}
+      {showPairingModal && (
+        <div className="modal-overlay" onClick={() => setShowPairingModal(false)}>
+          <div className="modal-window" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title-bar">
+              <h3>기기 페어링</h3>
+              <button className="btn-close" onClick={() => setShowPairingModal(false)}>✕</button>
+            </div>
+            <div className="modal-scroll-area">
+              <PairingPanel />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
-function formatLatency(session: SessionRow): string {
+function formatDetailedLatency(session: SessionRow): string {
   return [
     session.captureToEncodeUs !== undefined
       ? `cap: ${(session.captureToEncodeUs / 1000).toFixed(1)}ms`
       : "cap: <2ms",
     session.captureQueueWaitUs !== undefined
-      ? ` · q: ${(session.captureQueueWaitUs / 1000).toFixed(1)}ms`
+      ? ` · queue: ${(session.captureQueueWaitUs / 1000).toFixed(1)}ms`
       : "",
     session.encodeOutputUs !== undefined
       ? ` · enc: ${(session.encodeOutputUs / 1000).toFixed(1)}ms`
@@ -496,64 +428,7 @@ function formatLatency(session: SessionRow): string {
     session.sendBlockP95Us
       ? ` · send-p95: ${(session.sendBlockP95Us / 1000).toFixed(1)}ms`
       : "",
-    session.firstSendMs ? ` · first: ${session.firstSendMs}ms` : "",
-    session.dropped ? ` · drop: ${session.dropped}` : "",
-    session.captureBackend ? ` · ${session.captureBackend}` : "",
-    session.mediaTransport ? `/${session.mediaTransport.toUpperCase()}` : "",
-    session.error ? ` · ${session.error}` : "",
+    session.dropped ? ` · drops: ${session.dropped}` : "",
+    session.captureBackend ? ` · backend: ${session.captureBackend}` : "",
   ].join("");
-}
-
-function EmptySessions({ controlPort }: { controlPort: number }) {
-  return (
-    <div className="empty-state">
-      <div className="radar-wrapper">
-        <div className="radar-ring animate-ripple" />
-        <div className="radar-ring-2 animate-ripple" style={{ animationDelay: "1s" }} />
-        <div className="radar-center-icon">
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="12" cy="12" r="2" />
-            <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
-          </svg>
-        </div>
-      </div>
-      <p className="empty-title">활성 스트림 없음 — 뷰어 연결 대기 중</p>
-      <p className="empty-sub">
-        Galaxy XR 헤드셋 또는 모바일 뷰어 앱에서 <strong>호스트 연결</strong>을 누르고 원하는 화면을
-        선택하면 서브 30ms 초저지연 스트리밍이 즉시 시작됩니다.
-      </p>
-      <div className="empty-tips-box">
-        <span>⚡ 제어 포트: <span className="kbd-badge">{controlPort}</span></span>
-        <span>•</span>
-        <span>📡 mDNS 서비스: <span className="kbd-badge">_leftcar._tcp</span></span>
-        <span>•</span>
-        <span>🚀 AMediaCodec NDK 직결</span>
-      </div>
-    </div>
-  );
-}
-
-function SystemFooter({ lastUpdated }: { lastUpdated: Date }) {
-  return (
-    <footer className="system-footer">
-      <div className="footer-left">
-        <span className="footer-badge">
-          <span className="status-dot status-dot-emerald" style={{ width: "6px", height: "6px" }} />
-          Tauri 2 + ScreenCaptureKit FFI
-        </span>
-        <span>•</span>
-        <span>Direct Surface NDK Pipeline</span>
-      </div>
-      <div className="footer-right">Last polled: {lastUpdated.toLocaleTimeString()}</div>
-    </footer>
-  );
 }

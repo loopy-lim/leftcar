@@ -6,6 +6,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import { controlClient, controlHost } from "../src/session";
 
@@ -17,12 +18,9 @@ function openHostPicker() {
   router.push("/host");
 }
 
-/**
- * Leftcar XR Viewer Hub (docs/03 §3.2, Expo/RN 구현).
- *
- * Provides control plane connection (via Rustra JNI), source catalog,
- * multi-window document task launcher, and real-time stream status.
- */
+function openPairing() {
+  router.push("/pairing");
+}
 
 export default function Hub() {
   const [hostAddr, setHostAddr] = useState<string>("");
@@ -42,167 +40,181 @@ export default function Hub() {
   );
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={styles.content}>
-      {/* Brand Header */}
-      <View style={styles.header}>
-        <View style={styles.headerTop}>
-          <View style={styles.logoBadge}>
-            <Text style={styles.logoIcon}>⚡</Text>
-          </View>
-          <View style={styles.headerTitles}>
-            <View style={styles.titleRow}>
-              <Text style={styles.title}>Leftcar XR</Text>
-              <View style={styles.versionBadge}>
-                <Text style={styles.versionText}>v0.1</Text>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
+      <ScrollView style={styles.root} contentContainerStyle={styles.content}>
+        {/* Header Branding */}
+        <View style={styles.header}>
+          <View style={styles.brandRow}>
+            <View style={styles.logoBadge}>
+              <Text style={styles.logoIcon}>🖥️</Text>
+            </View>
+            <View style={styles.brandTextGroup}>
+              <View style={styles.titleRow}>
+                <Text style={styles.appTitle}>Leftcar XR</Text>
+                <View style={styles.versionBadge}>
+                  <Text style={styles.versionText}>v0.1</Text>
+                </View>
               </View>
+              <Text style={styles.appSubtitle}>초저지연 데스크톱 다중 화면 뷰어</Text>
             </View>
-            <Text style={styles.sub}>Galaxy XR · Low-Latency Desktop Viewer</Text>
           </View>
         </View>
 
-        <View style={[styles.badge, isConnected ? styles.badgeConnected : styles.badgeDisconnected]}>
-          <View style={[styles.badgeDot, isConnected ? styles.dotConnected : styles.dotDisconnected]} />
-          <Text style={[styles.badgeText, isConnected ? styles.badgeTextConnected : styles.badgeTextDisconnected]}>
-            {isConnected ? `호스트 연결됨 (${hostAddr})` : "호스트 연결 대기 중"}
-          </Text>
-        </View>
-      </View>
-
-      {/* Main Flow Action Banner */}
-      {isConnected ? (
-        <View style={styles.connectedBanner}>
-          <View style={styles.bannerInfo}>
-            <Text style={styles.bannerTitle}>호스트와 통신 중</Text>
-            <Text style={styles.bannerSub}>디스플레이 목록을 확인하고 독립 XR 창을 엽니다</Text>
-          </View>
-          <View style={styles.bannerActions}>
-            <Pressable
-              onPress={openCatalog}
-              style={styles.primaryActionBtn}
-            >
-              <Text style={styles.primaryActionText}>소스 카탈로그 열기 →</Text>
-            </Pressable>
-            <Pressable
-              onPress={openHostPicker}
-              style={styles.disconnectBtn}
-            >
-              <Text style={styles.disconnectBtnText}>호스트 바꾸기</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : (
-        <Pressable
-          onPress={openHostPicker}
-          style={styles.actionBanner}
-        >
-          <View style={styles.actionBannerLeft}>
-            <Text style={styles.actionBannerTitle}>호스트 연결 및 디스플레이 탐색</Text>
-            <Text style={styles.actionBannerSub}>mDNS 자동 검색 또는 수동 IP로 Mac/PC 연결</Text>
-          </View>
-          <View style={styles.actionBannerArrow}>
-            <Text style={styles.actionBannerArrowText}>→</Text>
-          </View>
-        </Pressable>
-      )}
-
-      {/* Quick Step Guide for User UX */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>🚀 시작하기 UX 가이드</Text>
-        <View style={styles.stepList}>
-          <View style={styles.stepItem}>
-            <View style={styles.stepNumBadge}>
-              <Text style={styles.stepNum}>1</Text>
-            </View>
-            <View style={styles.stepContent}>
-              <Text style={styles.stepTitle}>Mac/PC에서 Host 앱 실행</Text>
-              <Text style={styles.stepDesc}>
-                Leftcar Host Studio를 실행하면 7777 또는 자동 선택된 대체 포트를 mDNS로 알립니다.
+        {/* Main Status & Action Card */}
+        {isConnected ? (
+          <View style={styles.connectedCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.statusBadgeGreen}>
+                <View style={styles.dotGreen} />
+                <Text style={styles.statusBadgeTextGreen}>연결됨</Text>
+              </View>
+              <Text style={styles.hostEndpointText} numberOfLines={1}>
+                {hostAddr}
               </Text>
             </View>
+
+            <View style={styles.cardMainText}>
+              <Text style={styles.cardMainTitle}>컴퓨터 화면을 선택하세요</Text>
+              <Text style={styles.cardMainSub}>
+                원하는 모니터를 가상 공간에 독립된 창으로 띄울 수 있습니다.
+              </Text>
+            </View>
+
+            <View style={styles.btnRow}>
+              <Pressable onPress={openCatalog} style={styles.btnPrimary}>
+                <Text style={styles.btnPrimaryText}>화면 선택하기 →</Text>
+              </Pressable>
+              <Pressable onPress={openHostPicker} style={styles.btnSecondary}>
+                <Text style={styles.btnSecondaryText}>다른 호스트</Text>
+              </Pressable>
+            </View>
           </View>
+        ) : (
+          <View style={styles.disconnectedCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.statusBadgeGray}>
+                <View style={styles.dotGray} />
+                <Text style={styles.statusBadgeTextGray}>연결 대기</Text>
+              </View>
+            </View>
+
+            <View style={styles.cardMainText}>
+              <Text style={styles.cardMainTitle}>컴퓨터에 연결하세요</Text>
+              <Text style={styles.cardMainSub}>
+                동일한 Wi-Fi에 연결된 Leftcar 호스트를 자동으로 찾거나 QR 코드로 페어링하세요.
+              </Text>
+            </View>
+
+            <View style={styles.btnRow}>
+              <Pressable onPress={openHostPicker} style={styles.btnPrimary}>
+                <Text style={styles.btnPrimaryText}>호스트 연결하기 →</Text>
+              </Pressable>
+              <Pressable onPress={openPairing} style={styles.btnSecondary}>
+                <Text style={styles.btnSecondaryText}>QR 페어링</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        {/* 3-Step Setup Guide */}
+        <View style={styles.guideCard}>
+          <Text style={styles.guideCardTitle}>간편 사용 가이드</Text>
 
           <View style={styles.stepItem}>
-            <View style={styles.stepNumBadge}>
-              <Text style={styles.stepNum}>2</Text>
+            <View style={styles.stepNumberBadge}>
+              <Text style={styles.stepNumberText}>1</Text>
             </View>
-            <View style={styles.stepContent}>
-              <Text style={styles.stepTitle}>호스트 탐색 및 연결</Text>
-              <Text style={styles.stepDesc}>[호스트 연결] 버튼을 눌러 동일 Wi-Fi의 기기를 자동 선택합니다.</Text>
+            <View style={styles.stepTextGroup}>
+              <Text style={styles.stepTitle}>호스트 앱 실행</Text>
+              <Text style={styles.stepDesc}>Mac/Windows에서 Leftcar Host 앱을 실행합니다.</Text>
             </View>
           </View>
+
+          <View style={styles.stepDivider} />
 
           <View style={styles.stepItem}>
-            <View style={styles.stepNumBadge}>
-              <Text style={styles.stepNum}>3</Text>
+            <View style={styles.stepNumberBadge}>
+              <Text style={styles.stepNumberText}>2</Text>
             </View>
-            <View style={styles.stepContent}>
-              <Text style={styles.stepTitle}>독립 XR 윈도우 배치</Text>
-              <Text style={styles.stepDesc}>원하는 모니터를 [XR 창 열기]하여 공간 어디든 자유롭게 배치하세요.</Text>
+            <View style={styles.stepTextGroup}>
+              <Text style={styles.stepTitle}>호스트 선택 및 페어링</Text>
+              <Text style={styles.stepDesc}>[호스트 연결하기]를 눌러 검색된 컴퓨터를 선택합니다.</Text>
+            </View>
+          </View>
+
+          <View style={styles.stepDivider} />
+
+          <View style={styles.stepItem}>
+            <View style={styles.stepNumberBadge}>
+              <Text style={styles.stepNumberText}>3</Text>
+            </View>
+            <View style={styles.stepTextGroup}>
+              <Text style={styles.stepTitle}>XR 공간에 화면 배치</Text>
+              <Text style={styles.stepDesc}>모니터를 열고 가상 공간 원하는 위치에 배치하세요.</Text>
             </View>
           </View>
         </View>
-      </View>
 
-      {/* Metric Highlights */}
-      <View style={styles.metricRow}>
-        <View style={styles.metricCard}>
-          <Text style={styles.metricLabel}>Target Latency</Text>
-          <Text style={[styles.metricValue, { color: "#34d399" }]}>p50 &lt;28ms</Text>
+        {/* Feature Specs */}
+        <View style={styles.specsRow}>
+          <View style={styles.specCard}>
+            <Text style={styles.specLabel}>지연 시간</Text>
+            <Text style={styles.specHighlight}>&lt;30ms</Text>
+            <Text style={styles.specSub}>초저지연 반응</Text>
+          </View>
+          <View style={styles.specCard}>
+            <Text style={styles.specLabel}>재생률</Text>
+            <Text style={styles.specValue}>60 FPS</Text>
+            <Text style={styles.specSub}>부드러운 화면</Text>
+          </View>
+          <View style={styles.specCard}>
+            <Text style={styles.specLabel}>창 모드</Text>
+            <Text style={styles.specValue}>독립 창</Text>
+            <Text style={styles.specSub}>다중 화면 배치</Text>
+          </View>
         </View>
-        <View style={styles.metricCard}>
-          <Text style={styles.metricLabel}>Hardware Decode</Text>
-          <Text style={[styles.metricValue, { color: "#38bdf8" }]}>AMediaCodec</Text>
-        </View>
-        <View style={styles.metricCard}>
-          <Text style={styles.metricLabel}>Transport</Text>
-          <Text style={[styles.metricValue, { color: "#a5b4fc" }]}>Direct UDP/NDK</Text>
-        </View>
-      </View>
-
-      {/* Pipeline Info Card */}
-      <View style={styles.infoCard}>
-        <Text style={styles.infoTitle}>⚡ Zero-Copy Hardware Pipeline</Text>
-        <Text style={styles.footnote}>
-          Video plane은 React Native/Rustra 런타임을 거치지 않고 Android NDK AMediaCodec ➡️ Surface 직결 경로로 초저지연 디코딩 및 렌더링됩니다.
-        </Text>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: "#F8FAFC",
+  },
   root: {
     flex: 1,
-    backgroundColor: "#080b11",
+    backgroundColor: "#F8FAFC",
   },
   content: {
-    padding: 20,
-    paddingTop: 48,
-    gap: 16,
-    paddingBottom: 40,
+    padding: 16,
+    gap: 14,
+    paddingBottom: 36,
   },
   header: {
-    gap: 12,
+    marginTop: 4,
+    marginBottom: 2,
   },
-  headerTop: {
+  brandRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
+    gap: 12,
   },
   logoBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: "#161f33",
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    backgroundColor: "#EFF6FF",
     borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.4)",
+    borderColor: "#DBEAFE",
     alignItems: "center",
     justifyContent: "center",
   },
   logoIcon: {
     fontSize: 20,
   },
-  headerTitles: {
+  brandTextGroup: {
     flex: 1,
     gap: 2,
   },
@@ -211,253 +223,254 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
-  title: {
-    color: "#f8fafc",
-    fontSize: 24,
-    fontWeight: "800",
-    letterSpacing: -0.5,
+  appTitle: {
+    color: "#0F172A",
+    fontSize: 20,
+    fontWeight: "700",
+    letterSpacing: -0.3,
   },
   versionBadge: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#F1F5F9",
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#E2E8F0",
   },
   versionText: {
-    color: "#94a3b8",
+    color: "#64748B",
     fontSize: 10,
     fontWeight: "600",
     fontFamily: "monospace",
   },
-  sub: {
-    color: "#94a3b8",
+  appSubtitle: {
+    color: "#64748B",
     fontSize: 12,
-    fontWeight: "400",
   },
-  badge: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  badgeConnected: {
-    backgroundColor: "rgba(16, 185, 129, 0.12)",
+
+  /* Main Cards */
+  connectedCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(16, 185, 129, 0.3)",
-  },
-  badgeDisconnected: {
-    backgroundColor: "rgba(245, 158, 11, 0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(245, 158, 11, 0.3)",
-  },
-  badgeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  dotConnected: {
-    backgroundColor: "#10b981",
-  },
-  dotDisconnected: {
-    backgroundColor: "#f59e0b",
-  },
-  badgeText: {
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  badgeTextConnected: {
-    color: "#34d399",
-  },
-  badgeTextDisconnected: {
-    color: "#fbbf24",
-  },
-  actionBanner: {
-    backgroundColor: "#0f172a",
-    borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.4)",
-    borderRadius: 14,
+    borderColor: "#A7F3D0",
     padding: 16,
+    gap: 12,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  disconnectedCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    padding: 16,
+    gap: 12,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  cardHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 8,
   },
-  actionBannerLeft: {
-    flex: 1,
-    gap: 4,
-  },
-  actionBannerTitle: {
-    color: "#f8fafc",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  actionBannerSub: {
-    color: "#94a3b8",
-    fontSize: 12,
-  },
-  actionBannerArrow: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: "#6366f1",
-    alignItems: "center",
-    justifyContent: "center",
-    marginLeft: 12,
-  },
-  actionBannerArrowText: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  connectedBanner: {
-    backgroundColor: "#0f172a",
-    borderWidth: 1,
-    borderColor: "rgba(16, 185, 129, 0.35)",
-    borderRadius: 14,
-    padding: 16,
-    gap: 12,
-  },
-  bannerInfo: {
-    gap: 2,
-  },
-  bannerTitle: {
-    color: "#f8fafc",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  bannerSub: {
-    color: "#94a3b8",
-    fontSize: 12,
-  },
-  bannerActions: {
+  statusBadgeGreen: {
     flexDirection: "row",
-    gap: 10,
-  },
-  primaryActionBtn: {
-    flex: 1,
-    backgroundColor: "#6366f1",
-    borderRadius: 8,
-    paddingVertical: 10,
     alignItems: "center",
-    justifyContent: "center",
-  },
-  primaryActionText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  disconnectBtn: {
-    backgroundColor: "#1e293b",
+    gap: 6,
+    backgroundColor: "#ECFDF5",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
+    borderColor: "#A7F3D0",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
   },
-  disconnectBtnText: {
-    color: "#94a3b8",
-    fontSize: 12,
+  dotGreen: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#059669",
+  },
+  statusBadgeTextGreen: {
+    color: "#059669",
+    fontSize: 11,
     fontWeight: "600",
   },
-  card: {
-    backgroundColor: "#0f172a",
+  statusBadgeGray: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#F1F5F9",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 14,
-    padding: 16,
-    gap: 14,
+    borderColor: "#E2E8F0",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
   },
-  cardTitle: {
-    color: "#f8fafc",
+  dotGray: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#94A3B8",
+  },
+  statusBadgeTextGray: {
+    color: "#64748B",
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  hostEndpointText: {
+    color: "#64748B",
+    fontSize: 12,
+    fontFamily: "monospace",
+    flex: 1,
+    textAlign: "right",
+  },
+  cardMainText: {
+    gap: 4,
+  },
+  cardMainTitle: {
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "600",
+    color: "#0F172A",
   },
-  stepList: {
+  cardMainSub: {
+    fontSize: 12,
+    color: "#64748B",
+    lineHeight: 18,
+  },
+  btnRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 2,
+  },
+  btnPrimary: {
+    flex: 1,
+    backgroundColor: "#2563EB",
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  btnPrimaryText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  btnSecondary: {
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  btnSecondaryText: {
+    color: "#334155",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  /* Guide Card */
+  guideCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    padding: 16,
     gap: 12,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  guideCardTitle: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#0F172A",
   },
   stepItem: {
     flexDirection: "row",
     alignItems: "flex-start",
-    gap: 12,
+    gap: 10,
   },
-  stepNumBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: "#161f33",
+  stepDivider: {
+    height: 1,
+    backgroundColor: "#F1F5F9",
+    marginLeft: 30,
+  },
+  stepNumberBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "#EFF6FF",
     borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.4)",
+    borderColor: "#BFDBFE",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 2,
+    marginTop: 1,
   },
-  stepNum: {
-    color: "#818cf8",
-    fontSize: 12,
+  stepNumberText: {
+    color: "#2563EB",
+    fontSize: 10,
     fontWeight: "700",
-    fontFamily: "monospace",
   },
-  stepContent: {
+  stepTextGroup: {
     flex: 1,
-    gap: 2,
+    gap: 1,
   },
   stepTitle: {
-    color: "#f8fafc",
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
+    color: "#0F172A",
   },
   stepDesc: {
-    color: "#94a3b8",
     fontSize: 11,
+    color: "#64748B",
     lineHeight: 16,
   },
-  metricRow: {
+
+  /* Specs */
+  specsRow: {
     flexDirection: "row",
     gap: 8,
   },
-  metricCard: {
+  specCard: {
     flex: 1,
-    backgroundColor: "#0f172a",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
-    borderRadius: 10,
-    padding: 12,
-    gap: 4,
+    borderColor: "#E2E8F0",
+    padding: 10,
+    gap: 2,
   },
-  metricLabel: {
-    color: "#64748b",
+  specLabel: {
+    color: "#94A3B8",
     fontSize: 10,
-    textTransform: "uppercase",
-    fontWeight: "600",
-    letterSpacing: 0.5,
+    fontWeight: "500",
   },
-  metricValue: {
-    fontSize: 13,
+  specHighlight: {
+    color: "#059669",
+    fontSize: 14,
     fontWeight: "700",
     fontFamily: "monospace",
   },
-  infoCard: {
-    backgroundColor: "rgba(15, 23, 42, 0.5)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
-    borderRadius: 12,
-    padding: 14,
-    gap: 6,
+  specValue: {
+    color: "#0F172A",
+    fontSize: 14,
+    fontWeight: "700",
   },
-  infoTitle: {
-    color: "#f8fafc",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  footnote: {
-    color: "#64748b",
-    fontSize: 11,
-    lineHeight: 16,
+  specSub: {
+    color: "#64748B",
+    fontSize: 10,
   },
 });

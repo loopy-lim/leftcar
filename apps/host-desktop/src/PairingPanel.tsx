@@ -21,7 +21,6 @@ interface ActiveSession {
   expiresAt: number;
 }
 
-/** "unix:<secs>" (pairing.rs) → readable local date; raw string when unparsable. */
 function formatPairedAt(pairedAt: string): string {
   const secs = Number(pairedAt.replace(/^unix:/, ""));
   if (!Number.isFinite(secs) || secs <= 0) return pairedAt;
@@ -42,8 +41,8 @@ export default function PairingPanel() {
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
-  // latest device count, readable by the poll callback without re-subscribing
   const deviceCountRef = useRef(devices.length);
+
   useEffect(() => {
     deviceCountRef.current = devices.length;
   }, [devices.length]);
@@ -51,15 +50,12 @@ export default function PairingPanel() {
   const refreshDevices = useCallback(async () => {
     try {
       const list = await invoke<PairedDevice[]>("list_paired_devices");
-      // A new device appearing means a viewer just completed pairing with the
-      // shown QR (single-use offer) — retire the session so a dead QR doesn't
-      // sit on screen until expiry.
       if (list.length > deviceCountRef.current) {
         setSession(null);
       }
       setDevices(list);
     } catch {
-      // best-effort poll; the list refreshes on the next tick
+      // best effort
     }
   }, []);
 
@@ -69,7 +65,7 @@ export default function PairingPanel() {
     try {
       const view = await invoke<PairingSessionView>("begin_pairing");
       const qrDataUrl = await QRCode.toDataURL(view.qr_payload, {
-        width: 240,
+        width: 200,
         margin: 1,
       });
       setSession({
@@ -89,7 +85,7 @@ export default function PairingPanel() {
     try {
       await invoke("cancel_pairing");
     } catch {
-      // offer expiry (120s) covers a failed cancel
+      // ignore
     }
     setSession(null);
   }, []);
@@ -99,7 +95,7 @@ export default function PairingPanel() {
       setRevoking(deviceId);
       setError(null);
       try {
-        await invoke("revoke_device", { deviceId });
+        await invoke("revoke_paired_device", { deviceId });
         await refreshDevices();
       } catch (e) {
         setError(String(e));
@@ -110,14 +106,12 @@ export default function PairingPanel() {
     [refreshDevices],
   );
 
-  // device list: initial load + 5s poll while the panel is open
   useEffect(() => {
     refreshDevices();
-    const poll = setInterval(refreshDevices, 5000);
-    return () => clearInterval(poll);
+    const interval = setInterval(refreshDevices, 2000);
+    return () => clearInterval(interval);
   }, [refreshDevices]);
 
-  // countdown tick
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(tick);
@@ -125,8 +119,6 @@ export default function PairingPanel() {
 
   const expired = session !== null && now >= session.expiresAt;
 
-  // release the host offer once the countdown hits zero (fire-and-forget:
-  // the offer is dead either way after its own TTL)
   useEffect(() => {
     if (session && expired) {
       invoke("cancel_pairing").catch(() => {});
@@ -134,90 +126,87 @@ export default function PairingPanel() {
   }, [session, expired]);
 
   return (
-    <main className="pairing-container">
-      <header className="pairing-header">
-        <h1>기기 페어링</h1>
-        <p>뷰어 앱에서 QR 코드를 스캔한 뒤 화면에 표시된 코드를 입력하세요.</p>
-      </header>
+    <div className="pairing-wrapper">
+      <div className="pairing-guide">
+        <p className="pairing-guide-title">뷰어 앱(XR / 모바일)에서 QR 코드를 스캔하세요</p>
+        <p className="pairing-guide-sub">동일한 Wi-Fi 네트워크에서 한 번 페어링하면 이후 자동 연결됩니다.</p>
+      </div>
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && <div className="banner-alert banner-danger">⚠️ {error}</div>}
 
-      <section className="dashboard-card">
+      <div className="pairing-qr-card">
         {!session ? (
-          <div className="pairing-idle">
-            <p className="empty-title">페어링 대기 중</p>
-            <p className="empty-sub">
-              QR 코드를 생성하면 2분 동안 유효한 페어링 코드가 만들어집니다.
-            </p>
+          <div className="pairing-idle-state">
+            <div className="idle-icon-box">🔐</div>
+            <p className="idle-title">페어링 세션 시작</p>
+            <p className="idle-sub">버튼을 누르면 2분 동안 유효한 일회용 QR 코드가 생성됩니다.</p>
             <button onClick={startPairing} className="btn-primary" disabled={starting}>
-              {starting ? "생성 중…" : "페어링 시작"}
+              {starting ? "생성 중…" : "페어링 QR 생성"}
             </button>
           </div>
         ) : expired ? (
-          <div className="pairing-idle">
-            <p className="empty-title">코드 만료</p>
-            <p className="empty-sub">유효 시간(2분)이 지나 코드가 만료되었습니다.</p>
+          <div className="pairing-idle-state">
+            <p className="idle-title font-rose">페어링 코드 만료</p>
+            <p className="idle-sub">유효 시간이 지나 코드가 만료되었습니다.</p>
             <button onClick={startPairing} className="btn-primary" disabled={starting}>
-              다시 생성
+              새 QR 코드 생성
             </button>
           </div>
         ) : (
-          <div className="pairing-active">
-            <img
-              src={session.qrDataUrl}
-              alt="페어링 QR 코드"
-              width={240}
-              height={240}
-              className="pairing-qr"
-            />
-            <div className="pairing-code">{session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}</div>
-            <div className="pairing-countdown">
-              남은 시간 {formatCountdown(session.expiresAt - now)}
+          <div className="pairing-active-state">
+            <div className="qr-image-frame">
+              <img
+                src={session.qrDataUrl}
+                alt="페어링 QR 코드"
+                width={190}
+                height={190}
+                className="qr-img"
+              />
             </div>
-            <button onClick={cancelPairing} className="btn-ghost">
-              취소
+            <div className="code-display-box">
+              <span className="code-label">인증 번호:</span>
+              <span className="code-value">{session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}</span>
+            </div>
+            <div className="countdown-badge">
+              ⏳ 남은 시간: {formatCountdown(session.expiresAt - now)}
+            </div>
+            <button onClick={cancelPairing} className="btn-ghost btn-sm">
+              페어링 취소
             </button>
           </div>
         )}
-      </section>
+      </div>
 
-      <section className="dashboard-card">
-        <div className="card-header">
-          <div className="card-header-left">
-            <h2 className="card-title">페어링된 기기</h2>
-            <span className="badge-count">{devices.length}</span>
-          </div>
-          <div className="card-header-right">
-            <button onClick={refreshDevices} className="btn-ghost">
-              새로고침
-            </button>
-          </div>
+      <div className="paired-devices-section">
+        <div className="section-title-row">
+          <h4>연결된 기기 목록</h4>
+          <span className="count-pill">{devices.length}</span>
         </div>
+
         {devices.length > 0 ? (
-          <ul className="pairing-device-list">
+          <div className="device-rows-container">
             {devices.map((device) => (
-              <li key={device.device_id} className="pairing-device-row">
-                <div className="pairing-device-info">
-                  <span className="pairing-device-name">{device.name}</span>
-                  <span className="pairing-device-date">{formatPairedAt(device.paired_at)}</span>
+              <div key={device.device_id} className="device-row-item">
+                <div className="device-row-main">
+                  <span className="device-row-name">📱 {device.name}</span>
+                  <span className="device-row-date">{formatPairedAt(device.paired_at)}</span>
                 </div>
                 <button
                   onClick={() => revoke(device.device_id)}
-                  className="btn-ghost pairing-revoke"
+                  className="btn-danger-outline"
                   disabled={revoking === device.device_id}
                 >
                   {revoking === device.device_id ? "제거 중…" : "제거"}
                 </button>
-              </li>
+              </div>
             ))}
-          </ul>
+          </div>
         ) : (
-          <div className="empty-state">
-            <p className="empty-title">페어링된 기기 없음</p>
-            <p className="empty-sub">QR 코드를 스캔한 뷰어가 여기에 표시됩니다.</p>
+          <div className="empty-devices-box">
+            <p>아직 등록된 기기가 없습니다.</p>
           </div>
         )}
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }

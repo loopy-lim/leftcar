@@ -101,6 +101,9 @@ extern "C" {
         repeat: u32,
     ) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
+    fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
+    fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
 }
 
 // Java signatures:
@@ -112,6 +115,9 @@ extern "C" {
 //   sendPointer(String, int, float, float, int, int, float, float): int
 //   sendKey(String, int, int, int, boolean, int): int
 //   releaseInput(String): int
+//   inputStatus(String): int
+//   streamStats(String): long
+//   streamLatency(String): long
 //   release(long, String): int
 
 macro_rules! jni_fn {
@@ -363,6 +369,48 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_releaseInput(
         None => return 1,
     };
     unsafe { leftcar_jni_input_release_all(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_inputStatus(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return -1,
+    };
+    unsafe { leftcar_jni_input_status(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamStats(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i64 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return -1,
+    };
+    unsafe { leftcar_jni_stream_stats(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamLatency(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i64 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return -1,
+    };
+    unsafe { leftcar_jni_stream_latency(c.as_ptr()) }
 }
 
 #[no_mangle]
