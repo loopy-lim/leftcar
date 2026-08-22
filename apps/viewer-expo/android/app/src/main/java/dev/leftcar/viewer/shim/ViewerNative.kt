@@ -34,5 +34,24 @@ object ViewerNative {
     ): Int
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
+    external fun sendPointer(
+        instanceId: String,
+        action: Int,
+        x: Float,
+        y: Float,
+        buttons: Int,
+        actionButton: Int,
+        horizontalScroll: Float,
+        verticalScroll: Float,
+    ): Int
+    external fun sendKey(
+        instanceId: String,
+        keyCode: Int,
+        scanCode: Int,
+        metaState: Int,
+        down: Boolean,
+        repeat: Int,
+    ): Int
+    external fun releaseInput(instanceId: String): Int
     external fun release(state: Long, instanceId: String): Int
 }

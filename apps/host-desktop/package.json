@@ -5,21 +5,21 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "pnpm --workspace-root check:react-runtime && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "qrcode": "^1.5.4",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@types/qrcode": "^1.5.6",
-    "@types/react": "~19.1.0",
-    "@types/react-dom": "~19.1.0",
+    "@types/react": "~19.2.4",
+    "@types/react-dom": "~19.2.3",
     "@vitejs/plugin-react": "^4",
     "typescript": "^5.7.0",
     "vite": "^6"

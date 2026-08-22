@@ -37,8 +37,8 @@ fn unknown_command_is_rejected() {
 }
 
 #[test]
-fn viewer_contract_does_not_expose_input_commands() {
-    // The generated schema must not contain any input-injection command.
+fn viewer_contract_does_not_expose_high_rate_input_commands() {
+    // Input is a token-bound native datagram plane, not a Rustra command.
     let generated = viewer_package().generate_typescript().expect("generates");
     let surface = format!("{}{}", generated.commands_ts, generated.types_ts);
     for banned in [

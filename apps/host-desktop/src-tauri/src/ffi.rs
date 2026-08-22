@@ -6,6 +6,9 @@
 //!   leftcar_capture_stats_v2(handle) -> JSON {frames,bytes,state,fps,kbps}
 //!   leftcar_capture_free_string(ptr)
 //!   leftcar_capture_last_error_v2() -> cstr
+//!   leftcar_capture_input_permission_v1() -> granted
+//!   leftcar_capture_request_input_permission_v1() -> granted
+//!   leftcar_capture_set_input_enabled_v1(handle, enabled)
 
 use crate::backend::CaptureBackend;
 use control_contract::host::{DisplayInfo, StatsInfo};
@@ -95,6 +98,19 @@ impl FfiBackend {
             let _ = lib
                 .get::<unsafe extern "C" fn(CPtr)>(b"leftcar_capture_free_string")
                 .map_err(|e| e.to_string())?;
+            let _ = lib
+                .get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_input_permission_v1")
+                .map_err(|e| e.to_string())?;
+            let _ = lib
+                .get::<unsafe extern "C" fn() -> i32>(
+                    b"leftcar_capture_request_input_permission_v1",
+                )
+                .map_err(|e| e.to_string())?;
+            let _ = lib
+                .get::<unsafe extern "C" fn(u32, i32) -> i32>(
+                    b"leftcar_capture_set_input_enabled_v1",
+                )
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -162,16 +178,50 @@ impl CaptureBackend for FfiBackend {
         w: u32,
         h: u32,
         fps: u32,
+        capture_backend: &str,
     ) -> Result<u32, String> {
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
+        let c_backend = CString::new(capture_backend).map_err(|_| "backend contains NUL")?;
         unsafe {
-            let f: Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_char, u16, u32, u32, u32, u32) -> u32,
-            > = lib
-                .get(b"leftcar_capture_start_v2")
-                .map_err(|e| e.to_string())?;
-            let handle = f(c_ip.as_ptr(), port, source_index, w, h, fps);
+            type StartV3 = unsafe extern "C" fn(
+                *const std::ffi::c_char,
+                u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const std::ffi::c_char,
+            ) -> u32;
+            let handle = match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
+                Ok(f) => f(
+                    c_ip.as_ptr(),
+                    port,
+                    source_index,
+                    w,
+                    h,
+                    fps,
+                    c_backend.as_ptr(),
+                ),
+                Err(_) if capture_backend == "screenCaptureKit" => {
+                    let f: Symbol<
+                        unsafe extern "C" fn(
+                            *const std::ffi::c_char,
+                            u16,
+                            u32,
+                            u32,
+                            u32,
+                            u32,
+                        ) -> u32,
+                    > = lib
+                        .get(b"leftcar_capture_start_v2")
+                        .map_err(|e| e.to_string())?;
+                    f(c_ip.as_ptr(), port, source_index, w, h, fps)
+                }
+                Err(_) => {
+                    return Err("capture shim does not support selectable backends".into());
+                }
+            };
             if handle == 0 {
                 let err_f: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
                     .get(b"leftcar_capture_last_error_v2")
@@ -230,11 +280,70 @@ impl CaptureBackend for FfiBackend {
                 send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
                 max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
                 pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
+                capture_backend: v["captureBackend"]
+                    .as_str()
+                    .unwrap_or("screenCaptureKit")
+                    .into(),
+                media_transport: v["mediaTransport"].as_str().unwrap_or("udp").into(),
+                first_capture_ms: v["firstCaptureMs"].as_u64().unwrap_or(0),
+                first_encode_ms: v["firstEncodeMs"].as_u64().unwrap_or(0),
+                first_send_ms: v["firstSendMs"].as_u64().unwrap_or(0),
+                current_bitrate: v["currentBitrate"].as_u64().unwrap_or(0) as u32,
+                capture_interval_p95_us: v["captureIntervalP95Us"].as_u64().unwrap_or(0),
+                capture_to_encode_p95_us: v["captureToEncodeP95Us"].as_u64().unwrap_or(0),
+                capture_queue_wait_p95_us: v["captureQueueWaitP95Us"].as_u64().unwrap_or(0),
+                encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
+                send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
                 error: v["error"]
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
             })
+        }
+    }
+
+    fn input_permission(&self) -> Result<bool, String> {
+        let lib = self.lib()?;
+        unsafe {
+            let function: Symbol<unsafe extern "C" fn() -> i32> = lib
+                .get(b"leftcar_capture_input_permission_v1")
+                .map_err(|error| error.to_string())?;
+            Ok(function() == 1)
+        }
+    }
+
+    fn request_input_permission(&self) -> Result<bool, String> {
+        let lib = self.lib()?;
+        unsafe {
+            let function: Symbol<unsafe extern "C" fn() -> i32> = lib
+                .get(b"leftcar_capture_request_input_permission_v1")
+                .map_err(|error| error.to_string())?;
+            Ok(function() == 1)
+        }
+    }
+
+    fn set_input_enabled(&self, handle: u32, enabled: bool) -> Result<(), String> {
+        let lib = self.lib()?;
+        unsafe {
+            let function: Symbol<unsafe extern "C" fn(u32, i32) -> i32> = lib
+                .get(b"leftcar_capture_set_input_enabled_v1")
+                .map_err(|error| error.to_string())?;
+            let result = function(handle, i32::from(enabled));
+            if result == 0 {
+                return Ok(());
+            }
+            let error_function: Symbol<
+                unsafe extern "C" fn() -> *const std::ffi::c_char,
+            > = lib
+                .get(b"leftcar_capture_last_error_v2")
+                .map_err(|error| error.to_string())?;
+            let pointer = error_function();
+            let message = if pointer.is_null() {
+                format!("set input enabled failed with rc={result}")
+            } else {
+                CStr::from_ptr(pointer).to_string_lossy().into_owned()
+            };
+            Err(message)
         }
     }
 }

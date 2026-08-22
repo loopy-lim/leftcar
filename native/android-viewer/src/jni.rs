@@ -8,6 +8,8 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
+use crate::input_protocol::{encode_input, normalized_axis, parse_ack, InputEvent, InputScheduler};
+use crate::media_datagram::{parse_fragment, FrameReassembler};
 use crate::net_guard::{host_is_valid, peer_allowed};
 
 #[repr(C)]
@@ -88,10 +90,11 @@ use std::sync::{Arc, Mutex};
 
 struct RendererControl {
     port: u16,
+    input: Mutex<InputScheduler>,
     stop: AtomicBool,
     // Surface destruction is not always the end of the Activity. During an
     // XR/freeform resize, release MediaCodec's ANativeWindow promptly but keep
-    // the TCP connection alive until either a replacement Surface attaches or
+    // the UDP listener alive until either a replacement Surface attaches or
     // the Activity performs its final release.
     suspend: AtomicBool,
     suspended: AtomicBool,
@@ -170,51 +173,6 @@ struct RendererStats {
     host_clock_offset_ms: Option<i128>,
 }
 
-fn parse_frame_packet(pkt: &[u8]) -> Option<FramePacket> {
-    if pkt.len() < 5 || pkt[0] != 0x46 {
-        return None;
-    }
-    let id = u16::from_le_bytes([pkt[3], pkt[4]]);
-    let mut offset = 5usize;
-    let host_wall_ms = if pkt.len() >= 15 && pkt[5..7] == [0x4c, 0x54] {
-        offset = 15;
-        Some(u64::from_be_bytes(pkt[7..15].try_into().ok()?))
-    } else {
-        None
-    };
-    let payload = pkt.get(offset..)?;
-    // Older hosts nested the AU+PTS envelope inside F. Keep compatibility
-    // while the current host sends raw Annex-B after the F header.
-    let au = if payload.len() >= 10 && &payload[..2] == b"AU" {
-        &payload[10..]
-    } else {
-        payload
-    };
-    if au.is_empty() {
-        return None;
-    }
-    Some(FramePacket {
-        id,
-        au: au.to_vec(),
-        host_wall_ms,
-    })
-}
-
-fn parse_legacy_au_packet(pkt: &[u8]) -> Option<FramePacket> {
-    if pkt.len() < 10 || &pkt[..2] != b"AU" {
-        return None;
-    }
-    let au = &pkt[10..];
-    if au.is_empty() {
-        return None;
-    }
-    Some(FramePacket {
-        id: 0,
-        au: au.to_vec(),
-        host_wall_ms: None,
-    })
-}
-
 fn is_keyframe(au: &[u8]) -> bool {
     viewer_decoder::split_annexb(au)
         .iter()
@@ -237,9 +195,11 @@ fn reset_decoder(
 }
 
 /// A missing encoded AU can invalidate the reference chain of every later
-/// H.264 delta frame. Flush the existing codec but retain SPS/PPS so the next
-/// IDR can recover immediately without waiting for a full reconnect. If a
-/// vendor codec rejects flush, drop it and let the next CFG recreate it.
+/// H.264 delta frame. Drop the codec but retain SPS/PPS bookkeeping; the host
+/// sends CFG before the requested IDR and that packet recreates MediaCodec.
+/// Android requires codec-specific data to be resubmitted after `flush`, and
+/// vendor behavior differs, so a clean recreate is safer than a flush whose
+/// next input is only an IDR.
 fn resync_decoder_after_frame_gap(
     decoder: &mut Option<viewer_decoder::AndroidDecoder>,
     awaiting_keyframe: &mut bool,
@@ -247,15 +207,70 @@ fn resync_decoder_after_frame_gap(
     if *awaiting_keyframe {
         return;
     }
-    let flush_error = decoder.as_mut().and_then(|decoder| decoder.flush().err());
-    if let Some(error) = flush_error {
-        log_info!("decoder flush after frame gap failed: {error}");
-        if let Some(decoder) = decoder.as_mut() {
-            decoder.stop();
-        }
-        *decoder = None;
+    if let Some(decoder) = decoder.as_mut() {
+        decoder.stop();
     }
+    *decoder = None;
     *awaiting_keyframe = true;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedOutcome {
+    Queued,
+    ResyncRequired,
+}
+
+fn send_viewer_command(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    command: &[u8],
+    token: &[u8],
+) {
+    if token.is_empty() {
+        return;
+    }
+    let mut authenticated = Vec::with_capacity(command.len() + token.len());
+    authenticated.extend_from_slice(command);
+    authenticated.extend_from_slice(token);
+    if let Err(error) = socket.send_to(&authenticated, peer) {
+        log_info!("failed to send viewer command: {error}");
+    }
+}
+
+fn monotonic_us() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn flush_input(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    control: &RendererControl,
+) {
+    if token.is_empty() {
+        return;
+    }
+    // Two candidates allow an immediately due reliable transition and the
+    // newest coalesced pointer position to share one socket-loop tick.
+    for _ in 0..2 {
+        let outbound = control.input.lock().unwrap().next_ready(monotonic_us());
+        let Some(outbound) = outbound else { break };
+        let packet = encode_input(&outbound, token);
+        if let Err(error) = socket.send_to(&packet, peer) {
+            log_info!("failed to send input datagram: {error}");
+            break;
+        }
+    }
+}
+
+fn request_idr(socket: &std::net::UdpSocket, peer: std::net::SocketAddr, token: &[u8]) {
+    send_viewer_command(socket, peer, b"IDR", token);
 }
 
 fn feed_and_render(
@@ -264,12 +279,15 @@ fn feed_and_render(
     aus: &mut u64,
     fps: u32,
     stats: &mut RendererStats,
-) -> bool {
+) -> FeedOutcome {
     *aus += 1;
     let frame_us = 1_000_000u64 / u64::from(fps.max(1));
     let pts_us = aus.saturating_mul(frame_us) as i64;
     let started = std::time::Instant::now();
-    let result = dec.feed_au_status(&frame.au, pts_us, 0);
+    // Give a hardware codec at most 1 ms to hand back an input slot. This
+    // absorbs normal scheduler jitter without allowing a frame backlog to
+    // become visible interaction latency.
+    let result = dec.feed_au_status(&frame.au, pts_us, 1_000);
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
 
@@ -277,15 +295,24 @@ fn feed_and_render(
         Ok(viewer_decoder::FeedStatus::Queued { .. }) => {
             stats.queued += 1;
             while dec.pump_output(0).unwrap_or(false) {}
-            true
+            FeedOutcome::Queued
         }
         Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
             stats.input_drops += 1;
-            false
+            FeedOutcome::ResyncRequired
+        }
+        Ok(viewer_decoder::FeedStatus::InputTooLarge { required, capacity }) => {
+            stats.input_drops += 1;
+            log_info!(
+                "decoder input AU too large: required={} capacity={}; resyncing",
+                required,
+                capacity
+            );
+            FeedOutcome::ResyncRequired
         }
         Err(e) => {
             log_info!("decoder feed failed: {}", e);
-            false
+            FeedOutcome::ResyncRequired
         }
     };
 
@@ -325,7 +352,7 @@ fn spawn_live_stream_renderer(
 ) {
     let width = width.max(1);
     let height = height.max(1);
-    let fps = fps.clamp(1, 60);
+    let fps = fps.clamp(1, 90);
     log_info!(
         "spawn_live_stream_renderer: instance={} window={:?} port={} size={}x{} fps={} host={}",
         instance_str,
@@ -344,6 +371,7 @@ fn spawn_live_stream_renderer(
 
     let control = Arc::new(RendererControl {
         port,
+        input: Mutex::new(InputScheduler::new(fps)),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),
         suspended: AtomicBool::new(false),
@@ -362,46 +390,55 @@ fn spawn_live_stream_renderer(
 
     let window_handle = surface_window as usize;
     std::thread::spawn(move || {
-        let listener = match std::net::TcpListener::bind(format!("0.0.0.0:{port}")) {
-            Ok(s) => s,
+        let socket = match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
+            Ok(socket) => socket,
             Err(e) => {
-                log_info!("FAILED to bind TCP listener on 0.0.0.0:{}: {}", port, e);
+                log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
                 control_clone.finished.store(true, Ordering::SeqCst);
                 remove_renderer_if_current(&instance_str, &control_clone);
                 return;
             }
         };
+        // Input motion is transmitted at 2x stream FPS (120Hz at 60fps,
+        // 180Hz at 90fps). A 2ms receive timeout lets the same authenticated
+        // session socket service that scheduler without a second network
+        // transport or a frame-rate-sized delay.
+        let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(2)));
+        use std::os::fd::AsRawFd;
+        let receive_buffer: libc::c_int = 4 * 1024 * 1024;
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &receive_buffer as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&receive_buffer) as libc::socklen_t,
+            );
+        }
         log_info!(
-            "TCP listening on port {} (accepting media only from {expected_host})",
+            "UDP listening on port {} (accepting media only from {expected_host})",
             port
         );
-        // accept one sender (reconnect allowed after disconnect)
-        let mut sock: Option<std::net::TcpStream> = None;
-
-        let mut buf = vec![0u8; 1 << 20]; // 1MB read buffer for framed packets
-        let mut pending: Vec<u8> = Vec::with_capacity(1 << 20); // stream reassembly
+        let mut buf = vec![0u8; 2_048];
+        let mut host_peer: Option<std::net::SocketAddr> = None;
+        let mut viewer_control_token = Vec::new();
+        let mut reassembler = FrameReassembler::default();
         let mut sps = Vec::new();
         let mut pps = Vec::new();
         let mut decoder: Option<viewer_decoder::AndroidDecoder> = None;
         let mut aus = 0u64;
-        let mut last_frame_ms = std::time::Instant::now();
         let mut awaiting_keyframe = true;
         let mut last_frame_id: Option<u16> = None;
-        let mut latest_frame: Option<FramePacket> = None;
-        let mut latest_keyframe: Option<FramePacket> = None;
         let mut renderer_stats = RendererStats::default();
 
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
                 // MediaCodec must let go of the old ANativeWindow before
-                // SurfaceHolder.surfaceDestroyed returns. Keep the accepted
-                // socket around so a subsequent final release can still send
-                // BYE and the host does not leave a phantom running session.
+                // SurfaceHolder.surfaceDestroyed returns. Keep the UDP socket
+                // so a subsequent final release can still send BYE.
                 reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                pending.clear();
+                reassembler.clear();
                 last_frame_id = None;
-                latest_frame = None;
-                latest_keyframe = None;
                 control_clone.suspended.store(true, Ordering::SeqCst);
                 while control_clone.suspend.load(Ordering::SeqCst)
                     && !control_clone.stop.load(Ordering::SeqCst)
@@ -409,62 +446,17 @@ fn spawn_live_stream_renderer(
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 control_clone.suspended.store(false, Ordering::SeqCst);
+                if let Some(peer) = host_peer {
+                    request_idr(&socket, peer, &viewer_control_token);
+                }
                 continue;
             }
 
-            // (re)connect: wait for a sender when no stream is attached
-            if sock.is_none() {
-                let _ = listener.set_nonblocking(true);
-                // poll accept briefly so the stop flag stays responsive
-                if let Ok((s, peer)) = listener.accept() {
-                    if !peer_allowed(Some(peer), &expected_host) {
-                        // Drop the socket (never assign it) and keep waiting
-                        // for the paired host: a LAN attacker must not be able
-                        // to push forged H.264 into the decoder surface.
-                        log_info!("rejected media connection from {peer}: not the paired host");
-                        drop(s);
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        continue;
-                    }
-                    let _ = s.set_nodelay(true);
-                    // accepted sockets inherit O_NONBLOCK from the listener on
-                    // Linux — clear it so read_timeout (blocking poll) works;
-                    // otherwise read returns EAGAIN instantly and we treat it
-                    // as a disconnect
-                    use std::os::fd::AsRawFd;
-                    unsafe {
-                        let fd = s.as_raw_fd();
-                        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
-                        if flags >= 0 {
-                            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-                        }
-                    }
-                    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(300)));
-                    log_info!("TCP sender connected");
-                    sock = Some(s);
-                    pending.clear();
-                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                    last_frame_id = None;
-                    latest_frame = None;
-                    latest_keyframe = None;
-                    aus = 0;
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                }
+            if let Some(peer) = host_peer {
+                flush_input(&socket, peer, &viewer_control_token, &control_clone);
             }
-            let stream = sock.as_mut().unwrap();
-            let n = match std::io::Read::read(stream, &mut buf) {
-                Ok(0) => {
-                    // sender disconnected — wait for reconnect
-                    log_info!("TCP sender disconnected (EOF)");
-                    sock = None;
-                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                    last_frame_id = None;
-                    latest_frame = None;
-                    latest_keyframe = None;
-                    continue;
-                }
+
+            let (received, peer) = match socket.recv_from(&mut buf) {
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -472,177 +464,151 @@ fn spawn_live_stream_renderer(
                     continue;
                 }
                 Err(e) => {
-                    log_info!("TCP sender read error: {e}");
-                    sock = None;
-                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                    last_frame_id = None;
-                    latest_frame = None;
-                    latest_keyframe = None;
+                    log_info!("UDP receive error: {e}");
                     continue;
                 }
-                Ok(n) => n,
+                Ok(received) => received,
             };
-            pending.extend_from_slice(&buf[..n]);
-            if pending.len() > 8 * 1024 * 1024 {
-                log_info!("pending TCP bytes exceeded 8MB — dropping stale stream data");
-                pending.clear();
+
+            if !peer_allowed(Some(peer), &expected_host) {
+                log_info!("rejected media datagram from {peer}: not the paired host");
+                continue;
+            }
+            if host_peer != Some(peer) {
+                log_info!("UDP sender active: {peer}");
+                host_peer = Some(peer);
+                reassembler.clear();
                 reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
                 last_frame_id = None;
-                latest_frame = None;
-                latest_keyframe = None;
+                aus = 0;
+            }
+
+            let packet = &buf[..received];
+            if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
+                viewer_control_token.clear();
+                viewer_control_token.extend_from_slice(&packet[4..]);
+                control_clone.input.lock().unwrap().reset_session();
+                if let Err(error) = socket.send_to(packet, peer) {
+                    log_info!("failed to echo UDP reachability challenge: {error}");
+                } else {
+                    log_info!("UDP reachability challenge verified for {peer}");
+                }
+                continue;
+            }
+            if let Some(sequence) = parse_ack(packet, &viewer_control_token) {
+                control_clone.input.lock().unwrap().acknowledge(sequence);
+                continue;
+            }
+            if packet.len() >= 3 && &packet[..3] == b"CFG" {
+                log_info!("Received CFG datagram ({} bytes)", packet.len());
+                let mut off = 3usize;
+                while off + 4 <= packet.len() {
+                    let l = u32::from_be_bytes(packet[off..off + 4].try_into().unwrap()) as usize;
+                    off += 4;
+                    if off + l > packet.len() {
+                        break;
+                    }
+                    let nal = &packet[off..off + l];
+                    if nal.len() > 4 {
+                        let t = viewer_decoder::nal_type(&nal[4..]);
+                        if t == Some(viewer_decoder::NAL_SPS) {
+                            sps = nal.to_vec();
+                        } else if t == Some(viewer_decoder::NAL_PPS) {
+                            pps = nal.to_vec();
+                        }
+                    }
+                    off += l;
+                }
+                if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
+                    unsafe {
+                        log_info!(
+                            "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
+                            window_handle,
+                            sps.len(),
+                            pps.len()
+                        );
+                        match viewer_decoder::AndroidDecoder::new_h264(
+                            &sps,
+                            &pps,
+                            width,
+                            height,
+                            window_handle,
+                            fps,
+                        ) {
+                            Ok(d) => {
+                                log_info!("AndroidDecoder created successfully!");
+                                decoder = Some(d);
+                            }
+                            Err(e) => {
+                                log_info!("AndroidDecoder creation FAILED: {}", e);
+                            }
+                        }
+                    }
+                }
+                // CFG is emitted with an IDR on the host. Do not feed
+                // delta frames until that recovery keyframe arrives.
+                awaiting_keyframe = true;
                 continue;
             }
 
-            // Keep only the newest complete AU from this read batch. This is
-            // the viewer-side drop boundary: if decode falls behind, old
-            // frames are discarded before they become interaction latency.
-            latest_frame = None;
-            latest_keyframe = None;
+            let Some(fragment) = parse_fragment(packet) else {
+                continue;
+            };
+            let Some(completed) = reassembler.push(fragment) else {
+                continue;
+            };
+            let frame = FramePacket {
+                id: completed.id,
+                au: completed.au,
+                host_wall_ms: Some(completed.host_wall_ms),
+            };
+            let keyframe = is_keyframe(&frame.au);
+            let frame_gap = last_frame_id
+                .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
+                .unwrap_or(false);
+            last_frame_id = Some(frame.id);
 
-            // extract complete [u32 len][payload] frames from the stream
-            loop {
-                if pending.len() < 4 {
-                    break;
-                }
-                let len = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
-                if len > 4 * 1024 * 1024 {
-                    // framing corrupted — hard reset the connection
-                    log_info!("frame len {} exceeds cap — resetting connection", len);
-                    sock = None;
-                    pending.clear();
-                    last_frame_id = None;
-                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                    break;
-                }
-                if pending.len() < 4 + len {
-                    break; // need more bytes
-                }
-                let pkt: Vec<u8> = pending[4..4 + len].to_vec();
-                pending.drain(..4 + len);
-
-                if pkt.len() >= 3 && &pkt[..3] == b"CFG" {
-                    log_info!("Received CFG packet ({} bytes)", pkt.len());
-                    let mut off = 3usize;
-                    while off + 4 <= pkt.len() {
-                        let l = u32::from_be_bytes(pkt[off..off + 4].try_into().unwrap()) as usize;
-                        off += 4;
-                        if off + l > pkt.len() {
-                            break;
-                        }
-                        let nal = &pkt[off..off + l];
-                        if nal.len() > 4 {
-                            let t = viewer_decoder::nal_type(&nal[4..]);
-                            if t == Some(viewer_decoder::NAL_SPS) {
-                                sps = nal.to_vec();
-                            } else if t == Some(viewer_decoder::NAL_PPS) {
-                                pps = nal.to_vec();
-                            }
-                        }
-                        off += l;
-                    }
-                    if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
-                        last_frame_ms = std::time::Instant::now();
-                        unsafe {
-                            log_info!(
-                                "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
-                                window_handle,
-                                sps.len(),
-                                pps.len()
-                            );
-                            match viewer_decoder::AndroidDecoder::new_h264(
-                                &sps,
-                                &pps,
-                                width,
-                                height,
-                                window_handle,
-                                fps,
-                            ) {
-                                Ok(d) => {
-                                    log_info!("AndroidDecoder created successfully!");
-                                    decoder = Some(d);
-                                }
-                                Err(e) => {
-                                    log_info!("AndroidDecoder creation FAILED: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    // CFG is emitted with an IDR on the host. Do not feed
-                    // delta frames until that recovery keyframe arrives.
-                    awaiting_keyframe = true;
+            if frame_gap {
+                renderer_stats.frame_gaps += 1;
+                log_info!(
+                    "UDP access-unit gap detected at id={}; awaiting next IDR",
+                    frame.id
+                );
+                if keyframe {
+                    awaiting_keyframe = false;
+                } else {
+                    resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
+                    request_idr(&socket, peer, &viewer_control_token);
                     continue;
                 }
-
-                let frame = parse_legacy_au_packet(&pkt).or_else(|| parse_frame_packet(&pkt));
-                if let Some(frame) = frame {
-                    let keyframe = is_keyframe(&frame.au);
-                    let frame_gap = last_frame_id
-                        .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
-                        .unwrap_or(false);
-                    last_frame_id = Some(frame.id);
-
-                    if frame_gap {
-                        renderer_stats.frame_gaps += 1;
-                        log_info!(
-                            "encoded frame gap detected at id={}; awaiting next IDR",
-                            frame.id
-                        );
-                        resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                        latest_frame = None;
-                        latest_keyframe = None;
-                    }
-
-                    if keyframe {
-                        latest_keyframe = Some(frame.clone());
-                    }
-                    if !frame_gap {
-                        latest_frame = Some(frame);
-                    }
-                }
-            }
-
-            // stream-stall watchdog: if no AU was accepted for >3s, rebuild
-            // the codec rather than displaying a stale decoder state.
-            if decoder.is_some() && last_frame_ms.elapsed() > std::time::Duration::from_millis(3000)
-            {
-                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                latest_frame = None;
-                latest_keyframe = None;
-                log_info!("stream stalled >3s — decoder dropped, awaiting CFG");
             }
 
             if let Some(dec) = decoder.as_mut() {
-                if awaiting_keyframe {
-                    if let Some(frame) = latest_keyframe.take() {
-                        if feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
-                            awaiting_keyframe = false;
-                            last_frame_ms = std::time::Instant::now();
-                            if latest_frame.as_ref().map(|f| f.id) == Some(frame.id) {
-                                latest_frame = None;
-                            }
-                        }
-                    }
+                if awaiting_keyframe && !keyframe {
+                    continue;
                 }
-                if !awaiting_keyframe {
-                    if let Some(frame) = latest_frame.take() {
-                        if feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
-                            last_frame_ms = std::time::Instant::now();
-                        }
+                match feed_and_render(dec, &frame, &mut aus, fps, &mut renderer_stats) {
+                    FeedOutcome::Queued => {
+                        awaiting_keyframe = false;
+                    }
+                    FeedOutcome::ResyncRequired => {
+                        resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
+                        request_idr(&socket, peer, &viewer_control_token);
                     }
                 }
             }
         }
-        // A transient Surface destruction is deliberately an EOF only. The
-        // host's heartbeat reconnect then attaches to the next Surface. BYE
-        // is reserved for final Activity release.
+        // A transient Surface destruction keeps the host session alive. BYE
+        // is reserved for the Activity's final release.
         if control_clone.send_bye.load(Ordering::SeqCst) {
-            if let Some(mut stream) = sock.take() {
-                let payload = b"BYE";
-                let len = (payload.len() as u32).to_be_bytes();
-                let mut goodbye = Vec::with_capacity(4 + payload.len());
-                goodbye.extend_from_slice(&len);
-                goodbye.extend_from_slice(payload);
-                let _ = std::io::Write::write_all(&mut stream, &goodbye);
+            if let Some(peer) = host_peer {
+                control_clone
+                    .input
+                    .lock()
+                    .unwrap()
+                    .push(InputEvent::ReleaseAll);
+                flush_input(&socket, peer, &viewer_control_token, &control_clone);
+                send_viewer_command(&socket, peer, b"BYE", &viewer_control_token);
                 log_info!("Sent stream close signal for instance {}", instance_str);
             }
         } else {
@@ -655,8 +621,7 @@ fn spawn_live_stream_renderer(
             decoder.stop();
         }
         drop(decoder);
-        drop(sock);
-        drop(listener);
+        drop(socket);
         control_clone.suspended.store(false, Ordering::SeqCst);
         control_clone.finished.store(true, Ordering::SeqCst);
         remove_renderer_if_current(&instance_str, &control_clone);
@@ -672,7 +637,7 @@ fn suspend_live_stream_renderer(instance_str: &str) {
         .and_then(|map| map.get(instance_str).cloned());
     if let Some(control) = control {
         control.suspend.store(true, Ordering::SeqCst);
-        // The socket read timeout is 300 ms. Wait until the decoder has been
+        // The socket read timeout is 100 ms. Wait until the decoder has been
         // dropped before releasing the native window reference.
         for _ in 0..40 {
             if control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst) {
@@ -719,7 +684,7 @@ pub extern "C" fn leftcar_jni_attach(
     LEFTCAR_ERR_INVALID
 }
 
-/// Port-explicit attach: each stream window listens on its own TCP port
+/// Port-explicit attach: each stream window listens on its own UDP port
 /// (5000+n), so multiple instances receive independent pushes. `host_c` is
 /// the control-plane host IP; the media listener accepts only that peer.
 #[no_mangle]
@@ -841,6 +806,113 @@ pub extern "C" fn leftcar_jni_update_window(
             std::time::Duration::from_millis(monotonic_ms),
         );
         0
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+fn active_input_control(instance_c: *const c_char) -> Result<Arc<RendererControl>, i32> {
+    if instance_c.is_null() {
+        return Err(LEFTCAR_ERR_NULL);
+    }
+    let instance = unsafe { CStr::from_ptr(instance_c) }
+        .to_str()
+        .map_err(|_| LEFTCAR_ERR_INVALID)?;
+    ACTIVE_RENDERERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(instance).cloned())
+        .ok_or(LEFTCAR_ERR_STATE)
+}
+
+/// Queue a native Android pointer event. `x` and `y` are normalized to the
+/// actual video Surface before crossing JNI; Rust clamps once more at the
+/// fixed-point wire boundary.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_input_pointer(
+    instance_c: *const c_char,
+    action: u32,
+    x: f32,
+    y: f32,
+    buttons: u32,
+    action_button: u32,
+    horizontal_scroll: f32,
+    vertical_scroll: f32,
+) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        let event = match action {
+            1 => InputEvent::PointerMove {
+                x: normalized_axis(x),
+                y: normalized_axis(y),
+                buttons,
+            },
+            2 | 3 => InputEvent::PointerButton {
+                x: normalized_axis(x),
+                y: normalized_axis(y),
+                button: u8::try_from(action_button).unwrap_or(0),
+                down: action == 2,
+                buttons,
+            },
+            4 => InputEvent::Scroll {
+                horizontal_milli_lines: (horizontal_scroll.clamp(-1000.0, 1000.0) * 1_000.0).round()
+                    as i32,
+                vertical_milli_lines: (vertical_scroll.clamp(-1000.0, 1000.0) * 1_000.0).round()
+                    as i32,
+            },
+            _ => return LEFTCAR_ERR_INVALID,
+        };
+        control.input.lock().unwrap().push(event);
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_input_key(
+    instance_c: *const c_char,
+    key_code: u32,
+    scan_code: u32,
+    meta_state: u32,
+    down: bool,
+    repeat: u32,
+) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        let (Ok(key_code), Ok(scan_code), Ok(repeat)) = (
+            u16::try_from(key_code),
+            u16::try_from(scan_code),
+            u16::try_from(repeat),
+        ) else {
+            return LEFTCAR_ERR_INVALID;
+        };
+        control.input.lock().unwrap().push(InputEvent::Key {
+            key_code,
+            scan_code,
+            meta_state,
+            down,
+            repeat,
+        });
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        control.input.lock().unwrap().push(InputEvent::ReleaseAll);
+        LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }

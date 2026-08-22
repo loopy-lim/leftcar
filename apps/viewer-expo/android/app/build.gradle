@@ -96,7 +96,7 @@ android {
 
     namespace 'dev.leftcar.viewer'
     defaultConfig {
-        applicationId 'dev.leftcar.viewer'
+        applicationId 'leftcar.ll3.kr'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

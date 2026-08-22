@@ -46,6 +46,9 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_input_permission,
+            request_input_permission,
+            set_session_input,
             begin_pairing,
             cancel_pairing,
             list_paired_devices,
@@ -182,6 +185,29 @@ fn get_status(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> control::StatusViewPublic {
     state.snapshot()
+}
+
+#[tauri::command]
+fn get_input_permission(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<bool, String> {
+    state.input_permission()
+}
+
+#[tauri::command]
+fn request_input_permission(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<bool, String> {
+    state.request_input_permission()
+}
+
+#[tauri::command]
+fn set_session_input(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    session: u32,
+    enabled: bool,
+) -> Result<(), String> {
+    state.set_session_input(session, enabled)
 }
 
 #[tauri::command]

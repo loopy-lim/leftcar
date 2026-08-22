@@ -25,7 +25,7 @@ const config: LeftcarExpoConfig = {
     backgroundColor: "#080B1D",
   },
   android: {
-    package: "dev.leftcar.viewer",
+    package: "leftcar.ll3.kr",
   },
   plugins: [
     "expo-router",

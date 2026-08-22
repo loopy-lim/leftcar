@@ -4,10 +4,12 @@
   "license": "MIT",
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "typecheck": "tsc -b",
+    "check:react-runtime": "node tools/check-react-runtime-versions.mjs",
+    "typecheck": "pnpm check:react-runtime && tsc -b",
     "test": "vitest run",
     "test:contract": "vitest run -c vitest.contract.config.ts",
     "test:architecture": "tsx tools/architecture-check/ts.ts",
+    "benchmark:capture": "tsx tools/capture-ab-report.ts",
     "rustra:generate": "cargo run -p control-contract --bin generate"
   },
   "devDependencies": {

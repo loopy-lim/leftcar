@@ -33,6 +33,7 @@ Full Space의 SpatialPanel은 더 자유로운 3D 배치를 제공하지만 다�
 | 8 | [24주 구현 계획](08-implementation-roadmap.md) | 다른 개발자가 어떤 순서와 완료 기준으로 구현하는가 |
 | 9 | [위험과 미결정 사항](09-risk-register.md) | 어떤 가설이 실패할 수 있고 언제 방향을 바꾸는가 |
 | 10 | [공식 근거 자료](10-references.md) | 계획의 플랫폼 근거는 어디에서 확인하는가 |
+| 부록 | [Apple 화면 공유 비교 기준](apple-screen-sharing-baseline.md) | Apple UX·성능 기준과 Leftcar의 차이는 무엇인가 |
 
 결정 기록:
 
@@ -72,7 +73,7 @@ Full Space의 SpatialPanel은 더 자유로운 3D 배치를 제공하지만 다�
 - 각 stream window는 독립적으로 해상도, 프레임률, 비트레이트를 낮추거나 일시 중지할 수 있다.
 - Overview는 선택 기능이며 1x1, 2x1, 2x2 타일 레이아웃을 한 창에 제공한다.
 - v1은 호스트 OS에 새 가상 디스플레이를 만들지 않는다.
-- 캡처 대상 앱을 Galaxy XR에서 조작하지 않는다. 호스트에서의 입력은 호스트 사용자가 담당한다.
+- 캡처 대상 앱은 Host가 해당 스트림을 `Control`로 전환했을 때만 Galaxy XR에서 조작한다. 기본 상태는 `Observe`다.
 
 Android 시스템 창보다 더 자유로운 깊이 배치, 곡면 배치, 3D 고정이 필요할 때만 선택적 Spatial Mode를 검토한다.
 
@@ -108,7 +109,7 @@ Android 시스템 창보다 더 자유로운 깊이 배치, 곡면 배치, 3D �
 다음 항목이 합의되기 전에는 Phase 1 이후로 진행하지 않는다.
 
 - [x] 기본 UX가 Home Space의 멀티 인스턴스 stream window라는 점
-- [x] 보기 전용이며 원격 입력, 오디오, 파일 전송을 제외한다는 점
+- [x] 원격 입력은 기본 거부·Host 스트림별 승인이고, 오디오와 파일 전송은 제외한다는 점
 - [x] macOS를 첫 호스트로 삼고 Windows는 두 번째로 진행한다는 점
 - [x] 로컬 네트워크 직접 연결만 첫 배포 범위에 둔다는 점
 - [x] Rustra는 제어 계약에만 쓰고 영상은 네이티브 별도 경로로 보낸다는 점

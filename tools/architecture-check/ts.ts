@@ -4,7 +4,7 @@
  *
  * Rules (docs/05 L0):
  * - generated TS contains no video payload types
- * - viewer app sources contain no input-injection symbols
+ * - generated/TypeScript control sources contain no high-rate input plane
  * - Kotlin shim imports only allowlisted packages (no java.net, no codec)
  * - Kotlin shim contains no business-layer markers (network/codec policy)
  */
@@ -68,23 +68,22 @@ checkFiles(
   "generated-no-video-types",
 );
 
-// 2. viewer apps: no input commands anywhere (P-01, T-06)
-checkFiles(
-  join(ROOT, "apps/viewer-android"),
-  [
-    [/sendKey|sendMouse|injectInput|sendTouch/i, "input-injection symbol in viewer"],
-    [/readClipboard|writeClipboard|readFile|writeFile/, "file/clipboard access in viewer"],
-  ],
-  "viewer-no-input-commands",
-);
-checkFiles(
-  join(ROOT, "apps/viewer-expo"),
-  [
-    [/sendKey|sendMouse|injectInput|sendTouch/i, "input-injection symbol in viewer"],
-    [/readClipboard|writeClipboard|readFile|writeFile/, "file/clipboard access in viewer"],
-  ],
-  "viewer-no-input-commands",
-);
+// 2. The 120/180Hz input plane is native Kotlin/JNI/UDP. Keep it out of
+//    React/Rustra/JSON while continuing to deny clipboard and file transfer.
+for (const folder of [
+  join(ROOT, "apps/viewer-android/src"),
+  join(ROOT, "apps/viewer-expo/src"),
+  join(ROOT, "apps/viewer-expo/app"),
+]) {
+  checkFiles(
+    folder,
+    [
+      [/sendKey|sendMouse|injectInput|sendTouch/i, "high-rate input leaked into TypeScript"],
+      [/readClipboard|writeClipboard|readFile|writeFile/, "file/clipboard access in viewer"],
+    ],
+    "viewer-ts-no-high-rate-input",
+  );
+}
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
 const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;

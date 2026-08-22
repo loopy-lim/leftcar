@@ -417,6 +417,7 @@ pub enum DecoderError {
 pub enum FeedStatus {
     Queued { rendered: bool },
     InputUnavailable,
+    InputTooLarge { required: usize, capacity: usize },
 }
 
 /// A live hardware decoder session bound to one Surface.
@@ -474,10 +475,16 @@ impl AndroidDecoder {
             AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
             AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
             AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
+            // Request an input slot large enough for a worst-case IDR. Without
+            // this hint, some vendor codecs size compressed input buffers for
+            // average frames and reject the first high-motion/key frame.
+            let max_input_size =
+                (u64::from(sw) * u64::from(sh) * 3 / 2).clamp(1 << 20, 16 << 20) as i32;
+            AMediaFormat_setInt32(format, c"max-input-size".as_ptr(), max_input_size);
             // Tell platform decoders this is an interactive, real-time
             // stream. These are optional MediaFormat keys, so older/vendor
             // codecs can ignore them while modern codecs avoid extra queueing.
-            let fps = fps.clamp(1, 60) as i32;
+            let fps = fps.clamp(1, 90) as i32;
             AMediaFormat_setInt32(format, c"frame-rate".as_ptr(), fps);
             AMediaFormat_setInt32(format, c"operating-rate".as_ptr(), fps);
             AMediaFormat_setInt32(format, c"priority".as_ptr(), 0);
@@ -547,7 +554,7 @@ impl AndroidDecoder {
     ) -> Result<bool, DecoderError> {
         match self.feed_au_status(au, pts_us, timeout_us)? {
             FeedStatus::Queued { rendered } => Ok(rendered),
-            FeedStatus::InputUnavailable => Ok(false),
+            FeedStatus::InputUnavailable | FeedStatus::InputTooLarge { .. } => Ok(false),
         }
     }
 
@@ -562,6 +569,14 @@ impl AndroidDecoder {
         if !self.started {
             return Err(DecoderError::NotStarted);
         }
+        // Release every output buffer that is already ready before asking for
+        // another input slot. Some vendor codecs stop returning input buffers
+        // while a renderable output remains queued, which otherwise turns one
+        // transient miss into a permanent black-screen/drop cascade.
+        let mut rendered = false;
+        while self.pump_output(0)? {
+            rendered = true;
+        }
         let idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, timeout_us) };
         if idx < 0 {
             return Ok(FeedStatus::InputUnavailable);
@@ -569,12 +584,23 @@ impl AndroidDecoder {
         let idx = idx as usize;
         let mut capacity = 0usize;
         let buf = unsafe { AMediaCodec_getInputBuffer(self.codec, idx, &mut capacity) };
-        if buf.is_null() || au.len() > capacity {
-            // drop oversized AU rather than corrupt the codec
+        if buf.is_null() {
             unsafe {
                 AMediaCodec_queueInputBuffer(self.codec, idx, 0, 0, pts_us, 0);
             }
             return Ok(FeedStatus::InputUnavailable);
+        }
+        if au.len() > capacity {
+            // Return the slot to MediaCodec, but report an oversized AU
+            // separately. Retrying it cannot succeed and the caller must
+            // rebuild/resync instead of treating this as transient pressure.
+            unsafe {
+                AMediaCodec_queueInputBuffer(self.codec, idx, 0, 0, pts_us, 0);
+            }
+            return Ok(FeedStatus::InputTooLarge {
+                required: au.len(),
+                capacity,
+            });
         }
         unsafe {
             std::ptr::copy_nonoverlapping(au.as_ptr(), buf, au.len());
@@ -584,7 +610,7 @@ impl AndroidDecoder {
             }
         }
         Ok(FeedStatus::Queued {
-            rendered: self.pump_output(timeout_us)?,
+            rendered: self.pump_output(timeout_us)? || rendered,
         })
     }
 

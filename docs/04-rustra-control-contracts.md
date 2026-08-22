@@ -415,7 +415,7 @@ pub struct CommandMeta {
 
 ```text
 host_contract_generates_stable_source_descriptor
-viewer_contract_does_not_expose_input_commands
+viewer_contract_does_not_expose_high_rate_input_commands
 video_payload_type_is_absent_from_generated_typescript
 pairing_offer_view_never_contains_private_key
 create_stream_launch_rejects_stale_catalog_revision
@@ -431,8 +431,7 @@ generated_contract_hash_matches_runtime
 CI에서 정적 검사 또는 architecture test로 다음을 막는다.
 
 - generated TS에 `EncodedFrame`, `NalUnit`, `VideoPacket`, raw `bytes` command가 나타남
-- Viewer contract에 `sendKey`, `sendMouse`, `injectInput`, `clipboard` command가 나타남
+- Viewer Rustra contract에 `sendKey`, `sendMouse`, `injectInput`, `clipboard` command가 나타남. 키보드/포인터는 세션 토큰으로 인증한 네이티브 데이터그램 평면만 사용한다.
 - pairing output에 `private`, `secret`, `token` 필드가 장기 값으로 나타남
 - domain crate가 Tauri, React Native, Android, Apple, Windows SDK를 import함
 - control event가 10Hz를 넘는 publish loop에 사용됨
-

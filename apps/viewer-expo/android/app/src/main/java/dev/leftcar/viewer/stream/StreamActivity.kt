@@ -8,6 +8,9 @@ import android.os.SystemClock
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.Surface
+import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.View
@@ -21,7 +24,7 @@ import dev.leftcar.viewer.shim.ViewerNative
  * Multi-instance: launched with documentLaunchMode="always" so each stream
  * becomes its own task/window (H05-proven manifest recipe). The decode loop
  * runs entirely in Rust (libleftcar_viewer) — Kotlin only forwards
- * lifecycle + Surface, plus the per-window TCP port from intent extras.
+ * lifecycle + Surface, plus the per-window UDP port from intent extras.
  */
 private class AspectRatioSurfaceView(context: android.content.Context) : SurfaceView(context) {
     private var videoWidth = 16
@@ -63,6 +66,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var nativeState: Long = 0
     private var surfaceAttached = false
     private var released = false
+    private var streamSurface: AspectRatioSurfaceView? = null
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
@@ -117,6 +121,85 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    private fun normalizedX(event: MotionEvent, view: View): Float =
+        (event.x / view.width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+
+    private fun normalizedY(event: MotionEvent, view: View): Float =
+        (event.y / view.height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+
+    private fun forwardPointer(event: MotionEvent, view: View): Boolean {
+        val touchLike = event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) ||
+            event.isFromSource(InputDevice.SOURCE_STYLUS)
+        // Android normally batches/resamples pointer motion around display
+        // frames. A remote-control Surface needs the hardware samples early;
+        // Rust still coalesces them to the bounded 2x-stream-FPS wire target.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            (event.actionMasked == MotionEvent.ACTION_HOVER_ENTER ||
+                event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS)
+        ) {
+            view.requestUnbufferedDispatch(event.source)
+        }
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_MOVE -> 1
+            MotionEvent.ACTION_BUTTON_PRESS -> 2
+            MotionEvent.ACTION_BUTTON_RELEASE -> 3
+            MotionEvent.ACTION_DOWN -> if (touchLike) 2 else return false
+            MotionEvent.ACTION_UP -> if (touchLike) 3 else return false
+            MotionEvent.ACTION_SCROLL -> 4
+            MotionEvent.ACTION_CANCEL -> {
+                ViewerNative.releaseInput(instanceId)
+                return true
+            }
+            else -> return false
+        }
+        val actionButton = when {
+            event.actionButton != 0 -> event.actionButton
+            touchLike -> MotionEvent.BUTTON_PRIMARY
+            else -> 0
+        }
+        val buttons = when {
+            touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
+            else -> event.buttonState
+        }
+        val result = ViewerNative.sendPointer(
+            instanceId,
+            action,
+            normalizedX(event, view),
+            normalizedY(event, view),
+            buttons,
+            actionButton,
+            event.getAxisValue(MotionEvent.AXIS_HSCROLL),
+            event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+        )
+        return result == 0
+    }
+
+    private fun isRemoteKey(keyCode: Int): Boolean = keyCode !in setOf(
+        KeyEvent.KEYCODE_HOME,
+        KeyEvent.KEYCODE_BACK,
+        KeyEvent.KEYCODE_POWER,
+        KeyEvent.KEYCODE_VOLUME_UP,
+        KeyEvent.KEYCODE_VOLUME_DOWN,
+        KeyEvent.KEYCODE_VOLUME_MUTE,
+        KeyEvent.KEYCODE_APP_SWITCH,
+    )
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!isRemoteKey(event.keyCode)) return super.dispatchKeyEvent(event)
+        if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP) {
+            return super.dispatchKeyEvent(event)
+        }
+        val result = ViewerNative.sendKey(
+            instanceId,
+            event.keyCode,
+            event.scanCode,
+            event.metaState,
+            event.action == KeyEvent.ACTION_DOWN,
+            event.repeatCount,
+        )
+        return result == 0 || super.dispatchKeyEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instanceId = intent?.getStringExtra("instance")
@@ -124,17 +207,25 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             ?: "instance-${System.nanoTime()}"
         host = intent?.getStringExtra("host") ?: savedInstanceState?.getString("host") ?: ""
         port = intent?.getIntExtra("port", 5000) ?: 5000
-        fps = (intent?.getIntExtra("fps", 60) ?: 60).coerceIn(1, 60)
+        fps = (intent?.getIntExtra("fps", 60) ?: 60).coerceIn(1, 90)
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
 
         val sv = AspectRatioSurfaceView(this).apply {
             setVideoSize(sourceWidth, sourceHeight)
             setBackgroundColor(Color.BLACK)
+            isFocusable = true
+            isFocusableInTouchMode = true
             // This Activity has no UI overlay. Keep the decoder Surface above
             // the opaque window buffer; some XR/vendor compositors otherwise
             // leave the default z=-2 SurfaceView hidden behind the black root.
             setZOrderOnTop(true)
+        }
+        streamSurface = sv
+        sv.setOnGenericMotionListener { view, event -> forwardPointer(event, view) }
+        sv.setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) view.requestFocus()
+            forwardPointer(event, view)
         }
         // Keep the decoding Surface tied to the actual window geometry.
         // A fixed source-sized buffer can be discarded by some freeform/XR
@@ -163,6 +254,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
         setContentView(fl)
+        sv.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
@@ -182,7 +274,12 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         lifecycleEvent(if (hasFocus) 4 else 5) // FOCUS_GAIN / FOCUS_LOSS
-        if (hasFocus) window.decorView.post { hideSystemBars() }
+        if (hasFocus) {
+            streamSurface?.requestFocus()
+            window.decorView.post { hideSystemBars() }
+        } else {
+            ViewerNative.releaseInput(instanceId)
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -226,6 +323,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         android.util.Log.i("LeftcarStream", "surfaceDestroyed: transient detach instanceId=$instanceId")
         lifecycleEvent(8) // SURFACE_DESTROY
+        ViewerNative.releaseInput(instanceId)
         val res = if (surfaceAttached) {
             surfaceAttached = false
             ViewerNative.detachSurface(nativeState, instanceId)
@@ -236,6 +334,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        ViewerNative.releaseInput(instanceId)
         lifecycleEvent(9) // ACTIVITY_PAUSE
         super.onPause()
     }
@@ -261,6 +360,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             released = true
         }
         releaseNetworkLocks()
+        ViewerNative.releaseInput(instanceId)
         ViewerNative.release(nativeState, instanceId)
         super.onDestroy()
     }

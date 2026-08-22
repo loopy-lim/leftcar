@@ -8,7 +8,7 @@
 1. 페어링되지 않은 장치는 Host 존재를 최소 정보 이상 알 수 없고 화면을 받을 수 없다.
 2. 페어링된 Viewer도 Host 사용자가 승인한 source만 볼 수 있다.
 3. 페어링된 장치만 제어 연결을 획득하고, 제어 채널의 토큰/승인 정보가 유효해야 한다.
-4. 보기 전용 capability만 존재하고 원격 입력 경로가 없다.
+4. 원격 입력은 Host가 세션별로 허용하고 macOS 손쉬운 사용 권한이 있을 때만 동작하며, 세션 난수 검증 전에는 입력을 처리하지 않는다.
 5. 창 제목, 화면 pixel, token, private key가 log/telemetry에 남지 않는다.
 6. 세션 종료 또는 권한 철회가 빠르고 완전하게 반영된다.
 7. malformed network/media input이 unbounded allocation, panic, double free를 유발하지 않는다.
@@ -45,6 +45,7 @@ v1은 다음 공격 환경을 완전히 해결한다고 주장하지 않는다.
 ```text
 Host user approval
   ├─ screen recording permission
+  ├─ accessibility input permission + per-stream opt-in
   ├─ source selection
   └─ Viewer pairing approval
 
@@ -69,7 +70,7 @@ Platform codec
 | T-03 | MITM이 Host를 바꿈 | QR에 Host public key fingerprint binding |
 | T-04 | 기존 paired Viewer 도난 | Host device list와 즉시 revoke |
 | T-05 | 승인되지 않은 source 요청 | source capability와 session authorization check |
-| T-06 | Viewer가 입력 명령 주입 | protocol에 입력 message 없음, unknown command deny |
+| T-06 | Viewer 또는 LAN 공격자가 입력을 무단 주입 | 페어링된 미디어 세션 난수 검증, Host 세션별 기본 거부/명시 승인, reliable sequence/ACK, 종료 시 전체 해제 |
 | T-07 | 무제한 fragment로 memory exhaustion | frame/fragment/stream/session byte cap와 timeout |
 | T-08 | malformed H.264로 decoder crash | codec config validation, fuzz, process watchdog, paired peer라도 제한 |
 | T-09 | log에 화면/창 제목 노출 | structured allowlist metric, redaction test |
@@ -79,7 +80,7 @@ Platform codec
 | T-13 | malicious update/dependency | lockfile, checksum, signed release, SBOM/audit |
 | T-14 | protected content 우회 | blank/protected error를 정상 처리, bypass 시도 금지 |
 
-v0.1.0 범위에서는 LAN 내 짧은 범위 사용을 가정하며 미디어/제어 모두 동일 TCP 평문에서 운용한다.
+v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용한다. 미디어는 제어 peer와 같은 사설 LAN 후보 중 난수 UDP 왕복을 증명한 주소에만 전송하지만 내용 자체는 평문이다.
 공개 인터넷 노출이 필요한 경우 TLS + PAKE + certificate/pinning 기반의 추가 상호인증/암호화가 요구된다.
 
 ## 6. 장치 identity
@@ -164,14 +165,12 @@ v1 device capability:
 ```text
 view_catalog
 view_source(source_id, revision, expiry)
+remote_input(stream_session, host_opt_in)
 ```
 
 존재하지 않는 capability:
 
 ```text
-send_keyboard
-send_pointer
-send_touch
 read_clipboard
 write_clipboard
 read_file
@@ -187,7 +186,7 @@ source capability는 다음에 bind한다.
 - short expiry/renewal
 - codec/profile upper bound
 
-Viewer가 임의 source ID를 추측해도 authorization에 실패해야 한다.
+Viewer가 임의 source ID나 입력 세션 난수를 추측해도 authorization에 실패해야 한다. 입력 capability는 source 보기 승인만으로 자동 획득되지 않으며 Host 토글을 끄면 즉시 주입을 중단하고 눌린 키와 버튼을 해제한다.
 
 ## 10. Host 사용자 가시성
 
@@ -341,6 +340,7 @@ replayed_offer_is_rejected
 host_fingerprint_mismatch_is_fatal
 revocation_closes_existing_streams
 unknown_input_like_command_is_denied
+native_input_requires_session_nonce_and_host_opt_in
 oversized_control_message_allocates_nothing_large
 fragment_flood_stays_within_memory_bound
 diagnostics_redact_title_path_token_and_ip

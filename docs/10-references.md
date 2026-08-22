@@ -1,6 +1,6 @@
 # 공식 근거 자료
 
-확인일: 2026-08-17  
+확인일: 2026-08-22
 정책: 기술 및 플랫폼 사실은 가능한 한 원 제작사/표준 문서를 사용한다. 이 목록의 존재는 Leftcar 실기기 성능을 증명하지 않는다.
 
 ## 1. Rustra
@@ -102,6 +102,29 @@
 - [Disable frame reordering](https://developer.apple.com/documentation/videotoolbox/kvtcompressionpropertykey_allowframereordering)
 - [Encoding video for live streaming](https://developer.apple.com/documentation/videotoolbox/encoding-video-for-live-streaming)
 
+### 화면 공유와 원격 입력 비교 기준
+
+- [Share the screen of another Mac](https://support.apple.com/guide/mac-help/share-the-screen-of-another-mac-mh14066/mac)
+  - Observe/Control 전환과 화면 공유 기본 동작
+- [Screen sharing type options on Mac](https://support.apple.com/guide/mac-help/screen-sharing-type-options-on-mac-mchl1883115d/mac)
+  - High Performance의 30/60fps, 낮은 지연, 4:4:4, HDR, 가상 디스플레이와 네트워크 권장사항
+- [Request or give remote control in FaceTime on Mac](https://support.apple.com/guide/facetime/request-or-give-remote-control-fctmebd8481a/mac)
+  - 대상 사용자 승인·중지와 로컬 입력 우선의 안전 기준
+- [CGEvent mouse event](https://developer.apple.com/documentation/coregraphics/cgevent/init%28mouseeventsource%3Amousetype%3Amousecursorposition%3Amousebutton%3A%29)
+- [CGEvent keyboard event](https://developer.apple.com/documentation/coregraphics/cgevent/init%28keyboardeventsource%3AvirtualKey%3AkeyDown%3A%29)
+- [CGDisplayBounds](https://developer.apple.com/documentation/coregraphics/cgdisplaybounds%28_%3A%29)
+- [CGPreflightPostEventAccess](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess%28%29)
+- [CGRequestPostEventAccess](https://developer.apple.com/documentation/coregraphics/cgrequestposteventaccess%28%29)
+
+Apple 공개 자료에는 포인터 장치의 내부 polling rate가 없다. Leftcar의 영상 FPS × 2 정책은 독립적인 제품 목표이며 실기기에서 별도로 계측한다.
+
+### Android 입력 전달
+
+- [SurfaceView.requestUnbufferedDispatch](https://developer.android.com/reference/kotlin/android/view/SurfaceView)
+  - API 30 이상에서 지정 입력 source의 `MotionEvent`를 display frame batching 없이 요청하는 근거
+- [MotionEvent](https://developer.android.com/reference/android/view/MotionEvent.html)
+  - mouse button/action, pointer coordinate, scroll axis 해석의 근거
+
 ## 8. Windows capture/encode
 
 - [Windows screen capture](https://learn.microsoft.com/en-us/windows/apps/develop/media-authoring-processing/screen-capture)
@@ -141,4 +164,3 @@
 - release candidate 전
 
 변경된 플랫폼 동작은 ADR과 위험 등록부에 반영한다.
-

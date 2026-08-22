@@ -123,6 +123,44 @@ describe("connect token injection", () => {
     expect(lastSocket().written.length).toBe(0);
     client.close();
   });
+
+  it("caches the token so a stream request is written in the same JS turn", async () => {
+    const tokenProvider = vi.fn(async () => "tok-cached");
+    const client = await connect("1.2.3.4", 7777, 1000, tokenProvider);
+    const socket = lastSocket();
+
+    const probe = client.request("getStatus");
+    await vi.waitFor(() => expect(socket.written.length).toBe(1));
+    reply(socket, { ok: true, result: { sessions: [] } });
+    await probe;
+
+    const start = client.request("startStream", { viewerPort: 5001 });
+    // No await here: opening StreamActivity immediately after this call must
+    // not suspend JS before the native socket write has been queued.
+    expect(socket.written.length).toBe(2);
+    expect(JSON.parse(socket.written[1].payload).token).toBe("tok-cached");
+    expect(tokenProvider).toHaveBeenCalledTimes(1);
+    reply(socket, { ok: true, result: { session: 1 } });
+    await expect(start).resolves.toEqual({ session: 1 });
+    client.close();
+  });
+
+  it("acknowledges the native socket write before the server response", async () => {
+    const client = await connect("1.2.3.4", 7777, 1000, async () => "tok");
+    const socket = lastSocket();
+    const onWritten = vi.fn();
+
+    const request = client.request("startStream", { viewerPort: 5001 }, onWritten);
+    await vi.waitFor(() => expect(socket.written.length).toBe(1));
+    expect(onWritten).not.toHaveBeenCalled();
+
+    socket.written[0].cb?.(null);
+    expect(onWritten).toHaveBeenCalledOnce();
+
+    reply(socket, { ok: true, result: { session: 1 } });
+    await expect(request).resolves.toEqual({ session: 1 });
+    client.close();
+  });
 });
 
 describe("unauthorized error handling", () => {

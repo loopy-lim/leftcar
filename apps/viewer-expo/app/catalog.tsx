@@ -33,7 +33,12 @@ type StreamLauncherNative = {
   openStream(port: number, host: string, width: number, height: number, fps: number): Promise<string>;
 };
 
+type NetworkInfoNative = {
+  getWifiIpv4(): Promise<string>;
+};
+
 const launcher = NativeModules.StreamLauncher as StreamLauncherNative | undefined;
+const networkInfo = NativeModules.NsdDiscovery as NetworkInfoNative | undefined;
 
 interface ActiveStream {
   port: number;
@@ -43,6 +48,7 @@ interface ActiveStream {
   width: number;
   height: number;
   fps: number;
+  captureBackend: CaptureBackendId;
   startedAt: number;
 }
 
@@ -89,6 +95,11 @@ const STREAM_PROFILES = [
 
 type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
 type StreamProfile = (typeof STREAM_PROFILES)[number];
+
+const CAPTURE_BACKENDS = [
+  { id: "screenCaptureKit", label: "ScreenCaptureKit", hint: "권장 · 최신 macOS 기본 경로" },
+] as const;
+type CaptureBackendId = (typeof CAPTURE_BACKENDS)[number]["id"];
 
 function fitProfileToDisplay(
   display: DisplayInfo,
@@ -143,14 +154,15 @@ function formatStatus(statusView: StatusView | undefined, streams: ActiveStream[
     .map(
       (session) =>
         `#${session.session} ${session.sourceName}: ${session.fps}/${session.fpsTarget || 60}fps · ${session.kbps}kbps ` +
-        `· drop=${session.dropped} · cap=${(session.captureToEncodeUs / 1000).toFixed(1)}ms ` +
+        `· ${session.captureBackend}/${session.mediaTransport.toUpperCase()} · first=${session.firstSendMs}ms ` +
+        `· drop=${session.dropped} · cap-p95=${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms ` +
         (session.captureQueueWaitUs !== undefined
           ? `· q=${(session.captureQueueWaitUs / 1000).toFixed(1)}ms `
           : "") +
         (session.encodeOutputUs !== undefined
           ? `· enc=${(session.encodeOutputUs / 1000).toFixed(1)}ms `
           : "") +
-        `· send=${(session.sendBlockUs / 1000).toFixed(1)}ms` +
+        `· send-p95=${(session.sendBlockP95Us / 1000).toFixed(1)}ms` +
         (session.error ? ` · ${session.error}` : ""),
     )
     .join("\n");
@@ -192,10 +204,12 @@ interface CatalogHeaderProps {
   host: string;
   loading: boolean;
   profileId: StreamProfileId;
+  captureBackend: CaptureBackendId;
   refreshing: boolean;
   selectedProfile: StreamProfile;
   onRefresh: () => void;
   onSelectProfile: (id: StreamProfileId) => void;
+  onSelectCaptureBackend: (id: CaptureBackendId) => void;
 }
 
 function CatalogHeader({
@@ -203,10 +217,12 @@ function CatalogHeader({
   host,
   loading,
   profileId,
+  captureBackend,
   refreshing,
   selectedProfile,
   onRefresh,
   onSelectProfile,
+  onSelectCaptureBackend,
 }: CatalogHeaderProps) {
   const refreshDisabled = loading || refreshing;
   return (
@@ -279,6 +295,35 @@ function CatalogHeader({
               selected={profile.id === profileId}
               onSelect={onSelectProfile}
             />
+          ))}
+        </View>
+        <View style={styles.profileRow}>
+          {CAPTURE_BACKENDS.map((backend) => (
+            <Pressable
+              key={backend.id}
+              style={[
+                styles.profileButton,
+                backend.id === captureBackend && styles.profileButtonSelected,
+              ]}
+              onPress={() => onSelectCaptureBackend(backend.id)}
+            >
+              <Text
+                style={[
+                  styles.profileLabel,
+                  backend.id === captureBackend && styles.profileLabelSelected,
+                ]}
+              >
+                {backend.label}
+              </Text>
+              <Text
+                style={[
+                  styles.profileDetail,
+                  backend.id === captureBackend && styles.profileDetailSelected,
+                ]}
+              >
+                {backend.hint}
+              </Text>
+            </Pressable>
           ))}
         </View>
       </View>
@@ -443,6 +488,7 @@ function useStreamController(
         width: active.width,
         height: active.height,
         fps: active.fps,
+        captureBackend: active.captureBackend,
       });
       return { active, restarted };
     },
@@ -476,7 +522,8 @@ function useStreamController(
     const now = Date.now();
     for (const active of streams) {
       const session = sessionsById.get(active.session);
-      const unhealthy = !session || session.state !== "running" || session.fps === 0;
+      const unhealthy =
+        !session || ["error", "stopped", "unknown"].includes(session.state);
       if (session?.error === "viewer closed stream") {
         setStreams((previous) =>
           previous.filter((item) => item.session !== active.session),
@@ -513,12 +560,16 @@ function useStreamController(
 
 /**
  * Source catalog: list displays from the host, open each in its own OS
- * window (StreamLauncher.openStream), then push the video via startStream.
+ * window after the control socket confirms its startStream write. Waiting for
+ * that write callback prevents XR Activity pause from stranding the request,
+ * while the host's bounded connect retry covers native listener startup.
  */
 export default function Catalog() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [profileId, setProfileId] = useState<StreamProfileId>("latency");
+  const [captureBackend, setCaptureBackend] =
+    useState<CaptureBackendId>("screenCaptureKit");
   const host = controlHost();
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
@@ -564,6 +615,7 @@ export default function Catalog() {
       const port = allocPort();
       const selectedSize = fitProfileToDisplay(d, selectedProfile);
       const { width, height, fps } = selectedSize;
+      const viewerIps = await networkInfo?.getWifiIpv4().then((address) => [address]).catch(() => []);
 
       const startArgs = {
         sourceIndex: d.index,
@@ -571,48 +623,37 @@ export default function Catalog() {
         width,
         height,
         fps,
+        captureBackend,
+        viewerIps: viewerIps ?? [],
       };
 
-      // Send the control request while the catalog Activity is still active.
-      // Opening StreamActivity first suspends this JS activity on some XR
-      // builds, which previously meant the request was only sent after Back.
-      // The macOS sender retries the endpoint while the native listener binds.
-      let startPromise = client.request<{ session: number }>("startStream", startArgs);
-      let out: { session: number } | null = null;
-      let lastError: unknown = null;
-      try {
-        // The Activity and its Rust TCP listener now start in parallel with
-        // the host's bounded connect retry, removing the fixed 1.5s guess.
-        await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
-        out = await startPromise;
-      } catch (e) {
-        lastError = e;
-        // Do not leave the in-flight request unobserved if opening the window
-        // itself failed. It may still finish while the native side unwinds.
-        await startPromise.catch(() => undefined);
-        if (isControlTransportError(e)) {
-          try {
-            client = await reconnectHost();
-            startPromise = client.request<{ session: number }>("startStream", startArgs);
-            out = await startPromise;
-          } catch (reconnectError) {
-            lastError = reconnectError;
-          }
-        }
-      }
-      if (!out) {
-        throw lastError instanceof Error
-          ? lastError
-          : new Error(String(lastError ?? "스트림 시작 실패"));
-      }
+      let confirmWritten!: () => void;
+      let rejectWritten!: (error: unknown) => void;
+      const written = new Promise<void>((resolve, reject) => {
+        confirmWritten = resolve;
+        rejectWritten = reject;
+      });
+      const startPromise = client.request<{ session: number }>(
+        "startStream",
+        startArgs,
+        confirmWritten,
+      );
+      void startPromise.catch(rejectWritten);
+
+      // The react-native-tcp-socket callback confirms the native write has
+      // completed. Only then may StreamActivity pause the catalog Activity.
+      await written;
+      await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
+      const { session } = await startPromise;
       addStream({
         port,
-        session: out.session,
+        session,
         sourceIndex: d.index,
         sourceName: d.name,
         width,
         height,
         fps,
+        captureBackend,
         startedAt: Date.now(),
       });
     } catch (e) {
@@ -620,7 +661,7 @@ export default function Catalog() {
     } finally {
       setLaunchingIndex(null);
     }
-  }, [addStream, selectedProfile]);
+  }, [addStream, captureBackend, host, selectedProfile]);
 
   const stopStream = useCallback(async (a: ActiveStream) => {
     const client = controlClient();
@@ -639,6 +680,9 @@ export default function Catalog() {
   }, [refetchCatalog]);
   const handleSelectProfile = useCallback((id: StreamProfileId) => {
     setProfileId(id);
+  }, []);
+  const handleSelectCaptureBackend = useCallback((id: CaptureBackendId) => {
+    setCaptureBackend(id);
   }, []);
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
@@ -670,10 +714,12 @@ export default function Catalog() {
             host={host || "localhost:7777"}
             loading={loading}
             profileId={profileId}
+            captureBackend={captureBackend}
             refreshing={refreshing}
             selectedProfile={selectedProfile}
             onRefresh={handleRefresh}
             onSelectProfile={handleSelectProfile}
+            onSelectCaptureBackend={handleSelectCaptureBackend}
           />
         }
         data={displays}

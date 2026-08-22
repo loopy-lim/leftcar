@@ -1,9 +1,9 @@
-// CaptureShim: real macOS screen capture -> H.264 -> TCP, as a C-ABI dylib.
+// CaptureShim: real macOS screen capture -> H.264 -> low-latency UDP, as a C-ABI dylib.
 //
 // Path (docs/02 §4, H16-H18; rebuild design 2026-08-18):
-//   SCShareableContent (selected display) -> SCStream (BGRA frames)
-//   -> VTCompressionSession (H.264 baseline, realtime, no B-frames)
-//   -> TCP framed stream ([u32 BE len][payload]; CFG csd + AU packets).
+//   SCShareableContent (selected display) -> SCStream (420v IOSurface frames)
+//   -> VTCompressionSession (H.264 Main, realtime, no B-frames)
+//   -> MTU-bounded UDP datagrams (CFG + fragmented H.264 access units).
 //
 // v2: handle table — multiple concurrent sessions (multi-display /
 // multi-viewer), parameterized fps/bitrate, JSON stats, auto-stop on
@@ -15,6 +15,7 @@ import VideoToolbox
 import CoreMedia
 import CoreVideo
 import CoreGraphics
+import IOSurface
 import Darwin
 
 // MARK: - C ABI surface (v2, handle-based)
@@ -22,6 +23,20 @@ import Darwin
 private let registryLock = NSLock()
 private var registry: [UInt32: CaptureSession] = [:]
 private var nextHandle: UInt32 = 1
+
+private enum CaptureBackendKind: String {
+    case screenCaptureKit
+    case cgDisplayStream
+
+    static func parse(_ value: String?) -> CaptureBackendKind? {
+        guard let value else { return .screenCaptureKit }
+        switch value.lowercased() {
+        case "sck", "screencapturekit": return .screenCaptureKit
+        case "cg", "cgdisplaystream": return .cgDisplayStream
+        default: return nil
+        }
+    }
+}
 
 // SCShareableContent enumeration is relatively expensive and concurrent
 // callers can amplify a temporary WindowServer delay. Keep one in-flight
@@ -73,16 +88,6 @@ private final class DisplayCatalogCache {
         let snapshot = displays.isEmpty ? nil : displays
         let error = lastRefreshError
         let stillRefreshing = refreshInFlight
-        if displays.isEmpty && stillRefreshing {
-            // ScreenCaptureKit occasionally never invokes an enumeration
-            // callback after a host reinstall/relaunch. Invalidate that
-            // generation so the next refresh can issue a fresh request instead
-            // of timing out forever behind a permanently in-flight flag.
-            refreshGeneration &+= 1
-            refreshInFlight = false
-            lastRefreshError = "SCShareableContent timed out"
-            condition.broadcast()
-        }
         condition.unlock()
 
         if snapshot != nil {
@@ -122,25 +127,6 @@ private final class DisplayCatalogCache {
                 } ?? "ScreenCaptureKit returned no displays"
             }
             self.refreshInFlight = false
-            self.condition.broadcast()
-            self.condition.unlock()
-        }
-
-        // A ScreenCaptureKit request issued while the host is still bringing
-        // up AppKit can occasionally never invoke its completion handler.
-        // Release that generation without waiting for a foreground
-        // startStream call to hit its much longer timeout. A later catalog or
-        // stream request can then issue a fresh enumeration on the live app.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard let self else { return }
-            self.condition.lock()
-            guard self.refreshGeneration == generation, self.refreshInFlight else {
-                self.condition.unlock()
-                return
-            }
-            self.refreshGeneration &+= 1
-            self.refreshInFlight = false
-            self.lastRefreshError = "SCShareableContent timed out"
             self.condition.broadcast()
             self.condition.unlock()
         }
@@ -205,6 +191,24 @@ private func coreGraphicsCatalogJSON() -> String? {
     return json
 }
 
+private func activeDisplayIDs() -> [CGDirectDisplayID] {
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+        return []
+    }
+    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    var filled = count
+    guard CGGetActiveDisplayList(count, &displayIDs, &filled) == .success else {
+        return []
+    }
+    let mainDisplayID = CGMainDisplayID()
+    return displayIDs.prefix(Int(filled)).sorted { lhs, rhs in
+        if lhs == mainDisplayID { return true }
+        if rhs == mainDisplayID { return false }
+        return lhs < rhs
+    }
+}
+
 private func withRegistry<T>(_ body: (inout [UInt32: CaptureSession]) -> T) -> T {
     registryLock.lock()
     defer { registryLock.unlock() }
@@ -229,21 +233,20 @@ private func hasScreenCaptureAccess() -> Bool {
     CGPreflightScreenCaptureAccess()
 }
 
-// Use ScreenCaptureKit's structured-concurrency API on the main actor, as in
-// Apple's current sample. The control plane waits on its own background
-// thread, so AppKit stays free to service TCC and WindowServer callbacks.
+// ScreenCaptureKit is reached from Rust/Tokio worker threads. On recent macOS
+// versions the request may reach replayd but never deliver its completion when
+// it is initiated from a worker without an AppKit run loop. Enter the framework
+// from the application's main dispatch queue, while the control worker remains
+// the thread that performs the bounded wait in DisplayCatalogCache.
 private func requestShareableContent(
     completion: @escaping (SCShareableContent?, Error?) -> Void
 ) {
-    Task { @MainActor in
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                true,
-                onScreenWindowsOnly: true
-            )
-            completion(content, nil)
-        } catch {
-            completion(nil, error)
+    DispatchQueue.main.async {
+        SCShareableContent.getExcludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        ) { content, error in
+            completion(content, error)
         }
     }
 }
@@ -260,9 +263,10 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         return UnsafeMutablePointer<CChar>(strdup(displayCatalogJSON(snapshot.displays)))
     }
     // The source catalog only needs stable display metadata. CoreGraphics can
-    // provide that synchronously while ScreenCaptureKit warms in the
-    // background; both paths use the same main-display-first ordering.
-    displayCatalogCache.refreshIfStale(maxAge: 0)
+    // provide that synchronously. Do not begin an SCK enumeration until the
+    // user actually selects the SCK backend: a pending WindowServer request
+    // can also serialize a subsequently requested CGDisplayStream on recent
+    // macOS releases.
     if let fallback = coreGraphicsCatalogJSON() {
         setLastError("")
         return UnsafeMutablePointer<CChar>(strdup(fallback))
@@ -284,6 +288,52 @@ public func leftcarCaptureStartV2(
     width: UInt32,
     height: UInt32,
     fps: UInt32
+) -> UInt32 {
+    startCaptureSession(
+        ip: ip,
+        port: port,
+        displayIndex: displayIndex,
+        width: width,
+        height: height,
+        fps: fps,
+        backend: .screenCaptureKit
+    )
+}
+
+@_cdecl("leftcar_capture_start_v3")
+public func leftcarCaptureStartV3(
+    ip: UnsafePointer<CChar>,
+    port: UInt16,
+    displayIndex: UInt32,
+    width: UInt32,
+    height: UInt32,
+    fps: UInt32,
+    backendName: UnsafePointer<CChar>?
+) -> UInt32 {
+    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
+    guard let backend = CaptureBackendKind.parse(rawBackend) else {
+        setLastError("unknown capture backend: \(rawBackend ?? "null")")
+        return 0
+    }
+    return startCaptureSession(
+        ip: ip,
+        port: port,
+        displayIndex: displayIndex,
+        width: width,
+        height: height,
+        fps: fps,
+        backend: backend
+    )
+}
+
+private func startCaptureSession(
+    ip: UnsafePointer<CChar>,
+    port: UInt16,
+    displayIndex: UInt32,
+    width: UInt32,
+    height: UInt32,
+    fps: UInt32,
+    backend: CaptureBackendKind
 ) -> UInt32 {
     guard hasScreenCaptureAccess() else {
         setLastError("screen-recording permission is not granted to Leftcar Host")
@@ -307,34 +357,48 @@ public func leftcarCaptureStartV2(
         targetLabel: "\(ipStr):\(port)",
         width: width,
         height: height,
-        fps: fps
+        fps: fps,
+        backend: backend
     )
 
-    var ok = false
-    var selectedDisplay = displayCatalogCache.display(at: Int(displayIndex))
-    if selectedDisplay == nil {
-        let result = displayCatalogCache.firstSnapshot(timeout: 13)
-        guard let displays = result.displays else {
-            setLastError(result.error ?? "SCShareableContent failed")
-            return 0
-        }
-        guard Int(displayIndex) < displays.count else {
-            setLastError("displayIndex \(displayIndex) out of range (\(displays.count) displays)")
-            return 0
-        }
-        selectedDisplay = displays[Int(displayIndex)]
-    }
-    if let selectedDisplay {
-        // Keep SCStream setup off the AppKit/ScreenCaptureKit callback queue;
-        // the query itself is filtered to on-screen content, while stream
-        // output and encoder startup belong to the capture queue.
-        ok = session.setupStream(display: selectedDisplay)
-    }
-    guard ok else { return 0 }
-
-    // TCP connect happens on the session queue before first frame send
+    // Establish the media socket first. Capture callbacks can then be accepted
+    // immediately without losing the initial CFG/IDR while the viewer listener
+    // is still racing to bind its port.
     let connected = session.connectSocket()
     guard connected else { return 0 }
+
+    let started: Bool
+    switch backend {
+    case .screenCaptureKit:
+        var selectedDisplay = displayCatalogCache.display(at: Int(displayIndex))
+        if selectedDisplay == nil {
+            let result = displayCatalogCache.firstSnapshot(timeout: 8)
+            guard let displays = result.displays else {
+                setLastError(result.error ?? "SCShareableContent failed")
+                session.stop()
+                return 0
+            }
+            guard Int(displayIndex) < displays.count else {
+                setLastError("displayIndex \(displayIndex) out of range (\(displays.count) displays)")
+                session.stop()
+                return 0
+            }
+            selectedDisplay = displays[Int(displayIndex)]
+        }
+        started = selectedDisplay.map { session.setupScreenCaptureKit(display: $0) } ?? false
+    case .cgDisplayStream:
+        let displayIDs = activeDisplayIDs()
+        guard Int(displayIndex) < displayIDs.count else {
+            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            session.stop()
+            return 0
+        }
+        started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
+    }
+    guard started else {
+        session.stop()
+        return 0
+    }
 
     let handle = withRegistry { reg in
         let h = nextHandle
@@ -378,6 +442,31 @@ public func leftcarCaptureLastErrorV2() -> UnsafePointer<CChar> {
     UnsafePointer(lastErrorUTF8)
 }
 
+@_cdecl("leftcar_capture_input_permission_v1")
+public func leftcarCaptureInputPermissionV1() -> Int32 {
+    CGPreflightPostEventAccess() ? 1 : 0
+}
+
+@_cdecl("leftcar_capture_request_input_permission_v1")
+public func leftcarCaptureRequestInputPermissionV1() -> Int32 {
+    CGRequestPostEventAccess() ? 1 : 0
+}
+
+@_cdecl("leftcar_capture_set_input_enabled_v1")
+public func leftcarCaptureSetInputEnabledV1(handle: UInt32, enabled: Int32) -> Int32 {
+    let session = withRegistry { $0[handle] }
+    guard let session else {
+        setLastError("input session handle not found: \(handle)")
+        return -1
+    }
+    if !session.setInputEnabled(enabled != 0) {
+        setLastError("Accessibility input permission is not granted to Leftcar Host")
+        return -2
+    }
+    setLastError("")
+    return 0
+}
+
 extension UnsafePointer where Pointee == CChar {
     /// Read a C string safely (nil-check + UTF-8 decode).
     func loadedCString() -> String? {
@@ -407,9 +496,79 @@ final class CaptureOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
 // MARK: - Session (one per active stream)
 
+private typealias CGFrameHandler = @convention(block) (
+    CGDisplayStreamFrameStatus,
+    UInt64,
+    IOSurfaceRef?,
+    CGDisplayStreamUpdate?
+) -> Void
+private typealias CGStreamCreateFn = @convention(c) (
+    CGDirectDisplayID,
+    Int,
+    Int,
+    Int32,
+    CFDictionary?,
+    DispatchQueue,
+    CGFrameHandler
+) -> Unmanaged<CGDisplayStream>?
+private typealias CGStreamStartFn = @convention(c) (CGDisplayStream) -> CGError
+private typealias CGStreamStopFn = @convention(c) (CGDisplayStream) -> CGError
+
+/// `CGDisplayStream` was obsoleted by the macOS 15 SDK. Keep it behind an
+/// explicitly selected, display-only compatibility backend loaded at runtime;
+/// ScreenCaptureKit remains the supported default and no unavailable API is
+/// referenced directly by Swift.
+private final class LegacyCGDisplayStreamAPI {
+    let library: UnsafeMutableRawPointer
+    let create: CGStreamCreateFn
+    let start: CGStreamStartFn
+    let stop: CGStreamStopFn
+
+    init?() {
+        guard let library = dlopen(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+            RTLD_NOW | RTLD_LOCAL
+        ),
+        let createSymbol = dlsym(library, "CGDisplayStreamCreateWithDispatchQueue"),
+        let startSymbol = dlsym(library, "CGDisplayStreamStart"),
+        let stopSymbol = dlsym(library, "CGDisplayStreamStop") else {
+            return nil
+        }
+        self.library = library
+        self.create = unsafeBitCast(createSymbol, to: CGStreamCreateFn.self)
+        self.start = unsafeBitCast(startSymbol, to: CGStreamStartFn.self)
+        self.stop = unsafeBitCast(stopSymbol, to: CGStreamStopFn.self)
+    }
+
+    deinit {
+        dlclose(library)
+    }
+}
+
 private struct PendingCaptureFrame {
-    let sample: CMSampleBuffer
+    let pixelBuffer: CVPixelBuffer
+    let pts: CMTime
+    let duration: CMTime
     let callbackNs: UInt64
+}
+
+private struct PendingEncodedFrame {
+    let data: Data
+    let isKeyframe: Bool
+}
+
+private func appendRollingSample(_ value: UInt64, to samples: inout [UInt64]) {
+    samples.append(value)
+    if samples.count > 300 {
+        samples.removeFirst(samples.count - 300)
+    }
+}
+
+private func percentile95(_ samples: [UInt64]) -> UInt64 {
+    guard !samples.isEmpty else { return 0 }
+    let sorted = samples.sorted()
+    let index = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)
+    return sorted[max(0, index)]
 }
 
 final class CaptureSession {
@@ -421,10 +580,26 @@ final class CaptureSession {
     private let encodeQueueKey = DispatchSpecificKey<Void>()
     private let captureLock = NSLock()
     private var pendingCapture: PendingCaptureFrame?
+    private var latestCapture: PendingCaptureFrame?
     private var encodeScheduled = false
     private var sock: Int32 = -1
+    private var viewerControlToken = Data()
+    private let inputQueue = DispatchQueue(label: "leftcar.input", qos: .userInteractive)
+    private let inputLock = NSLock()
+    private var inputReadSource: DispatchSourceRead?
+    private var inputEnabled = false
+    private var inputBounds: CGRect?
+    private var lastReliableInputSequence: UInt32 = 0
+    private var lastPointerInputSequence: UInt32 = 0
+    private var pressedKeys = Set<CGKeyCode>()
+    private var pressedButtons = Set<CGMouseButton>()
+    private var lastPointerPosition = CGPoint.zero
+    private var horizontalScrollRemainder: Int32 = 0
+    private var verticalScrollRemainder: Int32 = 0
     private var stream: SCStream?
     private var streamHandler: CaptureOutputHandler?
+    private var cgStream: CGDisplayStream?
+    private var cgStreamAPI: LegacyCGDisplayStreamAPI?
     private var session: VTCompressionSession?
     private let targetAddr: sockaddr_in
     private let targetPort: UInt16
@@ -432,22 +607,32 @@ final class CaptureSession {
     private let outWidth: UInt32
     private let outHeight: UInt32
     private let fps: UInt32
+    private let backend: CaptureBackendKind
     private var csdSent = false
 
-    // The encoder callback must never wait behind a slow TCP reader. Keep at
+    // The encoder callback must never wait behind network transmission. Keep at
     // most the newest encoded AU plus the latest config packet; an older AU
     // that has not reached the socket is intentionally dropped.
     private let networkQueue = DispatchQueue(label: "leftcar.network", qos: .userInteractive)
     private let networkLock = NSLock()
     private var pendingConfig: Data?
-    private var pendingFrame: Data?
-    private var viewerControlBuffer = Data()
+    // Absorb short UDP scheduler stalls without dropping an H.264
+    // reference frame. Four 60-fps frames bound queueing to about 67 ms; a
+    // sustained overload still flushes the queue and resumes from a fresh IDR.
+    private let maxPendingNetworkFrames = 4
+    private var pendingFrames: [PendingEncodedFrame] = []
+    private var networkAwaitingKeyframe = false
     private var networkDrainScheduled = false
     private var reconnectScheduled = false
 
     private let stateLock = NSLock()
     private var running = false
     private var stopRequested = false
+    private var lifecycleState = "connecting"
+    private let createdNs = DispatchTime.now().uptimeNanoseconds
+    private var firstCaptureNs: UInt64?
+    private var firstEncodeNs: UInt64?
+    private var firstSendNs: UInt64?
     private var framesEncoded: Int64 = 0
     private var framesDropped: Int64 = 0
     private var captureQueueDropped: Int64 = 0
@@ -460,6 +645,12 @@ final class CaptureSession {
     private var maxEncodeOutputUs: UInt64 = 0
     private var lastSendBlockUs: UInt64 = 0
     private var maxSendBlockUs: UInt64 = 0
+    private var lastCaptureCallbackNs: UInt64?
+    private var captureIntervalSamplesUs: [UInt64] = []
+    private var captureToEncodeSamplesUs: [UInt64] = []
+    private var captureQueueWaitSamplesUs: [UInt64] = []
+    private var encodeOutputSamplesUs: [UInt64] = []
+    private var sendBlockSamplesUs: [UInt64] = []
     private var stoppedReason = ""
 
     // Capture callback timestamps keyed by the real sample PTS. VideoToolbox
@@ -481,6 +672,9 @@ final class CaptureSession {
     private var lastFps: UInt32 = 0
     private var lastKbps: UInt32 = 0
     private var forceKeyframe = false
+    private var currentAverageBitrate = 0
+    private var lastAdaptedDropped: Int64 = 0
+    private var stableBitrateWindows = 0
 
     var isRunning: Bool {
         stateLock.lock()
@@ -488,175 +682,394 @@ final class CaptureSession {
         return running
     }
 
-    init(targetAddr: sockaddr_in, targetPort: UInt16, targetLabel: String, width: UInt32, height: UInt32, fps: UInt32) {
+    fileprivate init(
+        targetAddr: sockaddr_in,
+        targetPort: UInt16,
+        targetLabel: String,
+        width: UInt32,
+        height: UInt32,
+        fps: UInt32,
+        backend: CaptureBackendKind
+    ) {
         self.targetAddr = targetAddr
         self.targetPort = targetPort
         self.targetLabel = targetLabel
         self.outWidth = width
         self.outHeight = height
-        // The current capture/display profile is S1: 1080p60. Clamp callers
-        // that still send the old 90fps request so encoder, capture and
-        // viewer timing cannot silently disagree.
-        self.fps = min(max(1, fps), 60)
+        self.fps = min(max(1, fps), 90)
+        self.backend = backend
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
     }
 
     // MARK: Setup
 
+    private func sendToViewer(_ data: Data, fd: Int32) -> Int {
+        var addr = targetAddr
+        return data.withUnsafeBytes { raw in
+            guard let baseAddress = raw.baseAddress else { return -1 }
+            return withUnsafePointer(to: &addr) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    sendto(
+                        fd,
+                        baseAddress,
+                        raw.count,
+                        0,
+                        socketAddress,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                }
+            }
+        }
+    }
+
     func connectSocket(stopOnFailure: Bool = true) -> Bool {
-        // StreamLauncher starts the XR Activity asynchronously. The control
-        // request can therefore arrive before its TCP listener has bound the
-        // port. Keep trying the same endpoint for a bounded window instead of
-        // turning that normal startup race into a black screen.
-        let deadline = Date().addingTimeInterval(10.0)
-        var lastConnectError: Int32 = ETIMEDOUT
+        stopInputReceiver()
+        stateLock.lock()
+        let shouldStop = stopRequested
+        stateLock.unlock()
+        if shouldStop { return false }
 
-        while Date() < deadline {
-            stateLock.lock()
-            let shouldStop = stopRequested
-            stateLock.unlock()
-            if shouldStop { return false }
-
-            sock = socket(AF_INET, SOCK_STREAM, 0)
-            guard sock >= 0 else {
-                let reason = "socket() failed"
-                if stopOnFailure {
-                    setLastError(reason)
-                    markStopped(reason)
-                }
-                return false
+        sock = socket(AF_INET, SOCK_DGRAM, 0)
+        guard sock >= 0 else {
+            let reason = "UDP socket() failed"
+            if stopOnFailure {
+                setLastError(reason)
+                markStopped(reason)
             }
-            var noDelay: Int32 = 1
-            setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
-            var noSigPipe: Int32 = 1
-            setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-            // Keep the kernel queue small so TCP backpressure cannot hide a
-            // large stale-video backlog. The application-level slot below
-            // already keeps only the newest frame.
-            var sendBuffer: Int32 = 128 * 1024
-            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size))
+            return false
+        }
+        // A generous kernel queue absorbs a short Wi-Fi scheduling pause, but
+        // O_NONBLOCK ensures the interactive encoder never waits behind it.
+        var sendBuffer: Int32 = 2 * 1024 * 1024
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size))
+        let originalFlags = fcntl(sock, F_GETFL, 0)
+        if originalFlags >= 0 {
+            _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
+        }
 
-            // A VPN/Tailscale address may be unroutable from the Mac. A
-            // blocking connect would hold the control request for the OS TCP
-            // timeout; bound each attempt so the listener can appear during
-            // the XR Activity startup race.
-            let originalFlags = fcntl(sock, F_GETFL, 0)
-            if originalFlags >= 0 {
-                _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
+        // A paired viewer may reach the control port through a Tailscale
+        // subnet router even when both devices share Wi-Fi. Prove that the
+        // physical media candidate owns its UDP port before any screen bytes
+        // are captured or sent. The echoed nonce also authenticates reverse
+        // IDR/BYE messages when their VPN source address differs.
+        let token = Data(UUID().uuidString.utf8)
+        var challenge = Data("LCH1".utf8)
+        challenge.append(token)
+        var challengeVerified = false
+        for attempt in 0..<60 {
+            if attempt % 4 == 0 {
+                _ = sendToViewer(challenge, fd: sock)
             }
-            var addr = targetAddr
-            var result: Int32 = -1
-            var connectError: Int32 = 0
-            withUnsafePointer(to: &addr) { ap in
-                ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    result = connect(sock, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
-                    if result != 0 {
-                        connectError = errno
+            var response = [UInt8](repeating: 0, count: 256)
+            var source = sockaddr_in()
+            var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let count = response.withUnsafeMutableBytes { raw in
+                withUnsafeMutablePointer(to: &source) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                        recvfrom(
+                            sock,
+                            raw.baseAddress,
+                            raw.count,
+                            MSG_DONTWAIT,
+                            socketAddress,
+                            &sourceLength
+                        )
                     }
                 }
             }
-            if result != 0 && (connectError == EINPROGRESS || connectError == EWOULDBLOCK) {
-                var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
-                if poll(&pfd, 1, 500) > 0 {
-                    var socketError: Int32 = 0
-                    var socketErrorLength = socklen_t(MemoryLayout<Int32>.size)
-                    getsockopt(sock, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength)
-                    if socketError == 0 {
-                        result = 0
-                    } else {
-                        connectError = socketError
-                    }
-                } else {
-                    connectError = ETIMEDOUT
-                }
+            if count == challenge.count,
+               Data(response[0..<count]) == challenge {
+                challengeVerified = true
+                break
             }
-            if originalFlags >= 0 {
-                _ = fcntl(sock, F_SETFL, originalFlags)
-            }
-            if result == 0 {
-                stateLock.lock()
-                if stopRequested {
-                    stateLock.unlock()
-                    close(sock)
-                    sock = -1
-                    return false
-                }
-                stateLock.unlock()
-                running = true
-                return true
-            }
-
-            lastConnectError = connectError
+            usleep(50_000)
+        }
+        guard challengeVerified else {
             close(sock)
             sock = -1
-            usleep(100_000)
+            let reason = "UDP reachability proof failed for \(targetLabel)"
+            if stopOnFailure {
+                setLastError(reason)
+                markStopped(reason)
+            }
+            return false
         }
+        viewerControlToken = token
+        inputLock.lock()
+        lastReliableInputSequence = 0
+        lastPointerInputSequence = 0
+        inputLock.unlock()
+        startInputReceiver(fd: sock)
 
-        let reason = "TCP connect to \(targetLabel) failed after retry (errno \(lastConnectError)) — is the stream window open?"
-        if stopOnFailure {
-            setLastError(reason)
-            markStopped(reason)
+        stateLock.lock()
+        if stopRequested {
+            stateLock.unlock()
+            close(sock)
+            sock = -1
+            return false
         }
-        return false
+        lifecycleState = firstSendNs == nil ? "starting_capture" : "running"
+        stateLock.unlock()
+        return true
+    }
+
+    /// Remote input is opt-in per stream. Reliable packets continue to be
+    /// acknowledged while disabled so a viewer cannot build an unbounded
+    /// retry queue before the host grants control.
+    func setInputEnabled(_ enabled: Bool) -> Bool {
+        if enabled && !CGPreflightPostEventAccess() {
+            return false
+        }
+        inputLock.lock()
+        let changed = inputEnabled != enabled
+        inputEnabled = enabled
+        inputLock.unlock()
+        if changed && !enabled {
+            inputQueue.async { [weak self] in
+                self?.releaseInjectedInput()
+            }
+        }
+        return true
+    }
+
+    private func startInputReceiver(fd: Int32) {
+        inputQueue.sync {
+            guard inputReadSource == nil else { return }
+            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: inputQueue)
+            source.setEventHandler { [weak self] in
+                self?.consumeViewerControl(fd)
+            }
+            inputReadSource = source
+            source.resume()
+        }
+    }
+
+    private func stopInputReceiver() {
+        inputQueue.sync {
+            inputReadSource?.cancel()
+            inputReadSource = nil
+        }
     }
 
     static let tccDeniedHint = "screen-recording permission required (System Settings > Privacy & Security > Screen Recording)"
 
-    @discardableResult
-    func setupStream(display: SCDisplay) -> Bool {
-        let config = SCStreamConfiguration()
-        config.width = Int(outWidth)
-        config.height = Int(outHeight)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        // Feed VideoToolbox the native bi-planar 4:2:0 surface so the capture
-        // path does not make every frame pay for a BGRA -> YUV conversion.
-        // ScreenCaptureKit supports 420v directly for screen streams.
-        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        config.showsCursor = true
-        // Every queued capture frame is future latency. Two gives
-        // ScreenCaptureKit one spare buffer without allowing a multi-frame
-        // backlog to become visible interaction delay.
-        config.queueDepth = 2
+    private func beginCapture() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !stopRequested, sock >= 0 else { return false }
+        running = true
+        lifecycleState = "starting_capture"
+        return true
+    }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let s = SCStream(filter: filter, configuration: config, delegate: nil)
-        let handler = CaptureOutputHandler(session: self)
+    private func captureDidStart() {
+        stateLock.lock()
+        if running, !stopRequested {
+            lifecycleState = firstCaptureNs == nil ? "waiting_first_frame" : "running"
+        }
+        stateLock.unlock()
+        armFirstFrameWatchdog()
+    }
 
-        do {
-            try s.addStreamOutput(handler, type: .screen, sampleHandlerQueue: queue)
-            streamHandler = handler
-            s.startCapture { [weak self] error in
-                if let error = error {
-                    let reason = "startCapture failed: \(error.localizedDescription) — \(CaptureSession.tccDeniedHint)"
-                    setLastError(reason)
-                    self?.markStopped(reason)
-                }
+    private func armFirstFrameWatchdog() {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let timedOut = self.running && !self.stopRequested && self.firstSendNs == nil
+            let captured = self.firstCaptureNs != nil
+            let encoded = self.firstEncodeNs != nil
+            self.stateLock.unlock()
+            if timedOut {
+                let stage = !captured ? "capture" : (!encoded ? "encoder" : "network")
+                self.markStopped("\(stage) produced no video frame within 5s")
             }
-            stream = s
-            return true
-        } catch {
-            let reason = "addStreamOutput: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    func setupScreenCaptureKit(display: SCDisplay) -> Bool {
+        inputLock.lock()
+        inputBounds = CGDisplayBounds(display.displayID)
+        inputLock.unlock()
+        guard beginCapture() else {
+            setLastError("media socket closed before capture start")
+            return false
+        }
+        let completion = DispatchSemaphore(value: 0)
+        let completionLock = NSLock()
+        var setupFailure: String?
+        var startError: Error?
+
+        // Construct and start AppKit-adjacent ScreenCaptureKit objects on the
+        // main queue. Do not wait there: the Rust control worker owns the
+        // semaphore wait, leaving the main run loop free to receive replayd's
+        // completion callback.
+        DispatchQueue.main.async { [self] in
+            let config = SCStreamConfiguration()
+            config.width = Int(outWidth)
+            config.height = Int(outHeight)
+            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+            // Feed VideoToolbox the native bi-planar 4:2:0 surface so the
+            // capture path avoids a BGRA -> YUV conversion per frame.
+            config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            config.showsCursor = true
+            // The application keeps only its newest pending frame, so the
+            // framework's minimum/default depth does not add a stale queue.
+            config.queueDepth = 3
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let handler = CaptureOutputHandler(session: self)
+            let candidate = SCStream(
+                filter: filter,
+                configuration: config,
+                delegate: handler
+            )
+
+            do {
+                try candidate.addStreamOutput(
+                    handler,
+                    type: .screen,
+                    sampleHandlerQueue: queue
+                )
+                streamHandler = handler
+                stream = candidate
+                candidate.startCapture { error in
+                    completionLock.lock()
+                    startError = error
+                    completionLock.unlock()
+                    completion.signal()
+                }
+            } catch {
+                completionLock.lock()
+                setupFailure = "addStreamOutput: \(error.localizedDescription)"
+                completionLock.unlock()
+                completion.signal()
+            }
+        }
+
+        // replayd can take more than eight seconds to complete a cold start,
+        // especially after a display/profile transition. Keep this lifecycle
+        // guard outside the frame pipeline so it prevents a false teardown
+        // without adding any steady-state buffering or latency.
+        guard completion.wait(timeout: .now() + 15) == .success else {
+            let reason = "SCStream startCapture timed out after 15s"
             setLastError(reason)
             markStopped(reason)
             return false
         }
+        completionLock.lock()
+        let failure = setupFailure
+        let error = startError
+        completionLock.unlock()
+        if let failure {
+            setLastError(failure)
+            markStopped(failure)
+            return false
+        }
+        if let error {
+            let reason = "startCapture failed: \(error.localizedDescription) — \(CaptureSession.tccDeniedHint)"
+            setLastError(reason)
+            markStopped(reason)
+            return false
+        }
+        captureDidStart()
+        return true
+    }
+
+    @discardableResult
+    func setupCGDisplayStream(displayID: CGDirectDisplayID) -> Bool {
+        inputLock.lock()
+        inputBounds = CGDisplayBounds(displayID)
+        inputLock.unlock()
+        guard beginCapture() else {
+            setLastError("media socket closed before capture start")
+            return false
+        }
+        guard let api = LegacyCGDisplayStreamAPI() else {
+            let reason = "CGDisplayStream symbols are unavailable on this macOS version"
+            setLastError(reason)
+            markStopped(reason)
+            return false
+        }
+        let handler: CGFrameHandler = { [weak self] status, _, surface, _ in
+            guard let self else { return }
+            if status == .stopped {
+                self.stateLock.lock()
+                let intentional = self.stopRequested
+                self.stateLock.unlock()
+                if !intentional {
+                    self.markStopped("CGDisplayStream stopped")
+                }
+                return
+            }
+            guard status == .frameComplete, let surface else { return }
+            var unmanagedPixelBuffer: Unmanaged<CVPixelBuffer>?
+            let result = CVPixelBufferCreateWithIOSurface(
+                kCFAllocatorDefault,
+                surface,
+                nil,
+                &unmanagedPixelBuffer
+            )
+            guard result == kCVReturnSuccess,
+                  let pixelBuffer = unmanagedPixelBuffer?.takeRetainedValue() else {
+                return
+            }
+            self.handlePixelBuffer(
+                pixelBuffer,
+                pts: CMClockGetTime(CMClockGetHostTimeClock()),
+                duration: CMTime(value: 1, timescale: CMTimeScale(self.fps))
+            )
+        }
+        guard let cgStream = api.create(
+            displayID,
+            Int(outWidth),
+            Int(outHeight),
+            Int32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            nil,
+            queue,
+            handler
+        )?.takeRetainedValue() else {
+            let reason = "CGDisplayStream creation failed"
+            setLastError(reason)
+            markStopped(reason)
+            return false
+        }
+        self.cgStreamAPI = api
+        self.cgStream = cgStream
+        let status = api.start(cgStream)
+        guard status == .success else {
+            let reason = "CGDisplayStreamStart failed: \(status.rawValue)"
+            setLastError(reason)
+            markStopped(reason)
+            return false
+        }
+        captureDidStart()
+        return true
     }
 
     func stop() {
+        stopInputReceiver()
+        inputQueue.async { [weak self] in self?.releaseInjectedInput() }
         stateLock.lock()
         stopRequested = true
         stateLock.unlock()
         networkLock.lock()
         pendingConfig = nil
-        pendingFrame = nil
+        pendingFrames.removeAll(keepingCapacity: true)
         networkLock.unlock()
         captureLock.lock()
         pendingCapture = nil
+        latestCapture = nil
         captureLock.unlock()
         if let s = stream {
             s.stopCapture(completionHandler: nil)
             stream = nil
             streamHandler = nil
+        }
+        if let cgStream, let cgStreamAPI {
+            _ = cgStreamAPI.stop(cgStream)
+            self.cgStream = nil
+            self.cgStreamAPI = nil
         }
         invalidateEncoderOnEncodeQueue()
         stateLock.lock()
@@ -665,6 +1078,11 @@ final class CaptureSession {
             sock = -1
         }
         running = false
+        if stoppedReason.isEmpty {
+            lifecycleState = "stopped"
+        } else {
+            lifecycleState = "error"
+        }
         stateLock.unlock()
     }
 
@@ -685,10 +1103,16 @@ final class CaptureSession {
         forceKeyframe = true
         stateLock.unlock()
 
+        stopInputReceiver()
+        inputQueue.async { [weak self] in self?.releaseInjectedInput() }
         if staleSocket >= 0 {
             close(staleSocket)
         }
-        viewerControlBuffer.removeAll(keepingCapacity: true)
+        networkLock.lock()
+        pendingConfig = nil
+        pendingFrames.removeAll(keepingCapacity: true)
+        networkAwaitingKeyframe = true
+        networkLock.unlock()
         print("viewer disconnected; heartbeat reconnecting to \(targetLabel)")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -696,6 +1120,20 @@ final class CaptureSession {
             let reconnected = self.connectSocket(stopOnFailure: false)
             if reconnected {
                 print("viewer heartbeat reconnected to \(self.targetLabel)")
+                self.captureLock.lock()
+                let latest = self.latestCapture
+                self.captureLock.unlock()
+                if let latest {
+                    let replay = PendingCaptureFrame(
+                        pixelBuffer: latest.pixelBuffer,
+                        pts: .invalid,
+                        duration: CMTime(value: 1, timescale: CMTimeScale(self.fps)),
+                        callbackNs: DispatchTime.now().uptimeNanoseconds
+                    )
+                    self.encodeQueue.async { [weak self] in
+                        self?.encodeFrame(replay)
+                    }
+                }
             } else if self.isRunning {
                 let reason = "viewer connection lost after reconnect timeout"
                 print("\(reason): \(self.targetLabel)")
@@ -727,6 +1165,7 @@ final class CaptureSession {
         stoppedReason = "viewer closed stream"
         stopRequested = true
         running = false
+        lifecycleState = "error"
         let staleSocket = sock
         sock = -1
         stateLock.unlock()
@@ -736,7 +1175,7 @@ final class CaptureSession {
         }
         networkLock.lock()
         pendingConfig = nil
-        pendingFrame = nil
+        pendingFrames.removeAll(keepingCapacity: true)
         networkLock.unlock()
 
         queue.async { [weak self] in
@@ -747,18 +1186,44 @@ final class CaptureSession {
     // MARK: Frame Processing & VideoToolbox Encoding
 
     func handleFrame(_ sample: CMSampleBuffer) {
+        guard CMSampleBufferIsValid(sample), CMSampleBufferDataIsReady(sample),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else {
+            return
+        }
+        let inputPts = CMSampleBufferGetPresentationTimeStamp(sample)
+        let inputDuration = CMSampleBufferGetDuration(sample)
+        handlePixelBuffer(
+            pixelBuffer,
+            pts: inputPts,
+            duration: inputDuration
+        )
+    }
+
+    func handlePixelBuffer(_ pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) {
+        let callbackNs = DispatchTime.now().uptimeNanoseconds
         stateLock.lock()
         let stillRunning = running
+        if stillRunning, firstCaptureNs == nil {
+            firstCaptureNs = callbackNs
+            lifecycleState = "encoding_first_frame"
+        }
+        if let previous = lastCaptureCallbackNs, callbackNs >= previous {
+            appendRollingSample((callbackNs - previous) / 1_000, to: &captureIntervalSamplesUs)
+        }
+        lastCaptureCallbackNs = callbackNs
         stateLock.unlock()
         guard stillRunning else { return }
 
         let frame = PendingCaptureFrame(
-            sample: sample,
-            callbackNs: DispatchTime.now().uptimeNanoseconds
+            pixelBuffer: pixelBuffer,
+            pts: pts,
+            duration: duration,
+            callbackNs: callbackNs
         )
         captureLock.lock()
         let replaced = pendingCapture != nil
         pendingCapture = frame
+        latestCapture = frame
         let shouldSchedule = !encodeScheduled
         if shouldSchedule {
             encodeScheduled = true
@@ -801,19 +1266,19 @@ final class CaptureSession {
         stateLock.unlock()
         guard stillRunning else { return }
 
-        guard let pb = CMSampleBufferGetImageBuffer(captured.sample) else { return }
+        let pb = captured.pixelBuffer
         let encodeStartNs = DispatchTime.now().uptimeNanoseconds
         if session == nil {
             setupEncoder(for: pb)
         }
         guard let s = session else { return }
 
-        let inputPts = CMSampleBufferGetPresentationTimeStamp(captured.sample)
+        let inputPts = captured.pts
 
         let pts = inputPts.timescale > 0
             ? inputPts
             : CMTime(value: CMTimeValue(submittedFrames), timescale: CMTimeScale(fps))
-        let inputDuration = CMSampleBufferGetDuration(captured.sample)
+        let inputDuration = captured.duration
         let duration = inputDuration.timescale > 0
             ? inputDuration
             : CMTime(value: 1, timescale: CMTimeScale(fps))
@@ -826,11 +1291,15 @@ final class CaptureSession {
         let queueWaitUs = (encodeStartNs &- captured.callbackNs) / 1_000
         lastCaptureQueueWaitUs = queueWaitUs
         maxCaptureQueueWaitUs = max(maxCaptureQueueWaitUs, queueWaitUs)
+        appendRollingSample(queueWaitUs, to: &captureQueueWaitSamplesUs)
         if captureNsByPts.count > 256 {
             captureNsByPts.removeValue(forKey: captureNsByPts.keys.first!)
         }
         if encodeSubmitNsByPts.count > 256 {
             encodeSubmitNsByPts.removeValue(forKey: encodeSubmitNsByPts.keys.first!)
+        }
+        if encodeAuIdByPts.count > 256 {
+            encodeAuIdByPts.removeValue(forKey: encodeAuIdByPts.keys.first!)
         }
         stateLock.unlock()
         var flags: VTEncodeInfoFlags = []
@@ -842,6 +1311,7 @@ final class CaptureSession {
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary
             : nil
 
+        let trackedPts = pts.value
         let status = VTCompressionSessionEncodeFrame(
             s,
             imageBuffer: pb,
@@ -850,7 +1320,11 @@ final class CaptureSession {
             frameProperties: frameProperties,
             infoFlagsOut: &flags
         ) { [weak self] status, _, encodedSample in
-            guard status == noErr, let encodedSample = encodedSample else { return }
+            guard status == noErr, let encodedSample = encodedSample else {
+                self?.discardTrackedFrame(pts: trackedPts)
+                self?.requestRecoveryKeyframe()
+                return
+            }
             self?.handleEncoded(encodedSample)
         }
 
@@ -858,14 +1332,82 @@ final class CaptureSession {
             stateLock.lock()
             framesEncoded &+= 1
             rateWindowFrames &+= 1
+            let shouldAdaptBitrate = framesEncoded % Int64(max(1, fps)) == 0
             stateLock.unlock()
+            if shouldAdaptBitrate {
+                adaptBitrateIfNeeded()
+            }
         } else {
             stateLock.lock()
             captureNsByPts.removeValue(forKey: pts.value)
             encodeSubmitNsByPts.removeValue(forKey: pts.value)
             encodeAuIdByPts.removeValue(forKey: pts.value)
             stateLock.unlock()
+            requestRecoveryKeyframe()
         }
+    }
+
+    private func requestRecoveryKeyframe() {
+        stateLock.lock()
+        forceKeyframe = true
+        csdSent = false
+        stateLock.unlock()
+    }
+
+    private func discardTrackedFrame(pts: Int64) {
+        stateLock.lock()
+        captureNsByPts.removeValue(forKey: pts)
+        encodeSubmitNsByPts.removeValue(forKey: pts)
+        encodeAuIdByPts.removeValue(forKey: pts)
+        stateLock.unlock()
+    }
+
+    private func adaptBitrateIfNeeded() {
+        guard let session else { return }
+        stateLock.lock()
+        let totalDropped = framesDropped + captureQueueDropped
+        let newDrops = totalDropped - lastAdaptedDropped
+        lastAdaptedDropped = totalDropped
+        let congested = newDrops > 0 || lastSendBlockUs > 8_000
+        let current = currentAverageBitrate
+        if congested {
+            stableBitrateWindows = 0
+        } else {
+            stableBitrateWindows += 1
+        }
+        let canRaise = stableBitrateWindows >= 5
+        if canRaise {
+            stableBitrateWindows = 0
+        }
+        stateLock.unlock()
+
+        guard current > 0 else { return }
+        let floorBitrate = 6_000_000
+        let ceilingBitrate = 32_000_000
+        let target: Int
+        if congested {
+            target = max(floorBitrate, Int(Double(current) * 0.85))
+        } else if canRaise {
+            target = min(ceilingBitrate, Int(Double(current) * 1.05))
+        } else {
+            return
+        }
+        guard target != current else { return }
+        let status = VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_AverageBitRate,
+            value: target as CFNumber
+        )
+        guard status == noErr else { return }
+        let hardLimitBytes = max(1, Int(Double(target) / 8.0 * 1.5))
+        _ = VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_DataRateLimits,
+            value: [hardLimitBytes, 1] as CFArray
+        )
+        stateLock.lock()
+        currentAverageBitrate = target
+        stateLock.unlock()
     }
 
     private func invalidateEncoderOnEncodeQueue() {
@@ -919,9 +1461,28 @@ final class CaptureSession {
             return
         }
 
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: true as CFBoolean)
-        VTSessionSetProperty(s, key: kVTProfileLevel_H264_Baseline_AutoLevel, value: true as CFBoolean)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false as CFBoolean)
+        let realTimeStatus = VTSessionSetProperty(
+            s,
+            key: kVTCompressionPropertyKey_RealTime,
+            value: true as CFBoolean
+        )
+        let mainProfileStatus = VTSessionSetProperty(
+            s,
+            key: kVTCompressionPropertyKey_ProfileLevel,
+            value: kVTProfileLevel_H264_Main_AutoLevel
+        )
+        if mainProfileStatus != noErr {
+            _ = VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_ProfileLevel,
+                value: kVTProfileLevel_H264_Baseline_AutoLevel
+            )
+        }
+        let noReorderStatus = VTSessionSetProperty(
+            s,
+            key: kVTCompressionPropertyKey_AllowFrameReordering,
+            value: false as CFBoolean
+        )
         // This is an interactive remote display, not an offline encode. Ask
         // VideoToolbox to spend its budget on encode latency and keep no
         // additional frame-delay queue in front of the callback.
@@ -947,7 +1508,17 @@ final class CaptureSession {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: max(1, fps) as CFNumber)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: Int32(fps) as CFNumber)
 
-        VTCompressionSessionPrepareToEncodeFrames(s)
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(s)
+        guard realTimeStatus == noErr, noReorderStatus == noErr, prepareStatus == noErr else {
+            VTCompressionSessionInvalidate(s)
+            markStopped(
+                "VideoToolbox low-latency setup failed: realtime=\(realTimeStatus) noReorder=\(noReorderStatus) prepare=\(prepareStatus)"
+            )
+            return
+        }
+        stateLock.lock()
+        currentAverageBitrate = Int(avgBitrate)
+        stateLock.unlock()
         session = s
     }
 
@@ -958,16 +1529,22 @@ final class CaptureSession {
         let encodeNs = DispatchTime.now().uptimeNanoseconds
         let encodedPts = CMSampleBufferGetPresentationTimeStamp(sample).value
         stateLock.lock()
+        if firstEncodeNs == nil {
+            firstEncodeNs = encodeNs
+            lifecycleState = "waiting_first_send"
+        }
         let auId = encodeAuIdByPts.removeValue(forKey: encodedPts)
         if let captureNs = captureNsByPts.removeValue(forKey: encodedPts) {
             let elapsedUs = (encodeNs &- captureNs) / 1_000
             lastCaptureToEncodeUs = elapsedUs
             maxCaptureToEncodeUs = max(maxCaptureToEncodeUs, elapsedUs)
+            appendRollingSample(elapsedUs, to: &captureToEncodeSamplesUs)
         }
         if let submitNs = encodeSubmitNsByPts.removeValue(forKey: encodedPts) {
             let elapsedUs = (encodeNs &- submitNs) / 1_000
             lastEncodeOutputUs = elapsedUs
             maxEncodeOutputUs = max(maxEncodeOutputUs, elapsedUs)
+            appendRollingSample(elapsedUs, to: &encodeOutputSamplesUs)
         }
         stateLock.unlock()
         guard let auId else {
@@ -1062,41 +1639,65 @@ final class CaptureSession {
             offset += 4 + length
         }
 
-        // TCP mode: no MTU fragmentation — the length-prefix framing carries
-        // the whole AU in one logical packet; the kernel segments the stream.
-        // The F envelope carries the raw Annex-B AU. Do not nest the older
-        // AU+PTS packet here: the Android F receiver feeds its payload
-        // directly to MediaCodec.
-        // F header:
-        //   F, fragment-index, fragment-count, AU id (LE), "LT", host wall ms
-        // The wall timestamp is only a rough wire-age marker until the
-        // control-plane clock offset is measured; it is still useful for
-        // correlating host and viewer timing logs during a live run.
-        var p2 = Data([0x46, 0, 1, UInt8(auId & 0xFF), UInt8(auId >> 8), 0x4C, 0x54])
+        // The network writer splits this logical G access unit into 1,200-byte
+        // UDP datagrams. Its base envelope carries the AU id and timestamp;
+        // each emitted fragment receives its own index/count fields.
+        // Logical G header: G, AU id (LE), "LT", host wall ms.
+        var p2 = Data([0x47, UInt8(auId & 0xFF), UInt8(auId >> 8), 0x4C, 0x54])
         var hostWallMs = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
         withUnsafeBytes(of: &hostWallMs) { p2.append(contentsOf: $0) }
         p2.append(pkt.dropFirst(10))
-        enqueuePacket(frame: p2)
+        enqueuePacket(frame: p2, isKeyframe: isKeyframe)
     }
 
-    private func enqueuePacket(config: Data? = nil, frame: Data? = nil) {
+    private func enqueuePacket(
+        config: Data? = nil,
+        frame: Data? = nil,
+        isKeyframe: Bool = false
+    ) {
         networkLock.lock()
         if let config {
             pendingConfig = config
         }
         if let frame {
-            if pendingFrame != nil {
+            if networkAwaitingKeyframe {
+                if isKeyframe {
+                    pendingFrames.removeAll(keepingCapacity: true)
+                    networkAwaitingKeyframe = false
+                    pendingFrames.append(
+                        PendingEncodedFrame(data: frame, isKeyframe: true)
+                    )
+                } else {
+                    stateLock.lock()
+                    framesDropped &+= 1
+                    forceKeyframe = true
+                    stateLock.unlock()
+                }
+            } else if pendingFrames.count < maxPendingNetworkFrames {
+                pendingFrames.append(
+                    PendingEncodedFrame(data: frame, isKeyframe: isKeyframe)
+                )
+            } else {
+                // The unsent frames are a dependency chain. Once the bounded
+                // queue is full, sending a newer delta while skipping any of
+                // them would create visible corruption. Discard the whole
+                // unsent chain and recover on the next independently decodable
+                // IDR instead.
+                let discarded = pendingFrames.count + (isKeyframe ? 0 : 1)
+                pendingFrames.removeAll(keepingCapacity: true)
                 stateLock.lock()
-                framesDropped &+= 1
-                // Replacing an encoded AU means the viewer may lose an H.264
-                // reference frame. Ask VideoToolbox for a fresh IDR before
-                // resuming delta frames; otherwise low-latency dropping can
-                // turn into visible block corruption until the next GOP.
-                forceKeyframe = true
-                csdSent = false
+                framesDropped &+= Int64(discarded)
                 stateLock.unlock()
+                if isKeyframe {
+                    networkAwaitingKeyframe = false
+                    pendingFrames.append(
+                        PendingEncodedFrame(data: frame, isKeyframe: true)
+                    )
+                } else {
+                    networkAwaitingKeyframe = true
+                    requestRecoveryKeyframe()
+                }
             }
-            pendingFrame = frame
         }
         let schedule = !networkDrainScheduled
         if schedule {
@@ -1116,8 +1717,7 @@ final class CaptureSession {
             networkLock.lock()
             let config = pendingConfig
             pendingConfig = nil
-            let frame = pendingFrame
-            pendingFrame = nil
+            let frame = pendingFrames.isEmpty ? nil : pendingFrames.removeFirst()
             if config == nil && frame == nil {
                 networkDrainScheduled = false
                 networkLock.unlock()
@@ -1125,84 +1725,401 @@ final class CaptureSession {
             }
             networkLock.unlock()
 
-            // Config always precedes the newest pending frame. If capture
-            // outruns TCP while writePacket is blocked, the next loop sees
-            // only the latest frame rather than replaying a backlog.
+            // Config always precedes the next queued frame. The queue is
+            // intentionally tiny and overflow is recovered by an IDR, so it
+            // absorbs scheduler jitter without accumulating stale video.
             if let config {
                 writePacket(config)
             }
             if let frame {
-                writePacket(frame)
+                writePacket(frame.data, isFrame: true)
             }
         }
     }
 
-    /// Consume viewer-to-host control frames on the otherwise bidirectional
-    /// TCP socket. The video direction remains host -> viewer; the only
-    /// reverse packet currently defined is [u32 BE 3][BYE].
-    private func viewerRequestedStop(_ fd: Int32) -> Bool {
-        var bytes = [UInt8](repeating: 0, count: 256)
+    /// Consume nonce-authenticated viewer-to-host datagrams on a dedicated
+    /// queue. Pointer motion is latest-wins; buttons and keys are accepted in
+    /// sequence and acknowledged so the viewer can retry without duplicating
+    /// host events.
+    private func consumeViewerControl(_ fd: Int32) {
+        var bytes = [UInt8](repeating: 0, count: 512)
+        let token = viewerControlToken
         while true {
             let count = bytes.withUnsafeMutableBytes { raw in
-                recv(fd, raw.baseAddress, raw.count, MSG_DONTWAIT)
+                recvfrom(fd, raw.baseAddress, raw.count, MSG_DONTWAIT, nil, nil)
             }
             guard count > 0 else { break }
-            viewerControlBuffer.append(contentsOf: bytes[0..<count])
-        }
-
-        while viewerControlBuffer.count >= 4 {
-            let length = viewerControlBuffer.prefix(4).reduce(UInt32(0)) { value, byte in
-                (value << 8) | UInt32(byte)
+            let payload = Data(bytes[0..<count])
+            guard payload.count >= token.count,
+                  payload.suffix(token.count) == token else {
+                continue
             }
-            guard length <= 64 * 1024 else {
-                viewerControlBuffer.removeAll(keepingCapacity: true)
-                return false
-            }
-            let framedLength = 4 + Int(length)
-            guard viewerControlBuffer.count >= framedLength else { break }
-            let payload = Data(viewerControlBuffer[4..<framedLength])
-            viewerControlBuffer.removeFirst(framedLength)
-            if payload == Data("BYE".utf8) {
+            let message = Data(payload.dropLast(token.count))
+            if message == Data("BYE".utf8) {
                 print("viewer close signal received for \(targetLabel)")
                 requestViewerStop()
-                return true
+                return
             }
+            if message == Data("IDR".utf8) {
+                networkLock.lock()
+                pendingFrames.removeAll(keepingCapacity: true)
+                networkAwaitingKeyframe = true
+                networkLock.unlock()
+                requestRecoveryKeyframe()
+                continue
+            }
+            handleInputMessage(message, fd: fd)
         }
-        return false
     }
 
-    /// Send one framed packet: [u32 BE length][payload] over the TCP stream.
-    /// On send failure, keep the session alive and reconnect in the background.
-    private func writePacket(_ data: Data) {
+    private func readUInt16BE(_ data: Data, at offset: Int) -> UInt16 {
+        (UInt16(data[offset]) << 8) | UInt16(data[offset + 1])
+    }
+
+    private func readUInt32BE(_ data: Data, at offset: Int) -> UInt32 {
+        (UInt32(data[offset]) << 24)
+            | (UInt32(data[offset + 1]) << 16)
+            | (UInt32(data[offset + 2]) << 8)
+            | UInt32(data[offset + 3])
+    }
+
+    private func sendInputAck(sequence: UInt32, fd: Int32) {
+        var ack = Data("LCA1".utf8)
+        var sequenceBE = sequence.bigEndian
+        withUnsafeBytes(of: &sequenceBE) { ack.append(contentsOf: $0) }
+        ack.append(viewerControlToken)
+        _ = sendToViewer(ack, fd: fd)
+    }
+
+    private func handleInputMessage(_ message: Data, fd: Int32) {
+        guard message.count >= 10,
+              message.prefix(4) == Data("LCI1".utf8) else {
+            return
+        }
+        let sequence = readUInt32BE(message, at: 4)
+        let kind = message[8]
+        let reliable = message[9] & 1 == 1
+
+        if !reliable {
+            guard kind == 1, message.count == 18 else { return }
+            inputLock.lock()
+            let newer = Int32(bitPattern: sequence &- lastPointerInputSequence) > 0
+            if newer {
+                lastPointerInputSequence = sequence
+            }
+            let enabled = inputEnabled
+            inputLock.unlock()
+            if newer && enabled {
+                injectPointerMove(message)
+            }
+            return
+        }
+
+        inputLock.lock()
+        let last = lastReliableInputSequence
+        let enabled = inputEnabled
+        inputLock.unlock()
+        if sequence == last {
+            sendInputAck(sequence: sequence, fd: fd)
+            return
+        }
+        // Release-all is the fail-safe resynchronization packet. It may skip
+        // a lost reliable transition, but an older delayed release must never
+        // cancel newer input.
+        if kind == 5 {
+            guard message.count == 10,
+                  Int32(bitPattern: sequence &- last) > 0 else {
+                return
+            }
+            if enabled { releaseInjectedInput() }
+            inputLock.lock()
+            lastReliableInputSequence = sequence
+            inputLock.unlock()
+            sendInputAck(sequence: sequence, fd: fd)
+            return
+        }
+        guard sequence == last &+ 1,
+              validateAndInjectReliableInput(message, kind: kind, enabled: enabled) else {
+            return
+        }
+        inputLock.lock()
+        lastReliableInputSequence = sequence
+        inputLock.unlock()
+        sendInputAck(sequence: sequence, fd: fd)
+    }
+
+    private func validateAndInjectReliableInput(
+        _ message: Data,
+        kind: UInt8,
+        enabled: Bool
+    ) -> Bool {
+        switch kind {
+        case 2:
+            guard message.count == 20 else { return false }
+            if enabled { injectPointerButton(message) }
+        case 3:
+            guard message.count == 18 else { return false }
+            if enabled { injectScroll(message) }
+        case 4:
+            guard message.count == 21 else { return false }
+            if enabled { injectKey(message) }
+        case 5:
+            guard message.count == 10 else { return false }
+            if enabled { releaseInjectedInput() }
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func pointerPosition(x: UInt16, y: UInt16) -> CGPoint? {
+        inputLock.lock()
+        let bounds = inputBounds
+        inputLock.unlock()
+        guard let bounds else { return nil }
+        let px = bounds.origin.x + CGFloat(x) / CGFloat(UInt16.max) * bounds.width
+        let py = bounds.origin.y + CGFloat(y) / CGFloat(UInt16.max) * bounds.height
+        return CGPoint(x: px, y: py)
+    }
+
+    private func injectPointerMove(_ message: Data) {
+        guard let point = pointerPosition(
+            x: readUInt16BE(message, at: 10),
+            y: readUInt16BE(message, at: 12)
+        ) else { return }
+        let buttons = readUInt32BE(message, at: 14)
+        let type: CGEventType
+        let button: CGMouseButton
+        if buttons & 1 != 0 {
+            type = .leftMouseDragged
+            button = .left
+        } else if buttons & 2 != 0 {
+            type = .rightMouseDragged
+            button = .right
+        } else if buttons & 4 != 0 {
+            type = .otherMouseDragged
+            button = .center
+        } else {
+            type = .mouseMoved
+            button = .left
+        }
+        lastPointerPosition = point
+        CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: point,
+            mouseButton: button
+        )?.post(tap: .cghidEventTap)
+    }
+
+    private func mouseButton(mask: UInt8) -> CGMouseButton? {
+        switch mask {
+        case 1: return .left
+        case 2: return .right
+        case 4: return .center
+        default: return nil
+        }
+    }
+
+    private func injectPointerButton(_ message: Data) {
+        guard let point = pointerPosition(
+            x: readUInt16BE(message, at: 10),
+            y: readUInt16BE(message, at: 12)
+        ) else { return }
+        guard let button = mouseButton(mask: message[14]) else { return }
+        let down = message[15] != 0
+        let type: CGEventType
+        switch (button, down) {
+        case (.left, true): type = .leftMouseDown
+        case (.left, false): type = .leftMouseUp
+        case (.right, true): type = .rightMouseDown
+        case (.right, false): type = .rightMouseUp
+        case (_, true): type = .otherMouseDown
+        case (_, false): type = .otherMouseUp
+        }
+        lastPointerPosition = point
+        if down {
+            pressedButtons.insert(button)
+        } else {
+            pressedButtons.remove(button)
+        }
+        CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: point,
+            mouseButton: button
+        )?.post(tap: .cghidEventTap)
+    }
+
+    private func injectScroll(_ message: Data) {
+        horizontalScrollRemainder &+= Int32(bitPattern: readUInt32BE(message, at: 10))
+        verticalScrollRemainder &+= Int32(bitPattern: readUInt32BE(message, at: 14))
+        let horizontal = horizontalScrollRemainder / 1_000
+        let vertical = verticalScrollRemainder / 1_000
+        horizontalScrollRemainder %= 1_000
+        verticalScrollRemainder %= 1_000
+        guard horizontal != 0 || vertical != 0 else { return }
+        CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 2,
+            wheel1: vertical,
+            wheel2: horizontal,
+            wheel3: 0
+        )?.post(tap: .cghidEventTap)
+    }
+
+    private func keyboardFlags(metaState: UInt32) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if metaState & 0x0000_0001 != 0 { flags.insert(.maskShift) }
+        if metaState & 0x0000_0002 != 0 { flags.insert(.maskAlternate) }
+        if metaState & 0x0000_1000 != 0 { flags.insert(.maskControl) }
+        if metaState & 0x0001_0000 != 0 { flags.insert(.maskCommand) }
+        if metaState & 0x0010_0000 != 0 { flags.insert(.maskAlphaShift) }
+        return flags
+    }
+
+    private func macKeyCode(android code: UInt16) -> CGKeyCode? {
+        let letters: [CGKeyCode] = [
+            0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46,
+            45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6,
+        ]
+        if (29...54).contains(code) { return letters[Int(code - 29)] }
+        let digits: [CGKeyCode] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25]
+        if (7...16).contains(code) { return digits[Int(code - 7)] }
+        let keypad: [CGKeyCode] = [82, 83, 84, 85, 86, 87, 88, 89, 91, 92]
+        if (144...153).contains(code) { return keypad[Int(code - 144)] }
+        let functionKeys: [CGKeyCode] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
+        if (131...142).contains(code) { return functionKeys[Int(code - 131)] }
+        return [
+            19: 126, 20: 125, 21: 123, 22: 124,
+            55: 43, 56: 47, 57: 58, 58: 61, 59: 56, 60: 60,
+            61: 48, 62: 49, 66: 36, 67: 51, 68: 50, 69: 27,
+            70: 24, 71: 33, 72: 30, 73: 42, 74: 41, 75: 39,
+            76: 44, 92: 116, 93: 121, 111: 53, 112: 117,
+            113: 59, 114: 62, 115: 57, 117: 55, 118: 54,
+            122: 115, 123: 119, 124: 114,
+            154: 75, 155: 67, 156: 78, 157: 69, 158: 65,
+            160: 76, 161: 81, 204: 104,
+        ][code]
+    }
+
+    private func injectKey(_ message: Data) {
+        let androidCode = readUInt16BE(message, at: 10)
+        guard let keyCode = macKeyCode(android: androidCode) else { return }
+        let metaState = readUInt32BE(message, at: 14)
+        let down = message[18] != 0
+        let repeatCount = readUInt16BE(message, at: 19)
+        guard let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: keyCode,
+            keyDown: down
+        ) else { return }
+        event.flags = keyboardFlags(metaState: metaState)
+        if repeatCount > 0 {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
+        if down {
+            pressedKeys.insert(keyCode)
+        } else {
+            pressedKeys.remove(keyCode)
+        }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func releaseInjectedInput() {
+        for keyCode in pressedKeys {
+            CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: keyCode,
+                keyDown: false
+            )?.post(tap: .cghidEventTap)
+        }
+        pressedKeys.removeAll(keepingCapacity: true)
+        for button in pressedButtons {
+            let type: CGEventType = button == .left
+                ? .leftMouseUp
+                : (button == .right ? .rightMouseUp : .otherMouseUp)
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: type,
+                mouseCursorPosition: lastPointerPosition,
+                mouseButton: button
+            )?.post(tap: .cghidEventTap)
+        }
+        pressedButtons.removeAll(keepingCapacity: true)
+        horizontalScrollRemainder = 0
+        verticalScrollRemainder = 0
+    }
+
+    /// Send one config datagram or one fragmented H.264 AU. Datagram payloads
+    /// stay below 1,200 bytes to avoid IP fragmentation on Wi-Fi and Tailscale.
+    /// On a local queue overflow, recover from a fresh IDR instead of blocking
+    /// subsequent video behind a lost packet.
+    private func writePacket(_ data: Data, isFrame: Bool = false) {
         stateLock.lock()
         let fd = sock
         stateLock.unlock()
         guard fd >= 0 else { return }
-        if viewerRequestedStop(fd) { return }
-        var framed = Data()
-        var lenBE = UInt32(data.count).bigEndian
-        withUnsafeBytes(of: &lenBE) { framed.append(contentsOf: $0) }
-        framed.append(data)
-        let sendStart = DispatchTime.now().uptimeNanoseconds
-        let ok = framed.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
-            var off = 0
-            while off < raw.count {
-                let n = send(fd, raw.baseAddress!.advanced(by: off), raw.count - off, 0)
-                if n <= 0 { return false }
-                off += n
+
+        let datagrams: [Data]
+        if isFrame {
+            // Logical G header: marker + AU id LE + LT + wall clock.
+            guard data.count > 13, data[0] == 0x47, data[3...4] == Data([0x4C, 0x54]) else {
+                requestRecoveryKeyframe()
+                return
             }
-            return true
+            let payload = Data(data.dropFirst(13))
+            let maxPayload = 1_183 // 1,200-byte datagram - 17-byte wire header
+            let fragmentCount = max(1, (payload.count + maxPayload - 1) / maxPayload)
+            guard fragmentCount <= Int(UInt16.max) else {
+                requestRecoveryKeyframe()
+                return
+            }
+            datagrams = (0..<fragmentCount).map { index in
+                let start = index * maxPayload
+                let end = min(payload.count, start + maxPayload)
+                var datagram = Data([0x47])
+                var indexBE = UInt16(index).bigEndian
+                var countBE = UInt16(fragmentCount).bigEndian
+                withUnsafeBytes(of: &indexBE) { datagram.append(contentsOf: $0) }
+                withUnsafeBytes(of: &countBE) { datagram.append(contentsOf: $0) }
+                datagram.append(contentsOf: data[1...12])
+                datagram.append(contentsOf: payload[start..<end])
+                return datagram
+            }
+        } else {
+            datagrams = [data]
+        }
+
+        let sendStart = DispatchTime.now().uptimeNanoseconds
+        var sentBytes = 0
+        let ok = datagrams.allSatisfy { datagram in
+            let sent = sendToViewer(datagram, fd: fd)
+            if sent == datagram.count {
+                sentBytes += sent
+                return true
+            }
+            return false
         }
         if !ok {
-            scheduleReconnect()
+            stateLock.lock()
+            framesDropped &+= isFrame ? 1 : 0
+            stateLock.unlock()
+            requestRecoveryKeyframe()
             return
         }
         let sendUs = (DispatchTime.now().uptimeNanoseconds &- sendStart) / 1_000
         stateLock.lock()
-        bytesSent &+= Int64(data.count)
-        rateWindowBytes &+= Int64(data.count)
+        if isFrame, firstSendNs == nil {
+            firstSendNs = DispatchTime.now().uptimeNanoseconds
+            lifecycleState = "running"
+        }
+        bytesSent &+= Int64(sentBytes)
+        rateWindowBytes &+= Int64(sentBytes)
         lastSendBlockUs = sendUs
         maxSendBlockUs = max(maxSendBlockUs, sendUs)
+        appendRollingSample(sendUs, to: &sendBlockSamplesUs)
         stateLock.unlock()
     }
 
@@ -1221,7 +2138,7 @@ final class CaptureSession {
             rateWindowBytes = 0
         }
 
-        let state = running ? "running" : (stoppedReason.isEmpty ? "stopped" : "error")
+        let state = lifecycleState
         let captureToEncodeUs = lastCaptureToEncodeUs
         let maxCaptureToEncodeUs = maxCaptureToEncodeUs
         let captureQueueWaitUs = lastCaptureQueueWaitUs
@@ -1238,10 +2155,19 @@ final class CaptureSession {
         let reportedFps = lastFps
         let reportedKbps = lastKbps
         let error = stoppedReason
+        let firstCaptureMs = firstCaptureNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
+        let firstEncodeMs = firstEncodeNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
+        let firstSendMs = firstSendNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
+        let currentBitrate = currentAverageBitrate
+        let captureIntervalP95Us = percentile95(captureIntervalSamplesUs)
+        let captureToEncodeP95Us = percentile95(captureToEncodeSamplesUs)
+        let captureQueueWaitP95Us = percentile95(captureQueueWaitSamplesUs)
+        let encodeOutputP95Us = percentile95(encodeOutputSamplesUs)
+        let sendBlockP95Us = percentile95(sendBlockSamplesUs)
         stateLock.unlock()
 
         networkLock.lock()
-        let pending = pendingFrame != nil ? 1 : 0
+        let pending = pendingFrames.count
         networkLock.unlock()
 
         let obj: [String: Any] = [
@@ -1254,6 +2180,17 @@ final class CaptureSession {
             "fps": reportedFps,
             "kbps": reportedKbps,
             "fpsTarget": self.fps,
+            "captureBackend": backend.rawValue,
+            "mediaTransport": "udp",
+            "firstCaptureMs": firstCaptureMs,
+            "firstEncodeMs": firstEncodeMs,
+            "firstSendMs": firstSendMs,
+            "currentBitrate": currentBitrate,
+            "captureIntervalP95Us": captureIntervalP95Us,
+            "captureToEncodeP95Us": captureToEncodeP95Us,
+            "captureQueueWaitP95Us": captureQueueWaitP95Us,
+            "encodeOutputP95Us": encodeOutputP95Us,
+            "sendBlockP95Us": sendBlockP95Us,
             "captureToEncodeUs": captureToEncodeUs,
             "maxCaptureToEncodeUs": maxCaptureToEncodeUs,
             "captureQueueWaitUs": captureQueueWaitUs,

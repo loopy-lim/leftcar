@@ -14,9 +14,19 @@ pub trait CaptureBackend: Send + Sync {
         w: u32,
         h: u32,
         fps: u32,
+        capture_backend: &str,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
     fn stats(&self, handle: u32) -> Result<StatsInfo, String>;
+    fn input_permission(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn request_input_permission(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn set_input_enabled(&self, _handle: u32, _enabled: bool) -> Result<(), String> {
+        Err("remote input is unavailable in this capture backend".into())
+    }
 }
 
 /// In-memory backend for tests and UI development without the shim dylib.
@@ -37,6 +47,7 @@ impl CaptureBackend for FakeBackend {
         _w: u32,
         _h: u32,
         _fps: u32,
+        _capture_backend: &str,
     ) -> Result<u32, String> {
         Ok(7)
     }
@@ -72,8 +83,35 @@ impl CaptureBackend for FakeBackend {
             send_block_us: 0,
             max_send_block_us: 0,
             pending_frame: 0,
+            capture_backend: "screenCaptureKit".into(),
+            media_transport: "udp".into(),
+            first_capture_ms: 20,
+            first_encode_ms: 25,
+            first_send_ms: 26,
+            current_bitrate: 12_000_000,
+            capture_interval_p95_us: 16_667,
+            capture_to_encode_p95_us: 8_000,
+            capture_queue_wait_p95_us: 1_000,
+            encode_output_p95_us: 7_000,
+            send_block_p95_us: 1_000,
             error: None,
         })
+    }
+
+    fn input_permission(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn request_input_permission(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn set_input_enabled(&self, handle: u32, _enabled: bool) -> Result<(), String> {
+        if handle == 7 {
+            Ok(())
+        } else {
+            Err("no such handle".into())
+        }
     }
 }
 

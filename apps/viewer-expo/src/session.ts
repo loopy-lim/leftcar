@@ -52,7 +52,7 @@ export async function reconnectHost(): Promise<ControlClient> {
   }
 }
 
-/** Allocate the next viewer-side TCP port for a new stream window. */
+/** Allocate the next viewer-side UDP port for a new stream window. */
 export function allocPort(): number {
   return nextPort++;
 }

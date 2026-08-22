@@ -3,8 +3,11 @@ package dev.leftcar.viewer.nsd
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -77,6 +80,39 @@ class NsdModule(reactContext: ReactApplicationContext) :
         try {
             nsdManager?.stopServiceDiscovery(listener)
         } catch (_: IllegalArgumentException) {
+        }
+    }
+
+    /**
+     * Return the physical Wi-Fi IPv4 address even when a non-bypassable VPN
+     * advertises the same LAN subnet. The Host verifies this claimed address
+     * with a nonce UDP reachability challenge before sending any screen data.
+     */
+    @ReactMethod
+    fun getWifiIpv4(promise: Promise) {
+        try {
+            val manager = reactApplicationContext
+                .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val address = manager.allNetworks.asSequence()
+                .filter { network ->
+                    val capabilities = manager.getNetworkCapabilities(network)
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == false
+                }
+                .flatMap { network ->
+                    manager.getLinkProperties(network)?.linkAddresses.orEmpty().asSequence()
+                }
+                .map { it.address }
+                .filter { it.address.size == 4 }
+                .map { it.hostAddress }
+                .firstOrNull()
+            if (address == null) {
+                promise.reject("ERR_WIFI_ADDRESS", "physical Wi-Fi IPv4 address unavailable")
+            } else {
+                promise.resolve(address)
+            }
+        } catch (error: Throwable) {
+            promise.reject("ERR_WIFI_ADDRESS", error.message, error)
         }
     }
 

@@ -22,6 +22,8 @@ struct Session {
     source_index: u32,
     source_name: String,
     viewer_addr: String,
+    input_enabled: bool,
+    input_rate_hz: u32,
     terminal_since: Option<Instant>,
 }
 
@@ -107,17 +109,29 @@ impl ControlServer {
                     send_block_us: 0,
                     max_send_block_us: 0,
                     pending_frame: 0,
+                    capture_backend: "unknown".into(),
+                    media_transport: "unknown".into(),
+                    first_capture_ms: 0,
+                    first_encode_ms: 0,
+                    first_send_ms: 0,
+                    current_bitrate: 0,
+                    capture_interval_p95_us: 0,
+                    capture_to_encode_p95_us: 0,
+                    capture_queue_wait_p95_us: 0,
+                    encode_output_p95_us: 0,
+                    send_block_p95_us: 0,
                     error: Some("backend stats unavailable".into()),
                 });
 
-                if metrics.state == "running" {
-                    s.terminal_since = None;
-                } else {
+                let terminal = matches!(metrics.state.as_str(), "error" | "stopped" | "unknown");
+                if terminal {
                     let terminal_since = s.terminal_since.get_or_insert(now);
                     if now.duration_since(*terminal_since) >= TERMINAL_SESSION_RETENTION {
                         expired_ids.push(*id);
                         continue;
                     }
+                } else {
+                    s.terminal_since = None;
                 }
 
                 sessions.push(SessionView {
@@ -129,6 +143,8 @@ impl ControlServer {
                     fps: metrics.fps,
                     kbps: metrics.kbps,
                     fps_target: metrics.fps_target,
+                    input_enabled: s.input_enabled,
+                    input_rate_hz: s.input_rate_hz,
                     dropped: metrics.dropped,
                     network_dropped: metrics.network_dropped,
                     capture_queue_dropped: metrics.capture_queue_dropped,
@@ -141,6 +157,19 @@ impl ControlServer {
                     send_block_us: metrics.send_block_us,
                     max_send_block_us: metrics.max_send_block_us,
                     pending_frame: metrics.pending_frame,
+                    frames: metrics.frames,
+                    bytes: metrics.bytes,
+                    capture_backend: metrics.capture_backend,
+                    media_transport: metrics.media_transport,
+                    first_capture_ms: metrics.first_capture_ms,
+                    first_encode_ms: metrics.first_encode_ms,
+                    first_send_ms: metrics.first_send_ms,
+                    current_bitrate: metrics.current_bitrate,
+                    capture_interval_p95_us: metrics.capture_interval_p95_us,
+                    capture_to_encode_p95_us: metrics.capture_to_encode_p95_us,
+                    capture_queue_wait_p95_us: metrics.capture_queue_wait_p95_us,
+                    encode_output_p95_us: metrics.encode_output_p95_us,
+                    send_block_p95_us: metrics.send_block_p95_us,
                     error: metrics.error,
                 });
             }
@@ -162,6 +191,33 @@ impl ControlServer {
         }
 
         StatusView { sessions }
+    }
+
+    pub fn input_permission(&self) -> Result<bool, String> {
+        self.backend.input_permission()
+    }
+
+    pub fn request_input_permission(&self) -> Result<bool, String> {
+        self.backend.request_input_permission()
+    }
+
+    pub fn set_session_input(&self, session_id: u32, enabled: bool) -> Result<(), String> {
+        let handle = {
+            let state = self.sessions.lock().unwrap();
+            state
+                .live
+                .get(&session_id)
+                .map(|session| session.handle)
+                .ok_or_else(|| format!("no such session {session_id}"))?
+        };
+        self.backend.set_input_enabled(handle, enabled)?;
+        let mut state = self.sessions.lock().unwrap();
+        let session = state
+            .live
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session {session_id} ended while changing input"))?;
+        session.input_enabled = enabled;
+        Ok(())
     }
 
     /// A viewer restart can leave the old capture handle alive until its TCP
@@ -198,6 +254,18 @@ impl ControlServer {
         viewer_ip: &str,
     ) -> serde_json::Value {
         match command {
+            "beginPairing" => {
+                // Local operator/diagnostic entry point. This exposes the same
+                // short-lived two-factor offer as the Tauri pairing window,
+                // but it is never reachable from a LAN or tailnet peer.
+                if !is_loopback_peer(viewer_ip) {
+                    return err("unauthorized");
+                }
+                let Some(host_ip) = crate::local_lan_ip() else {
+                    return err("no LAN interface found");
+                };
+                ok(self.pairing.begin_pairing(&host_ip, crate::CONTROL_PORT))
+            }
             "pair" => {
                 #[derive(serde::Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -235,6 +303,21 @@ impl ControlServer {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
                 };
+                if input.width == 0
+                    || input.height == 0
+                    || input.width > 8192
+                    || input.height > 8192
+                    || input.fps == 0
+                    || input.fps > 90
+                {
+                    return err("unsupported stream dimensions or fps");
+                }
+                if !matches!(
+                    input.capture_backend.as_str(),
+                    "screenCaptureKit" | "cgDisplayStream"
+                ) {
+                    return err("unsupported capture backend");
+                }
                 let name = self
                     .backend
                     .list_displays()
@@ -242,11 +325,22 @@ impl ControlServer {
                     .and_then(|d| d.get(input.source_index as usize).cloned())
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
-                // The viewer's claimed IPs are untrusted input on an
-                // authenticated-but-unverified channel: a paired viewer must
-                // not redirect the media stream to an arbitrary host. Only
-                // the connection's actual peer address is used.
-                let candidates = vec![viewer_ip.to_owned()];
+                // A non-bypassable VPN can route a local control connection
+                // through a LAN subnet router, so its TCP peer is not always
+                // the viewer's physical Wi-Fi address. Consider claimed
+                // addresses only when they are private and on the peer's /24.
+                // The production UDP backend performs a nonce reachability
+                // proof before capture, preventing arbitrary redirection.
+                let mut candidates = input
+                    .viewer_ips
+                    .iter()
+                    .take(4)
+                    .filter(|candidate| same_private_lan_candidate(candidate, viewer_ip))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !candidates.iter().any(|candidate| candidate == viewer_ip) {
+                    candidates.push(viewer_ip.to_owned());
+                }
                 let mut last_error = None;
                 let mut started = None;
                 for candidate in candidates {
@@ -259,6 +353,7 @@ impl ControlServer {
                         input.width,
                         input.height,
                         input.fps,
+                        &input.capture_backend,
                     ) {
                         Ok(handle) => {
                             started = Some((handle, candidate));
@@ -281,6 +376,8 @@ impl ControlServer {
                                     source_index: input.source_index,
                                     source_name: name,
                                     viewer_addr,
+                                    input_enabled: false,
+                                    input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
                                 },
                             );
@@ -339,10 +436,16 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
         let resp = match parsed {
             Ok((cmd, args, token)) => {
                 // Auth gate: `pair` is the only command reachable without a
-                // token. Anything else requires a token issued by a completed
-                // pairing; on failure the connection is closed, not just the
-                // request rejected (design §2).
-                if cmd != "pair" && !server.pairing.authorize(token.as_deref().unwrap_or("")) {
+                // token over the network. The loopback-only beginPairing
+                // command is an operator diagnostic equivalent to opening the
+                // local Tauri pairing panel. Anything else requires a token
+                // issued by a completed pairing; on failure the connection is
+                // closed, not just the request rejected (design §2).
+                let local_pairing = cmd == "beginPairing" && is_loopback_peer(peer);
+                if cmd != "pair"
+                    && !local_pairing
+                    && !server.pairing.authorize(token.as_deref().unwrap_or(""))
+                {
                     write_line(
                         &mut wr,
                         &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
@@ -359,6 +462,25 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
             break;
         }
     }
+}
+
+fn is_loopback_peer(peer: &str) -> bool {
+    peer.parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
+    let Ok(candidate) = candidate.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(peer) = peer.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let candidate_octets = candidate.octets();
+    let peer_octets = peer.octets();
+    candidate.is_private()
+        && peer.is_private()
+        && candidate_octets[..3] == peer_octets[..3]
 }
 
 async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
@@ -421,6 +543,7 @@ mod tests {
             _w: u32,
             _h: u32,
             _fps: u32,
+            _capture_backend: &str,
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -450,6 +573,17 @@ mod tests {
                 send_block_us: 0,
                 max_send_block_us: 0,
                 pending_frame: 0,
+                capture_backend: "screenCaptureKit".into(),
+                media_transport: "udp".into(),
+                first_capture_ms: 20,
+                first_encode_ms: 25,
+                first_send_ms: 26,
+                current_bitrate: 12_000_000,
+                capture_interval_p95_us: 16_667,
+                capture_to_encode_p95_us: 8_000,
+                capture_queue_wait_p95_us: 1_000,
+                encode_output_p95_us: 7_000,
+                send_block_p95_us: 1_000,
                 error: Some("viewer closed stream".into()),
             })
         }
@@ -540,6 +674,8 @@ mod tests {
 
         let line = request(&mut sock, "getStatus", "{}", &token).await;
         assert!(line.contains("\"state\":\"running\""), "{line}");
+        assert!(line.contains("\"inputEnabled\":false"), "{line}");
+        assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
         let line = request(&mut sock, "stopStream", r#"{"session":1}"#, &token).await;
         assert!(line.contains("\"ok\":true"), "{line}");
@@ -605,6 +741,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_operator_can_begin_pairing_without_a_token() {
+        let addr = spawn_server().await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        let line = request(&mut sock, "beginPairing", "{}", "").await;
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["ok"], true, "{line}");
+        assert_eq!(response["result"]["expires_in_secs"], 120, "{line}");
+        assert_eq!(response["result"]["code"].as_str().unwrap().len(), 6);
+        let payload: serde_json::Value =
+            serde_json::from_str(response["result"]["qr_payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["v"], 1);
+        assert_eq!(payload["p"], crate::CONTROL_PORT);
+    }
+
+    #[test]
+    fn operator_pairing_is_strictly_loopback_only() {
+        assert!(is_loopback_peer("127.0.0.1"));
+        assert!(is_loopback_peer("::1"));
+        assert!(!is_loopback_peer("192.168.0.18"));
+        assert!(!is_loopback_peer("100.77.109.50"));
+        assert!(!is_loopback_peer("localhost"));
+    }
+
+    #[test]
+    fn media_candidate_must_be_private_and_on_the_control_peers_lan() {
+        assert!(same_private_lan_candidate(
+            "192.168.0.18",
+            "192.168.0.170"
+        ));
+        assert!(!same_private_lan_candidate(
+            "192.168.1.18",
+            "192.168.0.170"
+        ));
+        assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
+        assert!(!same_private_lan_candidate(
+            "192.168.0.18",
+            "100.77.109.50"
+        ));
+    }
+
+    #[tokio::test]
     async fn wrong_token_is_rejected() {
         let addr = spawn_server().await;
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -629,6 +807,8 @@ mod tests {
                 source_index: 0,
                 source_name: "Main".into(),
                 viewer_addr: "192.168.0.2:5001".into(),
+                input_enabled: false,
+                input_rate_hz: 120,
                 terminal_since: None,
             },
         );
@@ -653,5 +833,29 @@ mod tests {
         let second = server.snapshot();
         assert!(second.sessions.is_empty());
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn remote_input_is_host_opt_in_per_session() {
+        let server = ControlServer::new(backend(), test_pairing());
+        server.sessions.lock().unwrap().live.insert(
+            1,
+            Session {
+                handle: 7,
+                source_index: 0,
+                source_name: "Main".into(),
+                viewer_addr: "192.168.0.2:5001".into(),
+                input_enabled: false,
+                input_rate_hz: 120,
+                terminal_since: None,
+            },
+        );
+
+        assert!(server.input_permission().unwrap());
+        assert!(!server.snapshot().sessions[0].input_enabled);
+        server.set_session_input(1, true).unwrap();
+        let session = server.snapshot().sessions.remove(0);
+        assert!(session.input_enabled);
+        assert_eq!(session.input_rate_hz, 120);
     }
 }

@@ -13,7 +13,7 @@ import {
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { pairWithHost, parseQrPayload, type QrPayload } from "../src/pairing";
 
 /**
@@ -26,13 +26,16 @@ const CODE_LENGTH = 6;
 const INVALID_QR_HINT_MS = 1_800;
 
 export default function Pairing() {
+  const { payload: initialPayload } = useLocalSearchParams<{
+    payload?: string | string[];
+  }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [payload, setPayload] = useState<QrPayload | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [invalidQrHint, setInvalidQrHint] = useState(false);
-  const [failCount, setFailCount] = useState(0);
+  const failCountRef = useRef(0);
   // Once a valid offer is captured, stop reacting to further camera frames.
   const scannedRef = useRef(false);
   const invalidHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -59,7 +62,7 @@ export default function Pairing() {
       setPayload(parsed);
       setError(null);
       setCode("");
-      setFailCount(0);
+      failCountRef.current = 0;
       return;
     }
     // Wrong QR: brief hint, keep scanning (debounced).
@@ -70,6 +73,14 @@ export default function Pairing() {
       setInvalidQrHint(false);
     }, INVALID_QR_HINT_MS);
   }, []);
+
+  // QR remains the normal user flow. A deep link can carry the exact same
+  // short-lived payload for local ADB/MDM diagnostics; the independent
+  // six-digit code is still required before any pairing token is issued.
+  useEffect(() => {
+    const candidate = Array.isArray(initialPayload) ? initialPayload[0] : initialPayload;
+    if (candidate) handleBarcode({ data: candidate });
+  }, [handleBarcode, initialPayload]);
 
   const submitCode = useCallback(async () => {
     if (!payload || code.length !== CODE_LENGTH || busy) return;
@@ -83,8 +94,8 @@ export default function Pairing() {
         ]);
       }
     } catch {
-      const next = failCount + 1;
-      setFailCount(next);
+      const next = failCountRef.current + 1;
+      failCountRef.current = next;
       setError(
         next >= 2
           ? "페어링 실패. 코드를 확인하세요. 오퍼가 만료되었을 수 있습니다. 호스트에서 QR을 다시 생성하세요."
@@ -93,7 +104,7 @@ export default function Pairing() {
     } finally {
       if (mountedRef.current) setBusy(false);
     }
-  }, [busy, code, failCount, payload]);
+  }, [busy, code, payload]);
 
   const restartScan = useCallback(() => {
     scannedRef.current = false;
@@ -105,7 +116,7 @@ export default function Pairing() {
     setCode("");
     setError(null);
     setInvalidQrHint(false);
-    setFailCount(0);
+    failCountRef.current = 0;
   }, []);
 
   // ---- Stage 2: code entry ------------------------------------------------

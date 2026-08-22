@@ -328,6 +328,63 @@ body {
   background-color: var(--bg-card-subtle);
 }
 
+.input-permission-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  border-radius: 12px;
+  background: rgba(120, 53, 15, 0.13);
+}
+
+.input-permission-card strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.input-permission-card p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.input-permission-granted {
+  border-color: rgba(52, 211, 153, 0.22);
+  background: rgba(6, 78, 59, 0.12);
+}
+
+.input-permission-status {
+  flex: none;
+  color: #6ee7b7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.input-toggle {
+  min-width: 92px;
+  padding: 6px 9px;
+  border: 1px solid var(--border-card);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.input-toggle-enabled {
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(6, 78, 59, 0.28);
+  color: #6ee7b7;
+}
+
+.input-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 /* Table Cells */
 .session-id-chip {
   font-family: var(--font-mono);

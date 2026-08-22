@@ -82,6 +82,25 @@ extern "C" {
     ) -> i32;
     fn leftcar_jni_release(state: *mut c_void, instance: *const c_char) -> i32;
     fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool);
+    fn leftcar_jni_input_pointer(
+        instance: *const c_char,
+        action: u32,
+        x: f32,
+        y: f32,
+        buttons: u32,
+        action_button: u32,
+        horizontal_scroll: f32,
+        vertical_scroll: f32,
+    ) -> i32;
+    fn leftcar_jni_input_key(
+        instance: *const c_char,
+        key_code: u32,
+        scan_code: u32,
+        meta_state: u32,
+        down: bool,
+        repeat: u32,
+    ) -> i32;
+    fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
 }
 
 // Java signatures:
@@ -90,6 +109,9 @@ extern "C" {
 //   surfaceChanged(long, String, int, int): int
 //   detachSurface(long, String): int
 //   updateWindowEvent(long, String, int, long): int
+//   sendPointer(String, int, float, float, int, int, float, float): int
+//   sendKey(String, int, int, int, boolean, int): int
+//   releaseInput(String): int
 //   release(long, String): int
 
 macro_rules! jni_fn {
@@ -170,7 +192,7 @@ fn attach_port_body(
             host.as_ptr(),
             width.max(1) as u32,
             height.max(1) as u32,
-            fps.clamp(1, 60) as u32,
+            fps.clamp(1, 90) as u32,
         )
     };
     if r != 0 {
@@ -267,6 +289,80 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_updateWindowE
             monotonic_ms as u64,
         )
     }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendPointer(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+    action: i32,
+    x: f32,
+    y: f32,
+    buttons: i32,
+    action_button: i32,
+    horizontal_scroll: f32,
+    vertical_scroll: f32,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return 1,
+    };
+    unsafe {
+        leftcar_jni_input_pointer(
+            c.as_ptr(),
+            action as u32,
+            x,
+            y,
+            buttons as u32,
+            action_button as u32,
+            horizontal_scroll,
+            vertical_scroll,
+        )
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendKey(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+    key_code: i32,
+    scan_code: i32,
+    meta_state: i32,
+    down: u8,
+    repeat: i32,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return 1,
+    };
+    unsafe {
+        leftcar_jni_input_key(
+            c.as_ptr(),
+            key_code as u32,
+            scan_code as u32,
+            meta_state as u32,
+            down != 0,
+            repeat as u32,
+        )
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_releaseInput(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return 1,
+    };
+    unsafe { leftcar_jni_input_release_all(c.as_ptr()) }
 }
 
 #[no_mangle]

@@ -153,7 +153,7 @@ export default function Hub() {
         </View>
         <View style={styles.metricCard}>
           <Text style={styles.metricLabel}>Transport</Text>
-          <Text style={[styles.metricValue, { color: "#a5b4fc" }]}>Direct TCP/NDK</Text>
+          <Text style={[styles.metricValue, { color: "#a5b4fc" }]}>Direct UDP/NDK</Text>
         </View>
       </View>
 

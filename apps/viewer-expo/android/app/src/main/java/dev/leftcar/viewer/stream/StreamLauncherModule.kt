@@ -25,7 +25,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("host", host)
                 putExtra("width", width)
                 putExtra("height", height)
-                putExtra("fps", fps.coerceIn(1, 60))
+                putExtra("fps", fps.coerceIn(1, 90))
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             val ctx = getCurrentActivity()

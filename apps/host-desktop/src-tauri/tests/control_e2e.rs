@@ -43,6 +43,7 @@ impl CaptureBackend for RecordingBackend {
         _w: u32,
         _h: u32,
         _fps: u32,
+        _capture_backend: &str,
     ) -> Result<u32, String> {
         self.started_ips.lock().unwrap().push(ip.to_owned());
         Ok(7)
@@ -70,6 +71,17 @@ impl CaptureBackend for RecordingBackend {
             send_block_us: 0,
             max_send_block_us: 0,
             pending_frame: 0,
+            capture_backend: "screenCaptureKit".into(),
+            media_transport: "udp".into(),
+            first_capture_ms: 20,
+            first_encode_ms: 25,
+            first_send_ms: 26,
+            current_bitrate: 12_000_000,
+            capture_interval_p95_us: 16_667,
+            capture_to_encode_p95_us: 8_000,
+            capture_queue_wait_p95_us: 1_000,
+            encode_output_p95_us: 7_000,
+            send_block_p95_us: 1_000,
             error: None,
         })
     }
@@ -190,7 +202,7 @@ async fn test_full_stream_lifecycle() {
     let start2_resp = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":1,"viewerPort":5001,"width":2560,"height":1440,"fps":120}"#,
+        r#"{"sourceIndex":1,"viewerPort":5001,"width":2560,"height":1440,"fps":90}"#,
         &token,
     )
     .await;
@@ -301,7 +313,7 @@ async fn wrong_token_is_rejected() {
 }
 
 #[tokio::test]
-async fn startstream_ignores_viewer_ips_uses_peer() {
+async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
     let p = pairing();
     let recorder = Arc::new(RecordingBackend {
         displays: vec![DisplayInfo {

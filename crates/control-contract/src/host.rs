@@ -245,6 +245,17 @@ pub struct StatsInfo {
     pub send_block_us: u64,
     pub max_send_block_us: u64,
     pub pending_frame: u32,
+    pub capture_backend: String,
+    pub media_transport: String,
+    pub first_capture_ms: u64,
+    pub first_encode_ms: u64,
+    pub first_send_ms: u64,
+    pub current_bitrate: u32,
+    pub capture_interval_p95_us: u64,
+    pub capture_to_encode_p95_us: u64,
+    pub capture_queue_wait_p95_us: u64,
+    pub encode_output_p95_us: u64,
+    pub send_block_p95_us: u64,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -257,13 +268,20 @@ pub struct StartStreamInput {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Legacy redirection hint from early viewers. Kept for wire
-    /// compatibility (the server still deserializes it) but ignored: the
-    /// viewer's claimed IPs are untrusted on an authenticated-but-unverified
-    /// channel, so the server pushes only to the control connection peer.
+    /// Capture implementation selected for an A/B run. ScreenCaptureKit is
+    /// the supported default; cgDisplayStream is an explicit display-only
+    /// compatibility path on systems where the legacy symbols remain.
+    #[serde(default = "default_capture_backend")]
+    pub capture_backend: String,
+    /// Physical viewer interface candidates. The host only considers private
+    /// addresses on the control peer's LAN and the production media backend
+    /// proves UDP reachability with an unpredictable nonce before capture.
     #[serde(default)]
-    #[deprecated(note = "server pushes only to the control connection peer; ignored")]
     pub viewer_ips: Vec<String>,
+}
+
+fn default_capture_backend() -> String {
+    "screenCaptureKit".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -295,6 +313,10 @@ pub struct SessionView {
     pub fps: u32,
     pub kbps: u32,
     pub fps_target: u32,
+    /// Remote input is always host-approved per live stream and starts off.
+    pub input_enabled: bool,
+    /// Pointer sampling target. Discrete key/button events are immediate.
+    pub input_rate_hz: u32,
     pub dropped: i64,
     pub network_dropped: i64,
     pub capture_queue_dropped: i64,
@@ -307,6 +329,19 @@ pub struct SessionView {
     pub send_block_us: u64,
     pub max_send_block_us: u64,
     pub pending_frame: u32,
+    pub frames: i64,
+    pub bytes: i64,
+    pub capture_backend: String,
+    pub media_transport: String,
+    pub first_capture_ms: u64,
+    pub first_encode_ms: u64,
+    pub first_send_ms: u64,
+    pub current_bitrate: u32,
+    pub capture_interval_p95_us: u64,
+    pub capture_to_encode_p95_us: u64,
+    pub capture_queue_wait_p95_us: u64,
+    pub encode_output_p95_us: u64,
+    pub send_block_p95_us: u64,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -341,6 +376,7 @@ mod stream_control_tests {
         assert_eq!(v.source_index, 0);
         assert_eq!(v.viewer_port, 5001);
         assert_eq!(v.fps, 90);
+        assert_eq!(v.capture_backend, "screenCaptureKit");
         let back = serde_json::to_string(&v).unwrap();
         assert!(back.contains("\"sourceIndex\""));
     }
@@ -357,6 +393,8 @@ mod stream_control_tests {
                 fps: 90,
                 kbps: 12000,
                 fps_target: 60,
+                input_enabled: false,
+                input_rate_hz: 120,
                 dropped: 0,
                 network_dropped: 0,
                 capture_queue_dropped: 0,
@@ -369,6 +407,19 @@ mod stream_control_tests {
                 send_block_us: 0,
                 max_send_block_us: 0,
                 pending_frame: 0,
+                frames: 100,
+                bytes: 1_000_000,
+                capture_backend: "screenCaptureKit".into(),
+                media_transport: "udp".into(),
+                first_capture_ms: 20,
+                first_encode_ms: 25,
+                first_send_ms: 26,
+                current_bitrate: 12_000_000,
+                capture_interval_p95_us: 16_667,
+                capture_to_encode_p95_us: 8_000,
+                capture_queue_wait_p95_us: 1_000,
+                encode_output_p95_us: 7_000,
+                send_block_p95_us: 1_000,
                 error: None,
             }],
         };
@@ -397,6 +448,17 @@ mod stream_control_tests {
             send_block_us: 0,
             max_send_block_us: 0,
             pending_frame: 0,
+            capture_backend: "screenCaptureKit".into(),
+            media_transport: "udp".into(),
+            first_capture_ms: 20,
+            first_encode_ms: 25,
+            first_send_ms: 26,
+            current_bitrate: 12_000_000,
+            capture_interval_p95_us: 16_667,
+            capture_to_encode_p95_us: 8_000,
+            capture_queue_wait_p95_us: 1_000,
+            encode_output_p95_us: 7_000,
+            send_block_p95_us: 1_000,
             error: None,
         })
         .unwrap();

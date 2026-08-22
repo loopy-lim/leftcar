@@ -37,6 +37,19 @@ export interface SessionView {
   sendBlockUs: number;
   maxSendBlockUs: number;
   pendingFrame: number;
+  frames: number;
+  bytes: number;
+  captureBackend: "screenCaptureKit" | "cgDisplayStream" | string;
+  mediaTransport: "udp" | string;
+  firstCaptureMs: number;
+  firstEncodeMs: number;
+  firstSendMs: number;
+  currentBitrate: number;
+  captureIntervalP95Us: number;
+  captureToEncodeP95Us: number;
+  captureQueueWaitP95Us: number;
+  encodeOutputP95Us: number;
+  sendBlockP95Us: number;
   error?: string | null;
 }
 
@@ -45,7 +58,7 @@ export interface StatusView {
 }
 
 export interface ControlClient {
-  request<T>(command: string, args?: unknown): Promise<T>;
+  request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T>;
   close(): void;
 }
 
@@ -94,16 +107,19 @@ export function connect(
     >();
     let terminalError: ControlRequestError | null = null;
     let nextId = 1;
+    // The issued token is immutable for the lifetime of this socket. After
+    // the first authenticated probe, keep it in memory so a subsequent
+    // startStream reaches socket.write without waiting for another
+    // SecureStore/JS turn. Opening a native XR activity can pause React Native
+    // immediately after the call site.
+    let cachedToken: string | null | undefined;
 
     const socket = TcpSocket.createConnection({ host, port }, () => {
       if (settled) return;
       settled = true;
       resolve({
-        async request<T>(command: string, args?: unknown): Promise<T> {
-          // Resolve the token first: a rejection here fails the request
-          // before an id is allocated, so no pending entry leaks.
-          const token = tokenProvider ? await tokenProvider() : null;
-          return new Promise<T>((res, rej) => {
+        request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T> {
+          const issue = (token: string | null) => new Promise<T>((res, rej) => {
             if (terminalError) {
               rej(terminalError);
               return;
@@ -111,8 +127,11 @@ export function connect(
             const id = nextId++;
             const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
             const payload = JSON.stringify(envelope) + "\n";
-            const requestTimeout =
-              command === "getCatalog" || command === "startStream" ? 15_000 : 5_000;
+            const requestTimeout = command === "startStream"
+              ? 25_000
+              : command === "getCatalog"
+                ? 15_000
+                : 5_000;
             const timer = setTimeout(() => {
               const handler = pending.get(id);
               if (!handler) return;
@@ -130,7 +149,11 @@ export function connect(
             });
             try {
               socket.write(payload, "utf8", (writeError) => {
-                if (!writeError || !pending.has(id)) return;
+                if (!writeError) {
+                  onWritten?.();
+                  return;
+                }
+                if (!pending.has(id)) return;
                 const handler = pending.get(id);
                 pending.delete(id);
                 clearTimeout(handler?.timer ?? timer);
@@ -144,6 +167,20 @@ export function connect(
               clearTimeout(handler?.timer ?? timer);
               rej(new ControlRequestError(`control write error: ${String(e)}`, "transport"));
             }
+          });
+          if (cachedToken !== undefined) {
+            return issue(cachedToken);
+          }
+          if (!tokenProvider) {
+            cachedToken = null;
+            return issue(cachedToken);
+          }
+          // The initial lookup may be asynchronous, but a rejection occurs
+          // before an id is allocated. Every later request is issued
+          // synchronously through the cached branch above.
+          return tokenProvider().then((token) => {
+            cachedToken = token;
+            return issue(token);
           });
         },
         close() {

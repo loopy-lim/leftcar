@@ -39,7 +39,8 @@ pub struct ControlEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlKind {
-    /// No input-injection variants exist by design (P-01, T-06).
+    /// High-rate input uses the authenticated native datagram plane, never
+    /// this low-frequency JSON control envelope.
     ListSources,
     StartSource,
     StopSource,
@@ -185,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn no_input_injection_control_kind_exists() {
-        // T-06: the protocol enum must not contain input commands. The enum is
-        // closed; assert every variant against the allowlist.
+    fn high_rate_input_is_absent_from_json_control_plane() {
+        // The protocol enum is closed so input cannot accidentally cross the
+        // Rustra/JSON control plane.
         const ALLOWED: &[ControlKind] = &[
             ControlKind::ListSources,
             ControlKind::StartSource,

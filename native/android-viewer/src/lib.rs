@@ -8,10 +8,12 @@
 
 use std::ffi::{c_char, CStr};
 
+pub mod input_protocol;
 #[cfg(target_os = "android")]
 pub mod jni;
 #[cfg(target_os = "android")]
 pub mod jni_wrappers;
+pub mod media_datagram;
 /// Host-testable media-plane peer admission check. Not android-gated so
 /// `cargo test --workspace` (host target only in CI) exercises it.
 pub mod net_guard;

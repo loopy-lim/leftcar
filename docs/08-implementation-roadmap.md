@@ -41,7 +41,7 @@
 
 ### G0 계획 승인
 
-- 제품이 보기 전용이다.
+- 원격 입력은 Host의 스트림별 명시 승인과 별도 네이티브 데이터 경로만 사용한다.
 - Home Space multi-instance가 기본 UX다.
 - TypeScript/Rust 중심, 최소 Kotlin shim이다.
 - macOS 먼저, Windows 두 번째다.
@@ -815,5 +815,4 @@ v1 뒤에만 검토한다.
 - team pairing/device management
 - audio
 
-보기 전용 원칙을 바꾸는 원격 입력은 별도 제품/위협 모델로 다룬다.
-
+원격 입력의 실기기 지연·키보드 레이아웃·다중 모니터 좌표 검증은 별도 장치 게이트로 계속 추적한다.

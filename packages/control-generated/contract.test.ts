@@ -16,7 +16,7 @@ describe("generated control contract (docs/04 §11)", () => {
     }
   });
 
-  it("viewer_contract_has_no_input_commands", () => {
+  it("viewer_contract_has_no_high_rate_input_commands", () => {
     const types = readFileSync(join(root, "viewer", "types.ts"), "utf8");
     const commands = readFileSync(join(root, "viewer", "commands.ts"), "utf8");
     const surface = (types + commands).toLowerCase();

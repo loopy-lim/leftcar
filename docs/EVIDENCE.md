@@ -1,6 +1,6 @@
 # 구현 증거 문서 (EVIDENCE)
 
-기준일: 2026-08-17  
+기준일: 2026-08-22
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5 이상을 달성했다고 표기한 항목은 없다.**
 
 ## 요약
@@ -14,6 +14,7 @@
 | E4 에뮬레이터 | 미달성 | H05/H08 단계. 에뮬레이터 잡 미연결 |
 | E5 Galaxy XR 실기기 | 부분 달성 | Galaxy XR는 없음; **동일 Android 16 실기기(TB710FU)에서** Expo RN 앱 구동, HW 디코더 1/4/6/8개 동시, multi-instance task 분리, 60/90fps 실측 |
 | E11(신규) 페어링 + 미디어 출발지 검증 | 달성 | QR 페어링 + 토큰 인증 경로 유지, 미디어 역방향 peer 일치 검사 |
+| E12(신규) 네이티브 원격 입력 | 빌드·계약 달성, 실기기 대기 | Host 세션별 opt-in + macOS 접근성 권한 + 인증 UDP 입력 경로. 60fps→120Hz, 90fps→180Hz 목표의 장치 계측은 미달성 |
 | E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
@@ -28,8 +29,9 @@
 | 도메인 | `crates/domain` | `acquire_release_never_negative`(proptest), `rapid_focus_changes_do_not_thrash_encoder`, `allocator_never_exceeds_total_budget`(proptest), `diagnostics_redact_title_path_token_and_ip`, `all_stable_errors_have_user_recovery_mapping` | docs/05 §5.5, docs/07 §16/§18 |
 | 리스/스케줄 | `crates/domain/lease.rs` | `last_lease_stops_after_debounce`, `task_removal_releases_exactly_one_lease` | docs/03 §3.3 |
 | 미디어 | `crates/media-model` | `delta_before_keyframe_is_dropped`, `old_epoch_is_dropped_after_resize`, `duplicate_fragment_does_not_duplicate_output`, `fragment_flood_stays_within_memory_bound`, `queue_never_exceeds_configured_bytes` | docs/05 §5.4 |
-| 프로토콜 | `crates/network-protocol` | `oversized_control_message_allocates_nothing_large`, `version_mismatch_is_fatal`, `no_input_injection_control_kind_exists`(T-06), fuzz smoke `arbitrary_bytes_never_panic_envelope_parser` | docs/07 §13, docs/05 §9.3 |
-| 계약 | `crates/control-contract` | `host_add_numbers_20_22_is_42`, `viewer_contract_does_not_expose_input_commands`, `video_payload_type_is_absent_from_generated_typescript`, `generated_contract_hash_is_stable` | docs/08 H02/H09 수용기준 |
+| 프로토콜 | `crates/network-protocol` | `oversized_control_message_allocates_nothing_large`, `version_mismatch_is_fatal`, `high_rate_input_is_absent_from_json_control_plane`, fuzz smoke `arbitrary_bytes_never_panic_envelope_parser` | docs/07 §13, docs/05 §9.3 |
+| 계약 | `crates/control-contract` | `host_add_numbers_20_22_is_42`, `viewer_contract_does_not_expose_high_rate_input_commands`, `video_payload_type_is_absent_from_generated_typescript`, `generated_contract_hash_is_stable` | docs/08 H02/H09 수용기준 |
+| 원격 입력 | `native/android-viewer` + Host control | `pointer_rate_is_twice_stream_fps`, `pointer_updates_are_coalesced_at_target_rate`, `reliable_event_retries_until_authenticated_ack`, `release_all_supersedes_pending_input_and_pointer_motion`, `remote_input_is_host_opt_in_per_session` | docs/07, Apple 화면 공유 비교 기준 |
 | 세션 | `crates/session` | `new_offer_expires_after_two_minutes`, `replayed_offer_is_rejected`, `guessed_source_id_fails_authorization`, `revocation_closes_existing_streams`, `backoff_respects_max_delay_and_budget` | docs/07 §7/§9/§18 |
 | 호스트 | `crates/host-core` | `unapproved_source_cannot_start`, `approved_source_starts_once_for_first_lease`, `one_capture_failure_does_not_stop_other_sources`, `stop_all_is_idempotent`, `no_orphan_capture_after_close` | docs/05 §5.2 |
 | 뷰어 | `crates/viewer-core` | `unique_source_opens_unique_document_task`, `hub_close_keeps_stream_tasks_alive`, `decoder_output_never_configured_without_surface`, `restored_task_reauthenticates_before_decode`, `attach_once_detaches_at_most_once` | docs/05 §5.3/§6.2/§8.2 |
@@ -89,7 +91,7 @@
 - **구현 영역**:
   1. **호스트 (`apps/host-desktop`)**: Tauri v2 기반 데스크톱 앱. TCP 7777 제어 서버 (pull 방식 `getCatalog`, `startStream`, `stopStream`, `getStatus` + Rustra `addNumbers` 위임) + mDNS `_leftcar._tcp.local.` 자동 광고 + 실시간 세션 상태 UI (fps, kbps, 활성 세션 표).
   2. **캡처 심 (`native/macos-capture-shim`)**: HandleTable 기반 멀티 인스턴스 C ABI (`leftcar_capture_start_v2`, `stop_v2`, `stats_v2`, `list_displays`, `free_string`, `last_error_v2`), ScreenCaptureKit + VideoToolbox H.264 하드웨어 인코딩, 90fps 기본 / 120fps 상한, 비트레이트 dynamic clamp, 연결 끊김 시 자동 세션 정지.
-  3. **뷰어 렌더러 (`native/android-viewer`)**: `leftcar_jni_attach_port`로 포트 파라미터화(5000+n), TCP 수신 -> AMediaCodec 하드웨어 디코딩 -> Surface 렌더링.
+  3. **뷰어 렌더러 (`native/android-viewer`)**: `leftcar_jni_attach_port`로 포트 파라미터화(5000+n), MTU 단위 UDP H.264 AU 재조립 -> AMediaCodec 하드웨어 디코딩 -> Surface 렌더링. 유실 감지 시 즉시 IDR를 요청한다.
   4. **RN 뷰어 (`apps/viewer-expo`)**: Expo 57 / RN 0.86, Android OS 멀티윈도우 지원 (`android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI`, `documentLaunchMode="always"`, `resizeableActivity="true"`), NsdModule (mDNS NSD 자동 호스트 발견), StreamLauncherModule (인스턴스별 독립 OS 창 생성), TCP 제어 클라이언트(`control.ts`) 및 UI(`host.tsx`, `catalog.tsx`).
 - **검증**:
   - `cargo test --workspace`: 통과
@@ -103,11 +105,25 @@
 - **구현 상세**:
   - Viewer에서 `openStream` 호출 시 연결된 control host IP를 네이티브로 전달해 Native에서 사용.
   - Kotlin `StreamLauncher`/`StreamActivity`는 host를 intent로 전달 후 `ViewerNative.attachSurfacePort` 호출 시 넘김.
-  - JNI 수신 루프는 `accept()` peer의 IP와 control host를 비교해 불일치 시 드롭.
-  - `StartStreamInput.viewer_ips`는 폐기(deprecated) 처리. serde `default`로 역직렬화만 유지(구형 viewer wire compat)하며 서버는 완전 무시.
+  - JNI 수신 루프는 UDP 발신자의 IP와 control host를 비교해 불일치 시 미디어 데이터그램을 드롭한다.
+  - 비우회 VPN이 제어 연결을 서브넷 라우터로 보낼 수 있으므로 Viewer는 물리 Wi-Fi IPv4를 `StartStreamInput.viewer_ips` 후보로 전달한다. Host는 제어 peer와 같은 사설 `/24` 후보만 고려하고, 캡처 전에 예측 불가능한 난수의 UDP 왕복을 증명한 주소만 사용한다.
+  - Viewer의 IDR/종료 데이터그램도 같은 난수를 포함해야 하므로 경로만 위조한 비인증 패킷은 제어로 처리하지 않는다.
 
 - **검증**:
   - `cargo test --workspace`, `cargo test -p control-contract`: 통과 (net_guard 단위 테스트 포함).
-  - `cargo test` (`apps/host-desktop/src-tauri`): `startstream_ignores_viewer_ips_uses_peer` e2e 통과.
+  - `cargo test` (`apps/host-desktop/src-tauri`): 관련 없는 `viewer_ips`를 거부하고 제어 peer로 폴백하는 e2e 통과.
   - JNI 입장 허용 경로는 `cargo check --target aarch64-linux-android -p android-viewer`로 컴파일 검증만 수행(기기 실행 검증 아님).
-  - `pnpm test` / `pnpm typecheck` / `pnpm test:contract` / `pnpm test:architecture`: 통과.
+- `pnpm test` / `pnpm typecheck` / `pnpm test:contract` / `pnpm test:architecture`: 통과.
+
+## 네이티브 원격 입력 (E12, 2026-08-22 추가)
+
+- **구현 경로**: Android `MotionEvent`/`KeyEvent` → Kotlin shim → JNI → Rust 입력 스케줄러 → 기존 스트림 UDP 소켓의 세션 난수 인증 데이터그램 → macOS `CGEvent`.
+- **빈도 정책**: 포인터 목표 전송률은 스트림 FPS의 2배이며 30–240Hz로 제한한다. 포인터 이동은 최신 좌표만 유지하고, 키·버튼·휠·전체 해제는 sequence/ACK/20ms 재시도를 사용한다.
+- **권한·안전**: 모든 스트림은 Observe로 시작한다. macOS 손쉬운 사용 권한과 Host의 세션별 Control 토글을 모두 만족해야 입력을 주입한다. 포커스 이탈, Surface 종료, 연결 재수립, Host 토글 OFF에서 눌린 키와 버튼을 해제한다.
+- **검증 완료**:
+  - `cargo test --workspace`: 입력 스케줄러·wire 계약 8개를 포함한 Rust 전체 테스트 통과.
+  - Host Tauri Rust 단위 23개 + e2e 8개 통과, `cargo clippy --workspace --tests -- -D warnings` 통과.
+  - Android arm64 Rust release 빌드와 `:app:assembleDebug` 통과. 완성 APK의 dynamic symbol table에서 `sendPointer`, `sendKey`, `releaseInput` JNI 3개를 확인했다.
+  - macOS Swift shim을 ScreenCaptureKit, VideoToolbox, CoreGraphics에 링크하여 dylib 컴파일 통과.
+  - `pnpm typecheck`, TS/계약/아키텍처 테스트, React Doctor 통과.
+- **아직 증명하지 않은 항목**: 현재 ADB 연결 장치가 없어 실제 120/180Hz wire rate, Mac에 대한 실입력, 키보드 레이아웃·수식키·멀티모니터 좌표, 유실/재연결 복구, Apple 화면 공유와의 동일망 비교는 실행하지 못했다. 이 항목은 E6/E7 실기기 게이트로 유지한다.
