@@ -1,11 +1,27 @@
 //! Capture backend abstraction: the macOS shim FFI implementation and the
 //! in-memory test fake share this trait (design §Tauri 호스트).
 
-use control_contract::host::{DisplayInfo, StatsInfo};
+use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
 use std::sync::Arc;
 
 pub trait CaptureBackend: Send + Sync {
+    fn platform(&self) -> &'static str {
+        "unknown"
+    }
+    fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
+        vec![CaptureBackendInfo {
+            id: "screenCaptureKit".into(),
+            label: "ScreenCaptureKit".into(),
+            hint: "default capture backend".into(),
+        }]
+    }
+    fn supports_capture_backend(&self, id: &str) -> bool {
+        self.capture_backends()
+            .iter()
+            .any(|backend| backend.id == id)
+    }
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String>;
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &self,
         source_index: u32,
@@ -35,6 +51,18 @@ pub struct FakeBackend {
 }
 
 impl CaptureBackend for FakeBackend {
+    fn platform(&self) -> &'static str {
+        "test"
+    }
+
+    fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
+        vec![CaptureBackendInfo {
+            id: "screenCaptureKit".into(),
+            label: "ScreenCaptureKit".into(),
+            hint: "test backend".into(),
+        }]
+    }
+
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
         Ok(self.displays.clone())
     }

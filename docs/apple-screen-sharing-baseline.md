@@ -21,8 +21,8 @@
 | 기준 | Leftcar 상태 | 판정 |
 | --- | --- | --- |
 | Observe/Control 명시 전환 | 모든 스트림은 Observe로 시작하고 Host가 세션별 Control을 켠다 | 구현 |
-| OS 권한과 세션 승인 분리 | macOS 손쉬운 사용 권한과 Host 스트림 토글을 모두 요구한다 | 구현 |
-| 고주파 입력 경로 분리 | Kotlin → JNI → Rust → 인증 UDP → CGEvent이며 TS/Rustra/JSON을 통과하지 않는다 | 구현 |
+| OS 권한과 세션 승인 분리 | macOS는 손쉬운 사용 권한, Windows는 UIPI 경계와 Host 스트림 토글을 요구한다 | 구현 |
+| 고주파 입력 경로 분리 | Kotlin → JNI → Rust → 인증 UDP → CGEvent/SendInput이며 TS/Rustra/JSON을 통과하지 않는다 | 구현 |
 | 포인터 전송률 | 30fps→60Hz, 60fps→120Hz, 90fps→180Hz, 최대 240Hz 목표 | 구현·실측 대기 |
 | Android 입력 배치 회피 | API 30 이상 마우스 소스에 unbuffered dispatch를 요청하고 Rust에서 최신 위치만 유지한다 | 구현 |
 | 이산 입력 신뢰성 | 키·버튼·휠·전체 해제는 sequence/ACK/20ms 재시도를 사용한다 | 구현 |
@@ -41,3 +41,4 @@
 4. 단일·다중 디스플레이의 네 모서리와 Retina scaling에서 포인터 오차를 확인한다.
 5. Control OFF, Android 창 포커스 이탈, Activity 종료, Wi-Fi 경로 재연결 각각에서 전체 해제를 확인한다.
 6. Apple 화면 공유 Standard/High Performance와 동일 Mac·동일 네트워크에서 체감 및 계측 결과를 별도 기록한다. Apple의 비공개 입력 polling rate를 추정값으로 단정하지 않는다.
+7. 같은 Viewer 입력 장치와 네트워크에서 Windows Host의 120/180Hz wire rate, UIPI 제한, 다중 모니터 모서리 좌표를 별도 기록한다.

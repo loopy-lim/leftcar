@@ -8,7 +8,7 @@
 1. 페어링되지 않은 장치는 Host 존재를 최소 정보 이상 알 수 없고 화면을 받을 수 없다.
 2. 페어링된 Viewer도 Host 사용자가 승인한 source만 볼 수 있다.
 3. 페어링된 장치만 제어 연결을 획득하고, 제어 채널의 토큰/승인 정보가 유효해야 한다.
-4. 원격 입력은 Host가 세션별로 허용하고 macOS 손쉬운 사용 권한이 있을 때만 동작하며, 세션 난수 검증 전에는 입력을 처리하지 않는다.
+4. 원격 입력은 Host가 세션별로 허용하고 macOS 손쉬운 사용 권한 또는 Windows의 UIPI 무결성 경계를 만족할 때만 동작하며, 세션 난수 검증 전에는 입력을 처리하지 않는다.
 5. 창 제목, 화면 pixel, token, private key가 log/telemetry에 남지 않는다.
 6. 세션 종료 또는 권한 철회가 빠르고 완전하게 반영된다.
 7. malformed network/media input이 unbounded allocation, panic, double free를 유발하지 않는다.
@@ -187,6 +187,8 @@ source capability는 다음에 bind한다.
 - codec/profile upper bound
 
 Viewer가 임의 source ID나 입력 세션 난수를 추측해도 authorization에 실패해야 한다. 입력 capability는 source 보기 승인만으로 자동 획득되지 않으며 Host 토글을 끄면 즉시 주입을 중단하고 눌린 키와 버튼을 해제한다.
+
+Windows `SendInput`은 UIPI에 따라 Leftcar Host와 같거나 낮은 무결성 수준의 프로세스에만 입력을 주입할 수 있다. current-user 설치와 일반 권한 실행을 기본으로 하며, 관리자 앱을 제어하기 위해 Host를 자동 상승시키지 않는다. `SendInput`이 일부 이벤트만 처리하면 세션 진단에 오류를 기록하고 reliable packet은 재주입하지 않도록 ACK한다.
 
 ## 10. Host 사용자 가시성
 

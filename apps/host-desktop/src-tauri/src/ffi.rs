@@ -11,7 +11,7 @@
 //!   leftcar_capture_set_input_enabled_v1(handle, enabled)
 
 use crate::backend::CaptureBackend;
-use control_contract::host::{DisplayInfo, StatsInfo};
+use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
@@ -144,6 +144,25 @@ unsafe fn libc_free_string(ptr: *mut std::ffi::c_char) {
 }
 
 impl CaptureBackend for FfiBackend {
+    fn platform(&self) -> &'static str {
+        "macos"
+    }
+
+    fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
+        vec![
+            CaptureBackendInfo {
+                id: "screenCaptureKit".into(),
+                label: "ScreenCaptureKit".into(),
+                hint: "권장 · 최신 macOS 기본 경로".into(),
+            },
+            CaptureBackendInfo {
+                id: "cgDisplayStream".into(),
+                label: "CGDisplayStream".into(),
+                hint: "호환성 비교용 · 디스플레이 전용".into(),
+            },
+        ]
+    }
+
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
         let lib = self.lib()?;
         unsafe {
@@ -332,9 +351,7 @@ impl CaptureBackend for FfiBackend {
             if result == 0 {
                 return Ok(());
             }
-            let error_function: Symbol<
-                unsafe extern "C" fn() -> *const std::ffi::c_char,
-            > = lib
+            let error_function: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
                 .get(b"leftcar_capture_last_error_v2")
                 .map_err(|error| error.to_string())?;
             let pointer = error_function();

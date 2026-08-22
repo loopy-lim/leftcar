@@ -23,6 +23,8 @@ import { allocPort, controlClient, controlHost, reconnectHost } from "../src/ses
 import {
   isControlTransportError,
   isUnauthorizedError,
+  preferredCaptureBackend,
+  type CaptureBackendInfo,
   type CatalogView,
   type DisplayInfo,
   type StatusView,
@@ -96,10 +98,10 @@ const STREAM_PROFILES = [
 type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
 type StreamProfile = (typeof STREAM_PROFILES)[number];
 
-const CAPTURE_BACKENDS = [
+const FALLBACK_CAPTURE_BACKENDS: CaptureBackendInfo[] = [
   { id: "screenCaptureKit", label: "ScreenCaptureKit", hint: "권장 · 최신 macOS 기본 경로" },
-] as const;
-type CaptureBackendId = (typeof CAPTURE_BACKENDS)[number]["id"];
+];
+type CaptureBackendId = string;
 
 function fitProfileToDisplay(
   display: DisplayInfo,
@@ -205,6 +207,7 @@ interface CatalogHeaderProps {
   loading: boolean;
   profileId: StreamProfileId;
   captureBackend: CaptureBackendId;
+  captureBackends: CaptureBackendInfo[];
   refreshing: boolean;
   selectedProfile: StreamProfile;
   onRefresh: () => void;
@@ -218,6 +221,7 @@ function CatalogHeader({
   loading,
   profileId,
   captureBackend,
+  captureBackends,
   refreshing,
   selectedProfile,
   onRefresh,
@@ -298,7 +302,7 @@ function CatalogHeader({
           ))}
         </View>
         <View style={styles.profileRow}>
-          {CAPTURE_BACKENDS.map((backend) => (
+          {captureBackends.map((backend) => (
             <Pressable
               key={backend.id}
               style={[
@@ -582,6 +586,15 @@ export default function Catalog() {
   );
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
+  const captureBackends = catalogQuery.data?.captureBackends?.length
+    ? catalogQuery.data.captureBackends
+    : FALLBACK_CAPTURE_BACKENDS;
+  useEffect(() => {
+    const preferred = preferredCaptureBackend(catalogQuery.data, captureBackend);
+    if (preferred !== captureBackend) {
+      setCaptureBackend(preferred);
+    }
+  }, [captureBackend, catalogQuery.data]);
   // Revoked/expired token: drop it and start the pairing flow again.
   useEffect(() => {
     if (!catalogQuery.error || !isUnauthorizedError(catalogQuery.error)) return;
@@ -715,6 +728,7 @@ export default function Catalog() {
             loading={loading}
             profileId={profileId}
             captureBackend={captureBackend}
+            captureBackends={captureBackends}
             refreshing={refreshing}
             selectedProfile={selectedProfile}
             onRefresh={handleRefresh}

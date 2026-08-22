@@ -4,8 +4,12 @@
 
 pub mod backend;
 pub mod control;
+#[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod pairing;
+#[cfg(target_os = "windows")]
+pub mod windows_backend;
+pub mod wire;
 
 use backend::SharedBackend;
 use std::sync::Arc;
@@ -19,23 +23,18 @@ const CONTROL_PORT: u16 = 7777;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Real shim FFI when the dylib is available; FakeBackend otherwise (UI dev).
-    let backend: SharedBackend = match ffi::FfiBackend::new() {
-        Ok(b) => {
-            println!("{}", ffi::dylib_report());
-            Arc::new(b)
-        }
-        Err(e) => {
-            eprintln!("FFI backend unavailable ({e}) — falling back to FakeBackend");
-            Arc::new(backend::FakeBackend { displays: vec![] })
-        }
-    };
+    let backend = platform_backend().unwrap_or_else(|error| {
+        panic!("Leftcar capture backend unavailable: {error}");
+    });
     let warmup_backend = backend.clone();
     let pairing = Arc::new(pairing::PairingServer::new(
         "leftcar-host".into(),
         pairing::PairingServer::default_store_path(),
     ));
-    let server = Arc::new(control::ControlServer::new(backend.clone(), pairing.clone()));
+    let server = Arc::new(control::ControlServer::new(
+        backend.clone(),
+        pairing.clone(),
+    ));
     start_control_server(server.clone());
     // Advertise independently from the Tauri window so a viewer can connect
     // while WebView/AppKit initialization is still in progress.
@@ -46,6 +45,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_host_platform,
             get_input_permission,
             request_input_permission,
             set_session_input,
@@ -114,6 +114,26 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("tauri run");
+}
+
+#[cfg(target_os = "macos")]
+fn platform_backend() -> Result<SharedBackend, String> {
+    let backend = ffi::FfiBackend::new()?;
+    println!("{}", ffi::dylib_report());
+    Ok(Arc::new(backend))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_backend() -> Result<SharedBackend, String> {
+    Ok(Arc::new(windows_backend::WindowsBackend::new()?))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn platform_backend() -> Result<SharedBackend, String> {
+    Err(format!(
+        "{} is not a supported Leftcar host platform",
+        std::env::consts::OS
+    ))
 }
 
 /// Create the pairing window on first open; show+focus on later opens.
@@ -185,6 +205,11 @@ fn get_status(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> control::StatusViewPublic {
     state.snapshot()
+}
+
+#[tauri::command]
+fn get_host_platform(state: tauri::State<'_, std::sync::Arc<control::ControlServer>>) -> String {
+    state.platform().into()
 }
 
 #[tauri::command]

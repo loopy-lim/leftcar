@@ -158,6 +158,8 @@ async fn test_catalog_query() {
     assert!(resp.contains("\"Main Display\""), "{resp}");
     assert!(resp.contains("\"Secondary Display\""), "{resp}");
     assert!(resp.contains("\"width\":1920"), "{resp}");
+    assert!(resp.contains("\"platform\":\"test\""), "{resp}");
+    assert!(resp.contains("\"captureBackends\""), "{resp}");
 }
 
 #[tokio::test]

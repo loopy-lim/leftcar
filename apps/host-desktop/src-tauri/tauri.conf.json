@@ -15,14 +15,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/icon.png"],
-    "macOS": {
-      "infoPlist": "Info.plist",
-      "signingIdentity": "3D28D0786675B5D4AF9747098D7042816506BE50"
-    },
-    "resources": {
-      "../../../native/macos-capture-shim/libleftcar_capture.dylib": "libleftcar_capture.dylib"
-    }
+    "icon": ["icons/icon.png"]
   }
 }

@@ -10,11 +10,12 @@
 | E0 설계 | 달성 | docs/01–10, ADR-0001..0004 |
 | E1 단위/property | 달성 | cargo test --workspace (전 crate) |
 | E2 통합 | 달성 | L5 loopback (transport-api tests), C ABI 왕복 |
-| E3 빌드 | 부분 달성 | Rust workspace + TS 전부; Android aarch64 check는 CI 잡 | 
+| E3 빌드 | 부분 달성 | Rust workspace + TS 전부; Android aarch64와 Windows MSVC compile. Windows NSIS CI는 push 후 판정 |
 | E4 에뮬레이터 | 미달성 | H05/H08 단계. 에뮬레이터 잡 미연결 |
 | E5 Galaxy XR 실기기 | 부분 달성 | Galaxy XR는 없음; **동일 Android 16 실기기(TB710FU)에서** Expo RN 앱 구동, HW 디코더 1/4/6/8개 동시, multi-instance task 분리, 60/90fps 실측 |
 | E11(신규) 페어링 + 미디어 출발지 검증 | 달성 | QR 페어링 + 토큰 인증 경로 유지, 미디어 역방향 peer 일치 검사 |
 | E12(신규) 네이티브 원격 입력 | 빌드·계약 달성, 실기기 대기 | Host 세션별 opt-in + macOS 접근성 권한 + 인증 UDP 입력 경로. 60fps→120Hz, 90fps→180Hz 목표의 장치 계측은 미달성 |
+| E13(신규) Windows 원격 Host | 소스·교차 컴파일 달성, 물리 실행 대기 | WGC monitor capture + Media Foundation hardware H.264 + SendInput + NSIS/Windows CI. 실제 Windows/GPU/Viewer E6는 미달성 |
 | E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
@@ -51,6 +52,7 @@
 ### E3 — 빌드/구조
 
 - `cargo check --workspace` 전 crate green, clippy `-D warnings` 0.
+- `apps/host-desktop/src-tauri`는 `x86_64-pc-windows-msvc` 교차 `cargo check --lib`를 통과했다. 이 결과는 Windows API 타입/cfg의 E3 소스 검증이며 Windows 실행 또는 installer 생성 증거가 아니다.
 - TS typecheck 2앱 green, `pnpm test:architecture` TS/Kotlin 규칙 green.
 - Kotlin shim은 `android/.../shim/` 경로 + manifest(documentLaunchMode=always, PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI)만 존재. Gradle 빌드는 E4+ 단계.
 - macOS 파사드(macos-capture/macos-encode): 실API 링크 없이 구조만. 시작 시 `RealBackendNotLinked` 명시 실패(무인 소프트웨어 fallback 금지).
@@ -74,7 +76,7 @@
 - transport-quic: 구현 미포함(의도적). ADR-0004가 bake-off 전 확정 금지. `ProductBuildInfo::new(Undecided)`가 product build를 거부하는 것으로 대체(H14 Red).
 - macos-capture/macos-encode: Swift/C ABI shim과 실제 SCK/VT 세션은 H16–H18 장치 단계.
 - React Native/Gradle: 소스+스펙+manifest만. RN host 연결은 H05.
-- Windows/Linux host: 미착수(P7 단계, 문서대로).
+- Windows Host: P7 source 구현과 MSVC 교차 compile까지 진행. Windows CI NSIS artifact와 물리 E6/E7은 대기. Linux Host는 미착수.
 
 
 ## Expo + Rustra 실기기 경로 (H09, 2026-08-17 추가)
@@ -127,3 +129,12 @@
   - macOS Swift shim을 ScreenCaptureKit, VideoToolbox, CoreGraphics에 링크하여 dylib 컴파일 통과.
   - `pnpm typecheck`, TS/계약/아키텍처 테스트, React Doctor 통과.
 - **아직 증명하지 않은 항목**: 현재 ADB 연결 장치가 없어 실제 120/180Hz wire rate, Mac에 대한 실입력, 키보드 레이아웃·수식키·멀티모니터 좌표, 유실/재연결 복구, Apple 화면 공유와의 동일망 비교는 실행하지 못했다. 이 항목은 E6/E7 실기기 게이트로 유지한다.
+
+## Windows 원격 Host (E13, 2026-08-22 추가)
+
+- **구현 경로**: Tauri platform factory → Windows display catalog → `CreateForMonitor` WGC free-threaded frame pool → D3D11 BGRA readback/NV12 변환 → `MFT_ENUM_FLAG_HARDWARE` Media Foundation H.264 MFT → 기존 CFG/Annex-B/UDP fragment → Android MediaCodec.
+- **입력 경로**: 기존 인증 UDP `LCI1/LCA1` 계약 → capture와 독립된 Windows input worker → session별 Control 승인 → `SendInput`. 포인터 2× FPS와 reliable ACK/retry 정책은 macOS와 동일하다.
+- **실패·권한 정책**: Windows backend 또는 hardware H.264 MFT가 없으면 Fake/software backend로 조용히 전환하지 않는다. SendInput은 Windows UIPI 경계를 따르며 관리자 프로세스 제어를 우회하지 않는다.
+- **패키징**: `tauri.windows.conf.json`은 current-user NSIS를 지정하고, `windows-host` CI job은 Windows unit/clippy 뒤 unsigned installer artifact를 생성한다.
+- **현재 검증**: macOS에서 `x86_64-pc-windows-msvc` target `cargo check --lib` 통과. platform-neutral wire/input sequence unit test 통과.
+- **아직 증명하지 않은 항목**: Windows runner의 NSIS CI 결과, 물리 Windows WGC frame, 실제 GPU encoder identity, Windows→Android E6, 120/180Hz input 측정, DPI/회전/다중 monitor, sleep/wake/device-loss, 60분 soak. 상세 수용 기준은 `docs/windows-remote-host.md`에 유지한다.

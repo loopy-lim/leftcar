@@ -197,6 +197,10 @@ impl ControlServer {
         self.backend.input_permission()
     }
 
+    pub fn platform(&self) -> &'static str {
+        self.backend.platform()
+    }
+
     pub fn request_input_permission(&self) -> Result<bool, String> {
         self.backend.request_input_permission()
     }
@@ -295,7 +299,11 @@ impl ControlServer {
                 }
             }
             "getCatalog" => match self.backend.list_displays() {
-                Ok(displays) => ok(CatalogView { displays }),
+                Ok(displays) => ok(CatalogView {
+                    platform: self.backend.platform().into(),
+                    capture_backends: self.backend.capture_backends(),
+                    displays,
+                }),
                 Err(e) => err(&e),
             },
             "startStream" => {
@@ -312,10 +320,10 @@ impl ControlServer {
                 {
                     return err("unsupported stream dimensions or fps");
                 }
-                if !matches!(
-                    input.capture_backend.as_str(),
-                    "screenCaptureKit" | "cgDisplayStream"
-                ) {
+                if !self
+                    .backend
+                    .supports_capture_backend(&input.capture_backend)
+                {
                     return err("unsupported capture backend");
                 }
                 let name = self
@@ -478,9 +486,7 @@ fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
     };
     let candidate_octets = candidate.octets();
     let peer_octets = peer.octets();
-    candidate.is_private()
-        && peer.is_private()
-        && candidate_octets[..3] == peer_octets[..3]
+    candidate.is_private() && peer.is_private() && candidate_octets[..3] == peer_octets[..3]
 }
 
 async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
@@ -662,6 +668,8 @@ mod tests {
 
         let line = request(&mut sock, "getCatalog", "{}", &token).await;
         assert!(line.contains("\"displays\""), "{line}");
+        assert!(line.contains("\"platform\":\"test\""), "{line}");
+        assert!(line.contains("\"captureBackends\""), "{line}");
 
         let line = request(
             &mut sock,
@@ -767,19 +775,10 @@ mod tests {
 
     #[test]
     fn media_candidate_must_be_private_and_on_the_control_peers_lan() {
-        assert!(same_private_lan_candidate(
-            "192.168.0.18",
-            "192.168.0.170"
-        ));
-        assert!(!same_private_lan_candidate(
-            "192.168.1.18",
-            "192.168.0.170"
-        ));
+        assert!(same_private_lan_candidate("192.168.0.18", "192.168.0.170"));
+        assert!(!same_private_lan_candidate("192.168.1.18", "192.168.0.170"));
         assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
-        assert!(!same_private_lan_candidate(
-            "192.168.0.18",
-            "100.77.109.50"
-        ));
+        assert!(!same_private_lan_candidate("192.168.0.18", "100.77.109.50"));
     }
 
     #[tokio::test]

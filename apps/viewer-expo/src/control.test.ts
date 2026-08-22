@@ -52,7 +52,7 @@ vi.mock("react-native-tcp-socket", () => ({
   },
 }));
 
-import { connect, isUnauthorizedError } from "./control";
+import { connect, isUnauthorizedError, preferredCaptureBackend } from "./control";
 
 function lastSocket(): FakeSocket {
   return sockets[sockets.length - 1];
@@ -188,5 +188,28 @@ describe("unauthorized error handling", () => {
     expect(isUnauthorizedError(error)).toBe(false);
     expect(error instanceof Error && error.message).toBe("unknown command");
     client.close();
+  });
+});
+
+describe("host capture capabilities", () => {
+  it("selects Windows Graphics Capture instead of the macOS legacy default", () => {
+    expect(preferredCaptureBackend({
+      captureBackends: [{
+        id: "windowsGraphicsCapture",
+        label: "Windows Graphics Capture",
+        hint: "hardware H.264",
+      }],
+    }, "screenCaptureKit")).toBe("windowsGraphicsCapture");
+  });
+
+  it("keeps a supported selection and falls back for legacy hosts", () => {
+    const catalog = {
+      captureBackends: [
+        { id: "screenCaptureKit", label: "SCK", hint: "default" },
+        { id: "cgDisplayStream", label: "CGDS", hint: "compat" },
+      ],
+    };
+    expect(preferredCaptureBackend(catalog, "cgDisplayStream")).toBe("cgDisplayStream");
+    expect(preferredCaptureBackend(undefined)).toBe("screenCaptureKit");
   });
 });

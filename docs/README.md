@@ -34,6 +34,7 @@ Full Space의 SpatialPanel은 더 자유로운 3D 배치를 제공하지만 다�
 | 9 | [위험과 미결정 사항](09-risk-register.md) | 어떤 가설이 실패할 수 있고 언제 방향을 바꾸는가 |
 | 10 | [공식 근거 자료](10-references.md) | 계획의 플랫폼 근거는 어디에서 확인하는가 |
 | 부록 | [Apple 화면 공유 비교 기준](apple-screen-sharing-baseline.md) | Apple UX·성능 기준과 Leftcar의 차이는 무엇인가 |
+| 부록 | [Windows 원격 Host 구현과 검증](windows-remote-host.md) | Windows 캡처·인코딩·입력·패키징에서 무엇이 구현되고 무엇이 미검증인가 |
 
 결정 기록:
 

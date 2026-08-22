@@ -212,7 +212,22 @@ fn add_numbers(input: AddNumbersInput) -> rustra::Result<AddNumbersOutput> {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogView {
+    /// Host operating system. Viewers use this for platform-specific guidance,
+    /// never for choosing a transport implementation.
+    pub platform: String,
+    /// Capture paths the connected host can actually start. The first entry is
+    /// the host default; keeping this in the catalog removes viewer-side OS
+    /// guesses and lets newer hosts remain compatible with older viewers.
+    pub capture_backends: Vec<CaptureBackendInfo>,
     pub displays: Vec<DisplayInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureBackendInfo {
+    pub id: String,
+    pub label: String,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -379,6 +394,23 @@ mod stream_control_tests {
         assert_eq!(v.capture_backend, "screenCaptureKit");
         let back = serde_json::to_string(&v).unwrap();
         assert!(back.contains("\"sourceIndex\""));
+    }
+
+    #[test]
+    fn catalog_advertises_platform_capture_capabilities() {
+        let catalog = CatalogView {
+            platform: "windows".into(),
+            capture_backends: vec![CaptureBackendInfo {
+                id: "windowsGraphicsCapture".into(),
+                label: "Windows Graphics Capture".into(),
+                hint: "hardware H.264".into(),
+            }],
+            displays: Vec::new(),
+        };
+        let json = serde_json::to_string(&catalog).unwrap();
+        assert!(json.contains("\"platform\":\"windows\""));
+        assert!(json.contains("\"captureBackends\""));
+        assert!(json.contains("\"windowsGraphicsCapture\""));
     }
 
     #[test]

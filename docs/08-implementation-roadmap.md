@@ -566,6 +566,8 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 
 ### H39 Windows shell/permission baseline
 
+- 현재 상태(2026-08-22): platform factory, Windows catalog capability, current-user NSIS config와 Windows CI job 구현. physical Windows build/run 대기.
+
 - 선행 조건: G4
 - 대상: same Tauri Host, Windows config
 - Red: platform adapter selection and Rustra real-adapter proof (H15 `addNumbers -> 42`)
@@ -576,6 +578,8 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 - 인계: OS/GPU/build toolchain
 
 ### H40 Windows.Graphics.Capture adapter
+
+- 현재 상태(2026-08-22): physical monitor `CreateForMonitor` + free-threaded D3D11 frame pool source 구현 및 MSVC 교차 compile 통과. 앱 창 picker와 physical resize/device-loss 검증 대기.
 
 - 선행 조건: H39
 - 대상: `windows-capture`
@@ -588,6 +592,8 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 
 ### H41 Media Foundation encoder
 
+- 현재 상태(2026-08-22): hardware-only MFT 열거, NV12/H.264 low-latency 설정, CFG/Annex-B/IDR 경로 source 구현 및 MSVC 교차 compile 통과. GPU codec identity와 1080p60/4x30 실측 대기.
+
 - 선행 조건: H40
 - 대상: `windows-encode`
 - Red: config/key/delta/restart and hardware fallback tests
@@ -599,6 +605,8 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 
 ### H42 Windows to Galaxy XR E6
 
+- 현재 상태(2026-08-22): 기존 Android Viewer와 protocol capability 연결 완료. 실제 Windows→Android 픽셀 전달은 미실행.
+
 - 선행 조건: H41, existing session/transport/viewer
 - 대상: end-to-end integration
 - Red: platform parity scenario
@@ -609,6 +617,8 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 - 인계: Mac 대비 metrics
 
 ### H43 Windows device-loss/soak
+
+- 현재 상태(2026-08-22): frame pool resize 시 recreate와 session error 수렴 구현. sleep/wake/device lost/60분 physical 검증은 미실행.
 
 - 선행 조건: H42
 - 대상: capture/encoder recovery

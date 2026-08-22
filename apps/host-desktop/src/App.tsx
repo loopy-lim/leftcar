@@ -60,13 +60,15 @@ function useHostStatus() {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
+  const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission] = await Promise.all([
+      const [status, permission, hostPlatform] = await Promise.all([
         invoke<StatusView>("get_status"),
         invoke<boolean>("get_input_permission"),
+        invoke<HostSnapshotView["platform"]>("get_host_platform"),
       ]);
       const activeSessions = (status.sessions || []).filter(
         (session) => !["stopped", "unknown"].includes(session.state),
@@ -75,7 +77,7 @@ function useHostStatus() {
       setBanner(
         trayStatus({
           hostId: "local",
-          platform: "macos",
+          platform: hostPlatform,
           pairingState: "connected",
           pairedDevices: [],
           approvedSources: [],
@@ -84,6 +86,7 @@ function useHostStatus() {
       );
       setError(null);
       setInputPermission(permission);
+      setPlatform(hostPlatform);
       setLastUpdated(new Date());
     } catch (cause) {
       setError(String(cause));
@@ -103,11 +106,11 @@ function useHostStatus() {
     };
   }, [refresh]);
 
-  return { banner, sessions, error, inputPermission, lastUpdated, refresh };
+  return { banner, sessions, error, inputPermission, platform, lastUpdated, refresh };
 }
 
 function Dashboard() {
-  const { banner, sessions, error, inputPermission, lastUpdated, refresh } = useHostStatus();
+  const { banner, sessions, error, inputPermission, platform, lastUpdated, refresh } = useHostStatus();
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
   const totalKbps = sessions.reduce((total, session) => total + (session.kbps || 0), 0);
@@ -153,6 +156,7 @@ function Dashboard() {
       {inputActionError && <ErrorBanner message={inputActionError} />}
       <InputPermissionCard
         granted={inputPermission}
+        platform={platform}
         busy={inputBusy === "permission"}
         onRequest={() => void requestInputPermission()}
       />
@@ -175,10 +179,12 @@ function Dashboard() {
 
 function InputPermissionCard({
   granted,
+  platform,
   busy,
   onRequest,
 }: {
   granted: boolean;
+  platform: HostSnapshotView["platform"];
   busy: boolean;
   onRequest: () => void;
 }) {
@@ -188,7 +194,7 @@ function InputPermissionCard({
         <strong>Remote Input</strong>
         <p>
           {granted
-            ? "macOS 입력 권한 승인됨 · 각 스트림에서 별도로 켜야 합니다."
+            ? `${platform === "windows" ? "Windows SendInput 사용 가능" : "macOS 입력 권한 승인됨"} · 각 스트림에서 별도로 켜야 합니다.`
             : "키보드와 마우스 제어에는 macOS 손쉬운 사용 권한이 필요합니다."}
         </p>
       </div>

@@ -13,7 +13,24 @@ export interface DisplayInfo {
 }
 
 export interface CatalogView {
+  platform: "macos" | "windows" | "linux" | string;
+  captureBackends: CaptureBackendInfo[];
   displays: DisplayInfo[];
+}
+
+export interface CaptureBackendInfo {
+  id: string;
+  label: string;
+  hint: string;
+}
+
+export function preferredCaptureBackend(
+  catalog: Pick<CatalogView, "captureBackends"> | null | undefined,
+  current?: string,
+): string {
+  const available = catalog?.captureBackends ?? [];
+  if (current && available.some((backend) => backend.id === current)) return current;
+  return available[0]?.id ?? "screenCaptureKit";
 }
 
 export interface SessionView {
@@ -39,7 +56,7 @@ export interface SessionView {
   pendingFrame: number;
   frames: number;
   bytes: number;
-  captureBackend: "screenCaptureKit" | "cgDisplayStream" | string;
+  captureBackend: "screenCaptureKit" | "cgDisplayStream" | "windowsGraphicsCapture" | string;
   mediaTransport: "udp" | string;
   firstCaptureMs: number;
   firstEncodeMs: number;

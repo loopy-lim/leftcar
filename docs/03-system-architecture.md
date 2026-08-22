@@ -378,6 +378,10 @@ GraphicsCapturePicker
 
 frame pool resize와 device lost를 stream epoch 전환으로 처리한다.
 
+현재 Windows adapter는 monitor를 `IGraphicsCaptureItemInterop::CreateForMonitor`로 열고 `CreateFreeThreaded` frame pool을 사용한다. BGRA frame은 NV12로 변환한 뒤 `MFT_ENUM_FLAG_HARDWARE`로 열거한 H.264 MFT에만 전달한다. 하드웨어 MFT가 없으면 소프트웨어 encoder로 조용히 전환하지 않고 stream 시작을 실패시킨다. 출력은 macOS와 동일한 Annex-B/CFG 및 1,200-byte UDP fragment 계약으로 정규화한다.
+
+Windows 원격 입력은 영상 worker와 분리된 UDP receive thread에서 처리한다. `LCI1` 포인터는 latest-wins, reliable key/button/wheel/release는 sequence/ACK 계약을 공유하고, Host가 세션을 Control로 바꾼 경우에만 `SendInput`을 호출한다. Control OFF와 session 종료 시 모든 눌린 키와 버튼을 해제한다.
+
 ## 8. Decode pipeline
 
 ### 8.1 stream window 생성
