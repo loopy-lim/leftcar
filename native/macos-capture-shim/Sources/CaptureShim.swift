@@ -132,12 +132,6 @@ private func hasPersistentContentCaptureEntitlement() -> Bool {
         && CFBooleanGetValue((value as! CFBoolean))
 }
 
-// The system picker is the supported capture-consent path for a normal macOS
-// application. Unattended VNC-style capture requires Apple's restricted
-// com.apple.developer.persistent-content-capture entitlement; do not emulate
-// that capability by polling SCShareableContent in the background.
-private let sharingPickerRequestLock = NSLock()
-
 private final class PersistentDisplayFilterRequest: @unchecked Sendable {
     private let lock = NSLock()
     private let completed = DispatchSemaphore(value: 0)
@@ -186,90 +180,6 @@ private func requestPersistentDisplayFilter(
         }
     }
     return request.wait(timeout: timeout)
-}
-
-@available(macOS 14.0, *)
-private final class DisplayPickerObserver: NSObject, SCContentSharingPickerObserver {
-    private let lock = NSLock()
-    private let completed = DispatchSemaphore(value: 0)
-    private var isCompleted = false
-    private var selectedFilter: SCContentFilter?
-    private var failure: String?
-
-    func contentSharingPicker(
-        _ picker: SCContentSharingPicker,
-        didCancelFor stream: SCStream?
-    ) {
-        finish(error: "screen selection was cancelled on the Mac")
-    }
-
-    func contentSharingPicker(
-        _ picker: SCContentSharingPicker,
-        didUpdateWith filter: SCContentFilter,
-        for stream: SCStream?
-    ) {
-        finish(filter: filter)
-    }
-
-    func contentSharingPickerStartDidFailWithError(_ error: Error) {
-        finish(error: "system screen picker failed: \(error.localizedDescription)")
-    }
-
-    private func finish(filter: SCContentFilter? = nil, error: String? = nil) {
-        lock.lock()
-        guard !isCompleted else {
-            lock.unlock()
-            return
-        }
-        isCompleted = true
-        selectedFilter = filter
-        failure = error
-        lock.unlock()
-        completed.signal()
-    }
-
-    func wait(timeout: TimeInterval) -> (filter: SCContentFilter?, error: String?) {
-        guard completed.wait(timeout: .now() + timeout) == .success else {
-            return (nil, "system screen picker timed out after \(Int(timeout))s")
-        }
-        lock.lock()
-        defer { lock.unlock() }
-        return (selectedFilter, failure)
-    }
-}
-
-private func requestDisplayFilterWithSystemPicker(
-    timeout: TimeInterval
-) -> (filter: SCContentFilter?, error: String?) {
-    guard #available(macOS 14.0, *) else {
-        return (nil, "the system ScreenCaptureKit picker requires macOS 14 or later")
-    }
-
-    // SCContentSharingPicker.shared is process-global. Serialize initial
-    // selections so two viewers cannot consume one another's observer event.
-    sharingPickerRequestLock.lock()
-    defer { sharingPickerRequestLock.unlock() }
-
-    let observer = DisplayPickerObserver()
-    DispatchQueue.main.async {
-        let picker = SCContentSharingPicker.shared
-        var configuration = picker.defaultConfiguration
-        configuration.allowedPickerModes = .singleDisplay
-        configuration.allowsChangingSelectedContent = false
-        picker.defaultConfiguration = configuration
-        picker.maximumStreamCount = 1
-        picker.add(observer)
-        picker.isActive = true
-        picker.present(using: .display)
-    }
-
-    let result = observer.wait(timeout: timeout)
-    DispatchQueue.main.async {
-        let picker = SCContentSharingPicker.shared
-        picker.remove(observer)
-        picker.isActive = false
-    }
-    return result
 }
 
 @_cdecl("leftcar_capture_has_persistent_access_v1")
@@ -384,26 +294,27 @@ private func startCaptureSession(
     let started: Bool
     switch backend {
     case .screenCaptureKit:
+        guard hasPersistentContentCaptureEntitlement() else {
+            setLastError(
+                "persistent ScreenCaptureKit access is not approved; use the automatic cgDisplayStream backend"
+            )
+            session.stop()
+            return 0
+        }
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
             setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
             session.stop()
             return 0
         }
-        let selection: (filter: SCContentFilter?, error: String?)
-        if hasPersistentContentCaptureEntitlement() {
-            // Approved VNC-style builds can reconnect directly to the requested
-            // full display after Screen Recording permission has been granted.
-            selection = requestPersistentDisplayFilter(
-                displayID: displayIDs[Int(displayIndex)],
-                timeout: 15
-            )
-        } else {
-            // Development/App Store builds without Apple's restricted
-            // entitlement retain the supported, user-mediated full-display
-            // picker instead of silently attempting unattended capture.
-            selection = requestDisplayFilterWithSystemPicker(timeout: 60)
-        }
+        // Approved VNC-style builds reconnect directly to the requested
+        // display after Screen Recording permission has been granted. Builds
+        // without approval never show a picker; the Host advertises the
+        // automatic CGDisplayStream backend instead.
+        let selection = requestPersistentDisplayFilter(
+            displayID: displayIDs[Int(displayIndex)],
+            timeout: 15
+        )
         guard let filter = selection.filter else {
             setLastError(selection.error ?? "screen capture returned no display")
             session.stop()

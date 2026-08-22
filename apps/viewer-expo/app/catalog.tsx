@@ -100,9 +100,9 @@ type StreamProfile = (typeof STREAM_PROFILES)[number];
 
 const FALLBACK_CAPTURE_BACKENDS: CaptureBackendInfo[] = [
   {
-    id: "screenCaptureKit",
-    label: "Apple 화면 공유",
-    hint: "권장 · Mac의 시스템 선택기에서 화면 승인",
+    id: "cgDisplayStream",
+    label: "자동 화면 공유",
+    hint: "화면 선택기 없이 바로 연결",
   },
 ];
 type CaptureBackendId = string;
@@ -576,8 +576,7 @@ export default function Catalog() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [profileId, setProfileId] = useState<StreamProfileId>("latency");
-  const [captureBackend, setCaptureBackend] =
-    useState<CaptureBackendId>("screenCaptureKit");
+  const [captureBackend, setCaptureBackend] = useState<CaptureBackendId>("");
   const host = controlHost();
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
@@ -593,12 +592,15 @@ export default function Catalog() {
   const captureBackends = catalogQuery.data?.captureBackends?.length
     ? catalogQuery.data.captureBackends
     : FALLBACK_CAPTURE_BACKENDS;
+  const effectiveCaptureBackend = preferredCaptureBackend(
+    catalogQuery.data,
+    captureBackend,
+  );
   useEffect(() => {
-    const preferred = preferredCaptureBackend(catalogQuery.data, captureBackend);
-    if (preferred !== captureBackend) {
-      setCaptureBackend(preferred);
+    if (effectiveCaptureBackend !== captureBackend) {
+      setCaptureBackend(effectiveCaptureBackend);
     }
-  }, [captureBackend, catalogQuery.data]);
+  }, [captureBackend, effectiveCaptureBackend]);
   // Revoked/expired token: drop it and start the pairing flow again.
   useEffect(() => {
     if (!catalogQuery.error || !isUnauthorizedError(catalogQuery.error)) return;
@@ -640,7 +642,7 @@ export default function Catalog() {
         width,
         height,
         fps,
-        captureBackend,
+        captureBackend: effectiveCaptureBackend,
         viewerIps: viewerIps ?? [],
       };
 
@@ -670,7 +672,7 @@ export default function Catalog() {
         width,
         height,
         fps,
-        captureBackend,
+        captureBackend: effectiveCaptureBackend,
         startedAt: Date.now(),
       });
     } catch (e) {
@@ -678,7 +680,7 @@ export default function Catalog() {
     } finally {
       setLaunchingIndex(null);
     }
-  }, [addStream, captureBackend, host, selectedProfile]);
+  }, [addStream, effectiveCaptureBackend, host, selectedProfile]);
 
   const stopStream = useCallback(async (a: ActiveStream) => {
     const client = controlClient();
@@ -731,7 +733,7 @@ export default function Catalog() {
             host={host || "localhost:7777"}
             loading={loading}
             profileId={profileId}
-            captureBackend={captureBackend}
+            captureBackend={effectiveCaptureBackend}
             captureBackends={captureBackends}
             refreshing={refreshing}
             selectedProfile={selectedProfile}

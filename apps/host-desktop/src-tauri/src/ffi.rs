@@ -147,6 +147,25 @@ unsafe fn libc_free_string(ptr: *mut std::ffi::c_char) {
     free(ptr as *mut core::ffi::c_void);
 }
 
+fn macos_capture_backends(persistent_access: bool) -> Vec<CaptureBackendInfo> {
+    let automatic = CaptureBackendInfo {
+        id: "cgDisplayStream".into(),
+        label: "자동 화면 공유".into(),
+        hint: "화면 선택기 없이 바로 연결".into(),
+    };
+    if !persistent_access {
+        return vec![automatic];
+    }
+    vec![
+        CaptureBackendInfo {
+            id: "screenCaptureKit".into(),
+            label: "지속 화면 공유".into(),
+            hint: "Apple 지속 캡처 승인됨 · 선택기 없이 연결".into(),
+        },
+        automatic,
+    ]
+}
+
 impl CaptureBackend for FfiBackend {
     fn platform(&self) -> &'static str {
         "macos"
@@ -164,22 +183,7 @@ impl CaptureBackend for FfiBackend {
                 .map(|f| f() == 1)
             })
             .unwrap_or(false);
-        vec![
-            CaptureBackendInfo {
-                id: "screenCaptureKit".into(),
-                label: "Mac 전체 화면".into(),
-                hint: if persistent_access {
-                    "지속 전체 화면 캡처 승인됨 · 선택기 없이 연결".into()
-                } else {
-                    "Apple 지속 캡처 승인 필요 · 현재 빌드는 시스템 선택기 사용".into()
-                },
-            },
-            CaptureBackendInfo {
-                id: "cgDisplayStream".into(),
-                label: "CGDisplayStream".into(),
-                hint: "호환성 비교용 · 디스플레이 전용".into(),
-            },
-        ]
+        macos_capture_backends(persistent_access)
     }
 
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
@@ -425,5 +429,19 @@ mod tests {
     fn report_mentions_status() {
         let r = dylib_report();
         assert!(r.contains("dylib"), "{r}");
+    }
+
+    #[test]
+    fn unapproved_build_advertises_only_the_automatic_pickerless_backend() {
+        let backends = macos_capture_backends(false);
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].id, "cgDisplayStream");
+    }
+
+    #[test]
+    fn approved_build_prefers_persistent_screen_capture_kit() {
+        let backends = macos_capture_backends(true);
+        assert_eq!(backends[0].id, "screenCaptureKit");
+        assert_eq!(backends[1].id, "cgDisplayStream");
     }
 }

@@ -212,4 +212,13 @@ describe("host capture capabilities", () => {
     expect(preferredCaptureBackend(catalog, "cgDisplayStream")).toBe("cgDisplayStream");
     expect(preferredCaptureBackend(undefined)).toBe("screenCaptureKit");
   });
+
+  it("selects the host's first automatic backend before the user chooses one", () => {
+    const catalog = {
+      captureBackends: [
+        { id: "cgDisplayStream", label: "Automatic", hint: "pickerless" },
+      ],
+    };
+    expect(preferredCaptureBackend(catalog, "")).toBe("cgDisplayStream");
+  });
 });

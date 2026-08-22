@@ -4,6 +4,7 @@
   "license": "MIT",
   "packageManager": "pnpm@10.33.2",
   "scripts": {
+    "dev:host:macos": "zsh tools/dev-host-macos.zsh",
     "check:react-runtime": "node tools/check-react-runtime-versions.mjs",
     "typecheck": "pnpm check:react-runtime && tsc -b",
     "test": "vitest run",

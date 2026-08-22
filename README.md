@@ -72,6 +72,17 @@ cargo clippy --workspace --tests -- -D warnings
 
 운영 빌드/릴리스는 로컬 환경 변수(Tauri CLI, Android SDK/NDK PATH, Rust toolchain)를 맞춘 뒤 해당 타겟 빌드 파이프라인을 수행한다.
 
+macOS Host 개발은 아래 명령을 사용한다. Apple Development 서명 요구사항이
+설치본과 같은지 확인한 뒤 `/Applications/Leftcar Host.app`을 제자리에서 교체하고
+하나만 실행하므로, 최초 승인한 화면 기록 권한을 이후 빌드에서도 재사용한다.
+
+```text
+pnpm dev:host:macos
+```
+
+서명 요구사항이 달라지면 화면 기록 권한이 초기화될 수 있으므로 설치를 중단한다.
+일반 `tauri dev` 실행 파일과 `/Applications` 설치본을 동시에 실행하지 않는다.
+
 Windows x64 Host는 Windows 머신에서 다음 명령으로 current-user NSIS 설치 파일을 만든다.
 
 ```text
