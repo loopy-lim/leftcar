@@ -99,7 +99,11 @@ type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
 type StreamProfile = (typeof STREAM_PROFILES)[number];
 
 const FALLBACK_CAPTURE_BACKENDS: CaptureBackendInfo[] = [
-  { id: "screenCaptureKit", label: "ScreenCaptureKit", hint: "권장 · 최신 macOS 기본 경로" },
+  {
+    id: "screenCaptureKit",
+    label: "Apple 화면 공유",
+    hint: "권장 · Mac의 시스템 선택기에서 화면 승인",
+  },
 ];
 type CaptureBackendId = string;
 

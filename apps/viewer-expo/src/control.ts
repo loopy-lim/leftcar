@@ -145,7 +145,10 @@ export function connect(
             const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
             const payload = JSON.stringify(envelope) + "\n";
             const requestTimeout = command === "startStream"
-              ? 25_000
+              // A macOS host may be waiting for a person to confirm the
+              // system ScreenCaptureKit picker. Keep the control socket alive
+              // longer than the host's bounded 60-second picker wait.
+              ? 70_000
               : command === "getCatalog"
                 ? 15_000
                 : 5_000;

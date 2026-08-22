@@ -16,6 +16,7 @@ import CoreMedia
 import CoreVideo
 import CoreGraphics
 import IOSurface
+import Security
 import Darwin
 
 // MARK: - C ABI surface (v2, handle-based)
@@ -36,128 +37,6 @@ private enum CaptureBackendKind: String {
         default: return nil
         }
     }
-}
-
-// SCShareableContent enumeration is relatively expensive and concurrent
-// callers can amplify a temporary WindowServer delay. Keep one in-flight
-// request, serve the last successful catalog immediately, and refresh stale
-// data in the background. Display topology changes are rare compared with
-// catalog/status polling, so stale-while-refresh is the safer UI contract.
-private final class DisplayCatalogCache {
-    private let condition = NSCondition()
-    private var displays: [SCDisplay] = []
-    private var refreshedAt: Date?
-    private var refreshInFlight = false
-    private var refreshGeneration: UInt64 = 0
-    private var lastRefreshError: String?
-
-    func snapshot() -> (displays: [SCDisplay], age: TimeInterval)? {
-        condition.lock()
-        defer { condition.unlock() }
-        guard !displays.isEmpty, let refreshedAt else { return nil }
-        return (displays, Date().timeIntervalSince(refreshedAt))
-    }
-
-    func display(at index: Int) -> SCDisplay? {
-        condition.lock()
-        defer { condition.unlock() }
-        guard displays.indices.contains(index) else { return nil }
-        return displays[index]
-    }
-
-    func refreshIfStale(maxAge: TimeInterval) {
-        let shouldRefresh: Bool
-        condition.lock()
-        shouldRefresh = refreshedAt.map { Date().timeIntervalSince($0) > maxAge } ?? true
-        condition.unlock()
-        if shouldRefresh {
-            beginRefreshIfNeeded()
-        }
-    }
-
-    func firstSnapshot(timeout: TimeInterval) -> (displays: [SCDisplay]?, error: String?) {
-        beginRefreshIfNeeded()
-
-        condition.lock()
-        let deadline = Date().addingTimeInterval(timeout)
-        while displays.isEmpty && refreshInFlight {
-            if !condition.wait(until: deadline) {
-                break
-            }
-        }
-        let snapshot = displays.isEmpty ? nil : displays
-        let error = lastRefreshError
-        let stillRefreshing = refreshInFlight
-        condition.unlock()
-
-        if snapshot != nil {
-            return (snapshot, nil)
-        }
-        if stillRefreshing {
-            return (nil, "SCShareableContent timed out")
-        }
-        return (nil, error ?? "ScreenCaptureKit returned no displays")
-    }
-
-    private func beginRefreshIfNeeded() {
-        condition.lock()
-        guard !refreshInFlight else {
-            condition.unlock()
-            return
-        }
-        refreshInFlight = true
-        refreshGeneration &+= 1
-        let generation = refreshGeneration
-        condition.unlock()
-
-        requestShareableContent { [weak self] content, error in
-            guard let self else { return }
-            self.condition.lock()
-            guard self.refreshGeneration == generation else {
-                self.condition.unlock()
-                return
-            }
-            if let content, error == nil, !content.displays.isEmpty {
-                self.displays = normalizedDisplays(content.displays)
-                self.refreshedAt = Date()
-                self.lastRefreshError = nil
-            } else {
-                self.lastRefreshError = error.map {
-                    "SCShareableContent failed: \($0.localizedDescription)"
-                } ?? "ScreenCaptureKit returned no displays"
-            }
-            self.refreshInFlight = false
-            self.condition.broadcast()
-            self.condition.unlock()
-        }
-    }
-}
-
-private let displayCatalogCache = DisplayCatalogCache()
-
-private func normalizedDisplays(_ displays: [SCDisplay]) -> [SCDisplay] {
-    let mainDisplayID = CGMainDisplayID()
-    return displays.sorted { lhs, rhs in
-        if lhs.displayID == mainDisplayID { return true }
-        if rhs.displayID == mainDisplayID { return false }
-        return lhs.displayID < rhs.displayID
-    }
-}
-
-private func displayCatalogJSON(_ displays: [SCDisplay]) -> String {
-    let arr: [[String: Any]] = displays.enumerated().map { idx, d in
-        [
-            "index": idx,
-            "name": "Display \(idx)",
-            "width": Int(d.width),
-            "height": Int(d.height),
-        ]
-    }
-    guard let data = try? JSONSerialization.data(withJSONObject: arr),
-          let json = String(data: data, encoding: .utf8) else {
-        return "[]"
-    }
-    return json
 }
 
 private func coreGraphicsCatalogJSON() -> String? {
@@ -233,22 +112,169 @@ private func hasScreenCaptureAccess() -> Bool {
     CGPreflightScreenCaptureAccess()
 }
 
-// ScreenCaptureKit is reached from Rust/Tokio worker threads. On recent macOS
-// versions the request may reach replayd but never deliver its completion when
-// it is initiated from a worker without an AppKit run loop. Enter the framework
-// from the application's main dispatch queue, while the control worker remains
-// the thread that performs the bounded wait in DisplayCatalogCache.
-private func requestShareableContent(
-    completion: @escaping (SCShareableContent?, Error?) -> Void
-) {
-    DispatchQueue.main.async {
-        SCShareableContent.getExcludingDesktopWindows(
-            false,
-            onScreenWindowsOnly: true
-        ) { content, error in
-            completion(content, error)
+private let persistentContentCaptureEntitlement =
+    "com.apple.developer.persistent-content-capture" as CFString
+
+/// Apple's persistent-content-capture entitlement is restricted to approved
+/// remote-desktop/VNC apps. Read the entitlement from the running task instead
+/// of trusting a build flag: an unsigned development binary must never claim
+/// that it can bypass the system picker.
+private func hasPersistentContentCaptureEntitlement() -> Bool {
+    guard let task = SecTaskCreateFromSelf(nil),
+          let value = SecTaskCopyValueForEntitlement(
+              task,
+              persistentContentCaptureEntitlement,
+              nil
+          ) else {
+        return false
+    }
+    return CFGetTypeID(value) == CFBooleanGetTypeID()
+        && CFBooleanGetValue((value as! CFBoolean))
+}
+
+// The system picker is the supported capture-consent path for a normal macOS
+// application. Unattended VNC-style capture requires Apple's restricted
+// com.apple.developer.persistent-content-capture entitlement; do not emulate
+// that capability by polling SCShareableContent in the background.
+private let sharingPickerRequestLock = NSLock()
+
+private final class PersistentDisplayFilterRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private let completed = DispatchSemaphore(value: 0)
+    private var selectedFilter: SCContentFilter?
+    private var failure: String?
+
+    func finish(filter: SCContentFilter? = nil, error: String? = nil) {
+        lock.lock()
+        selectedFilter = filter
+        failure = error
+        lock.unlock()
+        completed.signal()
+    }
+
+    func wait(timeout: TimeInterval) -> (filter: SCContentFilter?, error: String?) {
+        guard completed.wait(timeout: .now() + timeout) == .success else {
+            return (nil, "persistent display lookup timed out after \(Int(timeout))s")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return (selectedFilter, failure)
+    }
+}
+
+private func requestPersistentDisplayFilter(
+    displayID: CGDirectDisplayID,
+    timeout: TimeInterval
+) -> (filter: SCContentFilter?, error: String?) {
+    let request = PersistentDisplayFilterRequest()
+
+    Task {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: false
+            )
+            if let display = content.displays.first(where: { $0.displayID == displayID }) {
+                request.finish(
+                    filter: SCContentFilter(display: display, excludingWindows: [])
+                )
+            } else {
+                request.finish(error: "persistent display lookup returned no matching display")
+            }
+        } catch {
+            request.finish(error: "persistent display lookup failed: \(error.localizedDescription)")
         }
     }
+    return request.wait(timeout: timeout)
+}
+
+@available(macOS 14.0, *)
+private final class DisplayPickerObserver: NSObject, SCContentSharingPickerObserver {
+    private let lock = NSLock()
+    private let completed = DispatchSemaphore(value: 0)
+    private var isCompleted = false
+    private var selectedFilter: SCContentFilter?
+    private var failure: String?
+
+    func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didCancelFor stream: SCStream?
+    ) {
+        finish(error: "screen selection was cancelled on the Mac")
+    }
+
+    func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didUpdateWith filter: SCContentFilter,
+        for stream: SCStream?
+    ) {
+        finish(filter: filter)
+    }
+
+    func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        finish(error: "system screen picker failed: \(error.localizedDescription)")
+    }
+
+    private func finish(filter: SCContentFilter? = nil, error: String? = nil) {
+        lock.lock()
+        guard !isCompleted else {
+            lock.unlock()
+            return
+        }
+        isCompleted = true
+        selectedFilter = filter
+        failure = error
+        lock.unlock()
+        completed.signal()
+    }
+
+    func wait(timeout: TimeInterval) -> (filter: SCContentFilter?, error: String?) {
+        guard completed.wait(timeout: .now() + timeout) == .success else {
+            return (nil, "system screen picker timed out after \(Int(timeout))s")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return (selectedFilter, failure)
+    }
+}
+
+private func requestDisplayFilterWithSystemPicker(
+    timeout: TimeInterval
+) -> (filter: SCContentFilter?, error: String?) {
+    guard #available(macOS 14.0, *) else {
+        return (nil, "the system ScreenCaptureKit picker requires macOS 14 or later")
+    }
+
+    // SCContentSharingPicker.shared is process-global. Serialize initial
+    // selections so two viewers cannot consume one another's observer event.
+    sharingPickerRequestLock.lock()
+    defer { sharingPickerRequestLock.unlock() }
+
+    let observer = DisplayPickerObserver()
+    DispatchQueue.main.async {
+        let picker = SCContentSharingPicker.shared
+        var configuration = picker.defaultConfiguration
+        configuration.allowedPickerModes = .singleDisplay
+        configuration.allowsChangingSelectedContent = false
+        picker.defaultConfiguration = configuration
+        picker.maximumStreamCount = 1
+        picker.add(observer)
+        picker.isActive = true
+        picker.present(using: .display)
+    }
+
+    let result = observer.wait(timeout: timeout)
+    DispatchQueue.main.async {
+        let picker = SCContentSharingPicker.shared
+        picker.remove(observer)
+        picker.isActive = false
+    }
+    return result
+}
+
+@_cdecl("leftcar_capture_has_persistent_access_v1")
+public func leftcarCaptureHasPersistentAccessV1() -> Int32 {
+    hasPersistentContentCaptureEntitlement() ? 1 : 0
 }
 
 @_cdecl("leftcar_capture_list_displays")
@@ -257,27 +283,15 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         setLastError("screen-recording permission is not granted to Leftcar Host")
         return UnsafeMutablePointer<CChar>(strdup("[]"))
     }
-    if let snapshot = displayCatalogCache.snapshot() {
-        displayCatalogCache.refreshIfStale(maxAge: 30)
+    // Source cards only need stable display metadata. Using CoreGraphics here
+    // keeps catalog refresh read-only; ScreenCaptureKit consent is requested
+    // exactly once, when the viewer starts a stream.
+    if let catalog = coreGraphicsCatalogJSON() {
         setLastError("")
-        return UnsafeMutablePointer<CChar>(strdup(displayCatalogJSON(snapshot.displays)))
+        return UnsafeMutablePointer<CChar>(strdup(catalog))
     }
-    // The source catalog only needs stable display metadata. CoreGraphics can
-    // provide that synchronously. Do not begin an SCK enumeration until the
-    // user actually selects the SCK backend: a pending WindowServer request
-    // can also serialize a subsequently requested CGDisplayStream on recent
-    // macOS releases.
-    if let fallback = coreGraphicsCatalogJSON() {
-        setLastError("")
-        return UnsafeMutablePointer<CChar>(strdup(fallback))
-    }
-    let result = displayCatalogCache.firstSnapshot(timeout: 13)
-    guard let displays = result.displays else {
-        setLastError(result.error ?? "SCShareableContent failed")
-        return UnsafeMutablePointer<CChar>(strdup("[]"))
-    }
-    setLastError("")
-    return UnsafeMutablePointer<CChar>(strdup(displayCatalogJSON(displays)))
+    setLastError("CoreGraphics returned no active displays")
+    return UnsafeMutablePointer<CChar>(strdup("[]"))
 }
 
 @_cdecl("leftcar_capture_start_v2")
@@ -370,22 +384,32 @@ private func startCaptureSession(
     let started: Bool
     switch backend {
     case .screenCaptureKit:
-        var selectedDisplay = displayCatalogCache.display(at: Int(displayIndex))
-        if selectedDisplay == nil {
-            let result = displayCatalogCache.firstSnapshot(timeout: 8)
-            guard let displays = result.displays else {
-                setLastError(result.error ?? "SCShareableContent failed")
-                session.stop()
-                return 0
-            }
-            guard Int(displayIndex) < displays.count else {
-                setLastError("displayIndex \(displayIndex) out of range (\(displays.count) displays)")
-                session.stop()
-                return 0
-            }
-            selectedDisplay = displays[Int(displayIndex)]
+        let displayIDs = activeDisplayIDs()
+        guard Int(displayIndex) < displayIDs.count else {
+            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            session.stop()
+            return 0
         }
-        started = selectedDisplay.map { session.setupScreenCaptureKit(display: $0) } ?? false
+        let selection: (filter: SCContentFilter?, error: String?)
+        if hasPersistentContentCaptureEntitlement() {
+            // Approved VNC-style builds can reconnect directly to the requested
+            // full display after Screen Recording permission has been granted.
+            selection = requestPersistentDisplayFilter(
+                displayID: displayIDs[Int(displayIndex)],
+                timeout: 15
+            )
+        } else {
+            // Development/App Store builds without Apple's restricted
+            // entitlement retain the supported, user-mediated full-display
+            // picker instead of silently attempting unattended capture.
+            selection = requestDisplayFilterWithSystemPicker(timeout: 60)
+        }
+        guard let filter = selection.filter else {
+            setLastError(selection.error ?? "screen capture returned no display")
+            session.stop()
+            return 0
+        }
+        started = session.setupScreenCaptureKit(filter: filter)
     case .cgDisplayStream:
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
@@ -887,9 +911,11 @@ final class CaptureSession {
     }
 
     @discardableResult
-    func setupScreenCaptureKit(display: SCDisplay) -> Bool {
+    func setupScreenCaptureKit(filter: SCContentFilter) -> Bool {
         inputLock.lock()
-        inputBounds = CGDisplayBounds(display.displayID)
+        if #available(macOS 14.0, *) {
+            inputBounds = filter.contentRect
+        }
         inputLock.unlock()
         guard beginCapture() else {
             setLastError("media socket closed before capture start")
@@ -917,7 +943,6 @@ final class CaptureSession {
             // framework's minimum/default depth does not add a stale queue.
             config.queueDepth = 3
 
-            let filter = SCContentFilter(display: display, excludingWindows: [])
             let handler = CaptureOutputHandler(session: self)
             let candidate = SCStream(
                 filter: filter,

@@ -9,6 +9,7 @@
 //!   leftcar_capture_input_permission_v1() -> granted
 //!   leftcar_capture_request_input_permission_v1() -> granted
 //!   leftcar_capture_set_input_enabled_v1(handle, enabled)
+//!   leftcar_capture_has_persistent_access_v1() -> granted
 
 use crate::backend::CaptureBackend;
 use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
@@ -111,6 +112,9 @@ impl FfiBackend {
                     b"leftcar_capture_set_input_enabled_v1",
                 )
                 .map_err(|e| e.to_string())?;
+            let _ = lib
+                .get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_has_persistent_access_v1")
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -149,11 +153,26 @@ impl CaptureBackend for FfiBackend {
     }
 
     fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
+        let persistent_access = self
+            .lib()
+            .ok()
+            .and_then(|lib| unsafe {
+                lib.get::<unsafe extern "C" fn() -> i32>(
+                    b"leftcar_capture_has_persistent_access_v1",
+                )
+                .ok()
+                .map(|f| f() == 1)
+            })
+            .unwrap_or(false);
         vec![
             CaptureBackendInfo {
                 id: "screenCaptureKit".into(),
-                label: "ScreenCaptureKit".into(),
-                hint: "권장 · 최신 macOS 기본 경로".into(),
+                label: "Mac 전체 화면".into(),
+                hint: if persistent_access {
+                    "지속 전체 화면 캡처 승인됨 · 선택기 없이 연결".into()
+                } else {
+                    "Apple 지속 캡처 승인 필요 · 현재 빌드는 시스템 선택기 사용".into()
+                },
             },
             CaptureBackendInfo {
                 id: "cgDisplayStream".into(),
