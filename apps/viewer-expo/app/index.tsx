@@ -115,7 +115,9 @@ export default function Hub() {
             </View>
             <View style={styles.stepContent}>
               <Text style={styles.stepTitle}>Mac/PC에서 Host 앱 실행</Text>
-              <Text style={styles.stepDesc}>Leftcar Host Studio를 실행하면 로컬 포트 7777로 대기합니다.</Text>
+              <Text style={styles.stepDesc}>
+                Leftcar Host Studio를 실행하면 7777 또는 자동 선택된 대체 포트를 mDNS로 알립니다.
+              </Text>
             </View>
           </View>
 

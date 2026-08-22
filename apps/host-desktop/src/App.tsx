@@ -61,14 +61,16 @@ function useHostStatus() {
   const [error, setError] = useState<string | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
+  const [controlPort, setControlPort] = useState(7777);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission, hostPlatform] = await Promise.all([
+      const [status, permission, hostPlatform, actualControlPort] = await Promise.all([
         invoke<StatusView>("get_status"),
         invoke<boolean>("get_input_permission"),
         invoke<HostSnapshotView["platform"]>("get_host_platform"),
+        invoke<number>("get_control_port"),
       ]);
       const activeSessions = (status.sessions || []).filter(
         (session) => !["stopped", "unknown"].includes(session.state),
@@ -87,6 +89,7 @@ function useHostStatus() {
       setError(null);
       setInputPermission(permission);
       setPlatform(hostPlatform);
+      setControlPort(actualControlPort);
       setLastUpdated(new Date());
     } catch (cause) {
       setError(String(cause));
@@ -106,11 +109,20 @@ function useHostStatus() {
     };
   }, [refresh]);
 
-  return { banner, sessions, error, inputPermission, platform, lastUpdated, refresh };
+  return { banner, sessions, error, inputPermission, platform, controlPort, lastUpdated, refresh };
 }
 
 function Dashboard() {
-  const { banner, sessions, error, inputPermission, platform, lastUpdated, refresh } = useHostStatus();
+  const {
+    banner,
+    sessions,
+    error,
+    inputPermission,
+    platform,
+    controlPort,
+    lastUpdated,
+    refresh,
+  } = useHostStatus();
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
   const totalKbps = sessions.reduce((total, session) => total + (session.kbps || 0), 0);
@@ -164,11 +176,13 @@ function Dashboard() {
         activeStreamCount={sessions.length}
         isStreaming={isStreaming}
         totalKbps={totalKbps}
+        controlPort={controlPort}
       />
       <SessionsCard
         sessions={sessions}
         inputPermission={inputPermission}
         inputBusy={inputBusy}
+        controlPort={controlPort}
         onToggleInput={(session) => void toggleSessionInput(session)}
         onRefresh={refresh}
       />
@@ -266,15 +280,17 @@ function SummaryStats({
   activeStreamCount,
   isStreaming,
   totalKbps,
+  controlPort,
 }: {
   activeStreamCount: number;
   isStreaming: boolean;
   totalKbps: number;
+  controlPort: number;
 }) {
   const [copied, setCopied] = useState(false);
 
   const copyPortInfo = () => {
-    void navigator.clipboard.writeText("7777");
+    void navigator.clipboard.writeText(String(controlPort));
     setCopied(true);
     setTimeout(() => setCopied(false), 2_000);
   };
@@ -289,7 +305,7 @@ function SummaryStats({
       </StatCard>
       <StatCard label="Control Plane">
         <span className="stat-value" style={{ fontSize: "18px", color: "#38bdf8" }}>
-          TCP :7777
+          TCP :{controlPort}
         </span>
         <button onClick={copyPortInfo} className="stat-chip" style={{ cursor: "pointer" }}>
           {copied ? "COPIED" : "mDNS AUTO"}
@@ -324,12 +340,14 @@ function SessionsCard({
   sessions,
   inputPermission,
   inputBusy,
+  controlPort,
   onToggleInput,
   onRefresh,
 }: {
   sessions: SessionRow[];
   inputPermission: boolean;
   inputBusy: number | "permission" | null;
+  controlPort: number;
   onToggleInput: (session: SessionRow) => void;
   onRefresh: () => void;
 }) {
@@ -352,7 +370,7 @@ function SessionsCard({
           onToggleInput={onToggleInput}
         />
       ) : (
-        <EmptySessions />
+        <EmptySessions controlPort={controlPort} />
       )}
     </section>
   );
@@ -486,7 +504,7 @@ function formatLatency(session: SessionRow): string {
   ].join("");
 }
 
-function EmptySessions() {
+function EmptySessions({ controlPort }: { controlPort: number }) {
   return (
     <div className="empty-state">
       <div className="radar-wrapper">
@@ -514,7 +532,7 @@ function EmptySessions() {
         선택하면 서브 30ms 초저지연 스트리밍이 즉시 시작됩니다.
       </p>
       <div className="empty-tips-box">
-        <span>⚡ 제어 포트: <span className="kbd-badge">7777</span></span>
+        <span>⚡ 제어 포트: <span className="kbd-badge">{controlPort}</span></span>
         <span>•</span>
         <span>📡 mDNS 서비스: <span className="kbd-badge">_leftcar._tcp</span></span>
         <span>•</span>

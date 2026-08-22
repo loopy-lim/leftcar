@@ -32,6 +32,20 @@ interface FoundHost {
   port: number;
 }
 
+function parseManualEndpoint(value: string): { host: string; port: number } | null {
+  const normalized = value.trim();
+  if (!normalized) return null;
+  const separator = normalized.lastIndexOf(":");
+  if (separator < 0) return { host: normalized, port: 7777 };
+  const host = normalized.slice(0, separator).trim();
+  const rawPort = normalized.slice(separator + 1).trim();
+  const port = Number(rawPort);
+  if (!host || !/^\d+$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return { host, port };
+}
+
 export default function Host() {
   const [ip, setIp] = useState("");
   const [busy, setBusy] = useState(false);
@@ -106,6 +120,15 @@ export default function Host() {
   }, []);
 
   const hosts = Object.values(found);
+
+  const connectManual = useCallback(() => {
+    const endpoint = parseManualEndpoint(ip);
+    if (!endpoint) {
+      setError("IP 주소 또는 포트를 확인해 주세요. 예: 192.168.0.10:7777");
+      return;
+    }
+    void doConnect(endpoint.host, endpoint.port);
+  }, [doConnect, ip]);
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
@@ -187,16 +210,16 @@ export default function Host() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>수동 IP 직접 연결</Text>
         <Text style={styles.fieldHint}>
-          호스트 Mac/PC의 로컬 IP 주소 (기본 포트: 7777)
+          호스트 Mac/PC의 로컬 IP 주소와 선택적 포트 (기본: 7777)
         </Text>
 
         <View style={styles.inputWrapper}>
           <Text style={styles.inputPrefix}>IP</Text>
           <TextInput
             style={styles.input}
-            placeholder="192.168.0.x"
+            placeholder="192.168.0.x:7777"
             placeholderTextColor="#64748b"
-            keyboardType="numeric"
+            keyboardType="url"
             autoCapitalize="none"
             autoCorrect={false}
             value={ip}
@@ -206,7 +229,7 @@ export default function Host() {
 
         <Pressable
           style={[styles.primaryBtn, (!ip.trim() || busy) && styles.btnDisabled]}
-          onPress={() => doConnect(ip.trim())}
+          onPress={connectManual}
           disabled={busy || !ip.trim()}
         >
           {busy ? (

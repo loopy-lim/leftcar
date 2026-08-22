@@ -18,8 +18,14 @@ use tauri::tray::TrayIconBuilder;
 use tauri::WebviewUrl;
 use tauri::{Manager, WindowEvent};
 
-/// Control plane port — must match the TCP listener and the mDNS record.
-const CONTROL_PORT: u16 = 7777;
+/// Preferred control-plane port. If it is already occupied, the Host binds an
+/// OS-assigned port and advertises that actual endpoint through mDNS and QR.
+const PREFERRED_CONTROL_PORT: u16 = 7777;
+
+#[derive(Clone, Copy)]
+struct ControlEndpoint {
+    port: u16,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -35,10 +41,14 @@ pub fn run() {
         backend.clone(),
         pairing.clone(),
     ));
-    start_control_server(server.clone());
+    let (control_listener, control_port) = bind_control_listener().unwrap_or_else(|error| {
+        panic!("Leftcar control listener unavailable: {error}");
+    });
+    server.set_control_port(control_port);
+    start_control_server(server.clone(), control_listener, control_port);
     // Advertise independently from the Tauri window so a viewer can connect
     // while WebView/AppKit initialization is still in progress.
-    if let Err(e) = advertise_mdns() {
+    if let Err(e) = advertise_mdns(control_port) {
         eprintln!("mDNS advertise failed: {e}");
     }
 
@@ -46,6 +56,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_host_platform,
+            get_control_port,
             get_input_permission,
             request_input_permission,
             set_session_input,
@@ -57,6 +68,7 @@ pub fn run() {
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
+            app.manage(ControlEndpoint { port: control_port });
             warm_display_catalog(warmup_backend);
 
             let show_item =
@@ -157,17 +169,15 @@ fn show_pairing_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Prime ScreenCaptureKit before the first viewer opens the source catalog.
-/// The first macOS enumeration can take several seconds; later calls are
-/// served by the capture shim's stale-while-refresh cache.
+/// Prime the display catalog before the first viewer opens it. On macOS this
+/// is a synchronous CoreGraphics metadata read; ScreenCaptureKit consent is
+/// requested only when the viewer starts a stream.
 fn warm_display_catalog(backend: SharedBackend) {
     let _ = std::thread::Builder::new()
         .name("leftcar-catalog-warmup".into())
         .spawn(move || {
-            // Tauri setup runs before AppKit has fully entered its event loop.
-            // Let that loop become live before asking ScreenCaptureKit to
-            // enumerate shareable content; an immediate CoreGraphics catalog
-            // remains available to control clients during this short delay.
+            // Let the AppKit event loop become live before the first catalog
+            // probe so a subsequent system picker can be presented cleanly.
             std::thread::sleep(std::time::Duration::from_millis(500));
             match backend.list_displays() {
                 Ok(displays) => println!("display catalog warm: {} display(s)", displays.len()),
@@ -179,7 +189,37 @@ fn warm_display_catalog(backend: SharedBackend) {
 /// Start the control plane before the Tauri window lifecycle. This keeps the
 /// host connectable while WebView/AppKit initialization is slow or blocked by
 /// a desktop permission prompt.
-fn start_control_server(server: std::sync::Arc<control::ControlServer>) {
+fn bind_control_listener() -> Result<(std::net::TcpListener, u16), String> {
+    bind_control_listener_at(PREFERRED_CONTROL_PORT)
+}
+
+fn bind_control_listener_at(preferred_port: u16) -> Result<(std::net::TcpListener, u16), String> {
+    let listener = match std::net::TcpListener::bind(("0.0.0.0", preferred_port)) {
+        Ok(listener) => listener,
+        Err(preferred_error) => {
+            eprintln!(
+                "control port {preferred_port} unavailable ({preferred_error}); selecting a free port"
+            );
+            std::net::TcpListener::bind(("0.0.0.0", 0)).map_err(|fallback_error| {
+                format!("port {preferred_port}: {preferred_error}; fallback: {fallback_error}")
+            })?
+        }
+    };
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("control listener nonblocking mode: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("control listener address: {error}"))?
+        .port();
+    Ok((listener, port))
+}
+
+fn start_control_server(
+    server: std::sync::Arc<control::ControlServer>,
+    listener: std::net::TcpListener,
+    port: u16,
+) {
     std::thread::Builder::new()
         .name("leftcar-control".into())
         .spawn(move || {
@@ -188,13 +228,10 @@ fn start_control_server(server: std::sync::Arc<control::ControlServer>) {
                 .build()
                 .expect("control runtime");
             runtime.block_on(async move {
-                match tokio::net::TcpListener::bind(("0.0.0.0", CONTROL_PORT)).await {
-                    Ok(listener) => {
-                        println!("control server on {}", listener.local_addr().unwrap());
-                        server.run(listener).await;
-                    }
-                    Err(e) => eprintln!("control bind failed: {e}"),
-                }
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("convert control listener to tokio");
+                println!("control server on 0.0.0.0:{port}");
+                server.run(listener).await;
             });
         })
         .expect("control server thread");
@@ -210,6 +247,11 @@ fn get_status(
 #[tauri::command]
 fn get_host_platform(state: tauri::State<'_, std::sync::Arc<control::ControlServer>>) -> String {
     state.platform().into()
+}
+
+#[tauri::command]
+fn get_control_port(state: tauri::State<'_, ControlEndpoint>) -> u16 {
+    state.port
 }
 
 #[tauri::command]
@@ -238,9 +280,10 @@ fn set_session_input(
 #[tauri::command]
 fn begin_pairing(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    endpoint: tauri::State<'_, ControlEndpoint>,
 ) -> Result<pairing::PairingSessionView, String> {
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
-    Ok(state.begin_pairing(&ip, CONTROL_PORT))
+    Ok(state.begin_pairing(&ip, endpoint.port))
 }
 
 #[tauri::command]
@@ -263,9 +306,9 @@ fn revoke_device(
     state.revoke(&device_id)
 }
 
-/// Register `_leftcar._tcp.local.` pointing at this host's LAN IP:7777.
+/// Register `_leftcar._tcp.local.` with the listener's actual control port.
 /// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
-fn advertise_mdns() -> Result<(), String> {
+fn advertise_mdns(port: u16) -> Result<(), String> {
     use std::collections::HashMap;
     let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {e:?}"))?;
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
@@ -274,7 +317,7 @@ fn advertise_mdns() -> Result<(), String> {
         "leftcar-host",
         "leftcar-host.local.",
         &ip,
-        CONTROL_PORT,
+        port,
         // Android's NSD resolver rejects an empty TXT property set on some
         // vendor builds ("Key cannot be empty"). Keep one stable property so
         // multiple hosts can still be resolved and listed independently.
@@ -284,7 +327,7 @@ fn advertise_mdns() -> Result<(), String> {
     daemon
         .register(info)
         .map_err(|e| format!("mdns register: {e:?}"))?;
-    println!("mDNS: leftcar-host._leftcar._tcp.local. at {ip}:{CONTROL_PORT}");
+    println!("mDNS: leftcar-host._leftcar._tcp.local. at {ip}:{port}");
     std::mem::forget(daemon);
     Ok(())
 }
@@ -294,4 +337,18 @@ fn local_lan_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:80").ok()?;
     Some(sock.local_addr().ok()?.ip().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn occupied_control_port_falls_back_to_an_available_port() {
+        let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let (_fallback, actual_port) = super::bind_control_listener_at(occupied_port).unwrap();
+
+        assert_ne!(actual_port, occupied_port);
+        assert_ne!(actual_port, 0);
+    }
 }

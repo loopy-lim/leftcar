@@ -12,7 +12,10 @@ use control_contract::host::{
 pub use control_contract::host::{StatsInfo, StatusView as StatusViewPublic};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU16, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -32,6 +35,7 @@ const TERMINAL_SESSION_RETENTION: Duration = Duration::from_secs(5);
 pub struct ControlServer {
     backend: SharedBackend,
     pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    control_port: AtomicU16,
     sessions: Mutex<State>,
 }
 
@@ -48,11 +52,16 @@ impl ControlServer {
         Self {
             backend,
             pairing,
+            control_port: AtomicU16::new(crate::PREFERRED_CONTROL_PORT),
             sessions: Mutex::new(State {
                 next: 1,
                 live: HashMap::new(),
             }),
         }
+    }
+
+    pub fn set_control_port(&self, port: u16) {
+        self.control_port.store(port, Ordering::Release);
     }
 
     pub async fn bind(&self, addr: &str) -> std::io::Result<std::net::SocketAddr> {
@@ -268,7 +277,8 @@ impl ControlServer {
                 let Some(host_ip) = crate::local_lan_ip() else {
                     return err("no LAN interface found");
                 };
-                ok(self.pairing.begin_pairing(&host_ip, crate::CONTROL_PORT))
+                let port = self.control_port.load(Ordering::Acquire);
+                ok(self.pairing.begin_pairing(&host_ip, port))
             }
             "pair" => {
                 #[derive(serde::Deserialize)]
@@ -609,9 +619,10 @@ mod tests {
     async fn spawn_server_with_pairing(
         pairing: std::sync::Arc<crate::pairing::PairingServer>,
     ) -> std::net::SocketAddr {
-        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing));
+        server.set_control_port(addr.port());
         tokio::spawn(async move { server.run(listener).await });
         addr
     }
@@ -761,7 +772,7 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(response["result"]["qr_payload"].as_str().unwrap()).unwrap();
         assert_eq!(payload["v"], 1);
-        assert_eq!(payload["p"], crate::CONTROL_PORT);
+        assert_eq!(payload["p"], addr.port());
     }
 
     #[test]
