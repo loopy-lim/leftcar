@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm --workspace-root check:react-runtime && tsc --noEmit && vite build",
+    "build": "bun run --cwd ../.. check:react-runtime && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

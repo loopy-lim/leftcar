@@ -41,7 +41,7 @@ ScreenCaptureKit direct capture를 기본으로 사용하며 두 모드 모두 �
 개발 중에는 저장소 루트에서 아래 명령만 사용한다.
 
 ```text
-pnpm dev:host:macos
+bun run dev:host:macos
 ```
 
 이 명령은 macOS 전용 Tauri 설정의 Apple Development 인증서로 앱을 빌드하고,

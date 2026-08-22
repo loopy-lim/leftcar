@@ -318,7 +318,7 @@ export 전에 automatic redaction test와 사용자 preview를 제공한다.
 
 ## 17. 의존성과 release
 
-- Cargo/pnpm/Gradle dependency pin/lock
+- Cargo/Bun/Gradle dependency pin/lock
 - release artifact checksum
 - SBOM 생성
 - known vulnerability audit

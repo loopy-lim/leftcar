@@ -13,7 +13,7 @@ empty. Static screens may legitimately report `fps=0` after the first frame.
 Run:
 
 ```sh
-pnpm benchmark:capture -- artifacts/sck.jsonl artifacts/cg.jsonl
+bun run benchmark:capture -- artifacts/sck.jsonl artifacts/cg.jsonl
 ```
 
 The report compares first-frame delivery, capture callback interval p95,

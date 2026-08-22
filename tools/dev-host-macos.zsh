@@ -15,7 +15,7 @@ codesign_requirement() {
 }
 
 cd "$host_dir"
-pnpm tauri build \
+bun run tauri build \
   --config src-tauri/tauri.macos.conf.json \
   --bundles app
 

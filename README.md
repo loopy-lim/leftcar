@@ -60,11 +60,11 @@ Leftcar는 macOS 또는 Windows 화면을 Galaxy XR과 Android 기기에서 빠�
 ## 빌드/실행
 
 ```text
-pnpm install
-pnpm typecheck
-pnpm test
-pnpm test:contract
-pnpm test:architecture
+bun install
+bun run typecheck
+bun run test
+bun run test:contract
+bun run test:architecture
 cargo run -p control-contract --bin generate   # 생성물 갱신/검증
 cargo test --workspace
 cargo clippy --workspace --tests -- -D warnings
@@ -77,7 +77,7 @@ macOS Host 개발은 아래 명령을 사용한다. Apple Development 서명 요
 하나만 실행하므로, 최초 승인한 화면 기록 권한을 이후 빌드에서도 재사용한다.
 
 ```text
-pnpm dev:host:macos
+bun run dev:host:macos
 ```
 
 서명 요구사항이 달라지면 화면 기록 권한이 초기화될 수 있으므로 설치를 중단한다.
@@ -86,7 +86,7 @@ pnpm dev:host:macos
 Windows x64 Host는 Windows 머신에서 다음 명령으로 current-user NSIS 설치 파일을 만든다.
 
 ```text
-pnpm --filter @leftcar/host-desktop tauri build
+bun run --cwd apps/host-desktop tauri build
 ```
 
 ### 로컬 검증 명령
@@ -94,9 +94,9 @@ pnpm --filter @leftcar/host-desktop tauri build
 ```text
 cargo test --workspace          # E1: 전 crate 단위/property 테스트
 cargo clippy --workspace --tests -- -D warnings
-pnpm test && pnpm test:contract # TS 단위 + 계약 테스트
-pnpm test:architecture          # ADR-0002 의존성/TS/Kotlin 규칙
-pnpm rustra:generate            # 생성 코드 재생성 (diff 없어야 함)
+bun run test && bun run test:contract # TS 단위 + 계약 테스트
+bun run test:architecture       # ADR-0002 의존성/TS/Kotlin 규칙
+bun run rustra:generate         # 생성 코드 재생성 (diff 없어야 함)
 ```
 
 추가 문서:

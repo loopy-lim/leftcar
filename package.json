@@ -2,15 +2,20 @@
   "name": "leftcar",
   "private": true,
   "license": "MIT",
-  "packageManager": "pnpm@10.33.2",
+  "packageManager": "bun@1.4.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "vendor/*"
+  ],
   "scripts": {
     "dev:host:macos": "zsh tools/dev-host-macos.zsh",
-    "check:react-runtime": "node tools/check-react-runtime-versions.mjs",
-    "typecheck": "pnpm check:react-runtime && tsc -b",
+    "check:react-runtime": "bun tools/check-react-runtime-versions.mjs",
+    "typecheck": "bun run check:react-runtime && tsc -b",
     "test": "vitest run",
     "test:contract": "vitest run -c vitest.contract.config.ts",
-    "test:architecture": "tsx tools/architecture-check/ts.ts",
-    "benchmark:capture": "tsx tools/capture-ab-report.ts",
+    "test:architecture": "bun tools/architecture-check/ts.ts",
+    "benchmark:capture": "bun tools/capture-ab-report.ts",
     "rustra:generate": "cargo run -p control-contract --bin generate"
   },
   "devDependencies": {

@@ -149,7 +149,8 @@ leftcar/
   Cargo.toml
   rust-toolchain.toml
   package.json
-  pnpm-workspace.yaml
+  bun.lock
+  bunfig.toml
 
   apps/
     host-desktop/

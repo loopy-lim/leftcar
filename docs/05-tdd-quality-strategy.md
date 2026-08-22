@@ -397,11 +397,11 @@ invariant:
 
 ```text
 cargo test --workspace
-pnpm typecheck
-pnpm test
-pnpm rustra:generate
+bun run typecheck
+bun run test
+bun run rustra:generate
 git diff --exit-code -- packages/control-generated
-pnpm test:contract
+bun run test:contract
 ```
 
 명령 이름은 scaffold에서 package script로 고정한다. 이 문서의 명령은 목표 인터페이스이며 현재 빈 저장소에서는 아직 실행되지 않는다.

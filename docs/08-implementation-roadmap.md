@@ -87,17 +87,17 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 ### H00 Workspace bootstrap
 
 - 선행 조건: G0 초안 합의
-- 대상: `Cargo.toml`, `package.json`, `pnpm-workspace.yaml`, `rust-toolchain.toml`, `apps/`, `crates/`, `packages/`
+- 대상: `Cargo.toml`, `package.json`, `bun.lock`, `bunfig.toml`, `rust-toolchain.toml`, `apps/`, `crates/`, `packages/`
 - Red: `tools/check-workspace-boundaries`가 필요한 디렉터리와 script 부재로 실패
-- 산출물: Rust workspace, pnpm workspace, React Native bare app, Tauri host shell placeholder
+- 산출물: Rust workspace, Bun workspace, React Native bare app, Tauri host shell placeholder
 - 검증:
   - `cargo metadata --no-deps`
-  - `pnpm install --frozen-lockfile`
-  - `pnpm typecheck`
+  - `bun install --frozen-lockfile`
+  - `bun run typecheck`
   - Android debug compile
 - 수용 기준: 빈 shell build, lockfile commit, toolchain/version 명시, generated/target 제외 정책
 - fallback: RN/Tauri 생성 CLI 결과를 별도 temp에서 검토 후 필요한 파일만 이동
-- 인계: 정확한 Rust, Node, pnpm, RN, Android Gradle Plugin, NDK version 기록
+- 인계: 정확한 Rust, Bun, RN, Android Gradle Plugin, NDK version 기록
 
 ### H01 Architecture guardrails
 
@@ -107,7 +107,7 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
   - domain crate에 임시 platform dependency를 넣으면 test 실패
   - Kotlin shim에 `java.net`, codec policy symbol을 넣으면 test 실패
 - 산출물: dependency graph 검사, Kotlin import allowlist, generated code drift 검사
-- 검증: `pnpm test:architecture`, `cargo test -p architecture-tests`
+- 검증: `bun run test:architecture`, `cargo test -p architecture-tests`
 - 수용 기준: ADR-0002 dependency rule을 CI에서 강제
 - fallback: custom parser보다 `cargo metadata`, `rg`, ESLint restricted imports 조합 사용
 - 인계: allowlist 변경에는 ADR review가 필요하다고 CI message에 표시
@@ -124,7 +124,7 @@ G1 실패 시 macOS capture 개발을 시작하지 않는다.
 - 검증:
   - Rustra upstream 자체 gate
   - `cargo test -p control-contract`
-  - `pnpm test:contract`
+  - `bun run test:contract`
   - clean regeneration diff
 - 수용 기준: Host test adapter와 RN adapter 계획 경로 모두 `20 + 22 = 42`; pin과 source URL 기록
 - fallback: package registry가 불완전하면 vetted git commit과 local generated runtime을 명시적으로 pin

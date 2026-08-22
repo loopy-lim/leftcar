@@ -35,18 +35,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
       - name: Unit + contract tests
-        run: pnpm test && pnpm test:contract
+        run: bun run test && bun run test:contract
       - name: Typecheck
-        run: pnpm typecheck
+        run: bun run typecheck
       - name: TS/Kotlin architecture rules
-        run: pnpm test:architecture
+        run: bun run test:architecture
       - name: Regeneration is clean (H26)
         run: |
           cargo run -p control-contract --bin generate
@@ -75,24 +73,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: pnpm
+          bun-version: 1.4.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/host-desktop/src-tauri
-      - run: pnpm install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - name: Windows host unit and control tests
         run: cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml
       - name: Windows host clippy
         run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests -- -D warnings
       - name: Build unsigned current-user NSIS installer
-        run: pnpm --filter @leftcar/host-desktop tauri build
+        run: bun run --cwd apps/host-desktop tauri build
       - uses: actions/upload-artifact@v4
         with:
           name: leftcar-host-windows-x64-unsigned

@@ -53,10 +53,10 @@ Viewer는 이 목록의 첫 backend를 기본으로 사용한다. 따라서 Wind
 Windows PC:
 
 ```text
-pnpm install --frozen-lockfile
+bun install --frozen-lockfile
 cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml
 cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests -- -D warnings
-pnpm --filter @leftcar/host-desktop tauri build
+bun run --cwd apps/host-desktop tauri build
 ```
 
 CI의 `windows-host` job은 동일한 테스트와 clippy를 실행한 뒤 unsigned NSIS `*-setup.exe`를 artifact로 올린다. 설치 모드는 current-user라서 관리자 권한을 요구하지 않는다. 공개 배포에는 별도의 Windows code-signing gate가 필요하다.

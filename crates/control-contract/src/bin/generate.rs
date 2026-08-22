@@ -1,4 +1,4 @@
-//! TS generation binary (`pnpm rustra:generate` → cargo run -p control-contract --bin generate).
+//! TS generation binary (`bun run rustra:generate` → cargo run -p control-contract --bin generate).
 
 fn main() {
     let out = std::path::PathBuf::from(

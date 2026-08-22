@@ -73,7 +73,7 @@ function summarize(path: string) {
 const paths = process.argv.slice(2).filter((arg) => arg !== "--");
 if (paths.length !== 2) {
   throw new Error(
-    "usage: pnpm benchmark:capture -- <screenCaptureKit.jsonl> <cgDisplayStream.jsonl>",
+    "usage: bun run benchmark:capture -- <screenCaptureKit.jsonl> <cgDisplayStream.jsonl>",
   );
 }
 
