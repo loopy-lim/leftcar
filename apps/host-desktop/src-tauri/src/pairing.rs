@@ -121,6 +121,7 @@ impl PairingServer {
             "s": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0),
             "h": host_ip,
             "p": port,
+            "c": offer.human_verification_code,
         })
         .to_string();
         drop(secret); // OfferSecret drops -> zeroized immediately
@@ -187,6 +188,70 @@ impl PairingServer {
                     inner.service.cancel(offer_id);
                     inner.live_offers.remove(offer_id);
                     inner.fail_counts.remove(offer_id);
+                }
+                Err(PairingServerError::PairingFailed)
+            }
+        }
+    }
+
+    /// Complete pairing via direct LAN connection using only the 6-digit human verification code.
+    pub fn pair_by_code(
+        &self,
+        code: &str,
+        device_id: &str,
+        name: &str,
+    ) -> Result<String, PairingServerError> {
+        let mut inner = self.inner.lock().unwrap();
+        let offer_id_opt = inner.service.find_offer_by_code(code);
+        let Some(offer_id) = offer_id_opt else {
+            let live: Vec<String> = inner.live_offers.iter().cloned().collect();
+            for oid in live {
+                let count = inner.fail_counts.entry(oid.clone()).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    inner.service.cancel(&oid);
+                    inner.live_offers.remove(&oid);
+                    inner.fail_counts.remove(&oid);
+                }
+            }
+            return Err(PairingServerError::PairingFailed);
+        };
+
+        if !inner.live_offers.contains(&offer_id) {
+            return Err(PairingServerError::OfferNotFound);
+        }
+
+        let Some(secret) = inner.service.take_secret_for_qr(&offer_id) else {
+            return Err(PairingServerError::PairingFailed);
+        };
+
+        let device = domain::ids::DeviceId::from_raw(device_id)
+            .map_err(|_| PairingServerError::PairingFailed)?;
+        match inner.service.approve(&offer_id, device, &secret.0, code) {
+            Ok(_device) => {
+                inner.fail_counts.remove(&offer_id);
+                let token = session::OfferSecret::from_random();
+                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+                let paired = PairedDevice {
+                    device_id: device_id.to_owned(),
+                    name: name.to_owned(),
+                    token_hex: token_hex.clone(),
+                    paired_at: unix_timestamp_utc(),
+                };
+                inner.paired.push(paired.clone());
+                inner.live_offers.remove(&offer_id);
+                if self.persist(inner.paired.clone()).is_err() {
+                    eprintln!("leftcar: paired-device persistence failed");
+                }
+                Ok(token_hex)
+            }
+            Err(_) => {
+                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    inner.service.cancel(&offer_id);
+                    inner.live_offers.remove(&offer_id);
+                    inner.fail_counts.remove(&offer_id);
                 }
                 Err(PairingServerError::PairingFailed)
             }
@@ -411,6 +476,29 @@ mod tests {
         let e = server.pair(offer_id, secret_b64, "000000", "viewer-1", "Quest 3");
         assert!(e.is_err());
         // error message must not reveal which factor failed
+        assert_eq!(e.unwrap_err().to_string(), "pairing failed");
+        assert!(server.list_devices().is_empty());
+    }
+
+    #[test]
+    fn pair_by_code_with_correct_code_issues_token() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let token = server
+            .pair_by_code(&view.code, "viewer-code-1", "Quest 3")
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        let devices = server.list_devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "viewer-code-1");
+    }
+
+    #[test]
+    fn pair_by_code_with_wrong_code_fails() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let _view = server.begin_pairing("192.168.0.10", 7777);
+        let e = server.pair_by_code("000000", "viewer-1", "Quest 3");
+        assert!(e.is_err());
         assert_eq!(e.unwrap_err().to_string(), "pairing failed");
         assert!(server.list_devices().is_empty());
     }

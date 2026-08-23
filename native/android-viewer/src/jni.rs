@@ -102,7 +102,9 @@ struct RendererControl {
     frame_gaps: AtomicU64,
     last_feed_us: AtomicU64,
     network_rtt_ms: AtomicU64,
-    mac_to_android_ms: AtomicU64,
+    capture_to_decoder_ms: AtomicU64,
+    encode_to_decoder_ms: AtomicU64,
+    wire_to_decoder_ms: AtomicU64,
     stop: AtomicBool,
     // Surface destruction is not always the end of the Activity. During an
     // XR/freeform resize, release MediaCodec's ANativeWindow promptly but keep
@@ -170,7 +172,9 @@ fn reclaim_udp_port(port: u16) {
 struct FramePacket {
     id: u16,
     au: Vec<u8>,
-    host_wall_ms: Option<u64>,
+    capture_wall_ms: Option<u64>,
+    encode_wall_ms: Option<u64>,
+    send_wall_ms: Option<u64>,
 }
 
 #[derive(Default)]
@@ -179,6 +183,7 @@ struct RendererStats {
     input_drops: u64,
     frame_gaps: u64,
     max_feed_us: u64,
+    stale_inputs: u64,
     // NTP-style authenticated probes estimate Host clock minus Android clock.
     // Do not infer this from the first video frame: that would erase the very
     // one-way delivery latency the HUD is intended to show.
@@ -187,6 +192,10 @@ struct RendererStats {
 
 const LATENCY_UNKNOWN: u64 = u64::MAX;
 const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+// Drop only a genuinely stale dependency chain. A lower fixed limit can lock
+// a busy Wi-Fi link into an IDR loop; 80ms cuts visible backlog while leaving
+// room for one short scheduling spike at 60/90fps.
+const MAX_CAPTURE_TO_DECODER_MS: u64 = 80;
 
 fn is_keyframe(au: &[u8]) -> bool {
     viewer_decoder::split_annexb(au)
@@ -294,6 +303,16 @@ fn store_smoothed_latency(target: &AtomicU64, sample: u64) {
     target.store(next, Ordering::Relaxed);
 }
 
+fn clock_corrected_age_ms(
+    host_wall_ms: Option<u64>,
+    host_clock_offset_ms: Option<i128>,
+) -> Option<u64> {
+    let host_wall_ms = host_wall_ms?;
+    let offset = host_clock_offset_ms?;
+    let age = i128::from(wall_clock_ms()) - i128::from(host_wall_ms) + offset;
+    (0..=60_000).contains(&age).then_some(age as u64)
+}
+
 fn flush_input(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
@@ -318,6 +337,40 @@ fn flush_input(
 
 fn request_idr(socket: &std::net::UdpSocket, peer: std::net::SocketAddr, token: &[u8]) {
     send_viewer_command(socket, peer, b"IDR", token);
+}
+
+fn consume_viewer_response(
+    packet: &[u8],
+    token: &[u8],
+    latency_probe_sequence: u32,
+    control: &RendererControl,
+    stats: &mut RendererStats,
+) -> bool {
+    if let Some(response) = parse_latency_probe_response(packet, token) {
+        if response.sequence == latency_probe_sequence {
+            if let Some(estimate) = estimate_latency(response, wall_clock_ms()) {
+                store_smoothed_latency(&control.network_rtt_ms, estimate.network_rtt_ms);
+                stats.host_clock_offset_ms = Some(estimate.host_clock_offset_ms);
+            }
+        }
+        return true;
+    }
+    if let Some(ack) = parse_ack(packet, token) {
+        control.input.lock().unwrap().acknowledge(ack.sequence);
+        if let Some(enabled) = ack.enabled {
+            control
+                .input_enabled
+                .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
+        }
+        return true;
+    }
+    if let Some(enabled) = parse_input_status(packet, token) {
+        control
+            .input_enabled
+            .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
+        return true;
+    }
+    false
 }
 
 fn feed_and_render(
@@ -365,34 +418,42 @@ fn feed_and_render(
         }
     };
 
-    let wire_age_ms = frame.host_wall_ms.and_then(|sent| {
-        let offset = stats.host_clock_offset_ms?;
-        let age = i128::from(wall_clock_ms()) - i128::from(sent) + offset;
-        (0..=60_000).contains(&age).then_some(age as u64)
-    });
+    let capture_age_ms = clock_corrected_age_ms(frame.capture_wall_ms, stats.host_clock_offset_ms);
+    let encode_age_ms = clock_corrected_age_ms(frame.encode_wall_ms, stats.host_clock_offset_ms);
+    let wire_age_ms = clock_corrected_age_ms(frame.send_wall_ms, stats.host_clock_offset_ms);
+    if let Some(age) = capture_age_ms {
+        store_smoothed_latency(&control.capture_to_decoder_ms, age);
+    }
+    if let Some(age) = encode_age_ms {
+        store_smoothed_latency(&control.encode_to_decoder_ms, age);
+    }
     if let Some(age) = wire_age_ms {
-        store_smoothed_latency(&control.mac_to_android_ms, age);
+        store_smoothed_latency(&control.wire_to_decoder_ms, age);
     }
 
     if dec.frames_rendered % 30 == 0 && dec.frames_rendered > 0 {
         log_info!(
-            "Rendered {} frames; outputDrops={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
+            stats.stale_inputs,
             stats.queued,
             stats.input_drops,
             stats.frame_gaps,
             feed_us,
             stats.max_feed_us,
+            capture_age_ms,
+            encode_age_ms,
             wire_age_ms
         );
     }
     control
         .rendered_frames
         .store(dec.frames_rendered, Ordering::Relaxed);
-    control
-        .stale_outputs
-        .store(dec.frames_discarded, Ordering::Relaxed);
+    control.stale_outputs.store(
+        dec.frames_discarded.saturating_add(stats.stale_inputs),
+        Ordering::Relaxed,
+    );
     control
         .decoder_input_drops
         .store(stats.input_drops, Ordering::Relaxed);
@@ -440,7 +501,9 @@ fn spawn_live_stream_renderer(
         frame_gaps: AtomicU64::new(0),
         last_feed_us: AtomicU64::new(0),
         network_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
-        mac_to_android_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        capture_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),
         suspended: AtomicBool::new(false),
@@ -468,13 +531,23 @@ fn spawn_live_stream_renderer(
                 return;
             }
         };
-        // Input motion is transmitted at 2x stream FPS (120Hz at 60fps,
-        // 180Hz at 90fps). A 2ms receive timeout lets the same authenticated
-        // session socket service that scheduler without a second network
-        // transport or a frame-rate-sized delay.
+        let control_socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => socket,
+            Err(error) => {
+                log_info!("FAILED to bind dedicated UDP control socket: {error}");
+                control_clone.finished.store(true, Ordering::SeqCst);
+                remove_renderer_if_current(&instance_str, &control_clone);
+                return;
+            }
+        };
+        // Media remains bounded to a short wait; input/probe traffic has a
+        // separate non-blocking socket and receive queue.
         let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(2)));
+        let _ = control_socket.set_nonblocking(true);
         use std::os::fd::AsRawFd;
-        let receive_buffer: libc::c_int = 4 * 1024 * 1024;
+        let receive_buffer: libc::c_int = 512 * 1024;
+        let media_tos: libc::c_int = 0x88;
+        let control_tos: libc::c_int = 0xb8;
         unsafe {
             libc::setsockopt(
                 socket.as_raw_fd(),
@@ -483,12 +556,27 @@ fn spawn_live_stream_renderer(
                 &receive_buffer as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&receive_buffer) as libc::socklen_t,
             );
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &media_tos as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&media_tos) as libc::socklen_t,
+            );
+            libc::setsockopt(
+                control_socket.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &control_tos as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&control_tos) as libc::socklen_t,
+            );
         }
         log_info!(
             "UDP listening on port {} (accepting media only from {expected_host})",
             port
         );
         let mut buf = vec![0u8; 2_048];
+        let mut control_buf = vec![0u8; 512];
         let mut host_peer: Option<std::net::SocketAddr> = None;
         let mut viewer_control_token = Vec::new();
         let mut reassembler = FrameReassembler::default();
@@ -518,24 +606,47 @@ fn spawn_live_stream_renderer(
                 }
                 control_clone.suspended.store(false, Ordering::SeqCst);
                 if let Some(peer) = host_peer {
-                    request_idr(&socket, peer, &viewer_control_token);
+                    request_idr(&control_socket, peer, &viewer_control_token);
                 }
                 continue;
             }
 
             if let Some(peer) = host_peer {
-                flush_input(&socket, peer, &viewer_control_token, &control_clone);
+                // Pointer samples run at 2x stream FPS (180Hz for 90fps) and
+                // never wait behind the media socket's fragment queue.
+                flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
                 if !viewer_control_token.is_empty()
                     && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL
                 {
                     latency_probe_sequence = latency_probe_sequence.wrapping_add(1);
                     send_latency_probe(
-                        &socket,
+                        &control_socket,
                         peer,
                         &viewer_control_token,
                         latency_probe_sequence,
                     );
                     last_latency_probe = std::time::Instant::now();
+                }
+                loop {
+                    match control_socket.recv_from(&mut control_buf) {
+                        Ok((received, source)) if source == peer => {
+                            let _ = consume_viewer_response(
+                                &control_buf[..received],
+                                &viewer_control_token,
+                                latency_probe_sequence,
+                                &control_clone,
+                                &mut renderer_stats,
+                            );
+                        }
+                        Ok((_received, source)) => {
+                            log_info!("rejected control datagram from unexpected peer {source}");
+                        }
+                        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => {
+                            log_info!("UDP control receive error: {error}");
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -569,7 +680,13 @@ fn spawn_live_stream_renderer(
                     .network_rtt_ms
                     .store(LATENCY_UNKNOWN, Ordering::Relaxed);
                 control_clone
-                    .mac_to_android_ms
+                    .capture_to_decoder_ms
+                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                control_clone
+                    .encode_to_decoder_ms
+                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                control_clone
+                    .wire_to_decoder_ms
                     .store(LATENCY_UNKNOWN, Ordering::Relaxed);
                 renderer_stats.host_clock_offset_ms = None;
             }
@@ -586,35 +703,15 @@ fn spawn_live_stream_renderer(
                 }
                 continue;
             }
-            if let Some(response) = parse_latency_probe_response(packet, &viewer_control_token) {
-                if response.sequence == latency_probe_sequence {
-                    if let Some(estimate) = estimate_latency(response, wall_clock_ms()) {
-                        store_smoothed_latency(
-                            &control_clone.network_rtt_ms,
-                            estimate.network_rtt_ms,
-                        );
-                        renderer_stats.host_clock_offset_ms = Some(estimate.host_clock_offset_ms);
-                    }
-                }
-                continue;
-            }
-            if let Some(ack) = parse_ack(packet, &viewer_control_token) {
-                control_clone
-                    .input
-                    .lock()
-                    .unwrap()
-                    .acknowledge(ack.sequence);
-                if let Some(enabled) = ack.enabled {
-                    control_clone
-                        .input_enabled
-                        .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
-                }
-                continue;
-            }
-            if let Some(enabled) = parse_input_status(packet, &viewer_control_token) {
-                control_clone
-                    .input_enabled
-                    .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
+            // Keep accepting responses on the legacy media socket during a
+            // rolling Host/Viewer upgrade.
+            if consume_viewer_response(
+                packet,
+                &viewer_control_token,
+                latency_probe_sequence,
+                &control_clone,
+                &mut renderer_stats,
+            ) {
                 continue;
             }
             if packet.len() >= 3 && &packet[..3] == b"CFG" {
@@ -645,16 +742,20 @@ fn spawn_live_stream_renderer(
                             sps.len(),
                             pps.len()
                         );
-                        match viewer_decoder::AndroidDecoder::new_h264(
+                        match viewer_decoder::AndroidDecoder::new_h264_named(
                             &sps,
                             &pps,
                             width,
                             height,
                             window_handle,
                             fps,
+                            Some("c2.qti.avc.decoder.low_latency"),
                         ) {
                             Ok(d) => {
-                                log_info!("AndroidDecoder created successfully!");
+                                log_info!(
+                                    "AndroidDecoder created successfully: actualCodec={}",
+                                    d.codec_name()
+                                );
                                 decoder = Some(d);
                             }
                             Err(e) => {
@@ -678,9 +779,23 @@ fn spawn_live_stream_renderer(
             let frame = FramePacket {
                 id: completed.id,
                 au: completed.au,
-                host_wall_ms: Some(completed.host_wall_ms),
+                capture_wall_ms: completed.capture_wall_ms,
+                encode_wall_ms: completed.encode_wall_ms,
+                send_wall_ms: Some(completed.send_wall_ms),
             };
             let keyframe = is_keyframe(&frame.au);
+            let capture_age_ms =
+                clock_corrected_age_ms(frame.capture_wall_ms, renderer_stats.host_clock_offset_ms);
+            if capture_age_ms.is_some_and(|age| age > MAX_CAPTURE_TO_DECODER_MS) {
+                renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
+                control_clone
+                    .stale_outputs
+                    .store(renderer_stats.stale_inputs, Ordering::Relaxed);
+                last_frame_id = Some(frame.id);
+                resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
+                request_idr(&control_socket, peer, &viewer_control_token);
+                continue;
+            }
             let frame_gap = last_frame_id
                 .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
                 .unwrap_or(false);
@@ -699,7 +814,7 @@ fn spawn_live_stream_renderer(
                     awaiting_keyframe = false;
                 } else {
                     resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                    request_idr(&socket, peer, &viewer_control_token);
+                    request_idr(&control_socket, peer, &viewer_control_token);
                     continue;
                 }
             }
@@ -721,7 +836,7 @@ fn spawn_live_stream_renderer(
                     }
                     FeedOutcome::ResyncRequired => {
                         resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                        request_idr(&socket, peer, &viewer_control_token);
+                        request_idr(&control_socket, peer, &viewer_control_token);
                     }
                 }
             }
@@ -735,8 +850,8 @@ fn spawn_live_stream_renderer(
                     .lock()
                     .unwrap()
                     .push(InputEvent::ReleaseAll);
-                flush_input(&socket, peer, &viewer_control_token, &control_clone);
-                send_viewer_command(&socket, peer, b"BYE", &viewer_control_token);
+                flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
+                send_viewer_command(&control_socket, peer, b"BYE", &viewer_control_token);
                 log_info!("Sent stream close signal for instance {}", instance_str);
             }
         } else {
@@ -749,6 +864,7 @@ fn spawn_live_stream_renderer(
             decoder.stop();
         }
         drop(decoder);
+        drop(control_socket);
         drop(socket);
         control_clone.suspended.store(false, Ordering::SeqCst);
         control_clone.finished.store(true, Ordering::SeqCst);
@@ -1003,9 +1119,9 @@ pub extern "C" fn leftcar_jni_stream_stats(instance_c: *const c_char) -> i64 {
     guard.unwrap_or(-1)
 }
 
-/// Authenticated latency diagnostics for the HUD. The low 16 bits are LAN
-/// round-trip milliseconds and the next 16 bits are Host-send to Android-feed
-/// milliseconds. `0xffff` means the NTP-style probe has not converged yet.
+/// Authenticated stage latency for the HUD, packed as four unsigned 16-bit
+/// milliseconds: LAN RTT, capture-to-decoder, encode-to-decoder, wire-to-decoder.
+/// `0xffff` means the NTP-style probe or L2 timestamp has not converged yet.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
     let guard = std::panic::catch_unwind(|| {
@@ -1021,8 +1137,10 @@ pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
             }
         };
         let network = encode(control.network_rtt_ms.load(Ordering::Relaxed));
-        let mac_to_android = encode(control.mac_to_android_ms.load(Ordering::Relaxed));
-        (network | (mac_to_android << 16)) as i64
+        let capture = encode(control.capture_to_decoder_ms.load(Ordering::Relaxed));
+        let encoded = encode(control.encode_to_decoder_ms.load(Ordering::Relaxed));
+        let wire = encode(control.wire_to_decoder_ms.load(Ordering::Relaxed));
+        (network | (capture << 16) | (encoded << 32) | (wire << 48)) as i64
     });
     guard.unwrap_or(-1)
 }

@@ -34,6 +34,7 @@ extern "C" {
         name: *const std::ffi::c_char,
         value: *const std::ffi::c_char,
     );
+    fn AMediaCodec_createCodecByName(name: *const std::ffi::c_char) -> *mut AMediaCodec;
     fn AMediaCodec_createDecoderByType(mime: *const std::ffi::c_char) -> *mut AMediaCodec;
     fn AMediaCodec_delete(codec: *mut AMediaCodec) -> media_status_t;
     fn AMediaCodec_configure(
@@ -91,6 +92,8 @@ extern "C" {
         out_name: *mut *mut std::ffi::c_char,
     ) -> media_status_t;
     // Host builds never call these; stubs keep the lib linking for tests.
+    #[allow(clippy::missing_safety_doc)]
+    pub fn AMediaCodec_createCodecByName(name: *const std::ffi::c_char) -> *mut AMediaCodec;
     #[allow(clippy::missing_safety_doc)]
     pub fn AMediaCodec_createDecoderByType(mime: *const std::ffi::c_char) -> *mut AMediaCodec;
     pub fn AMediaCodec_delete(codec: *mut AMediaCodec) -> media_status_t;
@@ -448,6 +451,23 @@ impl AndroidDecoder {
         window: usize,
         fps: u32,
     ) -> Result<Self, DecoderError> {
+        unsafe { Self::new_h264_named(sps, pps, width, height, window, fps, None) }
+    }
+
+    /// Create an H.264 decoder by a Rust-owned preferred platform codec name.
+    /// A failed/invalid named lookup falls back to normal MIME-type selection.
+    ///
+    /// # Safety
+    /// Same ANativeWindow lifetime requirements as [`Self::new_h264`].
+    pub unsafe fn new_h264_named(
+        sps: &[u8],
+        pps: &[u8],
+        width: u32,
+        height: u32,
+        window: usize,
+        fps: u32,
+        codec_name: Option<&str>,
+    ) -> Result<Self, DecoderError> {
         // strip optional Annex-B start codes so both conventions work
         fn strip_sc(b: &[u8]) -> &[u8] {
             if b.len() >= 4 && b[..4] == [0, 0, 0, 1] {
@@ -461,7 +481,15 @@ impl AndroidDecoder {
         let sps_nal = strip_sc(sps);
         let (sw, sh) = parse_sps_dimensions(sps_nal).unwrap_or((width, height));
         let mime = c"video/avc".as_ptr();
-        let codec = unsafe { AMediaCodec_createDecoderByType(mime) };
+        let named_codec = codec_name
+            .and_then(|name| std::ffi::CString::new(name).ok())
+            .map(|name| unsafe { AMediaCodec_createCodecByName(name.as_ptr()) })
+            .unwrap_or(std::ptr::null_mut());
+        let codec = if named_codec.is_null() {
+            unsafe { AMediaCodec_createDecoderByType(mime) }
+        } else {
+            named_codec
+        };
         if codec.is_null() {
             return Err(DecoderError::CreateFailed {
                 mime: "video/avc".into(),
@@ -540,6 +568,19 @@ impl AndroidDecoder {
             frames_rendered: 0,
             frames_discarded: 0,
         })
+    }
+
+    /// Platform name of the instantiated codec, for runtime verification.
+    pub fn codec_name(&self) -> String {
+        let mut name_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
+        let status = unsafe { AMediaCodec_getName_pub(self.codec, &mut name_ptr) };
+        if status == AMEDIA_OK && !name_ptr.is_null() {
+            unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            "<unknown>".to_owned()
+        }
     }
 
     pub fn size(&self) -> (i32, i32) {

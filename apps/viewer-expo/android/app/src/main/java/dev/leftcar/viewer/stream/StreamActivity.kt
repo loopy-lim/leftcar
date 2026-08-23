@@ -101,6 +101,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var lastDebugFrames = -1L
     private var lastDebugSampleMs = 0L
     private var displayedFps = 0.0
+    private val networkLatencySamples = mutableListOf<Long>()
+    private val captureLatencySamples = mutableListOf<Long>()
+    private val encodeLatencySamples = mutableListOf<Long>()
+    private val wireLatencySamples = mutableListOf<Long>()
     private val fadeInputStatusRunnable = Runnable {
         inputStatusView?.animate()
             ?.alpha(0f)
@@ -283,7 +287,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private fun updateDebugStats(packed: Long, latency: Long) {
         val stats = debugStatsView ?: return
         if (packed == -1L) {
-            stats.text = "NET -- ms  ·  M→A -- ms  ·  -- FPS  ·  DEC -- ms"
+            stats.text = "NET --/--  MAC CAP→DEC --/--  ENC→DEC --/--  WIRE --/-- ms\n-- FPS  FEED -- ms  SKIP --  LOSS --"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
@@ -310,12 +314,36 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         lastDebugSampleMs = now
         val loss = inputDrops + frameGaps
         val networkRtt = if (latency == -1L) 0xffff else latency and 0xffff
-        val macToAndroid = if (latency == -1L) 0xffff else (latency ushr 16) and 0xffff
-        val networkText = if (networkRtt == 0xffffL) "--" else networkRtt.toString()
-        val deliveryText = if (macToAndroid == 0xffffL) "--" else macToAndroid.toString()
-        stats.text = "NET ${networkText} ms  ·  M→A ${deliveryText} ms  ·  " +
-            "${displayedFps.toInt()} FPS  ·  DEC ${feedMs} ms  ·  " +
+        val captureToDecoder = if (latency == -1L) 0xffff else (latency ushr 16) and 0xffff
+        val encodeToDecoder = if (latency == -1L) 0xffff else (latency ushr 32) and 0xffff
+        val wireToDecoder = if (latency == -1L) 0xffff else (latency ushr 48) and 0xffff
+        addLatencySample(networkLatencySamples, networkRtt)
+        addLatencySample(captureLatencySamples, captureToDecoder)
+        addLatencySample(encodeLatencySamples, encodeToDecoder)
+        addLatencySample(wireLatencySamples, wireToDecoder)
+        stats.text = "NET ${formatLatency(networkLatencySamples)}  " +
+            "MAC CAP→DEC ${formatLatency(captureLatencySamples)}  " +
+            "ENC→DEC ${formatLatency(encodeLatencySamples)}  " +
+            "WIRE ${formatLatency(wireLatencySamples)} ms\n" +
+            "${displayedFps.toInt()} FPS  FEED ${feedMs} ms  " +
             "SKIP ${stale}  LOSS ${loss}"
+    }
+
+    private fun addLatencySample(samples: MutableList<Long>, value: Long) {
+        if (value == 0xffffL) return
+        samples += value
+        if (samples.size > 40) samples.removeAt(0)
+    }
+
+    /** Compact `p50/p95` display over the most recent ten seconds. */
+    private fun formatLatency(samples: List<Long>): String {
+        if (samples.isEmpty()) return "--/--"
+        val sorted = samples.sorted()
+        fun percentile(percent: Int): Long {
+            val index = ((sorted.size * percent + 99) / 100 - 1).coerceIn(0, sorted.lastIndex)
+            return sorted[index]
+        }
+        return "${percentile(50)}/${percentile(95)}"
     }
 
     private fun revealDebugStatsIndicator() {
@@ -344,7 +372,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(9), dp(4), dp(9), dp(4))
             background = badgeBackground(Color.argb(92, 15, 23, 42))
             alpha = 0f
-            text = "NET -- ms  ·  M→A -- ms  ·  -- FPS  ·  DEC -- ms"
+            text = "NET --/--  MAC CAP→DEC --/--  ENC→DEC --/--  WIRE --/-- ms\n-- FPS  FEED -- ms"
             contentDescription = "스트림 반응 디버그 정보"
         }
         debugStatsView = stats

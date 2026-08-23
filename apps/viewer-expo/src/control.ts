@@ -91,6 +91,24 @@ export class ControlRequestError extends Error {
   }
 }
 
+export function formatErrorMessage(err: unknown): string {
+  if (!err) return "unknown error";
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+  if (typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    if (typeof o.message === "string" && o.message) return o.message;
+    if (typeof o.error === "string" && o.error) return o.error;
+    if (typeof o.err === "string" && o.err) return o.err;
+    if (typeof o.code === "string" && o.code) return `Socket error: ${o.code}`;
+    try {
+      const json = JSON.stringify(err);
+      if (json && json !== "{}") return json;
+    } catch {}
+  }
+  return String(err);
+}
+
 export function isControlTransportError(error: unknown): boolean {
   return error instanceof ControlRequestError && error.kind === "transport";
 }
@@ -174,15 +192,17 @@ export function connect(
                 const handler = pending.get(id);
                 pending.delete(id);
                 clearTimeout(handler?.timer ?? timer);
+                const msg = formatErrorMessage(writeError);
                 (handler?.reject ?? rej)(
-                  new ControlRequestError(`control write error: ${writeError.message}`, "transport"),
+                  new ControlRequestError(`control write error: ${msg}`, "transport"),
                 );
               });
             } catch (e) {
               const handler = pending.get(id);
               pending.delete(id);
               clearTimeout(handler?.timer ?? timer);
-              rej(new ControlRequestError(`control write error: ${String(e)}`, "transport"));
+              const msg = formatErrorMessage(e);
+              rej(new ControlRequestError(`control write error: ${msg}`, "transport"));
             }
           });
           if (cachedToken !== undefined) {
@@ -244,8 +264,9 @@ export function connect(
       }
     });
 
-    socket.on("error", (err: Error) => {
-      const e = new ControlRequestError(`control connection error: ${err.message}`, "transport");
+    socket.on("error", (err: unknown) => {
+      const msg = formatErrorMessage(err);
+      const e = new ControlRequestError(`control connection error: ${msg}`, "transport");
       terminalError = e;
       if (!settled) {
         settled = true;

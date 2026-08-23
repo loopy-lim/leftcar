@@ -193,16 +193,6 @@ html, body, #root {
   white-space: nowrap;
 }
 
-.host-version {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  background: var(--bg-subtle);
-  padding: 1px 4px;
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-}
-
 .host-header-right {
   display: flex;
   align-items: center;
@@ -287,6 +277,13 @@ html, body, #root {
 
 .banner-text {
   flex: 1;
+}
+
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 /* Empty State Container */
@@ -602,7 +599,12 @@ html, body, #root {
 }
 
 .clickable-chip {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
   cursor: pointer;
+  font: inherit;
   padding: 1px 4px;
   border-radius: 4px;
   transition: background-color 0.15s ease;

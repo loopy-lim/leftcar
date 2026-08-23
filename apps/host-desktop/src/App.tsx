@@ -108,13 +108,96 @@ function useHostStatus() {
     void refresh();
     const timer = setInterval(refreshWhenVisible, 2_000);
     document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
     };
   }, [refresh]);
 
   return { banner, sessions, error, inputPermission, platform, controlPort, lastUpdated, refresh };
+}
+
+interface DashboardHeaderProps {
+  isStreaming: boolean;
+  sessionCount: number;
+  themeIcon: string;
+  themeLabel: string;
+  onPair: () => void;
+  onTheme: () => void;
+  onRefresh: () => void;
+}
+
+function DashboardHeader({
+  isStreaming,
+  sessionCount,
+  themeIcon,
+  themeLabel,
+  onPair,
+  onTheme,
+  onRefresh,
+}: DashboardHeaderProps) {
+  return (
+    <header className="host-header">
+      <div className="host-header-left">
+        <div className="host-logo-box">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+        </div>
+        <div className="host-title-group"><h1>Leftcar Host</h1></div>
+      </div>
+      <div className="host-header-right">
+        <div className={`host-status-pill ${isStreaming ? "pill-active" : "pill-idle"}`}>
+          <span className="status-dot" />
+          <span>{isStreaming ? `${sessionCount}개 스트리밍 중` : "대기 중"}</span>
+        </div>
+        <button className="btn-primary" onClick={onPair} title="기기 페어링 (⌘P)">기기 페어링</button>
+        <button className="btn-icon" onClick={onTheme} title={`테마: ${themeLabel}`} aria-label={`테마 변경: 현재 ${themeLabel}`}>{themeIcon}</button>
+        <button className="btn-icon" onClick={onRefresh} title="새로고침 (⌘R)" aria-label="호스트 상태 새로고침">🔄</button>
+      </div>
+    </header>
+  );
+}
+
+interface DashboardFooterProps {
+  controlPort: number;
+  copiedToast: boolean;
+  inputPermission: boolean;
+  lastUpdated: Date;
+  onCopyPort: () => void;
+}
+
+function DashboardFooter(props: DashboardFooterProps) {
+  return (
+    <footer className="host-footer">
+      <div className="footer-status-info">
+        <button type="button" className="clickable-chip" onClick={props.onCopyPort} title="포트 복사하기">
+          제어 포트: <strong>:{props.controlPort}</strong> {props.copiedToast ? "✅ 복사됨!" : "📋"}
+        </button>
+        <span className="footer-divider">·</span>
+        <span>원격 입력: <strong>{props.inputPermission ? "승인됨" : "권한 필요"}</strong></span>
+      </div>
+      <div className="footer-timestamp">최근 확인: {props.lastUpdated.toLocaleTimeString()}</div>
+    </footer>
+  );
+}
+
+function PairingModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-window" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-title-bar">
+          <h3>기기 페어링</h3>
+          <button className="btn-close" onClick={onClose} aria-label="페어링 창 닫기">✕</button>
+        </div>
+        <div className="modal-scroll-area"><PairingPanel /></div>
+      </div>
+    </div>
+  );
 }
 
 function Dashboard() {
@@ -164,15 +247,27 @@ function Dashboard() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [refresh]);
 
+  const openAccessibilitySettings = async () => {
+    try {
+      await invoke("open_system_settings", { pane: "accessibility" });
+    } catch (cause) {
+      setInputActionError(String(cause));
+    }
+  };
+
   const requestInputPermission = async () => {
     setInputBusy("permission");
     try {
       const granted = await invoke<boolean>("request_input_permission");
-      setInputActionError(
-        granted
-          ? null
-          : "macOS 시스템 설정의 '개인정보 보호 및 보안 > 손쉬운 사용'에서 Leftcar Host를 허용해 주세요.",
-      );
+      if (!granted) {
+        // Automatically open macOS Accessibility Settings pane
+        await invoke("open_system_settings", { pane: "accessibility" }).catch(() => {});
+        setInputActionError(
+          "macOS 시스템 설정의 '개인정보 보호 및 보안 > 손쉬운 사용'에서 Leftcar Host를 허용해 주세요.",
+        );
+      } else {
+        setInputActionError(null);
+      }
       await refresh();
     } catch (cause) {
       setInputActionError(String(cause));
@@ -216,55 +311,44 @@ function Dashboard() {
 
   return (
     <div className="host-window">
-      {/* Top Application Bar */}
-      <header className="host-header">
-        <div className="host-header-left">
-          <div className="host-logo-box">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-          </div>
-          <div className="host-title-group">
-            <h1>Leftcar Host</h1>
-            <span className="host-version">v0.1</span>
-          </div>
-        </div>
-
-        <div className="host-header-right">
-          <div className={`host-status-pill ${isStreaming ? "pill-active" : "pill-idle"}`}>
-            <span className="status-dot" />
-            <span>{isStreaming ? `${sessions.length}개 스트리밍 중` : "대기 중"}</span>
-          </div>
-          <button
-            className="btn-primary"
-            onClick={() => setShowPairingModal(true)}
-            title="기기 페어링 (⌘P)"
-          >
-            기기 페어링
-          </button>
-          <button
-            className="btn-icon"
-            onClick={toggleTheme}
-            title={`테마: ${themeLabel}`}
-          >
-            {themeIcon}
-          </button>
-          <button
-            className="btn-icon"
-            onClick={refresh}
-            title="새로고침 (⌘R)"
-          >
-            🔄
-          </button>
-        </div>
-      </header>
+      <DashboardHeader
+        isStreaming={isStreaming}
+        sessionCount={sessions.length}
+        themeIcon={themeIcon}
+        themeLabel={themeLabel}
+        onPair={() => setShowPairingModal(true)}
+        onTheme={toggleTheme}
+        onRefresh={() => void refresh()}
+      />
 
       {/* Main Scrollable Body */}
       <main className="host-body">
-        {error && <div className="banner-alert banner-danger">⚠️ {error}</div>}
-        {inputActionError && <div className="banner-alert banner-danger">⚠️ {inputActionError}</div>}
+        {error && (
+          <div className="banner-alert banner-danger">
+            <div className="banner-text">⚠️ {error}</div>
+            {platform === "macos" && error.includes("permission") && (
+              <button
+                className="btn-ghost btn-sm"
+                onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
+              >
+                설정 열기
+              </button>
+            )}
+          </div>
+        )}
+        {inputActionError && (
+          <div className="banner-alert banner-danger">
+            <div className="banner-text">⚠️ {inputActionError}</div>
+            {platform === "macos" && (
+              <button
+                className="btn-ghost btn-sm"
+                onClick={openAccessibilitySettings}
+              >
+                설정 열기
+              </button>
+            )}
+          </div>
+        )}
 
         {!inputPermission && platform === "macos" && (
           <div className="banner-alert banner-warning">
@@ -272,13 +356,22 @@ function Dashboard() {
               <strong>원격 조작 권한 필요</strong>
               <p>뷰어 기기에서 마우스/키보드로 컴퓨터를 조작하려면 손쉬운 사용 권한을 허용하세요.</p>
             </div>
-            <button
-              className="btn-primary btn-sm"
-              disabled={inputBusy === "permission"}
-              onClick={requestInputPermission}
-            >
-              {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
-            </button>
+            <div className="banner-actions">
+              <button
+                className="btn-primary btn-sm"
+                disabled={inputBusy === "permission"}
+                onClick={requestInputPermission}
+              >
+                {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
+              </button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={openAccessibilitySettings}
+                title="macOS 손쉬운 사용 설정 열기"
+              >
+                설정 열기
+              </button>
+            </div>
           </div>
         )}
 
@@ -374,36 +467,14 @@ function Dashboard() {
         )}
       </main>
 
-      {/* Bottom Status Bar */}
-      <footer className="host-footer">
-        <div className="footer-status-info">
-          <span
-            className="clickable-chip"
-            onClick={copyPortInfo}
-            title="포트 복사하기"
-          >
-            제어 포트: <strong>:{controlPort}</strong> {copiedToast ? "✅ 복사됨!" : "📋"}
-          </span>
-          <span className="footer-divider">·</span>
-          <span>원격 입력: <strong>{inputPermission ? "승인됨" : "권한 필요"}</strong></span>
-        </div>
-        <div className="footer-timestamp">최근 확인: {lastUpdated.toLocaleTimeString()}</div>
-      </footer>
-
-      {/* Pairing Modal */}
-      {showPairingModal && (
-        <div className="modal-overlay" onClick={() => setShowPairingModal(false)}>
-          <div className="modal-window" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title-bar">
-              <h3>기기 페어링</h3>
-              <button className="btn-close" onClick={() => setShowPairingModal(false)}>✕</button>
-            </div>
-            <div className="modal-scroll-area">
-              <PairingPanel />
-            </div>
-          </div>
-        </div>
-      )}
+      <DashboardFooter
+        controlPort={controlPort}
+        copiedToast={copiedToast}
+        inputPermission={inputPermission}
+        lastUpdated={lastUpdated}
+        onCopyPort={copyPortInfo}
+      />
+      {showPairingModal && <PairingModal onClose={() => setShowPairingModal(false)} />}
     </div>
   );
 }

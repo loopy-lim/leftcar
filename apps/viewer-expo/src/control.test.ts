@@ -52,7 +52,12 @@ vi.mock("react-native-tcp-socket", () => ({
   },
 }));
 
-import { connect, isUnauthorizedError, preferredCaptureBackend } from "./control";
+import {
+  connect,
+  formatErrorMessage,
+  isUnauthorizedError,
+  preferredCaptureBackend,
+} from "./control";
 
 function lastSocket(): FakeSocket {
   return sockets[sockets.length - 1];
@@ -162,7 +167,6 @@ describe("connect token injection", () => {
     client.close();
   });
 });
-
 describe("unauthorized error handling", () => {
   it("rejects with kind unauthorized and beats the close event", async () => {
     const client = await connect("1.2.3.4", 7777, 1000, async () => "bad-token");
@@ -188,6 +192,25 @@ describe("unauthorized error handling", () => {
     expect(isUnauthorizedError(error)).toBe(false);
     expect(error instanceof Error && error.message).toBe("unknown command");
     client.close();
+  });
+});
+
+describe("formatErrorMessage and socket error handling", () => {
+  it("formats Error objects, strings, error code objects, and null/undefined without undefined", () => {
+    expect(formatErrorMessage(new Error("custom error"))).toBe("custom error");
+    expect(formatErrorMessage("string error")).toBe("string error");
+    expect(formatErrorMessage({ code: "ECONNREFUSED" })).toBe("Socket error: ECONNREFUSED");
+    expect(formatErrorMessage({ message: "msg error" })).toBe("msg error");
+    expect(formatErrorMessage({ error: "err property" })).toBe("err property");
+    expect(formatErrorMessage(undefined)).toBe("unknown error");
+    expect(formatErrorMessage(null)).toBe("unknown error");
+  });
+
+  it("handles non-Error socket errors without producing 'control connection error: undefined'", async () => {
+    const connectPromise = connect("1.2.3.4", 7777, 1000);
+    const socket = lastSocket();
+    socket.emit("error", { code: "ECONNREFUSED" });
+    await expect(connectPromise).rejects.toThrow("control connection error: Socket error: ECONNREFUSED");
   });
 });
 

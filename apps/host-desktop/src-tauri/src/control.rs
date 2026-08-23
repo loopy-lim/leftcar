@@ -284,8 +284,10 @@ impl ControlServer {
                 #[derive(serde::Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct PairArgs {
-                    offer_id: String,
-                    secret: String,
+                    #[serde(default)]
+                    offer_id: Option<String>,
+                    #[serde(default)]
+                    secret: Option<String>,
                     code: String,
                     device_id: String,
                     #[serde(default)]
@@ -295,15 +297,23 @@ impl ControlServer {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
                 };
-                // The error is deliberately generic: never reveal whether the
-                // secret or the human code was the wrong factor.
-                match self.pairing.pair(
-                    &input.offer_id,
-                    &input.secret,
-                    &input.code,
-                    &input.device_id,
-                    &input.device_name,
-                ) {
+                let offer_id_opt = input.offer_id.as_deref().filter(|s| !s.is_empty());
+                let secret_opt = input.secret.as_deref().filter(|s| !s.is_empty());
+                let res = match (offer_id_opt, secret_opt) {
+                    (Some(offer_id), Some(secret)) => self.pairing.pair(
+                        offer_id,
+                        secret,
+                        &input.code,
+                        &input.device_id,
+                        &input.device_name,
+                    ),
+                    _ => self.pairing.pair_by_code(
+                        &input.code,
+                        &input.device_id,
+                        &input.device_name,
+                    ),
+                };
+                match res {
                     Ok(token) => ok(json!({ "token": token })),
                     Err(_) => err("pairing failed"),
                 }
@@ -749,13 +759,11 @@ mod tests {
         assert!(line.contains("\"error\":\"unauthorized\""), "{line}");
         assert!(line.contains("\"ok\":false"), "{line}");
 
-        // connection is closed: the next request hits EOF
+        // connection is closed: the next request hits EOF or reset
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
-            .await
-            .unwrap();
+        let _ = sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n").await;
         let mut buf = [0u8; 16];
-        let n = sock.read(&mut buf).await.unwrap();
+        let n = sock.read(&mut buf).await.unwrap_or(0);
         assert_eq!(n, 0, "connection must be closed after unauthorized");
     }
 

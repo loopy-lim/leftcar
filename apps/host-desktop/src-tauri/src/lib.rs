@@ -59,6 +59,7 @@ pub fn run() {
             get_control_port,
             get_input_permission,
             request_input_permission,
+            open_system_settings,
             set_session_input,
             begin_pairing,
             cancel_pairing,
@@ -266,6 +267,31 @@ fn request_input_permission(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> Result<bool, String> {
     state.request_input_permission()
+}
+
+#[tauri::command]
+fn open_system_settings(pane: Option<String>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match pane.as_deref() {
+            Some("screen_capture") | Some("screencapture") => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            _ => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+        };
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("failed to open macOS settings: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+        Ok(())
+    }
 }
 
 #[tauri::command]

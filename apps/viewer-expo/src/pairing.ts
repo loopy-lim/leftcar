@@ -13,6 +13,7 @@ export interface QrPayload {
   secret: string;
   host: string;
   port: number;
+  code?: string;
 }
 
 const DEVICE_ID_KEY = "leftcar.deviceId";
@@ -24,13 +25,15 @@ interface RawQrPayload {
   s?: unknown;
   h?: unknown;
   p?: unknown;
+  c?: unknown;
 }
 
-/** `{"v":1,"id":..,"s":..,"h":..,"p":..}` → QrPayload; null on any mismatch. */
+/** `{"v":1,"id":..,"s":..,"h":..,"p":..,"c":..}` → QrPayload; null on any mismatch. */
 export function parseQrPayload(text: string): QrPayload | null {
+  if (!text || typeof text !== "string") return null;
   let raw: RawQrPayload;
   try {
-    raw = JSON.parse(text) as RawQrPayload;
+    raw = JSON.parse(text.trim()) as RawQrPayload;
   } catch {
     return null;
   }
@@ -49,7 +52,11 @@ export function parseQrPayload(text: string): QrPayload | null {
   ) {
     return null;
   }
-  return { id: raw.id, secret: raw.s, host: raw.h, port: raw.p };
+  const code =
+    typeof raw.c === "string" && /^\d{6}$/.test(raw.c.trim())
+      ? raw.c.trim()
+      : undefined;
+  return { id: raw.id, secret: raw.s, host: raw.h, port: raw.p, ...(code ? { code } : {}) };
 }
 
 /** Stable per-install device label shown in the host's paired-device list. */
@@ -78,13 +85,17 @@ export function deviceName(): string {
  * Complete pairing against the QR offer host. On success the issued token is
  * persisted; on any failure nothing is kept (a stale token is dropped too).
  */
-export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
+export async function pairWithHost(p: QrPayload, code?: string): Promise<string> {
+  const pairingCode = code || p.code;
+  if (!pairingCode) {
+    throw new Error("6자리 인증 코드가 필요합니다");
+  }
   const client = await connect(p.host, p.port);
   try {
     const { token } = await client.request<{ token: string }>("pair", {
       offerId: p.id,
       secret: p.secret,
-      code,
+      code: pairingCode,
       deviceId: await getDeviceId(),
       deviceName: deviceName(),
     });
@@ -97,6 +108,36 @@ export async function pairWithHost(p: QrPayload, code: string): Promise<string> 
   } finally {
     // The pairing connection is single-purpose; the token travels via secure
     // storage into the main control session, so always release the socket.
+    client.close();
+  }
+}
+
+/**
+ * Complete pairing by connecting directly to the host IP and entering the 6-digit code.
+ */
+export async function pairWithHostByCode(
+  host: string,
+  port = 7777,
+  code: string,
+): Promise<string> {
+  const trimmed = code.trim().replace(/\s+/g, "");
+  if (trimmed.length !== 6) {
+    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
+  }
+  const client = await connect(host, port);
+  try {
+    const { token } = await client.request<{ token: string }>("pair", {
+      code: trimmed,
+      deviceId: await getDeviceId(),
+      deviceName: deviceName(),
+    });
+    if (!token) throw new Error("페어링 응답에 토큰이 없습니다");
+    await SecureStore.setItemAsync(TOKEN_KEY, token);
+    return token;
+  } catch (e) {
+    await clearToken();
+    throw e;
+  } finally {
     client.close();
   }
 }

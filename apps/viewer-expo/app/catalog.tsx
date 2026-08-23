@@ -24,7 +24,6 @@ import { allocPort, controlClient, controlHost, reconnectHost } from "../src/ses
 import {
   isControlTransportError,
   preferredCaptureBackend,
-  type CaptureBackendInfo,
   type CatalogView,
   type DisplayInfo,
   type StatusView,
@@ -67,7 +66,7 @@ const STREAM_PROFILES = [
     maxWidth: 1920,
     maxHeight: 1080,
     fps: 60,
-    hint: "마우스·키보드 조작에 최적",
+    hint: "120Hz 입력·최신 프레임",
   },
   {
     id: "balanced",
@@ -76,7 +75,7 @@ const STREAM_PROFILES = [
     maxWidth: 2560,
     maxHeight: 1440,
     fps: 60,
-    hint: "글자 가독성과 반응속도 균형",
+    hint: "가독성·반응속도",
   },
   {
     id: "clarity",
@@ -111,13 +110,10 @@ function fitProfileToDisplay(
 function catalogErrorMessage(error: unknown): string {
   const message = String(error instanceof Error ? error.message : error);
   if (message.includes("SCShareableContent timed out")) {
-    return "macOS 화면 소스 조회가 지연되고 있습니다. 잠시 후 새로고침을 눌러 주세요.";
+    return "화면 소스 조회가 지연되고 있습니다. 잠시 후 새로고침을 눌러 주세요.";
   }
   if (message.includes("screen-recording permission")) {
-    return "Leftcar Host의 화면 기록 권한이 없습니다. Mac 시스템 설정에서 허용해 주세요.";
-  }
-  if (message.includes("control request timeout")) {
-    return "호스트 응답이 지연되고 있습니다. 새로고침으로 다시 조회할 수 있습니다.";
+    return "호스트의 화면 기록 권한이 없습니다. Mac 시스템 설정에서 허용해 주세요.";
   }
   return message;
 }
@@ -142,36 +138,12 @@ function displayKey(display: DisplayInfo) {
   return String(display.index);
 }
 
-interface ProfileButtonProps {
-  profile: StreamProfile;
-  selected: boolean;
-  onSelect: (id: StreamProfileId) => void;
-}
-
-function ProfileButton({ profile, selected, onSelect }: ProfileButtonProps) {
-  const handlePress = useCallback(() => onSelect(profile.id), [onSelect, profile.id]);
-  return (
-    <Pressable
-      style={[styles.profileButton, selected && styles.profileButtonSelected]}
-      onPress={handlePress}
-    >
-      <Text style={[styles.profileLabel, selected && styles.profileLabelSelected]} numberOfLines={1}>
-        {profile.label}
-      </Text>
-      <Text style={[styles.profileDetail, selected && styles.profileDetailSelected]} numberOfLines={1}>
-        {profile.detail}
-      </Text>
-    </Pressable>
-  );
-}
-
 interface CatalogHeaderProps {
   error: string | null;
   host: string;
   loading: boolean;
   profileId: StreamProfileId;
   refreshing: boolean;
-  selectedProfile: StreamProfile;
   onRefresh: () => void;
   onSelectProfile: (id: StreamProfileId) => void;
 }
@@ -182,26 +154,26 @@ function CatalogHeader({
   loading,
   profileId,
   refreshing,
-  selectedProfile,
   onRefresh,
   onSelectProfile,
 }: CatalogHeaderProps) {
   const refreshDisabled = loading || refreshing;
   return (
     <View style={styles.headerContainer}>
-      <View style={styles.hostHeader}>
-        <View style={styles.hostHeaderLeft}>
-          <View style={styles.statusDot} />
-          <View style={styles.hostHeaderTextGroup}>
-            <Text style={styles.hostTitle}>호스트 연결됨</Text>
-            <Text style={styles.hostChipText} numberOfLines={1}>{host}</Text>
-          </View>
+      {/* Slim Connected Host Strip */}
+      <View style={styles.hostStrip}>
+        <View style={styles.hostStripLeft}>
+          <View style={styles.dotGreen} />
+          <Text style={styles.hostStripText} numberOfLines={1}>
+            호스트: <Text style={styles.hostStripAddr}>{host}</Text>
+          </Text>
         </View>
-        <Pressable onPress={navigateToHostPicker} style={styles.disconnectBtn}>
-          <Text style={styles.disconnectBtnText}>호스트 변경</Text>
+        <Pressable onPress={navigateToHostPicker} style={styles.btnHostChange}>
+          <Text style={styles.btnHostChangeText}>변경</Text>
         </Pressable>
       </View>
 
+      {/* Error Card */}
       {error ? (
         <View style={styles.errorCard}>
           <Text style={styles.errorIcon}>⚠️</Text>
@@ -223,34 +195,41 @@ function CatalogHeader({
         </View>
       ) : null}
 
-      <View style={styles.qualityCard}>
-        <View style={styles.qualityHeader}>
-          <Text style={styles.qualityTitle}>스트림 품질</Text>
-          <Text style={styles.qualitySub}>{selectedProfile.hint}</Text>
-        </View>
-        <View style={styles.profileRow}>
-          {STREAM_PROFILES.map((profile) => (
-            <ProfileButton
-              key={profile.id}
-              profile={profile}
-              selected={profile.id === profileId}
-              onSelect={onSelectProfile}
-            />
-          ))}
+      {/* Segmented Quality Control */}
+      <View style={styles.qualitySegmentWrapper}>
+        <View style={styles.qualitySegmentTabs}>
+          {STREAM_PROFILES.map((p) => {
+            const isSelected = p.id === profileId;
+            return (
+              <Pressable
+                key={p.id}
+                onPress={() => onSelectProfile(p.id)}
+                style={[styles.qualityTab, isSelected && styles.qualityTabActive]}
+              >
+                <Text style={[styles.qualityTabLabel, isSelected && styles.qualityTabLabelActive]}>
+                  {p.label}
+                </Text>
+                <Text style={[styles.qualityTabDetail, isSelected && styles.qualityTabDetailActive]}>
+                  {p.detail}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
       </View>
 
-      <View style={styles.sourceSectionHeader}>
-        <Text style={styles.sectionTitle}>사용 가능한 화면 목록</Text>
+      {/* Section Header */}
+      <View style={styles.sectionTitleRow}>
+        <Text style={styles.sectionTitleText}>디스플레이 선택</Text>
         <Pressable
           onPress={onRefresh}
-          style={[styles.sourceRefreshBtn, refreshDisabled && styles.btnDisabled]}
+          style={[styles.btnRefresh, refreshDisabled && styles.btnDisabled]}
           disabled={refreshDisabled}
         >
           {refreshDisabled ? (
             <ActivityIndicator color="#2563EB" size="small" />
           ) : (
-            <Text style={styles.sourceRefreshText}>새로고침</Text>
+            <Text style={styles.btnRefreshText}>새로고침</Text>
           )}
         </Pressable>
       </View>
@@ -280,33 +259,28 @@ function DisplayListItem({
       <View style={styles.displayIconBox}>
         <Text style={styles.displayIcon}>🖥️</Text>
       </View>
-      <View style={styles.displayInfo}>
-        <View style={styles.displayNameRow}>
-          <Text style={styles.displayName} numberOfLines={1}>
-            {display.name}
-          </Text>
-          {display.index === 0 && (
-            <View style={styles.primaryBadge}>
-              <Text style={styles.primaryBadgeText}>메인</Text>
-            </View>
-          )}
-        </View>
+
+      <View style={styles.displayMain}>
+        <Text style={styles.displayName} numberOfLines={1}>
+          {display.name}
+        </Text>
         <View style={styles.chipsRow}>
           <View style={styles.chip}>
             <Text style={styles.chipText}>
               {size.width} × {size.height}
             </Text>
           </View>
-          <View style={styles.chip}>
-            <Text style={styles.chipTextSuccess}>{profile.fps} fps</Text>
+          <View style={styles.chipSuccess}>
+            <Text style={styles.chipSuccessText}>{profile.fps} FPS</Text>
           </View>
         </View>
       </View>
+
       <View style={[styles.openBtn, isLaunching && styles.btnDisabled]}>
         {isLaunching ? (
           <ActivityIndicator color="#FFFFFF" size="small" />
         ) : (
-          <Text style={styles.openBtnText}>XR 창 열기 →</Text>
+          <Text style={styles.openBtnText}>열기 →</Text>
         )}
       </View>
     </Pressable>
@@ -319,7 +293,7 @@ function EmptyDisplayList({ loading }: { loading: boolean }) {
       {loading ? (
         <>
           <ActivityIndicator size="large" color="#2563EB" />
-          <Text style={styles.loadingText}>화면 소스를 조회하는 중…</Text>
+          <Text style={styles.loadingText}>화면 소스를 조회하는 중입니다…</Text>
         </>
       ) : (
         <Text style={styles.emptyText}>사용 가능한 디스플레이가 없습니다.</Text>
@@ -340,13 +314,13 @@ function ActiveStreamItem({
     <View style={styles.streamCard}>
       <View style={styles.streamInfo}>
         <View style={styles.streamNameRow}>
-          <View style={styles.liveDot} />
+          <View style={styles.dotGreen} />
           <Text style={styles.streamName} numberOfLines={1}>
             #{stream.session} {stream.sourceName}
           </Text>
         </View>
         <Text style={styles.streamPort} numberOfLines={1}>
-          {stream.width} × {stream.height} · {stream.fps}fps
+          {stream.width} × {stream.height} · {stream.fps} FPS
         </Text>
       </View>
       <Pressable style={styles.stopBtn} onPress={handleStop}>
@@ -367,7 +341,7 @@ function CatalogFooter({
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
-        <Text style={styles.activeSectionTitle}>활성 XR 스트림</Text>
+        <Text style={styles.activeSectionTitle}>현재 스트리밍 중인 화면</Text>
         <View style={styles.activeCountBadge}>
           <Text style={styles.activeCountText}>{streams.length}</Text>
         </View>
@@ -573,7 +547,7 @@ export default function Catalog() {
     try {
       await client.request("stopStream", { session: a.session });
     } catch {
-      // best-effort stop
+      // best effort
     }
     removeStream(a.session);
   }, [removeStream]);
@@ -602,6 +576,7 @@ export default function Catalog() {
       <FlatList
         style={styles.root}
         contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#2563EB" />
         }
@@ -612,7 +587,6 @@ export default function Catalog() {
             loading={loading}
             profileId={profileId}
             refreshing={refreshing}
-            selectedProfile={selectedProfile}
             onRefresh={handleRefresh}
             onSelectProfile={handleSelectProfile}
           />
@@ -639,77 +613,70 @@ const styles = StyleSheet.create({
     backgroundColor: "#F8FAFC",
   },
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 32,
     gap: 10,
-    paddingBottom: 36,
   },
   headerContainer: {
-    gap: 12,
+    gap: 10,
     marginBottom: 4,
   },
-  hostHeader: {
+  hostStrip: {
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
   },
-  hostHeaderLeft: {
+  hostStripLeft: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
     flex: 1,
     minWidth: 0,
-    marginRight: 8,
   },
-  statusDot: {
+  dotGreen: {
     width: 7,
     height: 7,
     borderRadius: 3.5,
     backgroundColor: "#059669",
     flexShrink: 0,
   },
-  hostHeaderTextGroup: {
-    flex: 1,
-    minWidth: 0,
-  },
-  hostTitle: {
-    color: "#0F172A",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  hostChipText: {
+  hostStripText: {
     color: "#64748B",
-    fontSize: 11,
+    fontSize: 12,
+    flex: 1,
+  },
+  hostStripAddr: {
+    color: "#0F172A",
+    fontWeight: "600",
     fontFamily: "monospace",
   },
-  disconnectBtn: {
+  btnHostChange: {
     backgroundColor: "#F1F5F9",
     borderWidth: 1,
     borderColor: "#E2E8F0",
     paddingHorizontal: 8,
-    paddingVertical: 5,
+    paddingVertical: 4,
     borderRadius: 6,
-    flexShrink: 0,
   },
-  disconnectBtnText: {
-    color: "#475569",
+  btnHostChangeText: {
+    color: "#334155",
     fontSize: 11,
     fontWeight: "600",
   },
+
+  /* Error Card */
   errorCard: {
     backgroundColor: "#FEF2F2",
     borderWidth: 1,
     borderColor: "#FECACA",
-    borderRadius: 10,
+    borderRadius: 8,
     padding: 10,
     flexDirection: "row",
     alignItems: "center",
@@ -755,110 +722,92 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
   },
-  qualityCard: {
+
+  /* Segmented Quality */
+  qualitySegmentWrapper: {
     backgroundColor: "#FFFFFF",
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    borderRadius: 12,
-    padding: 12,
-    gap: 8,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
+    padding: 3,
   },
-  qualityHeader: {
+  qualitySegmentTabs: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    gap: 4,
   },
-  qualityTitle: {
-    color: "#0F172A",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  qualitySub: {
-    color: "#64748B",
-    fontSize: 11,
-  },
-  profileRow: {
-    flexDirection: "row",
-    gap: 6,
-  },
-  profileButton: {
+  qualityTab: {
     flex: 1,
-    minHeight: 46,
-    backgroundColor: "#F8FAFC",
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    borderRadius: 6,
-    paddingHorizontal: 4,
     paddingVertical: 6,
-    justifyContent: "center",
+    paddingHorizontal: 4,
+    borderRadius: 7,
     alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
   },
-  profileButtonSelected: {
+  qualityTabActive: {
     backgroundColor: "#EFF6FF",
-    borderColor: "#3B82F6",
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
   },
-  profileLabel: {
-    color: "#475569",
+  qualityTabLabel: {
     fontSize: 11,
     fontWeight: "600",
+    color: "#64748B",
   },
-  profileLabelSelected: {
+  qualityTabLabelActive: {
     color: "#1D4ED8",
     fontWeight: "700",
   },
-  profileDetail: {
-    color: "#94A3B8",
+  qualityTabDetail: {
     fontSize: 9,
     fontFamily: "monospace",
-    marginTop: 1,
+    color: "#94A3B8",
   },
-  profileDetailSelected: {
+  qualityTabDetailActive: {
     color: "#2563EB",
   },
-  sourceSectionHeader: {
+
+  /* Section Title */
+  sectionTitleRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    paddingHorizontal: 2,
     marginTop: 4,
   },
-  sectionTitle: {
-    color: "#0F172A",
+  sectionTitleText: {
     fontSize: 13,
     fontWeight: "600",
+    color: "#0F172A",
   },
-  sourceRefreshBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
+  btnRefresh: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
   },
-  sourceRefreshText: {
+  btnRefreshText: {
     color: "#2563EB",
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "600",
   },
+  btnDisabled: {
+    opacity: 0.5,
+  },
+
+  /* Display Cards */
   displayCard: {
     backgroundColor: "#FFFFFF",
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    borderRadius: 10,
     padding: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
+    gap: 12,
+    boxShadow: "0 1px 2px rgba(0, 0, 0, 0.03)",
   },
   displayIconBox: {
-    width: 36,
-    height: 36,
+    width: 38,
+    height: 38,
     borderRadius: 8,
     backgroundColor: "#EFF6FF",
     alignItems: "center",
@@ -868,38 +817,19 @@ const styles = StyleSheet.create({
   displayIcon: {
     fontSize: 18,
   },
-  displayInfo: {
+  displayMain: {
     flex: 1,
     minWidth: 0,
-    gap: 3,
-  },
-  displayNameRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
+    gap: 4,
   },
   displayName: {
-    color: "#0F172A",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "600",
-    flex: 1,
-  },
-  primaryBadge: {
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#BFDBFE",
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 4,
-  },
-  primaryBadgeText: {
-    color: "#1D4ED8",
-    fontSize: 9,
-    fontWeight: "700",
+    color: "#0F172A",
   },
   chipsRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
+    alignItems: "center",
     gap: 6,
   },
   chip: {
@@ -911,40 +841,48 @@ const styles = StyleSheet.create({
     borderColor: "#E2E8F0",
   },
   chipText: {
-    color: "#64748B",
     fontSize: 10,
+    color: "#64748B",
     fontFamily: "monospace",
   },
-  chipTextSuccess: {
-    color: "#059669",
+  chipSuccess: {
+    backgroundColor: "#ECFDF5",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "#A7F3D0",
+  },
+  chipSuccessText: {
     fontSize: 10,
+    color: "#059669",
     fontFamily: "monospace",
+    fontWeight: "600",
   },
   openBtn: {
     backgroundColor: "#2563EB",
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 7,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-  },
-  btnDisabled: {
-    opacity: 0.6,
   },
   openBtnText: {
     color: "#FFFFFF",
     fontSize: 12,
     fontWeight: "600",
   },
+
+  /* Empty State */
   emptyCard: {
     backgroundColor: "#FFFFFF",
-    padding: 24,
-    borderRadius: 10,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: "#E2E8F0",
+    padding: 24,
     alignItems: "center",
-    gap: 10,
+    gap: 8,
   },
   loadingText: {
     color: "#64748B",
@@ -954,8 +892,10 @@ const styles = StyleSheet.create({
     color: "#64748B",
     fontSize: 12,
   },
+
+  /* Active Streams */
   activeSection: {
-    marginTop: 10,
+    marginTop: 8,
     gap: 8,
   },
   activeSectionHeader: {
@@ -964,9 +904,9 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   activeSectionTitle: {
-    color: "#0F172A",
     fontSize: 13,
     fontWeight: "600",
+    color: "#0F172A",
   },
   activeCountBadge: {
     backgroundColor: "#059669",
@@ -984,7 +924,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: "#A7F3D0",
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 10,
     flexDirection: "row",
     alignItems: "center",
@@ -1000,13 +940,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#059669",
-    flexShrink: 0,
   },
   streamName: {
     color: "#0F172A",

@@ -40,137 +40,131 @@ export default function Hub() {
   );
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
-      <ScrollView style={styles.root} contentContainerStyle={styles.content}>
-        {/* Header Branding */}
-        <View style={styles.header}>
-          <View style={styles.brandRow}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right", "bottom"]}>
+      <ScrollView
+        style={styles.root}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Top App Branding */}
+        <View style={styles.brandHeader}>
+          <View style={styles.logoRow}>
             <View style={styles.logoBadge}>
               <Text style={styles.logoIcon}>🖥️</Text>
             </View>
-            <View style={styles.brandTextGroup}>
-              <View style={styles.titleRow}>
-                <Text style={styles.appTitle}>Leftcar XR</Text>
-                <View style={styles.versionBadge}>
-                  <Text style={styles.versionText}>v0.1</Text>
-                </View>
-              </View>
-              <Text style={styles.appSubtitle}>초저지연 데스크톱 다중 화면 뷰어</Text>
+            <View style={styles.titleColumn}>
+              <Text style={styles.appTitle}>Leftcar XR</Text>
+              <Text style={styles.appSubtitle}>초저지연 다중 데스크톱 화면 스트리밍</Text>
             </View>
           </View>
         </View>
 
-        {/* Main Status & Action Card */}
+        {/* Hero Connection Card */}
         {isConnected ? (
-          <View style={styles.connectedCard}>
-            <View style={styles.cardHeaderRow}>
-              <View style={styles.statusBadgeGreen}>
-                <View style={styles.dotGreen} />
-                <Text style={styles.statusBadgeTextGreen}>연결됨</Text>
+          <View style={styles.heroCardConnected}>
+            <View style={styles.cardTopRow}>
+              <View style={styles.badgeSuccess}>
+                <View style={styles.dotSuccess} />
+                <Text style={styles.badgeSuccessText}>호스트 연결됨</Text>
               </View>
-              <Text style={styles.hostEndpointText} numberOfLines={1}>
+              <Text style={styles.endpointLabel} numberOfLines={1}>
                 {hostAddr}
               </Text>
             </View>
 
-            <View style={styles.cardMainText}>
-              <Text style={styles.cardMainTitle}>컴퓨터 화면을 선택하세요</Text>
-              <Text style={styles.cardMainSub}>
-                원하는 모니터를 가상 공간에 독립된 창으로 띄울 수 있습니다.
+            <View style={styles.heroBody}>
+              <Text style={styles.heroTitle}>모니터 화면을 선택하세요</Text>
+              <Text style={styles.heroDesc}>
+                컴퓨터의 디스플레이를 가상 공간에 독립된 창으로 열어 작업할 수 있습니다.
               </Text>
             </View>
 
-            <View style={styles.btnRow}>
-              <Pressable onPress={openCatalog} style={styles.btnPrimary}>
-                <Text style={styles.btnPrimaryText}>화면 선택하기 →</Text>
+            <View style={styles.heroActionRow}>
+              <Pressable onPress={openCatalog} style={styles.primaryActionBtn}>
+                <Text style={styles.primaryActionText}>화면 목록 보기 →</Text>
               </Pressable>
-              <Pressable onPress={openHostPicker} style={styles.btnSecondary}>
-                <Text style={styles.btnSecondaryText}>다른 호스트</Text>
+              <Pressable onPress={openHostPicker} style={styles.secondaryActionBtn}>
+                <Text style={styles.secondaryActionText}>호스트 변경</Text>
               </Pressable>
             </View>
           </View>
         ) : (
-          <View style={styles.disconnectedCard}>
-            <View style={styles.cardHeaderRow}>
-              <View style={styles.statusBadgeGray}>
-                <View style={styles.dotGray} />
-                <Text style={styles.statusBadgeTextGray}>연결 대기</Text>
+          <View style={styles.heroCardStandby}>
+            <View style={styles.cardTopRow}>
+              <View style={styles.badgeStandby}>
+                <View style={styles.dotStandby} />
+                <Text style={styles.badgeStandbyText}>연결 대기 중</Text>
               </View>
             </View>
 
-            <View style={styles.cardMainText}>
-              <Text style={styles.cardMainTitle}>컴퓨터에 연결하세요</Text>
-              <Text style={styles.cardMainSub}>
-                동일한 Wi-Fi에 연결된 Leftcar 호스트를 자동으로 찾거나 QR 코드로 페어링하세요.
+            <View style={styles.heroBody}>
+              <Text style={styles.heroTitle}>컴퓨터와 연결하기</Text>
+              <Text style={styles.heroDesc}>
+                동일한 Wi-Fi 네트워크의 컴퓨터를 탐색하거나 QR 코드로 즉시 페어링하세요.
               </Text>
             </View>
 
-            <View style={styles.btnRow}>
-              <Pressable onPress={openHostPicker} style={styles.btnPrimary}>
-                <Text style={styles.btnPrimaryText}>호스트 연결하기 →</Text>
+            <View style={styles.heroActionRow}>
+              <Pressable onPress={openHostPicker} style={styles.primaryActionBtn}>
+                <Text style={styles.primaryActionText}>호스트 찾기 →</Text>
               </Pressable>
-              <Pressable onPress={openPairing} style={styles.btnSecondary}>
-                <Text style={styles.btnSecondaryText}>QR 페어링</Text>
+              <Pressable onPress={openPairing} style={styles.secondaryActionBtn}>
+                <Text style={styles.secondaryActionText}>QR 페어링</Text>
               </Pressable>
             </View>
           </View>
         )}
 
         {/* 3-Step Setup Guide */}
-        <View style={styles.guideCard}>
-          <Text style={styles.guideCardTitle}>간편 사용 가이드</Text>
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>빠른 시작 가이드</Text>
 
-          <View style={styles.stepItem}>
-            <View style={styles.stepNumberBadge}>
-              <Text style={styles.stepNumberText}>1</Text>
+          <View style={styles.stepRow}>
+            <View style={styles.stepBadge}>
+              <Text style={styles.stepNum}>1</Text>
             </View>
-            <View style={styles.stepTextGroup}>
-              <Text style={styles.stepTitle}>호스트 앱 실행</Text>
-              <Text style={styles.stepDesc}>Mac/Windows에서 Leftcar Host 앱을 실행합니다.</Text>
-            </View>
-          </View>
-
-          <View style={styles.stepDivider} />
-
-          <View style={styles.stepItem}>
-            <View style={styles.stepNumberBadge}>
-              <Text style={styles.stepNumberText}>2</Text>
-            </View>
-            <View style={styles.stepTextGroup}>
-              <Text style={styles.stepTitle}>호스트 선택 및 페어링</Text>
-              <Text style={styles.stepDesc}>[호스트 연결하기]를 눌러 검색된 컴퓨터를 선택합니다.</Text>
+            <View style={styles.stepInfo}>
+              <Text style={styles.stepName}>호스트 앱 실행</Text>
+              <Text style={styles.stepText}>Mac 또는 PC에서 Leftcar Host를 켭니다.</Text>
             </View>
           </View>
 
-          <View style={styles.stepDivider} />
+          <View style={styles.divider} />
 
-          <View style={styles.stepItem}>
-            <View style={styles.stepNumberBadge}>
-              <Text style={styles.stepNumberText}>3</Text>
+          <View style={styles.stepRow}>
+            <View style={styles.stepBadge}>
+              <Text style={styles.stepNum}>2</Text>
             </View>
-            <View style={styles.stepTextGroup}>
-              <Text style={styles.stepTitle}>XR 공간에 화면 배치</Text>
-              <Text style={styles.stepDesc}>모니터를 열고 가상 공간 원하는 위치에 배치하세요.</Text>
+            <View style={styles.stepInfo}>
+              <Text style={styles.stepName}>기기 연결 및 페어링</Text>
+              <Text style={styles.stepText}>[호스트 찾기]를 눌러 컴퓨터를 선택합니다.</Text>
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={styles.stepRow}>
+            <View style={styles.stepBadge}>
+              <Text style={styles.stepNum}>3</Text>
+            </View>
+            <View style={styles.stepInfo}>
+              <Text style={styles.stepName}>가상 공간에 화면 배치</Text>
+              <Text style={styles.stepText}>원하는 모니터를 열어 자유롭게 배치합니다.</Text>
             </View>
           </View>
         </View>
 
-        {/* Feature Specs */}
-        <View style={styles.specsRow}>
-          <View style={styles.specCard}>
-            <Text style={styles.specLabel}>지연 시간</Text>
-            <Text style={styles.specHighlight}>&lt;30ms</Text>
-            <Text style={styles.specSub}>초저지연 반응</Text>
+        {/* Quick Specs Grid (2 Column Clean Layout) */}
+        <View style={styles.featureGrid}>
+          <View style={styles.featureBox}>
+            <Text style={styles.featureEmoji}>⚡</Text>
+            <Text style={styles.featureValue}>&lt;30ms 초저지연</Text>
+            <Text style={styles.featureLabel}>실시간 마우스 조작 반응</Text>
           </View>
-          <View style={styles.specCard}>
-            <Text style={styles.specLabel}>재생률</Text>
-            <Text style={styles.specValue}>60 FPS</Text>
-            <Text style={styles.specSub}>부드러운 화면</Text>
-          </View>
-          <View style={styles.specCard}>
-            <Text style={styles.specLabel}>창 모드</Text>
-            <Text style={styles.specValue}>독립 창</Text>
-            <Text style={styles.specSub}>다중 화면 배치</Text>
+          <View style={styles.featureBox}>
+            <Text style={styles.featureEmoji}>🖥️</Text>
+            <Text style={styles.featureValue}>독립 다중 창</Text>
+            <Text style={styles.featureLabel}>모니터별 개별 XR 배치</Text>
           </View>
         </View>
       </ScrollView>
@@ -188,23 +182,23 @@ const styles = StyleSheet.create({
     backgroundColor: "#F8FAFC",
   },
   content: {
-    padding: 16,
-    gap: 14,
-    paddingBottom: 36,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 32,
+    gap: 16,
   },
-  header: {
-    marginTop: 4,
-    marginBottom: 2,
+  brandHeader: {
+    paddingVertical: 8,
   },
-  brandRow: {
+  logoRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
   },
   logoBadge: {
-    width: 42,
-    height: 42,
-    borderRadius: 10,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     backgroundColor: "#EFF6FF",
     borderWidth: 1,
     borderColor: "#DBEAFE",
@@ -212,76 +206,49 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   logoIcon: {
-    fontSize: 20,
+    fontSize: 22,
   },
-  brandTextGroup: {
+  titleColumn: {
     flex: 1,
     gap: 2,
   },
-  titleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
   appTitle: {
     color: "#0F172A",
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  versionBadge: {
-    backgroundColor: "#F1F5F9",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-  },
-  versionText: {
-    color: "#64748B",
-    fontSize: 10,
-    fontWeight: "600",
-    fontFamily: "monospace",
+    letterSpacing: -0.4,
   },
   appSubtitle: {
     color: "#64748B",
     fontSize: 12,
   },
 
-  /* Main Cards */
-  connectedCard: {
+  /* Hero Cards */
+  heroCardConnected: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "#A7F3D0",
-    padding: 16,
+    padding: 18,
     gap: 12,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)",
   },
-  disconnectedCard: {
+  heroCardStandby: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    padding: 16,
+    padding: 18,
     gap: 12,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.04)",
   },
-  cardHeaderRow: {
+  cardTopRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 8,
   },
-  statusBadgeGreen: {
+  badgeSuccess: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -289,21 +256,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#A7F3D0",
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 4,
     borderRadius: 12,
   },
-  dotGreen: {
+  dotSuccess: {
     width: 6,
     height: 6,
     borderRadius: 3,
     backgroundColor: "#059669",
   },
-  statusBadgeTextGreen: {
+  badgeSuccessText: {
     color: "#059669",
     fontSize: 11,
     fontWeight: "600",
   },
-  statusBadgeGray: {
+  badgeStandby: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -311,166 +278,154 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E2E8F0",
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 4,
     borderRadius: 12,
   },
-  dotGray: {
+  dotStandby: {
     width: 6,
     height: 6,
     borderRadius: 3,
     backgroundColor: "#94A3B8",
   },
-  statusBadgeTextGray: {
+  badgeStandbyText: {
     color: "#64748B",
     fontSize: 11,
     fontWeight: "500",
   },
-  hostEndpointText: {
+  endpointLabel: {
     color: "#64748B",
     fontSize: 12,
     fontFamily: "monospace",
     flex: 1,
     textAlign: "right",
   },
-  cardMainText: {
+  heroBody: {
     gap: 4,
   },
-  cardMainTitle: {
-    fontSize: 15,
+  heroTitle: {
+    fontSize: 16,
     fontWeight: "600",
     color: "#0F172A",
   },
-  cardMainSub: {
-    fontSize: 12,
+  heroDesc: {
+    fontSize: 13,
     color: "#64748B",
     lineHeight: 18,
   },
-  btnRow: {
+  heroActionRow: {
     flexDirection: "row",
     gap: 8,
-    marginTop: 2,
+    marginTop: 4,
   },
-  btnPrimary: {
+  primaryActionBtn: {
     flex: 1,
     backgroundColor: "#2563EB",
     borderRadius: 8,
-    paddingVertical: 10,
+    paddingVertical: 11,
     alignItems: "center",
     justifyContent: "center",
   },
-  btnPrimaryText: {
+  primaryActionText: {
     color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "600",
   },
-  btnSecondary: {
+  secondaryActionBtn: {
     backgroundColor: "#F1F5F9",
     borderWidth: 1,
     borderColor: "#E2E8F0",
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
     alignItems: "center",
     justifyContent: "center",
   },
-  btnSecondaryText: {
+  secondaryActionText: {
     color: "#334155",
     fontSize: 13,
     fontWeight: "600",
   },
 
-  /* Guide Card */
-  guideCard: {
+  /* Setup Guide */
+  sectionCard: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    padding: 16,
-    gap: 12,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
+    padding: 18,
+    gap: 14,
+    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.03)",
   },
-  guideCardTitle: {
-    fontSize: 13,
+  sectionTitle: {
+    fontSize: 14,
     fontWeight: "600",
     color: "#0F172A",
   },
-  stepItem: {
+  stepRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
+    alignItems: "center",
+    gap: 12,
   },
-  stepDivider: {
-    height: 1,
-    backgroundColor: "#F1F5F9",
-    marginLeft: 30,
-  },
-  stepNumberBadge: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+  stepBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: "#EFF6FF",
     borderWidth: 1,
     borderColor: "#BFDBFE",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 1,
   },
-  stepNumberText: {
+  stepNum: {
     color: "#2563EB",
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "700",
   },
-  stepTextGroup: {
+  stepInfo: {
     flex: 1,
     gap: 1,
   },
-  stepTitle: {
-    fontSize: 12,
+  stepName: {
+    fontSize: 13,
     fontWeight: "600",
     color: "#0F172A",
   },
-  stepDesc: {
-    fontSize: 11,
+  stepText: {
+    fontSize: 12,
     color: "#64748B",
-    lineHeight: 16,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: "#F1F5F9",
+    marginLeft: 36,
   },
 
-  /* Specs */
-  specsRow: {
+  /* 2-Column Feature Grid */
+  featureGrid: {
     flexDirection: "row",
-    gap: 8,
+    gap: 10,
   },
-  specCard: {
+  featureBox: {
     flex: 1,
     backgroundColor: "#FFFFFF",
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    padding: 10,
-    gap: 2,
+    padding: 14,
+    gap: 4,
   },
-  specLabel: {
-    color: "#94A3B8",
-    fontSize: 10,
-    fontWeight: "500",
+  featureEmoji: {
+    fontSize: 18,
+    marginBottom: 2,
   },
-  specHighlight: {
-    color: "#059669",
-    fontSize: 14,
-    fontWeight: "700",
-    fontFamily: "monospace",
-  },
-  specValue: {
+  featureValue: {
+    fontSize: 13,
+    fontWeight: "600",
     color: "#0F172A",
-    fontSize: 14,
-    fontWeight: "700",
   },
-  specSub: {
+  featureLabel: {
+    fontSize: 11,
     color: "#64748B",
-    fontSize: 10,
+    lineHeight: 15,
   },
 });

@@ -47,6 +47,7 @@ import {
   getDeviceId,
   getStoredToken,
   pairWithHost,
+  pairWithHostByCode,
   parseQrPayload,
 } from "./pairing";
 
@@ -77,6 +78,18 @@ describe("parseQrPayload", () => {
       secret: "abc",
       host: "192.168.1.5",
       port: 7777,
+    });
+  });
+
+  it("parseQrPayload_with_code: extracts code when present", () => {
+    const qrWithCode =
+      '{"v":1,"id":"offer-x","s":"abc","h":"192.168.1.5","p":7777,"c":"123456"}';
+    expect(parseQrPayload(qrWithCode)).toEqual({
+      id: "offer-x",
+      secret: "abc",
+      host: "192.168.1.5",
+      port: 7777,
+      code: "123456",
     });
   });
 
@@ -125,6 +138,20 @@ describe("pairWithHost", () => {
     expect(closeMock).toHaveBeenCalledTimes(1); // no leaked connection
   });
 
+  it("success with embedded payload code: uses payload.code without 2nd arg", async () => {
+    requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
+    const payloadWithCode = { ...makePayload(), code: "654321" };
+    const token = await pairWithHost(payloadWithCode);
+    expect(token).toBe(TOKEN_64HEX);
+    expect(requestMock).toHaveBeenCalledWith("pair", {
+      offerId: "offer-x",
+      secret: "abc",
+      code: "654321",
+      deviceId: store.get("leftcar.deviceId"),
+      deviceName: deviceName(),
+    });
+  });
+
   it("failure: throws and stores nothing", async () => {
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
@@ -137,6 +164,27 @@ describe("pairWithHost", () => {
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
     expect(store.get("leftcar.token")).toBeUndefined();
+  });
+});
+
+describe("pairWithHostByCode", () => {
+  it("success: connects and sends code directly", async () => {
+    requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
+    const token = await pairWithHostByCode("192.168.1.10", 7777, "123456");
+    expect(token).toBe(TOKEN_64HEX);
+    expect(connect).toHaveBeenCalledWith("192.168.1.10", 7777);
+    expect(requestMock).toHaveBeenCalledWith("pair", {
+      code: "123456",
+      deviceId: store.get("leftcar.deviceId"),
+      deviceName: deviceName(),
+    });
+    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+  });
+
+  it("invalid code format throws without connecting", async () => {
+    await expect(pairWithHostByCode("192.168.1.10", 7777, "123")).rejects.toThrow(
+      "6자리 인증 코드를 정확히 입력해 주세요",
+    );
   });
 });
 

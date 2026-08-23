@@ -127,23 +127,11 @@ export default function Host() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
-      <ScrollView style={styles.root} contentContainerStyle={styles.content}>
-        {/* Header Description */}
-        <View style={styles.header}>
-          <Text style={styles.title}>호스트 컴퓨터 연결</Text>
-          <Text style={styles.sub}>
-            동일한 Wi-Fi 네트워크에 있는 Mac 또는 PC의 화면을 찾습니다.
-          </Text>
-          {controlHost() ? (
-            <View style={styles.currentHostBadge}>
-              <View style={styles.currentHostDot} />
-              <Text style={styles.currentHostText} numberOfLines={1}>
-                현재 연결됨: {controlHost()}
-              </Text>
-            </View>
-          ) : null}
-        </View>
-
+      <ScrollView
+        style={styles.root}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
@@ -151,14 +139,14 @@ export default function Host() {
           </View>
         )}
 
-        {/* Auto Discovered Hosts Section */}
-        <View style={styles.card}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>주변 기기 자동 검색</Text>
+        {/* Nearby Auto Discovered Hosts */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>주변 기기 검색</Text>
             {nsd && (
               <View style={styles.scanningBadge}>
                 <ActivityIndicator size="small" color="#2563EB" />
-                <Text style={styles.scanningText}>검색 중</Text>
+                <Text style={styles.scanningText}>검색 중…</Text>
               </View>
             )}
           </View>
@@ -190,25 +178,26 @@ export default function Host() {
               ))}
             </View>
           ) : (
-            <View style={styles.emptyDiscoverBox}>
-              <Text style={styles.emptyDiscoverIcon}>🔍</Text>
-              <Text style={styles.emptyDiscoverText}>
-                {nsd
-                  ? "주변의 Leftcar Host를 찾는 중입니다…\n컴퓨터에서 Host 앱이 실행 중인지 확인하세요."
-                  : "자동 검색을 지원하지 않습니다. 아래에서 IP를 직접 입력하세요."}
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>📡</Text>
+              <Text style={styles.emptyTitle}>주변의 Leftcar Host를 찾는 중</Text>
+              <Text style={styles.emptyText}>
+                컴퓨터에서 Leftcar Host 앱이 켜져 있고 같은 Wi-Fi에 연결되어 있는지 확인하세요.
               </Text>
             </View>
           )}
         </View>
 
-        {/* Manual IP Entry Card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>IP 직접 입력</Text>
-          <Text style={styles.fieldHint}>컴퓨터의 로컬 IP 주소를 직접 입력하여 연결합니다.</Text>
+        {/* Manual IP Entry */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>IP 주소 직접 입력</Text>
+          <Text style={styles.fieldDesc}>
+            자동 검색이 되지 않는 경우 컴퓨터의 로컬 IP를 직접 입력합니다.
+          </Text>
 
-          <View style={styles.inputWrapper}>
+          <View style={styles.inputRow}>
             <TextInput
-              style={styles.input}
+              style={styles.textInput}
               placeholder="192.168.0.x:7777"
               placeholderTextColor="#94A3B8"
               keyboardType="url"
@@ -229,7 +218,7 @@ export default function Host() {
               <Text style={styles.quickChipText}>+ localhost:7777</Text>
             </Pressable>
             <Pressable onPress={() => setIp("10.0.2.2:7777")} style={styles.quickChip}>
-              <Text style={styles.quickChipText}>+ 10.0.2.2:7777 (에뮬레이터)</Text>
+              <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
             </Pressable>
           </View>
 
@@ -244,14 +233,6 @@ export default function Host() {
               <Text style={styles.primaryBtnText}>연결하기</Text>
             )}
           </Pressable>
-        </View>
-
-        {/* Tips */}
-        <View style={styles.tipBox}>
-          <Text style={styles.tipTitle}>💡 연결 팁</Text>
-          <Text style={styles.tipText}>
-            • XR 헤드셋과 컴퓨터를 같은 5GHz/6GHz Wi-Fi에 연결하면 최상의 지연시간과 화질을 얻을 수 있습니다.
-          </Text>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -268,51 +249,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#F8FAFC",
   },
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 32,
     gap: 14,
-    paddingBottom: 36,
-  },
-  header: {
-    gap: 4,
-    marginTop: 4,
-  },
-  title: {
-    color: "#0F172A",
-    fontSize: 18,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  sub: {
-    color: "#64748B",
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  currentHostBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#DBEAFE",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    alignSelf: "flex-start",
-    marginTop: 4,
-    maxWidth: "100%",
-  },
-  currentHostDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#2563EB",
-    flexShrink: 0,
-  },
-  currentHostText: {
-    color: "#1E40AF",
-    fontSize: 11,
-    fontWeight: "600",
-    flex: 1,
   },
   errorCard: {
     backgroundColor: "#FEF2F2",
@@ -326,28 +266,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
   },
-  card: {
+  sectionCard: {
     backgroundColor: "#FFFFFF",
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    borderRadius: 12,
     padding: 16,
     gap: 12,
-    shadowColor: "#000000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
+    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.03)",
   },
-  cardHeaderRow: {
+  sectionHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-  cardTitle: {
-    color: "#0F172A",
+  sectionTitle: {
     fontSize: 14,
     fontWeight: "600",
+    color: "#0F172A",
   },
   scanningBadge: {
     flexDirection: "row",
@@ -355,8 +291,9 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   scanningText: {
-    color: "#64748B",
+    color: "#2563EB",
     fontSize: 12,
+    fontWeight: "500",
   },
   hostList: {
     gap: 8,
@@ -365,23 +302,23 @@ const styles = StyleSheet.create({
     backgroundColor: "#F8FAFC",
     borderWidth: 1,
     borderColor: "#E2E8F0",
-    borderRadius: 8,
-    padding: 10,
+    borderRadius: 10,
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
   },
   hostIconBox: {
-    width: 34,
-    height: 34,
-    borderRadius: 6,
+    width: 36,
+    height: 36,
+    borderRadius: 8,
     backgroundColor: "#EFF6FF",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
   hostIcon: {
-    fontSize: 16,
+    fontSize: 18,
   },
   hostInfo: {
     flex: 1,
@@ -400,45 +337,52 @@ const styles = StyleSheet.create({
   },
   connectChip: {
     backgroundColor: "#2563EB",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 6,
     flexShrink: 0,
   },
   connectChipText: {
     color: "#FFFFFF",
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "600",
   },
-  emptyDiscoverBox: {
-    padding: 20,
+  emptyBox: {
+    padding: 24,
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
   },
-  emptyDiscoverIcon: {
-    fontSize: 22,
+  emptyIcon: {
+    fontSize: 26,
+    marginBottom: 2,
   },
-  emptyDiscoverText: {
+  emptyTitle: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#0F172A",
+  },
+  emptyText: {
     color: "#64748B",
     fontSize: 12,
     textAlign: "center",
     lineHeight: 17,
   },
-  fieldHint: {
+  fieldDesc: {
     color: "#64748B",
     fontSize: 12,
+    lineHeight: 16,
   },
-  inputWrapper: {
+  inputRow: {
     backgroundColor: "#F8FAFC",
     borderWidth: 1,
     borderColor: "#CBD5E1",
     borderRadius: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
   },
-  input: {
+  textInput: {
     color: "#0F172A",
     paddingVertical: 10,
     fontSize: 14,
@@ -476,6 +420,7 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     alignItems: "center",
     justifyContent: "center",
+    marginTop: 2,
   },
   btnDisabled: {
     opacity: 0.5,
@@ -484,21 +429,5 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "600",
-  },
-  tipBox: {
-    backgroundColor: "#F1F5F9",
-    borderRadius: 8,
-    padding: 12,
-    gap: 4,
-  },
-  tipTitle: {
-    color: "#334155",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  tipText: {
-    color: "#64748B",
-    fontSize: 11,
-    lineHeight: 16,
   },
 });

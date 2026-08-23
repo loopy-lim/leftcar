@@ -491,6 +491,7 @@ private struct PendingCaptureFrame {
     let pts: CMTime
     let duration: CMTime
     let callbackNs: UInt64
+    let captureWallMs: UInt64
 }
 
 private struct PendingEncodedFrame {
@@ -598,6 +599,7 @@ final class CaptureSession {
     // may call its output callback asynchronously, so this lets stats expose
     // capture -> encoded-output latency without putting a wait in the hot path.
     private var captureNsByPts: [Int64: UInt64] = [:]
+    private var captureWallMsByPts: [Int64: UInt64] = [:]
     private var encodeSubmitNsByPts: [Int64: UInt64] = [:]
     // VideoToolbox output callbacks can arrive after the next input frame has
     // already been submitted. Allocate the wire AU id at submission time and
@@ -646,6 +648,10 @@ final class CaptureSession {
 
     private func sendToViewer(_ data: Data, fd: Int32) -> Int {
         var addr = targetAddr
+        return send(data, fd: fd, to: &addr)
+    }
+
+    private func send(_ data: Data, fd: Int32, to addr: inout sockaddr_in) -> Int {
         return data.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return -1 }
             return withUnsafePointer(to: &addr) { pointer in
@@ -679,10 +685,14 @@ final class CaptureSession {
             }
             return false
         }
-        // A generous kernel queue absorbs a short Wi-Fi scheduling pause, but
-        // O_NONBLOCK ensures the interactive encoder never waits behind it.
-        var sendBuffer: Int32 = 2 * 1024 * 1024
+        // Keep only a short kernel burst behind the app's latest-frame queue.
+        // A multi-megabyte buffer can preserve stale video through Wi-Fi
+        // scheduling pauses even though userspace keeps only one frame.
+        var sendBuffer: Int32 = 512 * 1024
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size))
+        // AF41 is a best-effort Wi-Fi/WMM hint for interactive video.
+        var videoTos: Int32 = 0x88
+        _ = setsockopt(sock, IPPROTO_IP, IP_TOS, &videoTos, socklen_t(MemoryLayout<Int32>.size))
         let originalFlags = fcntl(sock, F_GETFL, 0)
         if originalFlags >= 0 {
             _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
@@ -865,7 +875,7 @@ final class CaptureSession {
             config.showsCursor = true
             // The application keeps only its newest pending frame, so the
             // framework's minimum/default depth does not add a stale queue.
-            config.queueDepth = 3
+            config.queueDepth = 2
 
             let handler = CaptureOutputHandler(session: self)
             let candidate = SCStream(
@@ -1085,7 +1095,8 @@ final class CaptureSession {
                         pixelBuffer: latest.pixelBuffer,
                         pts: .invalid,
                         duration: CMTime(value: 1, timescale: CMTimeScale(self.fps)),
-                        callbackNs: DispatchTime.now().uptimeNanoseconds
+                        callbackNs: DispatchTime.now().uptimeNanoseconds,
+                        captureWallMs: UInt64(Date().timeIntervalSince1970 * 1_000.0)
                     )
                     self.encodeQueue.async { [weak self] in
                         self?.encodeFrame(replay)
@@ -1158,6 +1169,7 @@ final class CaptureSession {
 
     func handlePixelBuffer(_ pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) {
         let callbackNs = DispatchTime.now().uptimeNanoseconds
+        let captureWallMs = UInt64(Date().timeIntervalSince1970 * 1_000.0)
         stateLock.lock()
         let stillRunning = running
         if stillRunning, firstCaptureNs == nil {
@@ -1175,7 +1187,8 @@ final class CaptureSession {
             pixelBuffer: pixelBuffer,
             pts: pts,
             duration: duration,
-            callbackNs: callbackNs
+            callbackNs: callbackNs,
+            captureWallMs: captureWallMs
         )
         captureLock.lock()
         let replaced = pendingCapture != nil
@@ -1243,6 +1256,7 @@ final class CaptureSession {
         let auId = nextAuId
         nextAuId &+= 1
         captureNsByPts[pts.value] = captured.callbackNs
+        captureWallMsByPts[pts.value] = captured.captureWallMs
         encodeSubmitNsByPts[pts.value] = encodeStartNs
         encodeAuIdByPts[pts.value] = auId
         let queueWaitUs = (encodeStartNs &- captured.callbackNs) / 1_000
@@ -1251,6 +1265,9 @@ final class CaptureSession {
         appendRollingSample(queueWaitUs, to: &captureQueueWaitSamplesUs)
         if captureNsByPts.count > 256 {
             captureNsByPts.removeValue(forKey: captureNsByPts.keys.first!)
+        }
+        if captureWallMsByPts.count > 256 {
+            captureWallMsByPts.removeValue(forKey: captureWallMsByPts.keys.first!)
         }
         if encodeSubmitNsByPts.count > 256 {
             encodeSubmitNsByPts.removeValue(forKey: encodeSubmitNsByPts.keys.first!)
@@ -1297,6 +1314,7 @@ final class CaptureSession {
         } else {
             stateLock.lock()
             captureNsByPts.removeValue(forKey: pts.value)
+            captureWallMsByPts.removeValue(forKey: pts.value)
             encodeSubmitNsByPts.removeValue(forKey: pts.value)
             encodeAuIdByPts.removeValue(forKey: pts.value)
             stateLock.unlock()
@@ -1314,6 +1332,7 @@ final class CaptureSession {
     private func discardTrackedFrame(pts: Int64) {
         stateLock.lock()
         captureNsByPts.removeValue(forKey: pts)
+        captureWallMsByPts.removeValue(forKey: pts)
         encodeSubmitNsByPts.removeValue(forKey: pts)
         encodeAuIdByPts.removeValue(forKey: pts)
         stateLock.unlock()
@@ -1497,6 +1516,7 @@ final class CaptureSession {
             lifecycleState = "waiting_first_send"
         }
         let auId = encodeAuIdByPts.removeValue(forKey: encodedPts)
+        let captureWallMs = captureWallMsByPts.removeValue(forKey: encodedPts)
         if let captureNs = captureNsByPts.removeValue(forKey: encodedPts) {
             let elapsedUs = (encodeNs &- captureNs) / 1_000
             lastCaptureToEncodeUs = elapsedUs
@@ -1510,7 +1530,7 @@ final class CaptureSession {
             appendRollingSample(elapsedUs, to: &encodeOutputSamplesUs)
         }
         stateLock.unlock()
-        guard let auId else {
+        guard let auId, let captureWallMs else {
             // An output callback arriving after its bookkeeping window is
             // still safer to drop than to emit a duplicate AU id. The next
             // frame will carry a forced IDR and restore decoder continuity.
@@ -1603,12 +1623,15 @@ final class CaptureSession {
         }
 
         // The network writer splits this logical G access unit into 1,200-byte
-        // UDP datagrams. Its base envelope carries the AU id and timestamp;
+        // UDP datagrams. Its base envelope carries the AU id and stage times;
         // each emitted fragment receives its own index/count fields.
-        // Logical G header: G, AU id (LE), "LT", host wall ms.
-        var p2 = Data([0x47, UInt8(auId & 0xFF), UInt8(auId >> 8), 0x4C, 0x54])
-        var hostWallMs = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
-        withUnsafeBytes(of: &hostWallMs) { p2.append(contentsOf: $0) }
+        // Logical L2 header: G, AU id (LE), "L2", capture wall ms,
+        // encoded-output wall ms. The network writer adds send wall ms.
+        var p2 = Data([0x47, UInt8(auId & 0xFF), UInt8(auId >> 8), 0x4C, 0x32])
+        var captureWallMsBE = captureWallMs.bigEndian
+        var encodeWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
+        withUnsafeBytes(of: &captureWallMsBE) { p2.append(contentsOf: $0) }
+        withUnsafeBytes(of: &encodeWallMsBE) { p2.append(contentsOf: $0) }
         p2.append(pkt.dropFirst(10))
         enqueuePacket(frame: p2, isKeyframe: isKeyframe)
     }
@@ -1708,8 +1731,21 @@ final class CaptureSession {
         var bytes = [UInt8](repeating: 0, count: 512)
         let token = viewerControlToken
         while true {
+            var source = sockaddr_in()
+            var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
             let count = bytes.withUnsafeMutableBytes { raw in
-                recvfrom(fd, raw.baseAddress, raw.count, MSG_DONTWAIT, nil, nil)
+                withUnsafeMutablePointer(to: &source) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                        recvfrom(
+                            fd,
+                            raw.baseAddress,
+                            raw.count,
+                            MSG_DONTWAIT,
+                            socketAddress,
+                            &sourceLength
+                        )
+                    }
+                }
             }
             guard count > 0 else { break }
             let payload = Data(bytes[0..<count])
@@ -1733,10 +1769,10 @@ final class CaptureSession {
             }
             if message.count == 16,
                message.prefix(4) == Data("LCP1".utf8) {
-                sendLatencyProbeResponse(message, fd: fd)
+                sendLatencyProbeResponse(message, fd: fd, destination: &source)
                 continue
             }
-            handleInputMessage(message, fd: fd)
+            handleInputMessage(message, fd: fd, destination: &source)
         }
     }
 
@@ -1762,7 +1798,11 @@ final class CaptureSession {
     /// NTP-style authenticated probe. Echoing the Android send time together
     /// with Host receive/send wall times lets the viewer separate LAN RTT from
     /// Host-to-device media delivery without assuming synchronized clocks.
-    private func sendLatencyProbeResponse(_ message: Data, fd: Int32) {
+    private func sendLatencyProbeResponse(
+        _ message: Data,
+        fd: Int32,
+        destination: inout sockaddr_in
+    ) {
         let sequence = readUInt32BE(message, at: 4)
         let viewerSendMs = readUInt64BE(message, at: 8)
         let hostReceiveMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
@@ -1776,10 +1816,14 @@ final class CaptureSession {
         var hostSendBE = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
         withUnsafeBytes(of: &hostSendBE) { response.append(contentsOf: $0) }
         response.append(viewerControlToken)
-        _ = sendToViewer(response, fd: fd)
+        _ = send(response, fd: fd, to: &destination)
     }
 
-    private func sendInputAck(sequence: UInt32, fd: Int32) {
+    private func sendInputAck(
+        sequence: UInt32,
+        fd: Int32,
+        destination: inout sockaddr_in
+    ) {
         var ack = Data("LCA1".utf8)
         var sequenceBE = sequence.bigEndian
         withUnsafeBytes(of: &sequenceBE) { ack.append(contentsOf: $0) }
@@ -1788,7 +1832,7 @@ final class CaptureSession {
         inputLock.unlock()
         ack.append(enabled ? 1 : 0)
         ack.append(viewerControlToken)
-        _ = sendToViewer(ack, fd: fd)
+        _ = send(ack, fd: fd, to: &destination)
     }
 
     /// Authenticated state packet for the viewer's lock indicator. It is sent
@@ -1804,7 +1848,11 @@ final class CaptureSession {
         _ = sendToViewer(status, fd: fd)
     }
 
-    private func handleInputMessage(_ message: Data, fd: Int32) {
+    private func handleInputMessage(
+        _ message: Data,
+        fd: Int32,
+        destination: inout sockaddr_in
+    ) {
         guard message.count >= 10,
               message.prefix(4) == Data("LCI1".utf8) else {
             return
@@ -1833,7 +1881,7 @@ final class CaptureSession {
         let enabled = inputEnabled
         inputLock.unlock()
         if sequence == last {
-            sendInputAck(sequence: sequence, fd: fd)
+            sendInputAck(sequence: sequence, fd: fd, destination: &destination)
             return
         }
         // Release-all is the fail-safe resynchronization packet. It may skip
@@ -1848,7 +1896,7 @@ final class CaptureSession {
             inputLock.lock()
             lastReliableInputSequence = sequence
             inputLock.unlock()
-            sendInputAck(sequence: sequence, fd: fd)
+            sendInputAck(sequence: sequence, fd: fd, destination: &destination)
             return
         }
         guard sequence == last &+ 1,
@@ -1858,7 +1906,7 @@ final class CaptureSession {
         inputLock.lock()
         lastReliableInputSequence = sequence
         inputLock.unlock()
-        sendInputAck(sequence: sequence, fd: fd)
+        sendInputAck(sequence: sequence, fd: fd, destination: &destination)
     }
 
     private func validateAndInjectReliableInput(
@@ -2077,18 +2125,19 @@ final class CaptureSession {
 
         let datagrams: [Data]
         if isFrame {
-            // Logical G header: marker + AU id LE + LT + wall clock.
-            guard data.count > 13, data[0] == 0x47, data[3...4] == Data([0x4C, 0x54]) else {
+            // Logical L2 header: marker + AU id LE + capture/encode clocks.
+            guard data.count > 21, data[0] == 0x47, data[3...4] == Data([0x4C, 0x32]) else {
                 requestRecoveryKeyframe()
                 return
             }
-            let payload = Data(data.dropFirst(13))
-            let maxPayload = 1_183 // 1,200-byte datagram - 17-byte wire header
+            let payload = Data(data.dropFirst(21))
+            let maxPayload = 1_167 // 1,200-byte datagram - 33-byte L2 wire header
             let fragmentCount = max(1, (payload.count + maxPayload - 1) / maxPayload)
             guard fragmentCount <= Int(UInt16.max) else {
                 requestRecoveryKeyframe()
                 return
             }
+            var sendWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
             datagrams = (0..<fragmentCount).map { index in
                 let start = index * maxPayload
                 let end = min(payload.count, start + maxPayload)
@@ -2097,7 +2146,8 @@ final class CaptureSession {
                 var countBE = UInt16(fragmentCount).bigEndian
                 withUnsafeBytes(of: &indexBE) { datagram.append(contentsOf: $0) }
                 withUnsafeBytes(of: &countBE) { datagram.append(contentsOf: $0) }
-                datagram.append(contentsOf: data[1...12])
+                datagram.append(contentsOf: data[1...20])
+                withUnsafeBytes(of: &sendWallMsBE) { datagram.append(contentsOf: $0) }
                 datagram.append(contentsOf: payload[start..<end])
                 return datagram
             }

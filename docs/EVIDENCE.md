@@ -1,6 +1,6 @@
 # 구현 증거 문서 (EVIDENCE)
 
-기준일: 2026-08-22
+기준일: 2026-08-23
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5 이상을 달성했다고 표기한 항목은 없다.**
 
 ## 요약
@@ -18,7 +18,7 @@
 | E13(신규) Windows 원격 Host | 소스·교차 컴파일 달성, 물리 실행 대기 | WGC monitor capture + Media Foundation hardware H.264 + SendInput + NSIS/Windows CI. 실제 Windows/GPU/Viewer E6는 미달성 |
 | E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
-| E6 종단간 | 미달성 | 실제 캡처→표시 미실행. G3/G5 대기 |
+| E6 종단간 | 부분 달성 | Mac CGDisplayStream → VideoToolbox → LAN UDP → TB710FU Qualcomm 저지연 디코더의 실제 화면 갱신 확인. 실제 포인터·키 입력과 4K60은 대기 |
 | E7 계측 장시간 | 미달성 | H51 대기 |
 
 ## 달성한 증거 상세
@@ -64,7 +64,7 @@
 | 같은 APK 창 4개 동시 표시 | G1/H05 (E5) | Galaxy XR | `adb shell dumpsys activity` task dump + 10분 창 유지 관찰; docs/06 §7.1 W4 |
 | 비초점 창 Surface 갱신 지속 | G1/H06/H08 (E5) | Galaxy XR | frame counter 4개 10분 진행 (docs/02 F-02) |
 | AMediaCodec 4 디코더 1080p30 | G1/H07-H08 (E5) | Galaxy XR | golden H.264 4개 동시 재생, thermal 기록 (docs/02 F-03) |
-| 실제 Mac 창→표시 종단간 | G3/H20 (E6) | Mac+Galaxy XR | S1 10분 + resize/close/outage 시나리오 (docs/08 H20) |
+| 실제 Mac 창→표시 장시간 종단간 | G3/H20 (E6) | Mac+Galaxy XR | TB710FU 단기 실시간 표시는 확인. S1 10분 + resize/close/outage 시나리오는 대기 (docs/08 H20) |
 | glass-to-glass p50/p95 | H21 (E7) | 240fps 카메라 | docs/06 §5 절차, 200 sample |
 | transport bake-off | G2/H11–H14 (E5) | Galaxy XR | docs/06 §9 동일조건 비교, ADR-0004 갱신 |
 | 60분 soak/latency creep | H36/H51 (E7) | Galaxy XR | NFR-002/006/007/008 |
@@ -139,3 +139,21 @@
 - **패키징**: `tauri.windows.conf.json`은 current-user NSIS를 지정하고, `windows-host` CI job은 Windows unit/clippy 뒤 unsigned installer artifact를 생성한다.
 - **현재 검증**: macOS에서 `x86_64-pc-windows-msvc` target `cargo check --lib` 통과. platform-neutral wire/input sequence unit test 통과.
 - **아직 증명하지 않은 항목**: Windows runner의 NSIS CI 결과, 물리 Windows WGC frame, 실제 GPU encoder identity, Windows→Android E6, 120/180Hz input 측정, DPI/회전/다중 monitor, sleep/wake/device-loss, 60분 soak. 상세 수용 기준은 `docs/windows-remote-host.md`에 유지한다.
+
+## 배포 크기 최적화 (E14, 2026-08-23 추가)
+
+- **Android 기준선과 결과**: arm64 release APK를 `43,473,166` bytes에서 `19,733,916` bytes로 줄였다(약 54.6%). R8 코드 최적화에 resource shrink, 한국어/영어 resource configuration, Metro bundle 압축을 결합하고, 직접 사용하지 않는 Gesture Handler/Reanimated/Worklets 자동 링크 및 RN GIF/WebP 디코더를 제외했다. 직접 APK 배포를 위해 native `.so`는 legacy packaging으로 압축한다.
+- **기능 보존 경계**: QR 페어링에 필요한 `expo-camera`, `libbarhopper_v3.so`, CAMERA 권한과 Leftcar의 `libleftcar_viewer.so`/`libleftcar_rustra.so`는 APK에 유지했다. 패키지는 `leftcar.ll3.kr`, ABI는 `arm64-v8a` 한 개다.
+- **Desktop 기준선과 결과**: 서명된 macOS `Leftcar Host.app`을 11MB에서 5.0MB로 줄였다. standalone Tauri crate의 release profile에 size 최적화, full LTO, 단일 codegen unit, symbol strip을 적용했다. 설치 앱은 기존 identifier와 TeamIdentifier를 유지하며 deep/strict codesign 검증을 통과했다.
+- **회귀 검증**: Android release assemble, Desktop release bundle, Rust workspace, Host 30 unit + 8 E2E, TypeScript, UI/제어 테스트, 4 contract 테스트, architecture check를 통과했다. UI 접근성·시맨틱 요소·React Native shadow 스타일을 수정한 뒤 React Doctor `100 / 100`과 0 issues를 확인했다. 최종 APK를 기존 `leftcar.ll3.kr` 앱에 덮어 설치해 최초 설치 시각이 유지되는 것을 확인했고, 실기기에서 4K60 프로필 표시와 1080p H.264 하드웨어 디코더의 지속 프레임 렌더링(`inputDrops=0`)을 확인했다.
+
+## 저지연 계측과 실기기 재검증 (E15, 2026-08-23 추가)
+
+- **단계별 계측**: macOS 미디어 데이터그램 `L2` 헤더에 capture/encode/send wall-clock을 싣고 Android에서 `NET RTT`, `CAP→DEC`, `ENC→DEC`, `WIRE→DEC`를 10초 rolling p50/p95로 표시한다. `DEC`는 MediaCodec 입력 제출 시점이며 물리 패널의 photon 시점이 아니다.
+- **저지연 경로**: Android는 전용 control/probe UDP socket과 EF DSCP, 미디어는 AF41 DSCP를 사용한다. 미디어 수신·송신 버퍼를 줄이고, ScreenCaptureKit queue depth를 2로 제한했으며, 80ms를 넘은 의존 체인은 버리고 IDR를 요청한다.
+- **실제 디코더**: TB710FU 로그에서 `actualCodec=c2.qti.avc.decoder.low_latency`와 codec low-latency 값 활성화를 확인했다. 범용 MIME 선택이 아니라 장치의 Qualcomm 저지연 AVC decoder가 선택됐다.
+- **실제 화면 표본**: Android HUD에서 `NET 9/10 ms`, `CAP→DEC 25/29 ms`, `ENC→DEC 8/11 ms`, `WIRE 8/11 ms` 표본을 확인했다. 이후 native 로그 표본의 `captureAgeMs`는 주로 21–33ms, `encodeAgeMs`와 `wireAgeMs`는 주로 3–15ms였다.
+- **Host 5회 반복 표본**: 실제 running 세션은 59–61 FPS, 1,071–2,034 kbps였다. capture→encode p95는 18.883–19.096ms, queue wait p95는 0.460–0.702ms, send block p95는 1.721–2.061ms였고 `pendingFrame=0`, `error=null`이었다.
+- **90 FPS 회귀와 수정**: 약 60Hz인 현재 Mac 캡처 소스에 90 FPS operating-rate를 요청한 표본은 Android HUD가 39 FPS, SKIP 174까지 악화됐다. 동일 빌드의 60 FPS 표본은 55–56 FPS로 회복했다. 기본 저지연 프로필을 1080p60으로 복구하고 입력 폴링은 2배인 120Hz로 유지했다. 실제 90Hz 이상 소스·Surface를 런타임에서 함께 확인하기 전에는 90 FPS를 기본값으로 다시 노출하지 않는다.
+- **입력 검증 경계**: wire/스케줄러 테스트와 180Hz 목표 설정은 통과했지만 이 표본의 Host 세션은 `inputEnabled=false`였다. 따라서 실제 Mac 포인터·키 주입과 click-to-photon은 아직 달성으로 표기하지 않는다.
+- **배포 산출물**: arm64 release APK는 v2 개발 서명으로, macOS app/DMG는 기존 개발 서명 ID로 검증했다. DMG checksum 검증은 통과했지만 Apple notarization은 수행하지 않았다.
