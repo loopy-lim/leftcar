@@ -287,7 +287,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private fun updateDebugStats(packed: Long, latency: Long) {
         val stats = debugStatsView ?: return
         if (packed == -1L) {
-            stats.text = "NET --/--  MAC CAP→DEC --/--  ENC→DEC --/--  WIRE --/-- ms\n-- FPS  FEED -- ms  SKIP --  LOSS --"
+            stats.text = "SRC $fps / XR -- Hz  NET --/--  WIRE --/-- ms\n-- FPS  CAP→DEC --/--  FEED -- ms  SKIP --  LOSS --"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
@@ -321,11 +321,12 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         addLatencySample(captureLatencySamples, captureToDecoder)
         addLatencySample(encodeLatencySamples, encodeToDecoder)
         addLatencySample(wireLatencySamples, wireToDecoder)
-        stats.text = "NET ${formatLatency(networkLatencySamples)}  " +
-            "MAC CAP→DEC ${formatLatency(captureLatencySamples)}  " +
-            "ENC→DEC ${formatLatency(encodeLatencySamples)}  " +
+        val displayHz = window.decorView.display?.refreshRate?.toInt() ?: 0
+        stats.text = "SRC $fps / XR ${if (displayHz > 0) displayHz else "--"} Hz  " +
+            "NET ${formatLatency(networkLatencySamples)}  " +
             "WIRE ${formatLatency(wireLatencySamples)} ms\n" +
-            "${displayedFps.toInt()} FPS  FEED ${feedMs} ms  " +
+            "${displayedFps.toInt()} FPS  CAP→DEC ${formatLatency(captureLatencySamples)}  " +
+            "ENC→DEC ${formatLatency(encodeLatencySamples)}  FEED ${feedMs} ms  " +
             "SKIP ${stale}  LOSS ${loss}"
     }
 
@@ -372,7 +373,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(9), dp(4), dp(9), dp(4))
             background = badgeBackground(Color.argb(92, 15, 23, 42))
             alpha = 0f
-            text = "NET --/--  MAC CAP→DEC --/--  ENC→DEC --/--  WIRE --/-- ms\n-- FPS  FEED -- ms"
+            text = "SRC $fps / XR -- Hz  NET --/--  WIRE --/-- ms\n-- FPS  CAP→DEC --/--  FEED -- ms"
             contentDescription = "스트림 반응 디버그 정보"
         }
         debugStatsView = stats
@@ -525,9 +526,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             setBackgroundColor(Color.BLACK)
             isFocusable = true
             isFocusableInTouchMode = true
-            // This Activity has no UI overlay. Keep the decoder Surface above
-            // the opaque window buffer; some XR/vendor compositors otherwise
-            // leave the default z=-2 SurfaceView hidden behind the black root.
+            // This Activity has an opaque black root. Keep the decoder Surface
+            // above that window buffer; XR/vendor compositors can otherwise
+            // report rendered codec output while showing only the black root.
             setZOrderOnTop(true)
             pointerIcon = PointerIcon.getSystemIcon(this@StreamActivity, PointerIcon.TYPE_NULL)
         }

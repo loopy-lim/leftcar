@@ -101,6 +101,11 @@ impl CaptureBackend for FakeBackend {
             fps_target: 60,
             dropped: 0,
             network_dropped: 0,
+            network_queue_dropped: 0,
+            udp_send_failures: 0,
+            udp_send_retries: 0,
+            recovery_keyframes: 0,
+            recovery_requests_suppressed: 0,
             capture_queue_dropped: 0,
             capture_to_encode_us: 0,
             max_capture_to_encode_us: 0,
@@ -110,6 +115,8 @@ impl CaptureBackend for FakeBackend {
             max_encode_output_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
+            send_pace_us: 0,
+            max_send_pace_us: 0,
             pending_frame: 0,
             capture_backend: "screenCaptureKit".into(),
             media_transport: "udp".into(),
@@ -122,6 +129,7 @@ impl CaptureBackend for FakeBackend {
             capture_queue_wait_p95_us: 1_000,
             encode_output_p95_us: 7_000,
             send_block_p95_us: 1_000,
+            send_pace_p95_us: 0,
             error: None,
         })
     }

@@ -143,6 +143,16 @@ if (!/override fun onNewIntent\(newIntent: Intent\)/.test(streamActivity)) {
   fail("stream-task-reuse", "reused StreamActivity does not accept the refreshed intent");
 }
 
+// 5. StreamActivity's root is opaque black. On XR/vendor compositors a media
+// overlay Surface can remain behind that root even while MediaCodec reports
+// rendered output, producing a fully black stream window.
+if (!/setZOrderOnTop\(true\)/.test(streamActivity)) {
+  fail("stream-surface-z-order", "decoder Surface must stay above the opaque Activity root");
+}
+if (/setZOrderMediaOverlay\(true\)/.test(streamActivity)) {
+  fail("stream-surface-z-order", "media-overlay z-order is hidden behind the opaque Activity root");
+}
+
 if (failures > 0) {
   console.error(`architecture-check: ${failures} violation(s)`);
   process.exit(1);

@@ -1,6 +1,7 @@
 import type { ControlClient } from "./control";
 
 export interface StreamLauncher {
+  getLocalIpv4Addresses?(): Promise<string[]>;
   prepareStream(port: number, host: string): Promise<void>;
   openStream(
     port: number,
@@ -19,10 +20,19 @@ export interface StartStreamArgs {
   height: number;
   fps: number;
   captureBackend: string;
+  viewerIps?: string[];
 }
+
+export interface StartedStream {
+  session: number;
+  viewerIps: string[];
+}
+
+export type StreamControlRequest = <T>(command: string, args?: unknown) => Promise<T>;
 
 interface StartPreparedStreamInput {
   control: ControlClient;
+  request?: StreamControlRequest;
   launcher: StreamLauncher;
   host: string;
   args: StartStreamArgs;
@@ -35,14 +45,22 @@ interface StartPreparedStreamInput {
  */
 export async function startPreparedStream({
   control,
+  request = control.request.bind(control),
   launcher,
   host,
   args,
-}: StartPreparedStreamInput): Promise<number> {
+}: StartPreparedStreamInput): Promise<StartedStream> {
   let session: number | null = null;
   try {
+    const discoveredIps = launcher.getLocalIpv4Addresses
+      ? await launcher.getLocalIpv4Addresses().catch(() => [])
+      : [];
+    const viewerIps = [...new Set(discoveredIps)]
+      .filter((address) => typeof address === "string" && address.length > 0)
+      .slice(0, 4);
+    const startArgs = viewerIps.length > 0 ? { ...args, viewerIps } : args;
     await launcher.prepareStream(args.viewerPort, host);
-    const started = await control.request<{ session: number }>("startStream", args);
+    const started = await request<{ session: number }>("startStream", startArgs);
     session = started.session;
     await launcher.openStream(
       args.viewerPort,
@@ -51,10 +69,10 @@ export async function startPreparedStream({
       args.height,
       args.fps,
     );
-    return session;
+    return { session, viewerIps };
   } catch (error) {
     if (session !== null) {
-      await control.request("stopStream", { session }).catch(() => undefined);
+      await request("stopStream", { session }).catch(() => undefined);
     }
     await launcher.cancelPreparedStream(args.viewerPort).catch(() => undefined);
     throw error;

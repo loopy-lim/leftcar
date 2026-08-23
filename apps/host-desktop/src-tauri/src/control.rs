@@ -108,6 +108,11 @@ impl ControlServer {
                     fps_target: 0,
                     dropped: 0,
                     network_dropped: 0,
+                    network_queue_dropped: 0,
+                    udp_send_failures: 0,
+                    udp_send_retries: 0,
+                    recovery_keyframes: 0,
+                    recovery_requests_suppressed: 0,
                     capture_queue_dropped: 0,
                     capture_to_encode_us: 0,
                     max_capture_to_encode_us: 0,
@@ -117,6 +122,8 @@ impl ControlServer {
                     max_encode_output_us: 0,
                     send_block_us: 0,
                     max_send_block_us: 0,
+                    send_pace_us: 0,
+                    max_send_pace_us: 0,
                     pending_frame: 0,
                     capture_backend: "unknown".into(),
                     media_transport: "unknown".into(),
@@ -129,6 +136,7 @@ impl ControlServer {
                     capture_queue_wait_p95_us: 0,
                     encode_output_p95_us: 0,
                     send_block_p95_us: 0,
+                    send_pace_p95_us: 0,
                     error: Some("backend stats unavailable".into()),
                 });
 
@@ -156,6 +164,11 @@ impl ControlServer {
                     input_rate_hz: s.input_rate_hz,
                     dropped: metrics.dropped,
                     network_dropped: metrics.network_dropped,
+                    network_queue_dropped: metrics.network_queue_dropped,
+                    udp_send_failures: metrics.udp_send_failures,
+                    udp_send_retries: metrics.udp_send_retries,
+                    recovery_keyframes: metrics.recovery_keyframes,
+                    recovery_requests_suppressed: metrics.recovery_requests_suppressed,
                     capture_queue_dropped: metrics.capture_queue_dropped,
                     capture_to_encode_us: metrics.capture_to_encode_us,
                     max_capture_to_encode_us: metrics.max_capture_to_encode_us,
@@ -165,6 +178,8 @@ impl ControlServer {
                     max_encode_output_us: metrics.max_encode_output_us,
                     send_block_us: metrics.send_block_us,
                     max_send_block_us: metrics.max_send_block_us,
+                    send_pace_us: metrics.send_pace_us,
+                    max_send_pace_us: metrics.max_send_pace_us,
                     pending_frame: metrics.pending_frame,
                     frames: metrics.frames,
                     bytes: metrics.bytes,
@@ -179,6 +194,7 @@ impl ControlServer {
                     capture_queue_wait_p95_us: metrics.capture_queue_wait_p95_us,
                     encode_output_p95_us: metrics.encode_output_p95_us,
                     send_block_p95_us: metrics.send_block_p95_us,
+                    send_pace_p95_us: metrics.send_pace_p95_us,
                     error: metrics.error,
                 });
             }
@@ -322,6 +338,11 @@ impl ControlServer {
                 Ok(displays) => ok(CatalogView {
                     platform: self.backend.platform().into(),
                     capture_backends: self.backend.capture_backends(),
+                    media_host: crate::local_lan_ip().filter(|address| {
+                        address
+                            .parse::<std::net::Ipv4Addr>()
+                            .is_ok_and(|address| address.is_private())
+                    }),
                     displays,
                 }),
                 Err(e) => err(&e),
@@ -356,7 +377,10 @@ impl ControlServer {
                 // A non-bypassable VPN can route a local control connection
                 // through a LAN subnet router, so its TCP peer is not always
                 // the viewer's physical Wi-Fi address. Consider claimed
-                // addresses only when they are private and on the peer's /24.
+                // addresses only when they are private and either on the
+                // peer's /24 or the authenticated control peer is a tailnet
+                // CGNAT address. This lets control remain on Tailscale while
+                // media takes the lower-latency physical LAN path.
                 // The production UDP backend performs a nonce reachability
                 // proof before capture, preventing arbitrary redirection.
                 let mut candidates = input
@@ -506,7 +530,10 @@ fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
     };
     let candidate_octets = candidate.octets();
     let peer_octets = peer.octets();
-    candidate.is_private() && peer.is_private() && candidate_octets[..3] == peer_octets[..3]
+    let same_private_subnet =
+        peer.is_private() && candidate_octets[..3] == peer_octets[..3];
+    let tailnet_peer = peer_octets[0] == 100 && (peer_octets[1] & 0b1100_0000) == 64;
+    candidate.is_private() && (same_private_subnet || tailnet_peer)
 }
 
 async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
@@ -589,6 +616,11 @@ mod tests {
                 fps_target: 60,
                 dropped: 0,
                 network_dropped: 0,
+                network_queue_dropped: 0,
+                udp_send_failures: 0,
+                udp_send_retries: 0,
+                recovery_keyframes: 0,
+                recovery_requests_suppressed: 0,
                 capture_queue_dropped: 0,
                 capture_to_encode_us: 0,
                 max_capture_to_encode_us: 0,
@@ -598,6 +630,8 @@ mod tests {
                 max_encode_output_us: 0,
                 send_block_us: 0,
                 max_send_block_us: 0,
+                send_pace_us: 0,
+                max_send_pace_us: 0,
                 pending_frame: 0,
                 capture_backend: "screenCaptureKit".into(),
                 media_transport: "udp".into(),
@@ -610,6 +644,7 @@ mod tests {
                 capture_queue_wait_p95_us: 1_000,
                 encode_output_p95_us: 7_000,
                 send_block_p95_us: 1_000,
+                send_pace_p95_us: 0,
                 error: Some("viewer closed stream".into()),
             })
         }
@@ -795,9 +830,10 @@ mod tests {
     #[test]
     fn media_candidate_must_be_private_and_on_the_control_peers_lan() {
         assert!(same_private_lan_candidate("192.168.0.18", "192.168.0.170"));
+        assert!(same_private_lan_candidate("192.168.0.18", "100.80.133.120"));
         assert!(!same_private_lan_candidate("192.168.1.18", "192.168.0.170"));
         assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
-        assert!(!same_private_lan_candidate("192.168.0.18", "100.77.109.50"));
+        assert!(!same_private_lan_candidate("192.168.0.18", "100.128.0.1"));
     }
 
     #[tokio::test]

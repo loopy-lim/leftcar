@@ -12,6 +12,7 @@ pub const ACK_MAGIC: &[u8; 4] = b"LCA1";
 pub const STATUS_MAGIC: &[u8; 4] = b"LCS1";
 pub const LATENCY_PROBE_MAGIC: &[u8; 4] = b"LCP1";
 pub const LATENCY_RESPONSE_MAGIC: &[u8; 4] = b"LCP2";
+pub const RECEIVER_FEEDBACK_MAGIC: &[u8; 4] = b"LCF1";
 pub const INPUT_HEADER_LEN: usize = 10;
 pub const INPUT_FLAG_RELIABLE: u8 = 1;
 pub const MAX_RELIABLE_QUEUE: usize = 256;
@@ -171,6 +172,29 @@ pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64, token: &[u8]) ->
     bytes.extend_from_slice(LATENCY_PROBE_MAGIC);
     bytes.extend_from_slice(&sequence.to_be_bytes());
     bytes.extend_from_slice(&viewer_send_ms.to_be_bytes());
+    bytes.extend_from_slice(token);
+    bytes
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverFeedback {
+    pub frame_gaps: u32,
+    pub input_drops: u32,
+    pub incomplete_aus: u32,
+    pub stale_frames: u32,
+    pub network_rtt_ms: u16,
+    pub wire_to_decoder_ms: u16,
+}
+
+pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(24 + token.len());
+    bytes.extend_from_slice(RECEIVER_FEEDBACK_MAGIC);
+    bytes.extend_from_slice(&feedback.frame_gaps.to_be_bytes());
+    bytes.extend_from_slice(&feedback.input_drops.to_be_bytes());
+    bytes.extend_from_slice(&feedback.incomplete_aus.to_be_bytes());
+    bytes.extend_from_slice(&feedback.stale_frames.to_be_bytes());
+    bytes.extend_from_slice(&feedback.network_rtt_ms.to_be_bytes());
+    bytes.extend_from_slice(&feedback.wire_to_decoder_ms.to_be_bytes());
     bytes.extend_from_slice(token);
     bytes
 }
@@ -414,6 +438,30 @@ mod tests {
             })
         );
         assert!(parse_latency_probe_response(&packet, b"wrong-token").is_none());
+    }
+
+    #[test]
+    fn receiver_feedback_is_fixed_width_and_nonce_authenticated() {
+        let token = b"session-token";
+        let packet = encode_receiver_feedback(
+            ReceiverFeedback {
+                frame_gaps: 1,
+                input_drops: 2,
+                incomplete_aus: 3,
+                stale_frames: 4,
+                network_rtt_ms: 5,
+                wire_to_decoder_ms: 6,
+            },
+            token,
+        );
+        assert_eq!(&packet[..4], RECEIVER_FEEDBACK_MAGIC);
+        assert_eq!(&packet[4..8], &1u32.to_be_bytes());
+        assert_eq!(&packet[8..12], &2u32.to_be_bytes());
+        assert_eq!(&packet[12..16], &3u32.to_be_bytes());
+        assert_eq!(&packet[16..20], &4u32.to_be_bytes());
+        assert_eq!(&packet[20..22], &5u16.to_be_bytes());
+        assert_eq!(&packet[22..24], &6u16.to_be_bytes());
+        assert_eq!(&packet[24..], token);
     }
 
     #[test]

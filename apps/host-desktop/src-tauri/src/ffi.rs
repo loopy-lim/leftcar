@@ -312,6 +312,13 @@ impl CaptureBackend for FfiBackend {
                 fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
                 dropped: v["dropped"].as_i64().unwrap_or(0),
                 network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
+                network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
+                udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
+                udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
+                recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
+                recovery_requests_suppressed: v["recoveryRequestsSuppressed"]
+                    .as_i64()
+                    .unwrap_or(0),
                 capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
                 capture_to_encode_us: v["captureToEncodeUs"].as_u64().unwrap_or(0),
                 max_capture_to_encode_us: v["maxCaptureToEncodeUs"].as_u64().unwrap_or(0),
@@ -321,6 +328,8 @@ impl CaptureBackend for FfiBackend {
                 max_encode_output_us: v["maxEncodeOutputUs"].as_u64().unwrap_or(0),
                 send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
                 max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
+                send_pace_us: v["sendPaceUs"].as_u64().unwrap_or(0),
+                max_send_pace_us: v["maxSendPaceUs"].as_u64().unwrap_or(0),
                 pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
                 capture_backend: v["captureBackend"]
                     .as_str()
@@ -336,6 +345,7 @@ impl CaptureBackend for FfiBackend {
                 capture_queue_wait_p95_us: v["captureQueueWaitP95Us"].as_u64().unwrap_or(0),
                 encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
                 send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
+                send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
                 error: v["error"]
                     .as_str()
                     .filter(|s| !s.is_empty())

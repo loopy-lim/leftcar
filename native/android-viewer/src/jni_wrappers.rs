@@ -6,11 +6,9 @@
 use std::ffi::{c_char, c_void, CString};
 
 #[repr(C)]
-struct jobject(c_void);
+pub struct jobject(c_void);
 #[repr(C)]
-struct JNIEnv(c_void);
-#[repr(C)]
-struct _jobject(c_void);
+pub struct JNIEnv(c_void);
 
 // JNI vtable access: GetStringUTFChars / ReleaseStringUTFChars / ExceptionCheck
 // JNIEnv is a pointer to a struct whose first field points to a function table.
@@ -124,17 +122,6 @@ extern "C" {
 //   streamLatency(String): long
 //   release(long, String): int
 
-macro_rules! jni_fn {
-    ($(#[$meta:meta])* $name:ident($($arg:ty),*) -> $ret:ty, $body:expr) => {
-        $(#[$meta])*
-        #[no_mangle]
-        #[allow(clippy::not_unsafe_ptr_arg_deref)]
-        pub unsafe extern "C" fn $name(_env: *mut JNIEnv, _class: *mut jobject, $($arg: $arg),*) -> $ret {
-            $body(_env, $($arg),*)
-        }
-    };
-}
-
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_start(
@@ -174,8 +161,6 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cancelPrepare
     }
     unsafe { leftcar_jni_cancel_prepared_port(port as u16) }
 }
-
-type AttachArgs = (i64, *mut jobject, *mut jobject);
 
 fn attach_body(env: *mut JNIEnv, state: i64, jstr: *mut jobject, surface: *mut jobject) -> i32 {
     if unsafe { exception_pending(env) } {

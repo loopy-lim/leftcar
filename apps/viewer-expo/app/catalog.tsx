@@ -9,6 +9,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   type ListRenderItemInfo,
   Pressable,
@@ -17,16 +18,19 @@ import {
   Text,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { NativeModules } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { allocPort, controlClient, controlHost, reconnectHost } from "../src/session";
+import { allocPort, controlClient, controlHost, disconnectHost, reconnectHost } from "../src/session";
+import { clearToken } from "../src/pairing";
 import {
   startPreparedStream,
   type StreamLauncher,
 } from "../src/launch-stream";
 import {
   isControlTransportError,
+  isUnauthorizedError,
   preferredCaptureBackend,
   type CatalogView,
   type DisplayInfo,
@@ -44,6 +48,7 @@ interface ActiveStream {
   height: number;
   fps: number;
   captureBackend: string;
+  viewerIps: string[];
   startedAt: number;
 }
 
@@ -176,7 +181,7 @@ function CatalogHeader({
       {/* Error Card */}
       {error ? (
         <View style={styles.errorCard}>
-          <Text style={styles.errorIcon}>⚠️</Text>
+          <Ionicons name="alert-circle-outline" size={18} color="#DC2626" />
           <View style={styles.errorBody}>
             <Text style={styles.errorText}>{error}</Text>
             <View style={styles.errorActions}>
@@ -229,7 +234,10 @@ function CatalogHeader({
           {refreshDisabled ? (
             <ActivityIndicator color="#2563EB" size="small" />
           ) : (
-            <Text style={styles.btnRefreshText}>새로고침</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+              <Ionicons name="refresh-outline" size={13} color="#2563EB" />
+              <Text style={styles.btnRefreshText}>새로고침</Text>
+            </View>
           )}
         </Pressable>
       </View>
@@ -257,7 +265,7 @@ function DisplayListItem({
   return (
     <Pressable style={styles.displayCard} onPress={handlePress} disabled={disabled}>
       <View style={styles.displayIconBox}>
-        <Text style={styles.displayIcon}>🖥️</Text>
+        <Ionicons name="desktop-outline" size={20} color="#2563EB" />
       </View>
 
       <View style={styles.displayMain}>
@@ -280,7 +288,10 @@ function DisplayListItem({
         {isLaunching ? (
           <ActivityIndicator color="#FFFFFF" size="small" />
         ) : (
-          <Text style={styles.openBtnText}>열기 →</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <Text style={styles.openBtnText}>열기</Text>
+            <Ionicons name="arrow-forward" size={13} color="#FFFFFF" />
+          </View>
         )}
       </View>
     </Pressable>
@@ -380,6 +391,7 @@ function useStreamController(
         height: active.height,
         fps: active.fps,
         captureBackend: active.captureBackend,
+        viewerIps: active.viewerIps,
       });
       return { active, restarted };
     },
@@ -457,6 +469,21 @@ export default function Catalog() {
     staleTime: 30_000,
   });
   const { refetch: refetchCatalog } = catalogQuery;
+
+  useEffect(() => {
+    if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
+      void (async () => {
+        await clearToken();
+        disconnectHost();
+        Alert.alert(
+          "기기 인증 만료",
+          "호스트와의 연결 인증이 만료되었거나 해제되었습니다. 다시 페어링해 주세요.",
+        );
+        router.replace("/pairing");
+      })();
+    }
+  }, [catalogQuery.error]);
+
   const displays = (catalogQuery.data?.displays ?? []).filter(
     (display) => !isHubDisplay(display.name),
   );
@@ -466,6 +493,8 @@ export default function Catalog() {
     catalogQuery.data,
     "",
   );
+  const mediaHost =
+    catalogQuery.data?.mediaHost?.trim() || catalogDisplayHost(host);
 
   const { addStream, removeStream, streams } = useStreamController(setError);
 
@@ -505,21 +534,23 @@ export default function Catalog() {
           fps,
           captureBackend: effectiveCaptureBackend,
         };
-        const session = await startPreparedStream({
+        const started = await startPreparedStream({
           control: client,
+          request: requestWithReconnect,
           launcher,
-          host: catalogDisplayHost(host),
+          host: mediaHost,
           args: startArgs,
         });
         addStream({
           port,
-          session,
+          session: started.session,
           sourceIndex: d.index,
           sourceName: d.name,
           width,
           height,
           fps,
           captureBackend: effectiveCaptureBackend,
+          viewerIps: started.viewerIps,
           startedAt: Date.now(),
         });
       } catch (e) {
@@ -528,14 +559,12 @@ export default function Catalog() {
         setLaunchingIndex(null);
       }
     },
-    [addStream, effectiveCaptureBackend, host, selectedProfile],
+    [addStream, effectiveCaptureBackend, mediaHost, selectedProfile],
   );
 
   const stopStream = useCallback(async (a: ActiveStream) => {
-    const client = controlClient();
-    if (!client) return;
     try {
-      await client.request("stopStream", { session: a.session });
+      await requestWithReconnect("stopStream", { session: a.session });
     } catch {
       // best effort
     }

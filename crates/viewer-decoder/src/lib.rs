@@ -481,93 +481,82 @@ impl AndroidDecoder {
         let sps_nal = strip_sc(sps);
         let (sw, sh) = parse_sps_dimensions(sps_nal).unwrap_or((width, height));
         let mime = c"video/avc".as_ptr();
-        let named_codec = codec_name
-            .and_then(|name| std::ffi::CString::new(name).ok())
-            .map(|name| unsafe { AMediaCodec_createCodecByName(name.as_ptr()) })
-            .unwrap_or(std::ptr::null_mut());
-        let codec = if named_codec.is_null() {
-            unsafe { AMediaCodec_createDecoderByType(mime) }
-        } else {
-            named_codec
-        };
-        if codec.is_null() {
-            return Err(DecoderError::CreateFailed {
-                mime: "video/avc".into(),
+        let mut candidates: Vec<Option<&str>> = Vec::new();
+        if let Some(name) = codec_name {
+            candidates.push(Some(name));
+        }
+        candidates.push(None);
+
+        let mut last_error = None;
+        for candidate in candidates {
+            let codec = if let Some(name) = candidate {
+                if let Ok(c_name) = std::ffi::CString::new(name) {
+                    unsafe { AMediaCodec_createCodecByName(c_name.as_ptr()) }
+                } else {
+                    std::ptr::null_mut()
+                }
+            } else {
+                unsafe { AMediaCodec_createDecoderByType(mime) }
+            };
+            if codec.is_null() {
+                continue;
+            }
+            let format = unsafe { AMediaFormat_new() };
+            unsafe {
+                // NDK samples set the mime key on the format even for decoders
+                // created by type; some vendors reject without it.
+                AMediaFormat_setString_pub(format, c"mime".as_ptr(), mime);
+                AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
+                AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
+                AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
+                AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
+                // Request an input slot large enough for a worst-case IDR. Without
+                // this hint, some vendor codecs size compressed input buffers for
+                // average frames and reject the first high-motion/key frame.
+                let max_input_size =
+                    (u64::from(sw) * u64::from(sh) * 3 / 2).clamp(1 << 20, 16 << 20) as i32;
+                AMediaFormat_setInt32(format, c"max-input-size".as_ptr(), max_input_size);
+                // Tell platform decoders this is an interactive, real-time
+                // stream. These are optional MediaFormat keys, so older/vendor
+                // codecs can ignore them while modern codecs avoid extra queueing.
+                let fps_val = fps.clamp(1, 90) as i32;
+                AMediaFormat_setInt32(format, c"frame-rate".as_ptr(), fps_val);
+                AMediaFormat_setInt32(format, c"operating-rate".as_ptr(), fps_val);
+                AMediaFormat_setInt32(format, c"priority".as_ptr(), 0);
+                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
+                let surface = if window == 0 {
+                    std::ptr::null_mut()
+                } else {
+                    window as *mut std::ffi::c_void
+                };
+                let status = AMediaCodec_configure(codec, format, surface, std::ptr::null(), 0);
+                if status != AMEDIA_OK {
+                    AMediaFormat_delete(format);
+                    AMediaCodec_delete(codec);
+                    last_error = Some(DecoderError::ConfigureFailed { status });
+                    continue;
+                }
+                let status = AMediaCodec_start(codec);
+                if status != AMEDIA_OK {
+                    AMediaFormat_delete(format);
+                    AMediaCodec_delete(codec);
+                    last_error = Some(DecoderError::StartFailed { status });
+                    continue;
+                }
+            }
+            return Ok(Self {
+                codec,
+                format,
+                started: true,
+                width: sw as i32,
+                height: sh as i32,
+                frames_rendered: 0,
+                frames_discarded: 0,
             });
         }
-        let format = unsafe { AMediaFormat_new() };
-        unsafe {
-            // NDK samples set the mime key on the format even for decoders
-            // created by type; some vendors reject without it.
-            AMediaFormat_setString_pub(format, c"mime".as_ptr(), mime);
-            AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
-            AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
-            AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
-            AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
-            // Request an input slot large enough for a worst-case IDR. Without
-            // this hint, some vendor codecs size compressed input buffers for
-            // average frames and reject the first high-motion/key frame.
-            let max_input_size =
-                (u64::from(sw) * u64::from(sh) * 3 / 2).clamp(1 << 20, 16 << 20) as i32;
-            AMediaFormat_setInt32(format, c"max-input-size".as_ptr(), max_input_size);
-            // Tell platform decoders this is an interactive, real-time
-            // stream. These are optional MediaFormat keys, so older/vendor
-            // codecs can ignore them while modern codecs avoid extra queueing.
-            let fps = fps.clamp(1, 90) as i32;
-            AMediaFormat_setInt32(format, c"frame-rate".as_ptr(), fps);
-            AMediaFormat_setInt32(format, c"operating-rate".as_ptr(), fps);
-            AMediaFormat_setInt32(format, c"priority".as_ptr(), 0);
-            AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
-            let surface = if window == 0 {
-                std::ptr::null_mut()
-            } else {
-                window as *mut std::ffi::c_void
-            };
-            let status = AMediaCodec_configure(codec, format, surface, std::ptr::null(), 0);
-            if status != AMEDIA_OK {
-                let fmt_str = AMediaFormat_toString_pub(format);
-                let fmt_cstr = if fmt_str.is_null() {
-                    "<null>".to_string()
-                } else {
-                    std::ffi::CStr::from_ptr(fmt_str)
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                let mut name_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
-                let name = if AMediaCodec_getName_pub(codec, &mut name_ptr) == AMEDIA_OK
-                    && !name_ptr.is_null()
-                {
-                    // leak the small name buffer: no delete API in this NDK
-                    std::ffi::CStr::from_ptr(name_ptr)
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    "<unknown>".to_string()
-                };
-                AMediaFormat_delete(format);
-                AMediaCodec_delete(codec);
-                return Err(DecoderError::ConfigureFailedWithFormat {
-                    status,
-                    format: fmt_str_cstr(fmt_cstr),
-                    codec_name: name,
-                });
-            }
-            let status = AMediaCodec_start(codec);
-            if status != AMEDIA_OK {
-                AMediaFormat_delete(format);
-                AMediaCodec_delete(codec);
-                return Err(DecoderError::StartFailed { status });
-            }
-        }
-        Ok(Self {
-            codec,
-            format,
-            started: true,
-            width: sw as i32,
-            height: sh as i32,
-            frames_rendered: 0,
-            frames_discarded: 0,
-        })
+        Err(last_error.unwrap_or(DecoderError::CreateFailed {
+            mime: "video/avc".into(),
+        }))
     }
 
     /// Platform name of the instantiated codec, for runtime verification.
@@ -843,10 +832,6 @@ pub const FORMAT_KEY_CSD0: &str = "csd-0";
 pub const FORMAT_KEY_CSD1: &str = "csd-1";
 pub const FORMAT_KEY_WIDTH: &str = "width";
 pub const FORMAT_KEY_HEIGHT: &str = "height";
-
-fn fmt_str_cstr(s: String) -> String {
-    s
-}
 
 #[cfg(test)]
 mod sps_tests {

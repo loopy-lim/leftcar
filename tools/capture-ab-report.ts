@@ -5,11 +5,17 @@ type SessionSample = {
   state: string;
   frames?: number;
   dropped?: number;
+  networkQueueDropped?: number;
+  udpSendFailures?: number;
+  udpSendRetries?: number;
+  recoveryKeyframes?: number;
+  recoveryRequestsSuppressed?: number;
   captureBackend?: string;
   firstSendMs?: number;
   captureIntervalP95Us?: number;
   captureToEncodeP95Us?: number;
   sendBlockP95Us?: number;
+  sendPaceP95Us?: number;
   cpuPercent?: number;
   gpuPercent?: number;
   error?: string | null;
@@ -60,10 +66,31 @@ function summarize(path: string) {
     successful: successful.length,
     tenConnectionGate: sessions.length >= 10 && successful.length === sessions.length,
     totalDrops: successful.reduce((sum, sample) => sum + (sample.dropped ?? 0), 0),
+    networkQueueDrops: successful.reduce(
+      (sum, sample) => sum + (sample.networkQueueDropped ?? 0),
+      0,
+    ),
+    udpSendFailures: successful.reduce(
+      (sum, sample) => sum + (sample.udpSendFailures ?? 0),
+      0,
+    ),
+    udpSendRetries: successful.reduce(
+      (sum, sample) => sum + (sample.udpSendRetries ?? 0),
+      0,
+    ),
+    recoveryKeyframes: successful.reduce(
+      (sum, sample) => sum + (sample.recoveryKeyframes ?? 0),
+      0,
+    ),
+    recoveryRequestsSuppressed: successful.reduce(
+      (sum, sample) => sum + (sample.recoveryRequestsSuppressed ?? 0),
+      0,
+    ),
     firstSendP95Ms: p95(values("firstSendMs")),
     captureIntervalP95Ms: p95(values("captureIntervalP95Us")) / 1000,
     captureToEncodeP95Ms: p95(values("captureToEncodeP95Us")) / 1000,
     sendBlockP95Ms: p95(values("sendBlockP95Us")) / 1000,
+    sendPaceP95Ms: p95(values("sendPaceP95Us")) / 1000,
     cpuP95Percent: p95(values("cpuPercent")),
     gpuP95Percent: p95(values("gpuPercent")),
     errors: sessions.flatMap((sample) => (sample.error ? [sample.error] : [])),

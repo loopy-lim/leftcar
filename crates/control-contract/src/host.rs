@@ -219,6 +219,12 @@ pub struct CatalogView {
     /// the host default; keeping this in the catalog removes viewer-side OS
     /// guesses and lets newer hosts remain compatible with older viewers.
     pub capture_backends: Vec<CaptureBackendInfo>,
+    /// Best-effort RFC1918 address for the low-latency media path. Control may
+    /// arrive through a tailnet address while media can still travel directly
+    /// over the physical LAN. Older hosts omit this field and viewers fall
+    /// back to the control address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_host: Option<String>,
     pub displays: Vec<DisplayInfo>,
 }
 
@@ -250,6 +256,16 @@ pub struct StatsInfo {
     pub fps_target: u32,
     pub dropped: i64,
     pub network_dropped: i64,
+    #[serde(default)]
+    pub network_queue_dropped: i64,
+    #[serde(default)]
+    pub udp_send_failures: i64,
+    #[serde(default)]
+    pub udp_send_retries: i64,
+    #[serde(default)]
+    pub recovery_keyframes: i64,
+    #[serde(default)]
+    pub recovery_requests_suppressed: i64,
     pub capture_queue_dropped: i64,
     pub capture_to_encode_us: u64,
     pub max_capture_to_encode_us: u64,
@@ -259,6 +275,10 @@ pub struct StatsInfo {
     pub max_encode_output_us: u64,
     pub send_block_us: u64,
     pub max_send_block_us: u64,
+    #[serde(default)]
+    pub send_pace_us: u64,
+    #[serde(default)]
+    pub max_send_pace_us: u64,
     pub pending_frame: u32,
     pub capture_backend: String,
     pub media_transport: String,
@@ -271,6 +291,8 @@ pub struct StatsInfo {
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
     pub send_block_p95_us: u64,
+    #[serde(default)]
+    pub send_pace_p95_us: u64,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -334,6 +356,16 @@ pub struct SessionView {
     pub input_rate_hz: u32,
     pub dropped: i64,
     pub network_dropped: i64,
+    #[serde(default)]
+    pub network_queue_dropped: i64,
+    #[serde(default)]
+    pub udp_send_failures: i64,
+    #[serde(default)]
+    pub udp_send_retries: i64,
+    #[serde(default)]
+    pub recovery_keyframes: i64,
+    #[serde(default)]
+    pub recovery_requests_suppressed: i64,
     pub capture_queue_dropped: i64,
     pub capture_to_encode_us: u64,
     pub max_capture_to_encode_us: u64,
@@ -343,6 +375,10 @@ pub struct SessionView {
     pub max_encode_output_us: u64,
     pub send_block_us: u64,
     pub max_send_block_us: u64,
+    #[serde(default)]
+    pub send_pace_us: u64,
+    #[serde(default)]
+    pub max_send_pace_us: u64,
     pub pending_frame: u32,
     pub frames: i64,
     pub bytes: i64,
@@ -357,6 +393,8 @@ pub struct SessionView {
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
     pub send_block_p95_us: u64,
+    #[serde(default)]
+    pub send_pace_p95_us: u64,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -405,11 +443,13 @@ mod stream_control_tests {
                 label: "Windows Graphics Capture".into(),
                 hint: "hardware H.264".into(),
             }],
+            media_host: Some("192.168.0.134".into()),
             displays: Vec::new(),
         };
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(json.contains("\"platform\":\"windows\""));
         assert!(json.contains("\"captureBackends\""));
+        assert!(json.contains("\"mediaHost\":\"192.168.0.134\""));
         assert!(json.contains("\"windowsGraphicsCapture\""));
     }
 
@@ -429,6 +469,11 @@ mod stream_control_tests {
                 input_rate_hz: 120,
                 dropped: 0,
                 network_dropped: 0,
+                network_queue_dropped: 0,
+                udp_send_failures: 0,
+                udp_send_retries: 0,
+                recovery_keyframes: 0,
+                recovery_requests_suppressed: 0,
                 capture_queue_dropped: 0,
                 capture_to_encode_us: 0,
                 max_capture_to_encode_us: 0,
@@ -438,6 +483,8 @@ mod stream_control_tests {
                 max_encode_output_us: 0,
                 send_block_us: 0,
                 max_send_block_us: 0,
+                send_pace_us: 0,
+                max_send_pace_us: 0,
                 pending_frame: 0,
                 frames: 100,
                 bytes: 1_000_000,
@@ -452,6 +499,7 @@ mod stream_control_tests {
                 capture_queue_wait_p95_us: 1_000,
                 encode_output_p95_us: 7_000,
                 send_block_p95_us: 1_000,
+                send_pace_p95_us: 0,
                 error: None,
             }],
         };
@@ -470,6 +518,11 @@ mod stream_control_tests {
             fps_target: 60,
             dropped: 0,
             network_dropped: 0,
+            network_queue_dropped: 0,
+            udp_send_failures: 0,
+            udp_send_retries: 0,
+            recovery_keyframes: 0,
+            recovery_requests_suppressed: 0,
             capture_queue_dropped: 0,
             capture_to_encode_us: 0,
             max_capture_to_encode_us: 0,
@@ -479,6 +532,8 @@ mod stream_control_tests {
             max_encode_output_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
+            send_pace_us: 0,
+            max_send_pace_us: 0,
             pending_frame: 0,
             capture_backend: "screenCaptureKit".into(),
             media_transport: "udp".into(),
@@ -491,6 +546,7 @@ mod stream_control_tests {
             capture_queue_wait_p95_us: 1_000,
             encode_output_p95_us: 7_000,
             send_block_p95_us: 1_000,
+            send_pace_p95_us: 0,
             error: None,
         })
         .unwrap();

@@ -1,11 +1,15 @@
 package dev.leftcar.viewer.stream
 
 import android.content.Intent
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.Arguments
 import dev.leftcar.viewer.shim.ViewerNative
 
 /**
@@ -19,6 +23,33 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     override fun getName() = "StreamLauncher"
+
+    @ReactMethod
+    fun getLocalIpv4Addresses(promise: Promise) {
+        try {
+            val result = Arguments.createArray()
+            val seen = linkedSetOf<String>()
+            val manager = reactApplicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as ConnectivityManager
+            for (network in manager.allNetworks) {
+                val capabilities = manager.getNetworkCapabilities(network) ?: continue
+                val isPhysicalLan = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                if (!isPhysicalLan) continue
+                val properties = manager.getLinkProperties(network) ?: continue
+                for (linkAddress in properties.linkAddresses) {
+                    val address = linkAddress.address
+                    if (address.address.size == 4 && address.isSiteLocalAddress) {
+                        seen += address.hostAddress ?: continue
+                    }
+                }
+            }
+            seen.take(4).forEach(result::pushString)
+            promise.resolve(result)
+        } catch (t: Throwable) {
+            promise.reject("ERR_LOCAL_ADDRESSES", t.message, t)
+        }
+    }
 
     @ReactMethod
     fun prepareStream(port: Int, host: String, promise: Promise) {

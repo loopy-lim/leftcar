@@ -9,34 +9,21 @@
 use std::ffi::{c_char, c_void, CStr};
 
 use crate::input_protocol::{
-    encode_input, encode_latency_probe, estimate_latency, normalized_axis, parse_ack,
-    parse_input_status, parse_latency_probe_response, InputEvent, InputScheduler,
+    encode_input, encode_latency_probe, encode_receiver_feedback, estimate_latency,
+    normalized_axis, parse_ack, parse_input_status, parse_latency_probe_response, InputEvent,
+    InputScheduler, ReceiverFeedback,
 };
-use crate::media_datagram::{parse_fragment, FrameReassembler};
+use crate::media_datagram::{
+    parse_fragment, stale_frame_budget_ms, CompletedFrameSequencer, FrameReassembler,
+    RecoveryRequestGate,
+};
 use crate::net_guard::{host_is_valid, peer_allowed};
 use crate::prepared_udp::PreparedUdpReceiver;
-
-#[repr(C)]
-struct jobject;
-#[repr(C)]
-struct JNIEnv(c_void);
-#[repr(C)]
-struct JavaVM(c_void);
-#[repr(C)]
-struct JNINativeMethod {
-    name: *const c_char,
-    signature: *const c_char,
-    fnPtr: *mut c_void,
-}
+use std::os::fd::AsRawFd;
 
 extern "C" {
-    fn ANativeWindow_fromSurface(env: *mut JNIEnv, surface: *mut jobject) -> *mut c_void;
     fn ANativeWindow_acquire(window: *mut c_void);
     fn ANativeWindow_release(window: *mut c_void);
-}
-
-unsafe extern "C" {
-    fn GetJavaVM(env: *mut JNIEnv, vm: *mut *mut JavaVM) -> i32;
 }
 
 const LEFTCAR_OK: i32 = 0;
@@ -46,25 +33,6 @@ const LEFTCAR_ERR_PANIC: i32 = 3;
 const LEFTCAR_ERR_INVALID: i32 = 4;
 
 type StatePtr = *mut viewer_core::ProcessState;
-
-unsafe fn instance_from_jstring(
-    _env: *mut JNIEnv,
-    jstr: *mut jobject,
-) -> Result<viewer_core::StreamInstanceId, i32> {
-    if jstr.is_null() {
-        return Err(LEFTCAR_ERR_NULL);
-    }
-    // Read the String via JNI GetStringUTFChars through env vtable is
-    // heavyweight; instead the shim passes UTF-8 through a global call:
-    // we rely on the C-string path below (attachSurfaceCString). This stub
-    // is intentionally unreachable from Kotlin (no external binding).
-    let _ = _env;
-    Err(LEFTCAR_ERR_INVALID)
-}
-
-/// JNI methods table (registered via JNI_OnLoad).
-const METHODS: &[(&[u8], &[u8], *const c_void)] = &[];
-pub const _METHODS_LEN: usize = METHODS.len();
 
 extern "C" {
     fn __android_log_print(prio: i32, tag: *const c_char, fmt: *const c_char, ...) -> i32;
@@ -251,11 +219,6 @@ struct RendererStats {
 
 const LATENCY_UNKNOWN: u64 = u64::MAX;
 const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-// Drop only a genuinely stale dependency chain. A lower fixed limit can lock
-// a busy Wi-Fi link into an IDR loop; 80ms cuts visible backlog while leaving
-// room for one short scheduling spike at 60/90fps.
-const MAX_CAPTURE_TO_DECODER_MS: u64 = 80;
-
 fn is_keyframe(au: &[u8]) -> bool {
     viewer_decoder::split_annexb(au)
         .iter()
@@ -277,23 +240,10 @@ fn reset_decoder(
     *awaiting_keyframe = true;
 }
 
-/// A missing encoded AU can invalidate the reference chain of every later
-/// H.264 delta frame. Drop the codec but retain SPS/PPS bookkeeping; the host
-/// sends CFG before the requested IDR and that packet recreates MediaCodec.
-/// Android requires codec-specific data to be resubmitted after `flush`, and
-/// vendor behavior differs, so a clean recreate is safer than a flush whose
-/// next input is only an IDR.
-fn resync_decoder_after_frame_gap(
-    decoder: &mut Option<viewer_decoder::AndroidDecoder>,
-    awaiting_keyframe: &mut bool,
-) {
-    if *awaiting_keyframe {
-        return;
-    }
-    if let Some(decoder) = decoder.as_mut() {
-        decoder.stop();
-    }
-    *decoder = None;
+/// A missing encoded AU invalidates the reference chain of subsequent delta
+/// frames. Keep the MediaCodec instance running, but wait for the next IDR keyframe
+/// before feeding additional frames to the decoder.
+fn resync_decoder_after_frame_gap(awaiting_keyframe: &mut bool) {
     *awaiting_keyframe = true;
 }
 
@@ -301,6 +251,7 @@ fn resync_decoder_after_frame_gap(
 enum FeedOutcome {
     Queued,
     ResyncRequired,
+    FatalError,
 }
 
 fn send_viewer_command(
@@ -352,6 +303,43 @@ fn send_latency_probe(
     }
 }
 
+fn feedback_latency_value(value: u64) -> u16 {
+    if value == LATENCY_UNKNOWN {
+        u16::MAX
+    } else {
+        value.min(u64::from(u16::MAX - 1)) as u16
+    }
+}
+
+fn send_receiver_feedback(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    stats: &RendererStats,
+    incomplete_aus: u64,
+    control: &RendererControl,
+) {
+    if token.is_empty() {
+        return;
+    }
+    let feedback = encode_receiver_feedback(
+        ReceiverFeedback {
+            frame_gaps: stats.frame_gaps.min(u64::from(u32::MAX)) as u32,
+            input_drops: stats.input_drops.min(u64::from(u32::MAX)) as u32,
+            incomplete_aus: incomplete_aus.min(u64::from(u32::MAX)) as u32,
+            stale_frames: stats.stale_inputs.min(u64::from(u32::MAX)) as u32,
+            network_rtt_ms: feedback_latency_value(control.network_rtt_ms.load(Ordering::Relaxed)),
+            wire_to_decoder_ms: feedback_latency_value(
+                control.wire_to_decoder_ms.load(Ordering::Relaxed),
+            ),
+        },
+        token,
+    );
+    if let Err(error) = socket.send_to(&feedback, peer) {
+        log_info!("failed to send receiver feedback: {error}");
+    }
+}
+
 fn store_smoothed_latency(target: &AtomicU64, sample: u64) {
     let previous = target.load(Ordering::Relaxed);
     let next = if previous == LATENCY_UNKNOWN {
@@ -396,6 +384,99 @@ fn flush_input(
 
 fn request_idr(socket: &std::net::UdpSocket, peer: std::net::SocketAddr, token: &[u8]) {
     send_viewer_command(socket, peer, b"IDR", token);
+}
+
+fn request_idr_debounced(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    gate: &mut RecoveryRequestGate,
+) {
+    if gate.should_request(std::time::Instant::now()) {
+        request_idr(socket, peer, token);
+    }
+}
+
+const MEDIA_BATCH_SIZE: usize = 16;
+const MEDIA_DATAGRAM_BYTES: usize = 2_048;
+
+struct MediaBatch {
+    count: usize,
+    lengths: [usize; MEDIA_BATCH_SIZE],
+    peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE],
+}
+
+fn recv_media_batch(
+    socket: &std::net::UdpSocket,
+    buffers: &mut [[u8; MEDIA_DATAGRAM_BYTES]; MEDIA_BATCH_SIZE],
+) -> std::io::Result<MediaBatch> {
+    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
+    let mut iovecs: [libc::iovec; MEDIA_BATCH_SIZE] = std::array::from_fn(|index| libc::iovec {
+        iov_base: buffers[index].as_mut_ptr().cast(),
+        iov_len: MEDIA_DATAGRAM_BYTES,
+    });
+    let mut messages: [libc::mmsghdr; MEDIA_BATCH_SIZE] =
+        std::array::from_fn(|_| unsafe { std::mem::zeroed() });
+    for index in 0..MEDIA_BATCH_SIZE {
+        messages[index].msg_hdr.msg_name = (&mut peers[index] as *mut libc::sockaddr_in).cast();
+        messages[index].msg_hdr.msg_namelen =
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        messages[index].msg_hdr.msg_iov = &mut iovecs[index];
+        messages[index].msg_hdr.msg_iovlen = 1;
+    }
+    let count = unsafe {
+        libc::recvmmsg(
+            socket.as_raw_fd(),
+            messages.as_mut_ptr(),
+            MEDIA_BATCH_SIZE as u32,
+            libc::MSG_WAITFORONE,
+            std::ptr::null_mut(),
+        )
+    };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut lengths = [0usize; MEDIA_BATCH_SIZE];
+    for index in 0..count as usize {
+        lengths[index] = messages[index].msg_len as usize;
+    }
+    Ok(MediaBatch {
+        count: count as usize,
+        lengths,
+        peers,
+    })
+}
+
+fn ipv4_socket_addr(raw: &libc::sockaddr_in) -> Option<std::net::SocketAddr> {
+    if i32::from(raw.sin_family) != libc::AF_INET {
+        return None;
+    }
+    let octets = raw.sin_addr.s_addr.to_ne_bytes();
+    Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::from(octets),
+        u16::from_be(raw.sin_port),
+    )))
+}
+
+type InputEndpoint = std::sync::Arc<std::sync::Mutex<Option<(std::net::SocketAddr, Vec<u8>)>>>;
+
+fn spawn_input_worker(
+    socket: std::net::UdpSocket,
+    endpoint: InputEndpoint,
+    control: std::sync::Arc<RendererControl>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("leftcar-input".into())
+        .spawn(move || {
+            while !control.stop.load(Ordering::Relaxed) {
+                let target = endpoint.lock().unwrap().clone();
+                if let Some((peer, token)) = target {
+                    flush_input(&socket, peer, &token, &control);
+                }
+                std::thread::park_timeout(std::time::Duration::from_millis(2));
+            }
+        })
+        .expect("leftcar input worker must start")
 }
 
 fn consume_viewer_response(
@@ -444,10 +525,10 @@ fn feed_and_render(
     let frame_us = 1_000_000u64 / u64::from(fps.max(1));
     let pts_us = aus.saturating_mul(frame_us) as i64;
     let started = std::time::Instant::now();
-    // Give a hardware codec at most 1 ms to hand back an input slot. This
+    // Give a hardware codec at most 2 ms to hand back an input slot. This
     // absorbs normal scheduler jitter without allowing a frame backlog to
     // become visible interaction latency.
-    let result = dec.feed_au_status(&frame.au, pts_us, 1_000);
+    let result = dec.feed_au_status(&frame.au, pts_us, 2_000);
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
     control.last_feed_us.store(feed_us, Ordering::Relaxed);
@@ -469,11 +550,11 @@ fn feed_and_render(
                 required,
                 capacity
             );
-            FeedOutcome::ResyncRequired
+            FeedOutcome::FatalError
         }
         Err(e) => {
             log_info!("decoder feed failed: {}", e);
-            FeedOutcome::ResyncRequired
+            FeedOutcome::FatalError
         }
     };
 
@@ -490,7 +571,7 @@ fn feed_and_render(
         store_smoothed_latency(&control.wire_to_decoder_ms, age);
     }
 
-    if dec.frames_rendered % 30 == 0 && dec.frames_rendered > 0 {
+    if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
         log_info!(
             "Rendered {} frames; outputDrops={} staleInputs={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
@@ -618,7 +699,6 @@ fn spawn_live_stream_renderer(
         // separate non-blocking socket and receive queue.
         let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(2)));
         let _ = control_socket.set_nonblocking(true);
-        use std::os::fd::AsRawFd;
         let receive_buffer: libc::c_int = 512 * 1024;
         let media_tos: libc::c_int = 0x88;
         let control_tos: libc::c_int = 0xb8;
@@ -650,10 +730,24 @@ fn spawn_live_stream_renderer(
             port
         );
         let mut buf = vec![0u8; 2_048];
+        let mut media_buffers = [[0u8; MEDIA_DATAGRAM_BYTES]; MEDIA_BATCH_SIZE];
         let mut control_buf = vec![0u8; 512];
         let mut host_peer: Option<std::net::SocketAddr> = None;
         let mut viewer_control_token = prepared_token;
+        let input_endpoint: InputEndpoint = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let input_worker = match control_socket.try_clone() {
+            Ok(worker_socket) => Some(spawn_input_worker(
+                worker_socket,
+                input_endpoint.clone(),
+                control_clone.clone(),
+            )),
+            Err(error) => {
+                log_info!("failed to clone input socket; input stays on media loop: {error}");
+                None
+            }
+        };
         let mut reassembler = FrameReassembler::default();
+        let mut frame_sequencer = CompletedFrameSequencer::default();
         let mut sps = Vec::new();
         let mut pps = Vec::new();
         let mut decoder: Option<viewer_decoder::AndroidDecoder> = None;
@@ -663,6 +757,7 @@ fn spawn_live_stream_renderer(
         let mut renderer_stats = RendererStats::default();
         let mut latency_probe_sequence = 0u32;
         let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
+        let mut recovery_gate = RecoveryRequestGate::default();
 
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
@@ -673,7 +768,9 @@ fn spawn_live_stream_renderer(
                 // other visible stream even though this Surface is transient.
                 reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
                 reassembler.clear();
+                frame_sequencer.clear();
                 last_frame_id = None;
+                *input_endpoint.lock().unwrap() = None;
                 control_clone.suspended.store(true, Ordering::SeqCst);
                 while control_clone.suspend.load(Ordering::SeqCst)
                     && !control_clone.stop.load(Ordering::SeqCst)
@@ -685,6 +782,8 @@ fn spawn_live_stream_renderer(
                             if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
                                 viewer_control_token.clear();
                                 viewer_control_token.extend_from_slice(&packet[4..]);
+                                *input_endpoint.lock().unwrap() =
+                                    Some((peer, viewer_control_token.clone()));
                                 control_clone.input.lock().unwrap().reset_session();
                                 let _ = socket.send_to(packet, peer);
                             }
@@ -704,7 +803,13 @@ fn spawn_live_stream_renderer(
                 }
                 control_clone.suspended.store(false, Ordering::SeqCst);
                 if let Some(peer) = host_peer {
-                    request_idr(&control_socket, peer, &viewer_control_token);
+                    *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &mut recovery_gate,
+                    );
                 }
                 continue;
             }
@@ -712,7 +817,9 @@ fn spawn_live_stream_renderer(
             if let Some(peer) = host_peer {
                 // Pointer samples run at 2x stream FPS (180Hz for 90fps) and
                 // never wait behind the media socket's fragment queue.
-                flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
+                if input_worker.is_none() {
+                    flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
+                }
                 if !viewer_control_token.is_empty()
                     && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL
                 {
@@ -722,6 +829,14 @@ fn spawn_live_stream_renderer(
                         peer,
                         &viewer_control_token,
                         latency_probe_sequence,
+                    );
+                    send_receiver_feedback(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &renderer_stats,
+                        reassembler.incomplete_evictions(),
+                        &control_clone,
                     );
                     last_latency_probe = std::time::Instant::now();
                 }
@@ -748,7 +863,7 @@ fn spawn_live_stream_renderer(
                 }
             }
 
-            let (received, peer) = match socket.recv_from(&mut buf) {
+            let batch = match recv_media_batch(&socket, &mut media_buffers) {
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -759,102 +874,121 @@ fn spawn_live_stream_renderer(
                     log_info!("UDP receive error: {e}");
                     continue;
                 }
-                Ok(received) => received,
+                Ok(batch) => batch,
             };
 
-            if !peer_allowed(Some(peer), &expected_host) {
-                log_info!("rejected media datagram from {peer}: not the paired host");
-                continue;
-            }
-            if host_peer != Some(peer) {
-                log_info!("UDP sender active: {peer}");
-                host_peer = Some(peer);
-                reassembler.clear();
-                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
-                last_frame_id = None;
-                aus = 0;
-                control_clone.input_enabled.store(-1, Ordering::SeqCst);
-                control_clone
-                    .network_rtt_ms
-                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
-                control_clone
-                    .capture_to_decoder_ms
-                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
-                control_clone
-                    .encode_to_decoder_ms
-                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
-                control_clone
-                    .wire_to_decoder_ms
-                    .store(LATENCY_UNKNOWN, Ordering::Relaxed);
-                renderer_stats.host_clock_offset_ms = None;
-                // A preflight listener may have consumed the initial CFG/IDR
-                // before this Surface existed. Its authenticated token is
-                // handed over with the socket, so request a fresh recovery
-                // frame as soon as the Host's media endpoint is known.
-                request_idr(&control_socket, peer, &viewer_control_token);
-            }
+            for (batch_index, media_buffer) in media_buffers.iter().enumerate().take(batch.count) {
+                let received = batch.lengths[batch_index];
+                let Some(peer) = ipv4_socket_addr(&batch.peers[batch_index]) else {
+                    continue;
+                };
 
-            let packet = &buf[..received];
-            if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
-                viewer_control_token.clear();
-                viewer_control_token.extend_from_slice(&packet[4..]);
-                control_clone.input.lock().unwrap().reset_session();
-                if let Err(error) = socket.send_to(packet, peer) {
-                    log_info!("failed to echo UDP reachability challenge: {error}");
-                } else {
-                    log_info!("UDP reachability challenge verified for {peer}");
+                if !peer_allowed(Some(peer), &expected_host) {
+                    log_info!("rejected media datagram from {peer}: not the paired host");
+                    continue;
                 }
-                request_idr(&control_socket, peer, &viewer_control_token);
-                continue;
-            }
-            // Keep accepting responses on the legacy media socket during a
-            // rolling Host/Viewer upgrade.
-            if consume_viewer_response(
-                packet,
-                &viewer_control_token,
-                latency_probe_sequence,
-                &control_clone,
-                &mut renderer_stats,
-            ) {
-                continue;
-            }
-            if packet.len() >= 3 && &packet[..3] == b"CFG" {
-                log_info!("Received CFG datagram ({} bytes)", packet.len());
-                let mut off = 3usize;
-                while off + 4 <= packet.len() {
-                    let l = u32::from_be_bytes(packet[off..off + 4].try_into().unwrap()) as usize;
-                    off += 4;
-                    if off + l > packet.len() {
-                        break;
+                if host_peer != Some(peer) {
+                    log_info!("UDP sender active: {peer}");
+                    host_peer = Some(peer);
+                    recovery_gate = RecoveryRequestGate::default();
+                    *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                    reassembler.clear();
+                    frame_sequencer.clear();
+                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                    last_frame_id = None;
+                    aus = 0;
+                    control_clone.input_enabled.store(-1, Ordering::SeqCst);
+                    control_clone
+                        .network_rtt_ms
+                        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                    control_clone
+                        .capture_to_decoder_ms
+                        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                    control_clone
+                        .encode_to_decoder_ms
+                        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                    control_clone
+                        .wire_to_decoder_ms
+                        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                    renderer_stats.host_clock_offset_ms = None;
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &mut recovery_gate,
+                    );
+                }
+
+                let packet = &media_buffer[..received];
+                if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
+                    viewer_control_token.clear();
+                    viewer_control_token.extend_from_slice(&packet[4..]);
+                    *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                    control_clone.input.lock().unwrap().reset_session();
+                    if let Err(error) = socket.send_to(packet, peer) {
+                        log_info!("failed to echo UDP reachability challenge: {error}");
+                    } else {
+                        log_info!("UDP reachability challenge verified for {peer}");
                     }
-                    let nal = &packet[off..off + l];
-                    if nal.len() > 4 {
-                        let t = viewer_decoder::nal_type(&nal[4..]);
-                        if t == Some(viewer_decoder::NAL_SPS) {
-                            sps = nal.to_vec();
-                        } else if t == Some(viewer_decoder::NAL_PPS) {
-                            pps = nal.to_vec();
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &mut recovery_gate,
+                    );
+                    continue;
+                }
+                // Keep accepting responses on the legacy media socket during a
+                // rolling Host/Viewer upgrade.
+                if consume_viewer_response(
+                    packet,
+                    &viewer_control_token,
+                    latency_probe_sequence,
+                    &control_clone,
+                    &mut renderer_stats,
+                ) {
+                    continue;
+                }
+                if packet.len() >= 3 && &packet[..3] == b"CFG" {
+                    log_info!("Received CFG datagram ({} bytes)", packet.len());
+                    let mut off = 3usize;
+                    while off + 4 <= packet.len() {
+                        let l =
+                            u32::from_be_bytes(packet[off..off + 4].try_into().unwrap()) as usize;
+                        off += 4;
+                        if off + l > packet.len() {
+                            break;
                         }
+                        let nal = &packet[off..off + l];
+                        if nal.len() > 4 {
+                            let t = viewer_decoder::nal_type(&nal[4..]);
+                            if t == Some(viewer_decoder::NAL_SPS) {
+                                sps = nal.to_vec();
+                            } else if t == Some(viewer_decoder::NAL_PPS) {
+                                pps = nal.to_vec();
+                            }
+                        }
+                        off += l;
                     }
-                    off += l;
-                }
-                if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
-                    unsafe {
+                    if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
                         log_info!(
                             "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
                             window_handle,
                             sps.len(),
                             pps.len()
                         );
-                        match viewer_decoder::AndroidDecoder::new_h264_named(
-                            &sps,
-                            &pps,
-                            width,
-                            height,
-                            window_handle,
-                            fps,
-                            Some("c2.qti.avc.decoder.low_latency"),
-                        ) {
+                        let created = unsafe {
+                            viewer_decoder::AndroidDecoder::new_h264_named(
+                                &sps,
+                                &pps,
+                                width,
+                                height,
+                                window_handle,
+                                fps,
+                                Some("c2.qti.avc.decoder.low_latency"),
+                            )
+                        };
+                        match created {
                             Ok(d) => {
                                 log_info!(
                                     "AndroidDecoder created successfully: actualCodec={}",
@@ -867,80 +1001,121 @@ fn spawn_live_stream_renderer(
                             }
                         }
                     }
-                }
-                // CFG is emitted with an IDR on the host. Do not feed
-                // delta frames until that recovery keyframe arrives.
-                awaiting_keyframe = true;
-                continue;
-            }
-
-            let Some(fragment) = parse_fragment(packet) else {
-                continue;
-            };
-            let Some(completed) = reassembler.push(fragment) else {
-                continue;
-            };
-            let frame = FramePacket {
-                id: completed.id,
-                au: completed.au,
-                capture_wall_ms: completed.capture_wall_ms,
-                encode_wall_ms: completed.encode_wall_ms,
-                send_wall_ms: Some(completed.send_wall_ms),
-            };
-            let keyframe = is_keyframe(&frame.au);
-            let capture_age_ms =
-                clock_corrected_age_ms(frame.capture_wall_ms, renderer_stats.host_clock_offset_ms);
-            if capture_age_ms.is_some_and(|age| age > MAX_CAPTURE_TO_DECODER_MS) {
-                renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
-                control_clone
-                    .stale_outputs
-                    .store(renderer_stats.stale_inputs, Ordering::Relaxed);
-                last_frame_id = Some(frame.id);
-                resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                request_idr(&control_socket, peer, &viewer_control_token);
-                continue;
-            }
-            let frame_gap = last_frame_id
-                .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
-                .unwrap_or(false);
-            last_frame_id = Some(frame.id);
-
-            if frame_gap {
-                renderer_stats.frame_gaps += 1;
-                control_clone
-                    .frame_gaps
-                    .store(renderer_stats.frame_gaps, Ordering::Relaxed);
-                log_info!(
-                    "UDP access-unit gap detected at id={}; awaiting next IDR",
-                    frame.id
-                );
-                if keyframe {
-                    awaiting_keyframe = false;
-                } else {
-                    resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                    request_idr(&control_socket, peer, &viewer_control_token);
+                    // CFG is emitted with an IDR on the host. Do not feed
+                    // delta frames until that recovery keyframe arrives.
+                    awaiting_keyframe = true;
                     continue;
                 }
-            }
 
-            if let Some(dec) = decoder.as_mut() {
-                if awaiting_keyframe && !keyframe {
+                let Some(fragment) = parse_fragment(packet) else {
                     continue;
-                }
-                match feed_and_render(
-                    dec,
-                    &frame,
-                    &mut aus,
-                    fps,
-                    &mut renderer_stats,
-                    &control_clone,
-                ) {
-                    FeedOutcome::Queued => {
-                        awaiting_keyframe = false;
+                };
+                let Some(reassembled) = reassembler.push(fragment) else {
+                    continue;
+                };
+                for completed in frame_sequencer.push(reassembled) {
+                    let frame = FramePacket {
+                        id: completed.id,
+                        au: completed.au,
+                        capture_wall_ms: completed.capture_wall_ms,
+                        encode_wall_ms: completed.encode_wall_ms,
+                        send_wall_ms: Some(completed.send_wall_ms),
+                    };
+                    let keyframe = is_keyframe(&frame.au);
+                    let capture_age_ms = clock_corrected_age_ms(
+                        frame.capture_wall_ms,
+                        renderer_stats.host_clock_offset_ms,
+                    );
+                    let rtt_ms = control_clone.network_rtt_ms.load(Ordering::Relaxed);
+                    let stale_budget_ms =
+                        stale_frame_budget_ms((rtt_ms != LATENCY_UNKNOWN).then_some(rtt_ms));
+                    // An IDR is the recovery boundary. Feeding a late keyframe is
+                    // preferable to dropping it and entering another request loop.
+                    if !keyframe && capture_age_ms.is_some_and(|age| age > stale_budget_ms) {
+                        renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
+                        control_clone
+                            .stale_outputs
+                            .store(renderer_stats.stale_inputs, Ordering::Relaxed);
+                        last_frame_id = Some(frame.id);
+                        resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                        request_idr_debounced(
+                            &control_socket,
+                            peer,
+                            &viewer_control_token,
+                            &mut recovery_gate,
+                        );
+                        continue;
                     }
-                    FeedOutcome::ResyncRequired => {
-                        resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
-                        request_idr(&control_socket, peer, &viewer_control_token);
+                    let frame_gap = last_frame_id
+                        .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
+                        .unwrap_or(false);
+                    last_frame_id = Some(frame.id);
+
+                    if frame_gap {
+                        renderer_stats.frame_gaps += 1;
+                        control_clone
+                            .frame_gaps
+                            .store(renderer_stats.frame_gaps, Ordering::Relaxed);
+                        log_info!(
+                            "UDP access-unit gap detected at id={}; awaiting next IDR",
+                            frame.id
+                        );
+                        if keyframe {
+                            awaiting_keyframe = false;
+                        } else {
+                            resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                            request_idr_debounced(
+                                &control_socket,
+                                peer,
+                                &viewer_control_token,
+                                &mut recovery_gate,
+                            );
+                            continue;
+                        }
+                    }
+
+                    if let Some(dec) = decoder.as_mut() {
+                        if awaiting_keyframe && !keyframe {
+                            continue;
+                        }
+                        match feed_and_render(
+                            dec,
+                            &frame,
+                            &mut aus,
+                            fps,
+                            &mut renderer_stats,
+                            &control_clone,
+                        ) {
+                            FeedOutcome::Queued => {
+                                awaiting_keyframe = false;
+                                if keyframe {
+                                    recovery_gate.recovered();
+                                }
+                            }
+                            FeedOutcome::ResyncRequired => {
+                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                );
+                            }
+                            FeedOutcome::FatalError => {
+                                reset_decoder(
+                                    &mut decoder,
+                                    &mut sps,
+                                    &mut pps,
+                                    &mut awaiting_keyframe,
+                                );
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -966,6 +1141,10 @@ fn spawn_live_stream_renderer(
         }
         if let Some(decoder) = decoder.as_mut() {
             decoder.stop();
+        }
+        *input_endpoint.lock().unwrap() = None;
+        if let Some(worker) = input_worker {
+            let _ = worker.join();
         }
         drop(decoder);
         drop(control_socket);
@@ -1444,11 +1623,4 @@ pub extern "C" fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool) {
             ANativeWindow_release(surface);
         }
     }
-}
-
-#[allow(unused)]
-fn unused(_: *mut JNIEnv, _: *mut JavaVM, _: *const JNINativeMethod) {
-    let _ = instance_from_jstring as unsafe fn(*mut JNIEnv, *mut jobject) -> _;
-    let _ = METHODS;
-    let _ = [(&b"start\0"[..], b"()J\0".as_ptr())];
 }

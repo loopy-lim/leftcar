@@ -36,7 +36,8 @@ impl PreparedUdpReceiver {
         }
 
         let socket = UdpSocket::bind(("0.0.0.0", port))?;
-        socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+        // Keep cancellation/handoff quantization below one 60 Hz frame.
+        socket.set_read_timeout(Some(Duration::from_millis(10)))?;
         let worker_socket = socket.try_clone()?;
         let token = Arc::new(Mutex::new(Vec::new()));
         let worker_token = Arc::clone(&token);
