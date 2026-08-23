@@ -11,10 +11,17 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { connectHost, controlClient, controlHost } from "../src/session";
+import { connectHost, controlClient, controlHost, disconnectHost } from "../src/session";
 import { isUnauthorizedError, type CatalogView } from "../src/control";
+import {
+  clearToken,
+  formatHostEndpoint,
+  getStoredToken,
+  parseHostEndpoint,
+} from "../src/pairing";
 
 type NsdNative = {
   startDiscovery(): void;
@@ -29,25 +36,23 @@ interface FoundHost {
   port: number;
 }
 
-function parseManualEndpoint(value: string): { host: string; port: number } | null {
-  const normalized = value.trim();
-  if (!normalized) return null;
-  const separator = normalized.lastIndexOf(":");
-  if (separator < 0) return { host: normalized, port: 7777 };
-  const host = normalized.slice(0, separator).trim();
-  const rawPort = normalized.slice(separator + 1).trim();
-  const port = Number(rawPort);
-  if (!host || !/^\d+$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65535) {
-    return null;
-  }
-  return { host, port };
-}
-
 export default function Host() {
   const [ip, setIp] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundHost>>({});
+  const [hasStoredToken, setHasStoredToken] = useState(false);
+
+  useEffect(() => {
+    void getStoredToken().then((token) => setHasStoredToken(!!token));
+  }, []);
+
+  const handleClearToken = useCallback(async () => {
+    await clearToken();
+    disconnectHost();
+    setHasStoredToken(false);
+    Alert.alert("페어링 정보 초기화", "이 기기에 저장된 인증 토큰이 삭제되었습니다.");
+  }, []);
 
   useEffect(() => {
     if (!nsd) return;
@@ -95,13 +100,20 @@ export default function Host() {
       if (lastError) throw lastError;
       try {
         await controlClient()?.request<CatalogView>("getCatalog");
+        setHasStoredToken(true);
       } catch (e) {
         if (isUnauthorizedError(e)) {
+          await clearToken();
+          disconnectHost();
+          setHasStoredToken(false);
           Alert.alert(
             "기기 페어링 필요",
             "호스트 컴퓨터의 QR 코드 또는 인증 코드를 입력하여 페어링하세요.",
           );
-          router.push("/pairing");
+          router.push({
+            pathname: "/pairing",
+            params: { endpoint: formatHostEndpoint(target, port) },
+          });
           return;
         }
         throw e;
@@ -117,7 +129,7 @@ export default function Host() {
   const hosts = Object.values(found);
 
   const connectManual = useCallback(() => {
-    const endpoint = parseManualEndpoint(ip);
+    const endpoint = parseHostEndpoint(ip);
     if (!endpoint) {
       setError("IP 주소 형식을 확인해 주세요. (예: 192.168.0.10:7777)");
       return;
@@ -135,7 +147,8 @@ export default function Host() {
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
-            <Text style={styles.errorText}>⚠️ {error}</Text>
+            <Ionicons name="alert-circle-outline" size={16} color="#DC2626" />
+            <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
 
@@ -161,7 +174,7 @@ export default function Host() {
                   disabled={busy}
                 >
                   <View style={styles.hostIconBox}>
-                    <Text style={styles.hostIcon}>💻</Text>
+                    <Ionicons name="laptop-outline" size={20} color="#2563EB" />
                   </View>
                   <View style={styles.hostInfo}>
                     <Text style={styles.hostName} numberOfLines={1}>
@@ -179,7 +192,7 @@ export default function Host() {
             </View>
           ) : (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>📡</Text>
+              <Ionicons name="wifi-outline" size={28} color="#94A3B8" style={{ marginBottom: 4 }} />
               <Text style={styles.emptyTitle}>주변의 Leftcar Host를 찾는 중</Text>
               <Text style={styles.emptyText}>
                 컴퓨터에서 Leftcar Host 앱이 켜져 있고 같은 Wi-Fi에 연결되어 있는지 확인하세요.
@@ -208,19 +221,21 @@ export default function Host() {
             />
             {ip.length > 0 && (
               <Pressable onPress={() => setIp("")} style={styles.clearBtn}>
-                <Text style={styles.clearBtnText}>✕</Text>
+                <Ionicons name="close" size={16} color="#94A3B8" />
               </Pressable>
             )}
           </View>
 
-          <View style={styles.quickChipsRow}>
-            <Pressable onPress={() => setIp("localhost:7777")} style={styles.quickChip}>
-              <Text style={styles.quickChipText}>+ localhost:7777</Text>
-            </Pressable>
-            <Pressable onPress={() => setIp("10.0.2.2:7777")} style={styles.quickChip}>
-              <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
-            </Pressable>
-          </View>
+          {__DEV__ && (
+            <View style={styles.quickChipsRow}>
+              <Pressable onPress={() => setIp("localhost:7777")} style={styles.quickChip}>
+                <Text style={styles.quickChipText}>+ localhost (ADB reverse)</Text>
+              </Pressable>
+              <Pressable onPress={() => setIp("10.0.2.2:7777")} style={styles.quickChip}>
+                <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
+              </Pressable>
+            </View>
+          )}
 
           <Pressable
             style={[styles.primaryBtn, (!ip.trim() || busy) && styles.btnDisabled]}
@@ -233,6 +248,29 @@ export default function Host() {
               <Text style={styles.primaryBtnText}>연결하기</Text>
             )}
           </Pressable>
+        </View>
+
+        {/* Pairing Management */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>페어링 관리</Text>
+          <Text style={styles.fieldDesc}>
+            {hasStoredToken
+              ? "이 기기에 호스트 인증 토큰이 저장되어 있습니다."
+              : "저장된 인증 토큰이 없습니다. 새 컴퓨터와 연결하려면 페어링을 진행하세요."}
+          </Text>
+          <View style={styles.pairingActionRow}>
+            {hasStoredToken && (
+              <Pressable style={styles.dangerBtn} onPress={handleClearToken}>
+                <Text style={styles.dangerBtnText}>저장된 페어링 정보 삭제</Text>
+              </Pressable>
+            )}
+            <Pressable
+              style={styles.secondaryBtn}
+              onPress={() => router.push("/pairing")}
+            >
+              <Text style={styles.secondaryBtnText}>QR / 코드 페어링 열기</Text>
+            </Pressable>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -260,11 +298,15 @@ const styles = StyleSheet.create({
     borderColor: "#FECACA",
     borderRadius: 8,
     padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   errorText: {
     color: "#DC2626",
     fontSize: 12,
     lineHeight: 16,
+    flex: 1,
   },
   sectionCard: {
     backgroundColor: "#FFFFFF",
@@ -428,6 +470,42 @@ const styles = StyleSheet.create({
   primaryBtnText: {
     color: "#FFFFFF",
     fontSize: 13,
+    fontWeight: "600",
+  },
+  pairingActionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 4,
+  },
+  dangerBtn: {
+    backgroundColor: "#FEE2E2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    borderRadius: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dangerBtnText: {
+    color: "#DC2626",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  secondaryBtn: {
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1,
+    borderColor: "#CBD5E1",
+    borderRadius: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  secondaryBtnText: {
+    color: "#334155",
+    fontSize: 12,
     fontWeight: "600",
   },
 });

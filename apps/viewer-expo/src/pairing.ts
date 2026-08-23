@@ -16,6 +16,11 @@ export interface QrPayload {
   code?: string;
 }
 
+export interface HostEndpoint {
+  host: string;
+  port: number;
+}
+
 const DEVICE_ID_KEY = "leftcar.deviceId";
 const TOKEN_KEY = "leftcar.token";
 
@@ -26,6 +31,33 @@ interface RawQrPayload {
   h?: unknown;
   p?: unknown;
   c?: unknown;
+}
+
+/** Parse an explicitly selected host endpoint without inventing a localhost fallback. */
+export function parseHostEndpoint(endpoint: string): HostEndpoint | null {
+  const trimmed = endpoint.trim();
+  if (!trimmed) return null;
+
+  const separator = trimmed.lastIndexOf(":");
+  if (separator < 0) return { host: trimmed, port: 7777 };
+
+  const host = trimmed.slice(0, separator).trim();
+  const rawPort = trimmed.slice(separator + 1).trim();
+  const port = Number(rawPort);
+  if (
+    !host ||
+    !/^\d+$/.test(rawPort) ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    return null;
+  }
+  return { host, port };
+}
+
+export function formatHostEndpoint(host: string, port: number): string {
+  return `${host}:${port}`;
 }
 
 /** `{"v":1,"id":..,"s":..,"h":..,"p":..,"c":..}` → QrPayload; null on any mismatch. */

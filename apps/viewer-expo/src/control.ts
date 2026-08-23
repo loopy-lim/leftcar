@@ -15,6 +15,7 @@ export interface DisplayInfo {
 export interface CatalogView {
   platform: "macos" | "windows" | "linux" | string;
   captureBackends: CaptureBackendInfo[];
+  mediaHost?: string | null;
   displays: DisplayInfo[];
 }
 
@@ -44,6 +45,11 @@ export interface SessionView {
   fpsTarget: number;
   dropped: number;
   networkDropped?: number;
+  networkQueueDropped?: number;
+  udpSendFailures?: number;
+  udpSendRetries?: number;
+  recoveryKeyframes?: number;
+  recoveryRequestsSuppressed?: number;
   captureQueueDropped?: number;
   captureToEncodeUs: number;
   maxCaptureToEncodeUs: number;
@@ -53,6 +59,8 @@ export interface SessionView {
   maxEncodeOutputUs?: number;
   sendBlockUs: number;
   maxSendBlockUs: number;
+  sendPaceUs?: number;
+  maxSendPaceUs?: number;
   pendingFrame: number;
   frames: number;
   bytes: number;
@@ -67,6 +75,7 @@ export interface SessionView {
   captureQueueWaitP95Us: number;
   encodeOutputP95Us: number;
   sendBlockP95Us: number;
+  sendPaceP95Us?: number;
   error?: string | null;
 }
 
@@ -251,6 +260,9 @@ export function connect(
         if (parsed.ok) {
           handlers.resolve(parsed.result);
         } else {
+          if (parsed.error === "unauthorized") {
+            cachedToken = undefined;
+          }
           // The host closes the connection right after "unauthorized"; this
           // rejection is registered (and pending cleared) before the close
           // handler runs, so the specific error wins over the generic one.

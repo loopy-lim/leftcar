@@ -48,6 +48,8 @@ import {
   getStoredToken,
   pairWithHost,
   pairWithHostByCode,
+  formatHostEndpoint,
+  parseHostEndpoint,
   parseQrPayload,
 } from "./pairing";
 
@@ -107,6 +109,29 @@ describe("parseQrPayload", () => {
     expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":0}')).toBeNull(); // out of range (low)
     expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":70000}')).toBeNull(); // out of range (high)
     expect(parseQrPayload("not json")).toBeNull();
+  });
+});
+
+describe("host endpoint", () => {
+  it("roundtrips the selected LAN endpoint for the pairing route", () => {
+    const routeEndpoint = formatHostEndpoint("192.168.0.134", 7777);
+    expect(parseHostEndpoint(routeEndpoint)).toEqual({ host: "192.168.0.134", port: 7777 });
+  });
+
+  it("uses the control default port only for an explicit host", () => {
+    expect(parseHostEndpoint("192.168.0.134")).toEqual({
+      host: "192.168.0.134",
+      port: 7777,
+    });
+    expect(parseHostEndpoint("localhost:7777")).toEqual({ host: "localhost", port: 7777 });
+  });
+
+  it("never invents localhost when the target is missing or malformed", () => {
+    expect(parseHostEndpoint("")).toBeNull();
+    expect(parseHostEndpoint("   ")).toBeNull();
+    expect(parseHostEndpoint(":7777")).toBeNull();
+    expect(parseHostEndpoint("192.168.0.134:not-a-port")).toBeNull();
+    expect(parseHostEndpoint("192.168.0.134:0")).toBeNull();
   });
 });
 

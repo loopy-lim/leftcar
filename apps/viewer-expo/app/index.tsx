@@ -1,14 +1,18 @@
 import { useCallback, useState } from "react";
 import {
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
-import { controlClient, controlHost } from "../src/session";
+import { controlClient, controlHost, disconnectHost } from "../src/session";
+import { clearToken } from "../src/pairing";
+import { isUnauthorizedError, type CatalogView } from "../src/control";
 
 function openCatalog() {
   router.push("/catalog");
@@ -33,9 +37,27 @@ export default function Hub() {
     setHostAddr(addr);
   }, []);
 
+  const handleDisconnect = useCallback(() => {
+    disconnectHost();
+    checkConnection();
+  }, [checkConnection]);
+
   useFocusEffect(
     useCallback(() => {
       checkConnection();
+      const client = controlClient();
+      if (client) {
+        // Verify that the current connection and token are actually authorized
+        client.request<CatalogView>("getCatalog").catch((e) => {
+          if (isUnauthorizedError(e)) {
+            void (async () => {
+              await clearToken();
+              disconnectHost();
+              checkConnection();
+            })();
+          }
+        });
+      }
     }, [checkConnection])
   );
 
@@ -50,7 +72,7 @@ export default function Hub() {
         <View style={styles.brandHeader}>
           <View style={styles.logoRow}>
             <View style={styles.logoBadge}>
-              <Text style={styles.logoIcon}>🖥️</Text>
+              <Ionicons name="desktop-outline" size={24} color="#2563EB" />
             </View>
             <View style={styles.titleColumn}>
               <Text style={styles.appTitle}>Leftcar XR</Text>
@@ -85,6 +107,9 @@ export default function Hub() {
               </Pressable>
               <Pressable onPress={openHostPicker} style={styles.secondaryActionBtn}>
                 <Text style={styles.secondaryActionText}>호스트 변경</Text>
+              </Pressable>
+              <Pressable onPress={handleDisconnect} style={styles.disconnectActionBtn}>
+                <Text style={styles.disconnectActionText}>연결 해제</Text>
               </Pressable>
             </View>
           </View>
@@ -157,12 +182,12 @@ export default function Hub() {
         {/* Quick Specs Grid (2 Column Clean Layout) */}
         <View style={styles.featureGrid}>
           <View style={styles.featureBox}>
-            <Text style={styles.featureEmoji}>⚡</Text>
+            <Ionicons name="flash-outline" size={24} color="#2563EB" style={{ marginBottom: 4 }} />
             <Text style={styles.featureValue}>&lt;30ms 초저지연</Text>
             <Text style={styles.featureLabel}>실시간 마우스 조작 반응</Text>
           </View>
           <View style={styles.featureBox}>
-            <Text style={styles.featureEmoji}>🖥️</Text>
+            <Ionicons name="tv-outline" size={24} color="#2563EB" style={{ marginBottom: 4 }} />
             <Text style={styles.featureValue}>독립 다중 창</Text>
             <Text style={styles.featureLabel}>모니터별 개별 XR 배치</Text>
           </View>
@@ -342,6 +367,21 @@ const styles = StyleSheet.create({
   },
   secondaryActionText: {
     color: "#334155",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  disconnectActionBtn: {
+    backgroundColor: "#FEF2F2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  disconnectActionText: {
+    color: "#DC2626",
     fontSize: 13,
     fontWeight: "600",
   },

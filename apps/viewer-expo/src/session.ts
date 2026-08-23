@@ -56,3 +56,14 @@ export async function reconnectHost(): Promise<ControlClient> {
 export function allocPort(): number {
   return nextPort++;
 }
+
+/** Terminate the active control session and clear client state. */
+export function disconnectHost(): void {
+  if (client) {
+    client.close();
+    client = null;
+  }
+  hostAddr = "";
+  hostTarget = "";
+  reconnectInFlight = null;
+}

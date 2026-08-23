@@ -172,6 +172,7 @@ impl PairingServer {
                     token_hex: token_hex.clone(),
                     paired_at: unix_timestamp_utc(),
                 };
+                inner.paired.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
                 inner.paired.push(paired.clone());
                 inner.live_offers.remove(offer_id); // single-use: offer consumed
                 if self.persist(inner.paired.clone()).is_err() {
@@ -238,6 +239,7 @@ impl PairingServer {
                     token_hex: token_hex.clone(),
                     paired_at: unix_timestamp_utc(),
                 };
+                inner.paired.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
                 inner.paired.push(paired.clone());
                 inner.live_offers.remove(&offer_id);
                 if self.persist(inner.paired.clone()).is_err() {
@@ -298,6 +300,17 @@ impl PairingServer {
             }
         }
         removed
+    }
+
+    /// Remove all paired devices and tokens; persists the change.
+    pub fn revoke_all(&self) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let count = inner.paired.len();
+        inner.paired.clear();
+        if let Err(e) = self.persist(Vec::new()) {
+            eprintln!("leftcar: persist after revoke_all failed: {e}");
+        }
+        count
     }
 
     pub fn list_devices(&self) -> Vec<PairedDevice> {

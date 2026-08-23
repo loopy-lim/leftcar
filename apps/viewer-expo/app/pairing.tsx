@@ -8,13 +8,15 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { connectHost, controlHost } from "../src/session";
 import {
   pairWithHost,
   pairWithHostByCode,
+  parseHostEndpoint,
   parseQrPayload,
   type QrPayload,
 } from "../src/pairing";
@@ -22,18 +24,8 @@ import { formatErrorMessage } from "../src/control";
 
 type PairingMode = "qr" | "code";
 
-function parseHostEndpoint(endpoint: string): { host: string; port: number } {
-  const trimmed = endpoint.trim();
-  if (!trimmed) return { host: "localhost", port: 7777 };
-  const idx = trimmed.lastIndexOf(":");
-  if (idx < 0) return { host: trimmed, port: 7777 };
-  const host = trimmed.slice(0, idx).trim() || "localhost";
-  const rawPort = Number(trimmed.slice(idx + 1).trim());
-  const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort < 65536 ? rawPort : 7777;
-  return { host, port };
-}
-
 export default function Pairing() {
+  const params = useLocalSearchParams<{ endpoint?: string | string[] }>();
   const [mode, setMode] = useState<PairingMode>("qr");
   const [code, setCode] = useState("");
   const scannedPayloadRef = useRef<QrPayload | null>(null);
@@ -41,8 +33,10 @@ export default function Pairing() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
-  const host = controlHost();
+  const routeEndpoint = Array.isArray(params.endpoint) ? params.endpoint[0] : params.endpoint;
+  const host = controlHost() || routeEndpoint || "";
   const scanningLockRef = useRef(false);
+  const hasCodeTarget = Boolean(scannedPayloadRef.current || parseHostEndpoint(host));
 
   useEffect(() => {
     setError(null);
@@ -64,7 +58,10 @@ export default function Pairing() {
           await pairWithHost(scannedPayload, trimmed);
           await connectHost(scannedPayload.host, scannedPayload.port);
         } else {
-          const endpoint = parseHostEndpoint(host || "localhost:7777");
+          const endpoint = parseHostEndpoint(host);
+          if (!endpoint) {
+            throw new Error("대상 호스트가 없습니다. 먼저 호스트를 선택하거나 QR 코드를 스캔해 주세요.");
+          }
           await pairWithHostByCode(endpoint.host, endpoint.port, trimmed);
           await connectHost(endpoint.host, endpoint.port);
         }
@@ -138,17 +135,31 @@ export default function Pairing() {
               style={[styles.modeTab, mode === "qr" && styles.modeTabActive]}
               onPress={() => setMode("qr")}
             >
-              <Text style={[styles.modeTabText, mode === "qr" && styles.modeTabTextActive]}>
-                📷 QR 스캔
-              </Text>
+              <View style={styles.tabContentRow}>
+                <Ionicons
+                  name="qr-code-outline"
+                  size={15}
+                  color={mode === "qr" ? "#2563EB" : "#64748B"}
+                />
+                <Text style={[styles.modeTabText, mode === "qr" && styles.modeTabTextActive]}>
+                  QR 스캔
+                </Text>
+              </View>
             </Pressable>
             <Pressable
               style={[styles.modeTab, mode === "code" && styles.modeTabActive]}
               onPress={() => setMode("code")}
             >
-              <Text style={[styles.modeTabText, mode === "code" && styles.modeTabTextActive]}>
-                🔢 6자리 코드
-              </Text>
+              <View style={styles.tabContentRow}>
+                <Ionicons
+                  name="keypad-outline"
+                  size={15}
+                  color={mode === "code" ? "#2563EB" : "#64748B"}
+                />
+                <Text style={[styles.modeTabText, mode === "code" && styles.modeTabTextActive]}>
+                  6자리 코드
+                </Text>
+              </View>
             </Pressable>
           </View>
         </View>
@@ -164,7 +175,8 @@ export default function Pairing() {
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
-            <Text style={styles.errorText}>⚠️ {error}</Text>
+            <Ionicons name="alert-circle-outline" size={16} color="#DC2626" />
+            <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
 
@@ -182,7 +194,7 @@ export default function Pairing() {
               </View>
             ) : !permission.granted ? (
               <View style={styles.cameraNotice}>
-                <Text style={styles.cameraNoticeIcon}>📷</Text>
+                <Ionicons name="camera-outline" size={32} color="#2563EB" style={{ marginBottom: 4 }} />
                 <Text style={styles.cameraNoticeTitle}>카메라 권한 필요</Text>
                 <Text style={styles.cameraNoticeText}>
                   컴퓨터 화면의 QR 코드를 스캔하려면 카메라 권한이 필요합니다.
@@ -216,7 +228,9 @@ export default function Pairing() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>6자리 인증 코드</Text>
             <Text style={styles.cardDesc}>
-              호스트 화면의 QR 코드 아래에 적힌 6자리 번호를 입력하세요.
+              {hasCodeTarget
+                ? "호스트 화면의 QR 코드 아래에 적힌 6자리 번호를 입력하세요."
+                : "먼저 호스트를 선택하거나 QR 코드를 스캔한 다음 인증 코드를 입력하세요."}
             </Text>
 
             <TextInput
@@ -231,9 +245,12 @@ export default function Pairing() {
             />
 
             <Pressable
-              style={[styles.primaryBtn, (code.length !== 6 || busy) && styles.btnDisabled]}
+              style={[
+                styles.primaryBtn,
+                (code.length !== 6 || busy || !hasCodeTarget) && styles.btnDisabled,
+              ]}
               onPress={() => handlePairWithCode(code)}
-              disabled={code.length !== 6 || busy}
+              disabled={code.length !== 6 || busy || !hasCodeTarget}
             >
               {busy ? (
                 <ActivityIndicator color="#FFFFFF" size="small" />
@@ -246,7 +263,10 @@ export default function Pairing() {
 
         {/* Security / Help Card */}
         <View style={styles.tipBox}>
-          <Text style={styles.tipTitle}>💡 보안 및 안내</Text>
+          <View style={styles.tipTitleRow}>
+            <Ionicons name="shield-checkmark-outline" size={16} color="#2563EB" />
+            <Text style={styles.tipTitle}>보안 및 안내</Text>
+          </View>
           <Text style={styles.tipText}>
             • 한 번 페어링된 기기는 다음 연결 시 자동으로 승인됩니다.
           </Text>
@@ -334,6 +354,11 @@ const styles = StyleSheet.create({
     color: "#1D4ED8",
     fontWeight: "700",
   },
+  tabContentRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   statusCard: {
     backgroundColor: "#EFF6FF",
     borderWidth: 1,
@@ -356,11 +381,15 @@ const styles = StyleSheet.create({
     borderColor: "#FECACA",
     borderRadius: 8,
     padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   errorText: {
     color: "#DC2626",
     fontSize: 12,
     lineHeight: 16,
+    flex: 1,
   },
   card: {
     backgroundColor: "#FFFFFF",
@@ -487,6 +516,11 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 12,
     gap: 4,
+  },
+  tipTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   tipTitle: {
     color: "#334155",

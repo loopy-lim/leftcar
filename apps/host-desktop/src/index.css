@@ -886,6 +886,13 @@ html, body, #root {
 .section-title-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.section-title-left {
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 

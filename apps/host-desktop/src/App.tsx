@@ -1,5 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  ExternalLink,
+  Laptop,
+  Monitor,
+  Moon,
+  RefreshCw,
+  Sparkles,
+  Sun,
+  X,
+} from "lucide-react";
 import { trayStatus, type HostSnapshotView } from "./hostState";
 import PairingPanel from "./PairingPanel";
 
@@ -122,7 +137,7 @@ function useHostStatus() {
 interface DashboardHeaderProps {
   isStreaming: boolean;
   sessionCount: number;
-  themeIcon: string;
+  themeMode: ThemeMode;
   themeLabel: string;
   onPair: () => void;
   onTheme: () => void;
@@ -132,7 +147,7 @@ interface DashboardHeaderProps {
 function DashboardHeader({
   isStreaming,
   sessionCount,
-  themeIcon,
+  themeMode,
   themeLabel,
   onPair,
   onTheme,
@@ -142,11 +157,7 @@ function DashboardHeader({
     <header className="host-header">
       <div className="host-header-left">
         <div className="host-logo-box">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-            <line x1="8" y1="21" x2="16" y2="21" />
-            <line x1="12" y1="17" x2="12" y2="21" />
-          </svg>
+          <Monitor size={18} strokeWidth={2.2} aria-hidden="true" />
         </div>
         <div className="host-title-group"><h1>Leftcar Host</h1></div>
       </div>
@@ -156,8 +167,12 @@ function DashboardHeader({
           <span>{isStreaming ? `${sessionCount}개 스트리밍 중` : "대기 중"}</span>
         </div>
         <button className="btn-primary" onClick={onPair} title="기기 페어링 (⌘P)">기기 페어링</button>
-        <button className="btn-icon" onClick={onTheme} title={`테마: ${themeLabel}`} aria-label={`테마 변경: 현재 ${themeLabel}`}>{themeIcon}</button>
-        <button className="btn-icon" onClick={onRefresh} title="새로고침 (⌘R)" aria-label="호스트 상태 새로고침">🔄</button>
+        <button className="btn-icon" onClick={onTheme} title={`테마: ${themeLabel}`} aria-label={`테마 변경: 현재 ${themeLabel}`}>
+          {themeMode === "light" ? <Sun size={15} /> : themeMode === "dark" ? <Moon size={15} /> : <Laptop size={15} />}
+        </button>
+        <button className="btn-icon" onClick={onRefresh} title="새로고침 (⌘R)" aria-label="호스트 상태 새로고침">
+          <RefreshCw size={14} />
+        </button>
       </div>
     </header>
   );
@@ -176,7 +191,14 @@ function DashboardFooter(props: DashboardFooterProps) {
     <footer className="host-footer">
       <div className="footer-status-info">
         <button type="button" className="clickable-chip" onClick={props.onCopyPort} title="포트 복사하기">
-          제어 포트: <strong>:{props.controlPort}</strong> {props.copiedToast ? "✅ 복사됨!" : "📋"}
+          제어 포트: <strong>:{props.controlPort}</strong>{" "}
+          {props.copiedToast ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--accent-emerald)" }}>
+              <Check size={13} strokeWidth={2.5} /> 복사됨!
+            </span>
+          ) : (
+            <Copy size={13} style={{ opacity: 0.7 }} />
+          )}
         </button>
         <span className="footer-divider">·</span>
         <span>원격 입력: <strong>{props.inputPermission ? "승인됨" : "권한 필요"}</strong></span>
@@ -192,7 +214,9 @@ function PairingModal({ onClose }: { onClose: () => void }) {
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
           <h3>기기 페어링</h3>
-          <button className="btn-close" onClick={onClose} aria-label="페어링 창 닫기">✕</button>
+          <button className="btn-close" onClick={onClose} aria-label="페어링 창 닫기">
+            <X size={15} />
+          </button>
         </div>
         <div className="modal-scroll-area"><PairingPanel /></div>
       </div>
@@ -306,7 +330,6 @@ function Dashboard() {
     });
   };
 
-  const themeIcon = theme === "light" ? "☀️" : theme === "dark" ? "🌙" : "💻";
   const themeLabel = theme === "light" ? "라이트 모드" : theme === "dark" ? "다크 모드" : "시스템 동기화";
 
   return (
@@ -314,7 +337,7 @@ function Dashboard() {
       <DashboardHeader
         isStreaming={isStreaming}
         sessionCount={sessions.length}
-        themeIcon={themeIcon}
+        themeMode={theme}
         themeLabel={themeLabel}
         onPair={() => setShowPairingModal(true)}
         onTheme={toggleTheme}
@@ -325,7 +348,11 @@ function Dashboard() {
       <main className="host-body">
         {error && (
           <div className="banner-alert banner-danger">
-            <div className="banner-text">⚠️ {error}</div>
+            <div className="banner-text">
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <AlertTriangle size={15} /> {error}
+              </span>
+            </div>
             {platform === "macos" && error.includes("permission") && (
               <button
                 className="btn-ghost btn-sm"
@@ -338,7 +365,11 @@ function Dashboard() {
         )}
         {inputActionError && (
           <div className="banner-alert banner-danger">
-            <div className="banner-text">⚠️ {inputActionError}</div>
+            <div className="banner-text">
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <AlertTriangle size={15} /> {inputActionError}
+              </span>
+            </div>
             {platform === "macos" && (
               <button
                 className="btn-ghost btn-sm"
@@ -382,8 +413,13 @@ function Dashboard() {
               <button
                 className="btn-link"
                 onClick={() => setShowInspector((prev) => !prev)}
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
               >
-                {showInspector ? "세부 수치 숨기기 ▴" : "세부 지표 보기 ▾"}
+                {showInspector ? (
+                  <>세부 수치 숨기기 <ChevronUp size={14} /></>
+                ) : (
+                  <>세부 지표 보기 <ChevronDown size={14} /></>
+                )}
               </button>
             </div>
 
@@ -392,7 +428,9 @@ function Dashboard() {
                 <div key={session.session} className="stream-card-item">
                   <div className="stream-card-top-row">
                     <div className="stream-card-identity">
-                      <span className="stream-card-icon">🖥️</span>
+                      <span className="stream-card-icon">
+                        <Monitor size={18} strokeWidth={2} />
+                      </span>
                       <div className="stream-card-name-group">
                         <div className="stream-name-badge-row">
                           <h3>{session.sourceName}</h3>
@@ -450,7 +488,7 @@ function Dashboard() {
           <div className="empty-center-container">
             <div className="host-empty-card">
               <div className="empty-graphic-box">
-                <span style={{ fontSize: "28px" }}>✨</span>
+                <Sparkles size={28} color="var(--accent-primary)" />
               </div>
               <h2>스트리밍 준비 완료</h2>
               <p>

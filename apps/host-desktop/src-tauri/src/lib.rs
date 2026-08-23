@@ -64,7 +64,9 @@ pub fn run() {
             begin_pairing,
             cancel_pairing,
             list_paired_devices,
-            revoke_device
+            revoke_device,
+            revoke_paired_device,
+            revoke_all_devices
         ])
         .setup(move |app| {
             app.manage(server);
@@ -330,6 +332,21 @@ fn revoke_device(
     device_id: String,
 ) -> bool {
     state.revoke(&device_id)
+}
+
+#[tauri::command]
+fn revoke_paired_device(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    device_id: String,
+) -> bool {
+    state.revoke(&device_id)
+}
+
+#[tauri::command]
+fn revoke_all_devices(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+) -> usize {
+    state.revoke_all()
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

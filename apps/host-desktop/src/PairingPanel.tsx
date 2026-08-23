@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import QRCode from "qrcode";
+import {
+  AlertTriangle,
+  Clock,
+  KeyRound,
+  QrCode,
+  Smartphone,
+  Trash2,
+} from "lucide-react";
 
 interface PairingSessionView {
   qr_payload: string;
@@ -106,6 +114,19 @@ export default function PairingPanel() {
     [refreshDevices],
   );
 
+  const revokeAll = useCallback(async () => {
+    setRevoking("all");
+    setError(null);
+    try {
+      await invoke("revoke_all_devices");
+      await refreshDevices();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRevoking(null);
+    }
+  }, [refreshDevices]);
+
   useEffect(() => {
     refreshDevices();
     const interval = setInterval(refreshDevices, 2000);
@@ -132,12 +153,20 @@ export default function PairingPanel() {
         <p className="pairing-guide-sub">동일한 Wi-Fi 네트워크에서 한 번 페어링하면 이후 자동 연결됩니다.</p>
       </div>
 
-      {error && <div className="banner-alert banner-danger">⚠️ {error}</div>}
+      {error && (
+        <div className="banner-alert banner-danger">
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <AlertTriangle size={15} /> {error}
+          </span>
+        </div>
+      )}
 
       <div className="pairing-qr-card">
         {!session ? (
           <div className="pairing-idle-state">
-            <div className="idle-icon-box">🔐</div>
+            <div className="idle-icon-box">
+              <KeyRound size={22} strokeWidth={2} color="var(--accent-primary)" />
+            </div>
             <p className="idle-title">페어링 세션 시작</p>
             <p className="idle-sub">버튼을 누르면 2분 동안 유효한 일회용 QR 코드가 생성됩니다.</p>
             <button onClick={startPairing} className="btn-primary" disabled={starting}>
@@ -167,8 +196,8 @@ export default function PairingPanel() {
               <span className="code-label">인증 번호:</span>
               <span className="code-value">{session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}</span>
             </div>
-            <div className="countdown-badge">
-              ⏳ 남은 시간: {formatCountdown(session.expiresAt - now)}
+            <div className="countdown-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <Clock size={12} /> 남은 시간: {formatCountdown(session.expiresAt - now)}
             </div>
             <button onClick={cancelPairing} className="btn-ghost btn-sm">
               페어링 취소
@@ -179,8 +208,19 @@ export default function PairingPanel() {
 
       <div className="paired-devices-section">
         <div className="section-title-row">
-          <h4>연결된 기기 목록</h4>
-          <span className="count-pill">{devices.length}</span>
+          <div className="section-title-left">
+            <h4>연결된 기기 목록</h4>
+            <span className="count-pill">{devices.length}</span>
+          </div>
+          {devices.length > 0 && (
+            <button
+              onClick={revokeAll}
+              className="btn-danger-outline btn-sm"
+              disabled={revoking !== null}
+            >
+              {revoking === "all" ? "초기화 중…" : "모든 기기 연결 해제"}
+            </button>
+          )}
         </div>
 
         {devices.length > 0 ? (
@@ -188,7 +228,9 @@ export default function PairingPanel() {
             {devices.map((device) => (
               <div key={device.device_id} className="device-row-item">
                 <div className="device-row-main">
-                  <span className="device-row-name">📱 {device.name}</span>
+                  <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Smartphone size={15} strokeWidth={1.8} style={{ opacity: 0.75 }} /> {device.name}
+                  </span>
                   <span className="device-row-date">{formatPairedAt(device.paired_at)}</span>
                 </div>
                 <button
