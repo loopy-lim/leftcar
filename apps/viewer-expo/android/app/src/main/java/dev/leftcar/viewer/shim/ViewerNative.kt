@@ -16,6 +16,10 @@ object ViewerNative {
 
     /** Returns the opaque process-state handle. */
     external fun start(): Long
+    /** Bind the UDP media port before Host reachability proof starts. */
+    external fun prepareStream(port: Int, host: String): Int
+    /** Roll back a prepared port when Host start or Activity launch fails. */
+    external fun cancelPreparedStream(port: Int): Int
     external fun updateWindowEvent(state: Long, instanceId: String, eventCode: Int, monotonicMs: Long): Int
     /**
      * Attach with an explicit media port + paired host IP. The Rust media

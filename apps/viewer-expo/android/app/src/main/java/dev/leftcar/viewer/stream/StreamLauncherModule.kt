@@ -6,17 +6,45 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.Promise
+import dev.leftcar.viewer.shim.ViewerNative
 
 /**
  * Opens one OS window (task) per unique stream: RN calls
- * openStream(port, host, width, height, fps) and gets back the instanceId the
- * Rust core uses for that window. Reopening the same host/port reuses its
- * existing document task instead of adding another entry to Recents.
+ * prepareStream binds the media listener before Host reachability proof;
+ * openStream then displays the already-authorized stream. Reopening the same
+ * host/port reuses its existing document task instead of adding another entry
+ * to Recents.
  */
 class StreamLauncherModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     override fun getName() = "StreamLauncher"
+
+    @ReactMethod
+    fun prepareStream(port: Int, host: String, promise: Promise) {
+        val result = ViewerNative.prepareStream(port, host)
+        if (result == 0) {
+            promise.resolve(null)
+        } else {
+            promise.reject(
+                "ERR_STREAM_PREPARE",
+                "미디어 수신 포트를 준비하지 못했습니다. (code=$result)",
+            )
+        }
+    }
+
+    @ReactMethod
+    fun cancelPreparedStream(port: Int, promise: Promise) {
+        val result = ViewerNative.cancelPreparedStream(port)
+        if (result == 0) {
+            promise.resolve(null)
+        } else {
+            promise.reject(
+                "ERR_STREAM_PREPARE_CANCEL",
+                "미디어 수신 포트 정리에 실패했습니다. (code=$result)",
+            )
+        }
+    }
 
     @ReactMethod
     fun openStream(port: Int, host: String, width: Int, height: Int, fps: Int, promise: Promise) {
@@ -37,7 +65,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("fps", fps.coerceIn(1, 90))
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
-            val ctx = getCurrentActivity()
+            val ctx = getReactApplicationContext().getCurrentActivity()
             if (ctx != null) {
                 ctx.startActivity(intent)
             } else {

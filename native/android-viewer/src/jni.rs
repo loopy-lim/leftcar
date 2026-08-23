@@ -14,6 +14,7 @@ use crate::input_protocol::{
 };
 use crate::media_datagram::{parse_fragment, FrameReassembler};
 use crate::net_guard::{host_is_valid, peer_allowed};
+use crate::prepared_udp::PreparedUdpReceiver;
 
 #[repr(C)]
 struct jobject;
@@ -123,6 +124,7 @@ struct RendererControl {
 }
 
 static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<RendererControl>>>> = Mutex::new(None);
+static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpReceiver>>> = Mutex::new(None);
 
 fn remove_renderer_if_current(instance: &str, control: &Arc<RendererControl>) {
     let mut map = ACTIVE_RENDERERS.lock().unwrap();
@@ -165,6 +167,63 @@ fn reclaim_udp_port(port: u16) {
         control.suspend.store(false, Ordering::SeqCst);
         control.stop.store(true, Ordering::SeqCst);
         wait_for_renderer(&control);
+    }
+}
+
+fn cancel_prepared_receiver(port: u16) -> bool {
+    let prepared = PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port);
+    prepared.is_some()
+}
+
+fn prepare_udp_receiver(port: u16, expected_host: &str) -> Result<(), String> {
+    if port == 0 || !host_is_valid(expected_host) {
+        return Err("invalid prepared media port or host".into());
+    }
+    let active_port = ACTIVE_RENDERERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|renderers| renderers.values().any(|control| control.port == port));
+    if active_port {
+        return Err(format!("UDP media port {port} is already active"));
+    }
+
+    // A retry for the same not-yet-opened window replaces its old preflight.
+    // Drop outside the map lock because the worker has a bounded join.
+    let stale = PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port);
+    drop(stale);
+
+    let prepared = PreparedUdpReceiver::bind(port, expected_host.to_owned())
+        .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, prepared);
+    Ok(())
+}
+
+fn take_prepared_receiver(port: u16, expected_host: &str) -> Option<PreparedUdpReceiver> {
+    let prepared = PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port);
+    match prepared {
+        Some(prepared) if prepared.expected_host() == expected_host => Some(prepared),
+        Some(_) => {
+            log_info!("discarded prepared UDP port {port}: paired Host changed");
+            None
+        }
+        None => None,
     }
 }
 
@@ -490,6 +549,7 @@ fn spawn_live_stream_renderer(
     // renderer as EOF (not BYE), then evict any other renderer on the port.
     stop_live_stream_renderer(&instance_str, false);
     reclaim_udp_port(port);
+    let prepared_receiver = take_prepared_receiver(port, &expected_host);
 
     let control = Arc::new(RendererControl {
         port,
@@ -522,14 +582,28 @@ fn spawn_live_stream_renderer(
 
     let window_handle = surface_window as usize;
     std::thread::spawn(move || {
-        let socket = match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
-            Ok(socket) => socket,
-            Err(e) => {
-                log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
-                control_clone.finished.store(true, Ordering::SeqCst);
-                remove_renderer_if_current(&instance_str, &control_clone);
-                return;
-            }
+        let (socket, prepared_token) = match prepared_receiver {
+            Some(prepared) => match prepared.into_socket_and_token() {
+                Ok(parts) => {
+                    log_info!("claimed prepared UDP listener on port {port}");
+                    parts
+                }
+                Err(error) => {
+                    log_info!("FAILED to claim prepared UDP port {port}: {error}");
+                    control_clone.finished.store(true, Ordering::SeqCst);
+                    remove_renderer_if_current(&instance_str, &control_clone);
+                    return;
+                }
+            },
+            None => match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
+                Ok(socket) => (socket, Vec::new()),
+                Err(e) => {
+                    log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
+                    control_clone.finished.store(true, Ordering::SeqCst);
+                    remove_renderer_if_current(&instance_str, &control_clone);
+                    return;
+                }
+            },
         };
         let control_socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
             Ok(socket) => socket,
@@ -578,7 +652,7 @@ fn spawn_live_stream_renderer(
         let mut buf = vec![0u8; 2_048];
         let mut control_buf = vec![0u8; 512];
         let mut host_peer: Option<std::net::SocketAddr> = None;
-        let mut viewer_control_token = Vec::new();
+        let mut viewer_control_token = prepared_token;
         let mut reassembler = FrameReassembler::default();
         let mut sps = Vec::new();
         let mut pps = Vec::new();
@@ -593,8 +667,10 @@ fn spawn_live_stream_renderer(
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
                 // MediaCodec must let go of the old ANativeWindow before
-                // SurfaceHolder.surfaceDestroyed returns. Keep the UDP socket
-                // so a subsequent final release can still send BYE.
+                // SurfaceHolder.surfaceDestroyed returns. Keep draining the
+                // UDP socket while hidden: if the receiver stops reading, the
+                // Host's bounded latest-frame queue overflows and degrades the
+                // other visible stream even though this Surface is transient.
                 reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
                 reassembler.clear();
                 last_frame_id = None;
@@ -602,7 +678,29 @@ fn spawn_live_stream_renderer(
                 while control_clone.suspend.load(Ordering::SeqCst)
                     && !control_clone.stop.load(Ordering::SeqCst)
                 {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    match socket.recv_from(&mut buf) {
+                        Ok((received, peer)) if peer_allowed(Some(peer), &expected_host) => {
+                            host_peer = Some(peer);
+                            let packet = &buf[..received];
+                            if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
+                                viewer_control_token.clear();
+                                viewer_control_token.extend_from_slice(&packet[4..]);
+                                control_clone.input.lock().unwrap().reset_session();
+                                let _ = socket.send_to(packet, peer);
+                            }
+                            // Video/config packets are intentionally discarded
+                            // until a replacement Surface requests a fresh IDR.
+                        }
+                        Ok((_received, peer)) => {
+                            log_info!("rejected suspended media datagram from {peer}");
+                        }
+                        Err(ref error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                || error.kind() == std::io::ErrorKind::TimedOut => {}
+                        Err(error) => {
+                            log_info!("UDP receive error while Surface detached: {error}");
+                        }
+                    }
                 }
                 control_clone.suspended.store(false, Ordering::SeqCst);
                 if let Some(peer) = host_peer {
@@ -689,6 +787,11 @@ fn spawn_live_stream_renderer(
                     .wire_to_decoder_ms
                     .store(LATENCY_UNKNOWN, Ordering::Relaxed);
                 renderer_stats.host_clock_offset_ms = None;
+                // A preflight listener may have consumed the initial CFG/IDR
+                // before this Surface existed. Its authenticated token is
+                // handed over with the socket, so request a fresh recovery
+                // frame as soon as the Host's media endpoint is known.
+                request_idr(&control_socket, peer, &viewer_control_token);
             }
 
             let packet = &buf[..received];
@@ -701,6 +804,7 @@ fn spawn_live_stream_renderer(
                 } else {
                     log_info!("UDP reachability challenge verified for {peer}");
                 }
+                request_idr(&control_socket, peer, &viewer_control_token);
                 continue;
             }
             // Keep accepting responses on the legacy media socket during a
@@ -926,6 +1030,44 @@ pub extern "C" fn leftcar_jni_attach(
     let _ = (state, instance_c, surface);
     log_info!("leftcar_jni_attach: rejected — no paired host IP (use attach_port)");
     LEFTCAR_ERR_INVALID
+}
+
+/// Bind and authenticate the media port before React Native asks the Host to
+/// start capture. The renderer later claims this exact socket in
+/// `leftcar_jni_attach_port`, eliminating the Activity-start race.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_prepare_port(port: u16, host_c: *const c_char) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        if host_c.is_null() {
+            return LEFTCAR_ERR_NULL;
+        }
+        let host = unsafe { CStr::from_ptr(host_c) }
+            .to_string_lossy()
+            .into_owned();
+        match prepare_udp_receiver(port, &host) {
+            Ok(()) => {
+                log_info!("prepared UDP listener on port {port} for {host}");
+                LEFTCAR_OK
+            }
+            Err(error) => {
+                log_info!("failed to prepare UDP listener: {error}");
+                LEFTCAR_ERR_STATE
+            }
+        }
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+/// Idempotent rollback for a Host start failure or a window launch failure.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_cancel_prepared_port(port: u16) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        if cancel_prepared_receiver(port) {
+            log_info!("cancelled prepared UDP listener on port {port}");
+        }
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
 /// Port-explicit attach: each stream window listens on its own UDP port

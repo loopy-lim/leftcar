@@ -1765,6 +1765,10 @@ final class CaptureSession {
                 networkAwaitingKeyframe = true
                 networkLock.unlock()
                 requestRecoveryKeyframe()
+                // A prepared Android listener can consume the initial status
+                // before its Surface exists. IDR is the renderer handoff
+                // signal, so refresh both codec state and input-lock state.
+                sendInputStatus(fd: fd)
                 continue
             }
             if message.count == 16,

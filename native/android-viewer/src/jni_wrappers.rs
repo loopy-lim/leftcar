@@ -57,6 +57,8 @@ extern "C" {
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
+    fn leftcar_jni_prepare_port(port: u16, host: *const c_char) -> i32;
+    fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_attach_port(
         state: *mut c_void,
         instance: *const c_char,
@@ -108,6 +110,8 @@ extern "C" {
 
 // Java signatures:
 //   start(): long
+//   prepareStream(int, String): int
+//   cancelPreparedStream(int): int
 //   attachSurface(long, String, Surface): int
 //   surfaceChanged(long, String, int, int): int
 //   detachSurface(long, String): int
@@ -138,6 +142,37 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_start(
     _class: *mut jobject,
 ) -> i64 {
     leftcar_jni_start() as i64
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+) -> i32 {
+    if port <= 0 || port > i32::from(u16::MAX) {
+        return 4;
+    }
+    let host = match unsafe { get_utf(env, host) } {
+        Some(host) => host,
+        None => return 1,
+    };
+    unsafe { leftcar_jni_prepare_port(port as u16, host.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cancelPreparedStream(
+    _env: *mut JNIEnv,
+    _class: *mut jobject,
+    port: i32,
+) -> i32 {
+    if port <= 0 || port > i32::from(u16::MAX) {
+        return 4;
+    }
+    unsafe { leftcar_jni_cancel_prepared_port(port as u16) }
 }
 
 type AttachArgs = (i64, *mut jobject, *mut jobject);

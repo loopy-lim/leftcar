@@ -22,6 +22,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { allocPort, controlClient, controlHost, reconnectHost } from "../src/session";
 import {
+  startPreparedStream,
+  type StreamLauncher,
+} from "../src/launch-stream";
+import {
   isControlTransportError,
   preferredCaptureBackend,
   type CatalogView,
@@ -29,11 +33,7 @@ import {
   type StatusView,
 } from "../src/control";
 
-type StreamLauncherNative = {
-  openStream(port: number, host: string, width: number, height: number, fps: number): Promise<string>;
-};
-
-const launcher = NativeModules.StreamLauncher as StreamLauncherNative | undefined;
+const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
 interface ActiveStream {
   port: number;
@@ -505,22 +505,12 @@ export default function Catalog() {
           fps,
           captureBackend: effectiveCaptureBackend,
         };
-        let confirmWritten!: () => void;
-        let rejectWritten!: (error: unknown) => void;
-        const written = new Promise<void>((resolve, reject) => {
-          confirmWritten = resolve;
-          rejectWritten = reject;
+        const session = await startPreparedStream({
+          control: client,
+          launcher,
+          host: catalogDisplayHost(host),
+          args: startArgs,
         });
-        const startPromise = client.request<{ session: number }>(
-          "startStream",
-          startArgs,
-          confirmWritten,
-        );
-        void startPromise.catch(rejectWritten);
-
-        await written;
-        await launcher.openStream(port, catalogDisplayHost(host), width, height, fps);
-        const { session } = await startPromise;
         addStream({
           port,
           session,
