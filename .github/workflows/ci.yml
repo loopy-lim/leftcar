@@ -71,8 +71,13 @@ jobs:
   windows-host:
     name: Windows Host (WGC, Media Foundation, NSIS)
     runs-on: windows-latest
+    env:
+      CARGO_HOME: C:\c
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
+      - name: Enable long paths for Git dependencies
+        run: git config --global core.longpaths true
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0

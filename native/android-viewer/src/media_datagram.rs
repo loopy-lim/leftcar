@@ -497,7 +497,7 @@ mod tests {
         let first_bytes = datagram(0, 2, 7, 1, 2, 3, b"a");
         let second_bytes = datagram(1, 2, 7, 1, 2, 3, b"b");
         let first = parse_fragment(&first_bytes).unwrap();
-        assert!(reassembler.push(first.clone()).is_none());
+        assert!(reassembler.push(first).is_none());
         assert!(reassembler.push(first).is_none());
         let second = parse_fragment(&second_bytes).unwrap();
         assert_eq!(reassembler.push(second).unwrap().au, b"ab");
