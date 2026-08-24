@@ -267,12 +267,13 @@ async fn unauthenticated_getcatalog_is_rejected() {
     assert!(resp.contains("\"ok\":false"), "{resp}");
     assert!(resp.contains("\"error\":\"unauthorized\""), "{resp}");
 
-    // connection must be closed: next write gets EOF, not a response line
-    sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
-        .await
-        .unwrap();
+    // connection must be closed: Unix commonly reports EOF while Windows may
+    // report WSAECONNABORTED/WSAECONNRESET for the same peer-initiated close.
+    let _ = sock
+        .write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
+        .await;
     let mut buf = [0u8; 64];
-    let n = sock.read(&mut buf).await.unwrap();
+    let n = sock.read(&mut buf).await.unwrap_or(0);
     assert_eq!(n, 0, "server must close the connection after unauthorized");
 }
 
