@@ -13,7 +13,6 @@ export interface QrPayload {
   secret: string;
   host: string;
   port: number;
-  code?: string;
 }
 
 export interface HostEndpoint {
@@ -30,7 +29,37 @@ interface RawQrPayload {
   s?: unknown;
   h?: unknown;
   p?: unknown;
-  c?: unknown;
+}
+
+const OFFER_ID_PATTERN =
+  /^offer-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OFFER_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The current transport is protected by pairing but not encrypted by TLS.
+ * Restrict it to loopback, private LAN, link-local, and Tailscale addresses.
+ */
+export function isTrustedHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/\.$/, "");
+  if (!normalized || normalized.length > 253) return false;
+  if (normalized === "localhost" || normalized.endsWith(".local")) return true;
+  if (normalized.endsWith(".ts.net")) return true;
+
+  const octets = normalized.split(".");
+  if (octets.length !== 4 || octets.some((part) => !/^\d{1,3}$/.test(part))) {
+    return false;
+  }
+  const values = octets.map(Number);
+  if (values.some((value) => value < 0 || value > 255)) return false;
+  const [a, b] = values;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
 }
 
 /** Parse an explicitly selected host endpoint without inventing a localhost fallback. */
@@ -39,13 +68,15 @@ export function parseHostEndpoint(endpoint: string): HostEndpoint | null {
   if (!trimmed) return null;
 
   const separator = trimmed.lastIndexOf(":");
-  if (separator < 0) return { host: trimmed, port: 7777 };
+  if (separator < 0) {
+    return isTrustedHost(trimmed) ? { host: trimmed, port: 7777 } : null;
+  }
 
   const host = trimmed.slice(0, separator).trim();
   const rawPort = trimmed.slice(separator + 1).trim();
   const port = Number(rawPort);
   if (
-    !host ||
+    !isTrustedHost(host) ||
     !/^\d+$/.test(rawPort) ||
     !Number.isInteger(port) ||
     port < 1 ||
@@ -60,7 +91,7 @@ export function formatHostEndpoint(host: string, port: number): string {
   return `${host}:${port}`;
 }
 
-/** `{"v":1,"id":..,"s":..,"h":..,"p":..,"c":..}` → QrPayload; null on any mismatch. */
+/** `{"v":1,"id":..,"s":..,"h":..,"p":..}` → QrPayload; null on any mismatch. */
 export function parseQrPayload(text: string): QrPayload | null {
   if (!text || typeof text !== "string") return null;
   let raw: RawQrPayload;
@@ -72,11 +103,11 @@ export function parseQrPayload(text: string): QrPayload | null {
   if (
     raw.v !== 1 ||
     typeof raw.id !== "string" ||
-    !raw.id ||
+    !OFFER_ID_PATTERN.test(raw.id) ||
     typeof raw.s !== "string" ||
-    !raw.s ||
+    !OFFER_SECRET_PATTERN.test(raw.s) ||
     typeof raw.h !== "string" ||
-    !raw.h ||
+    !isTrustedHost(raw.h) ||
     typeof raw.p !== "number" ||
     !Number.isInteger(raw.p) ||
     raw.p <= 0 ||
@@ -84,11 +115,7 @@ export function parseQrPayload(text: string): QrPayload | null {
   ) {
     return null;
   }
-  const code =
-    typeof raw.c === "string" && /^\d{6}$/.test(raw.c.trim())
-      ? raw.c.trim()
-      : undefined;
-  return { id: raw.id, secret: raw.s, host: raw.h, port: raw.p, ...(code ? { code } : {}) };
+  return { id: raw.id, secret: raw.s, host: raw.h, port: raw.p };
 }
 
 /** Stable per-install device label shown in the host's paired-device list. */
@@ -117,10 +144,13 @@ export function deviceName(): string {
  * Complete pairing against the QR offer host. On success the issued token is
  * persisted; on any failure nothing is kept (a stale token is dropped too).
  */
-export async function pairWithHost(p: QrPayload, code?: string): Promise<string> {
-  const pairingCode = code || p.code;
-  if (!pairingCode) {
-    throw new Error("6자리 인증 코드가 필요합니다");
+export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
+  if (!isTrustedHost(p.host)) {
+    throw new Error("같은 Wi-Fi 또는 Tailscale에 있는 컴퓨터만 연결할 수 있습니다");
+  }
+  const pairingCode = code.trim().replace(/\s+/g, "");
+  if (!/^\d{6}$/.test(pairingCode)) {
+    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
   }
   const client = await connect(p.host, p.port);
   try {
@@ -131,7 +161,9 @@ export async function pairWithHost(p: QrPayload, code?: string): Promise<string>
       deviceId: await getDeviceId(),
       deviceName: deviceName(),
     });
-    if (!token) throw new Error("페어링 응답에 토큰이 없습니다");
+    if (!/^[0-9a-f]{64}$/.test(token)) {
+      throw new Error("컴퓨터의 연결 승인 응답을 확인할 수 없습니다");
+    }
     await SecureStore.setItemAsync(TOKEN_KEY, token);
     return token;
   } catch (e) {
@@ -140,36 +172,6 @@ export async function pairWithHost(p: QrPayload, code?: string): Promise<string>
   } finally {
     // The pairing connection is single-purpose; the token travels via secure
     // storage into the main control session, so always release the socket.
-    client.close();
-  }
-}
-
-/**
- * Complete pairing by connecting directly to the host IP and entering the 6-digit code.
- */
-export async function pairWithHostByCode(
-  host: string,
-  port = 7777,
-  code: string,
-): Promise<string> {
-  const trimmed = code.trim().replace(/\s+/g, "");
-  if (trimmed.length !== 6) {
-    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
-  }
-  const client = await connect(host, port);
-  try {
-    const { token } = await client.request<{ token: string }>("pair", {
-      code: trimmed,
-      deviceId: await getDeviceId(),
-      deviceName: deviceName(),
-    });
-    if (!token) throw new Error("페어링 응답에 토큰이 없습니다");
-    await SecureStore.setItemAsync(TOKEN_KEY, token);
-    return token;
-  } catch (e) {
-    await clearToken();
-    throw e;
-  } finally {
     client.close();
   }
 }

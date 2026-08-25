@@ -3,8 +3,8 @@
 //! viewer (design §2).
 //!
 //! QR payload: `{"v":1,"id":<offer_id>,"s":<base64url 32B secret>,"h":<host_ip>,"p":<port>}`.
-//! The 6-digit human verification code is displayed by the host UI and
-//! presented by the viewer on `pair` — a second factor on top of the secret.
+//! The 6-digit human verification code is shown separately by the host UI and
+//! presented by the viewer on `pair` — it must never be embedded in the QR.
 
 use base64::Engine as _;
 use serde_json::json;
@@ -50,6 +50,15 @@ pub struct PairedDevice {
     pub device_id: String,
     pub name: String,
     pub token_hex: String,
+    pub paired_at: String,
+}
+
+/// Redacted device metadata safe to expose to the webview. Authentication
+/// tokens stay inside the Rust host process and its restricted local store.
+#[derive(serde::Serialize, Clone)]
+pub struct PairedDeviceView {
+    pub device_id: String,
+    pub name: String,
     pub paired_at: String,
 }
 
@@ -105,6 +114,14 @@ impl PairingServer {
     /// human verification code for the host UI.
     pub fn begin_pairing(&self, host_ip: &str, port: u16) -> PairingSessionView {
         let mut inner = self.inner.lock().unwrap();
+        // Replacing the QR must invalidate every older image immediately. A
+        // screenshot of a superseded offer must not remain usable for 2 min.
+        let stale_offer_ids: Vec<String> = inner.live_offers.drain().collect();
+        for offer_id in stale_offer_ids {
+            inner.service.cancel(&offer_id);
+        }
+        inner.fail_counts.clear();
+
         let fingerprint = inner.fingerprint.clone();
         let offer = inner.service.begin_offer(fingerprint);
         // Borrow the secret only to encode it into the QR payload; the
@@ -121,7 +138,6 @@ impl PairingServer {
             "s": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0),
             "h": host_ip,
             "p": port,
-            "c": offer.human_verification_code,
         })
         .to_string();
         drop(secret); // OfferSecret drops -> zeroized immediately
@@ -172,7 +188,9 @@ impl PairingServer {
                     token_hex: token_hex.clone(),
                     paired_at: unix_timestamp_utc(),
                 };
-                inner.paired.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
+                inner
+                    .paired
+                    .retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
                 inner.paired.push(paired.clone());
                 inner.live_offers.remove(offer_id); // single-use: offer consumed
                 if self.persist(inner.paired.clone()).is_err() {
@@ -189,71 +207,6 @@ impl PairingServer {
                     inner.service.cancel(offer_id);
                     inner.live_offers.remove(offer_id);
                     inner.fail_counts.remove(offer_id);
-                }
-                Err(PairingServerError::PairingFailed)
-            }
-        }
-    }
-
-    /// Complete pairing via direct LAN connection using only the 6-digit human verification code.
-    pub fn pair_by_code(
-        &self,
-        code: &str,
-        device_id: &str,
-        name: &str,
-    ) -> Result<String, PairingServerError> {
-        let mut inner = self.inner.lock().unwrap();
-        let offer_id_opt = inner.service.find_offer_by_code(code);
-        let Some(offer_id) = offer_id_opt else {
-            let live: Vec<String> = inner.live_offers.iter().cloned().collect();
-            for oid in live {
-                let count = inner.fail_counts.entry(oid.clone()).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    inner.service.cancel(&oid);
-                    inner.live_offers.remove(&oid);
-                    inner.fail_counts.remove(&oid);
-                }
-            }
-            return Err(PairingServerError::PairingFailed);
-        };
-
-        if !inner.live_offers.contains(&offer_id) {
-            return Err(PairingServerError::OfferNotFound);
-        }
-
-        let Some(secret) = inner.service.take_secret_for_qr(&offer_id) else {
-            return Err(PairingServerError::PairingFailed);
-        };
-
-        let device = domain::ids::DeviceId::from_raw(device_id)
-            .map_err(|_| PairingServerError::PairingFailed)?;
-        match inner.service.approve(&offer_id, device, &secret.0, code) {
-            Ok(_device) => {
-                inner.fail_counts.remove(&offer_id);
-                let token = session::OfferSecret::from_random();
-                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
-                let paired = PairedDevice {
-                    device_id: device_id.to_owned(),
-                    name: name.to_owned(),
-                    token_hex: token_hex.clone(),
-                    paired_at: unix_timestamp_utc(),
-                };
-                inner.paired.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
-                inner.paired.push(paired.clone());
-                inner.live_offers.remove(&offer_id);
-                if self.persist(inner.paired.clone()).is_err() {
-                    eprintln!("leftcar: paired-device persistence failed");
-                }
-                Ok(token_hex)
-            }
-            Err(_) => {
-                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    inner.service.cancel(&offer_id);
-                    inner.live_offers.remove(&offer_id);
-                    inner.fail_counts.remove(&offer_id);
                 }
                 Err(PairingServerError::PairingFailed)
             }
@@ -315,6 +268,20 @@ impl PairingServer {
 
     pub fn list_devices(&self) -> Vec<PairedDevice> {
         self.inner.lock().unwrap().paired.clone()
+    }
+
+    pub fn list_device_views(&self) -> Vec<PairedDeviceView> {
+        self.inner
+            .lock()
+            .unwrap()
+            .paired
+            .iter()
+            .map(|device| PairedDeviceView {
+                device_id: device.device_id.clone(),
+                name: device.name.clone(),
+                paired_at: device.paired_at.clone(),
+            })
+            .collect()
     }
 
     /// Best-effort persist; parent dirs created, file written 0600.
@@ -429,6 +396,10 @@ mod tests {
         assert!(payload["id"].as_str().unwrap().starts_with("offer-"));
         assert_eq!(payload["h"], json!("192.168.0.10"));
         assert_eq!(payload["p"], json!(7777));
+        assert!(
+            payload.get("c").is_none(),
+            "QR must not contain the human code"
+        );
         let secret_b64 = payload["s"].as_str().unwrap();
         assert!(!secret_b64.contains('+') && !secret_b64.contains('/'));
         assert!(!secret_b64.contains('='));
@@ -489,29 +460,6 @@ mod tests {
         let e = server.pair(offer_id, secret_b64, "000000", "viewer-1", "Quest 3");
         assert!(e.is_err());
         // error message must not reveal which factor failed
-        assert_eq!(e.unwrap_err().to_string(), "pairing failed");
-        assert!(server.list_devices().is_empty());
-    }
-
-    #[test]
-    fn pair_by_code_with_correct_code_issues_token() {
-        let server = PairingServer::new("leftcar-host".into(), None);
-        let view = server.begin_pairing("192.168.0.10", 7777);
-        let token = server
-            .pair_by_code(&view.code, "viewer-code-1", "Quest 3")
-            .unwrap();
-        assert_eq!(token.len(), 64);
-        let devices = server.list_devices();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].device_id, "viewer-code-1");
-    }
-
-    #[test]
-    fn pair_by_code_with_wrong_code_fails() {
-        let server = PairingServer::new("leftcar-host".into(), None);
-        let _view = server.begin_pairing("192.168.0.10", 7777);
-        let e = server.pair_by_code("000000", "viewer-1", "Quest 3");
-        assert!(e.is_err());
         assert_eq!(e.unwrap_err().to_string(), "pairing failed");
         assert!(server.list_devices().is_empty());
     }
@@ -629,16 +577,23 @@ mod tests {
     }
 
     #[test]
-    fn cancel_active_burns_all_live_offers_but_keeps_paired_devices() {
+    fn replacing_or_canceling_an_offer_invalidates_old_qr_codes() {
         let server = PairingServer::new("leftcar-host".into(), None);
         let first = server.begin_pairing("192.168.0.10", 7777);
         let second = server.begin_pairing("192.168.0.10", 7777);
-        // accumulate a failure count on the first offer
         let payload = serde_json::from_str::<serde_json::Value>(&first.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap();
         let secret_b64 = payload["s"].as_str().unwrap();
-        let _ = server.pair(offer_id, secret_b64, "000000", "viewer-1", "Quest 3");
-        // pair one device successfully via the second offer
+        assert!(server
+            .pair(
+                offer_id,
+                secret_b64,
+                &first.code,
+                "viewer-1",
+                "Android Viewer"
+            )
+            .is_err());
+
         let payload2 = serde_json::from_str::<serde_json::Value>(&second.qr_payload).unwrap();
         server
             .pair(
@@ -646,29 +601,46 @@ mod tests {
                 payload2["s"].as_str().unwrap(),
                 &second.code,
                 "viewer-2",
-                "Quest 3",
+                "Android Viewer",
             )
             .unwrap();
         assert_eq!(server.list_devices().len(), 1);
 
+        let third = server.begin_pairing("192.168.0.10", 7777);
+        let payload3 = serde_json::from_str::<serde_json::Value>(&third.qr_payload).unwrap();
         server.cancel_active();
 
-        // both offers are dead: correct secret+code can no longer pair
-        assert!(server
-            .pair(offer_id, secret_b64, &first.code, "viewer-1", "Quest 3")
-            .is_err());
         assert!(server
             .pair(
-                payload2["id"].as_str().unwrap(),
-                payload2["s"].as_str().unwrap(),
-                &second.code,
+                payload3["id"].as_str().unwrap(),
+                payload3["s"].as_str().unwrap(),
+                &third.code,
                 "viewer-3",
-                "Quest 3",
+                "Android Viewer",
             )
             .is_err());
-        // already-paired devices survive cancellation
         assert_eq!(server.list_devices().len(), 1);
         assert_eq!(server.list_devices()[0].device_id, "viewer-2");
+    }
+
+    #[test]
+    fn device_views_never_expose_authentication_tokens() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
+        server
+            .pair(
+                payload["id"].as_str().unwrap(),
+                payload["s"].as_str().unwrap(),
+                &view.code,
+                "viewer-1",
+                "Android Viewer",
+            )
+            .unwrap();
+
+        let serialized = serde_json::to_value(server.list_device_views()).unwrap();
+        assert_eq!(serialized[0]["device_id"], "viewer-1");
+        assert!(serialized[0].get("token_hex").is_none());
     }
 
     #[test]

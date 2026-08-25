@@ -14,9 +14,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { connectHost, controlHost } from "../src/session";
 import {
+  formatHostEndpoint,
   pairWithHost,
-  pairWithHostByCode,
-  parseHostEndpoint,
   parseQrPayload,
   type QrPayload,
 } from "../src/pairing";
@@ -24,19 +23,74 @@ import { formatErrorMessage } from "../src/control";
 
 type PairingMode = "qr" | "code";
 
+function OtpPinInput({
+  code,
+  onChangeCode,
+  disabled,
+}: {
+  code: string;
+  onChangeCode: (val: string) => void;
+  disabled: boolean;
+}) {
+  const inputRef = useRef<TextInput>(null);
+  const digits = Array.from({ length: 6 }, (_, i) => code[i] ?? "");
+
+  const handleBoxPress = () => {
+    inputRef.current?.focus();
+  };
+
+  return (
+    <Pressable onPress={handleBoxPress} style={styles.otpContainer}>
+      <TextInput
+        ref={inputRef}
+        style={styles.hiddenTextInput}
+        value={code}
+        onChangeText={(text) => {
+          const cleaned = text.replace(/[^0-9]/g, "").slice(0, 6);
+          onChangeCode(cleaned);
+        }}
+        keyboardType="number-pad"
+        maxLength={6}
+        editable={!disabled}
+        autoFocus={false}
+        caretHidden
+      />
+      <View style={styles.otpBoxesRow}>
+        {digits.map((digit, index) => {
+          const isCurrent = index === code.length && !disabled;
+          const isFilled = Boolean(digit);
+          return (
+            <View
+              key={index}
+              style={[
+                styles.otpBox,
+                isFilled && styles.otpBoxFilled,
+                isCurrent && styles.otpBoxCurrent,
+              ]}
+            >
+              <Text style={styles.otpDigit}>{digit}</Text>
+            </View>
+          );
+        })}
+      </View>
+    </Pressable>
+  );
+}
+
 export default function Pairing() {
   const params = useLocalSearchParams<{ endpoint?: string | string[] }>();
   const [mode, setMode] = useState<PairingMode>("qr");
   const [code, setCode] = useState("");
   const scannedPayloadRef = useRef<QrPayload | null>(null);
+  const scannedHostRef = useRef("");
   const [busy, setBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const routeEndpoint = Array.isArray(params.endpoint) ? params.endpoint[0] : params.endpoint;
-  const host = controlHost() || routeEndpoint || "";
+  const host = scannedHostRef.current || controlHost() || routeEndpoint || "";
   const scanningLockRef = useRef(false);
-  const hasCodeTarget = Boolean(scannedPayloadRef.current || parseHostEndpoint(host));
+  const hasCodeTarget = Boolean(scannedPayloadRef.current);
 
   useEffect(() => {
     setError(null);
@@ -51,19 +105,14 @@ export default function Pairing() {
       }
       setBusy(true);
       setError(null);
-      setStatusMessage("호스트 인증 중…");
+      setStatusMessage("컴퓨터에서 연결을 확인하는 중…");
       try {
         const scannedPayload = scannedPayloadRef.current;
         if (scannedPayload) {
           await pairWithHost(scannedPayload, trimmed);
           await connectHost(scannedPayload.host, scannedPayload.port);
         } else {
-          const endpoint = parseHostEndpoint(host);
-          if (!endpoint) {
-            throw new Error("대상 호스트가 없습니다. 먼저 호스트를 선택하거나 QR 코드를 스캔해 주세요.");
-          }
-          await pairWithHostByCode(endpoint.host, endpoint.port, trimmed);
-          await connectHost(endpoint.host, endpoint.port);
+          throw new Error("먼저 컴퓨터 화면의 QR 코드를 스캔해 주세요.");
         }
         router.replace("/catalog");
       } catch (e) {
@@ -73,7 +122,7 @@ export default function Pairing() {
         setStatusMessage(null);
       }
     },
-    [host],
+    [],
   );
 
   const handleQrScanned = useCallback(
@@ -83,21 +132,15 @@ export default function Pairing() {
       try {
         const payload = parseQrPayload(scannedData);
         if (!payload) {
-          setError("올바른 Leftcar 페어링 QR 코드가 아닙니다.");
+          setError("Leftcar에서 만든 연결 QR 코드가 아닙니다.");
           return;
         }
         setBusy(true);
         setError(null);
-        if (payload.code) {
-          setStatusMessage("QR 코드로 자동 페어링 중…");
-          await pairWithHost(payload, payload.code);
-          await connectHost(payload.host, payload.port);
-          router.replace("/catalog");
-        } else {
-          scannedPayloadRef.current = payload;
-          setMode("code");
-          setStatusMessage("QR 코드가 인식되었습니다. 화면의 6자리 인증 번호를 입력하세요.");
-        }
+        scannedPayloadRef.current = payload;
+        scannedHostRef.current = formatHostEndpoint(payload.host, payload.port);
+        setMode("code");
+        setStatusMessage("QR 코드를 확인했습니다. 컴퓨터 화면의 6자리 번호를 입력해 주세요.");
       } catch (e) {
         setError(formatErrorMessage(e));
       } finally {
@@ -123,7 +166,7 @@ export default function Pairing() {
           <View style={styles.hostStrip}>
             <View style={styles.hostDot} />
             <Text style={styles.hostText} numberOfLines={1}>
-              대상 호스트: <Text style={styles.hostAddr}>{host}</Text>
+              연결 대상: <Text style={styles.hostAddr}>{host}</Text>
             </Text>
           </View>
         ) : null}
@@ -138,11 +181,11 @@ export default function Pairing() {
               <View style={styles.tabContentRow}>
                 <Ionicons
                   name="qr-code-outline"
-                  size={15}
-                  color={mode === "qr" ? "#2563EB" : "#64748B"}
+                  size={14}
+                  color={mode === "qr" ? "#FFFFFF" : "#71717A"}
                 />
                 <Text style={[styles.modeTabText, mode === "qr" && styles.modeTabTextActive]}>
-                  QR 스캔
+                  QR 코드 스캔
                 </Text>
               </View>
             </Pressable>
@@ -153,11 +196,11 @@ export default function Pairing() {
               <View style={styles.tabContentRow}>
                 <Ionicons
                   name="keypad-outline"
-                  size={15}
-                  color={mode === "code" ? "#2563EB" : "#64748B"}
+                  size={14}
+                  color={mode === "code" ? "#FFFFFF" : "#71717A"}
                 />
                 <Text style={[styles.modeTabText, mode === "code" && styles.modeTabTextActive]}>
-                  6자리 코드
+                  6자리 PIN 입력
                 </Text>
               </View>
             </Pressable>
@@ -167,7 +210,7 @@ export default function Pairing() {
         {/* Status Alert */}
         {statusMessage && (
           <View style={styles.statusCard}>
-            <ActivityIndicator size="small" color="#2563EB" />
+            <ActivityIndicator size="small" color="#09090B" />
             <Text style={styles.statusText}>{statusMessage}</Text>
           </View>
         )}
@@ -175,7 +218,7 @@ export default function Pairing() {
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
-            <Ionicons name="alert-circle-outline" size={16} color="#DC2626" />
+            <Ionicons name="alert-circle" size={16} color="#09090B" />
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
@@ -185,16 +228,16 @@ export default function Pairing() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>QR 코드 스캔</Text>
             <Text style={styles.cardDesc}>
-              컴퓨터의 Leftcar Host 화면에 띄운 QR 코드를 비춰주세요.
+              컴퓨터의 Leftcar Host Studio 화면에 띄운 QR 코드를 비춰 주세요.
             </Text>
 
             {!permission ? (
               <View style={styles.cameraBox}>
-                <ActivityIndicator color="#2563EB" />
+                <ActivityIndicator color="#09090B" />
               </View>
             ) : !permission.granted ? (
               <View style={styles.cameraNotice}>
-                <Ionicons name="camera-outline" size={32} color="#2563EB" style={{ marginBottom: 4 }} />
+                <Ionicons name="camera-outline" size={28} color="#09090B" style={{ marginBottom: 4 }} />
                 <Text style={styles.cameraNoticeTitle}>카메라 권한 필요</Text>
                 <Text style={styles.cameraNoticeText}>
                   컴퓨터 화면의 QR 코드를 스캔하려면 카메라 권한이 필요합니다.
@@ -226,22 +269,17 @@ export default function Pairing() {
           </View>
         ) : (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>6자리 인증 코드</Text>
+            <Text style={styles.cardTitle}>6자리 인증 PIN 번호</Text>
             <Text style={styles.cardDesc}>
               {hasCodeTarget
-                ? "호스트 화면의 QR 코드 아래에 적힌 6자리 번호를 입력하세요."
-                : "먼저 호스트를 선택하거나 QR 코드를 스캔한 다음 인증 코드를 입력하세요."}
+                ? "컴퓨터 화면의 QR 코드 아래에 표시된 6자리 번호를 입력하세요."
+                : "먼저 컴퓨터 화면의 QR 코드를 스캔한 다음 인증 번호를 입력하세요."}
             </Text>
 
-            <TextInput
-              style={styles.codeInput}
-              placeholder="000000"
-              placeholderTextColor="#94A3B8"
-              keyboardType="number-pad"
-              maxLength={6}
-              value={code}
-              onChangeText={setCode}
-              editable={!busy}
+            <OtpPinInput
+              code={code}
+              onChangeCode={setCode}
+              disabled={busy}
             />
 
             <Pressable
@@ -255,7 +293,7 @@ export default function Pairing() {
               {busy ? (
                 <ActivityIndicator color="#FFFFFF" size="small" />
               ) : (
-                <Text style={styles.primaryBtnText}>페어링 완료하기</Text>
+                <Text style={styles.primaryBtnText}>연결 승인하기</Text>
               )}
             </Pressable>
           </View>
@@ -264,14 +302,17 @@ export default function Pairing() {
         {/* Security / Help Card */}
         <View style={styles.tipBox}>
           <View style={styles.tipTitleRow}>
-            <Ionicons name="shield-checkmark-outline" size={16} color="#2563EB" />
-            <Text style={styles.tipTitle}>보안 및 안내</Text>
+            <Ionicons name="shield-checkmark-outline" size={15} color="#09090B" />
+            <Text style={styles.tipTitle}>안전한 기기 페어링</Text>
           </View>
           <Text style={styles.tipText}>
-            • 한 번 페어링된 기기는 다음 연결 시 자동으로 승인됩니다.
+            • QR 코드와 6자리 번호를 모두 확인해야 연결이 허용됩니다.
           </Text>
           <Text style={styles.tipText}>
-            • 보안을 위해 생성된 QR 코드는 2분 후 만료됩니다.
+            • 일회용 보안 QR 코드는 2분 뒤 자동으로 안전하게 만료됩니다.
+          </Text>
+          <Text style={styles.tipText}>
+            • 신뢰하는 동일한 Wi-Fi 네트워크에서만 사용하세요.
           </Text>
         </View>
       </ScrollView>
@@ -282,22 +323,22 @@ export default function Pairing() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   root: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   content: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
+    paddingHorizontal: 18,
+    paddingTop: 14,
     paddingBottom: 32,
     gap: 14,
   },
   hostStrip: {
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -309,49 +350,48 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     flexShrink: 0,
   },
   hostText: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 12,
     flex: 1,
   },
   hostAddr: {
-    color: "#0F172A",
-    fontWeight: "600",
+    color: "#09090B",
+    fontWeight: "700",
     fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
   },
   modeTabsWrapper: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     padding: 3,
   },
   modeTabs: {
     flexDirection: "row",
-    gap: 4,
+    gap: 3,
   },
   modeTab: {
     flex: 1,
     paddingVertical: 7,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 7,
+    borderRadius: 6,
   },
   modeTabActive: {
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#BFDBFE",
+    backgroundColor: "#09090B",
   },
   modeTabText: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 12,
     fontWeight: "600",
   },
   modeTabTextActive: {
-    color: "#1D4ED8",
+    color: "#FFFFFF",
     fontWeight: "700",
   },
   tabContentRow: {
@@ -360,59 +400,59 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   statusCard: {
-    backgroundColor: "#EFF6FF",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#BFDBFE",
+    borderColor: "#D4D4D8",
     borderRadius: 8,
-    padding: 10,
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
   statusText: {
-    color: "#1D4ED8",
+    color: "#09090B",
     fontSize: 12,
-    fontWeight: "500",
+    fontWeight: "600",
     flex: 1,
   },
   errorCard: {
-    backgroundColor: "#FEF2F2",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#FECACA",
+    borderColor: "#A1A1AA",
     borderRadius: 8,
-    padding: 10,
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
   errorText: {
-    color: "#DC2626",
+    color: "#09090B",
     fontSize: 12,
     lineHeight: 16,
     flex: 1,
+    fontWeight: "500",
   },
   card: {
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
-    borderRadius: 14,
+    borderColor: "#E4E4E7",
+    borderRadius: 12,
     padding: 16,
     gap: 12,
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.03)",
   },
   cardTitle: {
     fontSize: 14,
-    fontWeight: "600",
-    color: "#0F172A",
+    fontWeight: "700",
+    color: "#09090B",
   },
   cardDesc: {
     fontSize: 12,
-    color: "#64748B",
-    lineHeight: 16,
+    color: "#52525B",
+    lineHeight: 17,
   },
   scannerWrapper: {
     height: 220,
-    borderRadius: 10,
+    borderRadius: 8,
     overflow: "hidden",
     backgroundColor: "#000000",
   },
@@ -426,7 +466,7 @@ const styles = StyleSheet.create({
   },
   scanOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.3)",
+    backgroundColor: "rgba(0,0,0,0.35)",
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
@@ -440,7 +480,7 @@ const styles = StyleSheet.create({
     backgroundColor: "transparent",
   },
   scanHintBox: {
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: "rgba(0,0,0,0.7)",
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 4,
@@ -456,22 +496,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 6,
   },
-  cameraNoticeIcon: {
-    fontSize: 26,
-  },
   cameraNoticeTitle: {
-    color: "#0F172A",
+    color: "#09090B",
     fontSize: 13,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   cameraNoticeText: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 11,
     textAlign: "center",
     lineHeight: 16,
   },
   permissionBtn: {
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     borderRadius: 6,
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -482,29 +519,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
   },
-  codeInput: {
-    backgroundColor: "#F8FAFC",
-    borderWidth: 1,
-    borderColor: "#CBD5E1",
-    borderRadius: 8,
-    color: "#0F172A",
-    fontSize: 22,
-    fontWeight: "700",
-    fontFamily: "monospace",
-    letterSpacing: 6,
-    textAlign: "center",
-    paddingVertical: 10,
-    paddingHorizontal: 8,
+
+  /* OTP PIN Split Boxes */
+  otpContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginVertical: 4,
+    position: "relative",
   },
+  hiddenTextInput: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+  otpBoxesRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  otpBox: {
+    width: 42,
+    height: 48,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: "#E4E4E7",
+    backgroundColor: "#FAFAFA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  otpBoxFilled: {
+    borderColor: "#09090B",
+    backgroundColor: "#FFFFFF",
+  },
+  otpBoxCurrent: {
+    borderColor: "#09090B",
+    backgroundColor: "#FFFFFF",
+  },
+  otpDigit: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#09090B",
+    fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
+  },
+
   primaryBtn: {
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     borderRadius: 8,
     paddingVertical: 11,
     alignItems: "center",
     justifyContent: "center",
   },
   btnDisabled: {
-    opacity: 0.5,
+    opacity: 0.4,
   },
   primaryBtnText: {
     color: "#FFFFFF",
@@ -512,10 +579,12 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   tipBox: {
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F4F4F5",
     borderRadius: 10,
-    padding: 12,
-    gap: 4,
+    borderWidth: 1,
+    borderColor: "#E4E4E7",
+    padding: 14,
+    gap: 5,
   },
   tipTitleRow: {
     flexDirection: "row",
@@ -523,12 +592,12 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   tipTitle: {
-    color: "#334155",
+    color: "#09090B",
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   tipText: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 11,
     lineHeight: 16,
   },

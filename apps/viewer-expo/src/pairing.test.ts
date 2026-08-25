@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // expo-modules-core's raw TypeScript source, which the vitest/vite SSR
 // transform cannot parse (native modules are boundaries in tests anyway).
 vi.mock("expo-constants", () => ({
-  default: { deviceName: "Galaxy XR 테스트" },
+  default: { deviceName: "Android 뷰어 테스트" },
 }));
 
 vi.mock("expo-secure-store", () => {
@@ -46,8 +46,8 @@ import {
   deviceName,
   getDeviceId,
   getStoredToken,
+  isTrustedHost,
   pairWithHost,
-  pairWithHostByCode,
   formatHostEndpoint,
   parseHostEndpoint,
   parseQrPayload,
@@ -55,11 +55,13 @@ import {
 
 const store = (SecureStore as unknown as { __store: Map<string, string> }).__store;
 
+const OFFER_ID = "offer-123e4567-e89b-42d3-a456-426614174000";
+const OFFER_SECRET = "A".repeat(43);
 const validQr =
-  '{"v":1,"id":"offer-x","s":"abc","h":"192.168.1.5","p":7777}';
+  `{"v":1,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","h":"192.168.1.5","p":7777}`;
 
 function makePayload(): QrPayload {
-  return { id: "offer-x", secret: "abc", host: "192.168.1.5", port: 7777 };
+  return { id: OFFER_ID, secret: OFFER_SECRET, host: "192.168.1.5", port: 7777 };
 }
 
 const TOKEN_64HEX = "a".repeat(64);
@@ -76,22 +78,21 @@ afterEach(() => {
 describe("parseQrPayload", () => {
   it("parseQrPayload_valid: extracts id/secret/host/port", () => {
     expect(parseQrPayload(validQr)).toEqual({
-      id: "offer-x",
-      secret: "abc",
+      id: OFFER_ID,
+      secret: OFFER_SECRET,
       host: "192.168.1.5",
       port: 7777,
     });
   });
 
-  it("parseQrPayload_with_code: extracts code when present", () => {
+  it("never trusts a code embedded in a QR payload", () => {
     const qrWithCode =
-      '{"v":1,"id":"offer-x","s":"abc","h":"192.168.1.5","p":7777,"c":"123456"}';
+      `{"v":1,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","h":"192.168.1.5","p":7777,"c":"123456"}`;
     expect(parseQrPayload(qrWithCode)).toEqual({
-      id: "offer-x",
-      secret: "abc",
+      id: OFFER_ID,
+      secret: OFFER_SECRET,
       host: "192.168.1.5",
       port: 7777,
-      code: "123456",
     });
   });
 
@@ -133,6 +134,15 @@ describe("host endpoint", () => {
     expect(parseHostEndpoint("192.168.0.134:not-a-port")).toBeNull();
     expect(parseHostEndpoint("192.168.0.134:0")).toBeNull();
   });
+
+  it("accepts private and Tailscale targets but rejects public internet hosts", () => {
+    expect(isTrustedHost("10.0.0.5")).toBe(true);
+    expect(isTrustedHost("100.100.20.30")).toBe(true);
+    expect(isTrustedHost("my-mac.example.ts.net")).toBe(true);
+    expect(isTrustedHost("8.8.8.8")).toBe(false);
+    expect(isTrustedHost("example.com")).toBe(false);
+    expect(parseHostEndpoint("8.8.8.8:7777")).toBeNull();
+  });
 });
 
 describe("getDeviceId", () => {
@@ -153,8 +163,8 @@ describe("pairWithHost", () => {
     expect(token).toBe(TOKEN_64HEX);
     expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777);
     expect(requestMock).toHaveBeenCalledWith("pair", {
-      offerId: "offer-x",
-      secret: "abc",
+      offerId: OFFER_ID,
+      secret: OFFER_SECRET,
       code: "123456",
       deviceId: store.get("leftcar.deviceId"),
       deviceName: deviceName(),
@@ -163,18 +173,11 @@ describe("pairWithHost", () => {
     expect(closeMock).toHaveBeenCalledTimes(1); // no leaked connection
   });
 
-  it("success with embedded payload code: uses payload.code without 2nd arg", async () => {
-    requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
-    const payloadWithCode = { ...makePayload(), code: "654321" };
-    const token = await pairWithHost(payloadWithCode);
-    expect(token).toBe(TOKEN_64HEX);
-    expect(requestMock).toHaveBeenCalledWith("pair", {
-      offerId: "offer-x",
-      secret: "abc",
-      code: "654321",
-      deviceId: store.get("leftcar.deviceId"),
-      deviceName: deviceName(),
-    });
+  it("requires the separately displayed code", async () => {
+    await expect(pairWithHost(makePayload(), "")).rejects.toThrow(
+      "6자리 인증 코드를 정확히 입력해 주세요",
+    );
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("failure: throws and stores nothing", async () => {
@@ -190,26 +193,14 @@ describe("pairWithHost", () => {
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
     expect(store.get("leftcar.token")).toBeUndefined();
   });
-});
 
-describe("pairWithHostByCode", () => {
-  it("success: connects and sends code directly", async () => {
-    requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
-    const token = await pairWithHostByCode("192.168.1.10", 7777, "123456");
-    expect(token).toBe(TOKEN_64HEX);
-    expect(connect).toHaveBeenCalledWith("192.168.1.10", 7777);
-    expect(requestMock).toHaveBeenCalledWith("pair", {
-      code: "123456",
-      deviceId: store.get("leftcar.deviceId"),
-      deviceName: deviceName(),
-    });
-    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
-  });
-
-  it("invalid code format throws without connecting", async () => {
-    await expect(pairWithHostByCode("192.168.1.10", 7777, "123")).rejects.toThrow(
-      "6자리 인증 코드를 정확히 입력해 주세요",
+  it("rejects a malformed issued token instead of storing it", async () => {
+    requestMock.mockResolvedValueOnce({ token: "not-a-valid-token" });
+    await expect(pairWithHost(makePayload(), "123456")).rejects.toThrow(
+      "연결 승인 응답을 확인할 수 없습니다",
     );
+    expect(store.get("leftcar.token")).toBeUndefined();
+    expect(closeMock).toHaveBeenCalledTimes(1);
   });
 });
 

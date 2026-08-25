@@ -112,8 +112,9 @@ ephemeral_offer_id
 single_use_random_secret
 expiry
 address_hints
-human_verification_code
 ```
+
+6자리 확인 번호는 QR과 분리해 Host 화면에만 표시한다. QR 한 장만 촬영하거나 전달해서는 연결을 승인할 수 없어야 한다.
 
 QR 전체를 log, analytics, crash report에 넣지 않는다.
 
@@ -132,7 +133,7 @@ QR 전체를 log, analytics, crash report에 넣지 않는다.
 
 ### 7.3 규칙
 
-- QR scan만으로 무인 승인하지 않는다.
+- QR 스캔만으로 승인하지 않고 Host 화면의 6자리 번호를 별도로 확인한다.
 - offer는 single use다.
 - 같은 offer의 concurrent request는 최대 하나만 승인한다.
 - expiry 판단은 wall clock 변경에 취약하지 않게 monotonic deadline도 함께 사용한다.

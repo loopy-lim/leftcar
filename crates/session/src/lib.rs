@@ -290,20 +290,6 @@ impl PairingService {
         self.offers.remove(offer_id);
         self.offer_secrets.remove(offer_id); // associated OfferSecret drops -> zeroized
     }
-
-    /// Find an active, unexpired, unused offer matching the 6-digit human verification code.
-    pub fn find_offer_by_code(&self, code: &str) -> Option<String> {
-        let now = self.clock.monotonic();
-        for (id, offer) in &self.offers {
-            if !offer.used
-                && now <= offer.expires_at
-                && constant_time_eq(offer.human_verification_code.as_bytes(), code.as_bytes())
-            {
-                return Some(id.clone());
-            }
-        }
-        None
-    }
 }
 
 /// Constant-time equality helper (no early exit on mismatch).

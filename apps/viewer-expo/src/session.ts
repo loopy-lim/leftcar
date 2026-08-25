@@ -1,5 +1,5 @@
 import { connect, type ControlClient } from "./control";
-import { getStoredToken } from "./pairing";
+import { getStoredToken, isTrustedHost } from "./pairing";
 
 /**
  * App-wide control session singleton: the hub screen connects once, catalog
@@ -22,6 +22,9 @@ export function controlHost(): string {
 }
 
 export async function connectHost(host: string, port = 7777): Promise<ControlClient> {
+  if (!isTrustedHost(host)) {
+    throw new Error("신뢰하는 같은 Wi-Fi 또는 Tailscale의 컴퓨터만 연결할 수 있습니다");
+  }
   const c = await connect(host, port, 5000, () => getStoredToken());
   // Keep the previous connection alive until the replacement succeeds, then
   // release it so switching between multiple computers does not leak sockets.
@@ -35,7 +38,7 @@ export async function connectHost(host: string, port = 7777): Promise<ControlCli
 
 /** Reopen the control socket after the host app was restarted. */
 export async function reconnectHost(): Promise<ControlClient> {
-  if (!hostTarget) throw new Error("호스트 주소가 없습니다");
+  if (!hostTarget) throw new Error("연결할 컴퓨터 주소가 없습니다");
   if (reconnectInFlight) return reconnectInFlight;
 
   reconnectInFlight = (async () => {
