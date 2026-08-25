@@ -1,6 +1,6 @@
 # 공식 근거 자료
 
-확인일: 2026-08-22
+확인일: 2026-08-24
 정책: 기술 및 플랫폼 사실은 가능한 한 원 제작사/표준 문서를 사용한다. 이 목록의 존재는 Leftcar 실기기 성능을 증명하지 않는다.
 
 ## 1. Rustra
@@ -9,9 +9,9 @@
   - Rust command에서 TypeScript client 생성
   - Node, Bun, Tauri, React Native, Lynx adapter
   - local control contract의 근거
-- 조사 시 public `main` HEAD: [`11ff71f5e2b5a0c563d50525eef82b0a05768c1f`](https://github.com/loopy-lim/rustra/commit/11ff71f5e2b5a0c563d50525eef82b0a05768c1f)
-  - 구현자는 최신 상태를 다시 확인하고 vetted commit/tag를 pin해야 한다.
-  - 조사자의 로컬 `feat/event-sink` branch는 public main보다 앞선 commit을 포함했으므로 계획이 그 branch를 암묵적으로 요구하지 않는다.
+- 현재 검증·고정한 `0.4.0` public commit: [`f8bab2996010781135fe6bf2c439fef9d470ceb8`](https://github.com/loopy-lim/rustra/commit/f8bab2996010781135fe6bf2c439fef9d470ceb8)
+  - Rust crate, 생성 TypeScript 계약, vendored `@rustra/types`와 React Native adapter를 같은 릴리스로 맞춘다.
+  - 이후 업그레이드도 branch가 아니라 검증한 commit/tag를 pin하고 코드젠 diff와 런타임을 함께 확인한다.
 
 ## 2. Android XR와 Home Space
 

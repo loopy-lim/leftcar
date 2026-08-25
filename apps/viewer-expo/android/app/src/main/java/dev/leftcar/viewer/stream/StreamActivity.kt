@@ -76,6 +76,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         private const val INPUT_STATUS_FADE_MS = 320L
         private const val DEBUG_STATS_VISIBLE_MS = 6_000L
         private const val DEBUG_STATS_FADE_MS = 420L
+        private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
     }
 
     private var instanceId: String = ""
@@ -88,6 +89,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var surfaceAttached = false
     private var released = false
     private var streamSurface: AspectRatioSurfaceView? = null
+    private val surfaceHandler = Handler(Looper.getMainLooper())
+    private var surfaceGeneration = 0
+    private var surfaceChangeCount = 0
+    private var pendingSurfaceAttach: Runnable? = null
     private val tabletCursorHandler = Handler(Looper.getMainLooper())
     private val hideTabletCursorRunnable = Runnable {
         streamSurface?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
@@ -102,9 +107,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var lastDebugSampleMs = 0L
     private var displayedFps = 0.0
     private val networkLatencySamples = mutableListOf<Long>()
-    private val captureLatencySamples = mutableListOf<Long>()
-    private val encodeLatencySamples = mutableListOf<Long>()
-    private val wireLatencySamples = mutableListOf<Long>()
+    private val renderLatencySamples = mutableListOf<Long>()
     private val fadeInputStatusRunnable = Runnable {
         inputStatusView?.animate()
             ?.alpha(0f)
@@ -126,10 +129,36 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             updateDebugStats(
                 ViewerNative.streamStats(instanceId),
                 ViewerNative.streamLatency(instanceId),
+                ViewerNative.renderLatency(instanceId),
             )
+            checkHostTermination()
             inputStatusHandler.postDelayed(this, 250L)
         }
     }
+
+    /**
+     * The host terminates dead or operator-stopped sessions with an
+     * authenticated LCT1 notice. Close this window and report why instead of
+     * leaving a frozen last frame the user must dismiss manually.
+     */
+    private fun checkHostTermination() {
+        if (hostTerminationHandled) return
+        val reason = ViewerNative.terminationReason(instanceId)
+        if (reason < 0) return
+        hostTerminationHandled = true
+        val message = when (reason) {
+            1 -> "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
+            2 -> "컴퓨터에서 이 화면 공유를 종료했습니다."
+            else -> "컴퓨터에서 화면 공유를 종료했습니다."
+        }
+        android.util.Log.i("LeftcarStream", "host termination reason=$reason: $message")
+        setResult(2, android.content.Intent().putExtra("terminationReason", reason))
+        finish()
+        android.widget.Toast.makeText(applicationContext, message, android.widget.Toast.LENGTH_LONG)
+            .show()
+    }
+
+    private var hostTerminationHandled = false
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
@@ -284,10 +313,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun updateDebugStats(packed: Long, latency: Long) {
+    private fun updateDebugStats(packed: Long, latency: Long, renderLatency: Int) {
         val stats = debugStatsView ?: return
         if (packed == -1L) {
-            stats.text = "SRC $fps / XR -- Hz  NET --/--  WIRE --/-- ms\n-- FPS  CAP→DEC --/--  FEED -- ms  SKIP --  LOSS --"
+            stats.text = "SRC $fps / DISPLAY -- Hz  NET --/-- ms  CAP→SCR --/-- ms\n-- FPS  FEED -- ms"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
@@ -314,24 +343,26 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         lastDebugSampleMs = now
         val loss = inputDrops + frameGaps
         val networkRtt = if (latency == -1L) 0xffff else latency and 0xffff
-        val captureToDecoder = if (latency == -1L) 0xffff else (latency ushr 16) and 0xffff
-        val encodeToDecoder = if (latency == -1L) 0xffff else (latency ushr 32) and 0xffff
-        val wireToDecoder = if (latency == -1L) 0xffff else (latency ushr 48) and 0xffff
         addLatencySample(networkLatencySamples, networkRtt)
-        addLatencySample(captureLatencySamples, captureToDecoder)
-        addLatencySample(encodeLatencySamples, encodeToDecoder)
-        addLatencySample(wireLatencySamples, wireToDecoder)
+        addLatencySample(renderLatencySamples, renderLatency.toLong())
+        // The to-decoder stage estimates are diagnostic detail; the glass-to-
+        // glass capture→screen number is what the user actually feels, so it
+        // leads the second line.
         val displayHz = window.decorView.display?.refreshRate?.toInt() ?: 0
-        stats.text = "SRC $fps / XR ${if (displayHz > 0) displayHz else "--"} Hz  " +
-            "NET ${formatLatency(networkLatencySamples)}  " +
-            "WIRE ${formatLatency(wireLatencySamples)} ms\n" +
-            "${displayedFps.toInt()} FPS  CAP→DEC ${formatLatency(captureLatencySamples)}  " +
-            "ENC→DEC ${formatLatency(encodeLatencySamples)}  FEED ${feedMs} ms  " +
+        stats.text = "SRC $fps / DISPLAY ${if (displayHz > 0) displayHz else "--"} Hz  " +
+            "NET ${formatLatency(networkLatencySamples)} ms  " +
+            "CAP→SCR ${formatLatency(renderLatencySamples)} ms\n" +
+            "${displayedFps.toInt()} FPS  FEED ${feedMs} ms  " +
             "SKIP ${stale}  LOSS ${loss}"
     }
 
     private fun addLatencySample(samples: MutableList<Long>, value: Long) {
-        if (value == 0xffffL) return
+        if (value == 0xffffL) {
+            // Do not keep displaying a percentile from a probe window that
+            // has already expired in native code.
+            samples.clear()
+            return
+        }
         samples += value
         if (samples.size > 40) samples.removeAt(0)
     }
@@ -373,8 +404,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(9), dp(4), dp(9), dp(4))
             background = badgeBackground(Color.argb(92, 15, 23, 42))
             alpha = 0f
-            text = "SRC $fps / XR -- Hz  NET --/--  WIRE --/-- ms\n-- FPS  CAP→DEC --/--  FEED -- ms"
-            contentDescription = "스트림 반응 디버그 정보"
+            text = "SRC $fps / DISPLAY -- Hz  NET --/-- ms  CAP→SCR --/-- ms\n-- FPS  FEED -- ms"
+            contentDescription = "화면 공유 상세 정보"
         }
         debugStatsView = stats
         val popup = PopupWindow(
@@ -527,7 +558,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             isFocusable = true
             isFocusableInTouchMode = true
             // This Activity has an opaque black root. Keep the decoder Surface
-            // above that window buffer; XR/vendor compositors can otherwise
+            // above that window buffer; freeform/vendor compositors can otherwise
             // report rendered codec output while showing only the black root.
             setZOrderOnTop(true)
             pointerIcon = PointerIcon.getSystemIcon(this@StreamActivity, PointerIcon.TYPE_NULL)
@@ -539,7 +570,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             forwardPointer(event, view)
         }
         // Keep the decoding Surface tied to the actual window geometry.
-        // A fixed source-sized buffer can be discarded by some freeform/XR
+        // A fixed source-sized buffer can be discarded by some freeform
         // compositors when the task is resized, leaving the window black.
         sv.holder.setSizeFromLayout()
         sv.holder.setFormat(PixelFormat.OPAQUE)
@@ -619,8 +650,19 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        android.util.Log.i("LeftcarStream", "surfaceCreated: instanceId=$instanceId port=$port")
+    private fun cancelPendingSurfaceAttach() {
+        pendingSurfaceAttach?.let(surfaceHandler::removeCallbacks)
+        pendingSurfaceAttach = null
+    }
+
+    private fun attachStableSurface(holder: SurfaceHolder, generation: Int) {
+        pendingSurfaceAttach = null
+        if (
+            released || isFinishing || isDestroyed || surfaceAttached ||
+            generation != surfaceGeneration || !holder.surface.isValid
+        ) {
+            return
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             holder.surface.setFrameRate(
                 fps.toFloat(),
@@ -641,24 +683,41 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         surfaceAttached = res == 0
         android.util.Log.i(
             "LeftcarStream",
-            "attachSurfacePort returned $res, host=$host, source=${sourceWidth}x${sourceHeight}, fps=$fps",
+            "stable Surface attach returned $res after $surfaceChangeCount geometry changes, " +
+                "host=$host, source=${sourceWidth}x${sourceHeight}, fps=$fps",
         )
+    }
+
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        surfaceGeneration += 1
+        surfaceChangeCount = 0
+        val generation = surfaceGeneration
+        cancelPendingSurfaceAttach()
+        android.util.Log.i(
+            "LeftcarStream",
+            "surfaceCreated: debounce generation=$generation instanceId=$instanceId port=$port",
+        )
+        val attach = Runnable { attachStableSurface(holder, generation) }
+        pendingSurfaceAttach = attach
+        surfaceHandler.postDelayed(attach, SURFACE_ATTACH_DEBOUNCE_MS)
         lifecycleEvent(6) // SURFACE_CREATE
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        android.util.Log.i(
-            "LeftcarStream",
-            "surfaceChanged: ${width}x${height}, source=${sourceWidth}x${sourceHeight}",
-        )
+        surfaceChangeCount += 1
         if (surfaceAttached && width > 0 && height > 0) {
             ViewerNative.surfaceChanged(nativeState, instanceId, width, height)
         }
-        lifecycleEvent(7) // SURFACE_CHANGE
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        android.util.Log.i("LeftcarStream", "surfaceDestroyed: transient detach instanceId=$instanceId")
+        surfaceGeneration += 1
+        cancelPendingSurfaceAttach()
+        android.util.Log.i(
+            "LeftcarStream",
+            "surfaceDestroyed: cancel pending attach generation=$surfaceGeneration " +
+                "geometryChanges=$surfaceChangeCount instanceId=$instanceId",
+        )
         lifecycleEvent(8) // SURFACE_DESTROY
         hideTabletCursor()
         ViewerNative.releaseInput(instanceId)
@@ -698,6 +757,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             lifecycleEvent(12) // TASK_REMOVE / final Activity destruction
             released = true
         }
+        surfaceGeneration += 1
+        cancelPendingSurfaceAttach()
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         inputStatusHandler.removeCallbacks(inputStatusRunnable)
         inputStatusHandler.removeCallbacks(fadeInputStatusRunnable)

@@ -12,15 +12,15 @@ type LeftcarExpoConfig = ExpoConfig & {
 };
 
 const config: LeftcarExpoConfig = {
-  name: "Leftcar XR",
+  name: "Leftcar Viewer",
   slug: "leftcar-viewer",
   scheme: "leftcar",
   version: "0.1.1",
   orientation: "default",
   userInterfaceStyle: "automatic",
-  icon: "./assets/branding/leftcar-xr-icon-source.png",
+  icon: "./assets/branding/leftcar-viewer-icon-source.png",
   splash: {
-    image: "./assets/branding/leftcar-xr-icon-source.png",
+    image: "./assets/branding/leftcar-viewer-icon-source.png",
     resizeMode: "contain",
     backgroundColor: "#080B1D",
   },
@@ -32,7 +32,7 @@ const config: LeftcarExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission: "호스트와 페어링하기 위한 QR 코드 스캔에 카메라를 사용합니다.",
+        cameraPermission: "컴퓨터의 연결 QR 코드를 스캔할 때만 카메라를 사용합니다.",
         recordAudioAndroid: false,
         barcodeScannerEnabled: true,
       },

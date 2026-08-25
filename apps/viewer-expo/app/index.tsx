@@ -1,6 +1,5 @@
 import { useCallback, useState } from "react";
 import {
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -47,7 +46,6 @@ export default function Hub() {
       checkConnection();
       const client = controlClient();
       if (client) {
-        // Verify that the current connection and token are actually authorized
         client.request<CatalogView>("getCatalog").catch((e) => {
           if (isUnauthorizedError(e)) {
             void (async () => {
@@ -72,11 +70,16 @@ export default function Hub() {
         <View style={styles.brandHeader}>
           <View style={styles.logoRow}>
             <View style={styles.logoBadge}>
-              <Ionicons name="desktop-outline" size={24} color="#2563EB" />
+              <Ionicons name="desktop" size={20} color="#FFFFFF" />
             </View>
             <View style={styles.titleColumn}>
-              <Text style={styles.appTitle}>Leftcar XR</Text>
-              <Text style={styles.appSubtitle}>초저지연 다중 데스크톱 화면 스트리밍</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Text style={styles.appTitle}>Leftcar Viewer</Text>
+                <View style={styles.versionBadge}>
+                  <Text style={styles.versionBadgeText}>Hub</Text>
+                </View>
+              </View>
+              <Text style={styles.appSubtitle}>내 컴퓨터 화면을 초저지연으로 이어서 보기</Text>
             </View>
           </View>
         </View>
@@ -87,7 +90,7 @@ export default function Hub() {
             <View style={styles.cardTopRow}>
               <View style={styles.badgeSuccess}>
                 <View style={styles.dotSuccess} />
-                <Text style={styles.badgeSuccessText}>호스트 연결됨</Text>
+                <Text style={styles.badgeSuccessText}>컴퓨터 연결됨</Text>
               </View>
               <Text style={styles.endpointLabel} numberOfLines={1}>
                 {hostAddr}
@@ -95,9 +98,9 @@ export default function Hub() {
             </View>
 
             <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>모니터 화면을 선택하세요</Text>
+              <Text style={styles.heroTitle}>열어 볼 화면을 선택하세요</Text>
               <Text style={styles.heroDesc}>
-                컴퓨터의 디스플레이를 가상 공간에 독립된 창으로 열어 작업할 수 있습니다.
+                컴퓨터의 각 디스플레이를 독립된 고화질 창으로 열고 공간에 자유롭게 배치할 수 있습니다.
               </Text>
             </View>
 
@@ -106,7 +109,7 @@ export default function Hub() {
                 <Text style={styles.primaryActionText}>화면 목록 보기 →</Text>
               </Pressable>
               <Pressable onPress={openHostPicker} style={styles.secondaryActionBtn}>
-                <Text style={styles.secondaryActionText}>호스트 변경</Text>
+                <Text style={styles.secondaryActionText}>컴퓨터 변경</Text>
               </Pressable>
               <Pressable onPress={handleDisconnect} style={styles.disconnectActionBtn}>
                 <Text style={styles.disconnectActionText}>연결 해제</Text>
@@ -120,21 +123,23 @@ export default function Hub() {
                 <View style={styles.dotStandby} />
                 <Text style={styles.badgeStandbyText}>연결 대기 중</Text>
               </View>
+              <Text style={styles.networkHintText}>동일 Wi-Fi 권장</Text>
             </View>
 
             <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>컴퓨터와 연결하기</Text>
+              <Text style={styles.heroTitle}>내 컴퓨터 연결하기</Text>
               <Text style={styles.heroDesc}>
-                동일한 Wi-Fi 네트워크의 컴퓨터를 탐색하거나 QR 코드로 즉시 페어링하세요.
+                동일한 로컬 Wi-Fi 또는 Tailscale 네트워크의 컴퓨터를 자동으로 찾거나 QR 코드로 즉시 페어링하세요.
               </Text>
             </View>
 
             <View style={styles.heroActionRow}>
               <Pressable onPress={openHostPicker} style={styles.primaryActionBtn}>
-                <Text style={styles.primaryActionText}>호스트 찾기 →</Text>
+                <Text style={styles.primaryActionText}>컴퓨터 찾기 →</Text>
               </Pressable>
               <Pressable onPress={openPairing} style={styles.secondaryActionBtn}>
-                <Text style={styles.secondaryActionText}>QR 페어링</Text>
+                <Ionicons name="qr-code-outline" size={15} color="#09090B" style={{ marginRight: 4 }} />
+                <Text style={styles.secondaryActionText}>QR 연결</Text>
               </Pressable>
             </View>
           </View>
@@ -142,15 +147,15 @@ export default function Hub() {
 
         {/* 3-Step Setup Guide */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>빠른 시작 가이드</Text>
+          <Text style={styles.sectionTitle}>간편 3단계 시작 가이드</Text>
 
           <View style={styles.stepRow}>
             <View style={styles.stepBadge}>
               <Text style={styles.stepNum}>1</Text>
             </View>
             <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>호스트 앱 실행</Text>
-              <Text style={styles.stepText}>Mac 또는 PC에서 Leftcar Host를 켭니다.</Text>
+              <Text style={styles.stepName}>컴퓨터 앱 실행</Text>
+              <Text style={styles.stepText}>Mac 또는 PC에서 Leftcar Host Studio를 엽니다.</Text>
             </View>
           </View>
 
@@ -161,8 +166,8 @@ export default function Hub() {
               <Text style={styles.stepNum}>2</Text>
             </View>
             <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>기기 연결 및 페어링</Text>
-              <Text style={styles.stepText}>[호스트 찾기]를 눌러 컴퓨터를 선택합니다.</Text>
+              <Text style={styles.stepName}>동일 네트워크 확인</Text>
+              <Text style={styles.stepText}>호스트와 뷰어가 동일한 Wi-Fi(5GHz 권장)에 연결되어 있는지 확인합니다.</Text>
             </View>
           </View>
 
@@ -173,8 +178,8 @@ export default function Hub() {
               <Text style={styles.stepNum}>3</Text>
             </View>
             <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>가상 공간에 화면 배치</Text>
-              <Text style={styles.stepText}>원하는 모니터를 열어 자유롭게 배치합니다.</Text>
+              <Text style={styles.stepName}>화면 연결 & 공간 배치</Text>
+              <Text style={styles.stepText}>[컴퓨터 찾기]를 누르거나 QR 코드를 스캔하여 화면을 엽니다.</Text>
             </View>
           </View>
         </View>
@@ -182,14 +187,18 @@ export default function Hub() {
         {/* Quick Specs Grid (2 Column Clean Layout) */}
         <View style={styles.featureGrid}>
           <View style={styles.featureBox}>
-            <Ionicons name="flash-outline" size={24} color="#2563EB" style={{ marginBottom: 4 }} />
-            <Text style={styles.featureValue}>&lt;30ms 초저지연</Text>
-            <Text style={styles.featureLabel}>실시간 마우스 조작 반응</Text>
+            <View style={styles.featureIconBox}>
+              <Ionicons name="flash" size={16} color="#09090B" />
+            </View>
+            <Text style={styles.featureValue}>초저지연 60 FPS</Text>
+            <Text style={styles.featureLabel}>화면을 보면서 즉시 마우스·키보드 조작</Text>
           </View>
           <View style={styles.featureBox}>
-            <Ionicons name="tv-outline" size={24} color="#2563EB" style={{ marginBottom: 4 }} />
-            <Text style={styles.featureValue}>독립 다중 창</Text>
-            <Text style={styles.featureLabel}>모니터별 개별 XR 배치</Text>
+            <View style={styles.featureIconBox}>
+              <Ionicons name="tv" size={16} color="#09090B" />
+            </View>
+            <Text style={styles.featureValue}>멀티 디스플레이</Text>
+            <Text style={styles.featureLabel}>모니터마다 개별 공간 창으로 분리 배치</Text>
           </View>
         </View>
       </ScrollView>
@@ -200,20 +209,20 @@ export default function Hub() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   root: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   content: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
+    paddingHorizontal: 18,
+    paddingTop: 14,
     paddingBottom: 32,
-    gap: 16,
+    gap: 14,
   },
   brandHeader: {
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
   logoRow: {
     flexDirection: "row",
@@ -221,51 +230,58 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   logoBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#DBEAFE",
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    backgroundColor: "#09090B",
     alignItems: "center",
     justifyContent: "center",
-  },
-  logoIcon: {
-    fontSize: 22,
   },
   titleColumn: {
     flex: 1,
     gap: 2,
   },
   appTitle: {
-    color: "#0F172A",
-    fontSize: 22,
+    color: "#09090B",
+    fontSize: 18,
     fontWeight: "700",
-    letterSpacing: -0.4,
+    letterSpacing: -0.3,
+  },
+  versionBadge: {
+    backgroundColor: "#F4F4F5",
+    borderWidth: 1,
+    borderColor: "#E4E4E7",
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  versionBadgeText: {
+    color: "#52525B",
+    fontSize: 10,
+    fontWeight: "700",
+    fontFamily: "monospace",
   },
   appSubtitle: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 12,
   },
 
   /* Hero Cards */
   heroCardConnected: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#A7F3D0",
-    padding: 18,
+    borderColor: "#D4D4D8",
+    padding: 16,
     gap: 12,
-    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)",
   },
   heroCardStandby: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#E2E8F0",
-    padding: 18,
+    borderColor: "#E4E4E7",
+    padding: 16,
     gap: 12,
-    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.04)",
   },
   cardTopRow: {
     flexDirection: "row",
@@ -277,65 +293,71 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#ECFDF5",
+    backgroundColor: "#F4F4F5",
     borderWidth: 1,
-    borderColor: "#A7F3D0",
+    borderColor: "#D4D4D8",
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 3,
     borderRadius: 12,
   },
   dotSuccess: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#059669",
+    backgroundColor: "#09090B",
   },
   badgeSuccessText: {
-    color: "#059669",
+    color: "#09090B",
     fontSize: 11,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   badgeStandby: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F4F4F5",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 3,
     borderRadius: 12,
   },
   dotStandby: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#94A3B8",
+    backgroundColor: "#A1A1AA",
   },
   badgeStandbyText: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 11,
-    fontWeight: "500",
+    fontWeight: "600",
+  },
+  networkHintText: {
+    color: "#A1A1AA",
+    fontSize: 11,
   },
   endpointLabel: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 12,
     fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
     flex: 1,
     textAlign: "right",
   },
   heroBody: {
-    gap: 4,
+    gap: 3,
   },
   heroTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#0F172A",
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#09090B",
+    letterSpacing: -0.2,
   },
   heroDesc: {
-    fontSize: 13,
-    color: "#64748B",
-    lineHeight: 18,
+    fontSize: 12,
+    color: "#52525B",
+    lineHeight: 17,
   },
   heroActionRow: {
     flexDirection: "row",
@@ -344,62 +366,64 @@ const styles = StyleSheet.create({
   },
   primaryActionBtn: {
     flex: 1,
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     borderRadius: 8,
-    paddingVertical: 11,
+    paddingVertical: 10,
     alignItems: "center",
     justifyContent: "center",
   },
   primaryActionText: {
     color: "#FFFFFF",
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
   },
   secondaryActionBtn: {
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F4F4F5",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
   },
   secondaryActionText: {
-    color: "#334155",
-    fontSize: 13,
+    color: "#09090B",
+    fontSize: 12,
     fontWeight: "600",
   },
   disconnectActionBtn: {
-    backgroundColor: "#FEF2F2",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#FECACA",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 11,
+    paddingVertical: 10,
     alignItems: "center",
     justifyContent: "center",
   },
   disconnectActionText: {
-    color: "#DC2626",
-    fontSize: 13,
+    color: "#71717A",
+    fontSize: 12,
     fontWeight: "600",
   },
 
   /* Setup Guide */
   sectionCard: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#E2E8F0",
-    padding: 18,
-    gap: 14,
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.03)",
+    borderColor: "#E4E4E7",
+    padding: 16,
+    gap: 12,
   },
   sectionTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#0F172A",
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#71717A",
+    textTransform: "uppercase",
+    letterSpacing: 0.04,
   },
   stepRow: {
     flexDirection: "row",
@@ -407,19 +431,18 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   stepBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: "#EFF6FF",
-    borderWidth: 1,
-    borderColor: "#BFDBFE",
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "#09090B",
     alignItems: "center",
     justifyContent: "center",
   },
   stepNum: {
-    color: "#2563EB",
-    fontSize: 11,
+    color: "#FFFFFF",
+    fontSize: 10,
     fontWeight: "700",
+    fontFamily: "monospace",
   },
   stepInfo: {
     flex: 1,
@@ -428,16 +451,17 @@ const styles = StyleSheet.create({
   stepName: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#0F172A",
+    color: "#09090B",
   },
   stepText: {
-    fontSize: 12,
-    color: "#64748B",
+    fontSize: 11,
+    color: "#71717A",
+    lineHeight: 15,
   },
   divider: {
     height: 1,
-    backgroundColor: "#F1F5F9",
-    marginLeft: 36,
+    backgroundColor: "#F4F4F5",
+    marginLeft: 34,
   },
 
   /* 2-Column Feature Grid */
@@ -450,22 +474,30 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     padding: 14,
     gap: 4,
   },
-  featureEmoji: {
-    fontSize: 18,
+  featureIconBox: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: "#F4F4F5",
+    borderWidth: 1,
+    borderColor: "#E4E4E7",
+    alignItems: "center",
+    justifyContent: "center",
     marginBottom: 2,
   },
   featureValue: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#0F172A",
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#09090B",
+    fontVariant: ["tabular-nums"],
   },
   featureLabel: {
     fontSize: 11,
-    color: "#64748B",
+    color: "#71717A",
     lineHeight: 15,
   },
 });

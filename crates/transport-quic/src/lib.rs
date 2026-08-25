@@ -1,7 +1,7 @@
 //! QUIC transport candidate (ADR-0004).
 //!
 //! NOT IMPLEMENTED YET by design: ADR-0004 defers the WebRTC-vs-QUIC decision
-//! to the Galaxy XR bake-off (H11–H14). This crate will implement
+//! to the target Android device bake-off (H11–H14). This crate will implement
 //! `transport_api::Transport` with:
 //! - reliable bidirectional stream: handshake, control, codec config, IDR req
 //! - QUIC DATAGRAM: video fragments

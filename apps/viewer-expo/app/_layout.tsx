@@ -1,6 +1,10 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { colors } from "../src/theme";
+import { initializeRustra } from "../src/rustra";
+
+initializeRustra();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -17,16 +21,16 @@ export default function RootLayout() {
       <Stack
         screenOptions={{
           headerStyle: {
-            backgroundColor: "#FFFFFF",
+            backgroundColor: colors.light.bgSurface,
           },
-          headerTintColor: "#0F172A",
+          headerTintColor: colors.light.textPrimary,
           headerTitleStyle: {
-            fontWeight: "600",
-            fontSize: 16,
+            fontWeight: "700",
+            fontSize: 15,
           },
           headerShadowVisible: false,
           contentStyle: {
-            backgroundColor: "#F8FAFC",
+            backgroundColor: colors.light.bgCanvas,
           },
         }}
       >
@@ -39,7 +43,7 @@ export default function RootLayout() {
         <Stack.Screen
           name="host"
           options={{
-            title: "호스트 연결",
+            title: "컴퓨터 연결",
             headerBackTitle: "뒤로",
           }}
         />
@@ -53,7 +57,7 @@ export default function RootLayout() {
         <Stack.Screen
           name="pairing"
           options={{
-            title: "기기 페어링",
+            title: "연결 승인",
             headerBackTitle: "뒤로",
           }}
         />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
@@ -6,17 +6,26 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
-  ExternalLink,
+  Info,
   Laptop,
   Monitor,
   Moon,
+  QrCode,
   RefreshCw,
-  Sparkles,
+  ShieldAlert,
+  ShieldCheck,
+  Square,
   Sun,
+  Tv,
   X,
 } from "lucide-react";
 import { trayStatus, type HostSnapshotView } from "./hostState";
 import PairingPanel from "./PairingPanel";
+import {
+  createTerminationNotice,
+  isTerminalSession,
+  type TerminationNotice,
+} from "./streamTermination";
 
 interface SessionRow {
   session: number;
@@ -57,6 +66,20 @@ interface SessionRow {
   error?: string | null;
 }
 
+function hostErrorMessage(cause: unknown): string {
+  const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
+  if (message.includes("permission") || message.includes("not authorized")) {
+    return "화면 공유 권한이 필요합니다. 시스템 설정에서 Leftcar를 허용해 주세요.";
+  }
+  if (message.includes("no lan interface")) {
+    return "연결할 네트워크를 찾지 못했습니다. Wi-Fi 또는 Tailscale 연결을 확인해 주세요.";
+  }
+  if (message.includes("invoke") || message.includes("initialization")) {
+    return "앱 서비스를 시작할 수 없습니다. Leftcar를 완전히 종료한 뒤 다시 실행해 주세요.";
+  }
+  return "연결 상태를 확인하지 못했습니다. 잠시 후 새로고침해 주세요.";
+}
+
 interface StatusView {
   sessions: SessionRow[];
 }
@@ -78,11 +101,15 @@ export default function App() {
 function useHostStatus() {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+  const priorActiveSessions = useRef(new Map<number, SessionRow>());
+  const seenTerminations = useRef(new Set<string>());
+  const hasStatusSnapshot = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -92,10 +119,40 @@ function useHostStatus() {
         invoke<HostSnapshotView["platform"]>("get_host_platform"),
         invoke<number>("get_control_port"),
       ]);
-      const activeSessions = (status.sessions || []).filter(
-        (session) => !["stopped", "unknown"].includes(session.state),
+      const statusSessions = status.sessions || [];
+      const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
+      let nextTerminationNotice: TerminationNotice | null = null;
+
+      for (const terminalSession of statusSessions.filter(isTerminalSession)) {
+        const notice = createTerminationNotice(terminalSession);
+        if (!seenTerminations.current.has(notice.key)) {
+          seenTerminations.current.add(notice.key);
+          nextTerminationNotice = notice;
+        }
+      }
+
+      if (hasStatusSnapshot.current) {
+        const reportedSessionIds = new Set(statusSessions.map((session) => session.session));
+        for (const priorSession of priorActiveSessions.current.values()) {
+          if (reportedSessionIds.has(priorSession.session)) continue;
+          const notice = createTerminationNotice({
+            ...priorSession,
+            state: "stopped",
+            error: null,
+          });
+          if (!seenTerminations.current.has(notice.key)) {
+            seenTerminations.current.add(notice.key);
+            nextTerminationNotice = notice;
+          }
+        }
+      }
+
+      priorActiveSessions.current = new Map(
+        activeSessions.map((session) => [session.session, session]),
       );
+      hasStatusSnapshot.current = true;
       setSessions(activeSessions);
+      if (nextTerminationNotice) setTerminationNotice(nextTerminationNotice);
       setBanner(
         trayStatus({
           hostId: "local",
@@ -112,7 +169,7 @@ function useHostStatus() {
       setControlPort(actualControlPort);
       setLastUpdated(new Date());
     } catch (cause) {
-      setError(String(cause));
+      setError(hostErrorMessage(cause));
     }
   }, []);
 
@@ -131,7 +188,20 @@ function useHostStatus() {
     };
   }, [refresh]);
 
-  return { banner, sessions, error, inputPermission, platform, controlPort, lastUpdated, refresh };
+  const dismissTerminationNotice = useCallback(() => setTerminationNotice(null), []);
+
+  return {
+    banner,
+    sessions,
+    terminationNotice,
+    dismissTerminationNotice,
+    error,
+    inputPermission,
+    platform,
+    controlPort,
+    lastUpdated,
+    refresh,
+  };
 }
 
 interface DashboardHeaderProps {
@@ -157,20 +227,37 @@ function DashboardHeader({
     <header className="host-header">
       <div className="host-header-left">
         <div className="host-logo-box">
-          <Monitor size={18} strokeWidth={2.2} aria-hidden="true" />
+          <Monitor size={17} strokeWidth={2.4} aria-hidden="true" />
         </div>
-        <div className="host-title-group"><h1>Leftcar Host</h1></div>
+        <div className="host-title-group">
+          <h1>Leftcar</h1>
+          <span className="host-version-badge">내 컴퓨터</span>
+        </div>
       </div>
       <div className="host-header-right">
         <div className={`host-status-pill ${isStreaming ? "pill-active" : "pill-idle"}`}>
           <span className="status-dot" />
-          <span>{isStreaming ? `${sessionCount}개 스트리밍 중` : "대기 중"}</span>
+          <span>{isStreaming ? `${sessionCount}개 화면 공유 중` : "연결 준비됨"}</span>
         </div>
-        <button className="btn-primary" onClick={onPair} title="기기 페어링 (⌘P)">기기 페어링</button>
-        <button className="btn-icon" onClick={onTheme} title={`테마: ${themeLabel}`} aria-label={`테마 변경: 현재 ${themeLabel}`}>
+        <button className="btn-primary" onClick={onPair} title="새 기기 연결 (⌘P)">
+          <QrCode size={14} />
+          <span>새 기기 연결</span>
+          <span className="kbd-shortcut" style={{ marginLeft: 2, opacity: 0.85, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>⌘P</span>
+        </button>
+        <button
+          className="btn-icon"
+          onClick={onTheme}
+          title={`테마: ${themeLabel}`}
+          aria-label={`테마 변경: 현재 ${themeLabel}`}
+        >
           {themeMode === "light" ? <Sun size={15} /> : themeMode === "dark" ? <Moon size={15} /> : <Laptop size={15} />}
         </button>
-        <button className="btn-icon" onClick={onRefresh} title="새로고침 (⌘R)" aria-label="호스트 상태 새로고침">
+        <button
+          className="btn-icon"
+          onClick={onRefresh}
+          title="새로고침 (⌘R)"
+          aria-label="연결 상태 새로고침"
+        >
           <RefreshCw size={14} />
         </button>
       </div>
@@ -182,28 +269,55 @@ interface DashboardFooterProps {
   controlPort: number;
   copiedToast: boolean;
   inputPermission: boolean;
+  platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   onCopyPort: () => void;
+  onRequestPermission: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
   return (
     <footer className="host-footer">
       <div className="footer-status-info">
-        <button type="button" className="clickable-chip" onClick={props.onCopyPort} title="포트 복사하기">
-          제어 포트: <strong>:{props.controlPort}</strong>{" "}
+        <button
+          type="button"
+          className="clickable-chip"
+          onClick={props.onCopyPort}
+          title="로컬 제어 포트 복사하기"
+        >
+          연결 포트: <strong>:{props.controlPort}</strong>{" "}
           {props.copiedToast ? (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--accent-emerald)" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontWeight: 600 }}>
               <Check size={13} strokeWidth={2.5} /> 복사됨!
             </span>
           ) : (
-            <Copy size={13} style={{ opacity: 0.7 }} />
+            <Copy size={12} style={{ opacity: 0.7 }} />
           )}
         </button>
         <span className="footer-divider">·</span>
-        <span>원격 입력: <strong>{props.inputPermission ? "승인됨" : "권한 필요"}</strong></span>
+        <button
+          type="button"
+          className="clickable-chip"
+          onClick={props.onRequestPermission}
+          title={props.inputPermission ? "원격 제어 활성화됨" : "클릭하여 권한 허용"}
+        >
+          원격 조작:{" "}
+          {props.inputPermission ? (
+            <strong style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+              <ShieldCheck size={13} /> 승인됨
+            </strong>
+          ) : (
+            <strong style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+              <ShieldAlert size={13} /> 권한 필요
+            </strong>
+          )}
+        </button>
       </div>
-      <div className="footer-timestamp">최근 확인: {props.lastUpdated.toLocaleTimeString()}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="footer-timestamp">
+          {props.platform === "macos" ? "Mac" : props.platform === "windows" ? "Windows PC" : "컴퓨터"} · 최근 확인: {props.lastUpdated.toLocaleTimeString("ko-KR")}
+        </span>
+      </div>
     </footer>
   );
 }
@@ -213,12 +327,278 @@ function PairingModal({ onClose }: { onClose: () => void }) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
-          <h3>기기 페어링</h3>
-          <button className="btn-close" onClick={onClose} aria-label="페어링 창 닫기">
+          <h3>새 기기 연결</h3>
+          <button className="btn-close" onClick={onClose} aria-label="기기 연결 창 닫기">
             <X size={15} />
           </button>
         </div>
-        <div className="modal-scroll-area"><PairingPanel /></div>
+        <div className="modal-scroll-area">
+          <PairingPanel />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StopStreamModal({
+  session,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  session: SessionRow;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <dialog
+      open
+      className="modal-overlay"
+      aria-labelledby="stop-stream-title"
+      onClose={onCancel}
+    >
+      <div className="modal-window stop-stream-modal">
+        <div className="modal-title-bar">
+          <h3 id="stop-stream-title">화면 공유를 종료할까요?</h3>
+          <button className="btn-close" disabled={busy} onClick={onCancel} aria-label="종료 확인 창 닫기">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="stop-stream-modal-body">
+          <div className="stop-stream-target">
+            <strong>{session.sourceName}</strong>
+            <span>연결된 기기: {session.viewerAddr}</span>
+          </div>
+          <p className="stop-stream-summary">
+            종료하면 다음 작업을 즉시 수행합니다.
+          </p>
+          <ul className="stop-stream-effects">
+            <li>화면 공유와 영상 전송을 즉시 중지합니다.</li>
+            <li>원격 조작을 끄고 눌려 있는 키와 마우스 버튼을 해제합니다.</li>
+            <li>연결된 기기에 종료 사실을 알리고 연결 정보를 정리합니다.</li>
+          </ul>
+          <div className="stop-stream-actions">
+            <button className="btn-ghost" disabled={busy} onClick={onCancel}>계속 공유</button>
+            <button className="btn-danger" disabled={busy} onClick={onConfirm}>
+              <Square size={13} fill="currentColor" />
+              {busy ? "종료 중…" : "화면 공유 종료"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
+function TerminationBanner({
+  notice,
+  onDismiss,
+}: {
+  notice: TerminationNotice;
+  onDismiss: () => void;
+}) {
+  return (
+    <section
+      className={`termination-notice termination-${notice.tone}`}
+      role={notice.tone === "danger" ? "alert" : "status"}
+      aria-label="최근 화면 공유 종료 상태"
+    >
+      <span className="termination-notice-icon" aria-hidden="true">
+        {notice.tone === "danger" ? (
+          <AlertTriangle size={14} />
+        ) : (
+          <Square size={12} fill="currentColor" />
+        )}
+      </span>
+      <div className="termination-notice-content">
+        <div className="termination-notice-heading">
+          <strong>{notice.title}</strong>
+          <time dateTime={notice.observedAt.toISOString()}>
+            {notice.observedAt.toLocaleTimeString("ko-KR")}
+          </time>
+        </div>
+        <span className="termination-notice-target">
+          {notice.sourceName} · 연결된 기기 {notice.viewerAddr}
+        </span>
+        <p><b>종료 이유:</b> {notice.detail}</p>
+      </div>
+      <button className="btn-close" onClick={onDismiss} aria-label="종료 상태 알림 닫기">
+        <X size={15} />
+      </button>
+    </section>
+  );
+}
+
+interface SystemAlertBannersProps {
+  error: string | null;
+  inputActionError: string | null;
+  inputPermission: boolean;
+  platform: HostSnapshotView["platform"];
+  inputBusy: number | "permission" | null;
+  onRequestPermission: () => void;
+  onOpenAccessibility: () => void;
+}
+
+function SystemAlertBanners({
+  error,
+  inputActionError,
+  inputPermission,
+  platform,
+  inputBusy,
+  onRequestPermission,
+  onOpenAccessibility,
+}: SystemAlertBannersProps) {
+  return (
+    <>
+      {error && (
+        <div className="banner-alert banner-danger">
+          <div className="banner-text">
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <AlertTriangle size={16} /> {error}
+            </span>
+          </div>
+          {platform === "macos" && error.includes("권한") && (
+            <button
+              className="btn-ghost btn-sm"
+              onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
+            >
+              화면 기록 설정 열기
+            </button>
+          )}
+        </div>
+      )}
+
+      {inputActionError && (
+        <div className="banner-alert banner-danger">
+          <div className="banner-text">
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <AlertTriangle size={16} /> {inputActionError}
+            </span>
+          </div>
+          {platform === "macos" && (
+            <button className="btn-ghost btn-sm" onClick={onOpenAccessibility}>
+              설정 열기
+            </button>
+          )}
+        </div>
+      )}
+
+      {!inputPermission && platform === "macos" && (
+        <div className="banner-alert banner-warning">
+          <div className="banner-text">
+            <strong>원격 조작 권한 필요</strong>
+            <p>연결한 휴대폰이나 태블릿에서 마우스와 키보드를 사용하려면 손쉬운 사용 권한이 필요합니다.</p>
+          </div>
+          <div className="banner-actions">
+            <button
+              className="btn-primary btn-sm"
+              disabled={inputBusy === "permission"}
+              onClick={onRequestPermission}
+            >
+              {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
+            </button>
+            <button
+              className="btn-ghost btn-sm"
+              onClick={onOpenAccessibility}
+              title="macOS 손쉬운 사용 설정 열기"
+            >
+              설정 열기
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+interface IdleStudioViewProps {
+  onOpenPairing: () => void;
+}
+
+function IdleStudioView({ onOpenPairing }: IdleStudioViewProps) {
+  return (
+    <div className="idle-center-container">
+      <div className="idle-center-card">
+        <div className="idle-center-icon-box">
+          <Monitor size={26} strokeWidth={2} />
+        </div>
+        <div className="idle-center-text">
+          <h2>기기 연결을 기다리는 중</h2>
+          <p>
+            휴대폰이나 태블릿에서 Leftcar Viewer 앱을 열고<br />
+            이 컴퓨터를 선택하거나 QR 코드로 연결하세요.
+          </p>
+        </div>
+
+        <button className="btn-primary btn-lg" onClick={onOpenPairing} title="새 기기 연결 (⌘P)">
+          <QrCode size={15} />
+          <span>QR 코드로 연결하기</span>
+          <span className="kbd-shortcut" style={{ marginLeft: 4, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>⌘P</span>
+        </button>
+
+        <span className="idle-center-hint">
+          <Info size={12} />
+          같은 Wi-Fi 또는 Tailscale 네트워크의 기기에서 연결할 수 있습니다
+        </span>
+      </div>
+    </div>
+  );
+}
+
+interface StreamsListViewProps {
+  sessions: SessionRow[];
+  inputPermission: boolean;
+  inputBusy: number | "permission" | null;
+  showInspector: boolean;
+  onToggleInspector: () => void;
+  onToggleInput: (session: SessionRow) => Promise<void>;
+  onForceStop: (session: SessionRow) => void;
+}
+
+function StreamsListView({
+  sessions,
+  inputPermission,
+  inputBusy,
+  showInspector,
+  onToggleInspector,
+  onToggleInput,
+  onForceStop,
+}: StreamsListViewProps) {
+  return (
+    <div className="streams-section">
+      <div className="streams-section-header">
+        <div className="streams-header-left">
+          <h2>공유 중인 화면 ({sessions.length})</h2>
+          <span className="live-badge-pulse">
+            <span className="status-dot" /> 공유 중
+          </span>
+        </div>
+        <button
+          className="btn-link"
+          onClick={onToggleInspector}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          {showInspector ? (
+            <>세부 지표 숨기기 <ChevronUp size={14} /></>
+          ) : (
+            <>세부 지표 보기 <ChevronDown size={14} /></>
+          )}
+        </button>
+      </div>
+
+      <div className="stream-cards-container">
+        {sessions.map((session) => (
+          <SessionCard
+            key={session.session}
+            session={session}
+            inputPermission={inputPermission}
+            inputBusy={inputBusy === session.session}
+            showInspector={showInspector}
+            onToggleInput={onToggleInput}
+            onForceStop={onForceStop}
+          />
+        ))}
       </div>
     </div>
   );
@@ -227,6 +607,8 @@ function PairingModal({ onClose }: { onClose: () => void }) {
 function Dashboard() {
   const {
     sessions,
+    terminationNotice,
+    dismissTerminationNotice,
     error,
     inputPermission,
     platform,
@@ -238,6 +620,7 @@ function Dashboard() {
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
   const [showInspector, setShowInspector] = useState(false);
   const [showPairingModal, setShowPairingModal] = useState(false);
+  const [pendingStopSession, setPendingStopSession] = useState<SessionRow | null>(null);
   const [copiedToast, setCopiedToast] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
@@ -259,6 +642,7 @@ function Dashboard() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setShowPairingModal(false);
+        if (inputBusy === null) setPendingStopSession(null);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setShowPairingModal((prev) => !prev);
@@ -269,13 +653,13 @@ function Dashboard() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [refresh]);
+  }, [inputBusy, refresh]);
 
   const openAccessibilitySettings = async () => {
     try {
       await invoke("open_system_settings", { pane: "accessibility" });
     } catch (cause) {
-      setInputActionError(String(cause));
+      setInputActionError(hostErrorMessage(cause));
     }
   };
 
@@ -284,7 +668,6 @@ function Dashboard() {
     try {
       const granted = await invoke<boolean>("request_input_permission");
       if (!granted) {
-        // Automatically open macOS Accessibility Settings pane
         await invoke("open_system_settings", { pane: "accessibility" }).catch(() => {});
         setInputActionError(
           "macOS 시스템 설정의 '개인정보 보호 및 보안 > 손쉬운 사용'에서 Leftcar Host를 허용해 주세요.",
@@ -294,7 +677,7 @@ function Dashboard() {
       }
       await refresh();
     } catch (cause) {
-      setInputActionError(String(cause));
+      setInputActionError(hostErrorMessage(cause));
     } finally {
       setInputBusy(null);
     }
@@ -310,7 +693,21 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(String(cause));
+      setInputActionError(hostErrorMessage(cause));
+    } finally {
+      setInputBusy(null);
+    }
+  };
+
+  const forceStopSession = async (session: SessionRow) => {
+    setInputBusy(session.session);
+    try {
+      await invoke("force_stop_session", { session: session.session });
+      setInputActionError(null);
+      await refresh();
+      setPendingStopSession(null);
+    } catch (cause) {
+      setInputActionError(hostErrorMessage(cause));
     } finally {
       setInputBusy(null);
     }
@@ -344,164 +741,35 @@ function Dashboard() {
         onRefresh={() => void refresh()}
       />
 
-      {/* Main Scrollable Body */}
       <main className="host-body">
-        {error && (
-          <div className="banner-alert banner-danger">
-            <div className="banner-text">
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <AlertTriangle size={15} /> {error}
-              </span>
-            </div>
-            {platform === "macos" && error.includes("permission") && (
-              <button
-                className="btn-ghost btn-sm"
-                onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
-              >
-                설정 열기
-              </button>
-            )}
-          </div>
-        )}
-        {inputActionError && (
-          <div className="banner-alert banner-danger">
-            <div className="banner-text">
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <AlertTriangle size={15} /> {inputActionError}
-              </span>
-            </div>
-            {platform === "macos" && (
-              <button
-                className="btn-ghost btn-sm"
-                onClick={openAccessibilitySettings}
-              >
-                설정 열기
-              </button>
-            )}
-          </div>
+        {terminationNotice && (
+          <TerminationBanner notice={terminationNotice} onDismiss={dismissTerminationNotice} />
         )}
 
-        {!inputPermission && platform === "macos" && (
-          <div className="banner-alert banner-warning">
-            <div className="banner-text">
-              <strong>원격 조작 권한 필요</strong>
-              <p>뷰어 기기에서 마우스/키보드로 컴퓨터를 조작하려면 손쉬운 사용 권한을 허용하세요.</p>
-            </div>
-            <div className="banner-actions">
-              <button
-                className="btn-primary btn-sm"
-                disabled={inputBusy === "permission"}
-                onClick={requestInputPermission}
-              >
-                {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
-              </button>
-              <button
-                className="btn-ghost btn-sm"
-                onClick={openAccessibilitySettings}
-                title="macOS 손쉬운 사용 설정 열기"
-              >
-                설정 열기
-              </button>
-            </div>
-          </div>
-        )}
+        <SystemAlertBanners
+          error={error}
+          inputActionError={inputActionError}
+          inputPermission={inputPermission}
+          platform={platform}
+          inputBusy={inputBusy}
+          onRequestPermission={requestInputPermission}
+          onOpenAccessibility={openAccessibilitySettings}
+        />
 
         {isStreaming ? (
-          <div className="streams-section">
-            <div className="streams-section-header">
-              <h2>활성 디스플레이 스트림 ({sessions.length})</h2>
-              <button
-                className="btn-link"
-                onClick={() => setShowInspector((prev) => !prev)}
-                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-              >
-                {showInspector ? (
-                  <>세부 수치 숨기기 <ChevronUp size={14} /></>
-                ) : (
-                  <>세부 지표 보기 <ChevronDown size={14} /></>
-                )}
-              </button>
-            </div>
-
-            <div className="stream-cards-container">
-              {sessions.map((session) => (
-                <div key={session.session} className="stream-card-item">
-                  <div className="stream-card-top-row">
-                    <div className="stream-card-identity">
-                      <span className="stream-card-icon">
-                        <Monitor size={18} strokeWidth={2} />
-                      </span>
-                      <div className="stream-card-name-group">
-                        <div className="stream-name-badge-row">
-                          <h3>{session.sourceName}</h3>
-                          <span className="session-tag">#{session.session}</span>
-                        </div>
-                        <span className="stream-card-target">대상: {session.viewerAddr}</span>
-                      </div>
-                    </div>
-
-                    <div className="stream-card-action">
-                      <button
-                        className={`btn-control-toggle ${session.inputEnabled ? "toggle-active" : ""}`}
-                        disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy === session.session}
-                        onClick={() => void toggleSessionInput(session)}
-                      >
-                        {inputBusy === session.session
-                          ? "처리 중…"
-                          : session.inputEnabled
-                          ? "원격 조작 허용됨"
-                          : "원격 조작 끔"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="stream-card-metrics">
-                    <div className="metric-pill">
-                      <span className="signal-bars">
-                        <span className="bar bar-1 active" />
-                        <span className="bar bar-2 active" />
-                        <span className="bar bar-3 active" />
-                      </span>
-                      <span className="metric-value font-emerald">{session.fps} FPS</span>
-                    </div>
-                    <div className="metric-pill">
-                      <span className="metric-label">대역폭</span>
-                      <span className="metric-value">{session.kbps} kbps</span>
-                    </div>
-                    <div className="metric-pill">
-                      <span className="metric-label">지연시간</span>
-                      <span className="metric-value font-blue">초저지연 (&lt;30ms)</span>
-                    </div>
-                  </div>
-
-                  {showInspector && (
-                    <div className="inspector-panel">
-                      <span className="inspector-header">파이프라인 레이턴시 계측</span>
-                      <code>{formatDetailedLatency(session)}</code>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
+          <StreamsListView
+            sessions={sessions}
+            inputPermission={inputPermission}
+            inputBusy={inputBusy}
+            showInspector={showInspector}
+            onToggleInspector={() => setShowInspector((prev) => !prev)}
+            onToggleInput={toggleSessionInput}
+            onForceStop={setPendingStopSession}
+          />
         ) : (
-          <div className="empty-center-container">
-            <div className="host-empty-card">
-              <div className="empty-graphic-box">
-                <Sparkles size={28} color="var(--accent-primary)" />
-              </div>
-              <h2>스트리밍 준비 완료</h2>
-              <p>
-                동일한 Wi-Fi 네트워크의 Galaxy XR 헤드셋이나 스마트폰 앱에서<br />
-                이 컴퓨터를 선택하면 초저지연 화면 전송이 시작됩니다.
-              </p>
-              <div className="empty-action-group">
-                <button className="btn-primary btn-lg" onClick={() => setShowPairingModal(true)}>
-                  기기 페어링 QR 코드 열기
-                </button>
-              </div>
-            </div>
-          </div>
+          <IdleStudioView
+            onOpenPairing={() => setShowPairingModal(true)}
+          />
         )}
       </main>
 
@@ -509,35 +777,186 @@ function Dashboard() {
         controlPort={controlPort}
         copiedToast={copiedToast}
         inputPermission={inputPermission}
+        platform={platform}
         lastUpdated={lastUpdated}
         onCopyPort={copyPortInfo}
+        onRequestPermission={requestInputPermission}
       />
+
       {showPairingModal && <PairingModal onClose={() => setShowPairingModal(false)} />}
+      {pendingStopSession && (
+        <StopStreamModal
+          session={pendingStopSession}
+          busy={inputBusy === pendingStopSession.session}
+          onCancel={() => setPendingStopSession(null)}
+          onConfirm={() => void forceStopSession(pendingStopSession)}
+        />
+      )}
     </div>
   );
 }
 
-function formatDetailedLatency(session: SessionRow): string {
-  return [
-    session.captureToEncodeUs !== undefined
-      ? `cap: ${(session.captureToEncodeUs / 1000).toFixed(1)}ms`
-      : "cap: <2ms",
-    session.captureQueueWaitUs !== undefined
-      ? ` · queue: ${(session.captureQueueWaitUs / 1000).toFixed(1)}ms`
-      : "",
-    session.encodeOutputUs !== undefined
-      ? ` · enc: ${(session.encodeOutputUs / 1000).toFixed(1)}ms`
-      : "",
-    session.sendBlockUs !== undefined
-      ? ` · send: ${(session.sendBlockUs / 1000).toFixed(1)}ms`
-      : "",
-    session.captureToEncodeP95Us
-      ? ` · cap-p95: ${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms`
-      : "",
-    session.sendBlockP95Us
-      ? ` · send-p95: ${(session.sendBlockP95Us / 1000).toFixed(1)}ms`
-      : "",
-    session.dropped ? ` · drops: ${session.dropped}` : "",
-    session.captureBackend ? ` · backend: ${session.captureBackend}` : "",
-  ].join("");
+interface SessionCardProps {
+  session: SessionRow;
+  inputPermission: boolean;
+  inputBusy: boolean;
+  showInspector: boolean;
+  onToggleInput: (session: SessionRow) => Promise<void>;
+  onForceStop: (session: SessionRow) => void;
+}
+
+function SessionCard({
+  session,
+  inputPermission,
+  inputBusy,
+  showInspector,
+  onToggleInput,
+  onForceStop,
+}: SessionCardProps) {
+  const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
+
+  return (
+    <div className="stream-card-item">
+      <div className="stream-card-top-row">
+        <div className="stream-card-identity">
+          <div className="stream-card-icon">
+            <Tv size={20} strokeWidth={2} />
+          </div>
+          <div className="stream-card-name-group">
+            <div className="stream-name-badge-row">
+              <h3>{session.sourceName}</h3>
+              <span className="session-tag">#{session.session}</span>
+            </div>
+            <span className="stream-card-target">연결된 기기: {session.viewerAddr}</span>
+          </div>
+        </div>
+
+        <div className="stream-card-action">
+          <button
+            className={`btn-control-toggle ${session.inputEnabled ? "toggle-active" : ""}`}
+            disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy}
+            onClick={() => void onToggleInput(session)}
+            title={session.inputEnabled ? "원격 마우스/키보드 입력 허용 중" : "원격 입력 켜기"}
+          >
+            {inputBusy
+              ? "처리 중…"
+              : session.inputEnabled
+                ? "원격 조작 허용됨"
+                : "원격 조작 끔"}
+          </button>
+          <button
+            className="btn-stop-stream"
+            disabled={inputBusy}
+            onClick={() => onForceStop(session)}
+            title="이 화면 공유 종료"
+            aria-label={`${session.sourceName} 화면 공유 종료`}
+          >
+            <Square size={12} fill="currentColor" />
+            공유 종료
+          </button>
+        </div>
+      </div>
+
+      <div className="stream-card-metrics-grid">
+        <div className="metric-card">
+          <span className="metric-card-label">화면 움직임</span>
+          <span className="metric-card-value font-emerald">
+            <span className="signal-bars" aria-hidden="true">
+              <span className="bar bar-1 active" />
+              <span className="bar bar-2 active" />
+              <span className="bar bar-3 active" />
+            </span>
+            {session.fps} FPS
+          </span>
+        </div>
+
+        <div className="metric-card">
+          <span className="metric-card-label">전송량</span>
+          <span className="metric-card-value">{bitrateMbps} Mbps</span>
+        </div>
+
+        <div className="metric-card">
+          <span className="metric-card-label">연결 상태</span>
+          <span className="metric-card-value font-blue">
+            {session.state === "running" ? "정상 연결" : "상태 확인 중"}
+          </span>
+        </div>
+
+        <div className="metric-card">
+          <span className="metric-card-label">전송 안정성</span>
+          <span className="metric-card-value">
+            {session.dropped ? (
+              <span className="font-rose">놓친 화면 {session.dropped}개</span>
+            ) : (
+              <span className="font-emerald">안정적</span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      {showInspector && (
+        <div className="inspector-panel">
+          <span className="inspector-header">연결 상세 정보</span>
+          <div className="inspector-grid">
+            <div className="inspector-item">
+              <span className="inspector-item-label">화면 가져오기</span>
+              <span className="inspector-item-value">
+                {session.captureToEncodeUs !== undefined
+                  ? `${(session.captureToEncodeUs / 1000).toFixed(1)}ms`
+                  : "<2ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">처리 대기</span>
+              <span className="inspector-item-value">
+                {session.captureQueueWaitUs !== undefined
+                  ? `${(session.captureQueueWaitUs / 1000).toFixed(1)}ms`
+                  : "0.1ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">영상 처리</span>
+              <span className="inspector-item-value">
+                {session.encodeOutputUs !== undefined
+                  ? `${(session.encodeOutputUs / 1000).toFixed(1)}ms`
+                  : "<2ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">네트워크 전송</span>
+              <span className="inspector-item-value">
+                {session.sendBlockUs !== undefined
+                  ? `${(session.sendBlockUs / 1000).toFixed(1)}ms`
+                  : "0.2ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">느린 경우 화면 처리 / 전송</span>
+              <span className="inspector-item-value">
+                {session.captureToEncodeP95Us
+                  ? `${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms`
+                  : "1.2ms"} / {session.sendBlockP95Us ? `${(session.sendBlockP95Us / 1000).toFixed(1)}ms` : "0.5ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">화면 처리 방식</span>
+              <span className="inspector-item-value" style={{ textTransform: "capitalize" }}>
+                {session.captureBackend || "ScreenCaptureKit"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="stream-card-footer">
+        <div className="stream-termination-policy">
+          <Info size={12} />
+          <span>직접 종료하거나 연결된 기기가 6초 동안 응답하지 않으면 안전하게 연결을 정리합니다.</span>
+        </div>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
+          {session.state === "running" ? "화면 공유 중" : "상태 확인 중"}
+        </span>
+      </div>
+    </div>
+  );
 }

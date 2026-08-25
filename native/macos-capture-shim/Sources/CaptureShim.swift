@@ -1447,7 +1447,7 @@ final class CaptureSession {
     }
 
     func markStopped(_ reason: String) {
-        print("capture session stopped \(targetLabel): \(reason)")
+        NSLog("Leftcar capture session stopped %@: %@", targetLabel, reason)
         stateLock.lock()
         stoppedReason = reason
         stateLock.unlock()
@@ -1509,7 +1509,12 @@ final class CaptureSession {
         if stillRunning, firstCaptureNs == nil {
             firstCaptureNs = callbackNs
             lifecycleState = "encoding_first_frame"
-            print("first capture frame \(targetLabel): \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
+            NSLog(
+                "Leftcar first capture frame %@: %dx%d",
+                targetLabel,
+                CVPixelBufferGetWidth(pixelBuffer),
+                CVPixelBufferGetHeight(pixelBuffer)
+            )
         }
         if let previous = lastCaptureCallbackNs, callbackNs >= previous {
             appendRollingSample((callbackNs - previous) / 1_000, to: &captureIntervalSamplesUs)
@@ -1649,7 +1654,11 @@ final class CaptureSession {
         ) { [weak self] status, _, encodedSample in
             defer { self?.completeEncodeSlot() }
             guard status == noErr, let encodedSample = encodedSample else {
-                print("H.264 output failed \(self?.targetLabel ?? "unknown"): status=\(status)")
+                NSLog(
+                    "Leftcar H.264 output failed %@: status=%d",
+                    self?.targetLabel ?? "unknown",
+                    status
+                )
                 self?.discardTrackedFrame(pts: trackedPts)
                 self?.requestRecoveryKeyframe()
                 return
@@ -1667,7 +1676,7 @@ final class CaptureSession {
                 adaptBitrateIfNeeded()
             }
         } else {
-            print("H.264 submit failed \(targetLabel): status=\(status)")
+            NSLog("Leftcar H.264 submit failed %@: status=%d", targetLabel, status)
             stateLock.lock()
             captureNsByPts.removeValue(forKey: pts.value)
             captureWallMsByPts.removeValue(forKey: pts.value)
@@ -1931,7 +1940,13 @@ final class CaptureSession {
         stateLock.lock()
         currentAverageBitrate = Int(avgBitrate)
         stateLock.unlock()
-        print("hardware H.264 encoder ready \(targetLabel): \(w)x\(h) bitrate=\(Int(avgBitrate))")
+        NSLog(
+            "Leftcar hardware H.264 encoder ready %@: %dx%d bitrate=%d",
+            targetLabel,
+            w,
+            h,
+            Int(avgBitrate)
+        )
         session = s
     }
 
@@ -1945,7 +1960,7 @@ final class CaptureSession {
         if firstEncodeNs == nil {
             firstEncodeNs = encodeNs
             lifecycleState = "waiting_first_send"
-            print("first encoded frame \(targetLabel)")
+            NSLog("Leftcar first encoded frame %@", targetLabel)
         }
         let auId = encodeAuIdByPts.removeValue(forKey: encodedPts)
         let captureWallMs = captureWallMsByPts.removeValue(forKey: encodedPts)
@@ -2790,7 +2805,12 @@ final class CaptureSession {
         if isFrame, firstSendNs == nil {
             firstSendNs = DispatchTime.now().uptimeNanoseconds
             lifecycleState = "running"
-            print("first media frame sent \(targetLabel): bytes=\(sentBytes) transport=\(mediaTransport.rawValue)")
+            NSLog(
+                "Leftcar first media frame sent %@: bytes=%d transport=%@",
+                targetLabel,
+                sentBytes,
+                mediaTransport.rawValue
+            )
         }
         bytesSent &+= Int64(sentBytes)
         rateWindowBytes &+= Int64(sentBytes)

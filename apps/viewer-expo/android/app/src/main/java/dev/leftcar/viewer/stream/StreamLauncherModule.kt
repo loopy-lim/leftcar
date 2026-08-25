@@ -52,8 +52,8 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun prepareStream(port: Int, host: String, promise: Promise) {
-        val result = ViewerNative.prepareStream(port, host)
+    fun prepareStream(port: Int, host: String, mediaTransport: String, promise: Promise) {
+        val result = ViewerNative.prepareStream(port, host, mediaTransport)
         if (result == 0) {
             promise.resolve(null)
         } else {

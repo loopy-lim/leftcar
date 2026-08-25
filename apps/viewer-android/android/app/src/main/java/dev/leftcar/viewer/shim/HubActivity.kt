@@ -14,7 +14,7 @@ import android.view.Gravity
  * document tasks. Real multi-instance verification (H05): each open uses
  * FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK so the system
  * creates separate tasks — visible as separate windows in split-screen /
- * freeform / XR windowing.
+ * freeform multi-window environments.
  */
 class HubActivity : Activity() {
     private var windowCount = 0
@@ -42,7 +42,7 @@ class HubActivity : Activity() {
         fun openWindow() {
             val host = hostInput.text.toString().trim()
             if (host.isEmpty()) {
-                status.text = "host IP를 입력하세요 (페어링된 호스트만 수신 허용)"
+                status.text = "연결할 컴퓨터 주소를 입력하세요 (승인된 컴퓨터만 연결 가능)"
                 return
             }
             val idx = windowCount++

@@ -14,12 +14,13 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { connectHost, controlClient, controlHost, disconnectHost } from "../src/session";
-import { isUnauthorizedError, type CatalogView } from "../src/control";
+import { connectHost, controlClient, disconnectHost } from "../src/session";
+import { formatErrorMessage, isUnauthorizedError, type CatalogView } from "../src/control";
 import {
   clearToken,
   formatHostEndpoint,
   getStoredToken,
+  isTrustedHost,
   parseHostEndpoint,
 } from "../src/pairing";
 
@@ -51,7 +52,7 @@ export default function Host() {
     await clearToken();
     disconnectHost();
     setHasStoredToken(false);
-    Alert.alert("페어링 정보 초기화", "이 기기에 저장된 인증 토큰이 삭제되었습니다.");
+    Alert.alert("연결 승인 삭제", "이 기기에 저장된 컴퓨터 연결 승인을 삭제했습니다.");
   }, []);
 
   useEffect(() => {
@@ -84,6 +85,9 @@ export default function Host() {
     setBusy(true);
     setError(null);
     try {
+      if (!isTrustedHost(target)) {
+        throw new Error("신뢰하는 같은 Wi-Fi 또는 Tailscale의 컴퓨터만 연결할 수 있습니다.");
+      }
       let lastError: unknown = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -107,8 +111,8 @@ export default function Host() {
           disconnectHost();
           setHasStoredToken(false);
           Alert.alert(
-            "기기 페어링 필요",
-            "호스트 컴퓨터의 QR 코드 또는 인증 코드를 입력하여 페어링하세요.",
+            "연결 승인이 필요해요",
+            "컴퓨터 화면의 QR 코드와 6자리 인증 번호로 연결을 승인해 주세요.",
           );
           router.push({
             pathname: "/pairing",
@@ -120,7 +124,7 @@ export default function Host() {
       }
       router.push("/catalog");
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      setError(formatErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -131,7 +135,7 @@ export default function Host() {
   const connectManual = useCallback(() => {
     const endpoint = parseHostEndpoint(ip);
     if (!endpoint) {
-      setError("IP 주소 형식을 확인해 주세요. (예: 192.168.0.10:7777)");
+      setError("같은 Wi-Fi 또는 Tailscale의 컴퓨터 주소를 확인해 주세요. (예: 192.168.0.10:7777)");
       return;
     }
     void doConnect(endpoint.host, endpoint.port);
@@ -147,7 +151,7 @@ export default function Host() {
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
-            <Ionicons name="alert-circle-outline" size={16} color="#DC2626" />
+            <Ionicons name="alert-circle" size={16} color="#09090B" />
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
@@ -155,11 +159,11 @@ export default function Host() {
         {/* Nearby Auto Discovered Hosts */}
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionTitle}>주변 기기 검색</Text>
+            <Text style={styles.sectionTitle}>주변 컴퓨터 탐색</Text>
             {nsd && (
               <View style={styles.scanningBadge}>
-                <ActivityIndicator size="small" color="#2563EB" />
-                <Text style={styles.scanningText}>검색 중…</Text>
+                <ActivityIndicator size="small" color="#09090B" />
+                <Text style={styles.scanningText}>mDNS 탐색 중…</Text>
               </View>
             )}
           </View>
@@ -174,14 +178,14 @@ export default function Host() {
                   disabled={busy}
                 >
                   <View style={styles.hostIconBox}>
-                    <Ionicons name="laptop-outline" size={20} color="#2563EB" />
+                    <Ionicons name="laptop-outline" size={18} color="#09090B" />
                   </View>
                   <View style={styles.hostInfo}>
                     <Text style={styles.hostName} numberOfLines={1}>
-                      {h.name || "내 컴퓨터"}
+                      {h.name || "Leftcar Host"}
                     </Text>
                     <Text style={styles.hostAddr} numberOfLines={1}>
-                      {h.host}
+                      {h.host}:{h.port}
                     </Text>
                   </View>
                   <View style={styles.connectChip}>
@@ -192,10 +196,10 @@ export default function Host() {
             </View>
           ) : (
             <View style={styles.emptyBox}>
-              <Ionicons name="wifi-outline" size={28} color="#94A3B8" style={{ marginBottom: 4 }} />
-              <Text style={styles.emptyTitle}>주변의 Leftcar Host를 찾는 중</Text>
+              <Ionicons name="wifi-outline" size={24} color="#A1A1AA" style={{ marginBottom: 4 }} />
+              <Text style={styles.emptyTitle}>Leftcar가 실행 중인 컴퓨터를 찾는 중</Text>
               <Text style={styles.emptyText}>
-                컴퓨터에서 Leftcar Host 앱이 켜져 있고 같은 Wi-Fi에 연결되어 있는지 확인하세요.
+                컴퓨터에서 Leftcar Host Studio가 열려 있고 동일한 Wi-Fi에 연결되어 있는지 확인하세요.
               </Text>
             </View>
           )}
@@ -203,16 +207,16 @@ export default function Host() {
 
         {/* Manual IP Entry */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>IP 주소 직접 입력</Text>
+          <Text style={styles.sectionTitle}>컴퓨터 주소 직접 입력</Text>
           <Text style={styles.fieldDesc}>
-            자동 검색이 되지 않는 경우 컴퓨터의 로컬 IP를 직접 입력합니다.
+            자동으로 찾지 못한 경우 컴퓨터 화면 하단에 표시된 로컬 제어 포트 주소를 입력하세요.
           </Text>
 
           <View style={styles.inputRow}>
             <TextInput
               style={styles.textInput}
               placeholder="192.168.0.x:7777"
-              placeholderTextColor="#94A3B8"
+              placeholderTextColor="#A1A1AA"
               keyboardType="url"
               autoCapitalize="none"
               autoCorrect={false}
@@ -220,8 +224,8 @@ export default function Host() {
               onChangeText={setIp}
             />
             {ip.length > 0 && (
-              <Pressable onPress={() => setIp("")} style={styles.clearBtn}>
-                <Ionicons name="close" size={16} color="#94A3B8" />
+              <Pressable onPress={() => setIp("")} style={styles.clearBtn} aria-label="입력 지우기">
+                <Ionicons name="close-circle" size={16} color="#A1A1AA" />
               </Pressable>
             )}
           </View>
@@ -252,23 +256,24 @@ export default function Host() {
 
         {/* Pairing Management */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>페어링 관리</Text>
+          <Text style={styles.sectionTitle}>연결 승인 관리</Text>
           <Text style={styles.fieldDesc}>
             {hasStoredToken
-              ? "이 기기에 호스트 인증 토큰이 저장되어 있습니다."
-              : "저장된 인증 토큰이 없습니다. 새 컴퓨터와 연결하려면 페어링을 진행하세요."}
+              ? "이 기기는 이전에 연결한 컴퓨터의 인증 토큰을 안전하게 기억하고 있습니다."
+              : "기억하고 있는 연결 승인이 없습니다. 새 컴퓨터에서 QR 코드로 연결을 승인해 주세요."}
           </Text>
           <View style={styles.pairingActionRow}>
             {hasStoredToken && (
               <Pressable style={styles.dangerBtn} onPress={handleClearToken}>
-                <Text style={styles.dangerBtnText}>저장된 페어링 정보 삭제</Text>
+                <Text style={styles.dangerBtnText}>저장된 승인 토큰 삭제</Text>
               </Pressable>
             )}
             <Pressable
               style={styles.secondaryBtn}
               onPress={() => router.push("/pairing")}
             >
-              <Text style={styles.secondaryBtnText}>QR / 코드 페어링 열기</Text>
+              <Ionicons name="qr-code-outline" size={14} color="#09090B" style={{ marginRight: 4 }} />
+              <Text style={styles.secondaryBtnText}>새 연결 승인하기</Text>
             </Pressable>
           </View>
         </View>
@@ -280,42 +285,42 @@ export default function Host() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   root: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
   },
   content: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingTop: 14,
     paddingBottom: 32,
     gap: 14,
   },
   errorCard: {
-    backgroundColor: "#FEF2F2",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#FECACA",
+    borderColor: "#A1A1AA",
     borderRadius: 8,
-    padding: 10,
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
   errorText: {
-    color: "#DC2626",
+    color: "#09090B",
     fontSize: 12,
     lineHeight: 16,
     flex: 1,
+    fontWeight: "500",
   },
   sectionCard: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     padding: 16,
     gap: 12,
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.03)",
   },
   sectionHeaderRow: {
     flexDirection: "row",
@@ -323,9 +328,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   sectionTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#0F172A",
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#71717A",
+    textTransform: "uppercase",
+    letterSpacing: 0.04,
   },
   scanningBadge: {
     flexDirection: "row",
@@ -333,34 +340,33 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   scanningText: {
-    color: "#2563EB",
-    fontSize: 12,
-    fontWeight: "500",
+    color: "#09090B",
+    fontSize: 11,
+    fontWeight: "600",
   },
   hostList: {
     gap: 8,
   },
   hostItem: {
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
-    borderRadius: 10,
+    borderColor: "#E4E4E7",
+    borderRadius: 8,
     padding: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
   },
   hostIconBox: {
-    width: 36,
-    height: 36,
+    width: 34,
+    height: 34,
     borderRadius: 8,
-    backgroundColor: "#EFF6FF",
+    backgroundColor: "#F4F4F5",
+    borderWidth: 1,
+    borderColor: "#E4E4E7",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-  },
-  hostIcon: {
-    fontSize: 18,
   },
   hostInfo: {
     flex: 1,
@@ -368,17 +374,18 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   hostName: {
-    color: "#0F172A",
+    color: "#09090B",
     fontSize: 13,
-    fontWeight: "600",
+    fontWeight: "700",
   },
   hostAddr: {
-    color: "#64748B",
+    color: "#71717A",
     fontSize: 11,
     fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
   },
   connectChip: {
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 6,
@@ -390,53 +397,46 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   emptyBox: {
-    padding: 24,
+    padding: 20,
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
-  },
-  emptyIcon: {
-    fontSize: 26,
-    marginBottom: 2,
+    gap: 4,
   },
   emptyTitle: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#0F172A",
+    color: "#09090B",
   },
   emptyText: {
-    color: "#64748B",
-    fontSize: 12,
+    color: "#71717A",
+    fontSize: 11,
     textAlign: "center",
-    lineHeight: 17,
+    lineHeight: 16,
   },
   fieldDesc: {
-    color: "#64748B",
-    fontSize: 12,
+    color: "#71717A",
+    fontSize: 11,
     lineHeight: 16,
   },
   inputRow: {
-    backgroundColor: "#F8FAFC",
+    backgroundColor: "#FAFAFA",
     borderWidth: 1,
-    borderColor: "#CBD5E1",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
     paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
   },
   textInput: {
-    color: "#0F172A",
+    color: "#09090B",
     paddingVertical: 10,
-    fontSize: 14,
+    fontSize: 13,
     fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
     flex: 1,
   },
   clearBtn: {
-    padding: 6,
-  },
-  clearBtnText: {
-    color: "#94A3B8",
-    fontSize: 13,
+    padding: 4,
   },
   quickChipsRow: {
     flexDirection: "row",
@@ -444,20 +444,20 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   quickChip: {
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F4F4F5",
     borderWidth: 1,
-    borderColor: "#E2E8F0",
+    borderColor: "#E4E4E7",
     borderRadius: 6,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
   quickChipText: {
-    color: "#475569",
+    color: "#52525B",
     fontSize: 11,
     fontFamily: "monospace",
   },
   primaryBtn: {
-    backgroundColor: "#2563EB",
+    backgroundColor: "#09090B",
     borderRadius: 8,
     paddingVertical: 11,
     alignItems: "center",
@@ -465,7 +465,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   btnDisabled: {
-    opacity: 0.5,
+    opacity: 0.4,
   },
   primaryBtnText: {
     color: "#FFFFFF",
@@ -479,9 +479,9 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   dangerBtn: {
-    backgroundColor: "#FEE2E2",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#FECACA",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
     paddingVertical: 9,
     paddingHorizontal: 12,
@@ -489,22 +489,23 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   dangerBtnText: {
-    color: "#DC2626",
+    color: "#71717A",
     fontSize: 12,
     fontWeight: "600",
   },
   secondaryBtn: {
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F4F4F5",
     borderWidth: 1,
-    borderColor: "#CBD5E1",
+    borderColor: "#E4E4E7",
     borderRadius: 8,
     paddingVertical: 9,
     paddingHorizontal: 12,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
   },
   secondaryBtnText: {
-    color: "#334155",
+    color: "#09090B",
     fontSize: 12,
     fontWeight: "600",
   },

@@ -2,18 +2,18 @@
 
 ![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)
 
-Leftcar는 macOS 또는 Windows 화면을 Galaxy XR과 Android 기기에서 빠르게 보고, 필요할 때 키보드와 포인터로 제어하는 다중 화면 뷰어다. macOS Host는 ScreenCaptureKit/VideoToolbox를, Windows Host는 Windows Graphics Capture/Media Foundation 하드웨어 H.264를 사용하고, Android Viewer는 네이티브 MediaCodec 파이프라인으로 영상을 표시한다.
+Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에서 빠르게 보고, 필요할 때 키보드와 포인터로 조작하는 다중 화면 뷰어다. 컴퓨터마다 Leftcar를 실행하고, Viewer 앱에서 원하는 화면을 별도 창으로 열 수 있다.
 
 설치 가능한 macOS Host와 Android Viewer는 [GitHub Releases](https://github.com/loopy-lim/leftcar/releases)에서 받을 수 있다. Windows x64 Host는 unsigned NSIS 패키지 CI까지 구현했으며, 실제 Windows/GPU와 Android 기기의 E6 검증 및 서명 릴리스는 아직 대기 중이다.
 
 ## 한 문장 정의
 
-> 사용자가 선택한 데스크톱 화면이나 앱 창 여러 개를 로컬 네트워크로 전송하고, Galaxy XR Home Space에서 각각 독립된 Android 창으로 낮은 지연으로 보여 주는 도구
+> 사용자가 선택한 컴퓨터 화면이나 앱 창을 신뢰하는 로컬 네트워크로 전송하고, Android 기기에서 각각 독립된 창으로 보여 주는 도구
 
 ## 고정된 기본 범위
 
 - 원격 입력은 세션마다 Host에서 명시적으로 켜야 하며 기본값은 꺼짐이다. 포인터 전송률은 영상 FPS의 2배(60fps→120Hz, 90fps→180Hz)로 제한한다.
-- Android XR 전용 기능 없이 Home Space에서 실행되는 일반 Android 앱으로 시작한다.
+- 특정 기기 전용 기능 없이 일반 Android 앱의 다중 창 기능을 사용한다.
 - 원격 source 하나를 Android Activity/task 인스턴스 하나에 연결해 여러 독립 창으로 보여 준다.
 - 선택적인 Hub 창은 연결과 source 선택을 담당하고, 선택적인 Overview 창만 여러 타일을 한 화면에 모은다.
 - 실제 OS 가상 모니터 드라이버보다 앱 창 또는 물리 디스플레이 캡처를 먼저 지원한다.
@@ -48,7 +48,7 @@ Leftcar는 macOS 또는 Windows 화면을 Galaxy XR과 Android 기기에서 빠�
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows (코드 및 교차 컴파일 완료, 물리 E6/E7 대기)
 - 선택적 후속 대상: Linux
-- 우선 대상 뷰어: Galaxy XR 및 arm64 Android 기기
+- 우선 대상 뷰어: arm64 Android 휴대폰, 태블릿 및 대화면 기기
 
 ## 보안(요약)
 

@@ -112,7 +112,7 @@ jobs:
           echo "- E2 integration: L5 loopback in transport-api tests" >> $GITHUB_STEP_SUMMARY
           echo "- E3 build: android-compile job" >> $GITHUB_STEP_SUMMARY
           echo "- E4 emulator: NOT WIRED (H05/H08 device phase)" >> $GITHUB_STEP_SUMMARY
-          echo "- E5 Galaxy XR real device: PENDING — requires device lab (G1 gate)" >> $GITHUB_STEP_SUMMARY
+          echo "- E5 target Android device: PENDING — requires device lab (G1 gate)" >> $GITHUB_STEP_SUMMARY
           echo "- E6 real host ↔ device end-to-end: PENDING (G3/G5 gates)" >> $GITHUB_STEP_SUMMARY
           echo "- E7 instrumented long-run: PENDING (H51)" >> $GITHUB_STEP_SUMMARY
           echo "Device-gated evidence intentionally NOT claimed by CI. See docs/EVIDENCE.md."

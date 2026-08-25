@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- docs/02 §2.2 manifest hypothesis: multi-instance system UI opt-in +
-     document tasks. Actual behavior verified on Galaxy XR in H05 (E5). -->
+     document tasks. Actual behavior is verified separately on target devices. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.leftcar.viewer">
 

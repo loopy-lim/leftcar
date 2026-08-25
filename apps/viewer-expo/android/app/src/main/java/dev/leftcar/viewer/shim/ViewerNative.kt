@@ -17,7 +17,7 @@ object ViewerNative {
     /** Returns the opaque process-state handle. */
     external fun start(): Long
     /** Bind the UDP media port before Host reachability proof starts. */
-    external fun prepareStream(port: Int, host: String): Int
+    external fun prepareStream(port: Int, host: String, mediaTransport: String): Int
     /** Roll back a prepared port when Host start or Activity launch fails. */
     external fun cancelPreparedStream(port: Int): Int
     external fun updateWindowEvent(state: Long, instanceId: String, eventCode: Int, monotonicMs: Long): Int
@@ -63,5 +63,13 @@ object ViewerNative {
     external fun streamStats(instanceId: String): Long
     /** LAN RTT + capture/encode/wire-to-decoder stage latency. */
     external fun streamLatency(instanceId: String): Long
+    /**
+     * Host-initiated termination reason, or -1 while the stream is alive.
+     * 1 = connection lost (host health check), 2 = host operator forced stop,
+     * 3 = ordinary host stop.
+     */
+    external fun terminationReason(instanceId: String): Int
+    /** Glass-to-glass capture→render latency in ms; 0xffff = unmeasured. */
+    external fun renderLatency(instanceId: String): Int
     external fun release(state: Long, instanceId: String): Int
 }
