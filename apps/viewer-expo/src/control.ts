@@ -101,21 +101,40 @@ export class ControlRequestError extends Error {
 }
 
 export function formatErrorMessage(err: unknown): string {
-  if (!err) return "unknown error";
-  if (err instanceof Error && err.message) return err.message;
-  if (typeof err === "string") return err;
+  if (!err) return "문제가 발생했습니다. 잠시 후 다시 시도해 주세요.";
+  let message = "";
+  if (err instanceof Error && err.message) message = err.message;
+  if (!message && typeof err === "string") message = err;
   if (typeof err === "object") {
     const o = err as Record<string, unknown>;
-    if (typeof o.message === "string" && o.message) return o.message;
-    if (typeof o.error === "string" && o.error) return o.error;
-    if (typeof o.err === "string" && o.err) return o.err;
-    if (typeof o.code === "string" && o.code) return `Socket error: ${o.code}`;
-    try {
-      const json = JSON.stringify(err);
-      if (json && json !== "{}") return json;
-    } catch {}
+    if (!message && typeof o.message === "string" && o.message) message = o.message;
+    if (!message && typeof o.error === "string" && o.error) message = o.error;
+    if (!message && typeof o.err === "string" && o.err) message = o.err;
+    if (!message && typeof o.code === "string" && o.code) message = o.code;
   }
-  return String(err);
+  if (!message) message = String(err);
+
+  const normalized = message.toLowerCase();
+  if (normalized.includes("unauthorized")) {
+    return "컴퓨터의 연결 승인이 필요합니다.";
+  }
+  if (normalized.includes("pairing failed")) {
+    return "인증 번호가 맞지 않거나 만료되었습니다. 컴퓨터에서 새 QR 코드를 만들어 주세요.";
+  }
+  if (normalized.includes("offer not found")) {
+    return "연결 코드가 만료되었습니다. 컴퓨터에서 새 QR 코드를 만들어 주세요.";
+  }
+  if (normalized.includes("timeout")) {
+    return "컴퓨터가 응답하지 않습니다. 같은 네트워크인지 확인한 뒤 다시 시도해 주세요.";
+  }
+  if (
+    normalized.includes("connection closed") ||
+    normalized.includes("connection error") ||
+    normalized.includes("econn")
+  ) {
+    return "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.";
+  }
+  return message;
 }
 
 export function isControlTransportError(error: unknown): boolean {
@@ -154,7 +173,7 @@ export function connect(
     // The issued token is immutable for the lifetime of this socket. After
     // the first authenticated probe, keep it in memory so a subsequent
     // startStream reaches socket.write without waiting for another
-    // SecureStore/JS turn. Opening a native XR activity can pause React Native
+    // SecureStore/JS turn. Opening a native viewer activity can pause React Native
     // immediately after the call site.
     let cachedToken: string | null | undefined;
 

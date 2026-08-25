@@ -13,13 +13,14 @@ const args: StartStreamArgs = {
   height: 1080,
   fps: 60,
   captureBackend: "cgDisplayStream",
+  mediaTransport: "auto",
 };
 
 function harness() {
   const calls: string[] = [];
   const launcher: StreamLauncher = {
     getLocalIpv4Addresses: vi.fn(async () => ["192.168.0.42", "192.168.0.42"]),
-    prepareStream: vi.fn(async () => {
+    prepareStream: vi.fn(async (_port, _host, _transport) => {
       calls.push("prepare");
     }),
     openStream: vi.fn(async () => {

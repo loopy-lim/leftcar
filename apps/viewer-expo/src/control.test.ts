@@ -199,18 +199,22 @@ describe("formatErrorMessage and socket error handling", () => {
   it("formats Error objects, strings, error code objects, and null/undefined without undefined", () => {
     expect(formatErrorMessage(new Error("custom error"))).toBe("custom error");
     expect(formatErrorMessage("string error")).toBe("string error");
-    expect(formatErrorMessage({ code: "ECONNREFUSED" })).toBe("Socket error: ECONNREFUSED");
+    expect(formatErrorMessage({ code: "ECONNREFUSED" })).toBe(
+      "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.",
+    );
     expect(formatErrorMessage({ message: "msg error" })).toBe("msg error");
     expect(formatErrorMessage({ error: "err property" })).toBe("err property");
-    expect(formatErrorMessage(undefined)).toBe("unknown error");
-    expect(formatErrorMessage(null)).toBe("unknown error");
+    expect(formatErrorMessage(undefined)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+    expect(formatErrorMessage(null)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
   });
 
   it("handles non-Error socket errors without producing 'control connection error: undefined'", async () => {
     const connectPromise = connect("1.2.3.4", 7777, 1000);
     const socket = lastSocket();
     socket.emit("error", { code: "ECONNREFUSED" });
-    await expect(connectPromise).rejects.toThrow("control connection error: Socket error: ECONNREFUSED");
+    await expect(connectPromise).rejects.toThrow(
+      "control connection error: 컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.",
+    );
   });
 });
 

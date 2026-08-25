@@ -6,12 +6,13 @@
 
 use crate::backend::SharedBackend;
 use control_contract::host::{
-    CatalogView, SessionView, StartStreamInput, StartStreamOutput, StatusView, StopStreamInput,
+    CatalogView, SessionView, StartStreamInput, StartStreamOutput, StatusView,
 };
 
 pub use control_contract::host::{StatsInfo, StatusView as StatusViewPublic};
 use serde_json::json;
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicU16, Ordering},
     Mutex,
@@ -25,12 +26,68 @@ struct Session {
     source_index: u32,
     source_name: String,
     viewer_addr: String,
+    viewer_port: u16,
+    media_transport: String,
     input_enabled: bool,
     input_rate_hz: u32,
     terminal_since: Option<Instant>,
+    /// Control-plane tombstone retained long enough for the viewer's 2s
+    /// status poll to observe why the host stopped this session.
+    terminal_error: Option<String>,
+    /// A forced stop removes the handle from the backend immediately. Keep
+    /// that fact so terminal-state GC does not try to stop it a second time.
+    backend_released: bool,
+}
+
+fn normalize_media_transport(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "udp" | "wifi" => Some("udp"),
+        "tcp" | "wifitcp" | "wifi-tcp" => Some("tcp"),
+        "adbtcp" | "adb-tcp" | "usb" => Some("adbTcp"),
+        "auto" | "both" => Some("auto"),
+        _ => None,
+    }
+}
+
+fn adb_forward(port: u16) -> Result<(), String> {
+    let mapping = format!("tcp:{port}");
+    let output = Command::new("adb")
+        .args(["forward", mapping.as_str(), mapping.as_str()])
+        .output()
+        .map_err(|error| format!("ADB를 실행하지 못했습니다: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            format!("ADB USB 포트 전달에 실패했습니다 (code={})", output.status)
+        } else {
+            format!("ADB USB 포트 전달에 실패했습니다: {detail}")
+        })
+    }
+}
+
+fn adb_remove_forward(port: u16) {
+    let mapping = format!("tcp:{port}");
+    let _ = Command::new("adb")
+        .args(["forward", "--remove", mapping.as_str()])
+        .output();
+}
+
+fn cleanup_media_transport(transport: &str, port: u16) {
+    if transport == "adbTcp" {
+        adb_remove_forward(port);
+    }
 }
 
 const TERMINAL_SESSION_RETENTION: Duration = Duration::from_secs(5);
+const STARTUP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_STATS_INTERVAL: Duration = Duration::from_millis(100);
+/// A healthy viewer polls `getStatus` every 2s, so a connected control
+/// socket should never sit silent this long. Half-open connections (network
+/// drop, laptop sleep, no FIN) would otherwise hold their task and socket
+/// open forever.
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct ControlServer {
     backend: SharedBackend,
@@ -62,6 +119,26 @@ impl ControlServer {
 
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
+    }
+
+    async fn wait_for_first_frame(&self, handle: u32) -> Result<(), String> {
+        let deadline = Instant::now() + STARTUP_FIRST_FRAME_TIMEOUT;
+        loop {
+            let stats = self.backend.stats(handle)?;
+            if stats.first_send_ms > 0 || stats.state == "running" {
+                return Ok(());
+            }
+            if let Some(error) = stats.error.filter(|error| !error.is_empty()) {
+                return Err(error);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "no video frame produced within {}s",
+                    STARTUP_FIRST_FRAME_TIMEOUT.as_secs()
+                ));
+            }
+            tokio::time::sleep(STARTUP_STATS_INTERVAL).await;
+        }
     }
 
     pub async fn bind(&self, addr: &str) -> std::io::Result<std::net::SocketAddr> {
@@ -99,7 +176,7 @@ impl ControlServer {
             let mut expired_ids = Vec::new();
 
             for (id, s) in &mut state.live {
-                let metrics = self.backend.stats(s.handle).unwrap_or_else(|_| StatsInfo {
+                let mut metrics = self.backend.stats(s.handle).unwrap_or_else(|_| StatsInfo {
                     frames: 0,
                     bytes: 0,
                     state: "stopped".into(),
@@ -139,6 +216,14 @@ impl ControlServer {
                     send_pace_p95_us: 0,
                     error: Some("backend stats unavailable".into()),
                 });
+
+                if let Some(error) = &s.terminal_error {
+                    metrics.state = "stopped".into();
+                    metrics.fps = 0;
+                    metrics.kbps = 0;
+                    metrics.pending_frame = 0;
+                    metrics.error = Some(error.clone());
+                }
 
                 let terminal = matches!(metrics.state.as_str(), "error" | "stopped" | "unknown");
                 if terminal {
@@ -207,12 +292,15 @@ impl ControlServer {
         };
 
         for session in expired {
-            if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!(
-                    "failed to release terminal session {}: {error}",
-                    session.handle
-                );
+            if !session.backend_released {
+                if let Err(error) = self.backend.stop(session.handle) {
+                    eprintln!(
+                        "failed to release terminal session {}: {error}",
+                        session.handle
+                    );
+                }
             }
+            cleanup_media_transport(&session.media_transport, session.viewer_port);
         }
 
         StatusView { sessions }
@@ -236,6 +324,7 @@ impl ControlServer {
             state
                 .live
                 .get(&session_id)
+                .filter(|session| !session.backend_released)
                 .map(|session| session.handle)
                 .ok_or_else(|| format!("no such session {session_id}"))?
         };
@@ -246,6 +335,34 @@ impl ControlServer {
             .get_mut(&session_id)
             .ok_or_else(|| format!("session {session_id} ended while changing input"))?;
         session.input_enabled = enabled;
+        Ok(())
+    }
+
+    /// Operator-forced termination: stop the capture session and tell the
+    /// still-live viewer (LCT1 code 2) so it closes its window and shows why
+    /// instead of waiting for a media timeout or auto-restarting.
+    pub fn force_stop_session(&self, session_id: u32) -> Result<(), String> {
+        let handle = {
+            let state = self.sessions.lock().unwrap();
+            state
+                .live
+                .get(&session_id)
+                .filter(|session| !session.backend_released)
+                .map(|session| session.handle)
+                .ok_or_else(|| format!("no such session {session_id}"))?
+        };
+        self.backend.stop_with_reason(handle, 2)?;
+
+        let mut state = self.sessions.lock().unwrap();
+        let session = state
+            .live
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session {session_id} ended while stopping"))?;
+        session.input_enabled = false;
+        session.terminal_since = Some(Instant::now());
+        session.terminal_error = Some("host operator stopped the stream".into());
+        session.backend_released = true;
+        cleanup_media_transport(&session.media_transport, session.viewer_port);
         Ok(())
     }
 
@@ -267,12 +384,15 @@ impl ControlServer {
         };
 
         for session in stale {
-            if let Err(error) = self.backend.stop(session.handle) {
-                eprintln!(
-                    "failed to stop stale viewer session {}: {error}",
-                    session.handle
-                );
+            if !session.backend_released {
+                if let Err(error) = self.backend.stop(session.handle) {
+                    eprintln!(
+                        "failed to stop stale viewer session {}: {error}",
+                        session.handle
+                    );
+                }
             }
+            cleanup_media_transport(&session.media_transport, session.viewer_port);
         }
     }
 
@@ -300,10 +420,8 @@ impl ControlServer {
                 #[derive(serde::Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct PairArgs {
-                    #[serde(default)]
-                    offer_id: Option<String>,
-                    #[serde(default)]
-                    secret: Option<String>,
+                    offer_id: String,
+                    secret: String,
                     code: String,
                     device_id: String,
                     #[serde(default)]
@@ -311,24 +429,15 @@ impl ControlServer {
                 }
                 let input: PairArgs = match serde_json::from_value(args) {
                     Ok(v) => v,
-                    Err(e) => return err(&format!("bad args: {e}")),
+                    Err(_) => return err("pairing failed"),
                 };
-                let offer_id_opt = input.offer_id.as_deref().filter(|s| !s.is_empty());
-                let secret_opt = input.secret.as_deref().filter(|s| !s.is_empty());
-                let res = match (offer_id_opt, secret_opt) {
-                    (Some(offer_id), Some(secret)) => self.pairing.pair(
-                        offer_id,
-                        secret,
-                        &input.code,
-                        &input.device_id,
-                        &input.device_name,
-                    ),
-                    _ => self.pairing.pair_by_code(
-                        &input.code,
-                        &input.device_id,
-                        &input.device_name,
-                    ),
-                };
+                let res = self.pairing.pair(
+                    &input.offer_id,
+                    &input.secret,
+                    &input.code,
+                    &input.device_id,
+                    &input.device_name,
+                );
                 match res {
                     Ok(token) => ok(json!({ "token": token })),
                     Err(_) => err("pairing failed"),
@@ -374,30 +483,80 @@ impl ControlServer {
                     .and_then(|d| d.get(input.source_index as usize).cloned())
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
+                let requested_transport = normalize_media_transport(&input.media_transport)
+                    .ok_or_else(|| format!("unsupported media transport: {}", input.media_transport));
+                let requested_transport = match requested_transport {
+                    Ok(value) => value,
+                    Err(error) => return err(&error),
+                };
+
                 // A non-bypassable VPN can route a local control connection
                 // through a LAN subnet router, so its TCP peer is not always
                 // the viewer's physical Wi-Fi address. Consider claimed
                 // addresses only when they are private and either on the
                 // peer's /24 or the authenticated control peer is a tailnet
-                // CGNAT address. This lets control remain on Tailscale while
-                // media takes the lower-latency physical LAN path.
-                // The production UDP backend performs a nonce reachability
-                // proof before capture, preventing arbitrary redirection.
-                let mut candidates = input
+                // CGNAT address. USB is deliberately different: adb forward
+                // terminates on the Host, so the only valid media peer is the
+                // Host loopback address.
+                let mut wifi_candidates = input
                     .viewer_ips
                     .iter()
                     .take(4)
                     .filter(|candidate| same_private_lan_candidate(candidate, viewer_ip))
                     .cloned()
                     .collect::<Vec<_>>();
-                if !candidates.iter().any(|candidate| candidate == viewer_ip) {
-                    candidates.push(viewer_ip.to_owned());
+                if !wifi_candidates.iter().any(|candidate| candidate == viewer_ip) {
+                    wifi_candidates.push(viewer_ip.to_owned());
+                }
+                let mut attempts = Vec::new();
+                match requested_transport {
+                    // TCP is the reliable Wi-Fi path. It uses the same
+                    // authenticated framing as USB, so one lost UDP fragment
+                    // cannot invalidate the following H.264 frames.
+                    "tcp" => attempts.extend(
+                        wifi_candidates
+                            .iter()
+                            .cloned()
+                            .map(|candidate| (candidate, "tcp")),
+                    ),
+                    "udp" => attempts.extend(
+                        wifi_candidates
+                            .iter()
+                            .cloned()
+                            .map(|candidate| (candidate, "udp")),
+                    ),
+                    "adbTcp" => attempts.push(("127.0.0.1".into(), "adbTcp")),
+                    "auto" => {
+                        // Prefer reliable Wi-Fi first. UDP remains a useful
+                        // low-latency fallback when a viewer build lacks the
+                        // TCP bridge, and USB is the final stable fallback.
+                        attempts.extend(
+                            wifi_candidates
+                                .iter()
+                                .cloned()
+                                .map(|candidate| (candidate, "tcp")),
+                        );
+                        attempts.extend(
+                            wifi_candidates
+                                .iter()
+                                .cloned()
+                                .map(|candidate| (candidate, "udp")),
+                        );
+                        attempts.push(("127.0.0.1".into(), "adbTcp"));
+                    }
+                    _ => unreachable!("transport was normalized above"),
                 }
                 let mut last_error = None;
                 let mut started = None;
-                for candidate in candidates {
+                for (candidate, transport) in attempts {
                     let viewer_addr = format!("{candidate}:{}", input.viewer_port);
                     self.stop_sessions_for_viewer(&viewer_addr);
+                    if transport == "adbTcp" {
+                        if let Err(error) = adb_forward(input.viewer_port) {
+                            last_error = Some(error);
+                            continue;
+                        }
+                    }
                     match self.backend.start(
                         input.source_index,
                         &candidate,
@@ -406,16 +565,31 @@ impl ControlServer {
                         input.height,
                         input.fps,
                         &input.capture_backend,
+                        transport,
                     ) {
                         Ok(handle) => {
-                            started = Some((handle, candidate));
-                            break;
+                            match self.wait_for_first_frame(handle).await {
+                                Ok(()) => {
+                                    started = Some((handle, candidate, transport));
+                                    break;
+                                }
+                                Err(error) => {
+                                    let _ = self.backend.stop(handle);
+                                    cleanup_media_transport(transport, input.viewer_port);
+                                    last_error = Some(format!(
+                                        "{candidate} ({transport}) startup failed: {error}"
+                                    ));
+                                }
+                            }
                         }
-                        Err(e) => last_error = Some(format!("{candidate}: {e}")),
+                        Err(e) => {
+                            cleanup_media_transport(transport, input.viewer_port);
+                            last_error = Some(format!("{candidate} ({transport}): {e}"));
+                        }
                     }
                 }
                 match started {
-                    Some((handle, candidate)) => {
+                    Some((handle, candidate, transport)) => {
                         let viewer_addr = format!("{candidate}:{}", input.viewer_port);
                         let session_id = {
                             let mut st = self.sessions.lock().unwrap();
@@ -428,9 +602,13 @@ impl ControlServer {
                                     source_index: input.source_index,
                                     source_name: name,
                                     viewer_addr,
+                                    viewer_port: input.viewer_port,
+                                    media_transport: transport.into(),
                                     input_enabled: false,
                                     input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
+                                    terminal_error: None,
+                                    backend_released: false,
                                 },
                             );
                             id
@@ -446,7 +624,17 @@ impl ControlServer {
                 }
             }
             "stopStream" => {
-                let input: StopStreamInput = match serde_json::from_value(args) {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct StopArgs {
+                    session: u32,
+                    /// LCT1 wire code the host forwards to the viewer:
+                    /// 2 = operator-forced, 3 = ordinary stop. Optional for
+                    /// backward compatibility with older viewers.
+                    #[serde(default)]
+                    reason: Option<u8>,
+                }
+                let input: StopArgs = match serde_json::from_value(args) {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
                 };
@@ -455,10 +643,23 @@ impl ControlServer {
                     st.live.remove(&input.session)
                 };
                 match removed {
-                    Some(s) => match self.backend.stop(s.handle) {
-                        Ok(()) => ok(json!({})),
-                        Err(e) => err(&e),
-                    },
+                    Some(s) => {
+                        let result = if s.backend_released {
+                            Ok(())
+                        } else {
+                            match input.reason {
+                                Some(code) => self.backend.stop_with_reason(s.handle, code),
+                                None => self.backend.stop(s.handle),
+                            }
+                        };
+                        match result {
+                            Ok(()) => {
+                                cleanup_media_transport(&s.media_transport, s.viewer_port);
+                                ok(json!({}))
+                            }
+                            Err(e) => err(&e),
+                        }
+                    }
                     None => err(&format!("no such session {}", input.session)),
                 }
             }
@@ -477,7 +678,15 @@ impl ControlServer {
 async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     let (rd, mut wr) = sock.into_split();
     let mut lines = BufReader::new(rd).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        // Reap half-open connections: a peer that vanished without FIN never
+        // unblocks this read otherwise, and its task leaks for the process
+        // lifetime. The viewer's 2s status poll makes 15s a generous budget.
+        let line = match tokio::time::timeout(CONTROL_IDLE_TIMEOUT, lines.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) | Err(_) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -530,8 +739,7 @@ fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
     };
     let candidate_octets = candidate.octets();
     let peer_octets = peer.octets();
-    let same_private_subnet =
-        peer.is_private() && candidate_octets[..3] == peer_octets[..3];
+    let same_private_subnet = peer.is_private() && candidate_octets[..3] == peer_octets[..3];
     let tailnet_peer = peer_octets[0] == 100 && (peer_octets[1] & 0b1100_0000) == 64;
     candidate.is_private() && (same_private_subnet || tailnet_peer)
 }
@@ -597,6 +805,7 @@ mod tests {
             _h: u32,
             _fps: u32,
             _capture_backend: &str,
+            _media_transport: &str,
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -796,7 +1005,9 @@ mod tests {
 
         // connection is closed: the next request hits EOF or reset
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _ = sock.write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n").await;
+        let _ = sock
+            .write_all(b"{\"command\":\"getCatalog\",\"args\":{}}\n")
+            .await;
         let mut buf = [0u8; 16];
         let n = sock.read(&mut buf).await.unwrap_or(0);
         assert_eq!(n, 0, "connection must be closed after unauthorized");
@@ -816,6 +1027,24 @@ mod tests {
             serde_json::from_str(response["result"]["qr_payload"].as_str().unwrap()).unwrap();
         assert_eq!(payload["v"], 1);
         assert_eq!(payload["p"], addr.port());
+    }
+
+    #[tokio::test]
+    async fn six_digit_code_alone_cannot_pair() {
+        let pairing = test_pairing();
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let args = json!({
+            "code": view.code,
+            "deviceId": "code-only-viewer",
+            "deviceName": "Code Only Viewer",
+        });
+
+        let line = request(&mut sock, "pair", &args.to_string(), "").await;
+        assert!(line.contains("\"ok\":false"), "{line}");
+        assert!(line.contains("\"error\":\"pairing failed\""), "{line}");
+        assert!(pairing.list_devices().is_empty());
     }
 
     #[test]
@@ -861,9 +1090,13 @@ mod tests {
                 source_index: 0,
                 source_name: "Main".into(),
                 viewer_addr: "192.168.0.2:5001".into(),
+                viewer_port: 5001,
+                media_transport: "udp".into(),
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
+                terminal_error: None,
+                backend_released: false,
             },
         );
 
@@ -890,6 +1123,57 @@ mod tests {
     }
 
     #[test]
+    fn forced_stop_is_retained_as_a_tombstone_without_double_stopping() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+        );
+        server.sessions.lock().unwrap().live.insert(
+            1,
+            Session {
+                handle: 7,
+                source_index: 0,
+                source_name: "Main".into(),
+                viewer_addr: "192.168.0.2:5001".into(),
+                viewer_port: 5001,
+                media_transport: "udp".into(),
+                input_enabled: true,
+                input_rate_hz: 120,
+                terminal_since: None,
+                terminal_error: None,
+                backend_released: false,
+            },
+        );
+
+        server.force_stop_session(1).unwrap();
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        let retained = server.snapshot();
+        assert_eq!(retained.sessions.len(), 1);
+        assert_eq!(retained.sessions[0].state, "stopped");
+        assert!(!retained.sessions[0].input_enabled);
+        assert_eq!(
+            retained.sessions[0].error.as_deref(),
+            Some("host operator stopped the stream")
+        );
+
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get_mut(&1)
+            .unwrap()
+            .terminal_since =
+            Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
+
+        assert!(server.snapshot().sessions.is_empty());
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn remote_input_is_host_opt_in_per_session() {
         let server = ControlServer::new(backend(), test_pairing());
         server.sessions.lock().unwrap().live.insert(
@@ -899,9 +1183,13 @@ mod tests {
                 source_index: 0,
                 source_name: "Main".into(),
                 viewer_addr: "192.168.0.2:5001".into(),
+                viewer_port: 5001,
+                media_transport: "udp".into(),
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
+                terminal_error: None,
+                backend_released: false,
             },
         );
 

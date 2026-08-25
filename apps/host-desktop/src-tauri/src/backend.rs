@@ -31,8 +31,14 @@ pub trait CaptureBackend: Send + Sync {
         h: u32,
         fps: u32,
         capture_backend: &str,
+        media_transport: &str,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
+    /// Stop while telling a still-live viewer why (LCT1 wire code). The
+    /// default degrades to a silent stop for backends without a notice path.
+    fn stop_with_reason(&self, handle: u32, _reason_code: u8) -> Result<(), String> {
+        self.stop(handle)
+    }
     fn stats(&self, handle: u32) -> Result<StatsInfo, String>;
     fn input_permission(&self) -> Result<bool, String> {
         Ok(false)
@@ -76,6 +82,7 @@ impl CaptureBackend for FakeBackend {
         _h: u32,
         _fps: u32,
         _capture_backend: &str,
+        _media_transport: &str,
     ) -> Result<u32, String> {
         Ok(7)
     }

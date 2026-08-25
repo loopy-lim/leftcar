@@ -55,7 +55,7 @@ extern "C" {
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
-    fn leftcar_jni_prepare_port(port: u16, host: *const c_char) -> i32;
+    fn leftcar_jni_prepare_port(port: u16, host: *const c_char, transport: *const c_char) -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_attach_port(
         state: *mut c_void,
@@ -104,11 +104,13 @@ extern "C" {
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
+    fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
+    fn leftcar_jni_render_latency(instance: *const c_char) -> i32;
 }
 
 // Java signatures:
 //   start(): long
-//   prepareStream(int, String): int
+//   prepareStream(int, String, String): int
 //   cancelPreparedStream(int): int
 //   attachSurface(long, String, Surface): int
 //   surfaceChanged(long, String, int, int): int
@@ -138,6 +140,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
     _class: *mut jobject,
     port: i32,
     host: *mut jobject,
+    transport: *mut jobject,
 ) -> i32 {
     if port <= 0 || port > i32::from(u16::MAX) {
         return 4;
@@ -146,7 +149,11 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
         Some(host) => host,
         None => return 1,
     };
-    unsafe { leftcar_jni_prepare_port(port as u16, host.as_ptr()) }
+    let transport = match unsafe { get_utf(env, transport) } {
+        Some(transport) => transport,
+        None => return 1,
+    };
+    unsafe { leftcar_jni_prepare_port(port as u16, host.as_ptr(), transport.as_ptr()) }
 }
 
 #[no_mangle]
@@ -431,6 +438,40 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamLatency
         None => return -1,
     };
     unsafe { leftcar_jni_stream_latency(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+/// JNI supplies a valid environment and Java string reference for the
+/// duration of this call.
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_terminationReason(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return -1,
+    };
+    unsafe { leftcar_jni_termination_reason(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+/// JNI supplies a valid environment and Java string reference for the
+/// duration of this call.
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_renderLatency(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return 0xffff,
+    };
+    unsafe { leftcar_jni_render_latency(c.as_ptr()) }
 }
 
 #[no_mangle]

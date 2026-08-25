@@ -17,6 +17,7 @@ pub mod media_datagram;
 /// Host-testable media-plane peer admission check. Not android-gated so
 /// `cargo test --workspace` (host target only in CI) exercises it.
 pub mod net_guard;
+pub mod prepared_tcp;
 /// Port preflight used before Android opens a stream Activity. Keeping this
 /// host-testable lets CI exercise the reachability race fix without an APK.
 pub mod prepared_udp;

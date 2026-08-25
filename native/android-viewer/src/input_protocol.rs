@@ -13,6 +13,13 @@ pub const STATUS_MAGIC: &[u8; 4] = b"LCS1";
 pub const LATENCY_PROBE_MAGIC: &[u8; 4] = b"LCP1";
 pub const LATENCY_RESPONSE_MAGIC: &[u8; 4] = b"LCP2";
 pub const RECEIVER_FEEDBACK_MAGIC: &[u8; 4] = b"LCF1";
+pub const TERMINATION_MAGIC: &[u8; 4] = b"LCT1";
+/// Host stopped this session because receiver feedback went silent.
+pub const TERMINATION_REASON_HEALTH: u8 = 1;
+/// The host operator explicitly terminated the session.
+pub const TERMINATION_REASON_FORCED: u8 = 2;
+/// The host stopped the session as part of an ordinary shutdown.
+pub const TERMINATION_REASON_STOPPED: u8 = 3;
 pub const INPUT_HEADER_LEN: usize = 10;
 pub const INPUT_FLAG_RELIABLE: u8 = 1;
 pub const MAX_RELIABLE_QUEUE: usize = 256;
@@ -174,6 +181,45 @@ pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64, token: &[u8]) ->
     bytes.extend_from_slice(&viewer_send_ms.to_be_bytes());
     bytes.extend_from_slice(token);
     bytes
+}
+
+/// Host → viewer session termination notice. The viewer treats it like an
+/// authenticated BYE from itself: stop rendering, close the window, and
+/// surface the reason instead of waiting for the media to time out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationReason {
+    HealthCheck,
+    HostForced,
+    HostStopped,
+}
+
+pub fn encode_termination(reason: TerminationReason, token: &[u8]) -> Vec<u8> {
+    let code = match reason {
+        TerminationReason::HealthCheck => TERMINATION_REASON_HEALTH,
+        TerminationReason::HostForced => TERMINATION_REASON_FORCED,
+        TerminationReason::HostStopped => TERMINATION_REASON_STOPPED,
+    };
+    let mut bytes = Vec::with_capacity(5 + token.len());
+    bytes.extend_from_slice(TERMINATION_MAGIC);
+    bytes.push(code);
+    bytes.extend_from_slice(token);
+    bytes
+}
+
+pub fn parse_termination(packet: &[u8], token: &[u8]) -> Option<TerminationReason> {
+    if token.is_empty()
+        || packet.len() != 5 + token.len()
+        || &packet[..4] != TERMINATION_MAGIC
+        || packet[5..] != *token
+    {
+        return None;
+    }
+    match packet[4] {
+        TERMINATION_REASON_HEALTH => Some(TerminationReason::HealthCheck),
+        TERMINATION_REASON_FORCED => Some(TerminationReason::HostForced),
+        TERMINATION_REASON_STOPPED => Some(TerminationReason::HostStopped),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,6 +484,24 @@ mod tests {
             })
         );
         assert!(parse_latency_probe_response(&packet, b"wrong-token").is_none());
+    }
+
+    #[test]
+    fn termination_notice_round_trips_and_rejects_wrong_token() {
+        let token = b"session-token";
+        for reason in [
+            TerminationReason::HealthCheck,
+            TerminationReason::HostForced,
+            TerminationReason::HostStopped,
+        ] {
+            let packet = encode_termination(reason, token);
+            assert_eq!(&packet[..4], TERMINATION_MAGIC);
+            assert_eq!(packet.len(), 5 + token.len());
+            assert_eq!(parse_termination(&packet, token), Some(reason));
+        }
+        let packet = encode_termination(TerminationReason::HostForced, token);
+        assert_eq!(parse_termination(&packet, b"wrong-token"), None);
+        assert_eq!(parse_termination(&packet[..4], token), None);
     }
 
     #[test]

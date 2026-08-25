@@ -10,14 +10,15 @@ use std::ffi::{c_char, c_void, CStr};
 
 use crate::input_protocol::{
     encode_input, encode_latency_probe, encode_receiver_feedback, estimate_latency,
-    normalized_axis, parse_ack, parse_input_status, parse_latency_probe_response, InputEvent,
-    InputScheduler, ReceiverFeedback,
+    normalized_axis, parse_ack, parse_input_status, parse_latency_probe_response,
+    parse_termination, InputEvent, InputScheduler, ReceiverFeedback,
 };
 use crate::media_datagram::{
-    parse_fragment, stale_frame_budget_ms, CompletedFrameSequencer, FrameReassembler,
-    RecoveryRequestGate,
+    parse_fragment, recovery_request_suppressed, stale_frame_budget_ms, CompletedFrameSequencer,
+    FrameReassembler, RecoveryRequestGate,
 };
 use crate::net_guard::{host_is_valid, peer_allowed};
+use crate::prepared_tcp::PreparedTcpBridge;
 use crate::prepared_udp::PreparedUdpReceiver;
 use std::os::fd::AsRawFd;
 
@@ -74,14 +75,23 @@ struct RendererControl {
     capture_to_decoder_ms: AtomicU64,
     encode_to_decoder_ms: AtomicU64,
     wire_to_decoder_ms: AtomicU64,
+    // Glass-to-glass: capture wall time of the newest rendered frame minus
+    // the moment MediaCodec released it to the Surface. Includes the decoder
+    // output wait the to-decoder estimates omit, which is the gap users feel.
+    capture_to_render_ms: AtomicU64,
+    // Repeated SurfaceView geometry updates during freeform resize can make
+    // decoder/compositor stalls look like packet loss. Defer recovery IDRs
+    // until the geometry has stayed stable, then emit at most one through the
+    // existing RecoveryRequestGate.
+    resize_recovery_suppressed_until_us: AtomicU64,
     stop: AtomicBool,
-    // Surface destruction is not always the end of the Activity. During an
-    // XR/freeform resize, release MediaCodec's ANativeWindow promptly but keep
+    // Surface destruction is not always the end of the Activity. During
+    // freeform resize, release MediaCodec's ANativeWindow promptly but keep
     // the UDP listener alive until either a replacement Surface attaches or
     // the Activity performs its final release.
     suspend: AtomicBool,
     suspended: AtomicBool,
-    // A surface can disappear briefly during an XR resize/reconfiguration.
+    // A surface can disappear briefly during a freeform resize/reconfiguration.
     // In that case the host must see EOF and use its existing reconnect path,
     // rather than receiving BYE and permanently stopping capture.
     send_bye: AtomicBool,
@@ -89,21 +99,55 @@ struct RendererControl {
     // owns the ANativeWindow. The callback waits on this bounded flag before
     // releasing the native window reference.
     finished: AtomicBool,
+    // Termination reason code received from the host (LCT1): 1 = feedback
+    // health check, 2 = host operator forced stop, 3 = ordinary stop.
+    // Negative means no notice arrived.
+    termination_reason: AtomicI8,
+}
+
+impl RendererControl {
+    fn termination_reason(&self) -> i8 {
+        self.termination_reason.load(Ordering::SeqCst)
+    }
 }
 
 static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<RendererControl>>>> = Mutex::new(None);
 static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpReceiver>>> = Mutex::new(None);
+static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> = Mutex::new(None);
+/// A renderer exits within milliseconds after an LCT1 packet, while the
+/// Activity polls every 250ms. Retain the reason by logical instance so the
+/// UI cannot miss it between renderer cleanup and the next poll.
+static TERMINATION_REASONS: Mutex<Option<HashMap<String, i8>>> = Mutex::new(None);
 
 fn remove_renderer_if_current(instance: &str, control: &Arc<RendererControl>) {
-    let mut map = ACTIVE_RENDERERS.lock().unwrap();
-    if let Some(map) = map.as_mut() {
+    let removed_reason = {
+        let mut map = ACTIVE_RENDERERS.lock().unwrap();
+        let Some(map) = map.as_mut() else {
+            return;
+        };
         let is_current = map
             .get(instance)
             .map(|current| Arc::ptr_eq(current, control))
             .unwrap_or(false);
-        if is_current {
-            map.remove(instance);
+        if !is_current {
+            return;
         }
+        map.remove(instance);
+        let reason = control.termination_reason();
+        (reason >= 0).then_some(reason)
+    };
+    if let Some(reason) = removed_reason {
+        TERMINATION_REASONS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(instance.to_owned(), reason);
+    }
+}
+
+fn clear_cached_termination(instance: &str) {
+    if let Some(reasons) = TERMINATION_REASONS.lock().unwrap().as_mut() {
+        reasons.remove(instance);
     }
 }
 
@@ -147,7 +191,45 @@ fn cancel_prepared_receiver(port: u16) -> bool {
     prepared.is_some()
 }
 
-fn prepare_udp_receiver(port: u16, expected_host: &str) -> Result<(), String> {
+fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result<(), String> {
+    let (bind_host, allowed_hosts) = if matches!(transport, "tcp" | "auto") {
+        // Auto must be able to accept the direct Wi-Fi attempt first and the
+        // loopback ADB fallback later. Admission is still restricted to the
+        // paired Host address plus loopback; binding broadly does not broaden
+        // the authenticated peer set.
+        ("0.0.0.0", format!("{expected_host},127.0.0.1"))
+    } else {
+        ("127.0.0.1", "127.0.0.1".to_owned())
+    };
+    let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts).map_err(|error| {
+        format!("failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}")
+    })?;
+    PREPARED_TCP_BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, bridge);
+    Ok(())
+}
+
+fn cancel_tcp_bridge(port: u16) -> bool {
+    PREPARED_TCP_BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+        .is_some()
+}
+
+fn take_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
+    PREPARED_TCP_BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+fn prepare_udp_receiver(port: u16, expected_host: &str, transport: &str) -> Result<(), String> {
     if port == 0 || !host_is_valid(expected_host) {
         return Err("invalid prepared media port or host".into());
     }
@@ -160,6 +242,10 @@ fn prepare_udp_receiver(port: u16, expected_host: &str) -> Result<(), String> {
         return Err(format!("UDP media port {port} is already active"));
     }
 
+    // A retry for the same not-yet-opened window replaces both preflight
+    // listeners, not only the UDP half.
+    let _ = cancel_tcp_bridge(port);
+
     // A retry for the same not-yet-opened window replaces its old preflight.
     // Drop outside the map lock because the worker has a bounded join.
     let stale = PREPARED_RECEIVERS
@@ -169,13 +255,24 @@ fn prepare_udp_receiver(port: u16, expected_host: &str) -> Result<(), String> {
         .remove(&port);
     drop(stale);
 
-    let prepared = PreparedUdpReceiver::bind(port, expected_host.to_owned())
+    let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "auto") {
+        format!("{expected_host},127.0.0.1")
+    } else {
+        expected_host.to_owned()
+    };
+    let prepared = PreparedUdpReceiver::bind(port, prepared_hosts)
         .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
     PREPARED_RECEIVERS
         .lock()
         .unwrap()
         .get_or_insert_with(HashMap::new)
         .insert(port, prepared);
+    if matches!(transport, "tcp" | "adbTcp" | "auto") {
+        if let Err(error) = prepare_tcp_bridge(port, expected_host, transport) {
+            let _ = cancel_prepared_receiver(port);
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -186,7 +283,15 @@ fn take_prepared_receiver(port: u16, expected_host: &str) -> Option<PreparedUdpR
         .get_or_insert_with(HashMap::new)
         .remove(&port);
     match prepared {
-        Some(prepared) if prepared.expected_host() == expected_host => Some(prepared),
+        Some(prepared)
+            if prepared
+                .expected_host()
+                .split(',')
+                .map(str::trim)
+                .any(|host| host == expected_host) =>
+        {
+            Some(prepared)
+        }
         Some(_) => {
             log_info!("discarded prepared UDP port {port}: paired Host changed");
             None
@@ -215,10 +320,18 @@ struct RendererStats {
     // Do not infer this from the first video frame: that would erase the very
     // one-way delivery latency the HUD is intended to show.
     host_clock_offset_ms: Option<i128>,
+    // When the last latency-probe response arrived. Silence here means the
+    // RTT/stage estimates are stale and the HUD must show "unmeasured"
+    // instead of a frozen number.
+    last_probe_received: Option<std::time::Instant>,
 }
 
 const LATENCY_UNKNOWN: u64 = u64::MAX;
 const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const RESIZE_RECOVERY_SUPPRESSION_US: u64 = 350_000;
+/// Probe responses arriving after this silence window leave the smoothed
+/// latency estimates stale; decay them toward "unknown" instead of freezing.
+const PROBE_STALE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 fn is_keyframe(au: &[u8]) -> bool {
     viewer_decoder::split_annexb(au)
         .iter()
@@ -350,6 +463,22 @@ fn store_smoothed_latency(target: &AtomicU64, sample: u64) {
     target.store(next, Ordering::Relaxed);
 }
 
+/// Probe silence makes every clock-corrected value unmeasured. Reset
+/// immediately: decaying a stale 100ms sample through 50/25/12ms would display
+/// an apparent improvement that never happened and would mislead congestion
+/// control for several more seconds.
+fn clear_stale_latency(control: &RendererControl) {
+    for target in [
+        &control.network_rtt_ms,
+        &control.capture_to_decoder_ms,
+        &control.encode_to_decoder_ms,
+        &control.wire_to_decoder_ms,
+        &control.capture_to_render_ms,
+    ] {
+        target.store(LATENCY_UNKNOWN, Ordering::Relaxed);
+    }
+}
+
 fn clock_corrected_age_ms(
     host_wall_ms: Option<u64>,
     host_clock_offset_ms: Option<i128>,
@@ -391,14 +520,43 @@ fn request_idr_debounced(
     peer: std::net::SocketAddr,
     token: &[u8],
     gate: &mut RecoveryRequestGate,
+    control: &RendererControl,
 ) {
+    if token.is_empty()
+        || recovery_request_suppressed(
+            monotonic_us(),
+            control
+                .resize_recovery_suppressed_until_us
+                .load(Ordering::Relaxed),
+        )
+    {
+        return;
+    }
     if gate.should_request(std::time::Instant::now()) {
         request_idr(socket, peer, token);
     }
 }
 
+fn suppress_resize_recovery(instance_str: &str) {
+    let control = ACTIVE_RENDERERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(instance_str).cloned());
+    if let Some(control) = control {
+        control.resize_recovery_suppressed_until_us.fetch_max(
+            monotonic_us().saturating_add(RESIZE_RECOVERY_SUPPRESSION_US),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 const MEDIA_BATCH_SIZE: usize = 16;
 const MEDIA_DATAGRAM_BYTES: usize = 2_048;
+/// Media is disposable. Waiting for a codec slot or output buffer would make
+/// every newer frame arrive behind an older one, so the hot path is strictly
+/// non-blocking and recovers from a missed AU at the next IDR.
+const DECODER_FEED_TIMEOUT_US: i64 = 0;
 
 struct MediaBatch {
     count: usize,
@@ -458,6 +616,19 @@ fn ipv4_socket_addr(raw: &libc::sockaddr_in) -> Option<std::net::SocketAddr> {
     )))
 }
 
+fn sockaddr_in_for_addr(addr: std::net::SocketAddr) -> Option<libc::sockaddr_in> {
+    let std::net::SocketAddr::V4(addr) = addr else {
+        return None;
+    };
+    let mut raw: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    raw.sin_family = libc::AF_INET as libc::sa_family_t;
+    raw.sin_port = addr.port().to_be();
+    raw.sin_addr = libc::in_addr {
+        s_addr: u32::from_ne_bytes(addr.ip().octets()),
+    };
+    Some(raw)
+}
+
 type InputEndpoint = std::sync::Arc<std::sync::Mutex<Option<(std::net::SocketAddr, Vec<u8>)>>>;
 
 fn spawn_input_worker(
@@ -491,8 +662,32 @@ fn consume_viewer_response(
             if let Some(estimate) = estimate_latency(response, wall_clock_ms()) {
                 store_smoothed_latency(&control.network_rtt_ms, estimate.network_rtt_ms);
                 stats.host_clock_offset_ms = Some(estimate.host_clock_offset_ms);
+                stats.last_probe_received = Some(std::time::Instant::now());
             }
         }
+        return true;
+    }
+    if let Some(reason) = parse_termination(packet, token) {
+        let code = match reason {
+            crate::input_protocol::TerminationReason::HealthCheck => 1,
+            crate::input_protocol::TerminationReason::HostForced => 2,
+            crate::input_protocol::TerminationReason::HostStopped => 3,
+        };
+        log_info!(
+            "host terminated stream: reason={} ({})",
+            code,
+            match reason {
+                crate::input_protocol::TerminationReason::HealthCheck => "health check",
+                crate::input_protocol::TerminationReason::HostForced => "forced stop",
+                crate::input_protocol::TerminationReason::HostStopped => "stopped",
+            }
+        );
+        control.termination_reason.store(code, Ordering::SeqCst);
+        // Do not send BYE: the host initiated this termination and already
+        // tore its session down. Stop the loop so the Activity can observe
+        // the reason and close the window.
+        control.send_bye.store(false, Ordering::SeqCst);
+        control.stop.store(true, Ordering::SeqCst);
         return true;
     }
     if let Some(ack) = parse_ack(packet, token) {
@@ -525,10 +720,10 @@ fn feed_and_render(
     let frame_us = 1_000_000u64 / u64::from(fps.max(1));
     let pts_us = aus.saturating_mul(frame_us) as i64;
     let started = std::time::Instant::now();
-    // Give a hardware codec at most 2 ms to hand back an input slot. This
-    // absorbs normal scheduler jitter without allowing a frame backlog to
-    // become visible interaction latency.
-    let result = dec.feed_au_status(&frame.au, pts_us, 2_000);
+    let rendered_before = dec.frames_rendered;
+    // Do not wait for a hardware codec slot. A missed AU is cheaper than
+    // turning a transient decoder backlog into visible interaction latency.
+    let result = dec.feed_au_status(&frame.au, pts_us, DECODER_FEED_TIMEOUT_US);
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
     control.last_feed_us.store(feed_us, Ordering::Relaxed);
@@ -536,7 +731,6 @@ fn feed_and_render(
     let queued = match result {
         Ok(viewer_decoder::FeedStatus::Queued { .. }) => {
             stats.queued += 1;
-            let _ = dec.pump_latest_output(0);
             FeedOutcome::Queued
         }
         Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
@@ -569,6 +763,15 @@ fn feed_and_render(
     }
     if let Some(age) = wire_age_ms {
         store_smoothed_latency(&control.wire_to_decoder_ms, age);
+    }
+    // Glass-to-glass: when this input produced a render, the frame that hit
+    // the Surface is the one these timestamps describe (the decoder drains
+    // stale outputs without rendering them). Record the render instant so the
+    // HUD can show the latency users actually perceive.
+    if dec.frames_rendered > rendered_before {
+        if let Some(age) = capture_age_ms {
+            store_smoothed_latency(&control.capture_to_render_ms, age);
+        }
     }
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
@@ -611,7 +814,18 @@ fn spawn_live_stream_renderer(
     width: u32,
     height: u32,
     fps: u32,
+    tcp_bridge: Option<PreparedTcpBridge>,
 ) {
+    let paired_host = expected_host.clone();
+    let tcp_control_addr = tcp_bridge.as_ref().map(PreparedTcpBridge::control_addr);
+    let expected_host = if tcp_bridge.is_some() {
+        // The TCP bridge injects datagrams from loopback; retain the paired
+        // Host IP as the Wi-Fi candidate as well so auto mode can use either
+        // path without weakening admission to the whole LAN.
+        format!("{expected_host},127.0.0.1")
+    } else {
+        expected_host
+    };
     let width = width.max(1);
     let height = height.max(1);
     let fps = fps.clamp(1, 90);
@@ -630,7 +844,10 @@ fn spawn_live_stream_renderer(
     // renderer as EOF (not BYE), then evict any other renderer on the port.
     stop_live_stream_renderer(&instance_str, false);
     reclaim_udp_port(port);
-    let prepared_receiver = take_prepared_receiver(port, &expected_host);
+    // A reused port/instance belongs to a new host session; do not leak the
+    // prior Activity's terminal reason into it.
+    clear_cached_termination(&instance_str);
+    let prepared_receiver = take_prepared_receiver(port, &paired_host);
 
     let control = Arc::new(RendererControl {
         port,
@@ -645,11 +862,14 @@ fn spawn_live_stream_renderer(
         capture_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        capture_to_render_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        resize_recovery_suppressed_until_us: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),
         suspended: AtomicBool::new(false),
         send_bye: AtomicBool::new(true),
         finished: AtomicBool::new(false),
+        termination_reason: AtomicI8::new(-1),
     });
     let control_clone = Arc::clone(&control);
 
@@ -663,6 +883,10 @@ fn spawn_live_stream_renderer(
 
     let window_handle = surface_window as usize;
     std::thread::spawn(move || {
+        // Keep the TCP bridge alive for the lifetime of the renderer. It is
+        // intentionally independent from Surface creation so Host can finish
+        // the TCP reachability proof before the Activity attaches.
+        let tcp_bridge = tcp_bridge;
         let (socket, prepared_token) = match prepared_receiver {
             Some(prepared) => match prepared.into_socket_and_token() {
                 Ok(parts) => {
@@ -729,6 +953,21 @@ fn spawn_live_stream_renderer(
             "UDP listening on port {} (accepting media only from {expected_host})",
             port
         );
+        let mut recovery_gate = RecoveryRequestGate::default();
+        if let Some(peer) = tcp_control_addr {
+            // A longer TCP GOP must not introduce a startup deadlock: the
+            // renderer may attach after the Host's first IDR was already
+            // consumed by the preflight listener. Send the authenticated
+            // recovery request directly into the bridge before any media
+            // datagram establishes host_peer. Register it in the same gate
+            // used by the LCH1/first-packet paths so startup cannot emit
+            // duplicate IDR requests and create a false initial frame gap.
+            if !prepared_token.is_empty() && recovery_gate.should_request(std::time::Instant::now())
+            {
+                request_idr(&control_socket, peer, &prepared_token);
+                log_info!("requested initial IDR through TCP media bridge at {peer}");
+            }
+        }
         let mut buf = vec![0u8; 2_048];
         let mut media_buffers = [[0u8; MEDIA_DATAGRAM_BYTES]; MEDIA_BATCH_SIZE];
         let mut control_buf = vec![0u8; 512];
@@ -757,7 +996,6 @@ fn spawn_live_stream_renderer(
         let mut renderer_stats = RendererStats::default();
         let mut latency_probe_sequence = 0u32;
         let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
-        let mut recovery_gate = RecoveryRequestGate::default();
 
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
@@ -775,6 +1013,9 @@ fn spawn_live_stream_renderer(
                 while control_clone.suspend.load(Ordering::SeqCst)
                     && !control_clone.stop.load(Ordering::SeqCst)
                 {
+                    if let Some(bridge) = tcp_bridge.as_ref() {
+                        bridge.drain_media();
+                    }
                     match socket.recv_from(&mut buf) {
                         Ok((received, peer)) if peer_allowed(Some(peer), &expected_host) => {
                             host_peer = Some(peer);
@@ -809,9 +1050,26 @@ fn spawn_live_stream_renderer(
                         peer,
                         &viewer_control_token,
                         &mut recovery_gate,
+                        &control_clone,
                     );
                 }
                 continue;
+            }
+
+            // A request suppressed by live resize must not be lost forever.
+            // Retry from the render loop after the final geometry event; the
+            // RecoveryRequestGate still coalesces this to one request per
+            // cooldown until a keyframe arrives.
+            if awaiting_keyframe {
+                if let Some(peer) = host_peer {
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &mut recovery_gate,
+                        &control_clone,
+                    );
+                }
             }
 
             if let Some(peer) = host_peer {
@@ -839,6 +1097,16 @@ fn spawn_live_stream_renderer(
                         &control_clone,
                     );
                     last_latency_probe = std::time::Instant::now();
+                    // A probe response that never arrives must decay the
+                    // smoothed estimates instead of freezing them: the host's
+                    // congestion controller reads these values via LCF1 and a
+                    // stale high RTT would hold the bitrate at its floor
+                    // forever.
+                    if let Some(last_response) = renderer_stats.last_probe_received {
+                        if last_response.elapsed() >= PROBE_STALE_INTERVAL {
+                            clear_stale_latency(&control_clone);
+                        }
+                    }
                 }
                 loop {
                     match control_socket.recv_from(&mut control_buf) {
@@ -863,20 +1131,71 @@ fn spawn_live_stream_renderer(
                 }
             }
 
-            let batch = match recv_media_batch(&socket, &mut media_buffers) {
-                Err(ref e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
+            let batch = if let Some(bridge) = tcp_bridge.as_ref() {
+                // TCP has already provided ordering and reliable delivery.
+                // Do not convert its frames back into UDP: a large IDR burst
+                // can overflow that local datagram queue even when the Wi-Fi
+                // TCP connection itself has no loss.
+                let packet = match bridge.recv_media_timeout(std::time::Duration::from_millis(2)) {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        log_info!("TCP media bridge receive error: {error}");
+                        control_clone.send_bye.store(false, Ordering::SeqCst);
+                        control_clone.stop.store(true, Ordering::SeqCst);
+                        continue;
+                    }
+                };
+                if packet.len() > MEDIA_DATAGRAM_BYTES {
+                    log_info!(
+                        "TCP media frame exceeds datagram capacity: {} bytes",
+                        packet.len()
+                    );
                     continue;
                 }
-                Err(e) => {
-                    log_info!("UDP receive error: {e}");
+                let Some(peer) = tcp_control_addr else {
+                    log_info!("TCP media frame arrived without a control endpoint");
                     continue;
+                };
+                let Some(peer) = sockaddr_in_for_addr(peer) else {
+                    log_info!("TCP media endpoint is not IPv4: {peer}");
+                    continue;
+                };
+                media_buffers[0][..packet.len()].copy_from_slice(&packet);
+                let mut lengths = [0usize; MEDIA_BATCH_SIZE];
+                lengths[0] = packet.len();
+                let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] =
+                    unsafe { std::mem::zeroed() };
+                peers[0] = peer;
+                MediaBatch {
+                    count: 1,
+                    lengths,
+                    peers,
                 }
-                Ok(batch) => batch,
+            } else {
+                match recv_media_batch(&socket, &mut media_buffers) {
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        continue;
+                    }
+                    Err(e) => {
+                        log_info!("UDP receive error: {e}");
+                        continue;
+                    }
+                    Ok(batch) => batch,
+                }
             };
 
+            // A recvmmsg burst can complete more than one access unit. Keep
+            // all completed AUs in this bounded, stack-backed batch and feed
+            // them in wire order. The decoder already discards stale output
+            // buffers at the Surface boundary; dropping here would turn a
+            // recoverable scheduling burst into an artificial frame gap.
+            let mut completed_frames: [Option<(std::net::SocketAddr, FramePacket)>;
+                MEDIA_BATCH_SIZE] = std::array::from_fn(|_| None);
+            let mut completed_count = 0usize;
             for (batch_index, media_buffer) in media_buffers.iter().enumerate().take(batch.count) {
                 let received = batch.lengths[batch_index];
                 let Some(peer) = ipv4_socket_addr(&batch.peers[batch_index]) else {
@@ -890,7 +1209,6 @@ fn spawn_live_stream_renderer(
                 if host_peer != Some(peer) {
                     log_info!("UDP sender active: {peer}");
                     host_peer = Some(peer);
-                    recovery_gate = RecoveryRequestGate::default();
                     *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
                     reassembler.clear();
                     frame_sequencer.clear();
@@ -910,13 +1228,20 @@ fn spawn_live_stream_renderer(
                     control_clone
                         .wire_to_decoder_ms
                         .store(LATENCY_UNKNOWN, Ordering::Relaxed);
+                    control_clone
+                        .capture_to_render_ms
+                        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
                     renderer_stats.host_clock_offset_ms = None;
-                    request_idr_debounced(
-                        &control_socket,
-                        peer,
-                        &viewer_control_token,
-                        &mut recovery_gate,
-                    );
+                    if tcp_control_addr.is_none() {
+                        recovery_gate = RecoveryRequestGate::default();
+                        request_idr_debounced(
+                            &control_socket,
+                            peer,
+                            &viewer_control_token,
+                            &mut recovery_gate,
+                            &control_clone,
+                        );
+                    }
                 }
 
                 let packet = &media_buffer[..received];
@@ -935,6 +1260,7 @@ fn spawn_live_stream_renderer(
                         peer,
                         &viewer_control_token,
                         &mut recovery_gate,
+                        &control_clone,
                     );
                     continue;
                 }
@@ -1021,31 +1347,42 @@ fn spawn_live_stream_renderer(
                         encode_wall_ms: completed.encode_wall_ms,
                         send_wall_ms: Some(completed.send_wall_ms),
                     };
-                    let keyframe = is_keyframe(&frame.au);
-                    let capture_age_ms = clock_corrected_age_ms(
-                        frame.capture_wall_ms,
-                        renderer_stats.host_clock_offset_ms,
-                    );
-                    let rtt_ms = control_clone.network_rtt_ms.load(Ordering::Relaxed);
-                    let stale_budget_ms =
-                        stale_frame_budget_ms((rtt_ms != LATENCY_UNKNOWN).then_some(rtt_ms));
-                    // An IDR is the recovery boundary. Feeding a late keyframe is
-                    // preferable to dropping it and entering another request loop.
-                    if !keyframe && capture_age_ms.is_some_and(|age| age > stale_budget_ms) {
-                        renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
-                        control_clone
-                            .stale_outputs
-                            .store(renderer_stats.stale_inputs, Ordering::Relaxed);
-                        last_frame_id = Some(frame.id);
-                        resync_decoder_after_frame_gap(&mut awaiting_keyframe);
-                        request_idr_debounced(
-                            &control_socket,
-                            peer,
-                            &viewer_control_token,
-                            &mut recovery_gate,
-                        );
-                        continue;
+                    if completed_count < MEDIA_BATCH_SIZE {
+                        completed_frames[completed_count] = Some((peer, frame));
+                        completed_count += 1;
                     }
+                }
+            }
+
+            for maybe_frame in completed_frames.into_iter().take(completed_count) {
+                let Some((peer, frame)) = maybe_frame else {
+                    continue;
+                };
+                let keyframe = is_keyframe(&frame.au);
+                let capture_age_ms = clock_corrected_age_ms(
+                    frame.capture_wall_ms,
+                    renderer_stats.host_clock_offset_ms,
+                );
+                let rtt_ms = control_clone.network_rtt_ms.load(Ordering::Relaxed);
+                let stale_budget_ms =
+                    stale_frame_budget_ms((rtt_ms != LATENCY_UNKNOWN).then_some(rtt_ms));
+                // An IDR is the recovery boundary. Feeding a late keyframe is
+                // preferable to dropping it and entering another request loop.
+                if !keyframe && capture_age_ms.is_some_and(|age| age > stale_budget_ms) {
+                    renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
+                    control_clone
+                        .stale_outputs
+                        .store(renderer_stats.stale_inputs, Ordering::Relaxed);
+                    last_frame_id = Some(frame.id);
+                    resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &viewer_control_token,
+                        &mut recovery_gate,
+                        &control_clone,
+                    );
+                } else {
                     let frame_gap = last_frame_id
                         .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
                         .unwrap_or(false);
@@ -1069,51 +1406,54 @@ fn spawn_live_stream_renderer(
                                 peer,
                                 &viewer_control_token,
                                 &mut recovery_gate,
+                                &control_clone,
                             );
-                            continue;
                         }
                     }
 
-                    if let Some(dec) = decoder.as_mut() {
-                        if awaiting_keyframe && !keyframe {
-                            continue;
-                        }
-                        match feed_and_render(
-                            dec,
-                            &frame,
-                            &mut aus,
-                            fps,
-                            &mut renderer_stats,
-                            &control_clone,
-                        ) {
-                            FeedOutcome::Queued => {
-                                awaiting_keyframe = false;
-                                if keyframe {
-                                    recovery_gate.recovered();
+                    if !frame_gap || keyframe {
+                        if let Some(dec) = decoder.as_mut() {
+                            if !(awaiting_keyframe && !keyframe) {
+                                match feed_and_render(
+                                    dec,
+                                    &frame,
+                                    &mut aus,
+                                    fps,
+                                    &mut renderer_stats,
+                                    &control_clone,
+                                ) {
+                                    FeedOutcome::Queued => {
+                                        awaiting_keyframe = false;
+                                        if keyframe {
+                                            recovery_gate.recovered();
+                                        }
+                                    }
+                                    FeedOutcome::ResyncRequired => {
+                                        resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                                        request_idr_debounced(
+                                            &control_socket,
+                                            peer,
+                                            &viewer_control_token,
+                                            &mut recovery_gate,
+                                            &control_clone,
+                                        );
+                                    }
+                                    FeedOutcome::FatalError => {
+                                        reset_decoder(
+                                            &mut decoder,
+                                            &mut sps,
+                                            &mut pps,
+                                            &mut awaiting_keyframe,
+                                        );
+                                        request_idr_debounced(
+                                            &control_socket,
+                                            peer,
+                                            &viewer_control_token,
+                                            &mut recovery_gate,
+                                            &control_clone,
+                                        );
+                                    }
                                 }
-                            }
-                            FeedOutcome::ResyncRequired => {
-                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
-                                request_idr_debounced(
-                                    &control_socket,
-                                    peer,
-                                    &viewer_control_token,
-                                    &mut recovery_gate,
-                                );
-                            }
-                            FeedOutcome::FatalError => {
-                                reset_decoder(
-                                    &mut decoder,
-                                    &mut sps,
-                                    &mut pps,
-                                    &mut awaiting_keyframe,
-                                );
-                                request_idr_debounced(
-                                    &control_socket,
-                                    peer,
-                                    &viewer_control_token,
-                                    &mut recovery_gate,
-                                );
                             }
                         }
                     }
@@ -1150,8 +1490,11 @@ fn spawn_live_stream_renderer(
         drop(control_socket);
         drop(socket);
         control_clone.suspended.store(false, Ordering::SeqCst);
-        control_clone.finished.store(true, Ordering::SeqCst);
         remove_renderer_if_current(&instance_str, &control_clone);
+        // Publish `finished` only after persisting an LCT1 reason; callers
+        // waiting to reuse this instance/port may clear the cache as soon as
+        // they observe completion.
+        control_clone.finished.store(true, Ordering::SeqCst);
         log_info!("Live stream renderer exiting for instance");
     });
 }
@@ -1182,7 +1525,11 @@ fn stop_live_stream_renderer(instance_str: &str, send_bye: bool) {
         .as_ref()
         .and_then(|map| map.get(instance_str).cloned());
     if let Some(control) = control {
-        control.send_bye.store(send_bye, Ordering::SeqCst);
+        // Activity.onDestroy follows a host-initiated finish. Preserve the
+        // renderer's earlier decision not to send BYE back to a host that has
+        // already torn the session down.
+        let should_send_bye = send_bye && control.termination_reason() < 0;
+        control.send_bye.store(should_send_bye, Ordering::SeqCst);
         control.suspend.store(false, Ordering::SeqCst);
         control.stop.store(true, Ordering::SeqCst);
         wait_for_renderer(&control);
@@ -1215,7 +1562,11 @@ pub extern "C" fn leftcar_jni_attach(
 /// start capture. The renderer later claims this exact socket in
 /// `leftcar_jni_attach_port`, eliminating the Activity-start race.
 #[no_mangle]
-pub extern "C" fn leftcar_jni_prepare_port(port: u16, host_c: *const c_char) -> i32 {
+pub extern "C" fn leftcar_jni_prepare_port(
+    port: u16,
+    host_c: *const c_char,
+    transport_c: *const c_char,
+) -> i32 {
     let guard = std::panic::catch_unwind(|| {
         if host_c.is_null() {
             return LEFTCAR_ERR_NULL;
@@ -1223,9 +1574,22 @@ pub extern "C" fn leftcar_jni_prepare_port(port: u16, host_c: *const c_char) -> 
         let host = unsafe { CStr::from_ptr(host_c) }
             .to_string_lossy()
             .into_owned();
-        match prepare_udp_receiver(port, &host) {
+        let transport = if transport_c.is_null() {
+            "udp".to_owned()
+        } else {
+            unsafe { CStr::from_ptr(transport_c) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if !matches!(transport.as_str(), "udp" | "tcp" | "adbTcp" | "auto") {
+            return LEFTCAR_ERR_INVALID;
+        }
+        match prepare_udp_receiver(port, &host, &transport) {
             Ok(()) => {
-                log_info!("prepared UDP listener on port {port} for {host}");
+                log_info!(
+                    "prepared {} listener(s) on port {port} for {host}",
+                    transport
+                );
                 LEFTCAR_OK
             }
             Err(error) => {
@@ -1243,6 +1607,9 @@ pub extern "C" fn leftcar_jni_cancel_prepared_port(port: u16) -> i32 {
     let guard = std::panic::catch_unwind(|| {
         if cancel_prepared_receiver(port) {
             log_info!("cancelled prepared UDP listener on port {port}");
+        }
+        if cancel_tcp_bridge(port) {
+            log_info!("cancelled prepared ADB TCP bridge on port {port}");
         }
         LEFTCAR_OK
     });
@@ -1296,7 +1663,17 @@ pub extern "C" fn leftcar_jni_attach_port(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        spawn_live_stream_renderer(instance_str, surface, port, host, width, height, fps);
+        let tcp_bridge = take_tcp_bridge(port);
+        spawn_live_stream_renderer(
+            instance_str,
+            surface,
+            port,
+            host,
+            width,
+            height,
+            fps,
+            tcp_bridge,
+        );
         0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -1316,6 +1693,8 @@ pub extern "C" fn leftcar_jni_surface_changed(
         let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
             return LEFTCAR_ERR_NULL;
         };
+        let instance_str = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy();
+        suppress_resize_recovery(&instance_str);
         viewer_core::c_abi::stream_surface_changed(state, &instance, w, h);
         0
     });
@@ -1464,6 +1843,60 @@ pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
         (network | (capture << 16) | (encoded << 32) | (wire << 48)) as i64
     });
     guard.unwrap_or(-1)
+}
+
+/// Host-initiated termination reason for this stream, or -1 when the host has
+/// not terminated it. 1 = feedback health check (connection lost), 2 = host
+/// operator forced stop, 3 = ordinary host stop. The Activity polls this
+/// alongside the stats HUD and closes its window on any non-negative value.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn leftcar_jni_termination_reason(instance_c: *const c_char) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        if instance_c.is_null() {
+            return -1;
+        }
+        let instance = unsafe { CStr::from_ptr(instance_c) }
+            .to_string_lossy()
+            .into_owned();
+        let active_reason = ACTIVE_RENDERERS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|renderers| renderers.get(&instance))
+            .map(|control| control.termination_reason())
+            .filter(|reason| *reason >= 0);
+        if let Some(reason) = active_reason {
+            return i32::from(reason);
+        }
+        TERMINATION_REASONS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|reasons| reasons.get(&instance).copied())
+            .map(i32::from)
+            .unwrap_or(-1)
+    });
+    guard.unwrap_or(-1)
+}
+
+/// Glass-to-glass latency (capture → Surface render) in milliseconds.
+/// `0xffff` means the clock-corrected estimate has not converged. This is the
+/// number users perceive; the to-decoder stages omit the decoder output wait.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_render_latency(instance_c: *const c_char) -> i32 {
+    let guard = std::panic::catch_unwind(|| match active_input_control(instance_c) {
+        Ok(control) => {
+            let value = control.capture_to_render_ms.load(Ordering::Relaxed);
+            if value == LATENCY_UNKNOWN {
+                0xffff
+            } else {
+                value.min(0xfffe) as i32
+            }
+        }
+        Err(_) => 0xffff,
+    });
+    guard.unwrap_or(0xffff)
 }
 
 /// Queue a native Android pointer event. `x` and `y` are normalized to the
@@ -1622,5 +2055,27 @@ pub extern "C" fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool) {
         } else {
             ANativeWindow_release(surface);
         }
+    }
+}
+
+#[cfg(test)]
+mod termination_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn cached_host_termination_survives_renderer_removal_until_reuse() {
+        let instance = "termination-cache-test";
+        clear_cached_termination(instance);
+        TERMINATION_REASONS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(instance.to_owned(), 2);
+        let instance_c = CString::new(instance).unwrap();
+
+        assert_eq!(leftcar_jni_termination_reason(instance_c.as_ptr()), 2);
+        clear_cached_termination(instance);
+        assert_eq!(leftcar_jni_termination_reason(instance_c.as_ptr()), -1);
     }
 }

@@ -7,7 +7,7 @@
 //! Host candidates, then hands the same socket and challenge token to the
 //! renderer once its Surface exists.
 
-use crate::net_guard::{host_is_valid, peer_allowed};
+use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::io;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +28,7 @@ pub struct PreparedUdpReceiver {
 
 impl PreparedUdpReceiver {
     pub fn bind(port: u16, expected_host: String) -> io::Result<Self> {
-        if !host_is_valid(&expected_host) {
+        if !hosts_are_valid(&expected_host) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "expected host must be a bare IP address",

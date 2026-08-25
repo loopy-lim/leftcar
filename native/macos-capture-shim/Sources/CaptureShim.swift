@@ -39,6 +39,35 @@ private enum CaptureBackendKind: String {
     }
 }
 
+private enum MediaTransportKind: String {
+    case udp
+    case tcp
+    case adbTcp
+
+    var usesTCP: Bool {
+        self == .tcp || self == .adbTcp
+    }
+
+    static func parse(_ value: String?) -> MediaTransportKind? {
+        guard let value else { return .udp }
+        switch value.lowercased() {
+        case "udp": return .udp
+        case "tcp", "wifitcp", "wifi-tcp": return .tcp
+        case "adbtcp", "adb-tcp", "usb": return .adbTcp
+        default: return nil
+        }
+    }
+}
+
+private func nativePixelSize(for displayID: CGDirectDisplayID) -> (width: Int, height: Int) {
+    if let mode = CGDisplayCopyDisplayMode(displayID),
+       mode.pixelWidth > 0,
+       mode.pixelHeight > 0 {
+        return (mode.pixelWidth, mode.pixelHeight)
+    }
+    return (CGDisplayPixelsWide(displayID), CGDisplayPixelsHigh(displayID))
+}
+
 private func coreGraphicsCatalogJSON() -> String? {
     var count: UInt32 = 0
     guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
@@ -56,11 +85,12 @@ private func coreGraphicsCatalogJSON() -> String? {
         return lhs < rhs
     }
     let entries: [[String: Any]] = sortedIDs.enumerated().map { index, displayID in
-        [
+        let pixelSize = nativePixelSize(for: displayID)
+        return [
             "index": index,
             "name": "Display \(index)",
-            "width": CGDisplayPixelsWide(displayID),
-            "height": CGDisplayPixelsHigh(displayID),
+            "width": pixelSize.width,
+            "height": pixelSize.height,
         ]
     }
     guard let data = try? JSONSerialization.data(withJSONObject: entries),
@@ -246,7 +276,44 @@ public func leftcarCaptureStartV3(
         width: width,
         height: height,
         fps: fps,
-        backend: backend
+        backend: backend,
+        mediaTransport: .udp
+    )
+}
+
+/// v4 adds an explicit media transport. TCP transports feed the existing
+/// bounded UDP decoder path through the viewer's local bridge; `tcp` is the
+/// reliable Wi-Fi path and `adbTcp` is the USB fallback.
+@_cdecl("leftcar_capture_start_v4")
+public func leftcarCaptureStartV4(
+    ip: UnsafePointer<CChar>,
+    port: UInt16,
+    displayIndex: UInt32,
+    width: UInt32,
+    height: UInt32,
+    fps: UInt32,
+    backendName: UnsafePointer<CChar>?,
+    transportName: UnsafePointer<CChar>?
+) -> UInt32 {
+    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
+    guard let backend = CaptureBackendKind.parse(rawBackend) else {
+        setLastError("unknown capture backend: \(rawBackend ?? "null")")
+        return 0
+    }
+    let rawTransport = transportName.flatMap { String(validatingUTF8: $0) }
+    guard let mediaTransport = MediaTransportKind.parse(rawTransport) else {
+        setLastError("unknown media transport: \(rawTransport ?? "null")")
+        return 0
+    }
+    return startCaptureSession(
+        ip: ip,
+        port: port,
+        displayIndex: displayIndex,
+        width: width,
+        height: height,
+        fps: fps,
+        backend: backend,
+        mediaTransport: mediaTransport
     )
 }
 
@@ -257,7 +324,8 @@ private func startCaptureSession(
     width: UInt32,
     height: UInt32,
     fps: UInt32,
-    backend: CaptureBackendKind
+    backend: CaptureBackendKind,
+    mediaTransport: MediaTransportKind = .udp
 ) -> UInt32 {
     guard hasScreenCaptureAccess() else {
         setLastError("screen-recording permission is not granted to Leftcar Host")
@@ -282,7 +350,8 @@ private func startCaptureSession(
         width: width,
         height: height,
         fps: fps,
-        backend: backend
+        backend: backend,
+        mediaTransport: mediaTransport
     )
 
     // Establish the media socket first. Capture callbacks can then be accepted
@@ -352,6 +421,29 @@ public func leftcarCaptureStopV2(handle: UInt32) -> Int32 {
     guard let session else {
         setLastError("no such handle \(handle)")
         return 1
+    }
+    session.stop()
+    return 0
+}
+
+/// Stop with a viewer-visible reason. `reasonCode` uses the LCT1 wire codes:
+/// 2 = host operator forced the stop, 3 = ordinary stop/shutdown. The viewer
+/// closes its window on receipt instead of waiting for a media timeout.
+@_cdecl("leftcar_capture_stop_v3")
+public func leftcarCaptureStopV3(handle: UInt32, reasonCode: Int32) -> Int32 {
+    let session = withRegistry { reg in
+        reg.removeValue(forKey: handle)
+    }
+    guard let session else {
+        setLastError("no such handle \(handle)")
+        return 1
+    }
+    if reasonCode > 0 {
+        session.notifyViewerTermination(
+            code: UInt8(clamping: reasonCode),
+            reason: reasonCode == 2 ? "host operator stopped the stream" : "stream stopped"
+        )
+        return 0
     }
     session.stop()
     return 0
@@ -522,7 +614,6 @@ final class CaptureSession {
     private let encodeQueueKey = DispatchSpecificKey<Void>()
     private let captureLock = NSLock()
     private var pendingCapture: PendingCaptureFrame?
-    private var latestCapture: PendingCaptureFrame?
     private var encodeScheduled = false
     // VideoToolbox accepts frames asynchronously. A latest-frame slot alone
     // does not prevent its internal queue from growing, so keep at most two
@@ -531,6 +622,8 @@ final class CaptureSession {
     private let maxEncodeInFlight = 2
     private var encodeInFlight = 0
     private var sock: Int32 = -1
+    private let tcpWriteLock = NSLock()
+    private var tcpControlBuffer = Data()
     private var viewerControlToken = Data()
     private let inputQueue = DispatchQueue(label: "leftcar.input", qos: .userInteractive)
     private let inputLock = NSLock()
@@ -556,6 +649,7 @@ final class CaptureSession {
     private let outHeight: UInt32
     private let fps: UInt32
     private let backend: CaptureBackendKind
+    private let mediaTransport: MediaTransportKind
     private var csdSent = false
 
     // The encoder callback must never wait behind network transmission. Keep at
@@ -564,14 +658,17 @@ final class CaptureSession {
     private let networkQueue = DispatchQueue(label: "leftcar.network", qos: .userInteractive)
     private let networkLock = NSLock()
     private var pendingConfig: Data?
-    // Remote control favors the newest screen state over preserving every
-    // encoded frame. Keep only one unsent AU; if the socket cannot keep up,
-    // discard the dependency chain and resume immediately from a fresh IDR.
-    private let maxPendingNetworkFrames = 1
+    // Both transports favor the newest screen state over preserving stale
+    // encoded frames. TCP's ordered stream must not be allowed to become a
+    // latency queue while a recovery AU is in flight; four slots are enough
+    // to absorb normal encoder/network jitter without hiding congestion.
+    private var maxPendingNetworkFrames: Int {
+        mediaTransport.usesTCP ? 4 : 1
+    }
     private var pendingFrames: [PendingEncodedFrame] = []
     private var networkAwaitingKeyframe = false
+    private var networkKeyframeInFlight = false
     private var networkDrainScheduled = false
-    private var reconnectScheduled = false
 
     private let stateLock = NSLock()
     private var running = false
@@ -584,6 +681,11 @@ final class CaptureSession {
     private var framesEncoded: Int64 = 0
     private var framesDropped: Int64 = 0
     private var networkQueueDropped: Int64 = 0
+    // Frames discarded while waiting for the next independently decodable
+    // IDR are expected recovery behavior, not evidence that the sender is
+    // congested. Keep them in user-facing drop telemetry, but exclude them
+    // from bitrate adaptation so recovery cannot ratchet the bitrate down.
+    private var recoveryFramesDropped: Int64 = 0
     private var udpSendFailures: Int64 = 0
     private var udpSendRetries: Int64 = 0
     private var recoveryKeyframes: Int64 = 0
@@ -641,6 +743,17 @@ final class CaptureSession {
     private var receiverFeedbackNs: UInt64 = 0
     private var lastAdaptedReceiverLoss: UInt64 = 0
     private var stableBitrateWindows = 0
+    // An IDR is an intentional intra-frame burst. Do not interpret its
+    // bounded send cost or the receiver's recovery boundary as persistent
+    // congestion and ratchet the stream bitrate downward.
+    private var lastRecoverySendNs: UInt64 = 0
+    // Transient Wi-Fi/power-save blips must not ratchet the bitrate to the
+    // floor. Drop only when congestion persists across two windows; recover
+    // with progressively larger steps so a floor exit takes seconds, not a
+    // minute.
+    private var consecutiveCongestedWindows = 0
+    private var consecutiveRaiseSteps = 0
+    private var healthCheckScheduled = false
 
     var isRunning: Bool {
         stateLock.lock()
@@ -655,7 +768,8 @@ final class CaptureSession {
         width: UInt32,
         height: UInt32,
         fps: UInt32,
-        backend: CaptureBackendKind
+        backend: CaptureBackendKind,
+        mediaTransport: MediaTransportKind = .udp
     ) {
         self.targetAddr = targetAddr
         self.targetPort = targetPort
@@ -664,6 +778,7 @@ final class CaptureSession {
         self.outHeight = height
         self.fps = min(max(1, fps), 90)
         self.backend = backend
+        self.mediaTransport = mediaTransport
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
     }
 
@@ -672,6 +787,38 @@ final class CaptureSession {
     private func sendToViewer(_ data: Data, fd: Int32) -> Int {
         var addr = targetAddr
         return send(data, fd: fd, to: &addr)
+    }
+
+    private func sendTCPBytes(_ data: Data, fd: Int32) -> Int {
+        data.withUnsafeBytes { raw in
+            guard let baseAddress = raw.baseAddress else { return 0 }
+            var offset = 0
+            while offset < raw.count {
+                let sent = Darwin.send(
+                    fd,
+                    baseAddress.advanced(by: offset),
+                    raw.count - offset,
+                    0
+                )
+                guard sent > 0 else { return offset }
+                offset += sent
+            }
+            return offset
+        }
+    }
+
+    /// TCP carries the existing CFG/G/control payloads as independent frames.
+    /// The Android USB bridge converts them back to loopback UDP datagrams, so
+    /// the decoder and its recovery telemetry stay identical on both paths.
+    private func sendTCPFrame(_ data: Data, fd: Int32) -> Int {
+        guard data.count <= 2 * 1024 * 1024 else { return -1 }
+        var length = UInt32(data.count).bigEndian
+        var framed = Data(capacity: data.count + 4)
+        withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
+        framed.append(data)
+        tcpWriteLock.lock()
+        defer { tcpWriteLock.unlock() }
+        return sendTCPBytes(framed, fd: fd) == framed.count ? data.count : -1
     }
 
     private func send(_ data: Data, fd: Int32, to addr: inout sockaddr_in) -> Int {
@@ -693,33 +840,25 @@ final class CaptureSession {
     }
 
     /// A non-blocking UDP socket can transiently report EAGAIN/ENOBUFS during
-    /// a Wi-Fi scheduling pause. Give the kernel one millisecond to drain and
-    /// retry once; other errors remain explicit drops.
+    /// a Wi-Fi scheduling pause. This is an intentional loss-tolerant media
+    /// path: never wait for the kernel to drain because the wait would hold
+    /// every newer frame behind an already-lost datagram. The next IDR
+    /// re-establishes the H.264 dependency chain.
     private func sendMediaDatagram(_ data: Data, fd: Int32) -> Int {
-        let first = sendToViewer(data, fd: fd)
-        if first == data.count { return first }
-        let firstError = errno
-        guard firstError == EAGAIN || firstError == EWOULDBLOCK || firstError == ENOBUFS else {
+        if mediaTransport.usesTCP {
+            let sent = sendTCPFrame(data, fd: fd)
+            if sent == data.count { return sent }
             stateLock.lock()
             udpSendFailures &+= 1
             stateLock.unlock()
-            return first
+            return sent
         }
-
-        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        if poll(&descriptor, 1, 1) > 0 {
-            let retry = sendToViewer(data, fd: fd)
-            if retry == data.count {
-                stateLock.lock()
-                udpSendRetries &+= 1
-                stateLock.unlock()
-                return retry
-            }
-        }
+        let sent = sendToViewer(data, fd: fd)
+        if sent == data.count { return sent }
         stateLock.lock()
         udpSendFailures &+= 1
         stateLock.unlock()
-        return -1
+        return sent
     }
 
     private func paceNetwork(until deadlineNs: UInt64) {
@@ -731,12 +870,126 @@ final class CaptureSession {
         }
     }
 
+    private func receiveTCPFrame(fd: Int32, timeoutMs: Int32) -> Data? {
+        func readExactly(_ length: Int) -> Data? {
+            var result = Data(count: length)
+            var offset = 0
+            while offset < length {
+                var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                guard poll(&descriptor, 1, timeoutMs) > 0 else { return nil }
+                let received = result.withUnsafeMutableBytes { raw in
+                    Darwin.recv(
+                        fd,
+                        raw.baseAddress!.advanced(by: offset),
+                        length - offset,
+                        MSG_DONTWAIT
+                    )
+                }
+                guard received > 0 else { return nil }
+                offset += received
+            }
+            return result
+        }
+
+        guard let header = readExactly(4) else { return nil }
+        let headerBytes = Array(header)
+        guard headerBytes.count == 4 else { return nil }
+        let length = (UInt32(headerBytes[0]) << 24)
+            | (UInt32(headerBytes[1]) << 16)
+            | (UInt32(headerBytes[2]) << 8)
+            | UInt32(headerBytes[3])
+        guard length > 0, length <= 2 * 1024 * 1024 else { return nil }
+        return readExactly(Int(length))
+    }
+
+    private func connectTCPSocket(stopOnFailure: Bool) -> Bool {
+        sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else {
+            let reason = "TCP socket() failed"
+            if stopOnFailure {
+                setLastError(reason)
+                markStopped(reason)
+            }
+            return false
+        }
+        var noDelay: Int32 = 1
+        _ = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+        var receiveTimeout = timeval(tv_sec: 2, tv_usec: 0)
+        _ = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, socklen_t(MemoryLayout<timeval>.size))
+        var sendTimeout = timeval(tv_sec: 0, tv_usec: 100_000)
+        _ = setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var address = targetAddr
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.connect(
+                    sock,
+                    socketAddress,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                ) == 0
+            }
+        }
+        guard connected else {
+            let reason = "TCP media connection failed for \(targetLabel): errno=\(errno)"
+            close(sock)
+            sock = -1
+            if stopOnFailure {
+                setLastError(reason)
+                markStopped(reason)
+            }
+            return false
+        }
+
+        let token = Data(UUID().uuidString.utf8)
+        var challenge = Data("LCH1".utf8)
+        challenge.append(token)
+        guard sendTCPFrame(challenge, fd: sock) == challenge.count,
+              let response = receiveTCPFrame(fd: sock, timeoutMs: 2_000),
+              response == challenge else {
+            let reason = "TCP media handshake failed for \(targetLabel)"
+            close(sock)
+            sock = -1
+            if stopOnFailure {
+                setLastError(reason)
+                markStopped(reason)
+            }
+            return false
+        }
+
+        let originalFlags = fcntl(sock, F_GETFL, 0)
+        if originalFlags >= 0 {
+            _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
+        }
+        viewerControlToken = token
+        inputLock.lock()
+        lastReliableInputSequence = 0
+        lastPointerInputSequence = 0
+        inputLock.unlock()
+        startInputReceiver(fd: sock)
+        sendInputStatus(fd: sock)
+
+        stateLock.lock()
+        if stopRequested {
+            stateLock.unlock()
+            close(sock)
+            sock = -1
+            return false
+        }
+        lifecycleState = firstSendNs == nil ? "starting_capture" : "running"
+        stateLock.unlock()
+        return true
+    }
+
     func connectSocket(stopOnFailure: Bool = true) -> Bool {
         stopInputReceiver()
         stateLock.lock()
         let shouldStop = stopRequested
         stateLock.unlock()
         if shouldStop { return false }
+
+        if mediaTransport.usesTCP {
+            return connectTCPSocket(stopOnFailure: stopOnFailure)
+        }
 
         sock = socket(AF_INET, SOCK_DGRAM, 0)
         guard sock >= 0 else {
@@ -891,6 +1144,10 @@ final class CaptureSession {
         }
         stateLock.unlock()
         armFirstFrameWatchdog()
+        // Start the viewer watchdog even before the first LCF1 packet. A
+        // viewer can disappear immediately after the UDP reachability proof;
+        // waiting for feedback to arm this timer would leak that session.
+        armReceiverHealthCheck()
     }
 
     private func armFirstFrameWatchdog() {
@@ -937,9 +1194,11 @@ final class CaptureSession {
             // capture path avoids a BGRA -> YUV conversion per frame.
             config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             config.showsCursor = true
-            // The application keeps only its newest pending frame, so the
-            // framework's minimum/default depth does not add a stale queue.
-            config.queueDepth = 2
+            // Keep one extra framework buffer so a short encoder scheduling
+            // pause does not make ScreenCaptureKit drop a source frame. The
+            // application still coalesces pending work to the newest frame,
+            // so this is a small capture cushion rather than a playback queue.
+            config.queueDepth = 3
             config.backgroundColor = CGColor.black
             if #available(macOS 14.0, *) {
                 config.shouldBeOpaque = true
@@ -1094,7 +1353,6 @@ final class CaptureSession {
         networkLock.unlock()
         captureLock.lock()
         pendingCapture = nil
-        latestCapture = nil
         captureLock.unlock()
         if let s = stream {
             s.stopCapture(completionHandler: nil)
@@ -1121,67 +1379,75 @@ final class CaptureSession {
         stateLock.unlock()
     }
 
-    /// Keep the capture/encoder alive while the viewer's listener is between
-    /// connections. The Android renderer intentionally keeps its port open
-    /// after EOF, so retrying here is enough to recover without a second JS
-    /// control request while StreamActivity is in the foreground.
-    private func scheduleReconnect() {
+    /// The viewer sends authenticated LCF1 feedback once per second. When that
+    /// stream goes silent while the session is running, the viewer is gone
+    /// (network drop, app kill, device sleep) and the media socket will never
+    /// report an error because it is unconnected UDP. Re-check after a grace
+    /// period and terminate the session so capture/encode work stops instead
+    /// of streaming into the void forever.
+    private func armReceiverHealthCheck() {
         stateLock.lock()
-        guard running, !stopRequested, !reconnectScheduled else {
+        guard running, !stopRequested, !healthCheckScheduled else {
             stateLock.unlock()
             return
         }
-        reconnectScheduled = true
-        let staleSocket = sock
-        sock = -1
-        csdSent = false
-        forceKeyframe = true
+        healthCheckScheduled = true
         stateLock.unlock()
 
-        stopInputReceiver()
-        inputQueue.async { [weak self] in self?.releaseInjectedInput() }
-        if staleSocket >= 0 {
-            close(staleSocket)
-        }
-        networkLock.lock()
-        pendingConfig = nil
-        pendingFrames.removeAll(keepingCapacity: true)
-        networkAwaitingKeyframe = true
-        networkLock.unlock()
-        print("viewer disconnected; heartbeat reconnecting to \(targetLabel)")
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self else { return }
-            let reconnected = self.connectSocket(stopOnFailure: false)
-            if reconnected {
-                print("viewer heartbeat reconnected to \(self.targetLabel)")
-                self.captureLock.lock()
-                let latest = self.latestCapture
-                self.captureLock.unlock()
-                if let latest {
-                    let replay = PendingCaptureFrame(
-                        pixelBuffer: latest.pixelBuffer,
-                        pts: .invalid,
-                        duration: CMTime(value: 1, timescale: CMTimeScale(self.fps)),
-                        callbackNs: DispatchTime.now().uptimeNanoseconds,
-                        captureWallMs: UInt64(Date().timeIntervalSince1970 * 1_000.0)
-                    )
-                    self.encodeQueue.async { [weak self] in
-                        self?.encodeFrame(replay)
-                    }
-                }
-            } else if self.isRunning {
-                let reason = "viewer connection lost after reconnect timeout"
-                print("\(reason): \(self.targetLabel)")
-                self.markStopped(reason)
-            }
             self.stateLock.lock()
-            self.reconnectScheduled = false
+            self.healthCheckScheduled = false
+            let shouldStop = self.running
+                && !self.stopRequested
+                && (self.receiverFeedbackNs == 0
+                    || (DispatchTime.now().uptimeNanoseconds &- self.receiverFeedbackNs) > 5_000_000_000)
+            let shouldRearm = self.running && !self.stopRequested && !shouldStop
             self.stateLock.unlock()
+            if shouldStop {
+                let reason = "viewer connection lost (feedback timeout)"
+                print("health check terminating \(self.targetLabel): \(reason)")
+                self.notifyViewerTermination(code: 1, reason: reason)
+            } else if shouldRearm {
+                // Keep one watchdog alive after healthy feedback. Without
+                // re-arming here, a viewer disappearing just after this check
+                // would never schedule another timeout because no new LCF1
+                // datagram exists to call armReceiverHealthCheck().
+                self.armReceiverHealthCheck()
+            }
         }
     }
 
+    /// Best-effort authenticated termination notice so a live viewer can close
+    /// its window immediately instead of waiting for its own stale-frame
+    /// timeout. A dead viewer simply never receives it.
+    func notifyViewerTermination(code: UInt8, reason: String) {
+        stateLock.lock()
+        let fd = sock
+        let token = viewerControlToken
+        stateLock.unlock()
+        guard fd >= 0, !token.isEmpty else {
+            markStopped(reason)
+            return
+        }
+        var notice = Data("LCT1".utf8)
+        notice.append(code)
+        notice.append(token)
+        if mediaTransport.usesTCP {
+            _ = sendTCPFrame(notice, fd: fd)
+            markStopped(reason)
+            return
+        }
+        // Send twice: one datagram may be lost exactly when the network that
+        // killed the feedback stream is degrading.
+        _ = sendToViewer(notice, fd: fd)
+        usleep(20_000)
+        _ = sendToViewer(notice, fd: fd)
+        markStopped(reason)
+    }
+
     func markStopped(_ reason: String) {
+        print("capture session stopped \(targetLabel): \(reason)")
         stateLock.lock()
         stoppedReason = reason
         stateLock.unlock()
@@ -1243,6 +1509,7 @@ final class CaptureSession {
         if stillRunning, firstCaptureNs == nil {
             firstCaptureNs = callbackNs
             lifecycleState = "encoding_first_frame"
+            print("first capture frame \(targetLabel): \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
         }
         if let previous = lastCaptureCallbackNs, callbackNs >= previous {
             appendRollingSample((callbackNs - previous) / 1_000, to: &captureIntervalSamplesUs)
@@ -1261,7 +1528,6 @@ final class CaptureSession {
         captureLock.lock()
         let replaced = pendingCapture != nil
         pendingCapture = frame
-        latestCapture = frame
         let shouldSchedule = !encodeScheduled && encodeInFlight < maxEncodeInFlight
         if shouldSchedule {
             encodeScheduled = true
@@ -1383,6 +1649,7 @@ final class CaptureSession {
         ) { [weak self] status, _, encodedSample in
             defer { self?.completeEncodeSlot() }
             guard status == noErr, let encodedSample = encodedSample else {
+                print("H.264 output failed \(self?.targetLabel ?? "unknown"): status=\(status)")
                 self?.discardTrackedFrame(pts: trackedPts)
                 self?.requestRecoveryKeyframe()
                 return
@@ -1400,6 +1667,7 @@ final class CaptureSession {
                 adaptBitrateIfNeeded()
             }
         } else {
+            print("H.264 submit failed \(targetLabel): status=\(status)")
             stateLock.lock()
             captureNsByPts.removeValue(forKey: pts.value)
             captureWallMsByPts.removeValue(forKey: pts.value)
@@ -1449,12 +1717,14 @@ final class CaptureSession {
     private func adaptBitrateIfNeeded() {
         guard let session else { return }
         stateLock.lock()
-        let totalDropped = framesDropped + captureQueueDropped
-        let newDrops = totalDropped - lastAdaptedDropped
-        lastAdaptedDropped = totalDropped
+        let congestionDrops = max(0, framesDropped - recoveryFramesDropped) + captureQueueDropped
+        let newDrops = congestionDrops - lastAdaptedDropped
+        lastAdaptedDropped = congestionDrops
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let feedbackFresh = receiverFeedbackNs > 0
             && nowNs &- receiverFeedbackNs <= 3_000_000_000
+        let recoveryBurstGrace = lastRecoverySendNs != 0
+            && nowNs &- lastRecoverySendNs < 1_000_000_000
         let receiverLoss = UInt64(receiverFrameGaps)
             + UInt64(receiverInputDrops)
             + UInt64(receiverIncompleteAUs)
@@ -1469,21 +1739,32 @@ final class CaptureSession {
             newReceiverLoss = 0
         }
         let receiverLatencyHigh = feedbackFresh
+            && !recoveryBurstGrace
             && ((receiverRttMs != .max && receiverRttMs >= 50)
                 || (receiverWireMs != .max && receiverWireMs >= 40))
         let congested = newDrops > 0
-            || lastSendBlockUs > 8_000
-            || newReceiverLoss > 0
+            || (!recoveryBurstGrace && lastSendBlockUs > 8_000)
+            || (!recoveryBurstGrace && newReceiverLoss > 0)
             || receiverLatencyHigh
         let current = currentAverageBitrate
         if congested {
             stableBitrateWindows = 0
+            consecutiveCongestedWindows += 1
+            consecutiveRaiseSteps = 0
         } else {
             stableBitrateWindows += 1
+            if stableBitrateWindows >= 8 {
+                consecutiveCongestedWindows = 0
+            }
         }
-        let canRaise = stableBitrateWindows >= 8
+        // Only treat sustained congestion (two consecutive windows) as real.
+        // A single lost datagram or one RTT spike is normal Wi-Fi behavior
+        // and must not cut the bitrate.
+        let congestionConfirmed = consecutiveCongestedWindows >= 2
+        let canRaise = !congested && stableBitrateWindows >= 8
         if canRaise {
             stableBitrateWindows = 0
+            consecutiveRaiseSteps += 1
         }
         stateLock.unlock()
 
@@ -1502,10 +1783,14 @@ final class CaptureSession {
         let floorBitrate = Int(min(max(pixelsPerSecond * 0.035, Double(minFloor)), Double(maxFloor)))
         let ceilingBitrate = Int(min(max(pixelsPerSecond * 0.14, Double(minCeiling)), Double(maxCeiling)))
         let target: Int
-        if congested {
+        if congestionConfirmed {
             target = max(floorBitrate, Int(Double(current) * 0.80))
         } else if canRaise {
-            target = min(ceilingBitrate, Int(Double(current) * 1.03))
+            // Accelerating recovery: 4% → 8% → 16% per stable window so a
+            // ratchet-down to the floor recovers in a few seconds while an
+            // early overshoot is still corrected by the next cut.
+            let raiseFactor = min(0.04 * pow(2.0, Double(min(consecutiveRaiseSteps - 1, 5))), 0.30)
+            target = min(ceilingBitrate, Int(Double(current) * (1.0 + raiseFactor)))
         } else {
             return
         }
@@ -1620,10 +1905,19 @@ final class CaptureSession {
         // 1-second headroom without allowing multi-second bursts.
         let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
-        // A 0.5s GOP caused a visible periodic keyframe burst. TCP is
-        // reliable, so use a roughly 1s nominal GOP while retaining bounded
-        // decoder recovery after a reconnect.
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: max(1, fps) as CFNumber)
+        // UDP needs a short recovery boundary because a lost fragment can
+        // invalidate every following delta. TCP is reliable, so avoid a
+        // periodic IDR burst during normal playback; reconnect and explicit
+        // recovery requests still force an immediate IDR through the
+        // authenticated control channel.
+        let nominalKeyframeInterval = mediaTransport.usesTCP
+            ? max(1, fps * 60)
+            : max(1, fps)
+        VTSessionSetProperty(
+            s,
+            key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            value: nominalKeyframeInterval as CFNumber
+        )
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: Int32(fps) as CFNumber)
 
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(s)
@@ -1637,6 +1931,7 @@ final class CaptureSession {
         stateLock.lock()
         currentAverageBitrate = Int(avgBitrate)
         stateLock.unlock()
+        print("hardware H.264 encoder ready \(targetLabel): \(w)x\(h) bitrate=\(Int(avgBitrate))")
         session = s
     }
 
@@ -1650,6 +1945,7 @@ final class CaptureSession {
         if firstEncodeNs == nil {
             firstEncodeNs = encodeNs
             lifecycleState = "waiting_first_send"
+            print("first encoded frame \(targetLabel)")
         }
         let auId = encodeAuIdByPts.removeValue(forKey: encodedPts)
         let captureWallMs = captureWallMsByPts.removeValue(forKey: encodedPts)
@@ -1793,6 +2089,7 @@ final class CaptureSession {
                     stateLock.lock()
                     framesDropped &+= 1
                     networkQueueDropped &+= 1
+                    recoveryFramesDropped &+= 1
                     stateLock.unlock()
                     requestRecoveryKeyframe()
                 }
@@ -1807,10 +2104,14 @@ final class CaptureSession {
                 // unsent chain and recover on the next independently decodable
                 // IDR instead.
                 let discarded = pendingFrames.count + (isKeyframe ? 0 : 1)
+                let keyframeInFlight = networkKeyframeInFlight
                 pendingFrames.removeAll(keepingCapacity: true)
                 stateLock.lock()
                 framesDropped &+= Int64(discarded)
                 networkQueueDropped &+= Int64(discarded)
+                if keyframeInFlight || networkAwaitingKeyframe {
+                    recoveryFramesDropped &+= Int64(discarded)
+                }
                 stateLock.unlock()
                 if isKeyframe {
                     networkAwaitingKeyframe = false
@@ -1818,8 +2119,14 @@ final class CaptureSession {
                         PendingEncodedFrame(data: frame, isKeyframe: true)
                     )
                 } else {
-                    networkAwaitingKeyframe = true
-                    requestRecoveryKeyframe()
+                    // A keyframe already being written is the recovery
+                    // boundary. Dropping deltas behind that boundary is
+                    // expected; asking for another IDR here would create a
+                    // second burst before the first one has arrived.
+                    if !keyframeInFlight {
+                        networkAwaitingKeyframe = true
+                        requestRecoveryKeyframe()
+                    }
                 }
             }
         }
@@ -1842,6 +2149,9 @@ final class CaptureSession {
             let config = pendingConfig
             pendingConfig = nil
             let frame = pendingFrames.isEmpty ? nil : pendingFrames.removeFirst()
+            if frame?.isKeyframe == true {
+                networkKeyframeInFlight = true
+            }
             if config == nil && frame == nil {
                 networkDrainScheduled = false
                 networkLock.unlock()
@@ -1857,6 +2167,9 @@ final class CaptureSession {
             }
             if let frame {
                 writePacket(frame.data, isFrame: true, isKeyframe: frame.isKeyframe)
+                networkLock.lock()
+                networkKeyframeInFlight = false
+                networkLock.unlock()
             }
         }
     }
@@ -1866,6 +2179,10 @@ final class CaptureSession {
     /// sequence and acknowledged so the viewer can retry without duplicating
     /// host events.
     private func consumeViewerControl(_ fd: Int32) {
+        if mediaTransport.usesTCP {
+            consumeViewerTCPControl(fd)
+            return
+        }
         var bytes = [UInt8](repeating: 0, count: 512)
         let token = viewerControlToken
         while true {
@@ -1911,7 +2228,7 @@ final class CaptureSession {
             }
             if message.count == 16,
                message.prefix(4) == Data("LCP1".utf8) {
-                sendLatencyProbeResponse(message, fd: fd, destination: &source)
+                sendLatencyProbeResponse(message, fd: fd, destination: source)
                 continue
             }
             if message.count == 24,
@@ -1925,26 +2242,121 @@ final class CaptureSession {
                 receiverWireMs = readUInt16BE(message, at: 22)
                 receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
                 stateLock.unlock()
+                armReceiverHealthCheck()
                 continue
             }
-            handleInputMessage(message, fd: fd, destination: &source)
+            handleInputMessage(message, fd: fd, destination: source)
+        }
+    }
+
+    private func consumeViewerTCPControl(_ fd: Int32) {
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = bytes.withUnsafeMutableBytes { raw in
+                Darwin.recv(fd, raw.baseAddress, raw.count, MSG_DONTWAIT)
+            }
+            if count == 0 {
+                requestViewerStop()
+                return
+            }
+            if count < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK { return }
+                requestViewerStop()
+                return
+            }
+            tcpControlBuffer.append(contentsOf: bytes[0..<count])
+            while true {
+                // Data can retain a non-zero startIndex after a partial
+                // consume. Copying to Array gives this parser a stable,
+                // zero-based view and removes every direct Data subscript
+                // from the untrusted TCP framing path.
+                let framed = Array(tcpControlBuffer)
+                guard framed.count >= 4 else { break }
+                let length = (UInt32(framed[0]) << 24)
+                    | (UInt32(framed[1]) << 16)
+                    | (UInt32(framed[2]) << 8)
+                    | UInt32(framed[3])
+                guard length > 0, length <= 2 * 1024 * 1024 else {
+                    requestViewerStop()
+                    return
+                }
+                let frameLength = 4 + Int(length)
+                guard framed.count >= frameLength else { break }
+                let payload = Data(framed[4..<frameLength])
+                tcpControlBuffer.removeAll(keepingCapacity: true)
+                tcpControlBuffer.append(contentsOf: framed[frameLength...])
+
+                // Keep all untrusted TCP parsing on Array. Foundation.Data
+                // slices may retain a non-zero index and can trap when a
+                // later Collection operation assumes a zero-based buffer.
+                let payloadBytes = Array(payload)
+                let tokenBytes = Array(viewerControlToken)
+                guard payloadBytes.count >= tokenBytes.count,
+                      Array(payloadBytes.suffix(tokenBytes.count)) == tokenBytes else {
+                    continue
+                }
+                let messageBytes = Array(payloadBytes.dropLast(tokenBytes.count))
+                if messageBytes == Array("BYE".utf8) {
+                    print("viewer close signal received for \(targetLabel)")
+                    requestViewerStop()
+                    return
+                }
+                if messageBytes == Array("IDR".utf8) {
+                    networkLock.lock()
+                    pendingFrames.removeAll(keepingCapacity: true)
+                    networkAwaitingKeyframe = true
+                    networkLock.unlock()
+                    requestRecoveryKeyframe()
+                    sendInputStatus(fd: fd)
+                    continue
+                }
+                if messageBytes.count == 16,
+                   Array(messageBytes.prefix(4)) == Array("LCP1".utf8) {
+                    let message = Data(messageBytes)
+                    sendLatencyProbeResponse(message, fd: fd, destination: nil)
+                    continue
+                }
+                if messageBytes.count == 24,
+                   Array(messageBytes.prefix(4)) == Array("LCF1".utf8) {
+                    let message = Data(messageBytes)
+                    stateLock.lock()
+                    receiverFrameGaps = readUInt32BE(message, at: 4)
+                    receiverInputDrops = readUInt32BE(message, at: 8)
+                    receiverIncompleteAUs = readUInt32BE(message, at: 12)
+                    receiverStaleFrames = readUInt32BE(message, at: 16)
+                    receiverRttMs = readUInt16BE(message, at: 20)
+                    receiverWireMs = readUInt16BE(message, at: 22)
+                    receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
+                    stateLock.unlock()
+                    armReceiverHealthCheck()
+                    continue
+                }
+                let message = Data(messageBytes)
+                handleInputMessage(message, fd: fd, destination: nil)
+            }
         }
     }
 
     private func readUInt16BE(_ data: Data, at offset: Int) -> UInt16 {
-        (UInt16(data[offset]) << 8) | UInt16(data[offset + 1])
+        guard offset >= 0, data.count >= offset + 2 else { return 0 }
+        let bytes = Array(data)
+        return (UInt16(bytes[offset]) << 8) | UInt16(bytes[offset + 1])
     }
 
     private func readUInt32BE(_ data: Data, at offset: Int) -> UInt32 {
-        (UInt32(data[offset]) << 24)
-            | (UInt32(data[offset + 1]) << 16)
-            | (UInt32(data[offset + 2]) << 8)
-            | UInt32(data[offset + 3])
+        guard offset >= 0, data.count >= offset + 4 else { return 0 }
+        let bytes = Array(data)
+        return (UInt32(bytes[offset]) << 24)
+            | (UInt32(bytes[offset + 1]) << 16)
+            | (UInt32(bytes[offset + 2]) << 8)
+            | UInt32(bytes[offset + 3])
     }
 
     private func readUInt64BE(_ data: Data, at offset: Int) -> UInt64 {
+        guard offset >= 0, data.count >= offset + 8 else { return 0 }
+        let bytes = Array(data)
         var value: UInt64 = 0
-        for byte in data[offset..<(offset + 8)] {
+        for byte in bytes[offset..<(offset + 8)] {
             value = (value << 8) | UInt64(byte)
         }
         return value
@@ -1956,7 +2368,7 @@ final class CaptureSession {
     private func sendLatencyProbeResponse(
         _ message: Data,
         fd: Int32,
-        destination: inout sockaddr_in
+        destination: sockaddr_in?
     ) {
         let sequence = readUInt32BE(message, at: 4)
         let viewerSendMs = readUInt64BE(message, at: 8)
@@ -1971,13 +2383,25 @@ final class CaptureSession {
         var hostSendBE = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
         withUnsafeBytes(of: &hostSendBE) { response.append(contentsOf: $0) }
         response.append(viewerControlToken)
-        _ = send(response, fd: fd, to: &destination)
+        _ = sendControlPayload(response, fd: fd, destination: destination)
+    }
+
+    private func sendControlPayload(
+        _ data: Data,
+        fd: Int32,
+        destination: sockaddr_in? = nil
+    ) -> Int {
+        if mediaTransport.usesTCP {
+            return sendTCPFrame(data, fd: fd)
+        }
+        guard var destination else { return -1 }
+        return send(data, fd: fd, to: &destination)
     }
 
     private func sendInputAck(
         sequence: UInt32,
         fd: Int32,
-        destination: inout sockaddr_in
+        destination: sockaddr_in?
     ) {
         var ack = Data("LCA1".utf8)
         var sequenceBE = sequence.bigEndian
@@ -1987,7 +2411,7 @@ final class CaptureSession {
         inputLock.unlock()
         ack.append(enabled ? 1 : 0)
         ack.append(viewerControlToken)
-        _ = send(ack, fd: fd, to: &destination)
+        _ = sendControlPayload(ack, fd: fd, destination: destination)
     }
 
     /// Authenticated state packet for the viewer's lock indicator. It is sent
@@ -2000,13 +2424,13 @@ final class CaptureSession {
         var status = Data("LCS1".utf8)
         status.append(enabled ? 1 : 0)
         status.append(viewerControlToken)
-        _ = sendToViewer(status, fd: fd)
+        _ = sendControlPayload(status, fd: fd)
     }
 
     private func handleInputMessage(
         _ message: Data,
         fd: Int32,
-        destination: inout sockaddr_in
+        destination: sockaddr_in?
     ) {
         guard message.count >= 10,
               message.prefix(4) == Data("LCI1".utf8) else {
@@ -2036,7 +2460,7 @@ final class CaptureSession {
         let enabled = inputEnabled
         inputLock.unlock()
         if sequence == last {
-            sendInputAck(sequence: sequence, fd: fd, destination: &destination)
+            sendInputAck(sequence: sequence, fd: fd, destination: destination)
             return
         }
         // Release-all is the fail-safe resynchronization packet. It may skip
@@ -2051,7 +2475,7 @@ final class CaptureSession {
             inputLock.lock()
             lastReliableInputSequence = sequence
             inputLock.unlock()
-            sendInputAck(sequence: sequence, fd: fd, destination: &destination)
+            sendInputAck(sequence: sequence, fd: fd, destination: destination)
             return
         }
         guard sequence == last &+ 1,
@@ -2061,7 +2485,7 @@ final class CaptureSession {
         inputLock.lock()
         lastReliableInputSequence = sequence
         inputLock.unlock()
-        sendInputAck(sequence: sequence, fd: fd, destination: &destination)
+        sendInputAck(sequence: sequence, fd: fd, destination: destination)
     }
 
     private func validateAndInjectReliableInput(
@@ -2300,44 +2724,46 @@ final class CaptureSession {
                 return
             }
             var sendWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
-            // Recovery keyframes are duplicated once because losing a single
-            // fragment invalidates the entire dependency chain. Spread all
-            // transmissions across a bounded portion of the frame cadence
-            // instead of releasing each AU as a UDP microburst.
-            let passes = isKeyframe ? 2 : 1
-            let transmissions = max(1, fragmentCount * passes)
-            let frameUs = UInt64(1_000_000 / max(1, fps))
-            let paceSpanUs = min(25_000, frameUs * UInt64(passes) * 3 / 4)
-            var ordinal = 0
-            primary: for pass in 0..<passes {
-                for index in 0..<fragmentCount {
-                    if transmissions > 1 {
-                        let offsetUs = paceSpanUs * UInt64(ordinal) / UInt64(transmissions - 1)
-                        paceNetwork(until: sendStart + offsetUs * 1_000)
-                    }
-                    ordinal += 1
-                    let start = 21 + index * maxPayload
-                    let end = min(data.count, start + maxPayload)
-                    var datagram = Data(capacity: 33 + end - start)
-                    datagram.append(0x47)
-                    var indexBE = UInt16(index).bigEndian
-                    var countBE = UInt16(fragmentCount).bigEndian
-                    withUnsafeBytes(of: &indexBE) { datagram.append(contentsOf: $0) }
-                    withUnsafeBytes(of: &countBE) { datagram.append(contentsOf: $0) }
-                    datagram.append(contentsOf: data[1...20])
-                    withUnsafeBytes(of: &sendWallMsBE) { datagram.append(contentsOf: $0) }
-                    datagram.append(contentsOf: data[start..<end])
-                    let syscallStart = DispatchTime.now().uptimeNanoseconds
-                    let sent = sendMediaDatagram(datagram, fd: fd)
-                    sendSyscallUs &+= (DispatchTime.now().uptimeNanoseconds &- syscallStart) / 1_000
-                    if sent != datagram.count {
-                        // The primary copy determines frame delivery. A failed
-                        // redundant copy is telemetry, not another frame loss.
-                        if pass == 0 { ok = false }
-                        break primary
-                    }
-                    sentBytes += sent
+            // Keep delta frames latest-wins, but spread a UDP recovery
+            // keyframe over a small bounded window. Sending every fragment
+            // back to back creates a Wi-Fi queue burst large enough to lose
+            // one fragment and immediately re-enter the IDR loop. TCP is
+            // ordered and reliable, so it sends the recovery AU immediately;
+            // pacing that path only builds stale latency in the bridge.
+            // UDP sends the recovery keyframe twice over the same paced
+            // window. The keyframe is the recovery boundary, so dropping
+            // deltas while it is in flight is intentional and handled by
+            // enqueuePacket.
+            let recoveryCopies = isKeyframe && mediaTransport == .udp ? 2 : 1
+            let paceSpanUs = isKeyframe && mediaTransport == .udp
+                ? min(220_000, max(120_000, UInt64(1_000_000 / max(1, fps)) * 12))
+                : 0
+            let transmissions = fragmentCount * recoveryCopies
+            primary: for ordinal in 0..<transmissions {
+                let index = ordinal % fragmentCount
+                if paceSpanUs > 0 && transmissions > 1 {
+                    let offsetUs = paceSpanUs * UInt64(ordinal) / UInt64(transmissions - 1)
+                    paceNetwork(until: sendStart + offsetUs * 1_000)
                 }
+                let start = 21 + index * maxPayload
+                let end = min(data.count, start + maxPayload)
+                var datagram = Data(capacity: 33 + end - start)
+                datagram.append(0x47)
+                var indexBE = UInt16(index).bigEndian
+                var countBE = UInt16(fragmentCount).bigEndian
+                withUnsafeBytes(of: &indexBE) { datagram.append(contentsOf: $0) }
+                withUnsafeBytes(of: &countBE) { datagram.append(contentsOf: $0) }
+                datagram.append(contentsOf: data[1...20])
+                withUnsafeBytes(of: &sendWallMsBE) { datagram.append(contentsOf: $0) }
+                datagram.append(contentsOf: data[start..<end])
+                let syscallStart = DispatchTime.now().uptimeNanoseconds
+                let sent = sendMediaDatagram(datagram, fd: fd)
+                sendSyscallUs &+= (DispatchTime.now().uptimeNanoseconds &- syscallStart) / 1_000
+                if sent != datagram.count {
+                    ok = false
+                    break primary
+                }
+                sentBytes += sent
             }
         } else {
             let syscallStart = DispatchTime.now().uptimeNanoseconds
@@ -2346,16 +2772,13 @@ final class CaptureSession {
             ok = sent == data.count
             if ok {
                 sentBytes = sent
-                usleep(200)
-                let duplicateStart = DispatchTime.now().uptimeNanoseconds
-                let duplicate = sendMediaDatagram(data, fd: fd)
-                sendSyscallUs &+= (DispatchTime.now().uptimeNanoseconds &- duplicateStart) / 1_000
-                if duplicate == data.count {
-                    sentBytes += duplicate
-                }
             }
         }
         if !ok {
+            networkLock.lock()
+            pendingFrames.removeAll(keepingCapacity: true)
+            networkAwaitingKeyframe = true
+            networkLock.unlock()
             stateLock.lock()
             framesDropped &+= isFrame ? 1 : 0
             stateLock.unlock()
@@ -2367,6 +2790,7 @@ final class CaptureSession {
         if isFrame, firstSendNs == nil {
             firstSendNs = DispatchTime.now().uptimeNanoseconds
             lifecycleState = "running"
+            print("first media frame sent \(targetLabel): bytes=\(sentBytes) transport=\(mediaTransport.rawValue)")
         }
         bytesSent &+= Int64(sentBytes)
         rateWindowBytes &+= Int64(sentBytes)
@@ -2376,6 +2800,9 @@ final class CaptureSession {
         lastSendPaceUs = sendPaceUs
         maxSendPaceUs = max(maxSendPaceUs, sendPaceUs)
         appendRollingSample(sendPaceUs, to: &sendPaceSamplesUs)
+        if isFrame && isKeyframe {
+            lastRecoverySendNs = DispatchTime.now().uptimeNanoseconds
+        }
         stateLock.unlock()
         if isFrame && isKeyframe {
             recoveryKeyframeDidSend()
@@ -2410,6 +2837,7 @@ final class CaptureSession {
         let maxSendPaceUs = maxSendPaceUs
         let networkDropped = framesDropped
         let networkQueueDropped = networkQueueDropped
+        let recoveryFramesDropped = recoveryFramesDropped
         let udpSendFailures = udpSendFailures
         let udpSendRetries = udpSendRetries
         let recoveryKeyframes = recoveryKeyframes
@@ -2442,6 +2870,7 @@ final class CaptureSession {
             "dropped": framesDropped,
             "networkDropped": networkDropped,
             "networkQueueDropped": networkQueueDropped,
+            "recoveryFramesDropped": recoveryFramesDropped,
             "udpSendFailures": udpSendFailures,
             "udpSendRetries": udpSendRetries,
             "recoveryKeyframes": recoveryKeyframes,
@@ -2453,7 +2882,7 @@ final class CaptureSession {
             "kbps": reportedKbps,
             "fpsTarget": self.fps,
             "captureBackend": backend.rawValue,
-            "mediaTransport": "udp",
+            "mediaTransport": mediaTransport.rawValue,
             "firstCaptureMs": firstCaptureMs,
             "firstEncodeMs": firstEncodeMs,
             "firstSendMs": firstSendMs,

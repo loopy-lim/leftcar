@@ -7,7 +7,7 @@ use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
 use input::InputInjector;
 use std::collections::HashMap;
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -33,10 +33,31 @@ pub(super) struct WindowsSession {
     stop: AtomicBool,
     input_enabled: AtomicBool,
     force_keyframe: AtomicBool,
+    /// Milliseconds since process start of the last authenticated viewer
+    /// datagram (feedback, probe, input, or BYE). Zero until first contact.
+    last_viewer_contact_ms: AtomicU64,
     pub stats: Mutex<StatsInfo>,
     injector: Mutex<InputInjector>,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Clone of the media socket used only for termination notices, so the
+    /// input receiver can notify a dying viewer before the capture thread's
+    /// socket is torn down. `None` on Windows builds where cloning failed.
+    notice_sender: Mutex<Option<UdpSocket>>,
+    /// Session nonce shared with the viewer; authenticates LCT1 notices.
+    termination_token: Vec<u8>,
 }
+
+impl WindowsSession {
+    fn termination_token(&self) -> &[u8] {
+        &self.termination_token
+    }
+}
+
+/// The viewer emits authenticated traffic at 1 Hz (latency probes and
+/// receiver feedback). Silence beyond this budget while a session is running
+/// means the peer is gone: the connected UDP socket may never error, so the
+/// input receiver reaps the session itself.
+const VIEWER_CONTACT_TIMEOUT: Duration = Duration::from_secs(6);
 
 impl WindowsBackend {
     pub fn new() -> Result<Self, String> {
@@ -72,6 +93,26 @@ impl CaptureBackend for WindowsBackend {
         "windows"
     }
 
+    fn stop_with_reason(&self, handle: u32, reason_code: u8) -> Result<(), String> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(&handle)
+            .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
+        let notice = wire::termination(reason_code, session.termination_token());
+        let _ = socket_attempt_send(&session, &notice);
+        session.stop.store(true, Ordering::Release);
+        session.input_enabled.store(false, Ordering::Release);
+        session.injector.lock().unwrap().release_all()?;
+        let threads = std::mem::take(&mut *session.threads.lock().unwrap());
+        for thread in threads {
+            let _ = thread.join();
+        }
+        session.stats.lock().unwrap().state = "stopped".into();
+        Ok(())
+    }
+
     fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
         vec![CaptureBackendInfo {
             id: "windowsGraphicsCapture".into(),
@@ -104,7 +145,11 @@ impl CaptureBackend for WindowsBackend {
         height: u32,
         fps: u32,
         capture_backend: &str,
+        media_transport: &str,
     ) -> Result<u32, String> {
+        if media_transport != "udp" {
+            return Err("Windows backend currently supports Wi-Fi UDP only".into());
+        }
         if capture_backend != "windowsGraphicsCapture" {
             return Err(format!(
                 "unsupported Windows capture backend: {capture_backend}"
@@ -126,13 +171,19 @@ impl CaptureBackend for WindowsBackend {
         prove_udp_reachability(&socket, &token, ip, port)?;
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed).max(1);
+        let notice_sender = socket
+            .try_clone()
+            .map_err(|error| format!("clone notice socket: {error}"))?;
         let session = Arc::new(WindowsSession {
             stop: AtomicBool::new(false),
             input_enabled: AtomicBool::new(false),
             force_keyframe: AtomicBool::new(true),
+            last_viewer_contact_ms: AtomicU64::new(0),
             stats: Mutex::new(initial_stats(width, height, fps)),
             injector: Mutex::new(InputInjector::new(monitor.rect)),
             threads: Mutex::new(Vec::new()),
+            notice_sender: Mutex::new(Some(notice_sender)),
+            termination_token: token.clone(),
         });
 
         let input_socket = socket
@@ -175,6 +226,10 @@ impl CaptureBackend for WindowsBackend {
             .unwrap()
             .remove(&handle)
             .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
+        // Let a live viewer close its window immediately; a dead one never
+        // receives this and the terminal-state GC reaps the session anyway.
+        let notice = wire::termination(wire::TERMINATION_STOPPED, session.termination_token());
+        let _ = socket_attempt_send(&session, &notice);
         session.stop.store(true, Ordering::Release);
         session.input_enabled.store(false, Ordering::Release);
         session.injector.lock().unwrap().release_all()?;
@@ -259,6 +314,7 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
     let mut packet = [0u8; 512];
+    let started = std::time::Instant::now();
     while !session.stop.load(Ordering::Acquire) {
         let size = match socket.recv(&mut packet) {
             Ok(size) => size,
@@ -268,7 +324,8 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                continue
+                check_viewer_health(&session, started);
+                continue;
             }
             Err(error) => {
                 set_session_error(&session, format!("Windows input receive failed: {error}"));
@@ -278,6 +335,9 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
         let Some(message) = wire::authenticated(&packet[..size], &token) else {
             continue;
         };
+        session
+            .last_viewer_contact_ms
+            .store(started.elapsed().as_millis() as u64, Ordering::Release);
         if message == b"BYE" {
             session.stop.store(true, Ordering::Release);
             break;
@@ -313,6 +373,44 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
 
 pub(super) fn set_session_error(session: &WindowsSession, error: String) {
     session.stats.lock().unwrap().error = Some(error);
+}
+
+/// Terminate a running session whose viewer stopped emitting authenticated
+/// traffic. Sends an LCT1 notice first so a still-live viewer closes its
+/// window promptly, then flips the session to `error` so the control plane's
+/// terminal-state GC releases the capture threads.
+fn check_viewer_health(session: &Arc<WindowsSession>, started: std::time::Instant) {
+    let last = session.last_viewer_contact_ms.load(Ordering::Acquire);
+    let now_ms = started.elapsed().as_millis() as u64;
+    if now_ms.saturating_sub(last) < VIEWER_CONTACT_TIMEOUT.as_millis() as u64 {
+        return;
+    }
+    if session.stop.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let notice = wire::termination(wire::TERMINATION_HEALTH, session.termination_token());
+    // Two attempts: the loss that killed the feedback stream may also take
+    // the notice itself.
+    let _ = socket_attempt_send(session, &notice);
+    std::thread::sleep(Duration::from_millis(20));
+    let _ = socket_attempt_send(session, &notice);
+    {
+        let mut stats = session.stats.lock().unwrap();
+        stats.state = "error".into();
+        stats.error = Some("viewer connection lost (feedback timeout)".into());
+    }
+    let _ = session.injector.lock().unwrap().release_all();
+}
+
+fn socket_attempt_send(session: &Arc<WindowsSession>, notice: &[u8]) -> std::io::Result<()> {
+    let sender = session.notice_sender.lock().unwrap();
+    match sender.as_ref() {
+        Some(socket) => socket.send(notice).map(|_| ()),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "no notice socket",
+        )),
+    }
 }
 
 fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {

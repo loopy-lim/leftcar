@@ -35,6 +35,10 @@ const MAX_COMPLETED_REORDER: usize = 3;
 pub const BASE_STALE_FRAME_BUDGET_MS: u64 = 80;
 pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(750);
 
+pub fn recovery_request_suppressed(now_us: u64, suppressed_until_us: u64) -> bool {
+    now_us < suppressed_until_us
+}
+
 pub fn stale_frame_budget_ms(network_rtt_ms: Option<u64>) -> u64 {
     BASE_STALE_FRAME_BUDGET_MS + network_rtt_ms.unwrap_or(0).saturating_div(2).min(120)
 }
@@ -565,6 +569,12 @@ mod tests {
         gate.recovered();
         assert!(!gate.should_request(now + Duration::from_millis(150)));
         assert!(gate.should_request(now + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn resize_recovery_waits_until_geometry_is_stable() {
+        assert!(recovery_request_suppressed(1_000, 351_000));
+        assert!(!recovery_request_suppressed(351_000, 351_000));
     }
 
     #[test]

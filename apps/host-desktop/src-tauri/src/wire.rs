@@ -152,6 +152,23 @@ pub fn input_ack(sequence: u32, token: &[u8]) -> Vec<u8> {
     ack
 }
 
+/// Host → viewer termination reason codes (LCT1). These mirror
+/// `TERMINATION_REASON_*` in the Android viewer's input_protocol.rs; keep the
+/// two lists in sync.
+pub const TERMINATION_HEALTH: u8 = 1;
+pub const TERMINATION_FORCED: u8 = 2;
+pub const TERMINATION_STOPPED: u8 = 3;
+
+/// Authenticated session-termination notice. The viewer stops rendering and
+/// closes its window when it receives one instead of timing out on its own.
+pub fn termination(reason: u8, token: &[u8]) -> Vec<u8> {
+    let mut notice = Vec::with_capacity(5 + token.len());
+    notice.extend_from_slice(b"LCT1");
+    notice.push(reason);
+    notice.extend_from_slice(token);
+    notice
+}
+
 /// Fragment an Annex-B H.264 access unit using the exact Android viewer wire
 /// envelope: `G | fragment index/count | AU id LE | LT | wall ms | payload`.
 pub fn media_datagrams(au_id: u16, host_wall_ms: u64, annex_b: &[u8]) -> Vec<Vec<u8>> {
@@ -326,6 +343,18 @@ mod tests {
             h264_parameter_sets(&annex_b),
             vec![vec![0x67, 1], vec![0x68, 2]]
         );
+    }
+
+    #[test]
+    fn termination_notice_matches_viewer_wire_format() {
+        let token = b"nonce";
+        let notice = termination(TERMINATION_HEALTH, token);
+        assert_eq!(&notice[..4], b"LCT1");
+        assert_eq!(notice[4], TERMINATION_HEALTH);
+        assert_eq!(&notice[5..], token);
+        // The Android parser accepts exactly 5 + token bytes; a length drift
+        // would silently drop every notice during a rolling upgrade.
+        assert_eq!(notice.len(), 5 + token.len());
     }
 
     #[test]

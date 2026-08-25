@@ -1,6 +1,6 @@
 # 구현 증거 문서 (EVIDENCE)
 
-기준일: 2026-08-23
+기준일: 2026-08-24
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5 이상을 달성했다고 표기한 항목은 없다.**
 
 ## 요약
@@ -16,7 +16,7 @@
 | E11(신규) 페어링 + 미디어 출발지 검증 | 달성 | QR 페어링 + 토큰 인증 경로 유지, 미디어 역방향 peer 일치 검사 |
 | E12(신규) 네이티브 원격 입력 | 빌드·계약 달성, 실기기 대기 | Host 세션별 opt-in + macOS 접근성 권한 + 인증 UDP 입력 경로. 60fps→120Hz, 90fps→180Hz 목표의 장치 계측은 미달성 |
 | E13(신규) Windows 원격 Host | 소스·교차 컴파일 달성, 물리 실행 대기 | WGC monitor capture + Media Foundation hardware H.264 + SendInput + NSIS/Windows CI. 실제 Windows/GPU/Viewer E6는 미달성 |
-| E9(신규) Expo+Rustra 실기기 | 달성 | H09: JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측 (screenshot artifacts/device/h09-expo-rustra-proof.png) |
+| E9(신규) Expo+Rustra 실기기 | 부분 달성 | 기존 `11ff71f` 경로는 JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측했다. 현재 `0.4.0`/`f8bab299` 핀은 코드젠·계약·Android native/Kotlin/APK 빌드까지 재검증했고 실기기 재검증은 대기 중이다. |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 부분 달성 | Mac CGDisplayStream → VideoToolbox → LAN UDP → TB710FU Qualcomm 저지연 디코더의 실제 화면 갱신 확인. 실제 포인터·키 입력과 4K60은 대기 |
 | E7 계측 장시간 | 미달성 | H51 대기 |
@@ -46,7 +46,7 @@
 ### E2 — 통합
 
 - **L5 loopback** (`crates/transport-api/tests/loopback.rs`): FakeEncoder→packetize→transport→assembler→FakeDecoder. 1/4-소스 멀티플렉스 교차 없음, 3% loss 전달, outage→IDR 복구(NFR-004 논리), lease 기반 소스 격리(NFR-005 논리). Simulated(5 profile) + InMemory 양쪽.
-- **Rustra 실경로**: pin `11ff71f`에서 `addNumbers 20+22=42`가 실제 invoke 경로로 증명(에뮬레이터/문자열 mock 아님).
+- **Rustra 실경로**: 기존 pin `11ff71f`에서 `addNumbers 20+22=42`가 실제 invoke 경로로 증명됐다(에뮬레이터/문자열 mock 아님). 현재 pin `f8bab299`(Rustra `0.4.0`)은 생성 계약 해시 갱신, Rust/TypeScript 계약 테스트, Android native/Kotlin/APK 빌드를 통과했지만 같은 실기기 경로는 다시 확인해야 한다.
 - **C ABI 왕복**: 6심볼 roundtrip, panic 미통과(catch_unwind), null/double-detach/instance-crossing 거부.
 
 ### E3 — 빌드/구조
@@ -54,7 +54,7 @@
 - `cargo check --workspace` 전 crate green, clippy `-D warnings` 0.
 - `apps/host-desktop/src-tauri`는 `x86_64-pc-windows-msvc` 교차 `cargo check --lib`를 통과했다. 이 결과는 Windows API 타입/cfg의 E3 소스 검증이며 Windows 실행 또는 installer 생성 증거가 아니다.
 - TS typecheck 2앱 green, `bun run test:architecture` TS/Kotlin 규칙 green.
-- Kotlin shim은 `android/.../shim/` 경로 + manifest(documentLaunchMode=always, PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI)만 존재. Gradle 빌드는 E4+ 단계.
+- Kotlin shim은 `android/.../shim/` 경로 + manifest(documentLaunchMode=always, PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI)에 있고 `:app:compileDebugKotlin`과 `:app:assembleDebug`를 통과했다. Debug APK에는 arm64 `libleftcar_viewer.so`와 `libleftcar_rustra.so`가 포함되고 v2 서명이 유효하다. 이는 내부 빌드 증거이며 설치·실행 증거는 아니다.
 - macOS 파사드(macos-capture/macos-encode): 실API 링크 없이 구조만. 시작 시 `RealBackendNotLinked` 명시 실패(무인 소프트웨어 fallback 금지).
 
 ## 대기 중인 증거 (E4–E7) — 판정 진입점
@@ -157,3 +157,6 @@
 - **90 FPS 회귀와 수정**: 약 60Hz인 현재 Mac 캡처 소스에 90 FPS operating-rate를 요청한 표본은 Android HUD가 39 FPS, SKIP 174까지 악화됐다. 동일 빌드의 60 FPS 표본은 55–56 FPS로 회복했다. 기본 저지연 프로필을 1080p60으로 복구하고 입력 폴링은 2배인 120Hz로 유지했다. 실제 90Hz 이상 소스·Surface를 런타임에서 함께 확인하기 전에는 90 FPS를 기본값으로 다시 노출하지 않는다.
 - **입력 검증 경계**: wire/스케줄러 테스트와 180Hz 목표 설정은 통과했지만 이 표본의 Host 세션은 `inputEnabled=false`였다. 따라서 실제 Mac 포인터·키 주입과 click-to-photon은 아직 달성으로 표기하지 않는다.
 - **배포 산출물**: arm64 release APK는 v2 개발 서명으로, macOS app/DMG는 기존 개발 서명 ID로 검증했다. DMG checksum 검증은 통과했지만 Apple notarization은 수행하지 않았다.
+- **2026-08-24 현재 빌드 실기기 재검증**: 서명된 macOS Host를 다시 빌드·설치하고 최신 debug APK를 Lenovo TB710FU에 덮어 설치한 뒤, `Display 0`의 Mac 화면이 `c2.qti.avc.decoder.low_latency`로 실제 갱신되는 것을 확인했다. HUD 표본은 `SRC 60 / XR 60 Hz`, `NET 13/21 ms`, `CAP→SCR 40/43 ms`, `55 FPS`, `FEED 5 ms`, `SKIP 461`, `LOSS 32`였다. 같은 세션의 Host 표본은 `60 FPS`, `4,125 kbps`, `pendingFrame=0`, `udpSendFailures=0`, capture→encode p95 `18.969 ms`, send block p95 `2.621 ms`였다. 이 값은 패널 photon 측정이 아닌 Surface render 직전 시점이다.
+- **종료·고장 감지 실기기 재검증**: 인증된 `stopStream`에 종료 사유 `2`를 전달했을 때 Viewer가 `host terminated stream: reason=2 (forced stop)`을 기록하고 스트림 Activity를 닫아 메인 Activity로 복귀했으며, BYE에 의한 세션 재생성은 없었다. 별도 세션에서 Viewer 프로세스를 강제 종료하자 Host가 약 6초 뒤 `viewer connection lost (feedback timeout)` 오류로 전환했고, 오류 상태를 약 5초 보존한 다음 세션을 제거했다.
+- **현재 판정 경계**: 이번 실시간 표본은 약 3분이며 장시간 soak, outage 후 자동 재연결, glass-to-glass 카메라 측정은 수행하지 않았다. `SKIP`/`LOSS`와 Host drop이 누적됐으므로 E7과 무손실 판정은 계속 미달성으로 유지한다.

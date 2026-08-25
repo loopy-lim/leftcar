@@ -605,8 +605,16 @@ impl AndroidDecoder {
         // another input slot. Some vendor codecs stop returning input buffers
         // while a renderable output remains queued, which otherwise turns one
         // transient miss into a permanent black-screen/drop cascade.
-        let rendered = self.pump_latest_output(0)?;
-        let idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, timeout_us) };
+        let mut rendered = self.pump_latest_output(0)?;
+        let mut idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, timeout_us) };
+        if idx < 0 && timeout_us == 0 {
+            // A vendor codec can report no input immediately while its
+            // output callback is being retired. Drain once more and retry
+            // without waiting; this removes a transient drop without
+            // allowing decoder backlog to become display latency.
+            rendered |= self.pump_latest_output(0)?;
+            idx = unsafe { AMediaCodec_dequeueInputBuffer(self.codec, 0) };
+        }
         if idx < 0 {
             return Ok(FeedStatus::InputUnavailable);
         }
@@ -643,12 +651,15 @@ impl AndroidDecoder {
         })
     }
 
-    /// Drain all currently ready decoder outputs, discard stale images, and
-    /// render only the newest one. MediaCodec has already consumed every
-    /// reference frame, so skipping Surface presentation is safe and prevents
-    /// compositor backlog from turning a short stall into visible latency.
+    /// Drain currently ready decoder outputs in presentation order. A small
+    /// output burst is normal when the codec thread wakes slightly late, so
+    /// keep up to three ready images instead of dropping them unconditionally.
+    /// If the codec is genuinely backed up, discard only the oldest images to
+    /// cap display latency while preserving the newest output.
     pub fn pump_latest_output(&mut self, timeout_us: i64) -> Result<bool, DecoderError> {
-        let mut latest: Option<usize> = None;
+        const MAX_RENDERABLE_OUTPUTS: usize = 3;
+        let mut ready = [0usize; 64];
+        let mut ready_count = 0usize;
         let mut next_timeout = timeout_us;
         let mut attempts = 0usize;
         while attempts < 64 {
@@ -667,26 +678,33 @@ impl AndroidDecoder {
                 AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED
                 | AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED => continue,
                 i if i >= 0 => {
-                    if let Some(stale) = latest.replace(i as usize) {
-                        let r =
-                            unsafe { AMediaCodec_releaseOutputBuffer(self.codec, stale, false) };
-                        if r != AMEDIA_OK {
-                            return Err(DecoderError::OpFailed { status: r });
-                        }
-                        self.frames_discarded += 1;
+                    if ready_count < ready.len() {
+                        ready[ready_count] = i as usize;
+                        ready_count += 1;
                     }
                 }
                 err => return Err(DecoderError::OpFailed { status: err as i32 }),
             }
         }
-        let Some(latest) = latest else {
+        if ready_count == 0 {
             return Ok(false);
-        };
-        let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, latest, true) };
-        if r != AMEDIA_OK {
-            return Err(DecoderError::OpFailed { status: r });
         }
-        self.frames_rendered += 1;
+
+        let discard_count = ready_count.saturating_sub(MAX_RENDERABLE_OUTPUTS);
+        for &idx in &ready[..discard_count] {
+            let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, idx, false) };
+            if r != AMEDIA_OK {
+                return Err(DecoderError::OpFailed { status: r });
+            }
+            self.frames_discarded += 1;
+        }
+        for &idx in &ready[discard_count..ready_count] {
+            let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, idx, true) };
+            if r != AMEDIA_OK {
+                return Err(DecoderError::OpFailed { status: r });
+            }
+            self.frames_rendered += 1;
+        }
         Ok(true)
     }
 

@@ -61,6 +61,7 @@ pub fn run() {
             request_input_permission,
             open_system_settings,
             set_session_input,
+            force_stop_session,
             begin_pairing,
             cancel_pairing,
             list_paired_devices,
@@ -279,9 +280,7 @@ fn open_system_settings(pane: Option<String>) -> Result<(), String> {
             Some("screen_capture") | Some("screencapture") => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             }
-            _ => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-            }
+            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         };
         std::process::Command::new("open")
             .arg(url)
@@ -306,6 +305,14 @@ fn set_session_input(
 }
 
 #[tauri::command]
+fn force_stop_session(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    session: u32,
+) -> Result<(), String> {
+    state.force_stop_session(session)
+}
+
+#[tauri::command]
 fn begin_pairing(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
     endpoint: tauri::State<'_, ControlEndpoint>,
@@ -322,8 +329,8 @@ fn cancel_pairing(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>
 #[tauri::command]
 fn list_paired_devices(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-) -> Vec<pairing::PairedDevice> {
-    state.list_devices()
+) -> Vec<pairing::PairedDeviceView> {
+    state.list_device_views()
 }
 
 #[tauri::command]
@@ -343,9 +350,7 @@ fn revoke_paired_device(
 }
 
 #[tauri::command]
-fn revoke_all_devices(
-    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-) -> usize {
+fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) -> usize {
     state.revoke_all()
 }
 

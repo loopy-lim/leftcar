@@ -2,7 +2,7 @@ import type { ControlClient } from "./control";
 
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
-  prepareStream(port: number, host: string): Promise<void>;
+  prepareStream(port: number, host: string, mediaTransport: string): Promise<void>;
   openStream(
     port: number,
     host: string,
@@ -20,6 +20,7 @@ export interface StartStreamArgs {
   height: number;
   fps: number;
   captureBackend: string;
+  mediaTransport: "udp" | "adbTcp" | "auto" | string;
   viewerIps?: string[];
 }
 
@@ -59,7 +60,7 @@ export async function startPreparedStream({
       .filter((address) => typeof address === "string" && address.length > 0)
       .slice(0, 4);
     const startArgs = viewerIps.length > 0 ? { ...args, viewerIps } : args;
-    await launcher.prepareStream(args.viewerPort, host);
+    await launcher.prepareStream(args.viewerPort, host, args.mediaTransport);
     const started = await request<{ session: number }>("startStream", startArgs);
     session = started.session;
     await launcher.openStream(

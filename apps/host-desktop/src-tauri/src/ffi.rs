@@ -78,6 +78,23 @@ impl FfiBackend {
         Err(last_err)
     }
 
+    /// Stop with a viewer-visible reason (LCT1 code 2 = operator-forced).
+    /// Distinct from `stop` so the ordinary shutdown path keeps its current
+    /// semantics on shims without the v3 symbol.
+    fn stop_with_notice(&self, handle: u32, reason_code: i32) -> Result<(), String> {
+        let lib = self.lib()?;
+        unsafe {
+            let f: Symbol<unsafe extern "C" fn(u32, i32) -> i32> = lib
+                .get(b"leftcar_capture_stop_v3")
+                .map_err(|e| format!("stop_v3 unavailable: {e}"))?;
+            let rc = f(handle, reason_code);
+            if rc != 0 {
+                return Err(format!("stop({handle}) rc={rc}"));
+            }
+            Ok(())
+        }
+    }
+
     fn verify_symbols(&self) -> Result<(), String> {
         unsafe {
             let lib = self.lib()?;
@@ -167,6 +184,10 @@ fn macos_capture_backends(persistent_access: bool) -> Vec<CaptureBackendInfo> {
 }
 
 impl CaptureBackend for FfiBackend {
+    fn stop_with_reason(&self, handle: u32, reason_code: u8) -> Result<(), String> {
+        self.stop_with_notice(handle, i32::from(reason_code))
+    }
+
     fn platform(&self) -> &'static str {
         "macos"
     }
@@ -221,11 +242,23 @@ impl CaptureBackend for FfiBackend {
         h: u32,
         fps: u32,
         capture_backend: &str,
+        media_transport: &str,
     ) -> Result<u32, String> {
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
         let c_backend = CString::new(capture_backend).map_err(|_| "backend contains NUL")?;
+        let c_transport = CString::new(media_transport).map_err(|_| "media transport contains NUL")?;
         unsafe {
+            type StartV4 = unsafe extern "C" fn(
+                *const std::ffi::c_char,
+                u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+            ) -> u32;
             type StartV3 = unsafe extern "C" fn(
                 *const std::ffi::c_char,
                 u16,
@@ -235,7 +268,7 @@ impl CaptureBackend for FfiBackend {
                 u32,
                 *const std::ffi::c_char,
             ) -> u32;
-            let handle = match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
+            let handle = match lib.get::<StartV4>(b"leftcar_capture_start_v4") {
                 Ok(f) => f(
                     c_ip.as_ptr(),
                     port,
@@ -244,24 +277,39 @@ impl CaptureBackend for FfiBackend {
                     h,
                     fps,
                     c_backend.as_ptr(),
+                    c_transport.as_ptr(),
                 ),
-                Err(_) if capture_backend == "screenCaptureKit" => {
-                    let f: Symbol<
-                        unsafe extern "C" fn(
-                            *const std::ffi::c_char,
-                            u16,
-                            u32,
-                            u32,
-                            u32,
-                            u32,
-                        ) -> u32,
-                    > = lib
-                        .get(b"leftcar_capture_start_v2")
-                        .map_err(|e| e.to_string())?;
-                    f(c_ip.as_ptr(), port, source_index, w, h, fps)
-                }
+                Err(_) if media_transport == "udp" => match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
+                    Ok(f) => f(
+                        c_ip.as_ptr(),
+                        port,
+                        source_index,
+                        w,
+                        h,
+                        fps,
+                        c_backend.as_ptr(),
+                    ),
+                    Err(_) if capture_backend == "screenCaptureKit" => {
+                        let f: Symbol<
+                            unsafe extern "C" fn(
+                                *const std::ffi::c_char,
+                                u16,
+                                u32,
+                                u32,
+                                u32,
+                                u32,
+                            ) -> u32,
+                        > = lib
+                            .get(b"leftcar_capture_start_v2")
+                            .map_err(|e| e.to_string())?;
+                        f(c_ip.as_ptr(), port, source_index, w, h, fps)
+                    }
+                    Err(_) => {
+                        return Err("capture shim does not support selectable backends".into());
+                    }
+                },
                 Err(_) => {
-                    return Err("capture shim does not support selectable backends".into());
+                    return Err("capture shim does not support the requested media transport".into());
                 }
             };
             if handle == 0 {
@@ -282,6 +330,17 @@ impl CaptureBackend for FfiBackend {
     fn stop(&self, handle: u32) -> Result<(), String> {
         let lib = self.lib()?;
         unsafe {
+            // v3 sends an LCT1 termination notice so a live viewer closes its
+            // window immediately; older shims fall back to the silent v2 stop.
+            if let Ok(f) =
+                lib.get::<unsafe extern "C" fn(u32, i32) -> i32>(b"leftcar_capture_stop_v3")
+            {
+                let rc = f(handle, 3);
+                if rc != 0 {
+                    return Err(format!("stop({handle}) rc={rc}"));
+                }
+                return Ok(());
+            }
             let f: Symbol<unsafe extern "C" fn(u32) -> i32> = lib
                 .get(b"leftcar_capture_stop_v2")
                 .map_err(|e| e.to_string())?;
@@ -316,9 +375,7 @@ impl CaptureBackend for FfiBackend {
                 udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
                 udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
                 recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
-                recovery_requests_suppressed: v["recoveryRequestsSuppressed"]
-                    .as_i64()
-                    .unwrap_or(0),
+                recovery_requests_suppressed: v["recoveryRequestsSuppressed"].as_i64().unwrap_or(0),
                 capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
                 capture_to_encode_us: v["captureToEncodeUs"].as_u64().unwrap_or(0),
                 max_capture_to_encode_us: v["maxCaptureToEncodeUs"].as_u64().unwrap_or(0),

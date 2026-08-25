@@ -44,6 +44,7 @@ impl CaptureBackend for RecordingBackend {
         _h: u32,
         _fps: u32,
         _capture_backend: &str,
+        _media_transport: &str,
     ) -> Result<u32, String> {
         self.started_ips.lock().unwrap().push(ip.to_owned());
         Ok(7)
