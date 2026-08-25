@@ -458,7 +458,15 @@ function SystemAlertBanners({
               <AlertTriangle size={16} /> {error}
             </span>
           </div>
-          {platform === "macos" && error.includes("권한") && (
+          {platform === "macos" && error.includes("Remote Desktop") && (
+            <button
+              className="btn-ghost btn-sm"
+              onClick={() => void invoke("open_system_settings", { pane: "remote_desktop" })}
+            >
+              Remote Desktop 설정 열기
+            </button>
+          )}
+          {platform === "macos" && error.includes("권한") && !error.includes("Remote Desktop") && (
             <button
               className="btn-ghost btn-sm"
               onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}

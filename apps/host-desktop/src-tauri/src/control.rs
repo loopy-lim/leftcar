@@ -125,7 +125,12 @@ impl ControlServer {
         let deadline = Instant::now() + STARTUP_FIRST_FRAME_TIMEOUT;
         loop {
             let stats = self.backend.stats(handle)?;
-            if stats.first_send_ms > 0 || stats.state == "running" {
+            // `running` only means that the capture backend accepted the
+            // start request. It does not prove that capture, encode, and the
+            // media socket produced a frame. Opening the viewer on that state
+            // creates a black stream that the recovery loop cannot distinguish
+            // from a healthy session. Require the first packet instead.
+            if stats.first_send_ms > 0 {
                 return Ok(());
             }
             if let Some(error) = stats.error.filter(|error| !error.is_empty()) {

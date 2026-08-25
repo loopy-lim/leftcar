@@ -233,6 +233,15 @@ fn prepare_udp_receiver(port: u16, expected_host: &str, transport: &str) -> Resu
     if port == 0 || !host_is_valid(expected_host) {
         return Err("invalid prepared media port or host".into());
     }
+
+    // A Host restart does not send a terminal packet to an existing UDP
+    // renderer. The old Activity therefore keeps the media port and its
+    // decoder alive while the control-plane recovery tries to prepare the
+    // same port again. Reclaim that logical stream before binding the
+    // replacement preflight listener; the subsequent Activity recreation
+    // will attach a fresh renderer to the new Host session.
+    reclaim_udp_port(port);
+
     let active_port = ACTIVE_RENDERERS
         .lock()
         .unwrap()

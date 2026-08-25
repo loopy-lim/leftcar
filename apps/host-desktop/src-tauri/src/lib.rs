@@ -280,6 +280,9 @@ fn open_system_settings(pane: Option<String>) -> Result<(), String> {
             Some("screen_capture") | Some("screencapture") => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             }
+            Some("remote_desktop") | Some("remotedesktop") => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
+            }
             _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         };
         std::process::Command::new("open")

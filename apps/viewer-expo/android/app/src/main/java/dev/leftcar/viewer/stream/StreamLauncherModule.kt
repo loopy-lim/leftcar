@@ -94,6 +94,10 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("width", width)
                 putExtra("height", height)
                 putExtra("fps", fps.coerceIn(1, 90))
+                // A recovery reuses the existing document task and port, but
+                // the old renderer was reclaimed before Host start. Force
+                // that task to recreate its Surface/decoder on re-entry.
+                putExtra("reconnect", true)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
             val ctx = getReactApplicationContext().getCurrentActivity()

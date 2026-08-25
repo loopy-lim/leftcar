@@ -155,9 +155,16 @@ fn run_bridge(
                     Err(_) => continue,
                 };
                 let write_stream = Arc::new(Mutex::new(write_stream));
+                let handshake_stream = Arc::clone(&write_stream);
                 let read_stream = stream;
                 let read_thread = thread::spawn(move || {
-                    tcp_to_media_channel(read_stream, read_media_tx, &global_read_stop, &read_stop);
+                    tcp_to_media_channel(
+                        read_stream,
+                        read_media_tx,
+                        &global_read_stop,
+                        &read_stop,
+                        &handshake_stream,
+                    );
                 });
                 let write_thread = thread::spawn(move || {
                     udp_to_tcp(write_udp, &write_stream, &global_write_stop, &write_stop);
@@ -179,6 +186,7 @@ fn tcp_to_media_channel(
     media_tx: SyncSender<Vec<u8>>,
     global_stop: &AtomicBool,
     connection_stop: &AtomicBool,
+    write_stream: &Arc<Mutex<TcpStream>>,
 ) {
     let mut input = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut buffer = [0u8; READ_BUFFER_BYTES];
@@ -202,6 +210,29 @@ fn tcp_to_media_channel(
                     }
                     let payload = input[4..frame_end].to_vec();
                     input.drain(..frame_end);
+                    if payload.starts_with(b"LCH1") {
+                        // Host media setup uses a framed challenge before it
+                        // starts capture. Echo it on the same TCP connection;
+                        // forwarding it to the renderer would leave Host in
+                        // connectSocket() until its two-second timeout.
+                        let mut response = Vec::with_capacity(payload.len() + 4);
+                        response.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                        response.extend_from_slice(&payload);
+                        let write_result = write_stream
+                            .lock()
+                            .map_err(|_| io::Error::other("TCP writer lock poisoned"))
+                            .and_then(|mut socket| socket.write_all(&response));
+                        if write_result.is_err() {
+                            connection_stop.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        bridge_log(&format!(
+                            "TCP handshake echoed frame={} prefix={:?}",
+                            payload.len(),
+                            &payload[..payload.len().min(4)]
+                        ));
+                        continue;
+                    }
                     if payload.starts_with(b"LCH1") || payload.starts_with(b"CFG") {
                         bridge_log(&format!(
                             "TCP -> renderer frame={} prefix={:?}",

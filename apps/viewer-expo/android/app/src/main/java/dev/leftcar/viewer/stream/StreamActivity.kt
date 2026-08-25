@@ -612,14 +612,16 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
+        val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val streamConfigurationChanged =
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight
 
         setIntent(newIntent)
-        if (streamConfigurationChanged) {
+        if (streamConfigurationChanged || reconnectRequested) {
             // Recreate inside the same document task so the native decoder and
-            // Surface are rebuilt with the new stream configuration.
+            // Surface are rebuilt with the new stream configuration or after
+            // a Host-restart recovery reclaimed the old renderer.
             recreate()
         } else {
             streamSurface?.requestFocus()

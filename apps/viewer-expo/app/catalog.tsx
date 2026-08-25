@@ -55,6 +55,12 @@ interface ActiveStream {
   startedAt: number;
 }
 
+interface RestoredStream {
+  session: number;
+  viewerIps: string[];
+  captureBackend: string;
+}
+
 const HIDABLE_DISPLAY_LABELS = ["leftcar hub", "leftcarhub"];
 
 function isHubDisplay(name: string): boolean {
@@ -391,6 +397,7 @@ function CatalogFooter({
 
 function useStreamController(
   setError: Dispatch<SetStateAction<string | null>>,
+  restoreStream: (active: ActiveStream) => Promise<RestoredStream>,
 ) {
   const [streams, setStreams] = useState<ActiveStream[]>([]);
   const heartbeatInFlight = useRef(new Set<number>());
@@ -407,26 +414,20 @@ function useStreamController(
   const statusView = statusQuery.data;
   const { mutate: restartStream } = useMutation({
     mutationFn: async (active: ActiveStream) => {
-      await requestWithReconnect("stopStream", { session: active.session }).catch(
-        () => undefined,
-      );
-      const restarted = await requestWithReconnect<{ session: number }>("startStream", {
-        sourceIndex: active.sourceIndex,
-        viewerPort: active.port,
-        width: active.width,
-        height: active.height,
-        fps: active.fps,
-        captureBackend: active.captureBackend,
-        mediaTransport: active.mediaTransport,
-        viewerIps: active.viewerIps,
-      });
+      const restarted = await restoreStream(active);
       return { active, restarted };
     },
     onSuccess: ({ active, restarted }) => {
       setStreams((previous) =>
         previous.map((item) =>
           item.session === active.session
-            ? { ...item, session: restarted.session, startedAt: Date.now() }
+            ? {
+                ...item,
+                session: restarted.session,
+                captureBackend: restarted.captureBackend,
+                viewerIps: restarted.viewerIps,
+                startedAt: Date.now(),
+              }
             : item,
         ),
       );
@@ -538,7 +539,51 @@ export default function Catalog() {
   const mediaHost =
     catalogQuery.data?.mediaHost?.trim() || catalogDisplayHost(host);
 
-  const { addStream, removeStream, streams } = useStreamController(setError);
+  const restoreActiveStream = useCallback(
+    async (active: ActiveStream): Promise<RestoredStream> => {
+      if (!launcher) {
+        throw new Error("화면을 다시 연결할 기능을 시작할 수 없습니다");
+      }
+      const refreshed = await refetchCatalog();
+      const currentCatalog = refreshed.data ?? catalogQuery.data;
+      if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
+        throw new Error("현재 컴퓨터의 화면 공유 backend를 조회하지 못했습니다");
+      }
+      const captureBackend = preferredCaptureBackend(
+        currentCatalog,
+        active.captureBackend,
+      );
+      const mediaHost = currentCatalog.mediaHost?.trim()
+        ? catalogDisplayHost(currentCatalog.mediaHost.trim())
+        : catalogDisplayHost(host);
+      await requestWithReconnect("stopStream", { session: active.session }).catch(
+        () => undefined,
+      );
+      const control = controlClient() ?? (await reconnectHost());
+      const restarted = await startPreparedStream({
+        control,
+        request: requestWithReconnect,
+        launcher,
+        host: mediaHost,
+        args: {
+          sourceIndex: active.sourceIndex,
+          viewerPort: active.port,
+          width: active.width,
+          height: active.height,
+          fps: active.fps,
+          captureBackend,
+          mediaTransport: "auto",
+        },
+      });
+      return { ...restarted, captureBackend };
+    },
+    [catalogQuery.data, host, refetchCatalog],
+  );
+
+  const { addStream, removeStream, streams } = useStreamController(
+    setError,
+    restoreActiveStream,
+  );
 
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === profileId) ?? STREAM_PROFILES[0];
