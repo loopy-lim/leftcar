@@ -26,3 +26,9 @@ apps/host-desktop/node_modules/
 # stale prebuilt viewer core — rebuilt from Rust by gradle copyViewerSo; never commit binaries
 apps/viewer-expo/android/app/libs/arm64-v8a/libleftcar_viewer.so
 apps/viewer-expo/android/app/libs/arm64-v8a/libleftcar_rustra.so
+
+# rustra-bridge native build artifacts (AGP CMake cache + Rust cross-compile targets)
+.cxx/
+apps/viewer-expo/modules/rustra-bridge/build/
+apps/viewer-expo/modules/rustra-bridge/android/build/
+apps/viewer-expo/modules/rustra-bridge/android/src/main/cpp/libs/
