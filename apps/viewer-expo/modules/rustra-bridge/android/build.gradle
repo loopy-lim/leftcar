@@ -1,0 +1,71 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+buildscript {
+  repositories { google(); mavenCentral() }
+  dependencies {
+    classpath "com.android.tools.build:gradle:8.7.2"
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.20"
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+def extOr = { name, fallback -> rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback }
+def adapterRoot = file("../../../../../node_modules/@rustra/react-native/native").canonicalFile
+def generatedRoot = file("../generated").canonicalFile
+def rustManifest = file("../../../../../native/leftcar-rustra/Cargo.toml").canonicalFile
+def rustLibsDir = file("src/main/cpp/libs")
+
+abstract class RustraExecOperations {
+  @Inject abstract ExecOperations getExecOperations()
+}
+def rustraExec = objects.newInstance(RustraExecOperations)
+
+android {
+  namespace = "dev.rustra.bridge"
+  compileSdk = extOr("compileSdkVersion", 36)
+  ndkVersion = extOr("ndkVersion", "27.1.12297006")
+  defaultConfig {
+    minSdk = extOr("minSdkVersion", 24)
+    targetSdk = extOr("targetSdkVersion", 36)
+    externalNativeBuild.cmake {
+      cppFlags "-std=c++20"
+      arguments "-DANDROID_STL=c++_shared",
+        "-DRUSTRA_ADAPTER_ROOT=$adapterRoot",
+        "-DRUSTRA_GENERATED_ROOT=$generatedRoot",
+        "-DRUSTRA_LIB_NAME=leftcar_rustra",
+        "-DRUSTRA_LEGACY_BENCHMARKS=OFF"
+    }
+    ndk { abiFilters "x86_64", "arm64-v8a" }
+  }
+  externalNativeBuild.cmake.path = file("CMakeLists.txt")
+  buildFeatures.prefab = true
+  packagingOptions.excludes = ["**/libc++_shared.so"]
+  sourceSets.main.java.srcDirs = ["src/main/java"]
+}
+
+tasks.register("buildRustAndroid") {
+  inputs.files(fileTree(rustManifest.parentFile) {
+    include "**/*.rs", "**/Cargo.toml", "Cargo.lock"
+    exclude "target/**", "**/node_modules/**", "**/build/**"
+  })
+  inputs.property("profile", gradle.startParameter.taskNames.any {
+    it.toLowerCase().contains("release")
+  } ? "release" : "debug")
+  outputs.dir(rustLibsDir)
+  outputs.cacheIf { true }
+  doLast {
+    def release = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
+    rustraExec.execOperations.exec {
+      workingDir projectDir
+      environment "RUSTRA_PROFILE", release ? "release" : "debug"
+      commandLine "sh", "build-rust-android.sh"
+    }
+  }
+}
+preBuild.dependsOn "buildRustAndroid"
+
+repositories { google(); mavenCentral() }
+dependencies { implementation "com.facebook.react:react-android" }

@@ -310,6 +310,12 @@ pub struct StartStreamInput {
     /// compatibility path on systems where the legacy symbols remain.
     #[serde(default = "default_capture_backend")]
     pub capture_backend: String,
+    /// Concrete media transport for this stream. `tcp` is reliable Wi-Fi/LAN,
+    /// `udp` is the low-latency Wi-Fi fallback, and `adbTcp` is the
+    /// ADB-over-USB fallback. `auto` tries those paths in that order without
+    /// duplicating one encoded frame over multiple links.
+    #[serde(default = "default_media_transport")]
+    pub media_transport: String,
     /// Physical viewer interface candidates. The host only considers private
     /// addresses on the control peer's LAN and the production media backend
     /// proves UDP reachability with an unpredictable nonce before capture.
@@ -319,6 +325,10 @@ pub struct StartStreamInput {
 
 fn default_capture_backend() -> String {
     "screenCaptureKit".into()
+}
+
+fn default_media_transport() -> String {
+    "udp".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

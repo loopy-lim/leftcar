@@ -1,0 +1,9 @@
+{
+  "schema": "../../packages/control-generated/host/schema.json",
+  "output": "./generated",
+  "reactNative": {
+    "moduleDir": "./modules/rustra-bridge",
+    "rustManifest": "../../native/leftcar-rustra/Cargo.toml",
+    "rustPackage": "leftcar-rustra"
+  }
+}

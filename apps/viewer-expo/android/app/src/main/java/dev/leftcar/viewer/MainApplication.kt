@@ -21,8 +21,6 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Leftcar rustra native module (docs/02 §9 shim)
-          add(RustraPackage())
           // Multi-window stream launcher (one OS window per source)
           add(dev.leftcar.viewer.stream.StreamLauncherPackage())
           // NSD host discovery (_leftcar._tcp)

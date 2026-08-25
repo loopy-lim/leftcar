@@ -1,9 +1,14 @@
-//! JNI bindings exposing the leftcar rustra host package to React Native
-//! (docs/02 §9: TS UI -> @rustra/react-native -> NativeModules.Rustra -> here).
+//! Rustra 0.4 control-package boundary for Leftcar.
 //!
-//! invoke() routes through Package::invoke_json — the SAME path the host
-//! contract tests use, so the on-device JS round trip (H09) exercises the
-//! real rustra invocation machinery, not a reimplementation.
+//! The generated React Native entry point is `native_entry!`; the JNI exports
+//! below are retained only as the legacy H09 device-proof shim until the app
+//! switches to the generated package. Neither this package nor that shim is
+//! used by the video/input hot path: compressed media and high-rate input stay
+//! on their dedicated native transports.
+//!
+//! `invoke()` routes through `Package::invoke_json` — the same path the host
+//! contract tests use — so the legacy device proof still exercises Rustra's
+//! real invocation machinery rather than a reimplementation.
 
 use std::ffi::{c_char, CStr, CString};
 use std::sync::OnceLock;
@@ -14,8 +19,20 @@ use rustra::prelude::Package;
 static PACKAGE: OnceLock<Package> = OnceLock::new();
 
 fn package() -> &'static Package {
-    PACKAGE.get_or_init(host_package)
+    let package = PACKAGE.get_or_init(host_package);
+    // Rustra 0.4 generated JSI calls the generic rkyv-v2 FFI surface. The
+    // legacy JNI shim invokes Package directly, so without this registration
+    // the old proof passes while the generated bridge returns
+    // `ffi.not_registered`.
+    package.register_ffi();
+    package
 }
+
+// Rustra 0.4's generated React Native package loads the stable native entry
+// point. Keep the legacy JNI shim below during the app cutover; both paths
+// resolve to the same OnceLock-backed package and therefore cannot diverge in
+// command registration or contract hash.
+rustra::native_entry!(package);
 
 /// Result strings carry an "OK"/"ER" prefix so errors never look like data.
 #[no_mangle]
@@ -80,6 +97,15 @@ mod tests {
             .invoke_json("addNumbers", serde_json::json!({"a": 20, "b": 22}))
             .expect("invoke");
         assert_eq!(out, serde_json::json!({"value": 42}));
+    }
+
+    #[test]
+    fn native_entry_target_is_registered_for_generated_ffi() {
+        let _ = package();
+        assert_eq!(
+            rustra::ffi::get_package().map(Package::id),
+            Some("leftcar.host.control")
+        );
     }
 }
 

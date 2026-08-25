@@ -1,5 +1,7 @@
 {
   "packageId": "leftcar.host.control",
+  "schemaVersion": 1,
+  "fieldOrder": "declaration",
   "commands": [
     {
       "name": "addNumbers",

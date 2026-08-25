@@ -50,6 +50,8 @@
       "dependencies": {
         "@expo/metro-runtime": "~57.0.12",
         "@expo/vector-icons": "^15.1.1",
+        "@rustra/generated-react-native": "workspace:*",
+        "@rustra/react-native": "^0.4.0",
         "@tanstack/react-query": "^5.101.4",
         "expo": "~57.0.15",
         "expo-camera": "~57.0.4",
@@ -72,21 +74,12 @@
         "typescript": "~6.0.3",
       },
     },
-    "vendor/rustra-react-native": {
-      "name": "@rustra/react-native",
-      "version": "0.1.2",
-      "dependencies": {
-        "@rustra/types": "^0.1.1",
-      },
-      "devDependencies": {
-        "typescript": "^5.9.0",
-      },
-    },
-    "vendor/rustra-types": {
-      "name": "@rustra/types",
-      "version": "0.1.2",
-      "devDependencies": {
-        "typescript": "^5.9.0",
+    "apps/viewer-expo/modules/rustra-bridge": {
+      "name": "@rustra/generated-react-native",
+      "version": "0.0.0",
+      "peerDependencies": {
+        "@rustra/react-native": "^0.4.0",
+        "react-native": ">=0.76",
       },
     },
   },
@@ -507,9 +500,11 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.4", "", { "os": "win32", "cpu": "x64" }, "sha512-zD6NdeWEByGE9QF9vCrlJ5YQB4oq9q91kPZS37Jwj5hOkvR1lTBSpsKhKDw4IJtbQ35LsTS1HD9DZYGKIshU1Q=="],
 
-    "@rustra/react-native": ["@rustra/react-native@workspace:vendor/rustra-react-native"],
+    "@rustra/generated-react-native": ["@rustra/generated-react-native@workspace:apps/viewer-expo/modules/rustra-bridge"],
 
-    "@rustra/types": ["@rustra/types@workspace:vendor/rustra-types"],
+    "@rustra/react-native": ["@rustra/react-native@0.4.0", "", { "dependencies": { "@rustra/types": "^0.4.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-FM8RQEoAvddEXg/nbRBtzRugdDH/thTm8hFBJv3pjzLIelimhLzwRUGZb5CBFdU8OIxSBNNammNlSG+EzWsD7w=="],
+
+    "@rustra/types": ["@rustra/types@0.4.0", "", {}, "sha512-7rE7bCsgTHhl+tuGoZzZoK/MVDXfvFA7FK9dKiuP+HpAcM7OmnMVuLS8ASAWYi4o9+INYbO88+R1fw7tjx7i1Q=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.27.12", "", {}, "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g=="],
 

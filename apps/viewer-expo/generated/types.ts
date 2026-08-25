@@ -12,4 +12,3 @@ export type AddNumbersInput = {
 export type AddNumbersOutput = {
   value: number;
 };
-
