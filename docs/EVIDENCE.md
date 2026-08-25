@@ -160,3 +160,10 @@
 - **2026-08-24 현재 빌드 실기기 재검증**: 서명된 macOS Host를 다시 빌드·설치하고 최신 debug APK를 Lenovo TB710FU에 덮어 설치한 뒤, `Display 0`의 Mac 화면이 `c2.qti.avc.decoder.low_latency`로 실제 갱신되는 것을 확인했다. HUD 표본은 `SRC 60 / XR 60 Hz`, `NET 13/21 ms`, `CAP→SCR 40/43 ms`, `55 FPS`, `FEED 5 ms`, `SKIP 461`, `LOSS 32`였다. 같은 세션의 Host 표본은 `60 FPS`, `4,125 kbps`, `pendingFrame=0`, `udpSendFailures=0`, capture→encode p95 `18.969 ms`, send block p95 `2.621 ms`였다. 이 값은 패널 photon 측정이 아닌 Surface render 직전 시점이다.
 - **종료·고장 감지 실기기 재검증**: 인증된 `stopStream`에 종료 사유 `2`를 전달했을 때 Viewer가 `host terminated stream: reason=2 (forced stop)`을 기록하고 스트림 Activity를 닫아 메인 Activity로 복귀했으며, BYE에 의한 세션 재생성은 없었다. 별도 세션에서 Viewer 프로세스를 강제 종료하자 Host가 약 6초 뒤 `viewer connection lost (feedback timeout)` 오류로 전환했고, 오류 상태를 약 5초 보존한 다음 세션을 제거했다.
 - **현재 판정 경계**: 이번 실시간 표본은 약 3분이며 장시간 soak, outage 후 자동 재연결, glass-to-glass 카메라 측정은 수행하지 않았다. `SKIP`/`LOSS`와 Host drop이 누적됐으므로 E7과 무손실 판정은 계속 미달성으로 유지한다.
+
+## 회복 정책 재설계 (2026-08-26 구현 기록)
+
+- **소스 구현**: UDP VideoToolbox GOP를 `3600` 프레임으로 전환해 정기 IDR 대신 인증된 IDR 요청 경로를 회복 경계로 사용하고, Viewer IDR 요청 debounce를 `750ms`에서 `250ms`로 줄였다.
+- **히스테리시스**: 단일 stale delta를 즉시 폐기하지 않고 연속 3개 초과 프레임에서만 재동기화하는 순수 결정 함수와 단위 테스트를 추가했다. 1~2개 초과 프레임은 늦게라도 디코더 경로로 진행한다.
+- **계측 경계**: `staleInputDrops`와 `outputBurst`를 별도 Atomic 카운터 및 `leftcar_jni_skip_breakdown`으로 노출했다. 기존 HUD 합산 필드는 하위 호환을 위해 유지한다.
+- **실기기 판정**: 기존 E15 표본의 `SKIP 461`을 새 빌드에서 재수집하지 않았으므로 SKIP 감소, 복구 p95 약 50ms, 목표 `SKIP < 50`은 측정 대기로 남긴다. E15와 같은 수집 방식으로 비교해야 한다.

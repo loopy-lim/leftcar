@@ -33,7 +33,22 @@ const RECENT_COMPLETED_AUS: usize = 64;
 const COMPLETION_REORDER_WAIT: Duration = Duration::from_millis(3);
 const MAX_COMPLETED_REORDER: usize = 3;
 pub const BASE_STALE_FRAME_BUDGET_MS: u64 = 80;
-pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(750);
+pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
+/// Number of consecutive over-budget delta frames required before resync.
+pub const STALE_RESYNC_THRESHOLD: u32 = 3;
+
+/// Advance the stale-frame hysteresis state without requiring a decoder.
+pub fn stale_streak_advance(
+    consecutive_stale: u32,
+    is_keyframe: bool,
+    over_budget: bool,
+) -> (u32, bool) {
+    if is_keyframe || !over_budget {
+        return (0, false);
+    }
+    let next = consecutive_stale.saturating_add(1);
+    (next, next >= STALE_RESYNC_THRESHOLD)
+}
 
 pub fn recovery_request_suppressed(now_us: u64, suppressed_until_us: u64) -> bool {
     now_us < suppressed_until_us
@@ -569,6 +584,32 @@ mod tests {
         gate.recovered();
         assert!(!gate.should_request(now + Duration::from_millis(150)));
         assert!(gate.should_request(now + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn recovery_cooldown_allows_four_requests_per_second() {
+        assert_eq!(RECOVERY_REQUEST_COOLDOWN, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn single_stale_frame_renders_late_without_resync() {
+        assert_eq!(stale_streak_advance(0, false, true), (1, false));
+        assert_eq!(stale_streak_advance(1, false, true), (2, false));
+    }
+
+    #[test]
+    fn third_consecutive_stale_frame_engages_resync() {
+        assert_eq!(stale_streak_advance(2, false, true), (3, true));
+    }
+
+    #[test]
+    fn fresh_frame_resets_the_streak() {
+        assert_eq!(stale_streak_advance(2, false, false), (0, false));
+    }
+
+    #[test]
+    fn keyframe_resets_the_streak_and_never_resyncs() {
+        assert_eq!(stale_streak_advance(2, true, true), (0, false));
     }
 
     #[test]

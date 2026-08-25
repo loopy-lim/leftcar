@@ -14,8 +14,8 @@ use crate::input_protocol::{
     parse_termination, InputEvent, InputScheduler, ReceiverFeedback,
 };
 use crate::media_datagram::{
-    parse_fragment, recovery_request_suppressed, stale_frame_budget_ms, CompletedFrameSequencer,
-    FrameReassembler, RecoveryRequestGate,
+    parse_fragment, recovery_request_suppressed, stale_frame_budget_ms, stale_streak_advance,
+    CompletedFrameSequencer, FrameReassembler, RecoveryRequestGate,
 };
 use crate::net_guard::{host_is_valid, peer_allowed};
 use crate::prepared_tcp::PreparedTcpBridge;
@@ -68,6 +68,8 @@ struct RendererControl {
     input_enabled: AtomicI8,
     rendered_frames: AtomicU64,
     stale_outputs: AtomicU64,
+    stale_input_drops: AtomicU64,
+    output_burst_discards: AtomicU64,
     decoder_input_drops: AtomicU64,
     frame_gaps: AtomicU64,
     last_feed_us: AtomicU64,
@@ -325,6 +327,7 @@ struct RendererStats {
     frame_gaps: u64,
     max_feed_us: u64,
     stale_inputs: u64,
+    consecutive_stale: u32,
     // NTP-style authenticated probes estimate Host clock minus Android clock.
     // Do not infer this from the first video frame: that would erase the very
     // one-way delivery latency the HUD is intended to show.
@@ -785,10 +788,12 @@ fn feed_and_render(
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
+            control.stale_input_drops.load(Ordering::Relaxed),
+            control.output_burst_discards.load(Ordering::Relaxed),
             stats.queued,
             stats.input_drops,
             stats.frame_gaps,
@@ -806,6 +811,12 @@ fn feed_and_render(
         dec.frames_discarded.saturating_add(stats.stale_inputs),
         Ordering::Relaxed,
     );
+    control
+        .stale_input_drops
+        .store(stats.stale_inputs, Ordering::Relaxed);
+    control
+        .output_burst_discards
+        .store(dec.frames_discarded, Ordering::Relaxed);
     control
         .decoder_input_drops
         .store(stats.input_drops, Ordering::Relaxed);
@@ -864,6 +875,8 @@ fn spawn_live_stream_renderer(
         input_enabled: AtomicI8::new(-1),
         rendered_frames: AtomicU64::new(0),
         stale_outputs: AtomicU64::new(0),
+        stale_input_drops: AtomicU64::new(0),
+        output_burst_discards: AtomicU64::new(0),
         decoder_input_drops: AtomicU64::new(0),
         frame_gaps: AtomicU64::new(0),
         last_feed_us: AtomicU64::new(0),
@@ -1375,13 +1388,18 @@ fn spawn_live_stream_renderer(
                 let rtt_ms = control_clone.network_rtt_ms.load(Ordering::Relaxed);
                 let stale_budget_ms =
                     stale_frame_budget_ms((rtt_ms != LATENCY_UNKNOWN).then_some(rtt_ms));
-                // An IDR is the recovery boundary. Feeding a late keyframe is
-                // preferable to dropping it and entering another request loop.
-                if !keyframe && capture_age_ms.is_some_and(|age| age > stale_budget_ms) {
+                // A single tail-latency delta should render late instead of
+                // invalidating the whole reference chain. Enter recovery only
+                // after three consecutive over-budget deltas.
+                let over_budget =
+                    !keyframe && capture_age_ms.is_some_and(|age| age > stale_budget_ms);
+                let (stale_streak, should_resync) =
+                    stale_streak_advance(renderer_stats.consecutive_stale, keyframe, over_budget);
+                renderer_stats.consecutive_stale = stale_streak;
+                if over_budget {
                     renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
-                    control_clone
-                        .stale_outputs
-                        .store(renderer_stats.stale_inputs, Ordering::Relaxed);
+                }
+                if should_resync {
                     last_frame_id = Some(frame.id);
                     resync_decoder_after_frame_gap(&mut awaiting_keyframe);
                     request_idr_debounced(
@@ -1391,7 +1409,10 @@ fn spawn_live_stream_renderer(
                         &mut recovery_gate,
                         &control_clone,
                     );
-                } else {
+                    continue;
+                }
+
+                {
                     let frame_gap = last_frame_id
                         .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
                         .unwrap_or(false);
@@ -1824,6 +1845,29 @@ pub extern "C" fn leftcar_jni_stream_stats(instance_c: *const c_char) -> i64 {
             Err(_) => return -1,
         };
         pack_stream_stats(&control)
+    });
+    guard.unwrap_or(-1)
+}
+
+/// Pack separated stale-input and decoder-burst discard counters for the
+/// measurement spike. The high 32 bits are input-policy observations and the
+/// low 32 bits are decoder output-burst discards.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_skip_breakdown(instance_c: *const c_char) -> i64 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return -1,
+        };
+        let input = control
+            .stale_input_drops
+            .load(Ordering::Relaxed)
+            .min(u64::from(u32::MAX));
+        let burst = control
+            .output_burst_discards
+            .load(Ordering::Relaxed)
+            .min(u64::from(u32::MAX));
+        (((input << 32) | burst) as i64)
     });
     guard.unwrap_or(-1)
 }

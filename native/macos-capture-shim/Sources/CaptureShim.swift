@@ -1914,14 +1914,14 @@ final class CaptureSession {
         // 1-second headroom without allowing multi-second bursts.
         let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
-        // UDP needs a short recovery boundary because a lost fragment can
-        // invalidate every following delta. TCP is reliable, so avoid a
-        // periodic IDR burst during normal playback; reconnect and explicit
-        // recovery requests still force an immediate IDR through the
-        // authenticated control channel.
+        // Recovery happens through the authenticated IDR request path
+        // (viewer IDR datagram -> kVTEncodeFrameOptionKey_ForceKeyFrame).
+        // A periodic UDP IDR would re-introduce the one-second resync ceiling
+        // this recovery redesign removes. 3600 frames is effectively an
+        // infinite GOP for an interactive 60fps session.
         let nominalKeyframeInterval = mediaTransport.usesTCP
             ? max(1, fps * 60)
-            : max(1, fps)
+            : 3600
         VTSessionSetProperty(
             s,
             key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
