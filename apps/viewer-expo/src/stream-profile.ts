@@ -30,6 +30,7 @@ export const STREAM_PROFILES = [
     maxHeight: 1440,
     fps: 60,
     contentMode: "interactive",
+    role: "fallback",
     hint: "글자 선명도와 반응 속도의 균형",
   },
   {

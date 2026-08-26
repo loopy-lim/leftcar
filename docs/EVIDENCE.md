@@ -189,3 +189,30 @@
 - **실기기 확인**: Lenovo TB710FU에 release APK를 덮어 설치했다. 4K video profile에서 `Received CF2 datagram (95 bytes)`, `vps=28B sps=40B pps=11B`, `codec=Hevc actualCodec=c2.qti.hevc.decoder.low_latency`를 확인했고, 장시간 관찰 중 `Rendered` 카운터가 계속 증가하며 종료·recovery gate timeout은 발생하지 않았다.
 - **현재 성능 판정**: Host UI와 native 로그의 실제 출력은 약 34–37 FPS였고, video processing은 약 65–81ms, UDP send failure는 0이었다. 고정 0 FPS로 멈추던 recovery gate는 timeout 해제로 회복됐지만, 4K 55–60 FPS는 아직 달성하지 못했다. 고속 화면에서 capture/recovery drop과 burst가 늘어 남은 병목은 macOS 4K capture/encode path로 판정한다.
 - **현재 APK 증거**: 재빌드·재설치한 APK SHA-256은 `8767f4ebfd268fbaec0e1a8cf017fb30eca7105f91f9e1158c1a791d9cf10748`이다. 이 표본의 미디어 전송은 `Wi-Fi UDP`였으며 USB/AOAP 물리 스트림 증거로 해석하지 않는다.
+
+## H-03/H-04 원인 분리 구현 및 정적 smoke (2026-08-26)
+
+- **구현**: Android `frame-id` 점프를 실제 `networkLoss`, 의도적인
+  `liveEdgeDiscard`, 이미 IDR을 기다리며 건너뛴 `recoverySkip`으로 분리했다.
+  live-edge로 중간 delta를 버린 뒤 선택된 delta는 참조 체인 손상을 피하기
+  위해 다음 keyframe까지 버리며, 같은 recovery episode에서 IDR을 반복
+  요청하지 않는다. Host에는 userspace media queue의
+  `pendingFrameBytes`와 `pendingFrameOldestAgeUs`를 추가했다.
+- **검증**: 관련 Android native 순수 로직 회귀 6개와 전체 native 51개,
+  `viewer-decoder`, Rust workspace/Host clippy, Swift policy, TypeScript와
+  React Doctor `100 / 100`을 통과했다. arm64 native release build와
+  release APK assemble/install도 통과했다.
+- **짧은 실기기 smoke**: `HA2D6EMP`에 APK SHA-256
+  `9333620c1cf9a79b19f5cc857e5b3630a90a97482a8ecc5f54bf0c6d1f6f0858`을
+  설치했다. `2560×1440@60`, H.264, `CgDisplayStream`, Wi-Fi UDP에서
+  `actualCodec=c2.qti.avc.decoder.low_latency`, `Rendered 150`,
+  `decoderInputDrops=0`, `outputDrops=0`, `frameGaps=0`,
+  `intentionalLiveEdgeGaps=0`을 확인했다. 이는 정적 장면 smoke이며
+  고모션 7~15fps 해결 또는 USB/AOAP 경로 증거가 아니다.
+
+## 복구 경계·고모션 재검증 (2026-08-26)
+
+- **복구 경계 수정**: Host가 이미 복구 키프레임을 전송 중이거나 네트워크 큐에 보유한 상태에서 반복 IDR 요청을 받아도, 대기 중인 복구 경계를 다시 지우지 않도록 `shouldStartNetworkRecovery` 정책을 추가했다. 큐 overflow에서도 이미 queued keyframe을 보존하고, 같은 recovery episode의 delta만 버린다.
+- **1440p 고모션 표본**: `HA2D6EMP`에서 `2560×1440@60`, H.264, `CgDisplayStream`, Wi-Fi UDP를 60초 유지했다. 캡처는 60fps였지만 후반 Host 표본은 submit 58fps, output 57fps, Android render 53fps였고 `decoderInputDrops=0`이었다. Android 누적 `frameGaps=72`, `outputDrops=320`, `fecRecovered=249`까지 증가해 복구·고모션 구간은 아직 60 unique fps로 판정하지 않는다.
+- **복구 경계 A/B**: queued recovery boundary 보존과 1440p 이상 encoder in-flight 5개 변경 후 별도 30초 표본에서는 Android 로그가 약 56fps 수준으로 유지됐고 Host 상세 표본은 `capture/submit/output/rendered = 60/60/60/60`이었다. 그러나 `frameGaps=9`, `outputDrops=57`, `recoveryFramesDropped=126`이 남아 장시간 무손실·60fps 달성으로 해석할 수 없다.
+- **4K 영상 프로필 비교**: 같은 기기에서 `동영상 우선` 프로필은 실제 `3840×2160@60` HEVC 경로로 시작되었다. Host 표본은 capture 약 39–46fps, output 약 30–35fps, Android render 약 1–37fps, video processing 약 74–80ms였고 UDP send failure는 0이었다. 따라서 이 환경에서 영상 프로필 전환만으로 4K 고모션 병목이 해결되지 않으며, 1440p를 안정적인 fallback으로 유지한다.

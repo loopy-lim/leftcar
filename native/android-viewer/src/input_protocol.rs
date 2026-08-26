@@ -232,10 +232,13 @@ pub struct ReceiverFeedback {
     pub wire_to_decoder_ms: u16,
     pub stale_input_drops: u32,
     pub output_burst_discards: u32,
+    /// Number of frames released to the Surface during the feedback window.
+    /// This is optional on the host side so older viewers remain compatible.
+    pub rendered_fps: u16,
 }
 
 pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(32 + token.len());
+    let mut bytes = Vec::with_capacity(34 + token.len());
     bytes.extend_from_slice(RECEIVER_FEEDBACK_MAGIC);
     bytes.extend_from_slice(&feedback.frame_gaps.to_be_bytes());
     bytes.extend_from_slice(&feedback.input_drops.to_be_bytes());
@@ -245,6 +248,7 @@ pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec
     bytes.extend_from_slice(&feedback.wire_to_decoder_ms.to_be_bytes());
     bytes.extend_from_slice(&feedback.stale_input_drops.to_be_bytes());
     bytes.extend_from_slice(&feedback.output_burst_discards.to_be_bytes());
+    bytes.extend_from_slice(&feedback.rendered_fps.to_be_bytes());
     bytes.extend_from_slice(token);
     bytes
 }
@@ -521,6 +525,7 @@ mod tests {
                 wire_to_decoder_ms: 6,
                 stale_input_drops: 7,
                 output_burst_discards: 8,
+                rendered_fps: 60,
             },
             token,
         );
@@ -533,7 +538,9 @@ mod tests {
         assert_eq!(&packet[22..24], &6u16.to_be_bytes());
         assert_eq!(&packet[24..28], &7u32.to_be_bytes());
         assert_eq!(&packet[28..32], &8u32.to_be_bytes());
-        assert_eq!(&packet[32..], token);
+        assert_eq!(&packet[32..34], &60u16.to_be_bytes());
+        assert_eq!(packet.len(), 34 + token.len());
+        assert_eq!(&packet[34..], token);
     }
 
     #[test]

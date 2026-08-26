@@ -14,10 +14,10 @@ use crate::input_protocol::{
     parse_termination, InputEvent, InputScheduler, ReceiverFeedback,
 };
 use crate::media_datagram::{
-    parse_fragment, parse_parity, recovery_request_suppressed, select_live_edge_frames,
-    stale_frame_budget_ms, stale_streak_advance, CompletedFrameSequencer, FecGroup, FrameFragment,
-    FrameReassembler, ReassembledFrame, ReceiverPressure, RecoveryRequestGate, RestoredFragment,
-    PARITY_MARKER,
+    classify_frame_gap, parse_fragment, parse_parity, recovery_request_suppressed,
+    select_live_edge_frames, should_feed_frame, stale_frame_budget_ms, stale_streak_advance,
+    CompletedFrameSequencer, FecGroup, FrameFragment, FrameGapReason, FrameReassembler,
+    ReassembledFrame, ReceiverPressure, RecoveryRequestGate, RestoredFragment, PARITY_MARKER,
 };
 use crate::net_guard::{host_is_valid, peer_allowed};
 use crate::prepared_tcp::PreparedTcpBridge;
@@ -419,6 +419,8 @@ struct RendererStats {
     queued: u64,
     input_drops: u64,
     frame_gaps: u64,
+    intentional_live_edge_gaps: u64,
+    recovery_skipped_frames: u64,
     max_feed_us: u64,
     stale_inputs: u64,
     completed_batch: usize,
@@ -545,6 +547,7 @@ fn send_receiver_feedback(
     stats: &RendererStats,
     incomplete_aus: u64,
     control: &RendererControl,
+    rendered_fps: u16,
 ) {
     if token.is_empty() {
         return;
@@ -567,6 +570,7 @@ fn send_receiver_feedback(
                 .output_burst_discards
                 .load(Ordering::Relaxed)
                 .min(u64::from(u32::MAX)) as u32,
+            rendered_fps,
         },
         token,
     );
@@ -904,7 +908,7 @@ fn feed_and_render(
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
@@ -920,6 +924,8 @@ fn feed_and_render(
             stats.live_edge_batch,
             stats.max_completed_batch,
             stats.frame_gaps,
+            stats.intentional_live_edge_gaps,
+            stats.recovery_skipped_frames,
             feed_us,
             stats.max_feed_us,
             capture_age_ms,
@@ -1148,6 +1154,7 @@ fn spawn_live_stream_renderer(
         let mut renderer_stats = RendererStats::default();
         let mut latency_probe_sequence = 0u32;
         let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
+        let mut last_feedback_rendered_frames = 0u64;
 
         while !control_clone.stop.load(Ordering::Relaxed) {
             if control_clone.suspend.load(Ordering::SeqCst) {
@@ -1240,6 +1247,11 @@ fn spawn_live_stream_renderer(
                         &viewer_control_token,
                         latency_probe_sequence,
                     );
+                    let rendered_frames = control_clone.rendered_frames.load(Ordering::Relaxed);
+                    let rendered_fps = rendered_frames
+                        .saturating_sub(last_feedback_rendered_frames)
+                        .min(u64::from(u16::MAX)) as u16;
+                    last_feedback_rendered_frames = rendered_frames;
                     send_receiver_feedback(
                         &control_socket,
                         peer,
@@ -1247,6 +1259,7 @@ fn spawn_live_stream_renderer(
                         &renderer_stats,
                         reassembler.incomplete_evictions(),
                         &control_clone,
+                        rendered_fps,
                     );
                     last_latency_probe = std::time::Instant::now();
                     // A probe response that never arrives must decay the
@@ -1598,8 +1611,11 @@ fn spawn_live_stream_renderer(
             renderer_stats
                 .pressure
                 .record_live_edge_discards(selection.discarded);
+            let mut intentional_live_edge_discard = selection.discarded > 0;
 
             for (peer, frame) in selection.frames {
+                let frame_was_intentionally_discarded =
+                    std::mem::replace(&mut intentional_live_edge_discard, false);
                 let codec = codec_config
                     .as_ref()
                     .map(|config| config.codec)
@@ -1624,7 +1640,10 @@ fn spawn_live_stream_renderer(
                     renderer_stats.stale_inputs = renderer_stats.stale_inputs.saturating_add(1);
                 }
                 if should_resync {
-                    last_frame_id = Some(frame.id);
+                    // The next independently decodable keyframe starts a new
+                    // frame-id observation epoch. Counting its jump from the
+                    // discarded stale frame would be another false loss.
+                    last_frame_id = None;
                     resync_decoder_after_frame_gap(&mut awaiting_keyframe);
                     request_idr_debounced(
                         &control_socket,
@@ -1637,44 +1656,94 @@ fn spawn_live_stream_renderer(
                 }
 
                 {
-                    let frame_gap = last_frame_id
-                        .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
-                        .unwrap_or(false);
+                    let gap_reason = classify_frame_gap(
+                        last_frame_id,
+                        frame.id,
+                        frame_was_intentionally_discarded,
+                        awaiting_keyframe,
+                    );
                     last_frame_id = Some(frame.id);
 
                     if keyframe {
                         log_info!(
-                            "Received IDR access unit id={} gap={} awaitingKeyframe={}",
+                            "Received IDR access unit id={} gapReason={:?} awaitingKeyframe={}",
                             frame.id,
-                            frame_gap,
+                            gap_reason,
                             awaiting_keyframe
                         );
                     }
 
-                    if frame_gap {
-                        renderer_stats.frame_gaps += 1;
-                        control_clone
-                            .frame_gaps
-                            .store(renderer_stats.frame_gaps, Ordering::Relaxed);
-                        log_info!(
-                            "UDP access-unit gap detected at id={}; awaiting next IDR",
-                            frame.id
-                        );
-                        if keyframe {
-                            awaiting_keyframe = false;
-                        } else {
-                            resync_decoder_after_frame_gap(&mut awaiting_keyframe);
-                            request_idr_debounced(
-                                &control_socket,
-                                peer,
-                                &viewer_control_token,
-                                &mut recovery_gate,
-                                &control_clone,
+                    match gap_reason {
+                        FrameGapReason::None => {}
+                        FrameGapReason::NetworkLoss { missing } => {
+                            renderer_stats.frame_gaps += 1;
+                            control_clone
+                                .frame_gaps
+                                .store(renderer_stats.frame_gaps, Ordering::Relaxed);
+                            log_info!(
+                                "UDP access-unit gap detected at id={} reason=networkLoss missing={} hardRecovery={}",
+                                frame.id,
+                                missing,
+                                !keyframe && missing >= 2
                             );
+                            if keyframe {
+                                awaiting_keyframe = false;
+                            } else if missing >= 2 {
+                                // A single missing AU can often be concealed
+                                // by MediaCodec. Do not turn every isolated
+                                // Wi-Fi loss into a keyframe burst; require a
+                                // larger hole or an actual decoder rejection.
+                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                    &control_clone,
+                                );
+                            }
+                        }
+                        FrameGapReason::LiveEdgeDiscard { missing } => {
+                            renderer_stats.intentional_live_edge_gaps += 1;
+                            log_info!(
+                                "UDP access-unit gap detected at id={} reason=liveEdgeDiscard missing={} awaitingKeyframe={}",
+                                frame.id,
+                                missing,
+                                awaiting_keyframe
+                            );
+                            if keyframe {
+                                awaiting_keyframe = false;
+                            } else if !awaiting_keyframe {
+                                // The selected delta may depend on one of the
+                                // AUs intentionally discarded by the
+                                // live-edge policy. Start one coalesced
+                                // recovery boundary; the outer gate prevents
+                                // another IDR request for this same episode.
+                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                    &control_clone,
+                                );
+                            }
+                        }
+                        FrameGapReason::RecoverySkip { missing } => {
+                            renderer_stats.recovery_skipped_frames += 1;
+                            log_info!(
+                                "UDP access-unit gap skipped at id={} reason=recoverySkip missing={} keyframe={}",
+                                frame.id,
+                                missing,
+                                keyframe
+                            );
+                            if keyframe {
+                                awaiting_keyframe = false;
+                            }
                         }
                     }
 
-                    if !frame_gap || keyframe {
+                    if should_feed_frame(gap_reason, keyframe) {
                         if let Some(dec) = decoder.as_mut() {
                             if !(awaiting_keyframe && !keyframe) {
                                 match feed_and_render(

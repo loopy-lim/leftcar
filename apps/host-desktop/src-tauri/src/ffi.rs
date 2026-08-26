@@ -409,6 +409,14 @@ impl CaptureBackend for FfiBackend {
                 fps: v["fps"].as_u64().unwrap_or(0) as u32,
                 kbps: v["kbps"].as_u64().unwrap_or(0) as u32,
                 fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
+                capture_fps: v["captureFps"].as_u64().unwrap_or(0) as u32,
+                encode_submit_fps: v["encodeSubmitFps"].as_u64().unwrap_or(0) as u32,
+                encode_output_fps: v["encodeOutputFps"].as_u64().unwrap_or(0) as u32,
+                rendered_fps: v["receiverRenderedFps"].as_u64().map(|value| value as u32),
+                capture_callbacks: v["captureCallbacks"].as_i64().unwrap_or(0),
+                encode_output_callbacks: v["encodeOutputCallbacks"].as_i64().unwrap_or(0),
+                encode_submit_failures: v["encodeSubmitFailures"].as_i64().unwrap_or(0),
+                encode_in_flight: v["encodeInFlight"].as_u64().unwrap_or(0) as u32,
                 dropped: v["dropped"].as_i64().unwrap_or(0),
                 network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
                 network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
@@ -429,6 +437,8 @@ impl CaptureBackend for FfiBackend {
                 send_pace_us: v["sendPaceUs"].as_u64().unwrap_or(0),
                 max_send_pace_us: v["maxSendPaceUs"].as_u64().unwrap_or(0),
                 pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
+                pending_frame_bytes: v["pendingFrameBytes"].as_u64().unwrap_or(0),
+                pending_frame_oldest_age_us: v["pendingFrameOldestAgeUs"].as_u64().unwrap_or(0),
                 capture_backend: v["captureBackend"]
                     .as_str()
                     .unwrap_or("screenCaptureKit")
@@ -442,6 +452,7 @@ impl CaptureBackend for FfiBackend {
                 capture_to_encode_p95_us: v["captureToEncodeP95Us"].as_u64().unwrap_or(0),
                 capture_queue_wait_p95_us: v["captureQueueWaitP95Us"].as_u64().unwrap_or(0),
                 encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
+                encode_output_interval_p95_us: v["encodeOutputIntervalP95Us"].as_u64().unwrap_or(0),
                 send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
                 send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
                 last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),

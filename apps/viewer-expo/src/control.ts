@@ -43,6 +43,14 @@ export interface SessionView {
   fps: number;
   kbps: number;
   fpsTarget: number;
+  captureFps?: number;
+  encodeSubmitFps?: number;
+  encodeOutputFps?: number;
+  renderedFps?: number | null;
+  captureCallbacks?: number;
+  encodeOutputCallbacks?: number;
+  encodeSubmitFailures?: number;
+  encodeInFlight?: number;
   dropped: number;
   networkDropped?: number;
   networkQueueDropped?: number;
@@ -62,6 +70,8 @@ export interface SessionView {
   sendPaceUs?: number;
   maxSendPaceUs?: number;
   pendingFrame: number;
+  pendingFrameBytes?: number;
+  pendingFrameOldestAgeUs?: number;
   frames: number;
   bytes: number;
   captureBackend: "screenCaptureKit" | "cgDisplayStream" | "windowsGraphicsCapture" | string;
@@ -74,6 +84,7 @@ export interface SessionView {
   captureToEncodeP95Us: number;
   captureQueueWaitP95Us: number;
   encodeOutputP95Us: number;
+  encodeOutputIntervalP95Us?: number;
   sendBlockP95Us: number;
   sendPaceP95Us?: number;
   error?: string | null;

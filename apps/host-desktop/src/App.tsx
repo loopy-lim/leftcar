@@ -36,6 +36,14 @@ interface SessionRow {
   fps: number;
   kbps: number;
   fpsTarget?: number;
+  captureFps?: number;
+  encodeSubmitFps?: number;
+  encodeOutputFps?: number;
+  renderedFps?: number | null;
+  captureCallbacks?: number;
+  encodeOutputCallbacks?: number;
+  encodeSubmitFailures?: number;
+  encodeInFlight?: number;
   inputEnabled: boolean;
   inputRateHz: number;
   dropped?: number;
@@ -55,6 +63,8 @@ interface SessionRow {
   sendBlockUs?: number;
   maxSendBlockUs?: number;
   pendingFrame?: number;
+  pendingFrameBytes?: number;
+  pendingFrameOldestAgeUs?: number;
   frames?: number;
   bytes?: number;
   captureBackend?: string;
@@ -67,6 +77,7 @@ interface SessionRow {
   captureToEncodeP95Us?: number;
   captureQueueWaitP95Us?: number;
   encodeOutputP95Us?: number;
+  encodeOutputIntervalP95Us?: number;
   sendBlockP95Us?: number;
   sendPaceP95Us?: number;
   lastAuBytes?: number;
@@ -847,6 +858,7 @@ function SessionCard({
   onForceStop,
 }: SessionCardProps) {
   const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
+  const encodeOutputFps = session.encodeOutputFps ?? session.fps;
   const transportLabel = session.mediaTransport === "usb"
     ? "USB (AOAP)"
     : session.mediaTransport === "udp"
@@ -897,14 +909,14 @@ function SessionCard({
 
       <div className="stream-card-metrics-grid">
         <div className="metric-card">
-          <span className="metric-card-label">화면 움직임</span>
+          <span className="metric-card-label">인코더 출력</span>
           <span className="metric-card-value font-emerald">
             <span className="signal-bars" aria-hidden="true">
               <span className="bar bar-1 active" />
               <span className="bar bar-2 active" />
               <span className="bar bar-3 active" />
             </span>
-            {session.fps} FPS
+            {encodeOutputFps} FPS
           </span>
         </div>
 
@@ -936,6 +948,38 @@ function SessionCard({
         <div className="inspector-panel">
           <span className="inspector-header">연결 상세 정보</span>
           <div className="inspector-grid">
+            <div className="inspector-item">
+              <span className="inspector-item-label">단계별 FPS (캡처 / 제출 / 출력)</span>
+              <span className="inspector-item-value">
+                {session.captureFps ?? "측정 중"}
+                {" / "}
+                {session.encodeSubmitFps ?? session.fps}
+                {" / "}
+                {session.encodeOutputFps ?? "측정 중"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">실제 Android 렌더 FPS</span>
+              <span className="inspector-item-value">
+                {session.renderedFps != null ? `${session.renderedFps} FPS` : "feedback 대기 중"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">인코더 제출 실패 / in-flight</span>
+              <span className="inspector-item-value">
+                {session.encodeSubmitFailures ?? 0}
+                {" / "}
+                {session.encodeInFlight ?? 0}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">인코더 출력 간격 p95</span>
+              <span className="inspector-item-value">
+                {session.encodeOutputIntervalP95Us != null
+                  ? `${(session.encodeOutputIntervalP95Us / 1000).toFixed(1)}ms`
+                  : "측정 중"}
+              </span>
+            </div>
             <div className="inspector-item">
               <span className="inspector-item-label">화면 가져오기</span>
               <span className="inspector-item-value">
@@ -998,6 +1042,14 @@ function SessionCard({
                 {session.recoveryFramesDropped ?? 0}
                 {" / 캡처 "}
                 {session.captureQueueDropped ?? 0}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">Host 큐 점유 / oldest</span>
+              <span className="inspector-item-value">
+                {session.pendingFrameBytes ?? 0}B
+                {" / "}
+                {((session.pendingFrameOldestAgeUs ?? 0) / 1000).toFixed(1)}ms
               </span>
             </div>
             <div className="inspector-item">

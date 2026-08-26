@@ -108,8 +108,67 @@ func recoveryEncodeGateExpired(startedNs: UInt64, nowNs: UInt64, timeoutNs: UInt
     startedNs > 0 && nowNs >= startedNs && nowNs - startedNs >= timeoutNs
 }
 
+/// The wall-clock budget for one frame at the requested stream rate. Round up
+/// so a 60fps budget is never reported as shorter than the actual 16.67ms
+/// interval.
+func frameBudgetUs(fps: UInt32) -> UInt64 {
+    let safeFps = UInt64(max(1, fps))
+    return (1_000_000 + safeFps - 1) / safeFps
+}
+
+/// Recovery IDRs are allowed a short LAN burst, but must not be paced at the
+/// steady-state bitrate. The required rate is derived from the observed AU
+/// size and a two-frame recovery budget, then bounded so a pathological IDR
+/// cannot monopolize the socket indefinitely. Ordinary deltas never call this
+/// policy and retain the ABR-selected bitrate.
+func recoveryPacingBitrate(
+    targetBitrate: Int,
+    bytes: Int,
+    fps: UInt32
+) -> Int {
+    let recoveryBudgetUs = max(frameBudgetUs(fps: fps) * 2, 25_000)
+    let safeBytes = UInt64(max(1, bytes))
+    let requiredBitrate = Int(
+        min(
+            UInt64(Int.max),
+            (safeBytes * 8 * 1_000_000 + recoveryBudgetUs - 1) / recoveryBudgetUs
+        )
+    )
+    return min(
+        max(max(1, targetBitrate), max(40_000_000, requiredBitrate)),
+        80_000_000
+    )
+}
+
 func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
-    width >= 3_840 && height >= 2_160 ? 4 : 2
+    width >= 2_560 && height >= 1_440 ? 5 : 2
+}
+
+func fecParityCount(dataCount: Int, reduced: Bool = false) -> Int {
+    guard dataCount > 1 else { return 0 }
+    if reduced {
+        // Video deltas use the same two-shard budget for a full group as the
+        // normal path. A short tail still gets one shard, which is enough to
+        // avoid promoting one lost tail fragment into an IDR recovery burst.
+        return dataCount >= 4 ? 2 : 1
+    }
+    if dataCount == 8 { return 2 }
+    return 1
+}
+
+func shouldStartNetworkRecovery(
+    awaitingKeyframe: Bool,
+    keyframeInFlight: Bool,
+    keyframeQueued: Bool
+) -> Bool {
+    !awaitingKeyframe && !keyframeInFlight && !keyframeQueued
+}
+
+func shouldRecoverAfterNetworkOverflow(
+    incomingIsKeyframe: Bool,
+    keyframeQueued: Bool
+) -> Bool {
+    !incomingIsKeyframe && !keyframeQueued
 }
 
 func shouldOffloadEncodedSample(width: UInt32, height: UInt32) -> Bool {
@@ -688,10 +747,41 @@ private struct PendingCaptureFrame {
     let captureWallMs: UInt64
 }
 
-private struct PendingEncodedFrame {
+struct PendingEncodedFrame {
     let data: Data
     let isKeyframe: Bool
     let isRecoveryKeyframe: Bool
+    let queuedNs: UInt64
+
+    init(
+        data: Data,
+        isKeyframe: Bool,
+        isRecoveryKeyframe: Bool,
+        queuedNs: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        self.data = data
+        self.isKeyframe = isKeyframe
+        self.isRecoveryKeyframe = isRecoveryKeyframe
+        self.queuedNs = queuedNs
+    }
+}
+
+struct NetworkQueueSnapshot {
+    let count: Int
+    let bytes: Int
+    let oldestAgeUs: UInt64
+}
+
+func networkQueueSnapshot(frames: [PendingEncodedFrame], nowNs: UInt64) -> NetworkQueueSnapshot {
+    let bytes = frames.reduce(into: 0) { total, frame in
+        total += frame.data.count
+    }
+    let oldestAgeUs = frames
+        .map { frame in
+            nowNs >= frame.queuedNs ? (nowNs - frame.queuedNs) / 1_000 : 0
+        }
+        .max() ?? 0
+    return NetworkQueueSnapshot(count: frames.count, bytes: bytes, oldestAgeUs: oldestAgeUs)
 }
 
 private func appendRollingSample(_ value: UInt64, to samples: inout [UInt64]) {
@@ -812,6 +902,9 @@ final class CaptureSession {
     private var networkQueueDropped: Int64 = 0
     private var sentDatagrams: Int64 = 0
     private var sentParityDatagrams: Int64 = 0
+    private var captureCallbacks: Int64 = 0
+    private var encodeOutputCallbacks: Int64 = 0
+    private var encodeSubmitFailures: Int64 = 0
     private var lastAuBytes: UInt64 = 0
     private var lastAuFragments: UInt32 = 0
     private var lastAuParity: UInt32 = 0
@@ -843,7 +936,9 @@ final class CaptureSession {
     private var lastSendPaceUs: UInt64 = 0
     private var maxSendPaceUs: UInt64 = 0
     private var lastCaptureCallbackNs: UInt64?
+    private var lastEncodeOutputCallbackNs: UInt64?
     private var captureIntervalSamplesUs: [UInt64] = []
+    private var encodeOutputIntervalSamplesUs: [UInt64] = []
     private var captureToEncodeSamplesUs: [UInt64] = []
     private var captureQueueWaitSamplesUs: [UInt64] = []
     private var encodeOutputSamplesUs: [UInt64] = []
@@ -866,9 +961,13 @@ final class CaptureSession {
 
     // 1s-window rate counters for stats
     private var rateWindowStart = Date()
+    private var rateWindowCaptureCallbacks: Int64 = 0
     private var rateWindowFrames: Int64 = 0
+    private var rateWindowEncodeOutputCallbacks: Int64 = 0
     private var rateWindowBytes: Int64 = 0
+    private var lastCaptureFps: UInt32 = 0
     private var lastFps: UInt32 = 0
+    private var lastEncodeOutputFps: UInt32 = 0
     private var lastKbps: UInt32 = 0
     private var forceKeyframe = false
     private var recoveryKeyframePending = false
@@ -883,6 +982,7 @@ final class CaptureSession {
     private var receiverRttMs: UInt16 = .max
     private var receiverWireMs: UInt16 = .max
     private var receiverFeedbackNs: UInt64 = 0
+    private var receiverRenderedFps: UInt32?
     private var lastAdaptedReceiverLoss: UInt64 = 0
     private var stableBitrateWindows = 0
     // Video playback produces sustained high-change deltas. Keep a short
@@ -1023,12 +1123,16 @@ final class CaptureSession {
         guard mediaTransport == .udp else { return }
         stateLock.lock()
         // A recovery IDR is a short intra-frame burst. Pacing it at the
-        // steady-state average bitrate takes hundreds of milliseconds on a
-        // 1080p screen, during which the encoder produces deltas that can no
-        // longer form a contiguous reference chain. The Wi-Fi path has ample
-        // headroom, so give only the recovery burst a bounded 20Mbps budget;
-        // ordinary deltas remain governed by ABR.
-        let bitrate = max(1, isKeyframe ? max(currentAverageBitrate, 20_000_000) : currentAverageBitrate)
+        // steady-state bitrate takes too long for the reference chain to
+        // remain useful. Use a bounded LAN recovery budget; ordinary deltas
+        // remain governed by ABR.
+        let bitrate = isKeyframe
+            ? recoveryPacingBitrate(
+                targetBitrate: currentAverageBitrate,
+                bytes: bytes,
+                fps: fps
+            )
+            : max(1, currentAverageBitrate)
         stateLock.unlock()
         // Pace at the configured media rate, with a small floor to avoid
         // recreating a burst for tiny tail fragments. The deadline is shared
@@ -1682,6 +1786,10 @@ final class CaptureSession {
         let captureWallMs = UInt64(Date().timeIntervalSince1970 * 1_000.0)
         stateLock.lock()
         let stillRunning = running
+        if stillRunning {
+            captureCallbacks &+= 1
+            rateWindowCaptureCallbacks &+= 1
+        }
         if stillRunning, firstCaptureNs == nil {
             firstCaptureNs = callbackNs
             lifecycleState = "encoding_first_frame"
@@ -1920,6 +2028,7 @@ final class CaptureSession {
         } else {
             NSLog("Leftcar H.264 submit failed %@: status=%d", targetLabel, status)
             stateLock.lock()
+            encodeSubmitFailures &+= 1
             captureNsByPts.removeValue(forKey: pts.value)
             captureWallMsByPts.removeValue(forKey: pts.value)
             encodeSubmitNsByPts.removeValue(forKey: pts.value)
@@ -1951,6 +2060,32 @@ final class CaptureSession {
             recoveryRequestsSuppressed &+= 1
         }
         stateLock.unlock()
+    }
+
+    /// Start one network recovery episode. A viewer can repeat IDR requests
+    /// while the same recovery keyframe is still being encoded or drained;
+    /// those requests must not repeatedly erase the recovery boundary or
+    /// churn the pending delta queue.
+    private func beginNetworkRecovery() {
+        networkLock.lock()
+        let keyframeQueued = pendingFrames.contains(where: { $0.isKeyframe })
+        let shouldStart = shouldStartNetworkRecovery(
+            awaitingKeyframe: networkAwaitingKeyframe,
+            keyframeInFlight: networkKeyframeInFlight,
+            keyframeQueued: keyframeQueued
+        )
+        if shouldStart {
+            pendingFrames.removeAll(keepingCapacity: true)
+            networkAwaitingKeyframe = true
+        }
+        let shouldRetry = networkAwaitingKeyframe
+            && !networkKeyframeInFlight
+            && !keyframeQueued
+        networkLock.unlock()
+
+        if shouldStart || shouldRetry {
+            requestRecoveryKeyframe()
+        }
     }
 
     private func recoveryKeyframeDidSend() {
@@ -2319,6 +2454,15 @@ final class CaptureSession {
         let encodeNs = DispatchTime.now().uptimeNanoseconds
         let encodedPts = CMSampleBufferGetPresentationTimeStamp(sample).value
         stateLock.lock()
+        encodeOutputCallbacks &+= 1
+        rateWindowEncodeOutputCallbacks &+= 1
+        if let previous = lastEncodeOutputCallbackNs, encodeNs >= previous {
+            appendRollingSample(
+                (encodeNs - previous) / 1_000,
+                to: &encodeOutputIntervalSamplesUs
+            )
+        }
+        lastEncodeOutputCallbackNs = encodeNs
         if firstEncodeNs == nil {
             firstEncodeNs = encodeNs
             lifecycleState = "waiting_first_send"
@@ -2532,12 +2676,26 @@ final class CaptureSession {
                 // IDR instead.
                 let discarded = pendingFrames.count + (isKeyframe ? 0 : 1)
                 let keyframeInFlight = networkKeyframeInFlight
+                let queuedKeyframe = pendingFrames.last(where: { $0.isKeyframe })
                 pendingFrames.removeAll(keepingCapacity: true)
+                if let queuedKeyframe, !isKeyframe {
+                    // Preserve an already queued recovery boundary. Dropping
+                    // it would make the next deltas undecodable and request a
+                    // second IDR burst for the same loss episode.
+                    pendingFrames.append(queuedKeyframe)
+                }
                 stateLock.lock()
-                framesDropped &+= Int64(discarded)
-                networkQueueDropped &+= Int64(discarded)
-                if keyframeInFlight || networkAwaitingKeyframe {
-                    recoveryFramesDropped &+= Int64(discarded)
+                if queuedKeyframe != nil && !isKeyframe {
+                    let retained = discarded - 1
+                    framesDropped &+= Int64(retained)
+                    networkQueueDropped &+= Int64(retained)
+                    recoveryFramesDropped &+= Int64(retained)
+                } else {
+                    framesDropped &+= Int64(discarded)
+                    networkQueueDropped &+= Int64(discarded)
+                    if keyframeInFlight || networkAwaitingKeyframe {
+                        recoveryFramesDropped &+= Int64(discarded)
+                    }
                 }
                 stateLock.unlock()
                 if isKeyframe {
@@ -2554,7 +2712,10 @@ final class CaptureSession {
                     // boundary. Dropping deltas behind that boundary is
                     // expected; asking for another IDR here would create a
                     // second burst before the first one has arrived.
-                    if !keyframeInFlight {
+                    if shouldRecoverAfterNetworkOverflow(
+                        incomingIsKeyframe: isKeyframe,
+                        keyframeQueued: queuedKeyframe != nil
+                    ) {
                         networkAwaitingKeyframe = true
                         requestRecoveryKeyframe()
                     }
@@ -2651,11 +2812,7 @@ final class CaptureSession {
                 return
             }
             if message == Data("IDR".utf8) {
-                networkLock.lock()
-                pendingFrames.removeAll(keepingCapacity: true)
-                networkAwaitingKeyframe = true
-                networkLock.unlock()
-                requestRecoveryKeyframe()
+                beginNetworkRecovery()
                 // A prepared Android listener can consume the initial status
                 // before its Surface exists. IDR is the renderer handoff
                 // signal, so refresh both codec state and input-lock state.
@@ -2682,6 +2839,9 @@ final class CaptureSession {
                 receiverOutputBurstDiscards = message.count >= 32
                     ? readUInt32BE(message, at: 28)
                     : 0
+                receiverRenderedFps = message.count >= 34
+                    ? UInt32(readUInt16BE(message, at: 32))
+                    : nil
                 receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
                 stateLock.unlock()
                 armReceiverHealthCheck()
@@ -2744,11 +2904,7 @@ final class CaptureSession {
                     return
                 }
                 if messageBytes == Array("IDR".utf8) {
-                    networkLock.lock()
-                    pendingFrames.removeAll(keepingCapacity: true)
-                    networkAwaitingKeyframe = true
-                    networkLock.unlock()
-                    requestRecoveryKeyframe()
+                    beginNetworkRecovery()
                     sendInputStatus(fd: fd)
                     continue
                 }
@@ -2774,6 +2930,9 @@ final class CaptureSession {
                     receiverOutputBurstDiscards = message.count >= 32
                         ? readUInt32BE(message, at: 28)
                         : 0
+                    receiverRenderedFps = message.count >= 34
+                        ? UInt32(readUInt16BE(message, at: 32))
+                        : nil
                     receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
                     stateLock.unlock()
                     armReceiverHealthCheck()
@@ -3143,18 +3302,6 @@ final class CaptureSession {
     // Keep the macOS shim self-contained: its C ABI dylib is loaded by the
     // Tauri host independently from the Rust host crate. This is the same
     // GF(256) RS(8,10) layout used by fec-core for Windows and Android.
-    private func fecParityCount(_ dataCount: Int, reduced: Bool = false) -> Int {
-        if reduced {
-            // Video deltas arrive every 16.7ms. One parity shard per full
-            // group covers the common single-loss case without making FEC a
-            // sustained bandwidth burst of its own.
-            return dataCount >= 4 ? 1 : 0
-        }
-        if dataCount == 8 { return 2 }
-        if dataCount > 1 { return 1 }
-        return 0
-    }
-
     private static let fecMultiplyTable: [UInt8] = {
         var table = [UInt8](repeating: 0, count: 256 * 256)
         for left in 0..<256 {
@@ -3199,7 +3346,7 @@ final class CaptureSession {
             let end = min(payloads.count, base + 8)
             let group = Array(payloads[base..<end])
             let k = group.count
-            let parityCount = fecParityCount(k, reduced: reducedParity)
+            let parityCount = fecParityCount(dataCount: k, reduced: reducedParity)
             guard parityCount > 0 else { continue }
             let width = (group.map(\.count).max() ?? 0) + 2
             let shards = group.map { payload -> [UInt8] in
@@ -3247,13 +3394,10 @@ final class CaptureSession {
         fragmentCount: Int,
         isKeyframe: Bool
     ) -> Bool {
-        // A parity datagram is a useful loss budget for a large AU, but it is
-        // pure overhead for the common one-to-three-fragment desktop delta.
-        // Protecting every small AU makes the sender spend more than one
-        // frame interval on the wire and fills the latest-frame queue before
-        // FEC can help. Keyframes remain protected because losing one would
-        // otherwise force another full decoder recovery.
-        isKeyframe || fragmentCount >= 4
+        // One parity shard protects a short AU from one lost fragment; full
+        // groups use two shards so a transient Wi-Fi burst does not promote
+        // the whole H.264 reference chain into an IDR recovery burst.
+        isKeyframe || fragmentCount >= 2
     }
 
     /// Send one config datagram or one fragmented H.264 AU. Datagram payloads
@@ -3355,7 +3499,7 @@ final class CaptureSession {
                 let end = min(fragmentCount, base + 8)
                 transmissions.append(contentsOf: primaryDatagrams[base..<end])
                 let parityCount = fecParityCount(
-                    end - base,
+                    dataCount: end - base,
                     reduced: contentMode == .video && !isKeyframe
                 )
                 if !mediaTransport.usesTCP && parityCount > 0 {
@@ -3470,16 +3614,24 @@ final class CaptureSession {
     // MARK: Stats
 
     func statsJSON() -> String {
+        captureLock.lock()
+        let currentEncodeInFlight = encodeInFlight
+        captureLock.unlock()
+
         stateLock.lock()
         // roll the 1s rate window
         let now = Date()
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let elapsed = now.timeIntervalSince(rateWindowStart)
         if elapsed >= 1.0 {
+            lastCaptureFps = UInt32((Double(rateWindowCaptureCallbacks) / elapsed).rounded())
             lastFps = UInt32((Double(rateWindowFrames) / elapsed).rounded())
+            lastEncodeOutputFps = UInt32((Double(rateWindowEncodeOutputCallbacks) / elapsed).rounded())
             lastKbps = UInt32((Double(rateWindowBytes) * 8.0 / 1000.0 / elapsed).rounded())
             rateWindowStart = now
+            rateWindowCaptureCallbacks = 0
             rateWindowFrames = 0
+            rateWindowEncodeOutputCallbacks = 0
             rateWindowBytes = 0
         }
 
@@ -3513,10 +3665,15 @@ final class CaptureSession {
         let recoveryKeyframes = recoveryKeyframes
         let recoveryRequestsSuppressed = recoveryRequestsSuppressed
         let captureQueueDropped = captureQueueDropped
+        let captureCallbacks = captureCallbacks
+        let encodeOutputCallbacks = encodeOutputCallbacks
+        let encodeSubmitFailures = encodeSubmitFailures
         let framesDropped = networkDropped + captureQueueDropped
         let framesEncoded = framesEncoded
         let bytesSent = bytesSent
+        let reportedCaptureFps = lastCaptureFps
         let reportedFps = lastFps
+        let reportedEncodeOutputFps = lastEncodeOutputFps
         let reportedKbps = lastKbps
         let error = stoppedReason
         let codec = codecKind.rawValue
@@ -3525,6 +3682,7 @@ final class CaptureSession {
         let firstSendMs = firstSendNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let currentBitrate = currentAverageBitrate
         let captureIntervalP95Us = percentile95(captureIntervalSamplesUs)
+        let encodeOutputIntervalP95Us = percentile95(encodeOutputIntervalSamplesUs)
         let captureToEncodeP95Us = percentile95(captureToEncodeSamplesUs)
         let captureQueueWaitP95Us = percentile95(captureQueueWaitSamplesUs)
         let encodeOutputP95Us = percentile95(encodeOutputSamplesUs)
@@ -3546,10 +3704,12 @@ final class CaptureSession {
         let reportedReceiverIncompleteAUs = receiverIncompleteAUs
         let reportedReceiverStaleFrames = receiverStaleFrames
         let reportedReceiverOutputBurstDiscards = receiverOutputBurstDiscards
+        let receiverRenderedFpsValue: Any = receiverRenderedFps
+            .map { NSNumber(value: $0) } ?? NSNull()
         stateLock.unlock()
 
         networkLock.lock()
-        let pending = pendingFrames.count
+        let queueSnapshot = networkQueueSnapshot(frames: pendingFrames, nowNs: nowNs)
         networkLock.unlock()
 
         let obj: [String: Any] = [
@@ -3566,8 +3726,15 @@ final class CaptureSession {
             "bytes": bytesSent,
             "state": state,
             "fps": reportedFps,
+            "captureFps": reportedCaptureFps,
+            "encodeSubmitFps": reportedFps,
+            "encodeOutputFps": reportedEncodeOutputFps,
             "kbps": reportedKbps,
             "fpsTarget": self.fps,
+            "captureCallbacks": captureCallbacks,
+            "encodeOutputCallbacks": encodeOutputCallbacks,
+            "encodeSubmitFailures": encodeSubmitFailures,
+            "encodeInFlight": currentEncodeInFlight,
             "codec": codec,
             "captureBackend": backend.rawValue,
             "mediaTransport": mediaTransport.rawValue,
@@ -3576,6 +3743,7 @@ final class CaptureSession {
             "firstSendMs": firstSendMs,
             "currentBitrate": currentBitrate,
             "captureIntervalP95Us": captureIntervalP95Us,
+            "encodeOutputIntervalP95Us": encodeOutputIntervalP95Us,
             "captureToEncodeP95Us": captureToEncodeP95Us,
             "captureQueueWaitP95Us": captureQueueWaitP95Us,
             "encodeOutputP95Us": encodeOutputP95Us,
@@ -3608,10 +3776,13 @@ final class CaptureSession {
             "receiverStaleFrames": reportedReceiverStaleFrames,
             "receiverStaleInputDrops": receiverStaleInputDropsValue,
             "receiverOutputBurstDiscards": reportedReceiverOutputBurstDiscards,
+            "receiverRenderedFps": receiverRenderedFpsValue,
             "receiverRttMs": receiverRttValue,
             "receiverWireMs": receiverWireValue,
             "receiverFeedbackAgeMs": receiverFeedbackAgeValue,
-            "pendingFrame": pending,
+            "pendingFrame": queueSnapshot.count,
+            "pendingFrameBytes": queueSnapshot.bytes,
+            "pendingFrameOldestAgeUs": queueSnapshot.oldestAgeUs,
             "error": error,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: obj),

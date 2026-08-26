@@ -21,4 +21,16 @@ describe("stream profiles", () => {
       contentMode: "interactive",
     });
   });
+
+  it("marks 1440p60 as the measurable fallback baseline", () => {
+    expect(STREAM_PROFILES.find((profile) => profile.id === "balanced")).toMatchObject({
+      id: "balanced",
+      detail: "1440p 60fps",
+      maxWidth: 2560,
+      maxHeight: 1440,
+      fps: 60,
+      contentMode: "interactive",
+      role: "fallback",
+    });
+  });
 });

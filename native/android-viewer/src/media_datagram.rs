@@ -62,6 +62,57 @@ pub fn select_live_edge_frames<T>(mut frames: Vec<T>) -> LiveEdgeSelection<T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameGapReason {
+    None,
+    NetworkLoss { missing: u16 },
+    LiveEdgeDiscard { missing: u16 },
+    RecoverySkip { missing: u16 },
+}
+
+/// Classify a frame-id jump using the receiver-side event that caused it.
+///
+/// A live-edge collapse is a deliberate local discard, not packet loss. Once
+/// recovery is already active, skipped deltas are also not a new loss event;
+/// counting either as network loss feeds the Host's recovery/bitrate loop with
+/// a false positive and can create another IDR burst.
+pub fn classify_frame_gap(
+    previous: Option<u16>,
+    current: u16,
+    intentional_live_edge_discard: bool,
+    awaiting_keyframe: bool,
+) -> FrameGapReason {
+    let Some(previous) = previous else {
+        return FrameGapReason::None;
+    };
+    let missing = viewer_decoder::frame_id_missing_count(previous, current);
+    if missing == 0 {
+        return FrameGapReason::None;
+    }
+    if awaiting_keyframe {
+        FrameGapReason::RecoverySkip { missing }
+    } else if intentional_live_edge_discard {
+        FrameGapReason::LiveEdgeDiscard { missing }
+    } else {
+        FrameGapReason::NetworkLoss { missing }
+    }
+}
+
+/// Decide whether a completed AU may enter MediaCodec after a frame-id jump.
+///
+/// Feeding a delta after a local live-edge collapse is unsafe because its
+/// reference chain may include one of the deliberately discarded AUs. A
+/// keyframe is independently decodable and remains eligible. A single actual
+/// network loss is retained as a concealment opportunity; larger holes wait
+/// for a recovery keyframe.
+pub fn should_feed_frame(reason: FrameGapReason, keyframe: bool) -> bool {
+    match reason {
+        FrameGapReason::None => true,
+        FrameGapReason::NetworkLoss { missing } => keyframe || missing == 1,
+        FrameGapReason::LiveEdgeDiscard { .. } | FrameGapReason::RecoverySkip { .. } => keyframe,
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiverPressure {
     pub live_edge_discards: u64,
@@ -1019,5 +1070,61 @@ mod tests {
             ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
             [22, 23]
         );
+    }
+
+    #[test]
+    fn live_edge_skip_is_not_reported_as_network_loss() {
+        assert_eq!(
+            classify_frame_gap(Some(10), 20, true, false),
+            FrameGapReason::LiveEdgeDiscard { missing: 9 }
+        );
+    }
+
+    #[test]
+    fn real_gap_is_reported_as_network_loss() {
+        assert_eq!(
+            classify_frame_gap(Some(10), 20, false, false),
+            FrameGapReason::NetworkLoss { missing: 9 }
+        );
+    }
+
+    #[test]
+    fn frames_skipped_while_waiting_for_keyframe_are_not_new_loss() {
+        assert_eq!(
+            classify_frame_gap(Some(10), 20, false, true),
+            FrameGapReason::RecoverySkip { missing: 9 }
+        );
+    }
+
+    #[test]
+    fn first_frame_has_no_gap_reason() {
+        assert_eq!(
+            classify_frame_gap(None, 20, true, false),
+            FrameGapReason::None
+        );
+    }
+
+    #[test]
+    fn live_edge_delta_is_not_fed_after_reference_chain_collapse() {
+        assert!(!should_feed_frame(
+            FrameGapReason::LiveEdgeDiscard { missing: 9 },
+            false
+        ));
+        assert!(should_feed_frame(
+            FrameGapReason::LiveEdgeDiscard { missing: 9 },
+            true
+        ));
+    }
+
+    #[test]
+    fn one_real_missing_delta_can_still_be_fed_for_decoder_concealment() {
+        assert!(should_feed_frame(
+            FrameGapReason::NetworkLoss { missing: 1 },
+            false
+        ));
+        assert!(!should_feed_frame(
+            FrameGapReason::NetworkLoss { missing: 2 },
+            false
+        ));
     }
 }

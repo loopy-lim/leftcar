@@ -254,6 +254,23 @@ pub struct StatsInfo {
     pub fps: u32,
     pub kbps: u32,
     pub fps_target: u32,
+    /// Stage-separated rates. `fps` remains the legacy encode-submit rate.
+    #[serde(default)]
+    pub capture_fps: u32,
+    #[serde(default)]
+    pub encode_submit_fps: u32,
+    #[serde(default)]
+    pub encode_output_fps: u32,
+    #[serde(default)]
+    pub rendered_fps: Option<u32>,
+    #[serde(default)]
+    pub capture_callbacks: i64,
+    #[serde(default)]
+    pub encode_output_callbacks: i64,
+    #[serde(default)]
+    pub encode_submit_failures: i64,
+    #[serde(default)]
+    pub encode_in_flight: u32,
     pub dropped: i64,
     pub network_dropped: i64,
     #[serde(default)]
@@ -282,6 +299,12 @@ pub struct StatsInfo {
     #[serde(default)]
     pub max_send_pace_us: u64,
     pub pending_frame: u32,
+    /// Userspace network queue depth in encoded bytes and age of its oldest
+    /// frame. A zero frame count does not prove the kernel socket is empty.
+    #[serde(default)]
+    pub pending_frame_bytes: u64,
+    #[serde(default)]
+    pub pending_frame_oldest_age_us: u64,
     pub capture_backend: String,
     pub media_transport: String,
     pub first_capture_ms: u64,
@@ -292,6 +315,8 @@ pub struct StatsInfo {
     pub capture_to_encode_p95_us: u64,
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
+    #[serde(default)]
+    pub encode_output_interval_p95_us: u64,
     pub send_block_p95_us: u64,
     #[serde(default)]
     pub send_pace_p95_us: u64,
@@ -439,6 +464,22 @@ pub struct SessionView {
     pub fps: u32,
     pub kbps: u32,
     pub fps_target: u32,
+    #[serde(default)]
+    pub capture_fps: u32,
+    #[serde(default)]
+    pub encode_submit_fps: u32,
+    #[serde(default)]
+    pub encode_output_fps: u32,
+    #[serde(default)]
+    pub rendered_fps: Option<u32>,
+    #[serde(default)]
+    pub capture_callbacks: i64,
+    #[serde(default)]
+    pub encode_output_callbacks: i64,
+    #[serde(default)]
+    pub encode_submit_failures: i64,
+    #[serde(default)]
+    pub encode_in_flight: u32,
     /// Remote input is always host-approved per live stream and starts off.
     pub input_enabled: bool,
     /// Pointer sampling target. Discrete key/button events are immediate.
@@ -471,6 +512,10 @@ pub struct SessionView {
     #[serde(default)]
     pub max_send_pace_us: u64,
     pub pending_frame: u32,
+    #[serde(default)]
+    pub pending_frame_bytes: u64,
+    #[serde(default)]
+    pub pending_frame_oldest_age_us: u64,
     pub frames: i64,
     pub bytes: i64,
     pub capture_backend: String,
@@ -483,6 +528,8 @@ pub struct SessionView {
     pub capture_to_encode_p95_us: u64,
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
+    #[serde(default)]
+    pub encode_output_interval_p95_us: u64,
     pub send_block_p95_us: u64,
     #[serde(default)]
     pub send_pace_p95_us: u64,
@@ -606,6 +653,14 @@ mod stream_control_tests {
                 fps: 90,
                 kbps: 12000,
                 fps_target: 60,
+                capture_fps: 90,
+                encode_submit_fps: 90,
+                encode_output_fps: 90,
+                rendered_fps: Some(90),
+                capture_callbacks: 100,
+                encode_output_callbacks: 100,
+                encode_submit_failures: 0,
+                encode_in_flight: 0,
                 input_enabled: false,
                 input_rate_hz: 120,
                 dropped: 0,
@@ -628,6 +683,8 @@ mod stream_control_tests {
                 send_pace_us: 0,
                 max_send_pace_us: 0,
                 pending_frame: 0,
+                pending_frame_bytes: 0,
+                pending_frame_oldest_age_us: 0,
                 frames: 100,
                 bytes: 1_000_000,
                 capture_backend: "screenCaptureKit".into(),
@@ -640,6 +697,7 @@ mod stream_control_tests {
                 capture_to_encode_p95_us: 8_000,
                 capture_queue_wait_p95_us: 1_000,
                 encode_output_p95_us: 7_000,
+                encode_output_interval_p95_us: 11_111,
                 send_block_p95_us: 1_000,
                 send_pace_p95_us: 0,
                 last_au_bytes: 0,
@@ -678,6 +736,14 @@ mod stream_control_tests {
             fps: 90,
             kbps: 12000,
             fps_target: 60,
+            capture_fps: 90,
+            encode_submit_fps: 90,
+            encode_output_fps: 90,
+            rendered_fps: Some(90),
+            capture_callbacks: 100,
+            encode_output_callbacks: 100,
+            encode_submit_failures: 0,
+            encode_in_flight: 0,
             dropped: 0,
             network_dropped: 0,
             network_queue_dropped: 0,
@@ -698,6 +764,8 @@ mod stream_control_tests {
             send_pace_us: 0,
             max_send_pace_us: 0,
             pending_frame: 0,
+            pending_frame_bytes: 0,
+            pending_frame_oldest_age_us: 0,
             capture_backend: "screenCaptureKit".into(),
             media_transport: "udp".into(),
             first_capture_ms: 20,
@@ -708,6 +776,7 @@ mod stream_control_tests {
             capture_to_encode_p95_us: 8_000,
             capture_queue_wait_p95_us: 1_000,
             encode_output_p95_us: 7_000,
+            encode_output_interval_p95_us: 11_111,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
             last_au_bytes: 0,

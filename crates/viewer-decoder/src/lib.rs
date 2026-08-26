@@ -364,6 +364,18 @@ pub fn frame_id_is_next(previous: u16, current: u16) -> bool {
     current == previous.wrapping_add(1)
 }
 
+/// Return the number of missing access units between two forward frame ids.
+/// A duplicate or an implausibly large backwards jump is treated as a large
+/// loss so the caller takes the hard recovery path instead of feeding an
+/// ambiguous reference chain to MediaCodec.
+pub fn frame_id_missing_count(previous: u16, current: u16) -> u16 {
+    let distance = current.wrapping_sub(previous);
+    if distance == 0 || distance > u16::MAX / 2 {
+        return u16::MAX;
+    }
+    distance - 1
+}
+
 /// Extract csd-0 (SPS) and csd-1 (PPS) from an access unit chain for
 /// `AMediaFormat_setBuffer("csd-0"/"csd-1", ...)`.
 pub fn extract_config(aus: &[&[u8]]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -1106,6 +1118,9 @@ mod tests {
         assert!(frame_id_is_next(u16::MAX, 0));
         assert!(!frame_id_is_next(41, 43));
         assert!(!frame_id_is_next(41, 41));
+        assert_eq!(frame_id_missing_count(41, 42), 0);
+        assert_eq!(frame_id_missing_count(41, 43), 1);
+        assert_eq!(frame_id_missing_count(u16::MAX, 1), 1);
     }
 
     #[test]

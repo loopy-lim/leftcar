@@ -35,6 +35,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - [24주 구현 계획](docs/08-implementation-roadmap.md)
 - [위험과 미결정 사항](docs/09-risk-register.md)
 - [공식 근거 자료](docs/10-references.md)
+- [저지연 스트리밍 병목 조사](docs/11-low-latency-investigation.md)
 - [Apple 화면 공유 비교 기준](docs/apple-screen-sharing-baseline.md)
 - [Windows 원격 Host 구현과 검증](docs/windows-remote-host.md)
 - [구현 증거 문서](docs/EVIDENCE.md)
