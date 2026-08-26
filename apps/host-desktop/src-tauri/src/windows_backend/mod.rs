@@ -6,7 +6,8 @@ use crate::wire::{self, InputDecision, InputSequencer};
 use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
 use input::InputInjector;
 use std::collections::HashMap;
-use std::net::UdpSocket;
+use std::io::{Read, Write};
+use std::net::{TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -22,6 +23,43 @@ pub(super) struct Monitor {
     pub handle: isize,
     pub rect: RECT,
     pub name: String,
+}
+
+const MAX_TCP_MEDIA_FRAME: usize = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+pub(super) enum MediaSender {
+    Udp(Arc<UdpSocket>),
+    Tcp(Arc<Mutex<TcpStream>>),
+}
+
+impl MediaSender {
+    fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Udp(socket) => socket.send(packet),
+            Self::Tcp(stream) => {
+                if packet.is_empty() || packet.len() > MAX_TCP_MEDIA_FRAME {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "TCP media frame is outside the bounded range",
+                    ));
+                }
+                let mut frame = Vec::with_capacity(4 + packet.len());
+                frame.extend_from_slice(&(packet.len() as u32).to_be_bytes());
+                frame.extend_from_slice(packet);
+                stream
+                    .lock()
+                    .map_err(|_| std::io::Error::other("TCP media writer lock poisoned"))?
+                    .write_all(&frame)
+                    .map(|_| packet.len())
+            }
+        }
+    }
+}
+
+pub(super) enum MediaReceiver {
+    Udp(UdpSocket),
+    Tcp(TcpStream),
 }
 
 pub struct WindowsBackend {
@@ -42,7 +80,7 @@ pub(super) struct WindowsSession {
     /// Clone of the media socket used only for termination notices, so the
     /// input receiver can notify a dying viewer before the capture thread's
     /// socket is torn down. `None` on Windows builds where cloning failed.
-    notice_sender: Mutex<Option<UdpSocket>>,
+    notice_sender: Mutex<Option<MediaSender>>,
     /// Session nonce shared with the viewer; authenticates LCT1 notices.
     termination_token: Vec<u8>,
 }
@@ -146,9 +184,10 @@ impl CaptureBackend for WindowsBackend {
         fps: u32,
         capture_backend: &str,
         media_transport: &str,
+        _content_mode: &str,
     ) -> Result<u32, String> {
-        if media_transport != "udp" {
-            return Err("Windows backend currently supports Wi-Fi UDP only".into());
+        if !matches!(media_transport, "udp" | "usb") {
+            return Err("Windows backend supports Wi-Fi UDP or USB AOAP media".into());
         }
         if capture_backend != "windowsGraphicsCapture" {
             return Err(format!(
@@ -159,50 +198,84 @@ impl CaptureBackend for WindowsBackend {
             .get(source_index as usize)
             .cloned()
             .ok_or_else(|| format!("display index {source_index} no longer exists"))?;
-        let socket = UdpSocket::bind(("0.0.0.0", 0))
-            .map_err(|error| format!("bind media socket: {error}"))?;
-        socket
-            .connect((ip, port))
-            .map_err(|error| format!("connect viewer UDP {ip}:{port}: {error}"))?;
-        socket
-            .set_write_timeout(Some(Duration::from_millis(20)))
-            .map_err(|error| format!("configure media socket: {error}"))?;
         let token = uuid::Uuid::new_v4().to_string().into_bytes();
-        prove_udp_reachability(&socket, &token, ip, port)?;
+        let (media_sender, media_receiver, notice_sender) = if media_transport == "usb" {
+            let stream = TcpStream::connect(("127.0.0.1", port))
+                .map_err(|error| format!("connect USB media proxy {port}: {error}"))?;
+            stream
+                .set_nodelay(true)
+                .map_err(|error| format!("configure USB media TCP_NODELAY: {error}"))?;
+            stream
+                .set_write_timeout(Some(Duration::from_millis(20)))
+                .map_err(|error| format!("configure USB media write timeout: {error}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .map_err(|error| format!("configure USB media read timeout: {error}"))?;
+            prove_tcp_reachability(&stream, &token)?;
+            let sender = MediaSender::Tcp(Arc::new(Mutex::new(
+                stream
+                    .try_clone()
+                    .map_err(|error| format!("clone USB media writer: {error}"))?,
+            )));
+            (sender, MediaReceiver::Tcp(stream), None)
+        } else {
+            let socket = UdpSocket::bind(("0.0.0.0", 0))
+                .map_err(|error| format!("bind media socket: {error}"))?;
+            socket
+                .connect((ip, port))
+                .map_err(|error| format!("connect viewer UDP {ip}:{port}: {error}"))?;
+            socket
+                .set_write_timeout(Some(Duration::from_millis(20)))
+                .map_err(|error| format!("configure media socket: {error}"))?;
+            prove_udp_reachability(&socket, &token, ip, port)?;
+            let input_socket = socket
+                .try_clone()
+                .map_err(|error| format!("clone Windows input socket: {error}"))?;
+            let notice_socket = socket
+                .try_clone()
+                .map_err(|error| format!("clone Windows notice socket: {error}"))?;
+            (
+                MediaSender::Udp(Arc::new(socket)),
+                MediaReceiver::Udp(input_socket),
+                Some(MediaSender::Udp(Arc::new(notice_socket))),
+            )
+        };
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed).max(1);
-        let notice_sender = socket
-            .try_clone()
-            .map_err(|error| format!("clone notice socket: {error}"))?;
+        let mut initial_stats = initial_stats(width, height, fps);
+        initial_stats.media_transport = media_transport.into();
         let session = Arc::new(WindowsSession {
             stop: AtomicBool::new(false),
             input_enabled: AtomicBool::new(false),
             force_keyframe: AtomicBool::new(true),
             last_viewer_contact_ms: AtomicU64::new(0),
-            stats: Mutex::new(initial_stats(width, height, fps)),
+            stats: Mutex::new(initial_stats),
             injector: Mutex::new(InputInjector::new(monitor.rect)),
             threads: Mutex::new(Vec::new()),
-            notice_sender: Mutex::new(Some(notice_sender)),
+            notice_sender: Mutex::new(notice_sender),
             termination_token: token.clone(),
         });
 
-        let input_socket = socket
-            .try_clone()
-            .map_err(|error| format!("clone input socket: {error}"))?;
         let input_session = session.clone();
         let input_token = token.clone();
+        let input_sender = media_sender.clone();
         let input_thread = std::thread::Builder::new()
             .name(format!("leftcar-windows-input-{handle}"))
-            .spawn(move || run_input(input_socket, input_token, input_session))
+            .spawn(move || run_input(media_receiver, input_sender, input_token, input_session))
             .map_err(|error| format!("spawn Windows input receiver: {error}"))?;
 
         let capture_session = session.clone();
         let capture_thread = std::thread::Builder::new()
             .name(format!("leftcar-windows-capture-{handle}"))
             .spawn(move || {
-                if let Err(error) =
-                    capture::run(monitor, width, height, fps, socket, capture_session.clone())
-                {
+                if let Err(error) = capture::run(
+                    monitor,
+                    width,
+                    height,
+                    fps,
+                    media_sender,
+                    capture_session.clone(),
+                ) {
                     let mut stats = capture_session.stats.lock().unwrap();
                     stats.state = "error".into();
                     stats.error = Some(error);
@@ -310,7 +383,81 @@ fn prove_udp_reachability(
     Err(format!("UDP reachability proof failed for {ip}:{port}"))
 }
 
-fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
+fn prove_tcp_reachability(stream: &TcpStream, token: &[u8]) -> Result<(), String> {
+    let challenge = wire::challenge(token);
+    let mut writer = stream
+        .try_clone()
+        .map_err(|error| format!("clone USB challenge writer: {error}"))?;
+    write_tcp_frame(&mut writer, &challenge)
+        .map_err(|error| format!("send USB media reachability proof: {error}"))?;
+    for _ in 0..20 {
+        match read_tcp_frame(
+            &mut stream
+                .try_clone()
+                .map_err(|error| format!("clone USB challenge reader: {error}"))?,
+        ) {
+            Ok(Some(response)) if response == challenge => return Ok(()),
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(format!("read USB media reachability proof: {error}")),
+        }
+    }
+    Err("USB media reachability proof failed".into())
+}
+
+fn write_tcp_frame(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
+    if payload.is_empty() || payload.len() > MAX_TCP_MEDIA_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP media frame is outside the bounded range",
+        ));
+    }
+    stream.write_all(&(payload.len() as u32).to_be_bytes())?;
+    stream.write_all(payload)
+}
+
+fn read_tcp_frame(stream: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 4];
+    match stream.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let length = u32::from_be_bytes(header) as usize;
+    if length == 0 || length > MAX_TCP_MEDIA_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid TCP media frame length",
+        ));
+    }
+    let mut payload = vec![0u8; length];
+    stream.read_exact(&mut payload)?;
+    Ok(Some(payload))
+}
+
+fn run_input(
+    receiver: MediaReceiver,
+    sender: MediaSender,
+    token: Vec<u8>,
+    session: Arc<WindowsSession>,
+) {
+    match receiver {
+        MediaReceiver::Udp(socket) => run_udp_input(socket, sender, token, session),
+        MediaReceiver::Tcp(stream) => run_tcp_input(stream, sender, token, session),
+    }
+}
+
+fn run_udp_input(
+    socket: UdpSocket,
+    sender: MediaSender,
+    token: Vec<u8>,
+    session: Arc<WindowsSession>,
+) {
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
     let mut packet = [0u8; 512];
@@ -349,7 +496,8 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
         match sequencer.accept(message) {
             InputDecision::Ignore => {}
             InputDecision::AckDuplicate(sequence) => {
-                let _ = socket.send(&wire::input_ack(sequence, &token));
+                let enabled = session.input_enabled.load(Ordering::Acquire);
+                let _ = sender.send(&wire::input_ack(sequence, enabled, &token));
             }
             InputDecision::Apply(event) => {
                 if session.input_enabled.load(Ordering::Acquire) {
@@ -364,11 +512,94 @@ fn run_input(socket: UdpSocket, token: Vec<u8>, session: Arc<WindowsSession>) {
                         set_session_error(&session, error);
                     }
                 }
-                let _ = socket.send(&wire::input_ack(sequence, &token));
+                let enabled = session.input_enabled.load(Ordering::Acquire);
+                let _ = sender.send(&wire::input_ack(sequence, enabled, &token));
             }
         }
     }
     let _ = session.injector.lock().unwrap().release_all();
+}
+
+fn run_tcp_input(
+    mut stream: TcpStream,
+    sender: MediaSender,
+    token: Vec<u8>,
+    session: Arc<WindowsSession>,
+) {
+    let mut sequencer = InputSequencer::default();
+    sequencer.reset();
+    let started = std::time::Instant::now();
+    while !session.stop.load(Ordering::Acquire) {
+        let packet = match read_tcp_frame(&mut stream) {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                check_viewer_health(&session, started);
+                continue;
+            }
+            Err(error) => {
+                set_session_error(
+                    &session,
+                    format!("Windows USB input receive failed: {error}"),
+                );
+                break;
+            }
+        };
+        process_input_packet(&packet, &token, &session, &mut sequencer, &sender, started);
+    }
+    let _ = session.injector.lock().unwrap().release_all();
+}
+
+fn process_input_packet(
+    packet: &[u8],
+    token: &[u8],
+    session: &Arc<WindowsSession>,
+    sequencer: &mut InputSequencer,
+    sender: &MediaSender,
+    started: std::time::Instant,
+) {
+    let Some(message) = wire::authenticated(packet, token) else {
+        return;
+    };
+    session
+        .last_viewer_contact_ms
+        .store(started.elapsed().as_millis() as u64, Ordering::Release);
+    if message == b"BYE" {
+        session.stop.store(true, Ordering::Release);
+        return;
+    }
+    if message == b"IDR" {
+        session.force_keyframe.store(true, Ordering::Release);
+        return;
+    }
+    match sequencer.accept(message) {
+        InputDecision::Ignore => {}
+        InputDecision::AckDuplicate(sequence) => {
+            let enabled = session.input_enabled.load(Ordering::Acquire);
+            let _ = sender.send(&wire::input_ack(sequence, enabled, token));
+        }
+        InputDecision::Apply(event) => {
+            if session.input_enabled.load(Ordering::Acquire) {
+                if let Err(error) = session.injector.lock().unwrap().apply(event) {
+                    set_session_error(session, error);
+                }
+            }
+        }
+        InputDecision::ApplyAndAck { sequence, event } => {
+            if session.input_enabled.load(Ordering::Acquire) {
+                if let Err(error) = session.injector.lock().unwrap().apply(event) {
+                    set_session_error(session, error);
+                }
+            }
+            let enabled = session.input_enabled.load(Ordering::Acquire);
+            let _ = sender.send(&wire::input_ack(sequence, enabled, token));
+        }
+    }
 }
 
 pub(super) fn set_session_error(session: &WindowsSession, error: String) {
@@ -405,7 +636,7 @@ fn check_viewer_health(session: &Arc<WindowsSession>, started: std::time::Instan
 fn socket_attempt_send(session: &Arc<WindowsSession>, notice: &[u8]) -> std::io::Result<()> {
     let sender = session.notice_sender.lock().unwrap();
     match sender.as_ref() {
-        Some(socket) => socket.send(notice).map(|_| ()),
+        Some(sender) => sender.send(notice).map(|_| ()),
         None => Err(std::io::Error::new(
             std::io::ErrorKind::NotConnected,
             "no notice socket",
@@ -426,6 +657,7 @@ fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {
         dropped: 0,
         network_dropped: 0,
         network_queue_dropped: 0,
+        recovery_frames_dropped: 0,
         udp_send_failures: 0,
         udp_send_retries: 0,
         recovery_keyframes: 0,
@@ -454,7 +686,27 @@ fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {
         encode_output_p95_us: 0,
         send_block_p95_us: 0,
         send_pace_p95_us: 0,
+        last_au_bytes: 0,
+        last_au_fragments: 0,
+        last_au_parity: 0,
+        last_au_datagrams: 0,
+        last_au_expected_datagrams: 0,
+        last_au_send_us: 0,
+        last_au_is_keyframe: false,
+        max_au_bytes: 0,
+        max_au_fragments: 0,
+        sent_datagrams: 0,
+        sent_parity_datagrams: 0,
         error: None,
+        receiver_frame_gaps: 0,
+        receiver_input_drops: 0,
+        receiver_incomplete_aus: 0,
+        receiver_stale_frames: 0,
+        receiver_stale_input_drops: None,
+        receiver_output_burst_discards: 0,
+        receiver_rtt_ms: None,
+        receiver_wire_ms: None,
+        receiver_feedback_age_ms: None,
     }
 }
 

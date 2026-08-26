@@ -1150,7 +1150,7 @@ git commit -m "feat(usb-js): USB 우선 연결 선택과 attach/detach 전환 �
 - Modify: `apps/host-desktop/src-tauri/src/aoap.rs`
 - Modify: `apps/host-desktop/src-tauri/src/aoap_proxy.rs`
 
-**Step 1: 구현** — nusb hotplug 이벤트 구독(지원 플랫폼: macOS/Windows/Linux). attach → 핸드셰이크 시도 → 성공 시 AccessoryLink 시작 + 진행 중 세션 마이그레이션 알림. detach → link 작업 종료 + Wi-Fi 폴백 트리거. 기존 세션 상태 머신(`Session.terminal_*`)과 통합.
+**Step 1: 구현** — nusb hotplug 이벤트를 수동 discovery로 구독한다(지원 플랫폼: macOS/Windows/Linux). attach 시 일반 USB 장치에는 아무 AOAP 명령도 보내지 않고, 이미 액세서리로 열거된 장치만 AccessoryLink로 연다. Viewer의 실제 USB/auto 스트림 요청이 인증된 `requestUsb` 제어 명령을 보낸 경우에만 GET PROTOCOL → SEND STRING → START를 실행하고, 재열거된 액세서리를 watcher가 연다. detach → link 작업 종료 + Wi-Fi 폴백 트리거. 기존 세션 상태 머신(`Session.terminal_*`)과 통합.
 
 물리 폰 없이 테스트 불가 — hotplug 이벤트 타입 매핑만 단위 테스트(이벤트 → 액션 순수 함수):
 
@@ -1176,7 +1176,7 @@ git commit -m "feat(aoap): USB 핫플러그 감지와 세션 마이그레이션 
 
 **Step 1: AOAP 핸드셰이크 1차 검증** — Host 로그로 GET PROTOCOL → SEND STRING → START → 재열거(VID 0x18D1/PID 0x2D00|0x2D01) 확인. 실패 시 UTF-16LE 인코딩/문자열 인덱스 재확인.
 
-**Step 2: 자동 실행 검증** — 폰에 뷰어 debug 빌드 설치, 케이블 연결 시 뷰어가 자동 실행(또는 실행 중이면 onNewIntent)되는지.
+**Step 2: 요청 시 실행 검증** — 폰에 뷰어 debug 빌드 설치, 케이블만 연결했을 때 ADB/AOAP가 선점되지 않는지 확인한다. Viewer에서 실제 스트림을 열 때만 `requestUsb`가 실행되고, 이후 Android 액세서리 intent/onNewIntent와 권한 흐름이 시작되는지 확인한다.
 
 **Step 3: E2E 스트림** — USB 연결 상태에서 페어링된 호스트 선택 → 스트리밍. 프레임 흐름, 제어 응답(getStatus 2s 폴), 지연 확인.
 
@@ -1214,3 +1214,10 @@ git commit -m "docs(usb): 물리 검증 결과 기록"
 - [ ] react-doctor 100/100 (RN/TSX 변경 후)
 - [ ] viewer-expo `tsc --noEmit` 통과
 - [ ] T11 물리 검증 6단계 전부 통과 및 결과 기록
+
+## 구현 상태 (2026-08-26)
+
+- 소스 구현 및 빌드/단위 검증: 완료. `nusb 0.1.14`의 Windows control-transfer 제약에 맞춰 AOAP handshake는 claimed interface를 사용하고, hotplug stream 실패 시 enumeration polling으로 폴백한다.
+- 계획의 최초 `take_usb_media_channel` 단회 소비 구조는 스트림 재시작 시 채널을 잃을 수 있어 persistent media dispatcher + session-scoped proxy release 구조로 보강했다.
+- `nanors`는 계획 URL이 C 저장소라 Cargo dependency로 사용할 수 없었다. GPL 코드를 추가하지 않고 `crates/fec-core` 순수 Rust 구현으로 대체했다.
+- T11 물리 6단계는 폰·데이터 케이블·USB 권한이 필요한 외부 게이트라 미실행 상태다. 따라서 완료 기준의 물리 항목은 체크하지 않는다.

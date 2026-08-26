@@ -672,3 +672,10 @@ Task 13 → Task 14 → Task 15  (Phase 4, Phase 1과 독립)
 ```
 
 Phase 1 먼저 완료 후 커밋해 두면 스파이크가 새 빌드로 측정을 시작할 수 있다(가장 빠른 가치 전달).
+
+## 구현 상태 (2026-08-26)
+
+- Phase 1~3 소스 구현과 테스트: 완료. `nanors` 계획 항목은 C 저장소로 확인되어 `crates/fec-core` 순수 Rust GF(256) 구현으로 대체했으며, GPL 코드는 추가하지 않았다.
+- Phase 4 소스 구현: WGC staging/CPU readback 및 `bgra_to_nv12`를 제거하고 D3D11 texture를 `MFCreateDXGISurfaceBuffer`로 hardware H.264 MFT에 전달한다. Windows USB transport도 AOAP framed media/input 경로를 사용한다.
+- 검증: root/Host/Android 테스트, Android aarch64 check, Kotlin/TS/contract/architecture, Swift dylib compile, React Doctor `100 / 100`, Windows MSVC cross `cargo check --lib`를 통과했다.
+- 실기기/물리 게이트: SKIP 감소·복구 p95·3% loss soak, 실제 Windows GPU/MFT, AOAP 물리 핸드셰이크와 E6/E7은 장치 확보 후 측정 대기다.

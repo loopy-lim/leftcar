@@ -48,9 +48,12 @@ import {
   getStoredToken,
   isTrustedHost,
   pairWithHost,
+  pairWithHostByCode,
   formatHostEndpoint,
   parseHostEndpoint,
   parseQrPayload,
+  canSubmitPairingCode,
+  resolvePairingHost,
 } from "./pairing";
 
 const store = (SecureStore as unknown as { __store: Map<string, string> }).__store;
@@ -114,6 +117,12 @@ describe("parseQrPayload", () => {
 });
 
 describe("host endpoint", () => {
+  it("prefers an explicit pairing route over a stale connected host", () => {
+    expect(resolvePairingHost("192.168.0.134:7777", "192.168.0.134:64098")).toBe(
+      "192.168.0.134:7777",
+    );
+  });
+
   it("roundtrips the selected LAN endpoint for the pairing route", () => {
     const routeEndpoint = formatHostEndpoint("192.168.0.134", 7777);
     expect(parseHostEndpoint(routeEndpoint)).toEqual({ host: "192.168.0.134", port: 7777 });
@@ -180,6 +189,22 @@ describe("pairWithHost", () => {
     expect(connect).not.toHaveBeenCalled();
   });
 
+  it("pairs directly with a host endpoint and six-digit code", async () => {
+    requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
+
+    const token = await pairWithHostByCode("192.168.1.5", 7777, "123 456");
+
+    expect(token).toBe(TOKEN_64HEX);
+    expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777);
+    expect(requestMock).toHaveBeenCalledWith("pair", {
+      code: "123456",
+      deviceId: expect.any(String),
+      deviceName: "Android 뷰어 테스트",
+    });
+    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("failure: throws and stores nothing", async () => {
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
@@ -201,6 +226,19 @@ describe("pairWithHost", () => {
     );
     expect(store.get("leftcar.token")).toBeUndefined();
     expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pairing code readiness", () => {
+  it("requires six digits and any known host target", () => {
+    expect(canSubmitPairingCode("12345", true, false)).toBe(false);
+    expect(canSubmitPairingCode("123456", false, false)).toBe(false);
+    expect(canSubmitPairingCode("123456", true, true)).toBe(false);
+    expect(canSubmitPairingCode("123456", true, false)).toBe(true);
+  });
+
+  it("normalizes pasted whitespace before checking the six-digit code", () => {
+    expect(canSubmitPairingCode("123 456", true, false)).toBe(true);
   });
 });
 

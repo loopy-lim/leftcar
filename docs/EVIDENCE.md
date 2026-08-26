@@ -1,6 +1,6 @@
 # 구현 증거 문서 (EVIDENCE)
 
-기준일: 2026-08-24
+기준일: 2026-08-26
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5 이상을 달성했다고 표기한 항목은 없다.**
 
 ## 요약
@@ -133,8 +133,8 @@
 
 ## Windows 원격 Host (E13, 2026-08-22 추가)
 
-- **구현 경로**: Tauri platform factory → Windows display catalog → `CreateForMonitor` WGC free-threaded frame pool → D3D11 BGRA readback/NV12 변환 → `MFT_ENUM_FLAG_HARDWARE` Media Foundation H.264 MFT → 기존 CFG/Annex-B/UDP fragment → Android MediaCodec.
-- **입력 경로**: 기존 인증 UDP `LCI1/LCA1` 계약 → capture와 독립된 Windows input worker → session별 Control 승인 → `SendInput`. 포인터 2× FPS와 reliable ACK/retry 정책은 macOS와 동일하다.
+- **구현 경로**: Tauri platform factory → Windows display catalog → `CreateForMonitor` WGC free-threaded frame pool → D3D11 texture → `MFCreateDXGISurfaceBuffer`/`IMFDXGIDeviceManager` → `MFT_ENUM_FLAG_HARDWARE` Media Foundation H.264 MFT → 기존 CFG/Annex-B/fragment → Android MediaCodec. CPU staging readback과 CPU BGRA→NV12 변환은 제거했다.
+- **입력 경로**: 기존 인증 UDP `LCI1/LCA1` 계약 또는 USB AOAP framed 양방향 경로 → capture와 독립된 Windows input worker → session별 Control 승인 → `SendInput`. 포인터 2× FPS와 reliable ACK/retry 정책은 macOS와 동일하다.
 - **실패·권한 정책**: Windows backend 또는 hardware H.264 MFT가 없으면 Fake/software backend로 조용히 전환하지 않는다. SendInput은 Windows UIPI 경계를 따르며 관리자 프로세스 제어를 우회하지 않는다.
 - **패키징**: `tauri.windows.conf.json`은 current-user NSIS를 지정하고, `windows-host` CI job은 Windows unit/clippy 뒤 unsigned installer artifact를 생성한다.
 - **현재 검증**: macOS에서 `x86_64-pc-windows-msvc` target `cargo check --lib` 통과. platform-neutral wire/input sequence unit test 통과.
@@ -167,3 +167,25 @@
 - **히스테리시스**: 단일 stale delta를 즉시 폐기하지 않고 연속 3개 초과 프레임에서만 재동기화하는 순수 결정 함수와 단위 테스트를 추가했다. 1~2개 초과 프레임은 늦게라도 디코더 경로로 진행한다.
 - **계측 경계**: `staleInputDrops`와 `outputBurst`를 별도 Atomic 카운터 및 `leftcar_jni_skip_breakdown`으로 노출했다. 기존 HUD 합산 필드는 하위 호환을 위해 유지한다.
 - **실기기 판정**: 기존 E15 표본의 `SKIP 461`을 새 빌드에서 재수집하지 않았으므로 SKIP 감소, 복구 p95 약 50ms, 목표 `SKIP < 50`은 측정 대기로 남긴다. E15와 같은 수집 방식으로 비교해야 한다.
+
+## FEC·ABR·Windows 제로카피 (2026-08-26 구현 기록)
+
+- **FEC 코어**: 계획의 `nanors` URL은 Cargo crate가 아닌 C 저장소로 확인되어, 별도 GPL 코드를 vendoring하지 않고 `crates/fec-core`에 순수 Rust GF(256) Reed-Solomon 코어를 구현했다. Host macOS/Windows 송신 경로와 Android 수신 복구 경로가 같은 코어를 사용하며, 8+2 손실 복구·3손실 실패·짧은 tail 그룹 테스트를 통과했다.
+- **wire/receiver**: 기존 `G` 데이터그램은 유지하고 `P` 패리티 마커와 bounded FEC group을 추가했다. 복구 실패는 기존 frame-gap/IDR 경로로 되돌아가며, FEC 자체가 제어 패킷을 복구한다고 주장하지 않는다.
+- **ABR**: `LCF1` 후위 확장으로 `staleInputDrops`와 `outputBurstDiscards`를 전달하고, Swift ABR 혼잡 신호는 분리된 stale 입력 드랍을 사용한다. 구형 피드백 길이는 기존 6개 필드로 계속 파싱한다.
+- **Windows GPU source path**: WGC D3D11 texture를 staging `Map(CPU_READ)` 또는 `bgra_to_nv12` CPU 변환 없이 `MFCreateDXGISurfaceBuffer`와 `IMFDXGIDeviceManager`가 연결된 ARGB32 hardware H.264 MFT에 직접 전달하도록 바꿨다. Windows USB transport에서는 동일한 bounded TCP framing을 AOAP loopback proxy에 연결하고, input/ACK도 같은 framed 양방향 경로를 사용한다.
+
+## USB AOAP 전송 (2026-08-26 구현 기록)
+
+- **Host**: `nusb 0.1` AOAP GET PROTOCOL/SEND STRING/START 협상, accessory bulk endpoint 탐색, 1바이트 채널 mux(ch0 제어/ch1 미디어), bounded queue와 nusb hotplug stream을 구현했다. 일반 USB attach에서는 AOAP를 시작하지 않고, 인증된 `requestUsb` 스트림 요청 때만 협상한다. hotplug API가 실패하는 환경은 제한된 enumeration polling으로 폴백한다. Host control relay는 기존 `ControlServer::dispatch`와 token authorization을 재사용한다.
+- **Viewer**: Android `UsbManager`/`UsbAccessory` 모듈이 fd를 Rust bridge로 넘기고, Rust bridge가 channel mux·loopback control TCP·renderer UDP side-channel을 제공한다. attach/detach intent와 dynamic receiver를 처리하며 RN은 USB 연결 시 USB를 우선 선택하고 없으면 기존 Wi-Fi auto 경로를 사용한다.
+- **검증 완료**: `usb-mux` 단위 테스트, Host unit/E2E, Android native unit 및 aarch64 cross check, Kotlin compile, TypeScript/contract/architecture, React Doctor `100 / 100`을 통과했다.
+- **물리 판정 대기**: 실제 AOAP GET PROTOCOL 응답·재열거 VID/PID, 케이블 제거 후 Wi-Fi failover, USB stream frame continuity, 60분 soak는 폰·케이블을 연결한 T11 물리 게이트에서만 달성으로 변경한다. 현재 구현·컴파일 증거는 E3 수준이며 E6/E7을 대신하지 않는다.
+
+## 4K HEVC 저지연 경로 (2026-08-26 구현·실기기 재검증)
+
+- **wire 호환 경계**: 기존 H.264 `CFG`와 `G` fragmentation은 유지하고, codec id와 VPS/SPS/PPS를 담는 `CF2`를 추가했다. Android는 `video/hevc`의 `csd-0/1/2`와 `video/avc`의 기존 `csd-0/1`을 각각 사용한다.
+- **Host 선택 정책**: 3840x2160 이상 video profile에서 VideoToolbox HEVC를 먼저 준비하고, 준비·생성·키프레임 설정에 실패하면 같은 시작 시도 안에서 H.264로 폴백한다. interactive/1080p 경로는 H.264를 유지한다.
+- **실기기 확인**: Lenovo TB710FU에 release APK를 덮어 설치했다. 4K video profile에서 `Received CF2 datagram (95 bytes)`, `vps=28B sps=40B pps=11B`, `codec=Hevc actualCodec=c2.qti.hevc.decoder.low_latency`를 확인했고, 장시간 관찰 중 `Rendered` 카운터가 계속 증가하며 종료·recovery gate timeout은 발생하지 않았다.
+- **현재 성능 판정**: Host UI와 native 로그의 실제 출력은 약 34–37 FPS였고, video processing은 약 65–81ms, UDP send failure는 0이었다. 고정 0 FPS로 멈추던 recovery gate는 timeout 해제로 회복됐지만, 4K 55–60 FPS는 아직 달성하지 못했다. 고속 화면에서 capture/recovery drop과 burst가 늘어 남은 병목은 macOS 4K capture/encode path로 판정한다.
+- **현재 APK 증거**: 재빌드·재설치한 APK SHA-256은 `8767f4ebfd268fbaec0e1a8cf017fb30eca7105f91f9e1158c1a791d9cf10748`이다. 이 표본의 미디어 전송은 `Wi-Fi UDP`였으며 USB/AOAP 물리 스트림 증거로 해석하지 않는다.

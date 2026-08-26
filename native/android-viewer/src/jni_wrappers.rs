@@ -56,6 +56,8 @@ extern "C" {
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
     fn leftcar_jni_prepare_port(port: u16, host: *const c_char, transport: *const c_char) -> i32;
+    fn leftcar_jni_prepare_usb(fd: i32) -> i32;
+    fn leftcar_jni_usb_control_port() -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_attach_port(
         state: *mut c_void,
@@ -154,6 +156,23 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
         None => return 1,
     };
     unsafe { leftcar_jni_prepare_port(port as u16, host.as_ptr(), transport.as_ptr()) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareUsb(
+    _env: *mut JNIEnv,
+    _class: *mut jobject,
+    fd: i32,
+) -> i32 {
+    std::panic::catch_unwind(|| unsafe { leftcar_jni_prepare_usb(fd) }).unwrap_or(3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_usbControlPort(
+    _env: *mut JNIEnv,
+    _class: *mut jobject,
+) -> i32 {
+    std::panic::catch_unwind(|| unsafe { leftcar_jni_usb_control_port() }).unwrap_or(-1)
 }
 
 #[no_mangle]

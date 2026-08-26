@@ -274,6 +274,22 @@ impl PairingService {
         self.offer_secrets.get(offer_id).cloned()
     }
 
+    /// Find an active offer by the human verification code. The Host uses
+    /// this for the direct `host endpoint + six-digit code` pairing flow.
+    pub fn find_offer_by_code(&self, code: &str) -> Option<String> {
+        let now = self.clock.monotonic();
+        self.offers.iter().find_map(|(id, offer)| {
+            if !offer.used
+                && now <= offer.expires_at
+                && constant_time_eq(offer.human_verification_code.as_bytes(), code.as_bytes())
+            {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn reject(&mut self, offer_id: &str) -> Result<(), PairingError> {
         if self.offers.remove(offer_id).is_none() {
             return Err(PairingError::Expired);
@@ -528,6 +544,18 @@ mod tests {
         assert!(svc
             .approve(&offer.ephemeral_offer_id, viewer.clone(), &secret, &code)
             .is_ok());
+    }
+
+    #[test]
+    fn find_live_offer_by_human_code_for_direct_pairing() {
+        let mut svc = PairingService::new(Box::new(VirtualClock(Duration::ZERO)));
+        let offer = svc.begin_offer("fp".into());
+
+        assert_eq!(
+            svc.find_offer_by_code(&offer.human_verification_code),
+            Some(offer.ephemeral_offer_id.clone())
+        );
+        assert_eq!(svc.find_offer_by_code("000000"), None);
     }
 
     #[test]

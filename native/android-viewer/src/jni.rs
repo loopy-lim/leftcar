@@ -14,12 +14,15 @@ use crate::input_protocol::{
     parse_termination, InputEvent, InputScheduler, ReceiverFeedback,
 };
 use crate::media_datagram::{
-    parse_fragment, recovery_request_suppressed, stale_frame_budget_ms, stale_streak_advance,
-    CompletedFrameSequencer, FrameReassembler, RecoveryRequestGate,
+    parse_fragment, parse_parity, recovery_request_suppressed, select_live_edge_frames,
+    stale_frame_budget_ms, stale_streak_advance, CompletedFrameSequencer, FecGroup, FrameFragment,
+    FrameReassembler, ReassembledFrame, ReceiverPressure, RecoveryRequestGate, RestoredFragment,
+    PARITY_MARKER,
 };
 use crate::net_guard::{host_is_valid, peer_allowed};
 use crate::prepared_tcp::PreparedTcpBridge;
 use crate::prepared_udp::PreparedUdpReceiver;
+use crate::usb_bridge::UsbBridge;
 use std::os::fd::AsRawFd;
 
 extern "C" {
@@ -57,7 +60,7 @@ macro_rules! log_info {
     };
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -116,10 +119,39 @@ impl RendererControl {
 static ACTIVE_RENDERERS: Mutex<Option<HashMap<String, Arc<RendererControl>>>> = Mutex::new(None);
 static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpReceiver>>> = Mutex::new(None);
 static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> = Mutex::new(None);
+static PREPARED_USB_BRIDGE: Mutex<Option<UsbBridge>> = Mutex::new(None);
 /// A renderer exits within milliseconds after an LCT1 packet, while the
 /// Activity polls every 250ms. Retain the reason by logical instance so the
 /// UI cannot miss it between renderer cleanup and the next poll.
 static TERMINATION_REASONS: Mutex<Option<HashMap<String, i8>>> = Mutex::new(None);
+
+enum MediaBridge {
+    Tcp(PreparedTcpBridge),
+    Usb(UsbBridge),
+}
+
+impl MediaBridge {
+    fn control_addr(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Tcp(bridge) => bridge.control_addr(),
+            Self::Usb(bridge) => bridge.control_addr(),
+        }
+    }
+
+    fn drain_media(&self) {
+        match self {
+            Self::Tcp(bridge) => bridge.drain_media(),
+            Self::Usb(bridge) => bridge.drain_media(),
+        }
+    }
+
+    fn recv_media_timeout(&self, timeout: std::time::Duration) -> std::io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Tcp(bridge) => bridge.recv_media_timeout(timeout),
+            Self::Usb(bridge) => bridge.recv_media_timeout(timeout),
+        }
+    }
+}
 
 fn remove_renderer_if_current(instance: &str, control: &Arc<RendererControl>) {
     let removed_reason = {
@@ -231,6 +263,16 @@ fn take_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
         .remove(&port)
 }
 
+fn take_media_bridge(port: u16) -> Option<MediaBridge> {
+    take_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
+        PREPARED_USB_BRIDGE
+            .lock()
+            .unwrap()
+            .take()
+            .map(MediaBridge::Usb)
+    })
+}
+
 fn prepare_udp_receiver(port: u16, expected_host: &str, transport: &str) -> Result<(), String> {
     if port == 0 || !host_is_valid(expected_host) {
         return Err("invalid prepared media port or host".into());
@@ -266,7 +308,7 @@ fn prepare_udp_receiver(port: u16, expected_host: &str, transport: &str) -> Resu
         .remove(&port);
     drop(stale);
 
-    let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "auto") {
+    let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "usb" | "auto") {
         format!("{expected_host},127.0.0.1")
     } else {
         expected_host.to_owned()
@@ -320,6 +362,58 @@ struct FramePacket {
     send_wall_ms: Option<u64>,
 }
 
+fn queue_reassembled_frame(
+    frame_sequencer: &mut CompletedFrameSequencer,
+    completed_frames: &mut [Option<(std::net::SocketAddr, FramePacket)>],
+    completed_count: &mut usize,
+    peer: std::net::SocketAddr,
+    reassembled: ReassembledFrame,
+) {
+    for completed in frame_sequencer.push(reassembled) {
+        let frame = FramePacket {
+            id: completed.id,
+            au: completed.au,
+            capture_wall_ms: completed.capture_wall_ms,
+            encode_wall_ms: completed.encode_wall_ms,
+            send_wall_ms: Some(completed.send_wall_ms),
+        };
+        if *completed_count < completed_frames.len() {
+            completed_frames[*completed_count] = Some((peer, frame));
+            *completed_count += 1;
+        }
+    }
+}
+
+fn queue_restored_fragments(
+    restored: Option<Vec<RestoredFragment>>,
+    reassembler: &mut FrameReassembler,
+    frame_sequencer: &mut CompletedFrameSequencer,
+    completed_frames: &mut [Option<(std::net::SocketAddr, FramePacket)>],
+    completed_count: &mut usize,
+    peer: std::net::SocketAddr,
+) {
+    for recovered in restored.into_iter().flatten() {
+        let fragment = FrameFragment {
+            index: recovered.index,
+            count: recovered.count,
+            id: recovered.id,
+            capture_wall_ms: recovered.capture_wall_ms,
+            encode_wall_ms: recovered.encode_wall_ms,
+            send_wall_ms: recovered.send_wall_ms,
+            payload: &recovered.payload,
+        };
+        if let Some(reassembled) = reassembler.push(fragment) {
+            queue_reassembled_frame(
+                frame_sequencer,
+                completed_frames,
+                completed_count,
+                peer,
+                reassembled,
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct RendererStats {
     queued: u64,
@@ -327,6 +421,10 @@ struct RendererStats {
     frame_gaps: u64,
     max_feed_us: u64,
     stale_inputs: u64,
+    completed_batch: usize,
+    live_edge_batch: usize,
+    max_completed_batch: usize,
+    pressure: ReceiverPressure,
     consecutive_stale: u32,
     // NTP-style authenticated probes estimate Host clock minus Android clock.
     // Do not infer this from the first video frame: that would erase the very
@@ -344,24 +442,28 @@ const RESIZE_RECOVERY_SUPPRESSION_US: u64 = 350_000;
 /// Probe responses arriving after this silence window leave the smoothed
 /// latency estimates stale; decay them toward "unknown" instead of freezing.
 const PROBE_STALE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-fn is_keyframe(au: &[u8]) -> bool {
+fn is_keyframe(au: &[u8], codec: viewer_decoder::VideoCodec) -> bool {
     viewer_decoder::split_annexb(au)
         .iter()
-        .any(|nal| viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR))
+        .any(|nal| match codec {
+            viewer_decoder::VideoCodec::H264 => {
+                viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR)
+            }
+            viewer_decoder::VideoCodec::Hevc => viewer_decoder::hevc_nal_type(nal.bytes)
+                .is_some_and(|nal_type| matches!(nal_type, 19..=21)),
+        })
 }
 
 fn reset_decoder(
     decoder: &mut Option<viewer_decoder::AndroidDecoder>,
-    sps: &mut Vec<u8>,
-    pps: &mut Vec<u8>,
+    codec_config: &mut Option<viewer_decoder::CodecConfig>,
     awaiting_keyframe: &mut bool,
 ) {
     if let Some(d) = decoder.as_mut() {
         d.stop();
     }
     *decoder = None;
-    sps.clear();
-    pps.clear();
+    *codec_config = None;
     *awaiting_keyframe = true;
 }
 
@@ -457,6 +559,14 @@ fn send_receiver_feedback(
             wire_to_decoder_ms: feedback_latency_value(
                 control.wire_to_decoder_ms.load(Ordering::Relaxed),
             ),
+            stale_input_drops: control
+                .stale_input_drops
+                .load(Ordering::Relaxed)
+                .min(u64::from(u32::MAX)) as u32,
+            output_burst_discards: control
+                .output_burst_discards
+                .load(Ordering::Relaxed)
+                .min(u64::from(u32::MAX)) as u32,
         },
         token,
     );
@@ -747,10 +857,12 @@ fn feed_and_render(
         }
         Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
             stats.input_drops += 1;
+            stats.pressure.record_decoder_input_drop();
             FeedOutcome::ResyncRequired
         }
         Ok(viewer_decoder::FeedStatus::InputTooLarge { required, capacity }) => {
             stats.input_drops += 1;
+            stats.pressure.record_decoder_input_drop();
             log_info!(
                 "decoder input AU too large: required={} capacity={}; resyncing",
                 required,
@@ -763,6 +875,10 @@ fn feed_and_render(
             FeedOutcome::FatalError
         }
     };
+
+    stats
+        .pressure
+        .record_decoder_output_discards(dec.frames_discarded);
 
     let capture_age_ms = clock_corrected_age_ms(frame.capture_wall_ms, stats.host_clock_offset_ms);
     let encode_age_ms = clock_corrected_age_ms(frame.encode_wall_ms, stats.host_clock_offset_ms);
@@ -788,14 +904,21 @@ fn feed_and_render(
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} queued={} inputDrops={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
             control.stale_input_drops.load(Ordering::Relaxed),
-            control.output_burst_discards.load(Ordering::Relaxed),
+            stats
+                .pressure
+                .live_edge_discards
+                .saturating_add(stats.pressure.decoder_output_discards),
+            stats.pressure.fec_recovered_fragments,
             stats.queued,
             stats.input_drops,
+            stats.completed_batch,
+            stats.live_edge_batch,
+            stats.max_completed_batch,
             stats.frame_gaps,
             feed_us,
             stats.max_feed_us,
@@ -808,15 +931,21 @@ fn feed_and_render(
         .rendered_frames
         .store(dec.frames_rendered, Ordering::Relaxed);
     control.stale_outputs.store(
-        dec.frames_discarded.saturating_add(stats.stale_inputs),
+        dec.frames_discarded
+            .saturating_add(stats.stale_inputs)
+            .saturating_add(stats.pressure.live_edge_discards),
         Ordering::Relaxed,
     );
     control
         .stale_input_drops
         .store(stats.stale_inputs, Ordering::Relaxed);
-    control
-        .output_burst_discards
-        .store(dec.frames_discarded, Ordering::Relaxed);
+    control.output_burst_discards.store(
+        stats
+            .pressure
+            .live_edge_discards
+            .saturating_add(dec.frames_discarded),
+        Ordering::Relaxed,
+    );
     control
         .decoder_input_drops
         .store(stats.input_drops, Ordering::Relaxed);
@@ -834,10 +963,10 @@ fn spawn_live_stream_renderer(
     width: u32,
     height: u32,
     fps: u32,
-    tcp_bridge: Option<PreparedTcpBridge>,
+    tcp_bridge: Option<MediaBridge>,
 ) {
     let paired_host = expected_host.clone();
-    let tcp_control_addr = tcp_bridge.as_ref().map(PreparedTcpBridge::control_addr);
+    let tcp_control_addr = tcp_bridge.as_ref().map(MediaBridge::control_addr);
     let expected_host = if tcp_bridge.is_some() {
         // The TCP bridge injects datagrams from loopback; retain the paired
         // Host IP as the Wi-Fi candidate as well so auto mode can use either
@@ -1009,8 +1138,9 @@ fn spawn_live_stream_renderer(
         };
         let mut reassembler = FrameReassembler::default();
         let mut frame_sequencer = CompletedFrameSequencer::default();
-        let mut sps = Vec::new();
-        let mut pps = Vec::new();
+        let mut fec_groups: HashMap<(u16, u16), FecGroup> = HashMap::new();
+        let mut fec_group_order = VecDeque::new();
+        let mut codec_config: Option<viewer_decoder::CodecConfig> = None;
         let mut decoder: Option<viewer_decoder::AndroidDecoder> = None;
         let mut aus = 0u64;
         let mut awaiting_keyframe = true;
@@ -1026,7 +1156,7 @@ fn spawn_live_stream_renderer(
                 // UDP socket while hidden: if the receiver stops reading, the
                 // Host's bounded latest-frame queue overflows and degrades the
                 // other visible stream even though this Surface is transient.
-                reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                reset_decoder(&mut decoder, &mut codec_config, &mut awaiting_keyframe);
                 reassembler.clear();
                 frame_sequencer.clear();
                 last_frame_id = None;
@@ -1234,7 +1364,7 @@ fn spawn_live_stream_renderer(
                     *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
                     reassembler.clear();
                     frame_sequencer.clear();
-                    reset_decoder(&mut decoder, &mut sps, &mut pps, &mut awaiting_keyframe);
+                    reset_decoder(&mut decoder, &mut codec_config, &mut awaiting_keyframe);
                     last_frame_id = None;
                     aus = 0;
                     control_clone.input_enabled.store(-1, Ordering::SeqCst);
@@ -1297,59 +1427,107 @@ fn spawn_live_stream_renderer(
                 ) {
                     continue;
                 }
-                if packet.len() >= 3 && &packet[..3] == b"CFG" {
-                    log_info!("Received CFG datagram ({} bytes)", packet.len());
-                    let mut off = 3usize;
-                    while off + 4 <= packet.len() {
-                        let l =
-                            u32::from_be_bytes(packet[off..off + 4].try_into().unwrap()) as usize;
-                        off += 4;
-                        if off + l > packet.len() {
-                            break;
+                if packet.first() == Some(&PARITY_MARKER) {
+                    let Some(parity) = parse_parity(packet) else {
+                        continue;
+                    };
+                    let key = (parity.id, parity.base);
+                    if !fec_groups.contains_key(&key) {
+                        while fec_groups.len() >= 4 {
+                            let Some(oldest) = fec_group_order.pop_front() else {
+                                break;
+                            };
+                            fec_groups.remove(&oldest);
                         }
-                        let nal = &packet[off..off + l];
-                        if nal.len() > 4 {
-                            let t = viewer_decoder::nal_type(&nal[4..]);
-                            if t == Some(viewer_decoder::NAL_SPS) {
-                                sps = nal.to_vec();
-                            } else if t == Some(viewer_decoder::NAL_PPS) {
-                                pps = nal.to_vec();
-                            }
-                        }
-                        off += l;
+                        let Some(group) =
+                            FecGroup::new(parity.id, parity.k, parity.base, parity.total)
+                        else {
+                            continue;
+                        };
+                        fec_groups.insert(key, group);
+                        fec_group_order.push_back(key);
                     }
-                    if !sps.is_empty() && !pps.is_empty() && decoder.is_none() {
+                    let mut restored = None;
+                    let mut complete = false;
+                    if let Some(group) = fec_groups.get_mut(&key) {
+                        restored = group.push_parity_and_restore(parity);
+                        complete = group.is_complete();
+                    }
+                    if let Some(restored) = restored.as_ref() {
+                        renderer_stats.pressure.record_fec_recovery(restored.len());
+                    }
+                    queue_restored_fragments(
+                        restored,
+                        &mut reassembler,
+                        &mut frame_sequencer,
+                        &mut completed_frames,
+                        &mut completed_count,
+                        peer,
+                    );
+                    if complete {
+                        fec_groups.remove(&key);
+                        fec_group_order.retain(|queued| *queued != key);
+                    }
+                    continue;
+                }
+                if packet.starts_with(b"CFG") || packet.starts_with(b"CF2") {
+                    let marker = if packet.starts_with(b"CF2") {
+                        "CF2"
+                    } else {
+                        "CFG"
+                    };
+                    log_info!("Received {} datagram ({} bytes)", marker, packet.len());
+                    let Some(config) = viewer_decoder::parse_codec_config(packet) else {
+                        log_info!("Ignoring malformed {} codec configuration", marker);
+                        awaiting_keyframe = true;
+                        continue;
+                    };
+                    if decoder.is_none() {
+                        let sps = config.sps.as_deref().expect("complete codec config SPS");
+                        let pps = config.pps.as_deref().expect("complete codec config PPS");
+                        let codec_name = match config.codec {
+                            viewer_decoder::VideoCodec::H264 => "c2.qti.avc.decoder.low_latency",
+                            viewer_decoder::VideoCodec::Hevc => "c2.qti.hevc.decoder.low_latency",
+                        };
                         log_info!(
-                            "Creating AndroidDecoder with Surface window=0x{:x} sps={}B pps={}B",
+                            "Creating {:?} AndroidDecoder with Surface window=0x{:x} vps={}B sps={}B pps={}B",
+                            config.codec,
                             window_handle,
+                            config.vps.as_ref().map_or(0, Vec::len),
                             sps.len(),
                             pps.len()
                         );
                         let created = unsafe {
-                            viewer_decoder::AndroidDecoder::new_h264_named(
-                                &sps,
-                                &pps,
-                                width,
-                                height,
-                                window_handle,
-                                fps,
-                                Some("c2.qti.avc.decoder.low_latency"),
+                            viewer_decoder::AndroidDecoder::new_video_named(
+                                viewer_decoder::VideoDecoderConfig {
+                                    codec: config.codec,
+                                    vps: config.vps.as_deref(),
+                                    sps,
+                                    pps,
+                                    width,
+                                    height,
+                                    window: window_handle,
+                                    fps,
+                                    codec_name: Some(codec_name),
+                                },
                             )
                         };
                         match created {
                             Ok(d) => {
                                 log_info!(
-                                    "AndroidDecoder created successfully: actualCodec={}",
+                                    "AndroidDecoder created successfully: codec={:?} actualCodec={}",
+                                    config.codec,
                                     d.codec_name()
                                 );
                                 decoder = Some(d);
+                                codec_config = Some(config);
                             }
                             Err(e) => {
                                 log_info!("AndroidDecoder creation FAILED: {}", e);
                             }
                         }
                     }
-                    // CFG is emitted with an IDR on the host. Do not feed
+                    // CFG/CF2 is emitted with an IDR on the host. Do not feed
                     // delta frames until that recovery keyframe arrives.
                     awaiting_keyframe = true;
                     continue;
@@ -1358,29 +1536,75 @@ fn spawn_live_stream_renderer(
                 let Some(fragment) = parse_fragment(packet) else {
                     continue;
                 };
+                let group_base = (fragment.index / 8) * 8;
+                let group_k = (fragment.count - group_base).min(8);
+                let group_key = (fragment.id, group_base);
+                if group_k > 1 && !fec_groups.contains_key(&group_key) {
+                    while fec_groups.len() >= 4 {
+                        let Some(oldest) = fec_group_order.pop_front() else {
+                            break;
+                        };
+                        fec_groups.remove(&oldest);
+                    }
+                    if let Some(group) =
+                        FecGroup::new(fragment.id, group_k as u8, group_base, fragment.count)
+                    {
+                        fec_groups.insert(group_key, group);
+                        fec_group_order.push_back(group_key);
+                    }
+                }
+                let mut restored = None;
+                if let Some(group) = fec_groups.get_mut(&group_key) {
+                    restored = group.push_data_and_restore(fragment);
+                    if group.is_complete() {
+                        fec_groups.remove(&group_key);
+                        fec_group_order.retain(|queued| *queued != group_key);
+                    }
+                }
+                if let Some(restored) = restored.as_ref() {
+                    renderer_stats.pressure.record_fec_recovery(restored.len());
+                }
+                queue_restored_fragments(
+                    restored,
+                    &mut reassembler,
+                    &mut frame_sequencer,
+                    &mut completed_frames,
+                    &mut completed_count,
+                    peer,
+                );
                 let Some(reassembled) = reassembler.push(fragment) else {
                     continue;
                 };
-                for completed in frame_sequencer.push(reassembled) {
-                    let frame = FramePacket {
-                        id: completed.id,
-                        au: completed.au,
-                        capture_wall_ms: completed.capture_wall_ms,
-                        encode_wall_ms: completed.encode_wall_ms,
-                        send_wall_ms: Some(completed.send_wall_ms),
-                    };
-                    if completed_count < MEDIA_BATCH_SIZE {
-                        completed_frames[completed_count] = Some((peer, frame));
-                        completed_count += 1;
-                    }
-                }
+                queue_reassembled_frame(
+                    &mut frame_sequencer,
+                    &mut completed_frames,
+                    &mut completed_count,
+                    peer,
+                    reassembled,
+                );
             }
 
-            for maybe_frame in completed_frames.into_iter().take(completed_count) {
-                let Some((peer, frame)) = maybe_frame else {
-                    continue;
-                };
-                let keyframe = is_keyframe(&frame.au);
+            let completed_frames = completed_frames
+                .into_iter()
+                .take(completed_count)
+                .flatten()
+                .collect::<Vec<_>>();
+            let completed_batch = completed_frames.len();
+            let selection = select_live_edge_frames(completed_frames);
+            renderer_stats.completed_batch = completed_batch;
+            renderer_stats.live_edge_batch = selection.frames.len();
+            renderer_stats.max_completed_batch =
+                renderer_stats.max_completed_batch.max(completed_batch);
+            renderer_stats
+                .pressure
+                .record_live_edge_discards(selection.discarded);
+
+            for (peer, frame) in selection.frames {
+                let codec = codec_config
+                    .as_ref()
+                    .map(|config| config.codec)
+                    .unwrap_or(viewer_decoder::VideoCodec::H264);
+                let keyframe = is_keyframe(&frame.au, codec);
                 let capture_age_ms = clock_corrected_age_ms(
                     frame.capture_wall_ms,
                     renderer_stats.host_clock_offset_ms,
@@ -1417,6 +1641,15 @@ fn spawn_live_stream_renderer(
                         .map(|previous| !viewer_decoder::frame_id_is_next(previous, frame.id))
                         .unwrap_or(false);
                     last_frame_id = Some(frame.id);
+
+                    if keyframe {
+                        log_info!(
+                            "Received IDR access unit id={} gap={} awaitingKeyframe={}",
+                            frame.id,
+                            frame_gap,
+                            awaiting_keyframe
+                        );
+                    }
 
                     if frame_gap {
                         renderer_stats.frame_gaps += 1;
@@ -1471,8 +1704,7 @@ fn spawn_live_stream_renderer(
                                     FeedOutcome::FatalError => {
                                         reset_decoder(
                                             &mut decoder,
-                                            &mut sps,
-                                            &mut pps,
+                                            &mut codec_config,
                                             &mut awaiting_keyframe,
                                         );
                                         request_idr_debounced(
@@ -1611,7 +1843,10 @@ pub extern "C" fn leftcar_jni_prepare_port(
                 .to_string_lossy()
                 .into_owned()
         };
-        if !matches!(transport.as_str(), "udp" | "tcp" | "adbTcp" | "auto") {
+        if !matches!(
+            transport.as_str(),
+            "udp" | "tcp" | "adbTcp" | "usb" | "auto"
+        ) {
             return LEFTCAR_ERR_INVALID;
         }
         match prepare_udp_receiver(port, &host, &transport) {
@@ -1631,6 +1866,38 @@ pub extern "C" fn leftcar_jni_prepare_port(
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Claim the current Android UsbAccessory file descriptor. The Kotlin module
+/// calls this before `prepare_port`; the bridge's loopback control port is
+/// then used by the JS control client.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_prepare_usb(fd: i32) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let bridge = match UsbBridge::start(fd) {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                log_info!("failed to prepare USB bridge: {error}");
+                return LEFTCAR_ERR_STATE;
+            }
+        };
+        *PREPARED_USB_BRIDGE.lock().unwrap() = Some(bridge);
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_usb_control_port() -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        PREPARED_USB_BRIDGE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|bridge| bridge.control_port() as i32)
+            .unwrap_or(0)
+    });
+    guard.unwrap_or(-1)
+}
+
 /// Idempotent rollback for a Host start failure or a window launch failure.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_cancel_prepared_port(port: u16) -> i32 {
@@ -1641,6 +1908,7 @@ pub extern "C" fn leftcar_jni_cancel_prepared_port(port: u16) -> i32 {
         if cancel_tcp_bridge(port) {
             log_info!("cancelled prepared ADB TCP bridge on port {port}");
         }
+        PREPARED_USB_BRIDGE.lock().unwrap().take();
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -1693,7 +1961,7 @@ pub extern "C" fn leftcar_jni_attach_port(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        let tcp_bridge = take_tcp_bridge(port);
+        let tcp_bridge = take_media_bridge(port);
         spawn_live_stream_renderer(
             instance_str,
             surface,
@@ -1867,7 +2135,7 @@ pub extern "C" fn leftcar_jni_skip_breakdown(instance_c: *const c_char) -> i64 {
             .output_burst_discards
             .load(Ordering::Relaxed)
             .min(u64::from(u32::MAX));
-        (((input << 32) | burst) as i64)
+        ((input << 32) | burst) as i64
     });
     guard.unwrap_or(-1)
 }

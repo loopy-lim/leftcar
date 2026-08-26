@@ -191,7 +191,7 @@ export default function PairingPanel() {
       <div className="pairing-guide">
         <p className="pairing-guide-title">휴대폰이나 태블릿 연결</p>
         <p className="pairing-guide-sub">
-          Leftcar Viewer에서 QR 코드를 스캔한 뒤, 이 화면의 6자리 번호를 입력하세요.
+          Leftcar Viewer에서 이 컴퓨터를 선택하거나 주소를 입력한 뒤, 이 화면의 6자리 번호를 입력하세요.
         </p>
       </div>
 
@@ -200,7 +200,7 @@ export default function PairingPanel() {
         <div>
           <strong>안전한 연결을 위해 확인해 주세요</strong>
           <p>
-            QR 코드와 인증 번호는 한 번만 사용할 수 있고 2분 뒤 만료됩니다. 신뢰하는 같은 Wi-Fi
+            연결 주소와 인증 번호는 한 번만 사용할 수 있고 2분 뒤 만료됩니다. 신뢰하는 같은 Wi-Fi
             또는 Tailscale에 연결된 기기에서만 진행하세요.
           </p>
         </div>
@@ -221,10 +221,10 @@ export default function PairingPanel() {
               <QrCode size={22} strokeWidth={2} />
             </div>
             <p className="idle-title">새 기기 연결하기</p>
-            <p className="idle-sub">2분 동안 한 번만 사용할 수 있는 QR 코드를 만듭니다.</p>
+            <p className="idle-sub">2분 동안 한 번만 사용할 수 있는 6자리 연결 코드를 만듭니다.</p>
             <button onClick={startPairing} className="btn-primary btn-lg" disabled={starting}>
-              <QrCode size={15} />
-              {starting ? "QR 코드 만드는 중…" : "연결 QR 코드 만들기"}
+              <KeyRound size={15} />
+              {starting ? "연결 코드 만드는 중…" : "연결 코드 만들기"}
             </button>
           </div>
         ) : expired ? (
@@ -233,10 +233,10 @@ export default function PairingPanel() {
               <Clock size={22} strokeWidth={2} />
             </div>
             <p className="idle-title">연결 코드가 만료되었어요</p>
-            <p className="idle-sub">새 QR 코드를 만든 뒤 다시 시도해 주세요.</p>
+            <p className="idle-sub">새 연결 코드를 만든 뒤 다시 시도해 주세요.</p>
             <button onClick={startPairing} className="btn-primary" disabled={starting}>
               <RefreshCw size={14} />
-              {starting ? "생성 중…" : "새 QR 코드 생성"}
+              {starting ? "생성 중…" : "새 연결 코드 생성"}
             </button>
           </div>
         ) : (

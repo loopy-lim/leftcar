@@ -1,4 +1,11 @@
 import type { ControlClient } from "./control";
+import {
+  getUsbState,
+  resolveTransport,
+  type ResolvedTransport,
+  type UsbAccessoryState,
+} from "./usb";
+import type { StreamContentMode } from "./stream-profile";
 
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
@@ -21,12 +28,14 @@ export interface StartStreamArgs {
   fps: number;
   captureBackend: string;
   mediaTransport: "udp" | "adbTcp" | "auto" | string;
+  contentMode?: StreamContentMode;
   viewerIps?: string[];
 }
 
 export interface StartedStream {
   session: number;
   viewerIps: string[];
+  mediaTransport: ResolvedTransport;
 }
 
 export type StreamControlRequest = <T>(command: string, args?: unknown) => Promise<T>;
@@ -37,6 +46,19 @@ interface StartPreparedStreamInput {
   launcher: StreamLauncher;
   host: string;
   args: StartStreamArgs;
+}
+
+const USB_ATTACH_TIMEOUT_MS = 5_000;
+const USB_ATTACH_POLL_MS = 100;
+
+async function waitForUsbAccessory(initial: UsbAccessoryState): Promise<UsbAccessoryState> {
+  let state = initial;
+  const deadline = Date.now() + USB_ATTACH_TIMEOUT_MS;
+  while (!state.attached && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, USB_ATTACH_POLL_MS));
+    state = await getUsbState();
+  }
+  return state;
 }
 
 /**
@@ -59,8 +81,34 @@ export async function startPreparedStream({
     const viewerIps = [...new Set(discoveredIps)]
       .filter((address) => typeof address === "string" && address.length > 0)
       .slice(0, 4);
-    const startArgs = viewerIps.length > 0 ? { ...args, viewerIps } : args;
-    await launcher.prepareStream(args.viewerPort, host, args.mediaTransport);
+    let usbState = await getUsbState();
+    const requestedTransport = args.mediaTransport.trim().toLowerCase();
+    let usbRequestError: unknown;
+    if (
+      !usbState.attached &&
+      (requestedTransport === "auto" || requestedTransport === "usb" || requestedTransport === "aoap")
+    ) {
+      try {
+        await request("requestUsb");
+      } catch (error) {
+        usbRequestError = error;
+      }
+      if (usbRequestError === undefined) {
+        usbState = await waitForUsbAccessory(usbState);
+      }
+      if (!usbState.attached && requestedTransport !== "auto") {
+        const detail = usbRequestError instanceof Error
+          ? `: ${usbRequestError.message}`
+          : "";
+        throw new Error(`USB 액세서리 권한을 허용하지 않아 USB 스트림을 시작하지 못했습니다${detail}`);
+      }
+    }
+    const mediaTransport = resolveTransport(usbState, args.mediaTransport);
+    const startArgs = {
+      ...(viewerIps.length > 0 ? { ...args, viewerIps } : args),
+      mediaTransport,
+    };
+    await launcher.prepareStream(args.viewerPort, host, mediaTransport);
     const started = await request<{ session: number }>("startStream", startArgs);
     session = started.session;
     await launcher.openStream(
@@ -70,7 +118,7 @@ export async function startPreparedStream({
       args.height,
       args.fps,
     );
-    return { session, viewerIps };
+    return { session, viewerIps, mediaTransport };
   } catch (error) {
     if (session !== null) {
       await request("stopStream", { session }).catch(() => undefined);

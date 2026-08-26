@@ -7,7 +7,9 @@ name = "android-viewer"
 version = "0.1.0"
 dependencies = [
  "domain",
+ "fec-core",
  "libc",
+ "usb-mux",
  "viewer-core",
  "viewer-decoder",
 ]
@@ -197,6 +199,10 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "fec-core"
+version = "0.1.0"
 
 [[package]]
 name = "fnv"
@@ -861,6 +867,10 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "usb-mux"
+version = "0.1.0"
 
 [[package]]
 name = "uuid"

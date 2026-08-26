@@ -38,6 +38,19 @@ import {
   type StatusView,
 } from "../src/control";
 import { resolveStreamResolution } from "../src/stream-resolution";
+import {
+  getUsbState,
+  resolveTransport,
+  subscribeUsbState,
+  type ResolvedTransport,
+  type UsbAccessoryState,
+} from "../src/usb";
+import { shouldSwitchTransport } from "../src/transport-switch";
+import {
+  STREAM_PROFILES,
+  type StreamProfile,
+  type StreamProfileId,
+} from "../src/stream-profile";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
@@ -50,7 +63,8 @@ interface ActiveStream {
   height: number;
   fps: number;
   captureBackend: string;
-  mediaTransport: "udp" | "adbTcp" | "auto";
+  contentMode: StreamProfile["contentMode"];
+  mediaTransport: ResolvedTransport;
   viewerIps: string[];
   startedAt: number;
 }
@@ -59,6 +73,7 @@ interface RestoredStream {
   session: number;
   viewerIps: string[];
   captureBackend: string;
+  mediaTransport: ResolvedTransport;
 }
 
 const HIDABLE_DISPLAY_LABELS = ["leftcar hub", "leftcarhub"];
@@ -71,40 +86,6 @@ function isHubDisplay(name: string): boolean {
 function catalogDisplayHost(catalogHost: string): string {
   return catalogHost.split(":")[0] ?? "";
 }
-
-const STREAM_PROFILES = [
-  {
-    id: "latency",
-    label: "빠른 반응",
-    detail: "1080p 60fps",
-    maxWidth: 1920,
-    maxHeight: 1080,
-    fps: 60,
-    hint: "움직임이 많은 화면에 적합",
-  },
-  {
-    id: "balanced",
-    label: "균형",
-    detail: "1440p 60fps",
-    maxWidth: 2560,
-    maxHeight: 1440,
-    fps: 60,
-    hint: "글자 선명도와 반응 속도의 균형",
-  },
-  {
-    id: "clarity",
-    label: "선명한 화면",
-    detail: "4K 60fps",
-    maxWidth: 3840,
-    maxHeight: 2160,
-    fps: 60,
-    allowUpscale: true,
-    hint: "빠르고 안정적인 Wi-Fi에 적합",
-  },
-] as const;
-
-type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
-type StreamProfile = (typeof STREAM_PROFILES)[number];
 
 function fitProfileToDisplay(
   display: DisplayInfo,
@@ -211,6 +192,8 @@ function CatalogHeader({
         </Pressable>
       </View>
 
+      <UsbTransportStatus />
+
       {/* Error Card */}
       {error ? (
         <View style={styles.errorCard}>
@@ -274,6 +257,37 @@ function CatalogHeader({
           )}
         </Pressable>
       </View>
+    </View>
+  );
+}
+
+function UsbTransportStatus() {
+  const [state, setState] = useState<UsbAccessoryState>({ attached: false, controlPort: 0 });
+
+  useEffect(() => {
+    let active = true;
+    void getUsbState().then((next) => {
+      if (active) setState(next);
+    });
+    const subscription = subscribeUsbState(setState);
+    return () => {
+      active = false;
+      subscription.remove();
+    };
+  }, []);
+
+  return (
+    <View style={styles.transportStrip}>
+      <View style={[styles.transportDot, state.attached && styles.transportDotUsb]} />
+      <Text style={styles.transportText}>
+        {state.attached
+          ? "USB 액세서리 연결됨 · USB 우선"
+          : state.permissionPending
+            ? "USB 액세서리 권한 요청 중…"
+            : state.accessoryPresent
+              ? "USB 액세서리 감지됨 · Android 권한 허용 필요"
+              : "USB 없음 · Wi-Fi UDP 우선"}
+      </Text>
     </View>
   );
 }
@@ -403,6 +417,8 @@ function useStreamController(
   const heartbeatInFlight = useRef(new Set<number>());
   const lastRestartAt = useRef(new Map<number, number>());
   const notifiedTerminations = useRef(new Set<number>());
+  const transportSwitchInFlight = useRef(new Set<number>());
+  const streamsRef = useRef<ActiveStream[]>([]);
   const host = controlHost();
   const queryClient = useQueryClient();
   const statusQuery = useQuery({
@@ -412,6 +428,9 @@ function useStreamController(
     staleTime: 1_000,
   });
   const statusView = statusQuery.data;
+  useEffect(() => {
+    streamsRef.current = streams;
+  }, [streams]);
   const { mutate: restartStream } = useMutation({
     mutationFn: async (active: ActiveStream) => {
       const restarted = await restoreStream(active);
@@ -426,6 +445,7 @@ function useStreamController(
                 session: restarted.session,
                 captureBackend: restarted.captureBackend,
                 viewerIps: restarted.viewerIps,
+                mediaTransport: restarted.mediaTransport,
                 startedAt: Date.now(),
               }
             : item,
@@ -444,6 +464,45 @@ function useStreamController(
       heartbeatInFlight.current.delete(active.session);
     },
   });
+
+  const { mutate: switchTransport } = useMutation({
+    mutationFn: async (active: ActiveStream) => {
+      const restarted = await restoreStream(active);
+      return { active, restarted };
+    },
+    onSuccess: ({ active, restarted }) => {
+      setStreams((previous) =>
+        previous.map((item) =>
+          item.session === active.session
+            ? {
+                ...item,
+                session: restarted.session,
+                captureBackend: restarted.captureBackend,
+                mediaTransport: restarted.mediaTransport,
+                viewerIps: restarted.viewerIps,
+                startedAt: Date.now(),
+              }
+            : item,
+        ),
+      );
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
+    },
+    onError: (error, active) => {
+      setError(
+        `전송 경로를 바꾸지 못했습니다: ${String(error instanceof Error ? error.message : error)}`,
+      );
+      transportSwitchInFlight.current.delete(active.session);
+    },
+    onSettled: (_data, _error, active) => {
+      transportSwitchInFlight.current.delete(active.session);
+    },
+  });
+
+  const switchTransportRef = useRef(switchTransport);
+  useEffect(() => {
+    switchTransportRef.current = switchTransport;
+  }, [switchTransport]);
 
   useEffect(() => {
     if (!statusView) return;
@@ -491,6 +550,41 @@ function useStreamController(
       restartStream(active);
     }
   }, [restartStream, statusView, streams]);
+
+  const [usbState, setUsbState] = useState<UsbAccessoryState>({
+    attached: false,
+    controlPort: 0,
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    void getUsbState().then((state) => {
+      if (!disposed) setUsbState(state);
+    });
+    const subscription = subscribeUsbState(setUsbState);
+    return () => {
+      disposed = true;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    const target = resolveTransport(usbState, "auto");
+    const timer = setTimeout(() => {
+      for (const active of streamsRef.current) {
+        if (
+          target === active.mediaTransport ||
+          !shouldSwitchTransport(active.mediaTransport, usbState) ||
+          transportSwitchInFlight.current.has(active.session)
+        ) {
+          continue;
+        }
+        transportSwitchInFlight.current.add(active.session);
+        switchTransportRef.current(active);
+      }
+    }, 1_000);
+    return () => clearTimeout(timer);
+  }, [usbState]);
 
   const addStream = useCallback((stream: ActiveStream) => {
     setStreams((previous) => [...previous, stream]);
@@ -573,6 +667,7 @@ export default function Catalog() {
           fps: active.fps,
           captureBackend,
           mediaTransport: "auto",
+          contentMode: active.contentMode,
         },
       });
       return { ...restarted, captureBackend };
@@ -621,6 +716,7 @@ export default function Catalog() {
           fps,
           captureBackend: effectiveCaptureBackend,
           mediaTransport: "auto",
+          contentMode: selectedProfile.contentMode,
         };
         const started = await startPreparedStream({
           control: client,
@@ -638,8 +734,9 @@ export default function Catalog() {
           height,
           fps,
           captureBackend: effectiveCaptureBackend,
-          mediaTransport: "auto",
+          contentMode: selectedProfile.contentMode,
           viewerIps: started.viewerIps,
+          mediaTransport: started.mediaTransport,
           startedAt: Date.now(),
         });
       } catch (e) {
@@ -765,6 +862,30 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontFamily: "monospace",
     fontVariant: ["tabular-nums"],
+  },
+  transportStrip: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E4E4E7",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  transportDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: "#A1A1AA",
+  },
+  transportDotUsb: {
+    backgroundColor: "#16A34A",
+  },
+  transportText: {
+    color: "#52525B",
+    fontSize: 12,
   },
   btnHostChange: {
     backgroundColor: "#F4F4F5",

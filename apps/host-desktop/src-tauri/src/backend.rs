@@ -32,6 +32,7 @@ pub trait CaptureBackend: Send + Sync {
         fps: u32,
         capture_backend: &str,
         media_transport: &str,
+        content_mode: &str,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
     /// Stop while telling a still-live viewer why (LCT1 wire code). The
@@ -83,6 +84,7 @@ impl CaptureBackend for FakeBackend {
         _fps: u32,
         _capture_backend: &str,
         _media_transport: &str,
+        _content_mode: &str,
     ) -> Result<u32, String> {
         Ok(7)
     }
@@ -109,6 +111,7 @@ impl CaptureBackend for FakeBackend {
             dropped: 0,
             network_dropped: 0,
             network_queue_dropped: 0,
+            recovery_frames_dropped: 0,
             udp_send_failures: 0,
             udp_send_retries: 0,
             recovery_keyframes: 0,
@@ -137,7 +140,27 @@ impl CaptureBackend for FakeBackend {
             encode_output_p95_us: 7_000,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
+            last_au_bytes: 0,
+            last_au_fragments: 0,
+            last_au_parity: 0,
+            last_au_datagrams: 0,
+            last_au_expected_datagrams: 0,
+            last_au_send_us: 0,
+            last_au_is_keyframe: false,
+            max_au_bytes: 0,
+            max_au_fragments: 0,
+            sent_datagrams: 0,
+            sent_parity_datagrams: 0,
             error: None,
+            receiver_frame_gaps: 0,
+            receiver_input_drops: 0,
+            receiver_incomplete_aus: 0,
+            receiver_stale_frames: 0,
+            receiver_stale_input_drops: None,
+            receiver_output_burst_discards: 0,
+            receiver_rtt_ms: None,
+            receiver_wire_ms: None,
+            receiver_feedback_age_ms: None,
         })
     }
 

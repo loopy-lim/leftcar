@@ -43,10 +43,57 @@ fn normalize_media_transport(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
         "udp" | "wifi" => Some("udp"),
         "tcp" | "wifitcp" | "wifi-tcp" => Some("tcp"),
-        "adbtcp" | "adb-tcp" | "usb" => Some("adbTcp"),
+        "adbtcp" | "adb-tcp" => Some("adbTcp"),
+        "usb" | "aoap" => Some("usb"),
         "auto" | "both" => Some("auto"),
         _ => None,
     }
+}
+
+fn normalize_content_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "interactive" | "latency" => Some("interactive"),
+        "video" | "movie" => Some("video"),
+        _ => None,
+    }
+}
+
+fn build_attempts(requested: &str, wifi_candidates: &[String]) -> Vec<(String, &'static str)> {
+    let mut attempts = Vec::new();
+    match requested {
+        "usb" => attempts.push(("127.0.0.1".into(), "usb")),
+        "tcp" => attempts.extend(
+            wifi_candidates
+                .iter()
+                .cloned()
+                .map(|candidate| (candidate, "tcp")),
+        ),
+        "udp" => attempts.extend(
+            wifi_candidates
+                .iter()
+                .cloned()
+                .map(|candidate| (candidate, "udp")),
+        ),
+        "adbTcp" => attempts.push(("127.0.0.1".into(), "adbTcp")),
+        "auto" => {
+            attempts.push(("127.0.0.1".into(), "usb"));
+            attempts.extend(
+                wifi_candidates
+                    .iter()
+                    .cloned()
+                    .map(|candidate| (candidate, "udp")),
+            );
+            attempts.extend(
+                wifi_candidates
+                    .iter()
+                    .cloned()
+                    .map(|candidate| (candidate, "tcp")),
+            );
+            attempts.push(("127.0.0.1".into(), "adbTcp"));
+        }
+        _ => {}
+    }
+    attempts
 }
 
 fn adb_forward(port: u16) -> Result<(), String> {
@@ -77,6 +124,11 @@ fn adb_remove_forward(port: u16) {
 fn cleanup_media_transport(transport: &str, port: u16) {
     if transport == "adbTcp" {
         adb_remove_forward(port);
+    } else if transport == "usb" {
+        // The USB mux is shared by control and media. Stop only the
+        // session-scoped loopback media proxy so the accessory link remains
+        // available for the next stream and for control polling.
+        crate::aoap_proxy::stop_media_proxy();
     }
 }
 
@@ -191,6 +243,7 @@ impl ControlServer {
                     dropped: 0,
                     network_dropped: 0,
                     network_queue_dropped: 0,
+                    recovery_frames_dropped: 0,
                     udp_send_failures: 0,
                     udp_send_retries: 0,
                     recovery_keyframes: 0,
@@ -219,7 +272,27 @@ impl ControlServer {
                     encode_output_p95_us: 0,
                     send_block_p95_us: 0,
                     send_pace_p95_us: 0,
+                    last_au_bytes: 0,
+                    last_au_fragments: 0,
+                    last_au_parity: 0,
+                    last_au_datagrams: 0,
+                    last_au_expected_datagrams: 0,
+                    last_au_send_us: 0,
+                    last_au_is_keyframe: false,
+                    max_au_bytes: 0,
+                    max_au_fragments: 0,
+                    sent_datagrams: 0,
+                    sent_parity_datagrams: 0,
                     error: Some("backend stats unavailable".into()),
+                    receiver_frame_gaps: 0,
+                    receiver_input_drops: 0,
+                    receiver_incomplete_aus: 0,
+                    receiver_stale_frames: 0,
+                    receiver_stale_input_drops: None,
+                    receiver_output_burst_discards: 0,
+                    receiver_rtt_ms: None,
+                    receiver_wire_ms: None,
+                    receiver_feedback_age_ms: None,
                 });
 
                 if let Some(error) = &s.terminal_error {
@@ -255,6 +328,7 @@ impl ControlServer {
                     dropped: metrics.dropped,
                     network_dropped: metrics.network_dropped,
                     network_queue_dropped: metrics.network_queue_dropped,
+                    recovery_frames_dropped: metrics.recovery_frames_dropped,
                     udp_send_failures: metrics.udp_send_failures,
                     udp_send_retries: metrics.udp_send_retries,
                     recovery_keyframes: metrics.recovery_keyframes,
@@ -285,7 +359,27 @@ impl ControlServer {
                     encode_output_p95_us: metrics.encode_output_p95_us,
                     send_block_p95_us: metrics.send_block_p95_us,
                     send_pace_p95_us: metrics.send_pace_p95_us,
+                    last_au_bytes: metrics.last_au_bytes,
+                    last_au_fragments: metrics.last_au_fragments,
+                    last_au_parity: metrics.last_au_parity,
+                    last_au_datagrams: metrics.last_au_datagrams,
+                    last_au_expected_datagrams: metrics.last_au_expected_datagrams,
+                    last_au_send_us: metrics.last_au_send_us,
+                    last_au_is_keyframe: metrics.last_au_is_keyframe,
+                    max_au_bytes: metrics.max_au_bytes,
+                    max_au_fragments: metrics.max_au_fragments,
+                    sent_datagrams: metrics.sent_datagrams,
+                    sent_parity_datagrams: metrics.sent_parity_datagrams,
                     error: metrics.error,
+                    receiver_frame_gaps: metrics.receiver_frame_gaps,
+                    receiver_input_drops: metrics.receiver_input_drops,
+                    receiver_incomplete_aus: metrics.receiver_incomplete_aus,
+                    receiver_stale_frames: metrics.receiver_stale_frames,
+                    receiver_stale_input_drops: metrics.receiver_stale_input_drops,
+                    receiver_output_burst_discards: metrics.receiver_output_burst_discards,
+                    receiver_rtt_ms: metrics.receiver_rtt_ms,
+                    receiver_wire_ms: metrics.receiver_wire_ms,
+                    receiver_feedback_age_ms: metrics.receiver_feedback_age_ms,
                 });
             }
 
@@ -401,17 +495,21 @@ impl ControlServer {
         }
     }
 
-    async fn dispatch(
+    pub(crate) async fn dispatch(
         &self,
         command: &str,
         args: serde_json::Value,
         viewer_ip: &str,
     ) -> serde_json::Value {
         match command {
+            "requestUsb" => match crate::aoap_control::ensure_usb_accessory().await {
+                Ok(()) => ok(json!({ "attached": true })),
+                Err(error) => err(&error),
+            },
             "beginPairing" => {
                 // Local operator/diagnostic entry point. This exposes the same
-                // short-lived two-factor offer as the Tauri pairing window,
-                // but it is never reachable from a LAN or tailnet peer.
+                // short-lived pairing offer as the Tauri pairing window, but
+                // it is never reachable from a LAN or tailnet peer.
                 if !is_loopback_peer(viewer_ip) {
                     return err("unauthorized");
                 }
@@ -425,8 +523,10 @@ impl ControlServer {
                 #[derive(serde::Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct PairArgs {
-                    offer_id: String,
-                    secret: String,
+                    #[serde(default)]
+                    offer_id: Option<String>,
+                    #[serde(default)]
+                    secret: Option<String>,
                     code: String,
                     device_id: String,
                     #[serde(default)]
@@ -436,13 +536,19 @@ impl ControlServer {
                     Ok(v) => v,
                     Err(_) => return err("pairing failed"),
                 };
-                let res = self.pairing.pair(
-                    &input.offer_id,
-                    &input.secret,
-                    &input.code,
-                    &input.device_id,
-                    &input.device_name,
-                );
+                let res = match (input.offer_id.as_deref(), input.secret.as_deref()) {
+                    (Some(offer_id), Some(secret)) => self.pairing.pair(
+                        offer_id,
+                        secret,
+                        &input.code,
+                        &input.device_id,
+                        &input.device_name,
+                    ),
+                    (None, None) => self
+                        .pairing
+                        .pair_by_code(&input.code, &input.device_id, &input.device_name),
+                    _ => Err(crate::pairing::PairingServerError::PairingFailed),
+                };
                 match res {
                     Ok(token) => ok(json!({ "token": token })),
                     Err(_) => err("pairing failed"),
@@ -489,11 +595,30 @@ impl ControlServer {
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
                 let requested_transport = normalize_media_transport(&input.media_transport)
-                    .ok_or_else(|| format!("unsupported media transport: {}", input.media_transport));
+                    .ok_or_else(|| {
+                        format!("unsupported media transport: {}", input.media_transport)
+                    });
                 let requested_transport = match requested_transport {
                     Ok(value) => value,
                     Err(error) => return err(&error),
                 };
+                let content_mode = match normalize_content_mode(&input.content_mode) {
+                    Some(value) => value,
+                    None => return err(&format!("unsupported content mode: {}", input.content_mode)),
+                };
+
+                // Do not claim a normal Android USB device merely because a
+                // cable was attached. AOAP negotiation is an explicit stream
+                // request; `auto` may fall back to Wi-Fi, while an explicit
+                // USB request reports the negotiation failure to the viewer.
+                if matches!(requested_transport, "usb" | "auto") {
+                    if let Err(error) = crate::aoap_control::ensure_usb_accessory().await {
+                        if requested_transport == "usb" {
+                            return err(&error);
+                        }
+                        eprintln!("AOAP unavailable; continuing with transport fallback: {error}");
+                    }
+                }
 
                 // A non-bypassable VPN can route a local control connection
                 // through a LAN subnet router, so its TCP peer is not always
@@ -503,6 +628,7 @@ impl ControlServer {
                 // CGNAT address. USB is deliberately different: adb forward
                 // terminates on the Host, so the only valid media peer is the
                 // Host loopback address.
+                let usb_control = viewer_ip == "usb";
                 let mut wifi_candidates = input
                     .viewer_ips
                     .iter()
@@ -510,47 +636,18 @@ impl ControlServer {
                     .filter(|candidate| same_private_lan_candidate(candidate, viewer_ip))
                     .cloned()
                     .collect::<Vec<_>>();
-                if !wifi_candidates.iter().any(|candidate| candidate == viewer_ip) {
+                if !usb_control
+                    && !wifi_candidates
+                        .iter()
+                        .any(|candidate| candidate == viewer_ip)
+                {
                     wifi_candidates.push(viewer_ip.to_owned());
                 }
-                let mut attempts = Vec::new();
-                match requested_transport {
-                    // TCP is the reliable Wi-Fi path. It uses the same
-                    // authenticated framing as USB, so one lost UDP fragment
-                    // cannot invalidate the following H.264 frames.
-                    "tcp" => attempts.extend(
-                        wifi_candidates
-                            .iter()
-                            .cloned()
-                            .map(|candidate| (candidate, "tcp")),
-                    ),
-                    "udp" => attempts.extend(
-                        wifi_candidates
-                            .iter()
-                            .cloned()
-                            .map(|candidate| (candidate, "udp")),
-                    ),
-                    "adbTcp" => attempts.push(("127.0.0.1".into(), "adbTcp")),
-                    "auto" => {
-                        // Prefer reliable Wi-Fi first. UDP remains a useful
-                        // low-latency fallback when a viewer build lacks the
-                        // TCP bridge, and USB is the final stable fallback.
-                        attempts.extend(
-                            wifi_candidates
-                                .iter()
-                                .cloned()
-                                .map(|candidate| (candidate, "tcp")),
-                        );
-                        attempts.extend(
-                            wifi_candidates
-                                .iter()
-                                .cloned()
-                                .map(|candidate| (candidate, "udp")),
-                        );
-                        attempts.push(("127.0.0.1".into(), "adbTcp"));
-                    }
-                    _ => unreachable!("transport was normalized above"),
-                }
+                let attempts = if usb_control {
+                    build_attempts("usb", &[])
+                } else {
+                    build_attempts(requested_transport, &wifi_candidates)
+                };
                 let mut last_error = None;
                 let mut started = None;
                 for (candidate, transport) in attempts {
@@ -558,6 +655,13 @@ impl ControlServer {
                     self.stop_sessions_for_viewer(&viewer_addr);
                     if transport == "adbTcp" {
                         if let Err(error) = adb_forward(input.viewer_port) {
+                            last_error = Some(error);
+                            continue;
+                        }
+                    }
+                    if transport == "usb" {
+                        if let Err(error) = crate::aoap_proxy::start_media_proxy(input.viewer_port)
+                        {
                             last_error = Some(error);
                             continue;
                         }
@@ -571,22 +675,21 @@ impl ControlServer {
                         input.fps,
                         &input.capture_backend,
                         transport,
+                        content_mode,
                     ) {
-                        Ok(handle) => {
-                            match self.wait_for_first_frame(handle).await {
-                                Ok(()) => {
-                                    started = Some((handle, candidate, transport));
-                                    break;
-                                }
-                                Err(error) => {
-                                    let _ = self.backend.stop(handle);
-                                    cleanup_media_transport(transport, input.viewer_port);
-                                    last_error = Some(format!(
-                                        "{candidate} ({transport}) startup failed: {error}"
-                                    ));
-                                }
+                        Ok(handle) => match self.wait_for_first_frame(handle).await {
+                            Ok(()) => {
+                                started = Some((handle, candidate, transport));
+                                break;
                             }
-                        }
+                            Err(error) => {
+                                let _ = self.backend.stop(handle);
+                                cleanup_media_transport(transport, input.viewer_port);
+                                last_error = Some(format!(
+                                    "{candidate} ({transport}) startup failed: {error}"
+                                ));
+                            }
+                        },
                         Err(e) => {
                             cleanup_media_transport(transport, input.viewer_port);
                             last_error = Some(format!("{candidate} ({transport}): {e}"));
@@ -677,6 +780,10 @@ impl ControlServer {
                 }
             }
         }
+    }
+
+    pub(crate) fn authorize_token(&self, token: &str) -> bool {
+        self.pairing.authorize(token)
     }
 }
 
@@ -811,6 +918,7 @@ mod tests {
             _fps: u32,
             _capture_backend: &str,
             _media_transport: &str,
+            _content_mode: &str,
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -831,6 +939,7 @@ mod tests {
                 dropped: 0,
                 network_dropped: 0,
                 network_queue_dropped: 0,
+                recovery_frames_dropped: 0,
                 udp_send_failures: 0,
                 udp_send_retries: 0,
                 recovery_keyframes: 0,
@@ -859,7 +968,27 @@ mod tests {
                 encode_output_p95_us: 7_000,
                 send_block_p95_us: 1_000,
                 send_pace_p95_us: 0,
+                last_au_bytes: 0,
+                last_au_fragments: 0,
+                last_au_parity: 0,
+                last_au_datagrams: 0,
+                last_au_expected_datagrams: 0,
+                last_au_send_us: 0,
+                last_au_is_keyframe: false,
+                max_au_bytes: 0,
+                max_au_fragments: 0,
+                sent_datagrams: 0,
+                sent_parity_datagrams: 0,
                 error: Some("viewer closed stream".into()),
+                receiver_frame_gaps: 0,
+                receiver_input_drops: 0,
+                receiver_incomplete_aus: 0,
+                receiver_stale_frames: 0,
+                receiver_stale_input_drops: None,
+                receiver_output_burst_discards: 0,
+                receiver_rtt_ms: None,
+                receiver_wire_ms: None,
+                receiver_feedback_age_ms: None,
             })
         }
     }
@@ -1035,7 +1164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn six_digit_code_alone_cannot_pair() {
+    async fn six_digit_code_alone_pairs_against_the_live_host_offer() {
         let pairing = test_pairing();
         let view = pairing.begin_pairing("127.0.0.1", 7777);
         let addr = spawn_server_with_pairing(pairing.clone()).await;
@@ -1047,9 +1176,9 @@ mod tests {
         });
 
         let line = request(&mut sock, "pair", &args.to_string(), "").await;
-        assert!(line.contains("\"ok\":false"), "{line}");
-        assert!(line.contains("\"error\":\"pairing failed\""), "{line}");
-        assert!(pairing.list_devices().is_empty());
+        assert!(line.contains("\"ok\":true"), "{line}");
+        assert!(line.contains("\"token\":"), "{line}");
+        assert_eq!(pairing.list_devices().len(), 1);
     }
 
     #[test]
@@ -1068,6 +1197,27 @@ mod tests {
         assert!(!same_private_lan_candidate("192.168.1.18", "192.168.0.170"));
         assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
         assert!(!same_private_lan_candidate("192.168.0.18", "100.128.0.1"));
+    }
+
+    #[test]
+    fn normalize_media_transport_accepts_usb_without_reinterpreting_adb() {
+        assert_eq!(normalize_media_transport("usb"), Some("usb"));
+        assert_eq!(normalize_media_transport("AOAP"), Some("usb"));
+        assert_eq!(normalize_media_transport("adbTcp"), Some("adbTcp"));
+    }
+
+    #[test]
+    fn auto_attempts_usb_then_udp_then_tcp() {
+        let attempts = build_attempts("auto", &["192.168.1.50".into()]);
+        assert_eq!(
+            attempts,
+            vec![
+                ("127.0.0.1".into(), "usb"),
+                ("192.168.1.50".into(), "udp"),
+                ("192.168.1.50".into(), "tcp"),
+                ("127.0.0.1".into(), "adbTcp"),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -18,6 +18,10 @@ object ViewerNative {
     external fun start(): Long
     /** Bind the UDP media port before Host reachability proof starts. */
     external fun prepareStream(port: Int, host: String, mediaTransport: String): Int
+    /** Claim an Android UsbAccessory fd and start the native mux bridge. */
+    external fun prepareUsb(fd: Int): Int
+    /** Loopback TCP port used by the JS control client for USB sessions. */
+    external fun usbControlPort(): Int
     /** Roll back a prepared port when Host start or Activity launch fails. */
     external fun cancelPreparedStream(port: Int): Int
     external fun updateWindowEvent(state: Long, instanceId: String, eventCode: Int, monotonicMs: Long): Int

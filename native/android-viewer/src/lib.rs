@@ -21,6 +21,7 @@ pub mod prepared_tcp;
 /// Port preflight used before Android opens a stream Activity. Keeping this
 /// host-testable lets CI exercise the reachability race fix without an APK.
 pub mod prepared_udp;
+pub mod usb_bridge;
 use std::time::Duration;
 
 pub const LEFTCAR_OK: i32 = 0;

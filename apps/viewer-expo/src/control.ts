@@ -77,6 +77,15 @@ export interface SessionView {
   sendBlockP95Us: number;
   sendPaceP95Us?: number;
   error?: string | null;
+  receiverFrameGaps?: number;
+  receiverInputDrops?: number;
+  receiverIncompleteAus?: number;
+  receiverStaleFrames?: number;
+  receiverStaleInputDrops?: number | null;
+  receiverOutputBurstDiscards?: number;
+  receiverRttMs?: number | null;
+  receiverWireMs?: number | null;
+  receiverFeedbackAgeMs?: number | null;
 }
 
 export interface StatusView {
@@ -119,10 +128,10 @@ export function formatErrorMessage(err: unknown): string {
     return "컴퓨터의 연결 승인이 필요합니다.";
   }
   if (normalized.includes("pairing failed")) {
-    return "인증 번호가 맞지 않거나 만료되었습니다. 컴퓨터에서 새 QR 코드를 만들어 주세요.";
+    return "인증 번호가 맞지 않거나 만료되었습니다. 컴퓨터에서 새 연결 코드를 만들어 주세요.";
   }
   if (normalized.includes("offer not found")) {
-    return "연결 코드가 만료되었습니다. 컴퓨터에서 새 QR 코드를 만들어 주세요.";
+    return "연결 코드가 만료되었습니다. 컴퓨터에서 새 연결 코드를 만들어 주세요.";
   }
   if (normalized.includes("timeout")) {
     return "컴퓨터가 응답하지 않습니다. 같은 네트워크인지 확인한 뒤 다시 시도해 주세요.";

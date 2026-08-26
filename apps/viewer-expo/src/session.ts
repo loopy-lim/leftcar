@@ -1,5 +1,6 @@
 import { connect, type ControlClient } from "./control";
 import { getStoredToken, isTrustedHost } from "./pairing";
+import { getUsbState } from "./usb";
 
 /**
  * App-wide control session singleton: the hub screen connects once, catalog
@@ -25,7 +26,17 @@ export async function connectHost(host: string, port = 7777): Promise<ControlCli
   if (!isTrustedHost(host)) {
     throw new Error("신뢰하는 같은 Wi-Fi 또는 Tailscale의 컴퓨터만 연결할 수 있습니다");
   }
-  const c = await connect(host, port, 5000, () => getStoredToken());
+  const usb = await getUsbState();
+  let c: ControlClient;
+  if (usb.attached && usb.controlPort > 0) {
+    try {
+      c = await connect("127.0.0.1", usb.controlPort, 5000, () => getStoredToken());
+    } catch {
+      c = await connect(host, port, 5000, () => getStoredToken());
+    }
+  } else {
+    c = await connect(host, port, 5000, () => getStoredToken());
+  }
   // Keep the previous connection alive until the replacement succeeds, then
   // release it so switching between multiple computers does not leak sockets.
   if (client && client !== c) client.close();
@@ -43,7 +54,17 @@ export async function reconnectHost(): Promise<ControlClient> {
 
   reconnectInFlight = (async () => {
     const previous = client;
-    const c = await connect(hostTarget, hostPort, 5000, () => getStoredToken());
+    const usb = await getUsbState();
+    let c: ControlClient;
+    if (usb.attached && usb.controlPort > 0) {
+      try {
+        c = await connect("127.0.0.1", usb.controlPort, 5000, () => getStoredToken());
+      } catch {
+        c = await connect(hostTarget, hostPort, 5000, () => getStoredToken());
+      }
+    } else {
+      c = await connect(hostTarget, hostPort, 5000, () => getStoredToken());
+    }
     if (previous && previous !== c) previous.close();
     client = c;
     return c;

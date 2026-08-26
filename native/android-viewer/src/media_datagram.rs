@@ -16,8 +16,10 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 pub const FRAME_MARKER: u8 = b'G';
+pub const PARITY_MARKER: u8 = b'P';
 pub const FRAME_HEADER_V1_LEN: usize = 17;
 pub const FRAME_HEADER_V2_LEN: usize = 33;
+pub const PARITY_HEADER_LEN: usize = 19;
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 pub const MAX_FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM_BYTES - FRAME_HEADER_V2_LEN;
 // Four AUs tolerate a short Wi-Fi scheduling/reordering burst. Completed AUs
@@ -36,6 +38,55 @@ pub const BASE_STALE_FRAME_BUDGET_MS: u64 = 80;
 pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
 /// Number of consecutive over-budget delta frames required before resync.
 pub const STALE_RESYNC_THRESHOLD: u32 = 3;
+/// Number of completed access units that may pass through one receive burst.
+/// A larger burst is already behind the live edge and must collapse to its
+/// newest complete access unit before it reaches MediaCodec.
+pub const MAX_LIVE_EDGE_BATCH: usize = 3;
+
+pub struct LiveEdgeSelection<T> {
+    pub frames: Vec<T>,
+    pub discarded: usize,
+}
+
+pub fn select_live_edge_frames<T>(mut frames: Vec<T>) -> LiveEdgeSelection<T> {
+    if frames.len() <= MAX_LIVE_EDGE_BATCH {
+        return LiveEdgeSelection {
+            frames,
+            discarded: 0,
+        };
+    }
+    let newest = frames.pop().expect("length checked above");
+    LiveEdgeSelection {
+        discarded: frames.len(),
+        frames: vec![newest],
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverPressure {
+    pub live_edge_discards: u64,
+    pub decoder_input_drops: u64,
+    pub decoder_output_discards: u64,
+    pub fec_recovered_fragments: u64,
+}
+
+impl ReceiverPressure {
+    pub fn record_live_edge_discards(&mut self, count: usize) {
+        self.live_edge_discards = self.live_edge_discards.saturating_add(count as u64);
+    }
+
+    pub fn record_decoder_input_drop(&mut self) {
+        self.decoder_input_drops = self.decoder_input_drops.saturating_add(1);
+    }
+
+    pub fn record_decoder_output_discards(&mut self, total: u64) {
+        self.decoder_output_discards = total;
+    }
+
+    pub fn record_fec_recovery(&mut self, count: usize) {
+        self.fec_recovered_fragments = self.fec_recovered_fragments.saturating_add(count as u64);
+    }
+}
 
 /// Advance the stale-frame hysteresis state without requiring a decoder.
 pub fn stale_streak_advance(
@@ -67,6 +118,177 @@ pub struct FrameFragment<'a> {
     pub encode_wall_ms: Option<u64>,
     pub send_wall_ms: u64,
     pub payload: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParityFragment<'a> {
+    pub id: u16,
+    pub k: u8,
+    pub index: u8,
+    pub base: u16,
+    pub total: u16,
+    pub send_wall_ms: u64,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_parity(datagram: &[u8]) -> Option<ParityFragment<'_>> {
+    if datagram.len() <= PARITY_HEADER_LEN || datagram[0] != PARITY_MARKER {
+        return None;
+    }
+    let id = u16::from_le_bytes(datagram[1..3].try_into().ok()?);
+    let k = datagram[3];
+    let index = datagram[4];
+    let base = u16::from_be_bytes(datagram[5..7].try_into().ok()?);
+    let total = u16::from_be_bytes(datagram[7..9].try_into().ok()?);
+    if !(1..=8).contains(&k)
+        || usize::from(index) >= fec_core::parity_count(usize::from(k))
+        || total == 0
+        || usize::from(base) + usize::from(k) > usize::from(total)
+        || &datagram[9..11] != b"LT"
+    {
+        return None;
+    }
+    Some(ParityFragment {
+        id,
+        k,
+        index,
+        base,
+        total,
+        send_wall_ms: u64::from_be_bytes(datagram[11..19].try_into().ok()?),
+        payload: &datagram[PARITY_HEADER_LEN..],
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredFragment {
+    pub index: u16,
+    pub count: u16,
+    pub id: u16,
+    pub capture_wall_ms: Option<u64>,
+    pub encode_wall_ms: Option<u64>,
+    pub send_wall_ms: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Bounded FEC state for one AU group. Data fragments may arrive before the
+/// parity width is known; they are retained in raw form until a P datagram
+/// supplies the fixed-width shard size.
+pub struct FecGroup {
+    id: u16,
+    k: usize,
+    base: u16,
+    total: u16,
+    data: Vec<Option<Vec<u8>>>,
+    parity: Vec<Option<Vec<u8>>>,
+    capture_wall_ms: Option<u64>,
+    encode_wall_ms: Option<u64>,
+    send_wall_ms: u64,
+    width: Option<usize>,
+}
+
+impl FecGroup {
+    pub fn new(id: u16, k: u8, base: u16, total: u16) -> Option<Self> {
+        let k = usize::from(k);
+        let parity = fec_core::parity_count(k);
+        if !(1..=8).contains(&k) || parity == 0 || usize::from(base) + k > usize::from(total) {
+            return None;
+        }
+        Some(Self {
+            id,
+            k,
+            base,
+            total,
+            data: vec![None; k],
+            parity: vec![None; parity],
+            capture_wall_ms: None,
+            encode_wall_ms: None,
+            send_wall_ms: 0,
+            width: None,
+        })
+    }
+
+    pub fn push_data(&mut self, fragment: FrameFragment<'_>) {
+        if fragment.id != self.id
+            || fragment.count != self.total
+            || fragment.index < self.base
+            || usize::from(fragment.index - self.base) >= self.k
+        {
+            return;
+        }
+        let index = usize::from(fragment.index - self.base);
+        if self.data[index].is_none() {
+            self.data[index] = Some(fragment.payload.to_vec());
+            self.capture_wall_ms = fragment.capture_wall_ms;
+            self.encode_wall_ms = fragment.encode_wall_ms;
+            self.send_wall_ms = fragment.send_wall_ms;
+        }
+    }
+
+    pub fn push_data_and_restore(
+        &mut self,
+        fragment: FrameFragment<'_>,
+    ) -> Option<Vec<RestoredFragment>> {
+        self.push_data(fragment);
+        self.try_restore()
+    }
+
+    pub fn push_parity(&mut self, fragment: ParityFragment<'_>) {
+        if fragment.id != self.id
+            || fragment.k as usize != self.k
+            || fragment.base != self.base
+            || fragment.total != self.total
+        {
+            return;
+        }
+        self.width = Some(fragment.payload.len());
+        self.parity[usize::from(fragment.index)] = Some(fragment.payload.to_vec());
+        if self.send_wall_ms == 0 {
+            self.send_wall_ms = fragment.send_wall_ms;
+        }
+    }
+
+    pub fn push_parity_and_restore(
+        &mut self,
+        fragment: ParityFragment<'_>,
+    ) -> Option<Vec<RestoredFragment>> {
+        self.push_parity(fragment);
+        self.try_restore()
+    }
+
+    pub fn try_restore(&mut self) -> Option<Vec<RestoredFragment>> {
+        let width = self.width?;
+        let received = self
+            .data
+            .iter()
+            .map(|payload| {
+                payload
+                    .as_deref()
+                    .and_then(|payload| fec_core::pack_shard(payload, width).ok())
+            })
+            .chain(self.parity.iter().cloned())
+            .collect::<Vec<_>>();
+        let restored = fec_core::decode_group(received, self.k, width).ok()?;
+        let mut output = Vec::new();
+        for (index, payload) in restored.into_iter().enumerate() {
+            if self.data[index].is_none() {
+                self.data[index] = Some(payload.clone());
+                output.push(RestoredFragment {
+                    index: self.base + index as u16,
+                    count: self.total,
+                    id: self.id,
+                    capture_wall_ms: self.capture_wall_ms,
+                    encode_wall_ms: self.encode_wall_ms,
+                    send_wall_ms: self.send_wall_ms,
+                    payload,
+                });
+            }
+        }
+        (!output.is_empty()).then_some(output)
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.data.iter().all(Option::is_some)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,6 +712,87 @@ mod tests {
         bytes
     }
 
+    fn parity_datagram(
+        id: u16,
+        k: u8,
+        index: u8,
+        base: u16,
+        total: u16,
+        wall: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = vec![PARITY_MARKER];
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.push(k);
+        bytes.push(index);
+        bytes.extend_from_slice(&base.to_be_bytes());
+        bytes.extend_from_slice(&total.to_be_bytes());
+        bytes.extend_from_slice(b"LT");
+        bytes.extend_from_slice(&wall.to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn parity_restores_one_lost_fragment_before_reassembly() {
+        let payloads = (0..8).map(|i| vec![i as u8; 64]).collect::<Vec<_>>();
+        let encoded = fec_core::encode_group(&payloads).unwrap();
+        let mut group = FecGroup::new(77, 8, 0, 8).unwrap();
+        for (index, payload) in payloads.iter().enumerate() {
+            if index != 3 {
+                group.push_data(
+                    parse_fragment(&datagram(index as u16, 8, 77, 1, 2, 3, payload)).unwrap(),
+                );
+            }
+        }
+        for (index, parity) in encoded.parity.iter().enumerate() {
+            group.push_parity(
+                parse_parity(&parity_datagram(77, 8, index as u8, 0, 8, 3, parity)).unwrap(),
+            );
+        }
+        let restored = group.try_restore().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].index, 3);
+        assert_eq!(restored[0].payload, payloads[3]);
+    }
+
+    #[test]
+    fn parity_first_arrival_retries_after_late_data() {
+        let payloads = (0..7).map(|i| vec![i as u8; 64]).collect::<Vec<_>>();
+        let encoded = fec_core::encode_group(&payloads).unwrap();
+        let mut group = FecGroup::new(78, 7, 0, 7).unwrap();
+
+        for (index, parity) in encoded.parity.iter().enumerate() {
+            assert!(group
+                .push_parity_and_restore(
+                    parse_parity(&parity_datagram(78, 7, index as u8, 0, 7, 3, parity)).unwrap()
+                )
+                .is_none());
+        }
+        for (index, payload) in payloads.iter().enumerate() {
+            if index == 3 {
+                continue;
+            }
+            let restored = group.push_data_and_restore(
+                parse_fragment(&datagram(index as u16, 7, 78, 1, 2, 3, payload)).unwrap(),
+            );
+            if index == 6 {
+                let restored = restored.expect("late data must trigger FEC retry");
+                assert_eq!(restored.len(), 1);
+                assert_eq!(restored[0].index, 3);
+                assert_eq!(restored[0].payload, payloads[3]);
+            } else {
+                assert!(restored.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn parity_parser_rejects_unknown_group_shape() {
+        let packet = parity_datagram(77, 8, 0, 8, 8, 3, &[1; 64]);
+        assert!(parse_parity(&packet).is_none());
+    }
+
     #[test]
     fn parses_and_reassembles_out_of_order_fragments() {
         let mut reassembler = FrameReassembler::default();
@@ -610,6 +913,37 @@ mod tests {
     #[test]
     fn keyframe_resets_the_streak_and_never_resyncs() {
         assert_eq!(stale_streak_advance(2, true, true), (0, false));
+    }
+
+    #[test]
+    fn live_edge_selection_keeps_all_frames_when_batch_is_small() {
+        let frames = vec![10u16, 11u16];
+        let selection = select_live_edge_frames(frames);
+        assert_eq!(selection.frames.as_slice(), [10, 11]);
+        assert_eq!(selection.discarded, 0);
+    }
+
+    #[test]
+    fn live_edge_selection_collapses_a_large_batch_to_the_newest_frame() {
+        let frames = (10..20).collect::<Vec<_>>();
+        let selection = select_live_edge_frames(frames);
+        assert_eq!(selection.frames.as_slice(), [19]);
+        assert_eq!(selection.discarded, 9);
+    }
+
+    #[test]
+    fn receiver_pressure_separates_live_edge_and_decoder_discards() {
+        let mut pressure = ReceiverPressure::default();
+        pressure.record_live_edge_discards(1);
+        pressure.record_decoder_input_drop();
+        pressure.record_decoder_input_drop();
+        pressure.record_decoder_output_discards(3);
+        pressure.record_fec_recovery(2);
+
+        assert_eq!(pressure.live_edge_discards, 1);
+        assert_eq!(pressure.decoder_input_drops, 2);
+        assert_eq!(pressure.decoder_output_discards, 3);
+        assert_eq!(pressure.fec_recovered_fragments, 2);
     }
 
     #[test]

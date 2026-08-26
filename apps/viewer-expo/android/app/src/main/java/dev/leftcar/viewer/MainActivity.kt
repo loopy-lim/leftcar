@@ -2,11 +2,13 @@ package dev.leftcar.viewer
 
 import android.os.Build
 import android.os.Bundle
+import android.content.Intent
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
+import dev.leftcar.viewer.usb.UsbAccessoryModule
 
 import expo.modules.ReactActivityDelegateWrapper
 
@@ -17,6 +19,13 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
+    UsbAccessoryModule.handleIntent(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    UsbAccessoryModule.handleIntent(intent)
   }
 
   /**

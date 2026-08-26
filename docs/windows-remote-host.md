@@ -11,8 +11,8 @@
 | Host shell | 동일한 Tauri 2 앱, mDNS/QR pairing/control server | Windows backend 초기화 실패 시 테스트 backend로 전환하지 않고 앱 시작 실패 |
 | source catalog | `EnumDisplayMonitors`의 활성 물리 디스플레이 | 시작 시 index를 다시 확인해 hot-plug stale index 거부 |
 | capture | `IGraphicsCaptureItemInterop::CreateForMonitor` + WGC `CreateFreeThreaded` frame pool | 5초 안에 첫 frame이 없거나 resize/recreate 실패 시 session error |
-| encode | BGRA → NV12, Media Foundation H.264 MFT | `MFT_ENUM_FLAG_HARDWARE` 결과가 없으면 명시 실패, software fallback 없음 |
-| media | SPS/PPS `CFG`, Annex-B H.264, 1,200-byte 이하 UDP fragment | malformed output/fragment 초과 시 명시 실패, send queue drop 시 IDR 요청 |
+| encode | WGC D3D11 texture → `MFCreateDXGISurfaceBuffer` → `IMFDXGIDeviceManager`가 연결된 Media Foundation hardware H.264 MFT | `MFT_ENUM_FLAG_HARDWARE` 또는 ARGB32 texture 입력 경로가 없으면 명시 실패, CPU readback/software fallback 없음 |
+| media | SPS/PPS `CFG`, Annex-B H.264, 1,200-byte 이하 UDP fragment 또는 USB AOAP mux의 framed media | malformed output/fragment 초과 시 명시 실패, send queue drop 시 IDR 요청 |
 | input | 인증 UDP → 별도 worker → `SendInput` | Observe가 기본, session별 Control OFF/종료에서 key/button 전체 해제 |
 | package | Windows x64 current-user NSIS installer | CI 산출물은 서명 전 internal artifact이며 public release로 간주하지 않음 |
 
@@ -23,7 +23,7 @@ Windows Graphics Capture desktop interop의 monitor 생성 API는 Windows 10 ver
 - Android Viewer는 포인터 위치를 영상 FPS의 2배로 샘플링한다: 30fps→60Hz, 60fps→120Hz, 90fps→180Hz, 전체 범위 30–240Hz.
 - pointer move는 최신 좌표만 유지하고 reliable queue를 막지 않는다.
 - key, button, wheel, release-all은 순서 번호와 인증된 ACK를 사용하며 20ms 간격으로 재시도한다.
-- Windows input worker는 WGC/Media Foundation worker와 분리한다. 캡처 readback이나 encoder가 늦어져도 UDP 입력 수신과 ACK가 같은 작업 큐에서 기다리지 않는다.
+- Windows input worker는 WGC/Media Foundation worker와 분리한다. 캡처/encoder가 늦어져도 UDP 입력 또는 USB AOAP framed 입력 수신과 ACK가 같은 작업 큐에서 기다리지 않는다.
 - absolute pointer 좌표는 선택한 monitor 좌표를 Windows virtual desktop 좌표로 변환한다. 다중 DPI/회전/배율의 물리 검증은 아직 E6 항목이다.
 
 `SendInput`은 UIPI의 적용을 받는다. 일반 권한 Leftcar Host는 같거나 낮은 무결성 수준의 앱을 제어할 수 있지만 관리자 권한으로 실행된 앱에는 입력을 넣을 수 없다. Leftcar는 이 제한을 우회하거나 자동으로 관리자 권한을 요구하지 않는다. 또한 Windows 문서가 지적하듯 `SendInput`은 현재 keyboard state를 초기화하지 않으므로 Leftcar가 실제로 주입한 down transition만 추적하고 Control OFF/종료 시 해당 항목만 release한다.
@@ -70,7 +70,7 @@ RC=/path/to/x86_64-w64-mingw32-windres \
   --target x86_64-pc-windows-msvc --lib
 ```
 
-이 교차 `cargo check`는 Windows API symbol/type과 cfg 경계를 검증하지만 WGC frame, GPU codec 선택, installer 실행을 증명하지 않는다.
+이 교차 `cargo check`는 Windows API symbol/type과 cfg 경계를 검증하지만 WGC frame, GPU codec 선택, USB AOAP 물리 링크, installer 실행을 증명하지 않는다.
 
 ## 물리 Windows 수용 기준
 
@@ -83,7 +83,7 @@ RC=/path/to/x86_64-w64-mingw32-windres \
 7. 다중 monitor의 네 모서리, 음수 origin, 서로 다른 DPI scaling, 화면 회전에서 pointer 오차를 측정한다.
 8. 5% input datagram loss와 500ms 단절 뒤 stuck key/button이 없어야 하며, 60분 soak에서 handle/memory 증가가 없어야 한다.
 
-현재 저장소에서 달성한 것은 protocol/unit test와 macOS→Windows MSVC 교차 compile까지다. 실제 Windows installer와 E6/E7 결과는 Windows CI 및 물리 장치 실행 뒤에만 달성으로 변경한다.
+현재 저장소에서 달성한 것은 protocol/unit test, USB AOAP framed media/input 소스 경로, GPU texture 입력 소스 경로와 macOS→Windows MSVC 교차 compile까지다. 실제 Windows installer, AOAP 핸드셰이크, WGC frame/GPU MFT identity와 E6/E7 결과는 Windows/폰 물리 장치 실행 뒤에만 달성으로 변경한다.
 
 ## 공식 근거
 

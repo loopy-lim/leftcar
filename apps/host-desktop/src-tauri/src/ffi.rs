@@ -243,12 +243,27 @@ impl CaptureBackend for FfiBackend {
         fps: u32,
         capture_backend: &str,
         media_transport: &str,
+        content_mode: &str,
     ) -> Result<u32, String> {
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
         let c_backend = CString::new(capture_backend).map_err(|_| "backend contains NUL")?;
-        let c_transport = CString::new(media_transport).map_err(|_| "media transport contains NUL")?;
+        let c_transport =
+            CString::new(media_transport).map_err(|_| "media transport contains NUL")?;
+        let c_content_mode =
+            CString::new(content_mode).map_err(|_| "content mode contains NUL")?;
         unsafe {
+            type StartV5 = unsafe extern "C" fn(
+                *const std::ffi::c_char,
+                u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+            ) -> u32;
             type StartV4 = unsafe extern "C" fn(
                 *const std::ffi::c_char,
                 u16,
@@ -268,8 +283,8 @@ impl CaptureBackend for FfiBackend {
                 u32,
                 *const std::ffi::c_char,
             ) -> u32;
-            let handle = match lib.get::<StartV4>(b"leftcar_capture_start_v4") {
-                Ok(f) => f(
+            let handle = if let Ok(f) = lib.get::<StartV5>(b"leftcar_capture_start_v5") {
+                f(
                     c_ip.as_ptr(),
                     port,
                     source_index,
@@ -278,9 +293,11 @@ impl CaptureBackend for FfiBackend {
                     fps,
                     c_backend.as_ptr(),
                     c_transport.as_ptr(),
-                ),
-                Err(_) if media_transport == "udp" => match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
-                    Ok(f) => f(
+                    c_content_mode.as_ptr(),
+                )
+            } else {
+                match lib.get::<StartV4>(b"leftcar_capture_start_v4") {
+                    Ok(f) if content_mode == "interactive" => f(
                         c_ip.as_ptr(),
                         port,
                         source_index,
@@ -288,28 +305,51 @@ impl CaptureBackend for FfiBackend {
                         h,
                         fps,
                         c_backend.as_ptr(),
+                        c_transport.as_ptr(),
                     ),
-                    Err(_) if capture_backend == "screenCaptureKit" => {
-                        let f: Symbol<
-                            unsafe extern "C" fn(
-                                *const std::ffi::c_char,
-                                u16,
-                                u32,
-                                u32,
-                                u32,
-                                u32,
-                            ) -> u32,
-                        > = lib
-                            .get(b"leftcar_capture_start_v2")
-                            .map_err(|e| e.to_string())?;
-                        f(c_ip.as_ptr(), port, source_index, w, h, fps)
+                    Ok(_) => {
+                        return Err(
+                            "capture shim does not support the requested content mode".into(),
+                        );
+                    }
+                    Err(_) if media_transport == "udp" && content_mode == "interactive" => {
+                        match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
+                            Ok(f) => f(
+                                c_ip.as_ptr(),
+                                port,
+                                source_index,
+                                w,
+                                h,
+                                fps,
+                                c_backend.as_ptr(),
+                            ),
+                            Err(_) if capture_backend == "screenCaptureKit" => {
+                                let f: Symbol<
+                                    unsafe extern "C" fn(
+                                        *const std::ffi::c_char,
+                                        u16,
+                                        u32,
+                                        u32,
+                                        u32,
+                                        u32,
+                                    ) -> u32,
+                                > = lib
+                                    .get(b"leftcar_capture_start_v2")
+                                    .map_err(|e| e.to_string())?;
+                                f(c_ip.as_ptr(), port, source_index, w, h, fps)
+                            }
+                            Err(_) => {
+                                return Err(
+                                    "capture shim does not support selectable backends".into(),
+                                );
+                            }
+                        }
                     }
                     Err(_) => {
-                        return Err("capture shim does not support selectable backends".into());
+                        return Err(
+                            "capture shim does not support the requested media transport".into(),
+                        );
                     }
-                },
-                Err(_) => {
-                    return Err("capture shim does not support the requested media transport".into());
                 }
             };
             if handle == 0 {
@@ -372,6 +412,7 @@ impl CaptureBackend for FfiBackend {
                 dropped: v["dropped"].as_i64().unwrap_or(0),
                 network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
                 network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
+                recovery_frames_dropped: v["recoveryFramesDropped"].as_i64().unwrap_or(0),
                 udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
                 udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
                 recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
@@ -403,6 +444,33 @@ impl CaptureBackend for FfiBackend {
                 encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
                 send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
                 send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
+                last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),
+                last_au_fragments: v["lastAuFragments"].as_u64().unwrap_or(0) as u32,
+                last_au_parity: v["lastAuParity"].as_u64().unwrap_or(0) as u32,
+                last_au_datagrams: v["lastAuDatagrams"].as_u64().unwrap_or(0) as u32,
+                last_au_expected_datagrams: v["lastAuExpectedDatagrams"]
+                    .as_u64()
+                    .unwrap_or(0) as u32,
+                last_au_send_us: v["lastAuSendUs"].as_u64().unwrap_or(0),
+                last_au_is_keyframe: v["lastAuIsKeyframe"].as_bool().unwrap_or(false),
+                max_au_bytes: v["maxAuBytes"].as_u64().unwrap_or(0),
+                max_au_fragments: v["maxAuFragments"].as_u64().unwrap_or(0) as u32,
+                sent_datagrams: v["sentDatagrams"].as_i64().unwrap_or(0),
+                sent_parity_datagrams: v["sentParityDatagrams"].as_i64().unwrap_or(0),
+                receiver_frame_gaps: v["receiverFrameGaps"].as_i64().unwrap_or(0),
+                receiver_input_drops: v["receiverInputDrops"].as_i64().unwrap_or(0),
+                receiver_incomplete_aus: v["receiverIncompleteAus"]
+                    .as_i64()
+                    .or_else(|| v["receiverIncompleteAUs"].as_i64())
+                    .unwrap_or(0),
+                receiver_stale_frames: v["receiverStaleFrames"].as_i64().unwrap_or(0),
+                receiver_stale_input_drops: v["receiverStaleInputDrops"].as_i64(),
+                receiver_output_burst_discards: v["receiverOutputBurstDiscards"]
+                    .as_i64()
+                    .unwrap_or(0),
+                receiver_rtt_ms: v["receiverRttMs"].as_u64().map(|value| value as u32),
+                receiver_wire_ms: v["receiverWireMs"].as_u64().map(|value| value as u32),
+                receiver_feedback_age_ms: v["receiverFeedbackAgeMs"].as_u64(),
                 error: v["error"]
                     .as_str()
                     .filter(|s| !s.is_empty())

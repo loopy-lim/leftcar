@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -15,13 +15,49 @@ import { router, useLocalSearchParams } from "expo-router";
 import { connectHost, controlHost } from "../src/session";
 import {
   formatHostEndpoint,
+  canSubmitPairingCode,
   pairWithHost,
+  pairWithHostByCode,
+  parseHostEndpoint,
   parseQrPayload,
+  resolvePairingHost,
   type QrPayload,
 } from "../src/pairing";
 import { formatErrorMessage } from "../src/control";
 
 type PairingMode = "qr" | "code";
+
+interface PairingViewState {
+  mode: PairingMode;
+  code: string;
+  scannedPayload: QrPayload | null;
+  scannedHost: string;
+  busy: boolean;
+  statusMessage: string | null;
+  error: string | null;
+}
+
+type PairingViewAction = {
+  type: "update";
+  patch: Partial<PairingViewState>;
+};
+
+const initialPairingViewState: PairingViewState = {
+  mode: "qr",
+  code: "",
+  scannedPayload: null,
+  scannedHost: "",
+  busy: false,
+  statusMessage: null,
+  error: null,
+};
+
+function pairingViewReducer(
+  state: PairingViewState,
+  action: PairingViewAction,
+): PairingViewState {
+  return action.type === "update" ? { ...state, ...action.patch } : state;
+}
 
 function OtpPinInput({
   code,
@@ -79,50 +115,63 @@ function OtpPinInput({
 
 export default function Pairing() {
   const params = useLocalSearchParams<{ endpoint?: string | string[] }>();
-  const [mode, setMode] = useState<PairingMode>("qr");
-  const [code, setCode] = useState("");
-  const scannedPayloadRef = useRef<QrPayload | null>(null);
-  const scannedHostRef = useRef("");
-  const [busy, setBusy] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [permission, requestPermission] = useCameraPermissions();
   const routeEndpoint = Array.isArray(params.endpoint) ? params.endpoint[0] : params.endpoint;
-  const host = scannedHostRef.current || controlHost() || routeEndpoint || "";
+  const initialHost = resolvePairingHost(routeEndpoint, controlHost());
+  const [state, dispatch] = useReducer(
+    pairingViewReducer,
+    {
+      ...initialPairingViewState,
+      mode: parseHostEndpoint(initialHost) ? "code" : "qr",
+    },
+  );
+  const { mode, code, scannedPayload, scannedHost, busy, statusMessage, error } = state;
+  const [permission, requestPermission] = useCameraPermissions();
+  const host = scannedHost || resolvePairingHost(routeEndpoint, controlHost());
   const scanningLockRef = useRef(false);
-  const hasCodeTarget = Boolean(scannedPayloadRef.current);
+  const hostEndpoint = parseHostEndpoint(host);
+  const hasCodeTarget = Boolean(hostEndpoint);
+  const canSubmitCode = canSubmitPairingCode(code, hasCodeTarget, busy);
 
   useEffect(() => {
-    setError(null);
+    dispatch({ type: "update", patch: { error: null } });
   }, [code, mode]);
 
   const handlePairWithCode = useCallback(
     async (codeToPair: string) => {
       const trimmed = codeToPair.trim().replace(/\s+/g, "");
       if (trimmed.length !== 6) {
-        setError("6자리 인증 코드를 정확히 입력해 주세요.");
+        dispatch({
+          type: "update",
+          patch: { error: "6자리 인증 코드를 정확히 입력해 주세요." },
+        });
         return;
       }
-      setBusy(true);
-      setError(null);
-      setStatusMessage("컴퓨터에서 연결을 확인하는 중…");
+      dispatch({
+        type: "update",
+        patch: {
+          busy: true,
+          error: null,
+          statusMessage: "컴퓨터에서 연결을 확인하는 중…",
+        },
+      });
       try {
-        const scannedPayload = scannedPayloadRef.current;
         if (scannedPayload) {
           await pairWithHost(scannedPayload, trimmed);
           await connectHost(scannedPayload.host, scannedPayload.port);
+        } else if (hostEndpoint) {
+          await pairWithHostByCode(hostEndpoint.host, hostEndpoint.port, trimmed);
+          await connectHost(hostEndpoint.host, hostEndpoint.port);
         } else {
-          throw new Error("먼저 컴퓨터 화면의 QR 코드를 스캔해 주세요.");
+          throw new Error("연결할 컴퓨터 주소가 없습니다.");
         }
         router.replace("/catalog");
       } catch (e) {
-        setError(formatErrorMessage(e));
+        dispatch({ type: "update", patch: { error: formatErrorMessage(e) } });
       } finally {
-        setBusy(false);
-        setStatusMessage(null);
+        dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
       }
     },
-    [],
+    [hostEndpoint, scannedPayload],
   );
 
   const handleQrScanned = useCallback(
@@ -132,20 +181,27 @@ export default function Pairing() {
       try {
         const payload = parseQrPayload(scannedData);
         if (!payload) {
-          setError("Leftcar에서 만든 연결 QR 코드가 아닙니다.");
+          dispatch({
+            type: "update",
+            patch: { error: "Leftcar에서 만든 연결 QR 코드가 아닙니다." },
+          });
           return;
         }
-        setBusy(true);
-        setError(null);
-        scannedPayloadRef.current = payload;
-        scannedHostRef.current = formatHostEndpoint(payload.host, payload.port);
-        setMode("code");
-        setStatusMessage("QR 코드를 확인했습니다. 컴퓨터 화면의 6자리 번호를 입력해 주세요.");
+        dispatch({
+          type: "update",
+          patch: {
+            busy: true,
+            error: null,
+            scannedPayload: payload,
+            scannedHost: formatHostEndpoint(payload.host, payload.port),
+            mode: "code",
+            statusMessage: "QR 코드를 확인했습니다. 컴퓨터 화면의 6자리 번호를 입력해 주세요.",
+          },
+        });
       } catch (e) {
-        setError(formatErrorMessage(e));
+        dispatch({ type: "update", patch: { error: formatErrorMessage(e) } });
       } finally {
-        setBusy(false);
-        setStatusMessage(null);
+        dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
         setTimeout(() => {
           scanningLockRef.current = false;
         }, 1500);
@@ -176,7 +232,7 @@ export default function Pairing() {
           <View style={styles.modeTabs}>
             <Pressable
               style={[styles.modeTab, mode === "qr" && styles.modeTabActive]}
-              onPress={() => setMode("qr")}
+              onPress={() => dispatch({ type: "update", patch: { mode: "qr" } })}
             >
               <View style={styles.tabContentRow}>
                 <Ionicons
@@ -191,7 +247,7 @@ export default function Pairing() {
             </Pressable>
             <Pressable
               style={[styles.modeTab, mode === "code" && styles.modeTabActive]}
-              onPress={() => setMode("code")}
+              onPress={() => dispatch({ type: "update", patch: { mode: "code" } })}
             >
               <View style={styles.tabContentRow}>
                 <Ionicons
@@ -272,23 +328,29 @@ export default function Pairing() {
             <Text style={styles.cardTitle}>6자리 인증 PIN 번호</Text>
             <Text style={styles.cardDesc}>
               {hasCodeTarget
-                ? "컴퓨터 화면의 QR 코드 아래에 표시된 6자리 번호를 입력하세요."
-                : "먼저 컴퓨터 화면의 QR 코드를 스캔한 다음 인증 번호를 입력하세요."}
+                ? "컴퓨터 화면에 표시된 6자리 번호를 입력하세요."
+                : "먼저 연결할 컴퓨터 주소를 선택하거나 입력하세요."}
             </Text>
 
             <OtpPinInput
               code={code}
-              onChangeCode={setCode}
+              onChangeCode={(value) => dispatch({ type: "update", patch: { code: value } })}
               disabled={busy}
             />
+
+            {code.length === 6 && !hasCodeTarget ? (
+              <Text style={styles.otpHint}>
+                연결할 컴퓨터 주소가 있어야 연결 승인 버튼이 활성화됩니다.
+              </Text>
+            ) : null}
 
             <Pressable
               style={[
                 styles.primaryBtn,
-                (code.length !== 6 || busy || !hasCodeTarget) && styles.btnDisabled,
+                !canSubmitCode && styles.btnDisabled,
               ]}
               onPress={() => handlePairWithCode(code)}
-              disabled={code.length !== 6 || busy || !hasCodeTarget}
+              disabled={!canSubmitCode}
             >
               {busy ? (
                 <ActivityIndicator color="#FFFFFF" size="small" />
@@ -306,10 +368,10 @@ export default function Pairing() {
             <Text style={styles.tipTitle}>안전한 기기 페어링</Text>
           </View>
           <Text style={styles.tipText}>
-            • QR 코드와 6자리 번호를 모두 확인해야 연결이 허용됩니다.
+            • Host 주소와 화면에 표시된 6자리 번호를 확인해야 연결이 허용됩니다.
           </Text>
           <Text style={styles.tipText}>
-            • 일회용 보안 QR 코드는 2분 뒤 자동으로 안전하게 만료됩니다.
+            • 6자리 연결 코드는 Host에서 새 연결을 만들 때마다 갱신됩니다.
           </Text>
           <Text style={styles.tipText}>
             • 신뢰하는 동일한 Wi-Fi 네트워크에서만 사용하세요.
@@ -561,6 +623,13 @@ const styles = StyleSheet.create({
     color: "#09090B",
     fontFamily: "monospace",
     fontVariant: ["tabular-nums"],
+  },
+  otpHint: {
+    color: "#71717A",
+    fontSize: 11,
+    textAlign: "center",
+    lineHeight: 16,
+    marginTop: 2,
   },
 
   primaryBtn: {

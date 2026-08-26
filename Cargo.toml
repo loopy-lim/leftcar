@@ -13,6 +13,8 @@ members = [
     "crates/viewer-core",
     "crates/viewer-decoder",
     "crates/diagnostics",
+    "crates/fec-core",
+    "crates/usb-mux",
     "crates/control-contract",
     "tools/architecture-check",
     "native/android-viewer",

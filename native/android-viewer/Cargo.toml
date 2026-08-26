@@ -12,4 +12,6 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 viewer-core = { path = "../../crates/viewer-core" }
 viewer-decoder = { path = "../../crates/viewer-decoder" }
 domain = { path = "../../crates/domain" }
+fec-core = { path = "../../crates/fec-core" }
+usb-mux = { path = "../../crates/usb-mux" }
 libc = "0.2"

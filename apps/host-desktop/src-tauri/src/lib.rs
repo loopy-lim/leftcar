@@ -2,8 +2,12 @@
 //!
 //! Design: docs/plans/2026-08-18-rn-tauri-rebuild-design.md
 
+pub mod aoap;
+pub mod aoap_control;
+pub mod aoap_proxy;
 pub mod backend;
 pub mod control;
+pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod pairing;
@@ -46,6 +50,10 @@ pub fn run() {
     });
     server.set_control_port(control_port);
     start_control_server(server.clone(), control_listener, control_port);
+    // AOAP devices re-enumerate after the accessory handshake. Keep discovery
+    // independent from the Tauri window so a cable connection is available
+    // before the viewer asks for its first USB stream.
+    aoap_control::start_usb_watcher(server.clone());
     // Advertise independently from the Tauri window so a viewer can connect
     // while WebView/AppKit initialization is still in progress.
     if let Err(e) = advertise_mdns(control_port) {

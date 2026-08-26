@@ -3,9 +3,10 @@ import * as SecureStore from "expo-secure-store";
 import { connect } from "./control";
 
 /**
- * Host pairing (design §페어링): scan the host's QR offer, confirm the
- * 6-digit human verification code, then keep the issued token in the
- * device secure storage for all later control-plane requests.
+ * Host pairing: connect to the selected Host endpoint, submit the six-digit
+ * code shown in the Host window, then keep the issued token in secure storage
+ * for all later control-plane requests. QR pairing remains supported as an
+ * optional path for older Host screens.
  */
 
 export interface QrPayload {
@@ -91,6 +92,24 @@ export function formatHostEndpoint(host: string, port: number): string {
   return `${host}:${port}`;
 }
 
+/** Prefer the endpoint explicitly selected for this pairing attempt. */
+export function resolvePairingHost(routeEndpoint: string | undefined, currentHost: string): string {
+  return routeEndpoint?.trim() || currentHost;
+}
+
+/**
+ * Keep this predicate shared with the UI so the enabled state cannot drift
+ * from the direct Host endpoint + six-digit pairing contract.
+ */
+export function canSubmitPairingCode(
+  code: string,
+  hasHostTarget: boolean,
+  busy: boolean,
+): boolean {
+  const normalized = code.trim().replace(/\s+/g, "");
+  return hasHostTarget && !busy && /^\d{6}$/.test(normalized);
+}
+
 /** `{"v":1,"id":..,"s":..,"h":..,"p":..}` → QrPayload; null on any mismatch. */
 export function parseQrPayload(text: string): QrPayload | null {
   if (!text || typeof text !== "string") return null;
@@ -172,6 +191,39 @@ export async function pairWithHost(p: QrPayload, code: string): Promise<string> 
   } finally {
     // The pairing connection is single-purpose; the token travels via secure
     // storage into the main control session, so always release the socket.
+    client.close();
+  }
+}
+
+/** Complete pairing directly against the selected Host endpoint. */
+export async function pairWithHostByCode(
+  host: string,
+  port = 7777,
+  code: string,
+): Promise<string> {
+  if (!isTrustedHost(host)) {
+    throw new Error("같은 Wi-Fi 또는 Tailscale에 있는 컴퓨터만 연결할 수 있습니다");
+  }
+  const pairingCode = code.trim().replace(/\s+/g, "");
+  if (!/^\d{6}$/.test(pairingCode)) {
+    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
+  }
+  const client = await connect(host, port);
+  try {
+    const { token } = await client.request<{ token: string }>("pair", {
+      code: pairingCode,
+      deviceId: await getDeviceId(),
+      deviceName: deviceName(),
+    });
+    if (!/^[0-9a-f]{64}$/.test(token)) {
+      throw new Error("컴퓨터의 연결 승인 응답을 확인할 수 없습니다");
+    }
+    await SecureStore.setItemAsync(TOKEN_KEY, token);
+    return token;
+  } catch (e) {
+    await clearToken();
+    throw e;
+  } finally {
     client.close();
   }
 }

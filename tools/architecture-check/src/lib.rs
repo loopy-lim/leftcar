@@ -119,6 +119,10 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
     // Layering: allowed internal dependency edges (ADR-0002).
     let allowed_edges: &[(&str, &[&str])] = &[
         ("domain", &[]),
+        // Shared protocol/codec primitives stay dependency-free so both
+        // desktop and Android facades can use the same bounded hot path.
+        ("fec-core", &[]),
+        ("usb-mux", &[]),
         ("media-model", &["domain"]),
         ("network-protocol", &["domain"]),
         ("control-contract", &["domain", "media-model"]),
@@ -147,7 +151,14 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("macos-encode", &["domain", "media-model"]),
         (
             "android-viewer",
-            &["domain", "viewer-core", "viewer-decoder", "libc"],
+            &[
+                "domain",
+                "viewer-core",
+                "viewer-decoder",
+                "fec-core",
+                "usb-mux",
+                "libc",
+            ],
         ),
         ("leftcar-rustra", &["control-contract"]),
         ("viewer-decoder", &["media-model", "libc"]),

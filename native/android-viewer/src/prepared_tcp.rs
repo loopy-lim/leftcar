@@ -213,8 +213,8 @@ fn tcp_to_media_channel(
                     if payload.starts_with(b"LCH1") {
                         // Host media setup uses a framed challenge before it
                         // starts capture. Echo it on the same TCP connection;
-                        // forwarding it to the renderer would leave Host in
-                        // connectSocket() until its two-second timeout.
+                        // the renderer also receives it so it can authenticate
+                        // reverse IDR/input/feedback traffic.
                         let mut response = Vec::with_capacity(payload.len() + 4);
                         response.extend_from_slice(&(payload.len() as u32).to_be_bytes());
                         response.extend_from_slice(&payload);
@@ -231,7 +231,6 @@ fn tcp_to_media_channel(
                             payload.len(),
                             &payload[..payload.len().min(4)]
                         ));
-                        continue;
                     }
                     if payload.starts_with(b"LCH1") || payload.starts_with(b"CFG") {
                         bridge_log(&format!(

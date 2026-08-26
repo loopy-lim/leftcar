@@ -230,10 +230,12 @@ pub struct ReceiverFeedback {
     pub stale_frames: u32,
     pub network_rtt_ms: u16,
     pub wire_to_decoder_ms: u16,
+    pub stale_input_drops: u32,
+    pub output_burst_discards: u32,
 }
 
 pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(24 + token.len());
+    let mut bytes = Vec::with_capacity(32 + token.len());
     bytes.extend_from_slice(RECEIVER_FEEDBACK_MAGIC);
     bytes.extend_from_slice(&feedback.frame_gaps.to_be_bytes());
     bytes.extend_from_slice(&feedback.input_drops.to_be_bytes());
@@ -241,6 +243,8 @@ pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec
     bytes.extend_from_slice(&feedback.stale_frames.to_be_bytes());
     bytes.extend_from_slice(&feedback.network_rtt_ms.to_be_bytes());
     bytes.extend_from_slice(&feedback.wire_to_decoder_ms.to_be_bytes());
+    bytes.extend_from_slice(&feedback.stale_input_drops.to_be_bytes());
+    bytes.extend_from_slice(&feedback.output_burst_discards.to_be_bytes());
     bytes.extend_from_slice(token);
     bytes
 }
@@ -515,6 +519,8 @@ mod tests {
                 stale_frames: 4,
                 network_rtt_ms: 5,
                 wire_to_decoder_ms: 6,
+                stale_input_drops: 7,
+                output_burst_discards: 8,
             },
             token,
         );
@@ -525,7 +531,9 @@ mod tests {
         assert_eq!(&packet[16..20], &4u32.to_be_bytes());
         assert_eq!(&packet[20..22], &5u16.to_be_bytes());
         assert_eq!(&packet[22..24], &6u16.to_be_bytes());
-        assert_eq!(&packet[24..], token);
+        assert_eq!(&packet[24..28], &7u32.to_be_bytes());
+        assert_eq!(&packet[28..32], &8u32.to_be_bytes());
+        assert_eq!(&packet[32..], token);
     }
 
     #[test]

@@ -42,10 +42,11 @@ private enum CaptureBackendKind: String {
 private enum MediaTransportKind: String {
     case udp
     case tcp
+    case usb
     case adbTcp
 
     var usesTCP: Bool {
-        self == .tcp || self == .adbTcp
+        self == .tcp || self == .usb || self == .adbTcp
     }
 
     static func parse(_ value: String?) -> MediaTransportKind? {
@@ -53,10 +54,66 @@ private enum MediaTransportKind: String {
         switch value.lowercased() {
         case "udp": return .udp
         case "tcp", "wifitcp", "wifi-tcp": return .tcp
-        case "adbtcp", "adb-tcp", "usb": return .adbTcp
+        case "usb", "aoap": return .usb
+        case "adbtcp", "adb-tcp": return .adbTcp
         default: return nil
         }
     }
+}
+
+private enum StreamContentMode: String {
+    case interactive
+    case video
+
+    static func parse(_ value: String?) -> StreamContentMode? {
+        guard let value else { return .interactive }
+        switch value.lowercased() {
+        case "interactive", "latency": return .interactive
+        case "video", "movie": return .video
+        default: return nil
+        }
+    }
+}
+
+enum VideoCodecKind: String {
+    case h264
+    case hevc
+
+    var id: UInt8 {
+        switch self {
+        case .h264: return 1
+        case .hevc: return 2
+        }
+    }
+
+    var parameterSetCount: Int {
+        self == .hevc ? 3 : 2
+    }
+}
+
+func preferredVideoCodec(width: UInt32, height: UInt32, contentMode: String) -> VideoCodecKind {
+    guard contentMode.lowercased() == StreamContentMode.video.rawValue,
+          width >= 3_840,
+          height >= 2_160 else {
+        return .h264
+    }
+    return .hevc
+}
+
+func codecParameterSetCount(_ codec: VideoCodecKind) -> Int {
+    codec.parameterSetCount
+}
+
+func recoveryEncodeGateExpired(startedNs: UInt64, nowNs: UInt64, timeoutNs: UInt64) -> Bool {
+    startedNs > 0 && nowNs >= startedNs && nowNs - startedNs >= timeoutNs
+}
+
+func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
+    width >= 3_840 && height >= 2_160 ? 4 : 2
+}
+
+func shouldOffloadEncodedSample(width: UInt32, height: UInt32) -> Bool {
+    width >= 3_840 && height >= 2_160
 }
 
 private func nativePixelSize(for displayID: CGDirectDisplayID) -> (width: Int, height: Int) {
@@ -317,6 +374,49 @@ public func leftcarCaptureStartV4(
     )
 }
 
+/// v5 adds a content-aware encoder policy while keeping v4 available for
+/// older Hosts. The video policy preserves the selected spatial resolution
+/// and spends a larger bitrate budget on high-change access units.
+@_cdecl("leftcar_capture_start_v5")
+public func leftcarCaptureStartV5(
+    ip: UnsafePointer<CChar>,
+    port: UInt16,
+    displayIndex: UInt32,
+    width: UInt32,
+    height: UInt32,
+    fps: UInt32,
+    backendName: UnsafePointer<CChar>?,
+    transportName: UnsafePointer<CChar>?,
+    contentModeName: UnsafePointer<CChar>?
+) -> UInt32 {
+    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
+    guard let backend = CaptureBackendKind.parse(rawBackend) else {
+        setLastError("unknown capture backend: \(rawBackend ?? "null")")
+        return 0
+    }
+    let rawTransport = transportName.flatMap { String(validatingUTF8: $0) }
+    guard let mediaTransport = MediaTransportKind.parse(rawTransport) else {
+        setLastError("unknown media transport: \(rawTransport ?? "null")")
+        return 0
+    }
+    let rawContentMode = contentModeName.flatMap { String(validatingUTF8: $0) }
+    guard let contentMode = StreamContentMode.parse(rawContentMode) else {
+        setLastError("unknown content mode: \(rawContentMode ?? "null")")
+        return 0
+    }
+    return startCaptureSession(
+        ip: ip,
+        port: port,
+        displayIndex: displayIndex,
+        width: width,
+        height: height,
+        fps: fps,
+        backend: backend,
+        mediaTransport: mediaTransport,
+        contentMode: contentMode
+    )
+}
+
 private func startCaptureSession(
     ip: UnsafePointer<CChar>,
     port: UInt16,
@@ -325,7 +425,8 @@ private func startCaptureSession(
     height: UInt32,
     fps: UInt32,
     backend: CaptureBackendKind,
-    mediaTransport: MediaTransportKind = .udp
+    mediaTransport: MediaTransportKind = .udp,
+    contentMode: StreamContentMode = .interactive
 ) -> UInt32 {
     guard hasScreenCaptureAccess() else {
         setLastError("screen-recording permission is not granted to Leftcar Host")
@@ -351,7 +452,8 @@ private func startCaptureSession(
         height: height,
         fps: fps,
         backend: backend,
-        mediaTransport: mediaTransport
+        mediaTransport: mediaTransport,
+        contentMode: contentMode
     )
 
     // Establish the media socket first. Capture callbacks can then be accepted
@@ -589,6 +691,7 @@ private struct PendingCaptureFrame {
 private struct PendingEncodedFrame {
     let data: Data
     let isKeyframe: Bool
+    let isRecoveryKeyframe: Bool
 }
 
 private func appendRollingSample(_ value: UInt64, to samples: inout [UInt64]) {
@@ -611,16 +714,29 @@ final class CaptureSession {
     // its own serial queue, so a slow VideoToolbox callback cannot make
     // ScreenCaptureKit wait behind an older frame.
     private let encodeQueue = DispatchQueue(label: "leftcar.encode", qos: .userInteractive)
+    // 4K access units can require hundreds of MTU-sized fragments and FEC
+    // shards. Prepare those packets away from the VideoToolbox callback so
+    // packetization cannot delay the next encoded output callback.
+    private let packetizationQueue = DispatchQueue(label: "leftcar.packetization", qos: .userInteractive)
     private let encodeQueueKey = DispatchSpecificKey<Void>()
     private let captureLock = NSLock()
     private var pendingCapture: PendingCaptureFrame?
     private var encodeScheduled = false
     // VideoToolbox accepts frames asynchronously. A latest-frame slot alone
-    // does not prevent its internal queue from growing, so keep at most two
-    // hardware encode submissions in flight and retain only the newest frame
-    // while both slots are occupied.
-    private let maxEncodeInFlight = 2
+    // does not prevent its internal queue from growing, so keep a small
+    // resolution-aware number of hardware encode submissions in flight and
+    // retain only the newest frame while those slots are occupied.
+    private var maxEncodeInFlight: Int {
+        encodeInFlightLimit(width: outWidth, height: outHeight)
+    }
     private var encodeInFlight = 0
+    // Once a recovery request is consumed by VideoToolbox, do not submit
+    // another delta until that IDR has reached the viewer. Otherwise the
+    // encoder advances its reference chain while the IDR burst is on the
+    // wire; dropping any of those deltas makes the first post-IDR frame
+    // undecodable and immediately starts another recovery loop.
+    private var recoveryEncodeInFlight = false
+    private var recoveryEncodeGateStartedNs: UInt64 = 0
     private var sock: Int32 = -1
     private let tcpWriteLock = NSLock()
     private var tcpControlBuffer = Data()
@@ -650,6 +766,8 @@ final class CaptureSession {
     private let fps: UInt32
     private let backend: CaptureBackendKind
     private let mediaTransport: MediaTransportKind
+    private let contentMode: StreamContentMode
+    private var codecKind: VideoCodecKind = .h264
     private var csdSent = false
 
     // The encoder callback must never wait behind network transmission. Keep at
@@ -659,16 +777,27 @@ final class CaptureSession {
     private let networkLock = NSLock()
     private var pendingConfig: Data?
     // Both transports favor the newest screen state over preserving stale
-    // encoded frames. TCP's ordered stream must not be allowed to become a
-    // latency queue while a recovery AU is in flight; four slots are enough
-    // to absorb normal encoder/network jitter without hiding congestion.
+    // encoded frames. UDP gets a short recovery cushion because a keyframe is
+    // sent at a higher burst rate than ordinary deltas; eight slots cover that
+    // bounded burst without turning the network queue into a playback buffer.
     private var maxPendingNetworkFrames: Int {
-        mediaTransport.usesTCP ? 4 : 1
+        if contentMode == .video && mediaTransport == .udp {
+            // A 60fps video stream must not accumulate eight stale frames
+            // while a large AU is being paced. The next recovery IDR is the
+            // only safe dependency boundary after overflow.
+            return 3
+        }
+        return mediaTransport == .udp ? 8 : 4
     }
     private var pendingFrames: [PendingEncodedFrame] = []
     private var networkAwaitingKeyframe = false
     private var networkKeyframeInFlight = false
     private var networkDrainScheduled = false
+    // UDP datagrams are individually loss-tolerant, but a burst of many
+    // fragments can overflow the Wi-Fi/AP receive queue as a group. Keep one
+    // global pacing deadline across access units so a normal frame does not
+    // arrive as a back-to-back burst behind the previous frame.
+    private var nextUdpSendNs: UInt64 = 0
 
     private let stateLock = NSLock()
     private var running = false
@@ -681,6 +810,17 @@ final class CaptureSession {
     private var framesEncoded: Int64 = 0
     private var framesDropped: Int64 = 0
     private var networkQueueDropped: Int64 = 0
+    private var sentDatagrams: Int64 = 0
+    private var sentParityDatagrams: Int64 = 0
+    private var lastAuBytes: UInt64 = 0
+    private var lastAuFragments: UInt32 = 0
+    private var lastAuParity: UInt32 = 0
+    private var lastAuDatagrams: UInt32 = 0
+    private var lastAuExpectedDatagrams: UInt32 = 0
+    private var lastAuSendUs: UInt64 = 0
+    private var lastAuIsKeyframe = false
+    private var maxAuBytes: UInt64 = 0
+    private var maxAuFragments: UInt32 = 0
     // Frames discarded while waiting for the next independently decodable
     // IDR are expected recovery behavior, not evidence that the sender is
     // congested. Keep them in user-facing drop telemetry, but exclude them
@@ -738,11 +878,18 @@ final class CaptureSession {
     private var receiverInputDrops: UInt32 = 0
     private var receiverIncompleteAUs: UInt32 = 0
     private var receiverStaleFrames: UInt32 = 0
+    private var receiverStaleInputDrops: UInt32? = nil
+    private var receiverOutputBurstDiscards: UInt32 = 0
     private var receiverRttMs: UInt16 = .max
     private var receiverWireMs: UInt16 = .max
     private var receiverFeedbackNs: UInt64 = 0
     private var lastAdaptedReceiverLoss: UInt64 = 0
     private var stableBitrateWindows = 0
+    // Video playback produces sustained high-change deltas. Keep a short
+    // EWMA of their shape so the bitrate controller can spend capacity on
+    // motion without mistaking one IDR burst for persistent congestion.
+    private var recentAuBytesEwma: Double = 0
+    private var highMotionUntilNs: UInt64 = 0
     // An IDR is an intentional intra-frame burst. Do not interpret its
     // bounded send cost or the receiver's recovery boundary as persistent
     // congestion and ratchet the stream bitrate downward.
@@ -769,7 +916,8 @@ final class CaptureSession {
         height: UInt32,
         fps: UInt32,
         backend: CaptureBackendKind,
-        mediaTransport: MediaTransportKind = .udp
+        mediaTransport: MediaTransportKind = .udp,
+        contentMode: StreamContentMode = .interactive
     ) {
         self.targetAddr = targetAddr
         self.targetPort = targetPort
@@ -779,6 +927,7 @@ final class CaptureSession {
         self.fps = min(max(1, fps), 90)
         self.backend = backend
         self.mediaTransport = mediaTransport
+        self.contentMode = contentMode
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
     }
 
@@ -868,6 +1017,31 @@ final class CaptureSession {
         if remainingUs > 0 {
             usleep(useconds_t(min(remainingUs, UInt64(useconds_t.max))))
         }
+    }
+
+    private func paceUdpDatagram(bytes: Int, isKeyframe: Bool = false) {
+        guard mediaTransport == .udp else { return }
+        stateLock.lock()
+        // A recovery IDR is a short intra-frame burst. Pacing it at the
+        // steady-state average bitrate takes hundreds of milliseconds on a
+        // 1080p screen, during which the encoder produces deltas that can no
+        // longer form a contiguous reference chain. The Wi-Fi path has ample
+        // headroom, so give only the recovery burst a bounded 20Mbps budget;
+        // ordinary deltas remain governed by ABR.
+        let bitrate = max(1, isKeyframe ? max(currentAverageBitrate, 20_000_000) : currentAverageBitrate)
+        stateLock.unlock()
+        // Pace at the configured media rate, with a small floor to avoid
+        // recreating a burst for tiny tail fragments. The deadline is shared
+        // by all AUs because each access unit is drained on one serial queue.
+        let intervalUs = max(
+            250,
+            min(4_000, UInt64(max(1, bytes) * 8 * 1_000_000 / bitrate))
+        )
+        let now = DispatchTime.now().uptimeNanoseconds
+        let deadline = max(now, nextUdpSendNs)
+        paceNetwork(until: deadline)
+        let sentAt = DispatchTime.now().uptimeNanoseconds
+        nextUdpSendNs = max(deadline, sentAt) + intervalUs * 1_000
     }
 
     private func receiveTCPFrame(fd: Int32, timeoutMs: Int32) -> Data? {
@@ -1353,6 +1527,8 @@ final class CaptureSession {
         networkLock.unlock()
         captureLock.lock()
         pendingCapture = nil
+        recoveryEncodeInFlight = false
+        recoveryEncodeGateStartedNs = 0
         captureLock.unlock()
         if let s = stream {
             s.stopCapture(completionHandler: nil)
@@ -1531,13 +1707,32 @@ final class CaptureSession {
             captureWallMs: captureWallMs
         )
         captureLock.lock()
+        let gateTimedOut = recoveryEncodeInFlight
+            && recoveryEncodeGateExpired(
+                startedNs: recoveryEncodeGateStartedNs,
+                nowNs: callbackNs,
+                timeoutNs: 750_000_000
+            )
+        if gateTimedOut {
+            // A VideoToolbox callback can be lost during a hardware reset. Do
+            // not let one missing recovery callback freeze the stream forever;
+            // the next submitted frame will be another recovery boundary.
+            recoveryEncodeInFlight = false
+            recoveryEncodeGateStartedNs = 0
+        }
         let replaced = pendingCapture != nil
         pendingCapture = frame
-        let shouldSchedule = !encodeScheduled && encodeInFlight < maxEncodeInFlight
+        let shouldSchedule = !encodeScheduled
+            && encodeInFlight < maxEncodeInFlight
+            && !recoveryEncodeInFlight
         if shouldSchedule {
             encodeScheduled = true
         }
         captureLock.unlock()
+
+        if gateTimedOut {
+            NSLog("Leftcar recovery encode gate timed out %@; resuming newest frame", targetLabel)
+        }
 
         if replaced {
             stateLock.lock()
@@ -1554,7 +1749,9 @@ final class CaptureSession {
     private func drainEncodeQueue() {
         while true {
             captureLock.lock()
-            guard encodeInFlight < maxEncodeInFlight, let next = pendingCapture else {
+            guard encodeInFlight < maxEncodeInFlight,
+                  !recoveryEncodeInFlight,
+                  let next = pendingCapture else {
                 encodeScheduled = false
                 captureLock.unlock()
                 return
@@ -1569,7 +1766,33 @@ final class CaptureSession {
     private func completeEncodeSlot() {
         captureLock.lock()
         encodeInFlight = max(0, encodeInFlight - 1)
-        let shouldSchedule = pendingCapture != nil && !encodeScheduled
+        let shouldSchedule = pendingCapture != nil
+            && !encodeScheduled
+            && !recoveryEncodeInFlight
+        if shouldSchedule {
+            encodeScheduled = true
+        }
+        captureLock.unlock()
+        if shouldSchedule {
+            encodeQueue.async { [weak self] in
+                self?.drainEncodeQueue()
+            }
+        }
+    }
+
+    private func clearRecoveryEncodeGate() {
+        captureLock.lock()
+        recoveryEncodeInFlight = false
+        recoveryEncodeGateStartedNs = 0
+        captureLock.unlock()
+    }
+
+    private func schedulePendingEncodeIfPossible() {
+        captureLock.lock()
+        let shouldSchedule = pendingCapture != nil
+            && !encodeScheduled
+            && encodeInFlight < maxEncodeInFlight
+            && !recoveryEncodeInFlight
         if shouldSchedule {
             encodeScheduled = true
         }
@@ -1639,6 +1862,12 @@ final class CaptureSession {
         let requestKeyframe = forceKeyframe
         forceKeyframe = false
         stateLock.unlock()
+        if requestKeyframe {
+            captureLock.lock()
+            recoveryEncodeInFlight = true
+            recoveryEncodeGateStartedNs = DispatchTime.now().uptimeNanoseconds
+            captureLock.unlock()
+        }
         let frameProperties: CFDictionary? = requestKeyframe
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary
             : nil
@@ -1652,7 +1881,6 @@ final class CaptureSession {
             frameProperties: frameProperties,
             infoFlagsOut: &flags
         ) { [weak self] status, _, encodedSample in
-            defer { self?.completeEncodeSlot() }
             guard status == noErr, let encodedSample = encodedSample else {
                 NSLog(
                     "Leftcar H.264 output failed %@: status=%d",
@@ -1660,10 +1888,24 @@ final class CaptureSession {
                     status
                 )
                 self?.discardTrackedFrame(pts: trackedPts)
+                if requestKeyframe {
+                    self?.clearRecoveryEncodeGate()
+                }
                 self?.requestRecoveryKeyframe()
+                self?.completeEncodeSlot()
                 return
             }
-            self?.handleEncoded(encodedSample)
+            guard let self else { return }
+            let process = { [weak self] in
+                guard let self else { return }
+                self.handleEncoded(encodedSample, requestedKeyframe: requestKeyframe)
+                self.completeEncodeSlot()
+            }
+            if shouldOffloadEncodedSample(width: self.outWidth, height: self.outHeight) {
+                self.packetizationQueue.async(execute: process)
+            } else {
+                process()
+            }
         }
 
         if status == noErr {
@@ -1683,6 +1925,9 @@ final class CaptureSession {
             encodeSubmitNsByPts.removeValue(forKey: pts.value)
             encodeAuIdByPts.removeValue(forKey: pts.value)
             stateLock.unlock()
+            if requestKeyframe {
+                clearRecoveryEncodeGate()
+            }
             requestRecoveryKeyframe()
             completeEncodeSlot()
         }
@@ -1711,7 +1956,10 @@ final class CaptureSession {
     private func recoveryKeyframeDidSend() {
         stateLock.lock()
         recoveryKeyframePending = false
+        forceKeyframe = false
         stateLock.unlock()
+        clearRecoveryEncodeGate()
+        schedulePendingEncodeIfPossible()
     }
 
     private func discardTrackedFrame(pts: Int64) {
@@ -1720,6 +1968,30 @@ final class CaptureSession {
         captureWallMsByPts.removeValue(forKey: pts)
         encodeSubmitNsByPts.removeValue(forKey: pts)
         encodeAuIdByPts.removeValue(forKey: pts)
+        stateLock.unlock()
+    }
+
+    private func recordAccessUnitShape(bytes: UInt64, isKeyframe: Bool, sendUs: UInt64) {
+        guard contentMode == .video, !isKeyframe else { return }
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        stateLock.lock()
+        let sample = Double(bytes)
+        recentAuBytesEwma = recentAuBytesEwma == 0
+            ? sample
+            : (recentAuBytesEwma * 0.75) + (sample * 0.25)
+        let expectedBytes = Double(max(1, currentAverageBitrate))
+            / 8.0
+            / Double(max(1, fps))
+        // The video profile has a strict 60fps floor. A sustained delta above
+        // both a practical 48KiB floor and 1.35x the current frame budget
+        // indicates a genuinely high-change scene (movie playback, scrolling
+        // video, or a camera feed).
+        let highMotion = sample >= max(48_000.0, expectedBytes * 1.35)
+            || recentAuBytesEwma >= max(48_000.0, expectedBytes * 1.20)
+            || sendUs >= max(20_000, 700_000 / UInt64(max(1, fps)))
+        if highMotion {
+            highMotionUntilNs = max(highMotionUntilNs, nowNs &+ 2_000_000_000)
+        }
         stateLock.unlock()
     }
 
@@ -1737,7 +2009,7 @@ final class CaptureSession {
         let receiverLoss = UInt64(receiverFrameGaps)
             + UInt64(receiverInputDrops)
             + UInt64(receiverIncompleteAUs)
-            + UInt64(receiverStaleFrames)
+            + UInt64(receiverStaleInputDrops ?? receiverStaleFrames)
         let newReceiverLoss: UInt64
         if feedbackFresh {
             newReceiverLoss = receiverLoss >= lastAdaptedReceiverLoss
@@ -1756,6 +2028,7 @@ final class CaptureSession {
             || (!recoveryBurstGrace && newReceiverLoss > 0)
             || receiverLatencyHigh
         let current = currentAverageBitrate
+        let highMotion = contentMode == .video && highMotionUntilNs > nowNs
         if congested {
             stableBitrateWindows = 0
             consecutiveCongestedWindows += 1
@@ -1785,15 +2058,52 @@ final class CaptureSession {
         // escaping congestion even while receiver loss kept rising. Text is
         // still readable at the 4-6Mbps recovery band; quality climbs again
         // only after eight stable windows.
-        let minFloor = activeCount > 1 ? 3_000_000 : 4_000_000
-        let maxFloor = activeCount > 1 ? 10_000_000 : 14_000_000
-        let minCeiling = activeCount > 1 ? 8_000_000 : 24_000_000
-        let maxCeiling = activeCount > 1 ? 28_000_000 : 60_000_000
+        let minFloor: Int
+        let maxFloor: Int
+        let minCeiling: Int
+        let maxCeiling: Int
+        if contentMode == .video {
+            // 4K60 needs a materially larger spatial-quality budget. Keep
+            // the frame rate fixed at 60 and spend the available capacity on
+            // bits per frame instead of letting moving pictures collapse into
+            // the old 8-28Mbps 1080p band.
+            let ultraHd = outWidth >= 3_840 && outHeight >= 2_160
+            if ultraHd {
+                minFloor = activeCount > 1 ? 18_000_000 : 24_000_000
+                maxFloor = activeCount > 1 ? 28_000_000 : 36_000_000
+                minCeiling = activeCount > 1 ? 32_000_000 : 44_000_000
+                maxCeiling = activeCount > 1 ? 56_000_000 : 80_000_000
+            } else {
+                minFloor = activeCount > 1 ? 7_000_000 : 8_000_000
+                maxFloor = activeCount > 1 ? 10_000_000 : 12_000_000
+                minCeiling = activeCount > 1 ? 10_000_000 : 12_000_000
+                maxCeiling = activeCount > 1 ? 20_000_000 : 28_000_000
+            }
+        } else {
+            minFloor = activeCount > 1 ? 3_000_000 : 4_000_000
+            maxFloor = activeCount > 1 ? 10_000_000 : 14_000_000
+            minCeiling = activeCount > 1 ? 8_000_000 : 24_000_000
+            maxCeiling = activeCount > 1 ? 28_000_000 : 60_000_000
+        }
         let floorBitrate = Int(min(max(pixelsPerSecond * 0.035, Double(minFloor)), Double(maxFloor)))
         let ceilingBitrate = Int(min(max(pixelsPerSecond * 0.14, Double(minCeiling)), Double(maxCeiling)))
         let target: Int
         if congestionConfirmed {
             target = max(floorBitrate, Int(Double(current) * 0.80))
+        } else if highMotion {
+            // Raise the budget as soon as a sustained high-change scene is
+            // observed. This avoids waiting through eight stable windows,
+            // which is too slow for the first seconds of a video.
+            let motionFloor: Int
+            if contentMode == .video {
+                let ultraHd = outWidth >= 3_840 && outHeight >= 2_160
+                motionFloor = ultraHd
+                    ? (activeCount > 1 ? 28_000_000 : 36_000_000)
+                    : (activeCount > 1 ? 9_000_000 : 10_000_000)
+            } else {
+                motionFloor = floorBitrate
+            }
+            target = min(ceilingBitrate, max(floorBitrate, motionFloor))
         } else if canRaise {
             // Accelerating recovery: 4% → 8% → 16% per stable window so a
             // ratchet-down to the floor recovers in a few seconds while an
@@ -1843,117 +2153,169 @@ final class CaptureSession {
         let activeCount = max(1, withRegistry { $0.count })
         let streamFactor = activeCount > 1 ? (1.0 / Double(activeCount) * 1.3) : 1.0
         let idealBits = Double(w) * Double(h) * Double(fps) * 0.07 * streamFactor
-        let minRate = activeCount > 1 ? 4_000_000 : 6_000_000
-        let maxRate = activeCount > 1 ? 24_000_000 : 60_000_000
+        let minRate: Int
+        let maxRate: Int
+        if contentMode == .video {
+            let ultraHd = w >= 3_840 && h >= 2_160
+            if ultraHd {
+                minRate = activeCount > 1 ? 18_000_000 : 24_000_000
+                maxRate = activeCount > 1 ? 56_000_000 : 80_000_000
+            } else {
+                minRate = activeCount > 1 ? 7_000_000 : 8_000_000
+                maxRate = activeCount > 1 ? 20_000_000 : 28_000_000
+            }
+        } else {
+            minRate = activeCount > 1 ? 4_000_000 : 6_000_000
+            maxRate = activeCount > 1 ? 24_000_000 : 60_000_000
+        }
         let avgBitrate = min(max(idealBits, Double(minRate)), Double(maxRate))
 
         // A software fallback is much slower for an interactive remote
         // display and would otherwise be invisible behind the same API.
-        // Require the platform H.264 hardware encoder so an unsupported host
-        // fails clearly instead of silently adding frame latency.
+        // Require a hardware encoder so an unsupported codec fails clearly
+        // instead of silently adding frame latency. 4K video prefers HEVC;
+        // the same start falls back to hardware H.264 if HEVC is unavailable.
         let encoderSpecification: CFDictionary = [
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
         ] as CFDictionary
+        let preferred = preferredVideoCodec(
+            width: UInt32(w),
+            height: UInt32(h),
+            contentMode: contentMode.rawValue
+        )
+        let candidates: [VideoCodecKind] = preferred == .hevc ? [.hevc, .h264] : [.h264]
+        var lastFailure = "no codec candidate"
 
-        var s: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
-            allocator: nil,
-            width: w,
-            height: h,
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: encoderSpecification,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &s
-        )
-        guard status == noErr, let s = s else {
-            markStopped("VTCompressionSessionCreate failed: \(status)")
-            return
-        }
+        for candidate in candidates {
+            var s: VTCompressionSession?
+            let codecType: CMVideoCodecType = candidate == .hevc
+                ? kCMVideoCodecType_HEVC
+                : kCMVideoCodecType_H264
+            let status = VTCompressionSessionCreate(
+                allocator: nil,
+                width: w,
+                height: h,
+                codecType: codecType,
+                encoderSpecification: encoderSpecification,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &s
+            )
+            guard status == noErr, let s = s else {
+                lastFailure = "\(candidate.rawValue) VTCompressionSessionCreate failed: \(status)"
+                NSLog("Leftcar %@", lastFailure)
+                continue
+            }
 
-        let realTimeStatus = VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_RealTime,
-            value: true as CFBoolean
-        )
-        let mainProfileStatus = VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_ProfileLevel,
-            value: kVTProfileLevel_H264_Main_AutoLevel
-        )
-        if mainProfileStatus != noErr {
-            _ = VTSessionSetProperty(
+            let realTimeStatus = VTSessionSetProperty(
                 s,
-                key: kVTCompressionPropertyKey_ProfileLevel,
-                value: kVTProfileLevel_H264_Baseline_AutoLevel
+                key: kVTCompressionPropertyKey_RealTime,
+                value: true as CFBoolean
             )
-        }
-        let noReorderStatus = VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_AllowFrameReordering,
-            value: false as CFBoolean
-        )
-        // This is an interactive remote display, not an offline encode. Ask
-        // VideoToolbox to spend its budget on encode latency and keep no
-        // additional frame-delay queue in front of the callback.
-        VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-            value: true as CFBoolean
-        )
-        VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-            value: 0 as CFNumber
-        )
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: Int(avgBitrate) as CFNumber)
-        // DataRateLimits is expressed as [bytes, seconds], while
-        // AverageBitRate is expressed in bits per second. Keep a small
-        // 1-second headroom without allowing multi-second bursts.
-        let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
-        // Recovery happens through the authenticated IDR request path
-        // (viewer IDR datagram -> kVTEncodeFrameOptionKey_ForceKeyFrame).
-        // A periodic UDP IDR would re-introduce the one-second resync ceiling
-        // this recovery redesign removes. 3600 frames is effectively an
-        // infinite GOP for an interactive 60fps session.
-        let nominalKeyframeInterval = mediaTransport.usesTCP
-            ? max(1, fps * 60)
-            : 3600
-        VTSessionSetProperty(
-            s,
-            key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-            value: nominalKeyframeInterval as CFNumber
-        )
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: Int32(fps) as CFNumber)
+            var profileStatus: OSStatus
+            switch candidate {
+            case .hevc:
+                profileStatus = VTSessionSetProperty(
+                    s,
+                    key: kVTCompressionPropertyKey_ProfileLevel,
+                    value: kVTProfileLevel_HEVC_Main_AutoLevel
+                )
+            case .h264:
+                profileStatus = VTSessionSetProperty(
+                    s,
+                    key: kVTCompressionPropertyKey_ProfileLevel,
+                    value: kVTProfileLevel_H264_Main_AutoLevel
+                )
+                if profileStatus != noErr {
+                    profileStatus = VTSessionSetProperty(
+                        s,
+                        key: kVTCompressionPropertyKey_ProfileLevel,
+                        value: kVTProfileLevel_H264_Baseline_AutoLevel
+                    )
+                }
+            }
+            let noReorderStatus = VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_AllowFrameReordering,
+                value: false as CFBoolean
+            )
+            // This is an interactive remote display, not an offline encode. Ask
+            // VideoToolbox to spend its budget on encode latency and keep no
+            // additional frame-delay queue in front of the callback.
+            VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                value: true as CFBoolean
+            )
+            VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                value: 0 as CFNumber
+            )
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: Int(avgBitrate) as CFNumber)
+            // DataRateLimits is expressed as [bytes, seconds], while
+            // AverageBitRate is expressed in bits per second. Keep a small
+            // 1-second headroom without allowing multi-second bursts.
+            let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
+            // Recovery happens through the authenticated IDR request path
+            // (viewer IDR datagram -> kVTEncodeFrameOptionKey_ForceKeyFrame).
+            // A periodic UDP IDR would re-introduce the one-second resync ceiling
+            // this recovery redesign removes. 3600 frames is effectively an
+            // infinite GOP for an interactive 60fps session.
+            let nominalKeyframeInterval = mediaTransport.usesTCP
+                ? max(1, fps * 60)
+                : 3600
+            VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                value: nominalKeyframeInterval as CFNumber
+            )
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: Int32(fps) as CFNumber)
 
-        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(s)
-        guard realTimeStatus == noErr, noReorderStatus == noErr, prepareStatus == noErr else {
-            VTCompressionSessionInvalidate(s)
-            markStopped(
-                "VideoToolbox low-latency setup failed: realtime=\(realTimeStatus) noReorder=\(noReorderStatus) prepare=\(prepareStatus)"
+            let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(s)
+            guard realTimeStatus == noErr,
+                  profileStatus == noErr,
+                  noReorderStatus == noErr,
+                  prepareStatus == noErr else {
+                VTCompressionSessionInvalidate(s)
+                lastFailure = "VideoToolbox \(candidate.rawValue) low-latency setup failed: realtime=\(realTimeStatus) profile=\(profileStatus) noReorder=\(noReorderStatus) prepare=\(prepareStatus)"
+                NSLog("Leftcar %@", lastFailure)
+                continue
+            }
+            stateLock.lock()
+            currentAverageBitrate = Int(avgBitrate)
+            stateLock.unlock()
+            codecKind = candidate
+            NSLog(
+                "Leftcar hardware %@ encoder ready %@: %dx%d bitrate=%d",
+                candidate.rawValue.uppercased(),
+                targetLabel,
+                w,
+                h,
+                Int(avgBitrate)
             )
+            session = s
             return
         }
-        stateLock.lock()
-        currentAverageBitrate = Int(avgBitrate)
-        stateLock.unlock()
-        NSLog(
-            "Leftcar hardware H.264 encoder ready %@: %dx%d bitrate=%d",
-            targetLabel,
-            w,
-            h,
-            Int(avgBitrate)
-        )
-        session = s
+
+        markStopped(lastFailure)
     }
 
     // MARK: Packetization & TCP Transmission
 
-    private func handleEncoded(_ sample: CMSampleBuffer) {
-        guard isRunning else { return }
+    private func handleEncoded(
+        _ sample: CMSampleBuffer,
+        requestedKeyframe: Bool
+    ) {
+        guard isRunning else {
+            if requestedKeyframe {
+                clearRecoveryEncodeGate()
+            }
+            return
+        }
         let encodeNs = DispatchTime.now().uptimeNanoseconds
         let encodedPts = CMSampleBufferGetPresentationTimeStamp(sample).value
         stateLock.lock()
@@ -1985,6 +2347,9 @@ final class CaptureSession {
             forceKeyframe = true
             csdSent = false
             stateLock.unlock()
+            if requestedKeyframe {
+                clearRecoveryEncodeGate()
+            }
             return
         }
 
@@ -2008,29 +2373,43 @@ final class CaptureSession {
         stateLock.unlock()
 
         if shouldSendConfig, let fd = sample.formatDescription {
-            var cfg = Data([0x43, 0x46, 0x47]) // "CFG"
+            var cfg = codecKind == .hevc
+                ? Data([0x43, 0x46, 0x32, codecKind.id]) // "CF2", codec id
+                : Data([0x43, 0x46, 0x47]) // legacy "CFG" = H.264
             var idx = 0
-            while true {
+            while idx < codecKind.parameterSetCount {
                 var ptr: UnsafePointer<UInt8>? = nil
                 var size = 0
-                let status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    fd,
-                    parameterSetIndex: idx,
-                    parameterSetPointerOut: &ptr,
-                    parameterSetSizeOut: &size,
-                    parameterSetCountOut: nil,
-                    nalUnitHeaderLengthOut: nil
-                )
-                if status != noErr { break }
-                if let ptr = ptr {
-                    var lenBE = UInt32(size + 4).bigEndian
-                    withUnsafeBytes(of: &lenBE) { cfg.append(contentsOf: $0) }
-                    cfg.append(contentsOf: [0, 0, 0, 1])
-                    cfg.append(contentsOf: UnsafeBufferPointer(start: ptr, count: size))
+                let status: OSStatus
+                switch codecKind {
+                case .h264:
+                    status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fd,
+                        parameterSetIndex: idx,
+                        parameterSetPointerOut: &ptr,
+                        parameterSetSizeOut: &size,
+                        parameterSetCountOut: nil,
+                        nalUnitHeaderLengthOut: nil
+                    )
+                case .hevc:
+                    status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                        fd,
+                        parameterSetIndex: idx,
+                        parameterSetPointerOut: &ptr,
+                        parameterSetSizeOut: &size,
+                        parameterSetCountOut: nil,
+                        nalUnitHeaderLengthOut: nil
+                    )
                 }
+                if status != noErr { break }
+                guard let ptr, size > 0 else { break }
+                var lenBE = UInt32(size + 4).bigEndian
+                withUnsafeBytes(of: &lenBE) { cfg.append(contentsOf: $0) }
+                cfg.append(contentsOf: [0, 0, 0, 1])
+                cfg.append(contentsOf: UnsafeBufferPointer(start: ptr, count: size))
                 idx += 1
             }
-            if idx > 0 {
+            if idx == codecKind.parameterSetCount {
                 enqueuePacket(config: cfg)
             } else {
                 stateLock.lock()
@@ -2039,7 +2418,13 @@ final class CaptureSession {
             }
         }
 
-        guard let bb = CMSampleBufferGetDataBuffer(sample) else { return }
+        guard let bb = CMSampleBufferGetDataBuffer(sample) else {
+            if requestedKeyframe {
+                clearRecoveryEncodeGate()
+                requestRecoveryKeyframe()
+            }
+            return
+        }
         var lengthAtOffset = 0
         var totalLength = 0
         var dataPointer: UnsafeMutablePointer<Int8>? = nil
@@ -2050,7 +2435,13 @@ final class CaptureSession {
             totalLengthOut: &totalLength,
             dataPointerOut: &dataPointer
         )
-        guard let ptr = dataPointer else { return }
+        guard let ptr = dataPointer else {
+            if requestedKeyframe {
+                clearRecoveryEncodeGate()
+                requestRecoveryKeyframe()
+            }
+            return
+        }
         let bytes = UnsafeRawBufferPointer(start: ptr, count: totalLength)
 
         var pkt = Data([0x41, 0x55]) // "AU"
@@ -2080,13 +2471,26 @@ final class CaptureSession {
         withUnsafeBytes(of: &captureWallMsBE) { p2.append(contentsOf: $0) }
         withUnsafeBytes(of: &encodeWallMsBE) { p2.append(contentsOf: $0) }
         p2.append(pkt.dropFirst(10))
-        enqueuePacket(frame: p2, isKeyframe: isKeyframe)
+        let isRecoveryKeyframe = requestedKeyframe && isKeyframe
+        if requestedKeyframe && !isKeyframe {
+            // VideoToolbox did not honor the recovery request. Do not leave
+            // the encoder paused forever; ask again after the normal cooldown.
+            clearRecoveryEncodeGate()
+            requestRecoveryKeyframe()
+            return
+        }
+        enqueuePacket(
+            frame: p2,
+            isKeyframe: isKeyframe,
+            isRecoveryKeyframe: isRecoveryKeyframe
+        )
     }
 
     private func enqueuePacket(
         config: Data? = nil,
         frame: Data? = nil,
-        isKeyframe: Bool = false
+        isKeyframe: Bool = false,
+        isRecoveryKeyframe: Bool = false
     ) {
         networkLock.lock()
         if let config {
@@ -2098,7 +2502,11 @@ final class CaptureSession {
                     pendingFrames.removeAll(keepingCapacity: true)
                     networkAwaitingKeyframe = false
                     pendingFrames.append(
-                        PendingEncodedFrame(data: frame, isKeyframe: true)
+                        PendingEncodedFrame(
+                            data: frame,
+                            isKeyframe: true,
+                            isRecoveryKeyframe: isRecoveryKeyframe
+                        )
                     )
                 } else {
                     stateLock.lock()
@@ -2110,7 +2518,11 @@ final class CaptureSession {
                 }
             } else if pendingFrames.count < maxPendingNetworkFrames {
                 pendingFrames.append(
-                    PendingEncodedFrame(data: frame, isKeyframe: isKeyframe)
+                    PendingEncodedFrame(
+                        data: frame,
+                        isKeyframe: isKeyframe,
+                        isRecoveryKeyframe: isRecoveryKeyframe
+                    )
                 )
             } else {
                 // The unsent frames are a dependency chain. Once the bounded
@@ -2131,7 +2543,11 @@ final class CaptureSession {
                 if isKeyframe {
                     networkAwaitingKeyframe = false
                     pendingFrames.append(
-                        PendingEncodedFrame(data: frame, isKeyframe: true)
+                        PendingEncodedFrame(
+                            data: frame,
+                            isKeyframe: true,
+                            isRecoveryKeyframe: isRecoveryKeyframe
+                        )
                     )
                 } else {
                     // A keyframe already being written is the recovery
@@ -2181,7 +2597,12 @@ final class CaptureSession {
                 writePacket(config)
             }
             if let frame {
-                writePacket(frame.data, isFrame: true, isKeyframe: frame.isKeyframe)
+                writePacket(
+                    frame.data,
+                    isFrame: true,
+                    isKeyframe: frame.isKeyframe,
+                    isRecoveryKeyframe: frame.isRecoveryKeyframe
+                )
                 networkLock.lock()
                 networkKeyframeInFlight = false
                 networkLock.unlock()
@@ -2246,7 +2667,7 @@ final class CaptureSession {
                 sendLatencyProbeResponse(message, fd: fd, destination: source)
                 continue
             }
-            if message.count == 24,
+            if message.count >= 24,
                message.prefix(4) == Data("LCF1".utf8) {
                 stateLock.lock()
                 receiverFrameGaps = readUInt32BE(message, at: 4)
@@ -2255,6 +2676,12 @@ final class CaptureSession {
                 receiverStaleFrames = readUInt32BE(message, at: 16)
                 receiverRttMs = readUInt16BE(message, at: 20)
                 receiverWireMs = readUInt16BE(message, at: 22)
+                receiverStaleInputDrops = message.count >= 32
+                    ? readUInt32BE(message, at: 24)
+                    : nil
+                receiverOutputBurstDiscards = message.count >= 32
+                    ? readUInt32BE(message, at: 28)
+                    : 0
                 receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
                 stateLock.unlock()
                 armReceiverHealthCheck()
@@ -2331,7 +2758,7 @@ final class CaptureSession {
                     sendLatencyProbeResponse(message, fd: fd, destination: nil)
                     continue
                 }
-                if messageBytes.count == 24,
+                if messageBytes.count >= 24,
                    Array(messageBytes.prefix(4)) == Array("LCF1".utf8) {
                     let message = Data(messageBytes)
                     stateLock.lock()
@@ -2341,6 +2768,12 @@ final class CaptureSession {
                     receiverStaleFrames = readUInt32BE(message, at: 16)
                     receiverRttMs = readUInt16BE(message, at: 20)
                     receiverWireMs = readUInt16BE(message, at: 22)
+                    receiverStaleInputDrops = message.count >= 32
+                        ? readUInt32BE(message, at: 24)
+                        : nil
+                    receiverOutputBurstDiscards = message.count >= 32
+                        ? readUInt32BE(message, at: 28)
+                        : 0
                     receiverFeedbackNs = DispatchTime.now().uptimeNanoseconds
                     stateLock.unlock()
                     armReceiverHealthCheck()
@@ -2707,6 +3140,122 @@ final class CaptureSession {
         verticalScrollRemainder = 0
     }
 
+    // Keep the macOS shim self-contained: its C ABI dylib is loaded by the
+    // Tauri host independently from the Rust host crate. This is the same
+    // GF(256) RS(8,10) layout used by fec-core for Windows and Android.
+    private func fecParityCount(_ dataCount: Int, reduced: Bool = false) -> Int {
+        if reduced {
+            // Video deltas arrive every 16.7ms. One parity shard per full
+            // group covers the common single-loss case without making FEC a
+            // sustained bandwidth burst of its own.
+            return dataCount >= 4 ? 1 : 0
+        }
+        if dataCount == 8 { return 2 }
+        if dataCount > 1 { return 1 }
+        return 0
+    }
+
+    private static let fecMultiplyTable: [UInt8] = {
+        var table = [UInt8](repeating: 0, count: 256 * 256)
+        for left in 0..<256 {
+            for right in 0..<256 {
+                var a = UInt8(left)
+                var b = UInt8(right)
+                var result: UInt8 = 0
+                for _ in 0..<8 {
+                    if b & 1 != 0 { result ^= a }
+                    let carry = a & 0x80 != 0
+                    a <<= 1
+                    if carry { a ^= 0x1d }
+                    b >>= 1
+                }
+                table[(left << 8) | right] = result
+            }
+        }
+        return table
+    }()
+
+    private func fecMultiply(_ left: UInt8, _ right: UInt8) -> UInt8 {
+        Self.fecMultiplyTable[(Int(left) << 8) | Int(right)]
+    }
+
+    private func fecPower(_ base: UInt8, _ exponent: Int) -> UInt8 {
+        if exponent == 0 { return 1 }
+        var result: UInt8 = 1
+        for _ in 0..<exponent { result = fecMultiply(result, base) }
+        return result
+    }
+
+    private func fecParityDatagrams(
+        auID: UInt16,
+        totalFragments: Int,
+        wallMs: UInt64,
+        payloads: [Data],
+        reducedParity: Bool = false
+    ) -> [Data] {
+        guard !payloads.isEmpty else { return [] }
+        var output = [Data]()
+        for base in stride(from: 0, to: payloads.count, by: 8) {
+            let end = min(payloads.count, base + 8)
+            let group = Array(payloads[base..<end])
+            let k = group.count
+            let parityCount = fecParityCount(k, reduced: reducedParity)
+            guard parityCount > 0 else { continue }
+            let width = (group.map(\.count).max() ?? 0) + 2
+            let shards = group.map { payload -> [UInt8] in
+                let bytes = Array(payload)
+                var shard = [UInt8](repeating: 0, count: width)
+                var length = UInt16(bytes.count).bigEndian
+                withUnsafeBytes(of: &length) { shard.replaceSubrange(0..<2, with: $0) }
+                shard.replaceSubrange(2..<(2 + bytes.count), with: bytes)
+                return shard
+            }
+            let coefficients = (0..<parityCount).map { parityIndex in
+                let rowBase = UInt8(parityIndex + 1)
+                return (0..<k).map { column in
+                    fecPower(rowBase, column)
+                }
+            }
+            for parityIndex in 0..<parityCount {
+                var parity = [UInt8](repeating: 0, count: width)
+                for byteIndex in 0..<width {
+                    for column in 0..<k {
+                        let coefficient = coefficients[parityIndex][column]
+                        parity[byteIndex] ^= fecMultiply(coefficient, shards[column][byteIndex])
+                    }
+                }
+                var datagram = Data([0x50]) // P
+                datagram.append(UInt8(auID & 0xff))
+                datagram.append(UInt8(auID >> 8))
+                datagram.append(UInt8(k))
+                datagram.append(UInt8(parityIndex))
+                var baseBE = UInt16(base).bigEndian
+                var totalBE = UInt16(totalFragments).bigEndian
+                withUnsafeBytes(of: &baseBE) { datagram.append(contentsOf: $0) }
+                withUnsafeBytes(of: &totalBE) { datagram.append(contentsOf: $0) }
+                datagram.append(contentsOf: [0x4c, 0x54]) // LT
+                var wallBE = wallMs.bigEndian
+                withUnsafeBytes(of: &wallBE) { datagram.append(contentsOf: $0) }
+                datagram.append(contentsOf: parity)
+                if datagram.count <= 1_200 { output.append(datagram) }
+            }
+        }
+        return output
+    }
+
+    private func shouldProtectUdpAccessUnit(
+        fragmentCount: Int,
+        isKeyframe: Bool
+    ) -> Bool {
+        // A parity datagram is a useful loss budget for a large AU, but it is
+        // pure overhead for the common one-to-three-fragment desktop delta.
+        // Protecting every small AU makes the sender spend more than one
+        // frame interval on the wire and fills the latest-frame queue before
+        // FEC can help. Keyframes remain protected because losing one would
+        // otherwise force another full decoder recovery.
+        isKeyframe || fragmentCount >= 4
+    }
+
     /// Send one config datagram or one fragmented H.264 AU. Datagram payloads
     /// stay below 1,200 bytes to avoid IP fragmentation on Wi-Fi and Tailscale.
     /// On a local queue overflow, recover from a fresh IDR instead of blocking
@@ -2714,20 +3263,35 @@ final class CaptureSession {
     private func writePacket(
         _ data: Data,
         isFrame: Bool = false,
-        isKeyframe: Bool = false
+        isKeyframe: Bool = false,
+        isRecoveryKeyframe: Bool = false
     ) {
         stateLock.lock()
         let fd = sock
         stateLock.unlock()
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            if isRecoveryKeyframe {
+                clearRecoveryEncodeGate()
+            }
+            return
+        }
 
         let sendStart = DispatchTime.now().uptimeNanoseconds
         var sentBytes = 0
+        var sentDatagramCount = 0
+        var sentParityDatagramCount = 0
+        var expectedDatagramCount = 0
+        var auBytes: UInt64 = 0
+        var auFragmentCount: UInt32 = 0
+        var auParityCount: UInt32 = 0
         var sendSyscallUs: UInt64 = 0
         var ok = true
         if isFrame {
             // Logical L2 header: marker + AU id LE + capture/encode clocks.
             guard data.count > 21, data[0] == 0x47, data[3...4] == Data([0x4C, 0x32]) else {
+                if isRecoveryKeyframe {
+                    clearRecoveryEncodeGate()
+                }
                 requestRecoveryKeyframe()
                 return
             }
@@ -2735,31 +3299,16 @@ final class CaptureSession {
             let payloadCount = data.count - 21
             let fragmentCount = max(1, (payloadCount + maxPayload - 1) / maxPayload)
             guard fragmentCount <= Int(UInt16.max) else {
+                if isRecoveryKeyframe {
+                    clearRecoveryEncodeGate()
+                }
                 requestRecoveryKeyframe()
                 return
             }
             var sendWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
-            // Keep delta frames latest-wins, but spread a UDP recovery
-            // keyframe over a small bounded window. Sending every fragment
-            // back to back creates a Wi-Fi queue burst large enough to lose
-            // one fragment and immediately re-enter the IDR loop. TCP is
-            // ordered and reliable, so it sends the recovery AU immediately;
-            // pacing that path only builds stale latency in the bridge.
-            // UDP sends the recovery keyframe twice over the same paced
-            // window. The keyframe is the recovery boundary, so dropping
-            // deltas while it is in flight is intentional and handled by
-            // enqueuePacket.
-            let recoveryCopies = isKeyframe && mediaTransport == .udp ? 2 : 1
-            let paceSpanUs = isKeyframe && mediaTransport == .udp
-                ? min(220_000, max(120_000, UInt64(1_000_000 / max(1, fps)) * 12))
-                : 0
-            let transmissions = fragmentCount * recoveryCopies
-            primary: for ordinal in 0..<transmissions {
-                let index = ordinal % fragmentCount
-                if paceSpanUs > 0 && transmissions > 1 {
-                    let offsetUs = paceSpanUs * UInt64(ordinal) / UInt64(transmissions - 1)
-                    paceNetwork(until: sendStart + offsetUs * 1_000)
-                }
+            var primaryDatagrams = [Data]()
+            primaryDatagrams.reserveCapacity(fragmentCount)
+            for index in 0..<fragmentCount {
                 let start = 21 + index * maxPayload
                 let end = min(data.count, start + maxPayload)
                 var datagram = Data(capacity: 33 + end - start)
@@ -2771,6 +3320,71 @@ final class CaptureSession {
                 datagram.append(contentsOf: data[1...20])
                 withUnsafeBytes(of: &sendWallMsBE) { datagram.append(contentsOf: $0) }
                 datagram.append(contentsOf: data[start..<end])
+                primaryDatagrams.append(datagram)
+            }
+            let auID = UInt16(data[1]) | (UInt16(data[2]) << 8)
+            // Protect every multi-fragment UDP AU. A single lost fragment
+            // otherwise invalidates the whole H.264 access unit and starts an
+            // IDR recovery loop. The parity math uses a lookup table and
+            // precomputed row coefficients so this stays off the capture and
+            // encoder queues while remaining cheap enough for 60fps deltas.
+            let parityDatagrams = mediaTransport == .udp
+                && shouldProtectUdpAccessUnit(
+                    fragmentCount: fragmentCount,
+                    isKeyframe: isKeyframe
+                )
+                ? fecParityDatagrams(
+                    auID: auID,
+                    totalFragments: fragmentCount,
+                    wallMs: UInt64(Date().timeIntervalSince1970 * 1_000.0),
+                    payloads: primaryDatagrams.map { Data($0.dropFirst(33)) },
+                    reducedParity: contentMode == .video && !isKeyframe
+                )
+                : []
+            auBytes = UInt64(payloadCount)
+            auFragmentCount = UInt32(fragmentCount)
+            auParityCount = UInt32(parityDatagrams.count)
+            // Send each FEC group before its parity. This keeps parity close
+            // to the fragments it protects and avoids losing an entire AU's
+            // recovery budget to one large primary burst. The shared UDP
+            // pacer spreads both ordinary frames and recovery IDRs.
+            var transmissions = [Data]()
+            transmissions.reserveCapacity(fragmentCount + parityDatagrams.count)
+            var parityOffset = 0
+            for base in stride(from: 0, to: fragmentCount, by: 8) {
+                let end = min(fragmentCount, base + 8)
+                transmissions.append(contentsOf: primaryDatagrams[base..<end])
+                let parityCount = fecParityCount(
+                    end - base,
+                    reduced: contentMode == .video && !isKeyframe
+                )
+                if !mediaTransport.usesTCP && parityCount > 0 {
+                    // A parity datagram may be omitted when it cannot fit the
+                    // MTU-safe envelope. Never let a malformed/oversized FEC
+                    // group abort the serial network queue with an array
+                    // bounds trap; the protected primary fragments are still
+                    // useful and the next IDR can recover the decoder.
+                    let available = max(0, parityDatagrams.count - parityOffset)
+                    let appendCount = min(parityCount, available)
+                    if appendCount > 0 {
+                        transmissions.append(contentsOf: parityDatagrams[parityOffset..<(parityOffset + appendCount)])
+                        parityOffset += appendCount
+                    }
+                }
+            }
+            expectedDatagramCount = transmissions.count
+            if isKeyframe {
+                NSLog(
+                    "Leftcar recovery AU %@: bytes=%d fragments=%d parity=%d transmissions=%d",
+                    targetLabel,
+                    data.count,
+                    fragmentCount,
+                    parityDatagrams.count,
+                    transmissions.count
+                )
+            }
+            primary: for datagram in transmissions {
+                paceUdpDatagram(bytes: datagram.count, isKeyframe: isKeyframe)
                 let syscallStart = DispatchTime.now().uptimeNanoseconds
                 let sent = sendMediaDatagram(datagram, fd: fd)
                 sendSyscallUs &+= (DispatchTime.now().uptimeNanoseconds &- syscallStart) / 1_000
@@ -2779,6 +3393,10 @@ final class CaptureSession {
                     break primary
                 }
                 sentBytes += sent
+                sentDatagramCount += 1
+                if datagram.first == 0x50 {
+                    sentParityDatagramCount += 1
+                }
             }
         } else {
             let syscallStart = DispatchTime.now().uptimeNanoseconds
@@ -2789,6 +3407,23 @@ final class CaptureSession {
                 sentBytes = sent
             }
         }
+        if isFrame {
+            let auSendUs = (DispatchTime.now().uptimeNanoseconds &- sendStart) / 1_000
+            stateLock.lock()
+            sentDatagrams &+= Int64(sentDatagramCount)
+            sentParityDatagrams &+= Int64(sentParityDatagramCount)
+            lastAuBytes = auBytes
+            lastAuFragments = auFragmentCount
+            lastAuParity = auParityCount
+            lastAuDatagrams = UInt32(sentDatagramCount)
+            lastAuExpectedDatagrams = UInt32(expectedDatagramCount)
+            lastAuSendUs = auSendUs
+            lastAuIsKeyframe = isKeyframe
+            maxAuBytes = max(maxAuBytes, auBytes)
+            maxAuFragments = max(maxAuFragments, auFragmentCount)
+            stateLock.unlock()
+            recordAccessUnitShape(bytes: auBytes, isKeyframe: isKeyframe, sendUs: auSendUs)
+        }
         if !ok {
             networkLock.lock()
             pendingFrames.removeAll(keepingCapacity: true)
@@ -2797,6 +3432,9 @@ final class CaptureSession {
             stateLock.lock()
             framesDropped &+= isFrame ? 1 : 0
             stateLock.unlock()
+            if isRecoveryKeyframe {
+                clearRecoveryEncodeGate()
+            }
             requestRecoveryKeyframe()
             return
         }
@@ -2824,7 +3462,7 @@ final class CaptureSession {
             lastRecoverySendNs = DispatchTime.now().uptimeNanoseconds
         }
         stateLock.unlock()
-        if isFrame && isKeyframe {
+        if isFrame && isRecoveryKeyframe {
             recoveryKeyframeDidSend()
         }
     }
@@ -2835,6 +3473,7 @@ final class CaptureSession {
         stateLock.lock()
         // roll the 1s rate window
         let now = Date()
+        let nowNs = DispatchTime.now().uptimeNanoseconds
         let elapsed = now.timeIntervalSince(rateWindowStart)
         if elapsed >= 1.0 {
             lastFps = UInt32((Double(rateWindowFrames) / elapsed).rounded())
@@ -2858,6 +3497,17 @@ final class CaptureSession {
         let networkDropped = framesDropped
         let networkQueueDropped = networkQueueDropped
         let recoveryFramesDropped = recoveryFramesDropped
+        let sentDatagrams = sentDatagrams
+        let sentParityDatagrams = sentParityDatagrams
+        let lastAuBytes = lastAuBytes
+        let lastAuFragments = lastAuFragments
+        let lastAuParity = lastAuParity
+        let lastAuDatagrams = lastAuDatagrams
+        let lastAuExpectedDatagrams = lastAuExpectedDatagrams
+        let lastAuSendUs = lastAuSendUs
+        let lastAuIsKeyframe = lastAuIsKeyframe
+        let maxAuBytes = maxAuBytes
+        let maxAuFragments = maxAuFragments
         let udpSendFailures = udpSendFailures
         let udpSendRetries = udpSendRetries
         let recoveryKeyframes = recoveryKeyframes
@@ -2869,6 +3519,7 @@ final class CaptureSession {
         let reportedFps = lastFps
         let reportedKbps = lastKbps
         let error = stoppedReason
+        let codec = codecKind.rawValue
         let firstCaptureMs = firstCaptureNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let firstEncodeMs = firstEncodeNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let firstSendMs = firstSendNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
@@ -2879,6 +3530,22 @@ final class CaptureSession {
         let encodeOutputP95Us = percentile95(encodeOutputSamplesUs)
         let sendBlockP95Us = percentile95(sendBlockSamplesUs)
         let sendPaceP95Us = percentile95(sendPaceSamplesUs)
+        let receiverStaleInputDropsValue: Any = receiverStaleInputDrops
+            .map { NSNumber(value: $0) } ?? NSNull()
+        let receiverRttValue: Any = receiverRttMs == .max
+            ? NSNull()
+            : NSNumber(value: receiverRttMs)
+        let receiverWireValue: Any = receiverWireMs == .max
+            ? NSNull()
+            : NSNumber(value: receiverWireMs)
+        let receiverFeedbackAgeValue: Any = receiverFeedbackNs == 0
+            ? NSNull()
+            : NSNumber(value: (nowNs &- receiverFeedbackNs) / 1_000_000)
+        let reportedReceiverFrameGaps = receiverFrameGaps
+        let reportedReceiverInputDrops = receiverInputDrops
+        let reportedReceiverIncompleteAUs = receiverIncompleteAUs
+        let reportedReceiverStaleFrames = receiverStaleFrames
+        let reportedReceiverOutputBurstDiscards = receiverOutputBurstDiscards
         stateLock.unlock()
 
         networkLock.lock()
@@ -2901,6 +3568,7 @@ final class CaptureSession {
             "fps": reportedFps,
             "kbps": reportedKbps,
             "fpsTarget": self.fps,
+            "codec": codec,
             "captureBackend": backend.rawValue,
             "mediaTransport": mediaTransport.rawValue,
             "firstCaptureMs": firstCaptureMs,
@@ -2913,6 +3581,17 @@ final class CaptureSession {
             "encodeOutputP95Us": encodeOutputP95Us,
             "sendBlockP95Us": sendBlockP95Us,
             "sendPaceP95Us": sendPaceP95Us,
+            "lastAuBytes": lastAuBytes,
+            "lastAuFragments": lastAuFragments,
+            "lastAuParity": lastAuParity,
+            "lastAuDatagrams": lastAuDatagrams,
+            "lastAuExpectedDatagrams": lastAuExpectedDatagrams,
+            "lastAuSendUs": lastAuSendUs,
+            "lastAuIsKeyframe": lastAuIsKeyframe,
+            "maxAuBytes": maxAuBytes,
+            "maxAuFragments": maxAuFragments,
+            "sentDatagrams": sentDatagrams,
+            "sentParityDatagrams": sentParityDatagrams,
             "captureToEncodeUs": captureToEncodeUs,
             "maxCaptureToEncodeUs": maxCaptureToEncodeUs,
             "captureQueueWaitUs": captureQueueWaitUs,
@@ -2923,6 +3602,15 @@ final class CaptureSession {
             "maxSendBlockUs": maxSendBlockUs,
             "sendPaceUs": sendPaceUs,
             "maxSendPaceUs": maxSendPaceUs,
+            "receiverFrameGaps": reportedReceiverFrameGaps,
+            "receiverInputDrops": reportedReceiverInputDrops,
+            "receiverIncompleteAus": reportedReceiverIncompleteAUs,
+            "receiverStaleFrames": reportedReceiverStaleFrames,
+            "receiverStaleInputDrops": receiverStaleInputDropsValue,
+            "receiverOutputBurstDiscards": reportedReceiverOutputBurstDiscards,
+            "receiverRttMs": receiverRttValue,
+            "receiverWireMs": receiverWireValue,
+            "receiverFeedbackAgeMs": receiverFeedbackAgeValue,
             "pendingFrame": pending,
             "error": error,
         ]

@@ -213,6 +213,144 @@ pub fn nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1f)
 }
 
+/// Codec selected for one media session. The id is carried only in the new
+/// configuration packet; legacy `CFG` packets are always H.264.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
+impl VideoCodec {
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::H264 => 1,
+            Self::Hevc => 2,
+        }
+    }
+
+    pub const fn mime(self) -> &'static str {
+        match self {
+            Self::H264 => "video/avc",
+            Self::Hevc => "video/hevc",
+        }
+    }
+
+    pub const fn parameter_set_count(self) -> usize {
+        match self {
+            Self::H264 => 2,
+            Self::Hevc => 3,
+        }
+    }
+
+    pub const fn csd_names(self) -> &'static [&'static str] {
+        match self {
+            Self::H264 => &["csd-0", "csd-1"],
+            Self::Hevc => &["csd-0", "csd-1", "csd-2"],
+        }
+    }
+
+    pub const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            1 => Some(Self::H264),
+            2 => Some(Self::Hevc),
+            _ => None,
+        }
+    }
+}
+
+/// Codec configuration extracted from either the legacy H.264 `CFG` packet
+/// or the codec-tagged `CF2` packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecConfig {
+    pub codec: VideoCodec,
+    pub vps: Option<Vec<u8>>,
+    pub sps: Option<Vec<u8>>,
+    pub pps: Option<Vec<u8>>,
+}
+
+/// Borrowed decoder construction parameters shared by H.264 and HEVC.
+pub struct VideoDecoderConfig<'a> {
+    pub codec: VideoCodec,
+    pub vps: Option<&'a [u8]>,
+    pub sps: &'a [u8],
+    pub pps: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    pub window: usize,
+    pub fps: u32,
+    pub codec_name: Option<&'a str>,
+}
+
+impl CodecConfig {
+    pub fn is_complete(&self) -> bool {
+        self.sps.is_some()
+            && self.pps.is_some()
+            && (self.codec == VideoCodec::H264 || self.vps.is_some())
+    }
+}
+
+fn strip_annexb_start_code(nal: &[u8]) -> &[u8] {
+    if nal.len() >= 4 && nal[..4] == [0, 0, 0, 1] {
+        &nal[4..]
+    } else if nal.len() >= 3 && nal[..3] == [0, 0, 1] {
+        &nal[3..]
+    } else {
+        nal
+    }
+}
+
+/// HEVC NAL type from the two-byte NAL header (bits 1..6 of the first byte).
+pub fn hevc_nal_type(nal: &[u8]) -> Option<u8> {
+    nal.first().map(|b| (b >> 1) & 0x3f)
+}
+
+/// Parse one complete codec configuration datagram. Lengths are bounded by
+/// the packet itself, and every parameter set must have the expected NAL type
+/// for the selected codec. Returning `None` makes malformed configuration a
+/// normal recoverable input rather than a decoder panic.
+pub fn parse_codec_config(packet: &[u8]) -> Option<CodecConfig> {
+    let (codec, mut offset) = if packet.starts_with(b"CFG") {
+        (VideoCodec::H264, 3)
+    } else if packet.starts_with(b"CF2") {
+        let codec = VideoCodec::from_id(*packet.get(3)?)?;
+        (codec, 4)
+    } else {
+        return None;
+    };
+
+    let mut config = CodecConfig {
+        codec,
+        vps: None,
+        sps: None,
+        pps: None,
+    };
+    while offset < packet.len() {
+        let length = u32::from_be_bytes(packet.get(offset..offset + 4)?.try_into().ok()?) as usize;
+        offset += 4;
+        if length == 0 || offset.checked_add(length)? > packet.len() {
+            return None;
+        }
+        let nal = packet.get(offset..offset + length)?;
+        offset += length;
+        let raw = strip_annexb_start_code(nal);
+        match codec {
+            VideoCodec::H264 => match nal_type(raw) {
+                Some(NAL_SPS) => config.sps = Some(nal.to_vec()),
+                Some(NAL_PPS) => config.pps = Some(nal.to_vec()),
+                _ => return None,
+            },
+            VideoCodec::Hevc => match hevc_nal_type(raw) {
+                Some(32) => config.vps = Some(nal.to_vec()),
+                Some(33) => config.sps = Some(nal.to_vec()),
+                Some(34) => config.pps = Some(nal.to_vec()),
+                _ => return None,
+            },
+        }
+    }
+    config.is_complete().then_some(config)
+}
+
 pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 pub const NAL_IDR: u8 = 5;
@@ -468,6 +606,40 @@ impl AndroidDecoder {
         fps: u32,
         codec_name: Option<&str>,
     ) -> Result<Self, DecoderError> {
+        unsafe {
+            Self::new_video_named(VideoDecoderConfig {
+                codec: VideoCodec::H264,
+                vps: None,
+                sps,
+                pps,
+                width,
+                height,
+                window,
+                fps,
+                codec_name,
+            })
+        }
+    }
+
+    /// Create a decoder for either H.264 or HEVC. HEVC requires VPS, SPS,
+    /// and PPS in that order for Android's `csd-0`, `csd-1`, and `csd-2`.
+    /// A failed/invalid named lookup falls back to normal MIME-type selection.
+    ///
+    /// # Safety
+    /// `window` must be a valid ANativeWindow* (from ANativeWindow_fromSurface)
+    /// or 0. Caller keeps the window alive for the session lifetime.
+    pub unsafe fn new_video_named(config: VideoDecoderConfig<'_>) -> Result<Self, DecoderError> {
+        let VideoDecoderConfig {
+            codec,
+            vps,
+            sps,
+            pps,
+            width,
+            height,
+            window,
+            fps,
+            codec_name,
+        } = config;
         // strip optional Annex-B start codes so both conventions work
         fn strip_sc(b: &[u8]) -> &[u8] {
             if b.len() >= 4 && b[..4] == [0, 0, 0, 1] {
@@ -479,8 +651,20 @@ impl AndroidDecoder {
             }
         }
         let sps_nal = strip_sc(sps);
-        let (sw, sh) = parse_sps_dimensions(sps_nal).unwrap_or((width, height));
-        let mime = c"video/avc".as_ptr();
+        let (sw, sh) = if codec == VideoCodec::H264 {
+            parse_sps_dimensions(sps_nal).unwrap_or((width, height))
+        } else {
+            (width, height)
+        };
+        let mime = match codec {
+            VideoCodec::H264 => c"video/avc".as_ptr(),
+            VideoCodec::Hevc => c"video/hevc".as_ptr(),
+        };
+        if codec == VideoCodec::Hevc && vps.is_none() {
+            return Err(DecoderError::CreateFailed {
+                mime: codec.mime().into(),
+            });
+        }
         let mut candidates: Vec<Option<&str>> = Vec::new();
         if let Some(name) = codec_name {
             candidates.push(Some(name));
@@ -489,7 +673,7 @@ impl AndroidDecoder {
 
         let mut last_error = None;
         for candidate in candidates {
-            let codec = if let Some(name) = candidate {
+            let codec_handle = if let Some(name) = candidate {
                 if let Ok(c_name) = std::ffi::CString::new(name) {
                     unsafe { AMediaCodec_createCodecByName(c_name.as_ptr()) }
                 } else {
@@ -498,7 +682,7 @@ impl AndroidDecoder {
             } else {
                 unsafe { AMediaCodec_createDecoderByType(mime) }
             };
-            if codec.is_null() {
+            if codec_handle.is_null() {
                 continue;
             }
             let format = unsafe { AMediaFormat_new() };
@@ -506,8 +690,43 @@ impl AndroidDecoder {
                 // NDK samples set the mime key on the format even for decoders
                 // created by type; some vendors reject without it.
                 AMediaFormat_setString_pub(format, c"mime".as_ptr(), mime);
-                AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
-                AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
+                match codec {
+                    VideoCodec::H264 => {
+                        AMediaFormat_setBuffer(
+                            format,
+                            c"csd-0".as_ptr(),
+                            sps.as_ptr().cast(),
+                            sps.len(),
+                        );
+                        AMediaFormat_setBuffer(
+                            format,
+                            c"csd-1".as_ptr(),
+                            pps.as_ptr().cast(),
+                            pps.len(),
+                        );
+                    }
+                    VideoCodec::Hevc => {
+                        let vps = vps.expect("HEVC VPS checked above");
+                        AMediaFormat_setBuffer(
+                            format,
+                            c"csd-0".as_ptr(),
+                            vps.as_ptr().cast(),
+                            vps.len(),
+                        );
+                        AMediaFormat_setBuffer(
+                            format,
+                            c"csd-1".as_ptr(),
+                            sps.as_ptr().cast(),
+                            sps.len(),
+                        );
+                        AMediaFormat_setBuffer(
+                            format,
+                            c"csd-2".as_ptr(),
+                            pps.as_ptr().cast(),
+                            pps.len(),
+                        );
+                    }
+                }
                 AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
                 AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
                 // Request an input slot large enough for a worst-case IDR. Without
@@ -529,23 +748,24 @@ impl AndroidDecoder {
                 } else {
                     window as *mut std::ffi::c_void
                 };
-                let status = AMediaCodec_configure(codec, format, surface, std::ptr::null(), 0);
+                let status =
+                    AMediaCodec_configure(codec_handle, format, surface, std::ptr::null(), 0);
                 if status != AMEDIA_OK {
                     AMediaFormat_delete(format);
-                    AMediaCodec_delete(codec);
+                    AMediaCodec_delete(codec_handle);
                     last_error = Some(DecoderError::ConfigureFailed { status });
                     continue;
                 }
-                let status = AMediaCodec_start(codec);
+                let status = AMediaCodec_start(codec_handle);
                 if status != AMEDIA_OK {
                     AMediaFormat_delete(format);
-                    AMediaCodec_delete(codec);
+                    AMediaCodec_delete(codec_handle);
                     last_error = Some(DecoderError::StartFailed { status });
                     continue;
                 }
             }
             return Ok(Self {
-                codec,
+                codec: codec_handle,
                 format,
                 started: true,
                 width: sw as i32,
@@ -555,7 +775,7 @@ impl AndroidDecoder {
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
-            mime: "video/avc".into(),
+            mime: codec.mime().into(),
         }))
     }
 
@@ -818,6 +1038,66 @@ mod tests {
         // 0x65 = IDR with ref/idc bits; 0x41 = non-IDR slice
         assert_eq!(nal_type(&[0x65]), Some(NAL_IDR));
         assert_eq!(nal_type(&[0x41]), Some(NAL_NON_IDR));
+    }
+
+    #[test]
+    fn parses_cf2_hevc_vps_sps_pps_configuration() {
+        let mut packet = b"CF2".to_vec();
+        packet.push(VideoCodec::Hevc.id());
+        for nal in [
+            &[0, 0, 0, 1, 0x40, 0x01, 0xAA][..],
+            &[0, 0, 0, 1, 0x42, 0x01, 0xBB][..],
+            &[0, 0, 0, 1, 0x44, 0x01, 0xCC][..],
+        ] {
+            packet.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+            packet.extend_from_slice(nal);
+        }
+
+        let config = parse_codec_config(&packet).expect("valid HEVC config");
+        assert_eq!(config.codec, VideoCodec::Hevc);
+        assert_eq!(config.vps.as_deref(), Some(&packet[8..15]));
+        assert_eq!(config.sps.as_deref(), Some(&packet[19..26]));
+        assert_eq!(config.pps.as_deref(), Some(&packet[30..37]));
+    }
+
+    #[test]
+    fn parses_legacy_cfg_as_h264_sps_pps_configuration() {
+        let mut packet = b"CFG".to_vec();
+        let sps = [0, 0, 0, 1, 0x67, 0x64];
+        let pps = [0, 0, 0, 1, 0x68, 0x1F];
+        for nal in [&sps[..], &pps[..]] {
+            packet.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+            packet.extend_from_slice(nal);
+        }
+
+        let config = parse_codec_config(&packet).expect("valid legacy config");
+        assert_eq!(config.codec, VideoCodec::H264);
+        assert!(config.vps.is_none());
+        assert_eq!(config.sps.as_deref(), Some(sps.as_slice()));
+        assert_eq!(config.pps.as_deref(), Some(pps.as_slice()));
+    }
+
+    #[test]
+    fn rejects_incomplete_or_unknown_codec_configuration() {
+        let mut incomplete = b"CF2".to_vec();
+        incomplete.push(VideoCodec::Hevc.id());
+        incomplete.extend_from_slice(&3u32.to_be_bytes());
+        incomplete.extend_from_slice(&[0, 0, 0]);
+        assert!(parse_codec_config(&incomplete).is_none());
+
+        let unknown = [b'C', b'F', b'2', 99];
+        assert!(parse_codec_config(&unknown).is_none());
+    }
+
+    #[test]
+    fn exposes_codec_mime_and_parameter_set_contract() {
+        assert_eq!(VideoCodec::H264.mime(), "video/avc");
+        assert_eq!(VideoCodec::Hevc.mime(), "video/hevc");
+        assert_eq!(VideoCodec::H264.parameter_set_count(), 2);
+        assert_eq!(VideoCodec::Hevc.parameter_set_count(), 3);
+        assert_eq!(VideoCodec::H264.csd_names(), &["csd-0", "csd-1"]);
+        assert_eq!(VideoCodec::Hevc.csd_names(), &["csd-0", "csd-1", "csd-2"]);
+        assert_eq!(hevc_nal_type(&[0x40, 0x01]), Some(32));
     }
 
     #[test]

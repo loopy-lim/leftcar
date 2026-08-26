@@ -23,6 +23,8 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Multi-window stream launcher (one OS window per source)
           add(dev.leftcar.viewer.stream.StreamLauncherPackage())
+          // Android Open Accessory lifecycle and the native fd bridge.
+          add(dev.leftcar.viewer.usb.UsbAccessoryPackage())
           // NSD host discovery (_leftcar._tcp)
           add(dev.leftcar.viewer.nsd.NsdPackage())
         }

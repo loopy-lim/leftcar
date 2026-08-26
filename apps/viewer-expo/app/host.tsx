@@ -112,7 +112,7 @@ export default function Host() {
           setHasStoredToken(false);
           Alert.alert(
             "연결 승인이 필요해요",
-            "컴퓨터 화면의 QR 코드와 6자리 인증 번호로 연결을 승인해 주세요.",
+            "컴퓨터 화면의 6자리 연결 번호로 연결을 승인해 주세요.",
           );
           router.push({
             pathname: "/pairing",
@@ -260,7 +260,7 @@ export default function Host() {
           <Text style={styles.fieldDesc}>
             {hasStoredToken
               ? "이 기기는 이전에 연결한 컴퓨터의 인증 토큰을 안전하게 기억하고 있습니다."
-              : "기억하고 있는 연결 승인이 없습니다. 새 컴퓨터에서 QR 코드로 연결을 승인해 주세요."}
+              : "기억하고 있는 연결 승인이 없습니다. 새 컴퓨터에서 6자리 연결 번호로 승인해 주세요."}
           </Text>
           <View style={styles.pairingActionRow}>
             {hasStoredToken && (

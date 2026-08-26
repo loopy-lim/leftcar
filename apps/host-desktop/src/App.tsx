@@ -40,6 +40,11 @@ interface SessionRow {
   inputRateHz: number;
   dropped?: number;
   networkDropped?: number;
+  networkQueueDropped?: number;
+  recoveryFramesDropped?: number;
+  recoveryKeyframes?: number;
+  recoveryRequestsSuppressed?: number;
+  udpSendFailures?: number;
   captureQueueDropped?: number;
   captureToEncodeUs?: number;
   maxCaptureToEncodeUs?: number;
@@ -63,6 +68,26 @@ interface SessionRow {
   captureQueueWaitP95Us?: number;
   encodeOutputP95Us?: number;
   sendBlockP95Us?: number;
+  sendPaceP95Us?: number;
+  lastAuBytes?: number;
+  lastAuFragments?: number;
+  lastAuParity?: number;
+  lastAuDatagrams?: number;
+  lastAuExpectedDatagrams?: number;
+  lastAuSendUs?: number;
+  lastAuIsKeyframe?: boolean;
+  maxAuBytes?: number;
+  maxAuFragments?: number;
+  sentDatagrams?: number;
+  sentParityDatagrams?: number;
+  receiverFrameGaps?: number;
+  receiverInputDrops?: number;
+  receiverIncompleteAus?: number;
+  receiverStaleFrames?: number;
+  receiverOutputBurstDiscards?: number;
+  receiverRttMs?: number | null;
+  receiverWireMs?: number | null;
+  receiverFeedbackAgeMs?: number | null;
   error?: string | null;
 }
 
@@ -535,13 +560,13 @@ function IdleStudioView({ onOpenPairing }: IdleStudioViewProps) {
           <h2>기기 연결을 기다리는 중</h2>
           <p>
             휴대폰이나 태블릿에서 Leftcar Viewer 앱을 열고<br />
-            이 컴퓨터를 선택하거나 QR 코드로 연결하세요.
+            이 컴퓨터를 선택하거나 주소를 입력한 뒤 연결 코드를 입력하세요.
           </p>
         </div>
 
         <button className="btn-primary btn-lg" onClick={onOpenPairing} title="새 기기 연결 (⌘P)">
           <QrCode size={15} />
-          <span>QR 코드로 연결하기</span>
+          <span>연결 코드 만들기</span>
           <span className="kbd-shortcut" style={{ marginLeft: 4, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>⌘P</span>
         </button>
 
@@ -822,6 +847,11 @@ function SessionCard({
   onForceStop,
 }: SessionCardProps) {
   const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
+  const transportLabel = session.mediaTransport === "usb"
+    ? "USB (AOAP)"
+    : session.mediaTransport === "udp"
+      ? "Wi-Fi UDP"
+      : session.mediaTransport || "확인 중";
 
   return (
     <div className="stream-card-item">
@@ -939,11 +969,82 @@ function SessionCard({
               </span>
             </div>
             <div className="inspector-item">
+              <span className="inspector-item-label">실제 전송 경로</span>
+              <span className="inspector-item-value">{transportLabel}</span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">수신 RTT / 디코더</span>
+              <span className="inspector-item-value">
+                {session.receiverRttMs != null ? `${session.receiverRttMs}ms` : "측정 중"}
+                {" / "}
+                {session.receiverWireMs != null ? `${session.receiverWireMs}ms` : "측정 중"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">수신 손실 / feedback</span>
+              <span className="inspector-item-value">
+                {(session.receiverFrameGaps ?? 0) + (session.receiverIncompleteAus ?? 0)}
+                {" / "}
+                {session.receiverFeedbackAgeMs != null
+                  ? `${session.receiverFeedbackAgeMs}ms 전`
+                  : "대기 중"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">Host 큐 드롭</span>
+              <span className="inspector-item-value">
+                일반 {Math.max(0, (session.networkQueueDropped ?? 0) - (session.recoveryFramesDropped ?? 0))}
+                {" / 복구 "}
+                {session.recoveryFramesDropped ?? 0}
+                {" / 캡처 "}
+                {session.captureQueueDropped ?? 0}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">최근 AU burst</span>
+              <span className="inspector-item-value">
+                {session.lastAuBytes !== undefined
+                  ? `${(session.lastAuBytes / 1024).toFixed(0)}KB · ${session.lastAuFragments ?? 0} + ${session.lastAuParity ?? 0}개 · ${((session.lastAuSendUs ?? 0) / 1000).toFixed(1)}ms`
+                  : "측정 중"}
+                {session.lastAuIsKeyframe ? " · IDR" : ""}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">UDP datagram</span>
+              <span className="inspector-item-value">
+                {session.sentDatagrams ?? 0}개 전송 · 실패 {session.udpSendFailures ?? 0}
+                {" · parity "}
+                {session.sentParityDatagrams ?? 0}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">복구 요청 / IDR</span>
+              <span className="inspector-item-value">
+                {session.recoveryRequestsSuppressed ?? 0} 억제 / {session.recoveryKeyframes ?? 0}회
+              </span>
+            </div>
+            <div className="inspector-item">
               <span className="inspector-item-label">느린 경우 화면 처리 / 전송</span>
               <span className="inspector-item-value">
                 {session.captureToEncodeP95Us
                   ? `${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms`
                   : "1.2ms"} / {session.sendBlockP95Us ? `${(session.sendBlockP95Us / 1000).toFixed(1)}ms` : "0.5ms"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">UDP pacing p95</span>
+              <span className="inspector-item-value">
+                {session.sendPaceP95Us !== undefined
+                  ? `${(session.sendPaceP95Us / 1000).toFixed(1)}ms`
+                  : "측정 중"}
+              </span>
+            </div>
+            <div className="inspector-item">
+              <span className="inspector-item-label">현재 인코더 목표</span>
+              <span className="inspector-item-value">
+                {session.currentBitrate !== undefined
+                  ? `${(session.currentBitrate / 1_000_000).toFixed(1)}Mbps`
+                  : "측정 중"}
               </span>
             </div>
             <div className="inspector-item">

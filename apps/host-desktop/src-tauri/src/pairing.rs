@@ -213,6 +213,74 @@ impl PairingServer {
         }
     }
 
+    /// Complete pairing through a direct Host connection using only the
+    /// six-digit code displayed in the Host window. The raw offer secret is
+    /// resolved inside the Host process; it is never sent by the Viewer.
+    pub fn pair_by_code(
+        &self,
+        code: &str,
+        device_id: &str,
+        name: &str,
+    ) -> Result<String, PairingServerError> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(offer_id) = inner.service.find_offer_by_code(code) else {
+            let live: Vec<String> = inner.live_offers.iter().cloned().collect();
+            for offer_id in live {
+                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    inner.service.cancel(&offer_id);
+                    inner.live_offers.remove(&offer_id);
+                    inner.fail_counts.remove(&offer_id);
+                }
+            }
+            return Err(PairingServerError::PairingFailed);
+        };
+
+        if !inner.live_offers.contains(&offer_id) {
+            return Err(PairingServerError::OfferNotFound);
+        }
+
+        let Some(secret) = inner.service.take_secret_for_qr(&offer_id) else {
+            return Err(PairingServerError::PairingFailed);
+        };
+        let device = domain::ids::DeviceId::from_raw(device_id)
+            .map_err(|_| PairingServerError::PairingFailed)?;
+
+        match inner.service.approve(&offer_id, device, &secret.0, code) {
+            Ok(_device) => {
+                inner.fail_counts.remove(&offer_id);
+                let token = session::OfferSecret::from_random();
+                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+                let paired = PairedDevice {
+                    device_id: device_id.to_owned(),
+                    name: name.to_owned(),
+                    token_hex: token_hex.clone(),
+                    paired_at: unix_timestamp_utc(),
+                };
+                inner
+                    .paired
+                    .retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
+                inner.paired.push(paired);
+                inner.live_offers.remove(&offer_id);
+                if self.persist(inner.paired.clone()).is_err() {
+                    eprintln!("leftcar: paired-device persistence failed");
+                }
+                Ok(token_hex)
+            }
+            Err(_) => {
+                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    inner.service.cancel(&offer_id);
+                    inner.live_offers.remove(&offer_id);
+                    inner.fail_counts.remove(&offer_id);
+                }
+                Err(PairingServerError::PairingFailed)
+            }
+        }
+    }
+
     /// Constant-time token check against every stored token. False when no
     /// devices are paired.
     pub fn authorize(&self, token_hex: &str) -> bool {

@@ -6,7 +6,10 @@
 
 pub const MAX_DATAGRAM: usize = 1_200;
 const MEDIA_HEADER: usize = 17;
-pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - MEDIA_HEADER;
+// Reserve four bytes beyond the legacy LT header: two bytes for the FEC
+// length prefix and room for the larger parity envelope.
+pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - MEDIA_HEADER - 4;
+pub const PARITY_HEADER: usize = 19;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
@@ -144,10 +147,11 @@ pub fn challenge(token: &[u8]) -> Vec<u8> {
     [b"LCH1".as_slice(), token].concat()
 }
 
-pub fn input_ack(sequence: u32, token: &[u8]) -> Vec<u8> {
-    let mut ack = Vec::with_capacity(8 + token.len());
+pub fn input_ack(sequence: u32, enabled: bool, token: &[u8]) -> Vec<u8> {
+    let mut ack = Vec::with_capacity(9 + token.len());
     ack.extend_from_slice(b"LCA1");
     ack.extend_from_slice(&sequence.to_be_bytes());
+    ack.push(u8::from(enabled));
     ack.extend_from_slice(token);
     ack
 }
@@ -191,6 +195,46 @@ pub fn media_datagrams(au_id: u16, host_wall_ms: u64, annex_b: &[u8]) -> Vec<Vec
             datagram
         })
         .collect()
+}
+
+/// Parity envelope: `P | AU id LE | k | parity index | base BE | total BE |
+/// LT | wall ms BE | fixed-width RS shard`. `base` identifies the first
+/// fragment covered by a bounded group within a larger access unit.
+pub fn parity_datagrams_for_group(
+    au_id: u16,
+    k: u8,
+    base: u16,
+    total_fragments: u16,
+    host_wall_ms: u64,
+    parity_shards: &[Vec<u8>],
+) -> Vec<Vec<u8>> {
+    parity_shards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, shard)| {
+            let mut datagram = Vec::with_capacity(PARITY_HEADER + shard.len());
+            datagram.push(b'P');
+            datagram.extend_from_slice(&au_id.to_le_bytes());
+            datagram.push(k);
+            datagram.push(u8::try_from(index).ok()?);
+            datagram.extend_from_slice(&base.to_be_bytes());
+            datagram.extend_from_slice(&total_fragments.to_be_bytes());
+            datagram.extend_from_slice(b"LT");
+            datagram.extend_from_slice(&host_wall_ms.to_be_bytes());
+            datagram.extend_from_slice(shard);
+            (datagram.len() <= MAX_DATAGRAM).then_some(datagram)
+        })
+        .collect()
+}
+
+/// Compatibility helper for callers that represent one complete group.
+pub fn parity_datagrams(
+    group_id: u16,
+    k: u8,
+    host_wall_ms: u64,
+    parity_shards: &[Vec<u8>],
+) -> Vec<Vec<u8>> {
+    parity_datagrams_for_group(group_id, k, 0, u16::from(k), host_wall_ms, parity_shards)
 }
 
 pub fn config_datagram(parameter_sets: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -317,6 +361,20 @@ mod tests {
     }
 
     #[test]
+    fn parity_datagrams_stay_under_mtu_and_carry_group_identity() {
+        let shards = vec![vec![9u8; 500], vec![8u8; 500]];
+        let datagrams = parity_datagrams(77, 8, 1_000, &shards);
+        assert_eq!(datagrams.len(), 2);
+        for (index, datagram) in datagrams.iter().enumerate() {
+            assert!(datagram.len() <= MAX_DATAGRAM);
+            assert_eq!(datagram[0], b'P');
+            assert_eq!(u16::from_le_bytes([datagram[1], datagram[2]]), 77);
+            assert_eq!(datagram[3], 8);
+            assert_eq!(datagram[4] as usize, index);
+        }
+    }
+
+    #[test]
     fn reliable_input_is_ordered_and_duplicate_is_acked() {
         let mut sequencer = InputSequencer::default();
         let mut packet = Vec::from(b"LCI1".as_slice());
@@ -333,6 +391,19 @@ mod tests {
         assert_eq!(sequencer.accept(&packet), InputDecision::AckDuplicate(1));
         packet[7] = 3;
         assert_eq!(sequencer.accept(&packet), InputDecision::Ignore);
+    }
+
+    #[test]
+    fn input_ack_carries_the_current_host_permission_state() {
+        let enabled = input_ack(7, true, b"nonce");
+        assert_eq!(&enabled[..4], b"LCA1");
+        assert_eq!(&enabled[4..8], &7u32.to_be_bytes());
+        assert_eq!(enabled[8], 1);
+        assert_eq!(&enabled[9..], b"nonce");
+
+        let disabled = input_ack(8, false, b"nonce");
+        assert_eq!(disabled[8], 0);
+        assert_eq!(&disabled[9..], b"nonce");
     }
 
     #[test]

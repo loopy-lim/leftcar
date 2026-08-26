@@ -259,6 +259,8 @@ pub struct StatsInfo {
     #[serde(default)]
     pub network_queue_dropped: i64,
     #[serde(default)]
+    pub recovery_frames_dropped: i64,
+    #[serde(default)]
     pub udp_send_failures: i64,
     #[serde(default)]
     pub udp_send_retries: i64,
@@ -293,8 +295,76 @@ pub struct StatsInfo {
     pub send_block_p95_us: u64,
     #[serde(default)]
     pub send_pace_p95_us: u64,
+    /// Latest encoded access-unit shape. These values make a motion-induced
+    /// burst visible without requiring a packet capture.
+    #[serde(default)]
+    pub last_au_bytes: u64,
+    #[serde(default)]
+    pub last_au_fragments: u32,
+    #[serde(default)]
+    pub last_au_parity: u32,
+    #[serde(default)]
+    pub last_au_datagrams: u32,
+    #[serde(default)]
+    pub last_au_expected_datagrams: u32,
+    #[serde(default)]
+    pub last_au_send_us: u64,
+    #[serde(default)]
+    pub last_au_is_keyframe: bool,
+    #[serde(default)]
+    pub max_au_bytes: u64,
+    #[serde(default)]
+    pub max_au_fragments: u32,
+    #[serde(default)]
+    pub sent_datagrams: i64,
+    #[serde(default)]
+    pub sent_parity_datagrams: i64,
     #[serde(default)]
     pub error: Option<String>,
+    /// Cumulative receiver-side loss and decode pressure reported by the
+    /// authenticated feedback channel. These are optional in wire JSON so an
+    /// older shim can still be read by a newer Host.
+    #[serde(default)]
+    pub receiver_frame_gaps: i64,
+    #[serde(default)]
+    pub receiver_input_drops: i64,
+    #[serde(default)]
+    pub receiver_incomplete_aus: i64,
+    #[serde(default)]
+    pub receiver_stale_frames: i64,
+    #[serde(default)]
+    pub receiver_stale_input_drops: Option<i64>,
+    #[serde(default)]
+    pub receiver_output_burst_discards: i64,
+    #[serde(default)]
+    pub receiver_rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub receiver_wire_ms: Option<u32>,
+    #[serde(default)]
+    pub receiver_feedback_age_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod receiver_stats_contract_tests {
+    use super::StatsInfo;
+
+    #[test]
+    fn stats_expose_receiver_pipeline_metrics() {
+        let read = |stats: &StatsInfo| {
+            (
+                stats.receiver_frame_gaps,
+                stats.receiver_input_drops,
+                stats.receiver_incomplete_aus,
+                stats.receiver_stale_frames,
+                stats.receiver_stale_input_drops,
+                stats.receiver_output_burst_discards,
+                stats.receiver_rtt_ms,
+                stats.receiver_wire_ms,
+                stats.receiver_feedback_age_ms,
+            )
+        };
+        let _ = read;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -311,11 +381,16 @@ pub struct StartStreamInput {
     #[serde(default = "default_capture_backend")]
     pub capture_backend: String,
     /// Concrete media transport for this stream. `tcp` is reliable Wi-Fi/LAN,
-    /// `udp` is the low-latency Wi-Fi fallback, and `adbTcp` is the
-    /// ADB-over-USB fallback. `auto` tries those paths in that order without
+    /// `udp` is the low-latency Wi-Fi path, `usb` is AOAP, and `adbTcp` is the
+    /// legacy ADB-over-USB path. `auto` tries USB, UDP, then TCP without
     /// duplicating one encoded frame over multiple links.
     #[serde(default = "default_media_transport")]
     pub media_transport: String,
+    /// Content-aware encoder policy. `video` keeps 1080p where possible and
+    /// gives high-change frames a larger bitrate budget; older viewers omit
+    /// the field and retain the interactive policy.
+    #[serde(default = "default_content_mode")]
+    pub content_mode: String,
     /// Physical viewer interface candidates. The host only considers private
     /// addresses on the control peer's LAN and the production media backend
     /// proves UDP reachability with an unpredictable nonce before capture.
@@ -329,6 +404,10 @@ fn default_capture_backend() -> String {
 
 fn default_media_transport() -> String {
     "udp".into()
+}
+
+fn default_content_mode() -> String {
+    "interactive".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -369,6 +448,8 @@ pub struct SessionView {
     #[serde(default)]
     pub network_queue_dropped: i64,
     #[serde(default)]
+    pub recovery_frames_dropped: i64,
+    #[serde(default)]
     pub udp_send_failures: i64,
     #[serde(default)]
     pub udp_send_retries: i64,
@@ -406,7 +487,47 @@ pub struct SessionView {
     #[serde(default)]
     pub send_pace_p95_us: u64,
     #[serde(default)]
+    pub last_au_bytes: u64,
+    #[serde(default)]
+    pub last_au_fragments: u32,
+    #[serde(default)]
+    pub last_au_parity: u32,
+    #[serde(default)]
+    pub last_au_datagrams: u32,
+    #[serde(default)]
+    pub last_au_expected_datagrams: u32,
+    #[serde(default)]
+    pub last_au_send_us: u64,
+    #[serde(default)]
+    pub last_au_is_keyframe: bool,
+    #[serde(default)]
+    pub max_au_bytes: u64,
+    #[serde(default)]
+    pub max_au_fragments: u32,
+    #[serde(default)]
+    pub sent_datagrams: i64,
+    #[serde(default)]
+    pub sent_parity_datagrams: i64,
+    #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub receiver_frame_gaps: i64,
+    #[serde(default)]
+    pub receiver_input_drops: i64,
+    #[serde(default)]
+    pub receiver_incomplete_aus: i64,
+    #[serde(default)]
+    pub receiver_stale_frames: i64,
+    #[serde(default)]
+    pub receiver_stale_input_drops: Option<i64>,
+    #[serde(default)]
+    pub receiver_output_burst_discards: i64,
+    #[serde(default)]
+    pub receiver_rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub receiver_wire_ms: Option<u32>,
+    #[serde(default)]
+    pub receiver_feedback_age_ms: Option<u64>,
 }
 
 /// Events (docs/04 §7) — low-frequency only, never per-frame.
@@ -440,8 +561,18 @@ mod stream_control_tests {
         assert_eq!(v.viewer_port, 5001);
         assert_eq!(v.fps, 90);
         assert_eq!(v.capture_backend, "screenCaptureKit");
+        assert_eq!(v.content_mode, "interactive");
         let back = serde_json::to_string(&v).unwrap();
         assert!(back.contains("\"sourceIndex\""));
+    }
+
+    #[test]
+    fn start_stream_input_roundtrips_video_content_mode() {
+        let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":30,"contentMode":"video"}"#;
+        let v: StartStreamInput = serde_json::from_str(json).unwrap();
+        assert_eq!(v.content_mode, "video");
+        let back = serde_json::to_string(&v).unwrap();
+        assert!(back.contains("\"contentMode\":\"video\""));
     }
 
     #[test]
@@ -480,6 +611,7 @@ mod stream_control_tests {
                 dropped: 0,
                 network_dropped: 0,
                 network_queue_dropped: 0,
+                recovery_frames_dropped: 0,
                 udp_send_failures: 0,
                 udp_send_retries: 0,
                 recovery_keyframes: 0,
@@ -510,7 +642,27 @@ mod stream_control_tests {
                 encode_output_p95_us: 7_000,
                 send_block_p95_us: 1_000,
                 send_pace_p95_us: 0,
+                last_au_bytes: 0,
+                last_au_fragments: 0,
+                last_au_parity: 0,
+                last_au_datagrams: 0,
+                last_au_expected_datagrams: 0,
+                last_au_send_us: 0,
+                last_au_is_keyframe: false,
+                max_au_bytes: 0,
+                max_au_fragments: 0,
+                sent_datagrams: 0,
+                sent_parity_datagrams: 0,
                 error: None,
+                receiver_frame_gaps: 0,
+                receiver_input_drops: 0,
+                receiver_incomplete_aus: 0,
+                receiver_stale_frames: 0,
+                receiver_stale_input_drops: None,
+                receiver_output_burst_discards: 0,
+                receiver_rtt_ms: None,
+                receiver_wire_ms: None,
+                receiver_feedback_age_ms: None,
             }],
         };
         let s = serde_json::to_string(&v).unwrap();
@@ -529,6 +681,7 @@ mod stream_control_tests {
             dropped: 0,
             network_dropped: 0,
             network_queue_dropped: 0,
+            recovery_frames_dropped: 0,
             udp_send_failures: 0,
             udp_send_retries: 0,
             recovery_keyframes: 0,
@@ -557,9 +710,32 @@ mod stream_control_tests {
             encode_output_p95_us: 7_000,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
+            last_au_bytes: 0,
+            last_au_fragments: 0,
+            last_au_parity: 0,
+            last_au_datagrams: 0,
+            last_au_expected_datagrams: 0,
+            last_au_send_us: 0,
+            last_au_is_keyframe: false,
+            max_au_bytes: 0,
+            max_au_fragments: 0,
+            sent_datagrams: 0,
+            sent_parity_datagrams: 0,
             error: None,
+            receiver_frame_gaps: 0,
+            receiver_input_drops: 0,
+            receiver_incomplete_aus: 0,
+            receiver_stale_frames: 0,
+            receiver_stale_input_drops: None,
+            receiver_output_burst_discards: 0,
+            receiver_rtt_ms: None,
+            receiver_wire_ms: None,
+            receiver_feedback_age_ms: None,
         })
         .unwrap();
         assert!(s.contains("\"frames\"") && s.contains("\"kbps\""));
+        assert!(s.contains("\"recoveryFramesDropped\""));
+        assert!(s.contains("\"lastAuFragments\""));
+        assert!(s.contains("\"sentDatagrams\""));
     }
 }

@@ -66,7 +66,7 @@ Platform codec
 | ID | 위협 | 대응 |
 | --- | --- | --- |
 | T-01 | LAN 공격자가 Host를 발견하고 연결 | pairing 이전 최소 discovery, authenticated handshake |
-| T-02 | QR을 촬영한 제3자가 재사용 | 128-bit 이상 single-use secret, 2분 expiry, Host confirmation |
+| T-02 | LAN 공격자가 짧은 연결 코드를 추측하거나 재사용 | 6자리 코드는 single-use, 2분 expiry, 3회 실패 시 offer 소각, Host 주소를 사용자가 확인 |
 | T-03 | MITM이 Host를 바꿈 | QR에 Host public key fingerprint binding |
 | T-04 | 기존 paired Viewer 도난 | Host device list와 즉시 revoke |
 | T-05 | 승인되지 않은 source 요청 | source capability와 session authorization check |
@@ -114,7 +114,7 @@ expiry
 address_hints
 ```
 
-6자리 확인 번호는 QR과 분리해 Host 화면에만 표시한다. QR 한 장만 촬영하거나 전달해서는 연결을 승인할 수 없어야 한다.
+6자리 확인 번호는 Host 화면에 표시하고 QR에는 포함하지 않는다. Viewer는 사용자가 선택하거나 입력한 Host 주소로 연결한 뒤 이 번호만 제출한다. QR 스캔 경로는 호환성을 위해 남아 있을 수 있지만 직접 연결에 필수는 아니다.
 
 QR 전체를 log, analytics, crash report에 넣지 않는다.
 
