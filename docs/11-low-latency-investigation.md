@@ -104,6 +104,8 @@ Android compositor / display photon
 | 1080p에서 Host 59~61fps, capture→encode p95 약 19ms, send block 약 2ms | `확인됨` | [구현 증거](EVIDENCE.md)의 기존 1080p 기록. 짧은 LAN 측정이며 장시간·4K 증거는 아니다 |
 | 4K HEVC 설정이 실제 Android 저지연 HEVC decoder로 연결되고 rendered counter가 증가 | `확인됨` | [구현 증거](EVIDENCE.md)의 4K 기록. 화면 광자 표시까지의 증거는 아니다 |
 | 4K Host/native 출력 약 34~37fps, 처리 약 65~81ms | `확인됨` | 기존 4K 기록. 현재 주원인 후보를 Host 처리로 좁힌다 |
+| 2026-08-27 4K H.264 실기기 표본: capture 60 / encode-output 47 / Android render 47fps, capture→encode p95 20.9ms, 영상 처리 20.8ms | `확인됨` | Mac CgDisplayStream → H.264 Main hardware encoder → TB710FU H.264 low-latency decoder. UDP send failure 0, RTT 12ms, decoder input drop 0인 안정 구간 표본이며 4K60은 아직 미달이다 |
+| 2026-08-27 4K H.264 Baseline A/B (영상 재생 조건) | `미검증` | 고변화 영상 부하와 프로파일 차이가 섞인 표본이다. output 44fps, Android render 4fps, 166KB IDR burst와 recovery 199회가 관측됐지만 Baseline 자체의 원인으로 분리할 수 없어 동일 영상 조건 A/B를 다시 수행한다 |
 | 기존 기록에서 UDP send failure가 0 | `확인됨` | `send()`가 실패하지 않았다는 뜻이다. 무선 손실, 수신 지연, kernel queue backlog가 없다는 뜻은 아니다 |
 | 4K 55~60fps에 도달하지 못함 | `확인됨` | 기존 기록. 4K 고품질 모드를 기본값으로 삼을 수 없는 근거다 |
 | 새 recovery/FEC/ABR 변경 후 4K 장시간 상관관계 | `미검증` | 이전 `SKIP/LOSS` 기록은 새 로직을 대표하지 않으며 재수집이 필요하다 |
@@ -412,7 +414,7 @@ B1/B3/B4의 결과는 `capture`, `encoded`, `received`, `rendered` FPS가 모두
 ### P1 — Host 4K 경로와 수신 burst를 최적화한다
 
 1. **4K profile을 capability-gated opt-in으로 둔다.**
-   1440p60 H264, 4K HEVC, 4K H264/저비트레이트 순서로 capability를 측정하고
+   1440p60 H264, 4K H264, 4K HEVC/저비트레이트 순서로 capability를 측정하고
    output FPS/queue age 조건을 만족하는 경우에만 노출한다.
 2. **in-flight 1/2/5와 ScreenCaptureKit queueDepth 2/3을 A/B한다.**
    숫자를 크게 해서 병렬성을 올리는 것이 항상 빠르지 않다. 처리시간보다 오래
@@ -568,3 +570,17 @@ ADB를 호출하지 않고 2026-08-26 현재 working tree에서 실행했다. �
   frame budget을 넘지 않는지 확인해야 한다. 이후에도 `encodeOutputFps`가
   55 미만이면 encoder/capture 병목이고, output이 유지되면서 rendered만
   떨어지면 Android/recovery 경로를 별도로 본다.
+
+## 12. 4K H.264 재검증 (2026-08-27)
+
+- 4K 동영상 프로필은 실제 `3840×2160@60`으로 시작되었고, 기존 HEVC 우선
+  정책의 약 42fps 표본보다 H.264 Main 우선 정책에서 약 47fps가 안정적으로
+  관측되었다. Android는 `c2.qti.avc.decoder.low_latency`로 연결되었다.
+- 같은 안정 구간에서 capture 60 / encode-output 47 / Android render 47fps,
+  capture→encode p95 20.9ms, 영상 처리 20.8ms, 네트워크 전송 0.2ms,
+  UDP send failure 0, RTT 12ms, decoder input drop 0이었다. 따라서 현재
+  4K60 미달 원인은 LAN/UDP보다 Mac 캡처·인코더 처리다.
+- 4K H.264 Baseline 우선 A/B는 영상 재생 중 output 44fps, Android render
+  4fps, 166KB IDR burst와 recovery 199회가 발생했지만, 고변화 영상 부하와
+  프로파일 효과를 분리하지 못했다. Baseline 결론은 보류하고 동일 영상·
+  동일 시간의 Main/Baseline 재실험 대상으로 남긴다.

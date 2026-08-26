@@ -942,9 +942,11 @@ fn feed_and_render(
             .saturating_add(stats.pressure.live_edge_discards),
         Ordering::Relaxed,
     );
-    control
-        .stale_input_drops
-        .store(stats.stale_inputs, Ordering::Relaxed);
+    // `stale_inputs` records late-but-valid frames that were still submitted
+    // to MediaCodec. They are not loss and must not feed the Host's recovery
+    // or bitrate controller as input drops. Actual decoder input misses are
+    // tracked separately below.
+    control.stale_input_drops.store(0, Ordering::Relaxed);
     control.output_burst_discards.store(
         stats
             .pressure

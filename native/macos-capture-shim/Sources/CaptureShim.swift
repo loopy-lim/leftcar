@@ -92,12 +92,15 @@ enum VideoCodecKind: String {
 }
 
 func preferredVideoCodec(width: UInt32, height: UInt32, contentMode: String) -> VideoCodecKind {
-    guard contentMode.lowercased() == StreamContentMode.video.rawValue,
-          width >= 3_840,
-          height >= 2_160 else {
-        return .h264
-    }
-    return .hevc
+    // The 4K path is latency-bound on the Mac, not bandwidth-bound on the
+    // tested LAN. H.264 has the faster hardware path on this machine and is
+    // also the codec used by the interactive profile. Keep H.264 as the
+    // low-latency remote-display default until a capability probe can prove a
+    // faster alternative on the current hardware.
+    _ = width
+    _ = height
+    _ = contentMode
+    return .h264
 }
 
 func codecParameterSetCount(_ codec: VideoCodecKind) -> Int {
@@ -140,12 +143,44 @@ func recoveryPacingBitrate(
     )
 }
 
-func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
-    width >= 2_560 && height >= 1_440 ? 5 : 2
+struct EncoderLatencyPolicy {
+    let maxEncodeInFlight: Int
+    let usesLowLatencyRateControl: Bool
+    let allowFrameReordering: Bool
+    let maxFrameDelayCount: Int
+    let suggestedLookAheadFrameCount: Int
 }
 
-func fecParityCount(dataCount: Int, reduced: Bool = false) -> Int {
+func encoderLatencyPolicy(width: UInt32, height: UInt32) -> EncoderLatencyPolicy {
+    let highResolution = width >= 2_560 && height >= 1_440
+    return EncoderLatencyPolicy(
+        // Three outstanding 4K jobs preserve enough parallelism for a 60fps
+        // hardware encoder while bounding the amount of pre-display work to
+        // roughly one 50ms latency target. Two is sufficient below 1440p.
+        maxEncodeInFlight: highResolution ? 3 : 2,
+        usesLowLatencyRateControl: true,
+        allowFrameReordering: false,
+        maxFrameDelayCount: 0,
+        suggestedLookAheadFrameCount: 0
+    )
+}
+
+func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
+    encoderLatencyPolicy(width: width, height: height).maxEncodeInFlight
+}
+
+func fecParityCount(
+    dataCount: Int,
+    reduced: Bool = false,
+    recovery: Bool = false
+) -> Int {
     guard dataCount > 1 else { return 0 }
+    if recovery {
+        // Recovery IDRs are the only path that can restore a broken codec
+        // reference chain. Protect full groups against a two-datagram Wi-Fi
+        // burst; a short tail gets one shard to avoid waste.
+        return dataCount >= 4 ? 2 : 1
+    }
     if reduced {
         // Video deltas use the same two-shard budget for a full group as the
         // normal path. A short tail still gets one shard, which is enough to
@@ -154,6 +189,27 @@ func fecParityCount(dataCount: Int, reduced: Bool = false) -> Int {
     }
     if dataCount == 8 { return 2 }
     return 1
+}
+
+func udpDatagramIntervalUs(
+    bytes: Int,
+    isKeyframe: Bool,
+    accessUnitBytes: Int = 0,
+    targetBitrate: Int,
+    fps: UInt32
+) -> UInt64 {
+    let pacingBitrate = isKeyframe
+        ? recoveryPacingBitrate(
+            targetBitrate: targetBitrate,
+            bytes: max(bytes, accessUnitBytes),
+            fps: fps
+        )
+        : max(1, targetBitrate)
+    let safeBytes = UInt64(max(1, bytes))
+    let safeBitrate = UInt64(max(1, pacingBitrate))
+    let interval = (safeBytes * 8 * 1_000_000 + safeBitrate - 1) / safeBitrate
+    let minimum: UInt64 = isKeyframe ? 50 : 100
+    return max(minimum, min(4_000, interval))
 }
 
 func shouldStartNetworkRecovery(
@@ -166,9 +222,10 @@ func shouldStartNetworkRecovery(
 
 func shouldRecoverAfterNetworkOverflow(
     incomingIsKeyframe: Bool,
-    keyframeQueued: Bool
+    keyframeQueued: Bool,
+    keyframeInFlight: Bool = false
 ) -> Bool {
-    !incomingIsKeyframe && !keyframeQueued
+    !incomingIsKeyframe && !keyframeQueued && !keyframeInFlight
 }
 
 func shouldOffloadEncodedSample(width: UInt32, height: UInt32) -> Bool {
@@ -817,7 +874,7 @@ final class CaptureSession {
     // resolution-aware number of hardware encode submissions in flight and
     // retain only the newest frame while those slots are occupied.
     private var maxEncodeInFlight: Int {
-        encodeInFlightLimit(width: outWidth, height: outHeight)
+        encoderLatencyPolicy(width: outWidth, height: outHeight).maxEncodeInFlight
     }
     private var encodeInFlight = 0
     // Once a recovery request is consumed by VideoToolbox, do not submit
@@ -1119,27 +1176,24 @@ final class CaptureSession {
         }
     }
 
-    private func paceUdpDatagram(bytes: Int, isKeyframe: Bool = false) {
+    private func paceUdpDatagram(
+        bytes: Int,
+        isKeyframe: Bool = false,
+        accessUnitBytes: Int = 0
+    ) {
         guard mediaTransport == .udp else { return }
         stateLock.lock()
-        // A recovery IDR is a short intra-frame burst. Pacing it at the
-        // steady-state bitrate takes too long for the reference chain to
-        // remain useful. Use a bounded LAN recovery budget; ordinary deltas
-        // remain governed by ABR.
-        let bitrate = isKeyframe
-            ? recoveryPacingBitrate(
-                targetBitrate: currentAverageBitrate,
-                bytes: bytes,
-                fps: fps
-            )
-            : max(1, currentAverageBitrate)
+        let bitrate = max(1, currentAverageBitrate)
         stateLock.unlock()
         // Pace at the configured media rate, with a small floor to avoid
         // recreating a burst for tiny tail fragments. The deadline is shared
         // by all AUs because each access unit is drained on one serial queue.
-        let intervalUs = max(
-            250,
-            min(4_000, UInt64(max(1, bytes) * 8 * 1_000_000 / bitrate))
+        let intervalUs = udpDatagramIntervalUs(
+            bytes: bytes,
+            isKeyframe: isKeyframe,
+            accessUnitBytes: accessUnitBytes,
+            targetBitrate: bitrate,
+            fps: fps
         )
         let now = DispatchTime.now().uptimeNanoseconds
         let deadline = max(now, nextUdpSendNs)
@@ -2281,9 +2335,40 @@ final class CaptureSession {
         }
     }
 
+    @available(macOS 26.0, *)
+    private func applyVideoConferencingPresetIfAvailable(
+        to session: VTCompressionSession
+    ) -> Bool {
+        var rawPresets: Unmanaged<CFTypeRef>?
+        let copyStatus = VTSessionCopyProperty(
+            session,
+            key: kVTCompressionPropertyKey_SupportedPresetDictionaries,
+            allocator: nil,
+            valueOut: &rawPresets
+        )
+        guard copyStatus == noErr,
+              let rawPresets,
+              let presets = rawPresets.takeRetainedValue() as? NSDictionary,
+              let settings = presets.object(
+                  forKey: kVTCompressionPreset_VideoConferencing as String
+              ) as? NSDictionary else {
+            return false
+        }
+        let status = VTSessionSetProperties(
+            session,
+            propertyDictionary: settings as CFDictionary
+        )
+        if status != noErr {
+            NSLog("Leftcar VideoConferencing preset rejected: status=%d", status)
+            return false
+        }
+        return true
+    }
+
     private func setupEncoder(for imageBuffer: CVImageBuffer) {
         let w = Int32(CVPixelBufferGetWidth(imageBuffer))
         let h = Int32(CVPixelBufferGetHeight(imageBuffer))
+        let latencyPolicy = encoderLatencyPolicy(width: UInt32(w), height: UInt32(h))
 
         let activeCount = max(1, withRegistry { $0.count })
         let streamFactor = activeCount > 1 ? (1.0 / Double(activeCount) * 1.3) : 1.0
@@ -2308,11 +2393,20 @@ final class CaptureSession {
         // A software fallback is much slower for an interactive remote
         // display and would otherwise be invisible behind the same API.
         // Require a hardware encoder so an unsupported codec fails clearly
-        // instead of silently adding frame latency. 4K video prefers HEVC;
-        // the same start falls back to hardware H.264 if HEVC is unavailable.
-        let encoderSpecification: CFDictionary = [
+        // instead of silently adding frame latency. H.264 is the low-latency
+        // default for 4K and smaller profiles on the tested hardware.
+        var encoderSpecificationValues: [String: Any] = [
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
-        ] as CFDictionary
+        ]
+        if #available(macOS 11.3, *), latencyPolicy.usesLowLatencyRateControl {
+            // VideoToolbox documents this as the encoder-selection switch for
+            // conferencing and cloud-gaming workloads. It disables lookahead
+            // and B-frame reordering before the first frame is submitted.
+            encoderSpecificationValues[
+                kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String
+            ] = true
+        }
+        let encoderSpecification = encoderSpecificationValues as CFDictionary
         let preferred = preferredVideoCodec(
             width: UInt32(w),
             height: UInt32(h),
@@ -2344,6 +2438,7 @@ final class CaptureSession {
                 continue
             }
 
+            let presetApplied = applyVideoConferencingPresetIfAvailable(to: s)
             let realTimeStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_RealTime,
@@ -2374,7 +2469,7 @@ final class CaptureSession {
             let noReorderStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_AllowFrameReordering,
-                value: false as CFBoolean
+                value: latencyPolicy.allowFrameReordering as CFBoolean
             )
             // This is an interactive remote display, not an offline encode. Ask
             // VideoToolbox to spend its budget on encode latency and keep no
@@ -2387,8 +2482,15 @@ final class CaptureSession {
             VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-                value: 0 as CFNumber
+                value: latencyPolicy.maxFrameDelayCount as CFNumber
             )
+            if #available(macOS 15.0, *) {
+                VTSessionSetProperty(
+                    s,
+                    key: kVTCompressionPropertyKey_SuggestedLookAheadFrameCount,
+                    value: latencyPolicy.suggestedLookAheadFrameCount as CFNumber
+                )
+            }
             VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: Int(avgBitrate) as CFNumber)
             // DataRateLimits is expressed as [bytes, seconds], while
             // AverageBitRate is expressed in bits per second. Keep a small
@@ -2425,12 +2527,14 @@ final class CaptureSession {
             stateLock.unlock()
             codecKind = candidate
             NSLog(
-                "Leftcar hardware %@ encoder ready %@: %dx%d bitrate=%d",
+                "Leftcar hardware %@ low-latency encoder ready %@: %dx%d bitrate=%d inFlight=%d preset=%@",
                 candidate.rawValue.uppercased(),
                 targetLabel,
                 w,
                 h,
-                Int(avgBitrate)
+                Int(avgBitrate),
+                latencyPolicy.maxEncodeInFlight,
+                presetApplied ? "video-conferencing" : "default"
             )
             session = s
             return
@@ -2714,7 +2818,8 @@ final class CaptureSession {
                     // second burst before the first one has arrived.
                     if shouldRecoverAfterNetworkOverflow(
                         incomingIsKeyframe: isKeyframe,
-                        keyframeQueued: queuedKeyframe != nil
+                        keyframeQueued: queuedKeyframe != nil,
+                        keyframeInFlight: keyframeInFlight
                     ) {
                         networkAwaitingKeyframe = true
                         requestRecoveryKeyframe()
@@ -3338,7 +3443,8 @@ final class CaptureSession {
         totalFragments: Int,
         wallMs: UInt64,
         payloads: [Data],
-        reducedParity: Bool = false
+        reducedParity: Bool = false,
+        recoveryParity: Bool = false
     ) -> [Data] {
         guard !payloads.isEmpty else { return [] }
         var output = [Data]()
@@ -3346,7 +3452,11 @@ final class CaptureSession {
             let end = min(payloads.count, base + 8)
             let group = Array(payloads[base..<end])
             let k = group.count
-            let parityCount = fecParityCount(dataCount: k, reduced: reducedParity)
+            let parityCount = fecParityCount(
+                dataCount: k,
+                reduced: reducedParity,
+                recovery: recoveryParity
+            )
             guard parityCount > 0 else { continue }
             let width = (group.map(\.count).max() ?? 0) + 2
             let shards = group.map { payload -> [UInt8] in
@@ -3482,7 +3592,8 @@ final class CaptureSession {
                     totalFragments: fragmentCount,
                     wallMs: UInt64(Date().timeIntervalSince1970 * 1_000.0),
                     payloads: primaryDatagrams.map { Data($0.dropFirst(33)) },
-                    reducedParity: contentMode == .video && !isKeyframe
+                    reducedParity: contentMode == .video && !isKeyframe,
+                    recoveryParity: isKeyframe
                 )
                 : []
             auBytes = UInt64(payloadCount)
@@ -3500,7 +3611,8 @@ final class CaptureSession {
                 transmissions.append(contentsOf: primaryDatagrams[base..<end])
                 let parityCount = fecParityCount(
                     dataCount: end - base,
-                    reduced: contentMode == .video && !isKeyframe
+                    reduced: contentMode == .video && !isKeyframe,
+                    recovery: isKeyframe
                 )
                 if !mediaTransport.usesTCP && parityCount > 0 {
                     // A parity datagram may be omitted when it cannot fit the
@@ -3528,7 +3640,11 @@ final class CaptureSession {
                 )
             }
             primary: for datagram in transmissions {
-                paceUdpDatagram(bytes: datagram.count, isKeyframe: isKeyframe)
+                paceUdpDatagram(
+                    bytes: datagram.count,
+                    isKeyframe: isKeyframe,
+                    accessUnitBytes: isKeyframe ? data.count : 0
+                )
                 let syscallStart = DispatchTime.now().uptimeNanoseconds
                 let sent = sendMediaDatagram(datagram, fd: fd)
                 sendSyscallUs &+= (DispatchTime.now().uptimeNanoseconds &- syscallStart) / 1_000

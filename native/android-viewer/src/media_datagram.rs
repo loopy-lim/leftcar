@@ -36,11 +36,13 @@ const COMPLETION_REORDER_WAIT: Duration = Duration::from_millis(3);
 const MAX_COMPLETED_REORDER: usize = 3;
 pub const BASE_STALE_FRAME_BUDGET_MS: u64 = 80;
 pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
-/// Number of consecutive over-budget delta frames required before resync.
+/// Number of consecutive over-budget delta frames that used to trigger
+/// resync. Kept as a telemetry threshold for compatibility; lateness alone
+/// must not invalidate a video codec reference chain.
 pub const STALE_RESYNC_THRESHOLD: u32 = 3;
-/// Number of completed access units that may pass through one receive burst.
-/// A larger burst is already behind the live edge and must collapse to its
-/// newest complete access unit before it reaches MediaCodec.
+/// The receive-side completion batch remains bounded for memory and work
+/// accounting. Completed AUs are still submitted in order so delta references
+/// are not broken; the decoder output pump owns latest-frame selection.
 pub const MAX_LIVE_EDGE_BATCH: usize = 3;
 
 pub struct LiveEdgeSelection<T> {
@@ -48,17 +50,17 @@ pub struct LiveEdgeSelection<T> {
     pub discarded: usize,
 }
 
-pub fn select_live_edge_frames<T>(mut frames: Vec<T>) -> LiveEdgeSelection<T> {
-    if frames.len() <= MAX_LIVE_EDGE_BATCH {
-        return LiveEdgeSelection {
-            frames,
-            discarded: 0,
-        };
-    }
-    let newest = frames.pop().expect("length checked above");
+/// Preserve every completed AU in receive order.
+///
+/// Dropping completed delta AUs here looks like a latency optimization, but
+/// it breaks the codec reference chain and forces an IDR recovery. The
+/// decoder's output pump already keeps the newest renderable outputs and
+/// discards older decoded images, so the input side must remain lossless
+/// within the bounded receive batch.
+pub fn select_live_edge_frames<T>(frames: Vec<T>) -> LiveEdgeSelection<T> {
     LiveEdgeSelection {
-        discarded: frames.len(),
-        frames: vec![newest],
+        discarded: 0,
+        frames,
     }
 }
 
@@ -72,10 +74,11 @@ pub enum FrameGapReason {
 
 /// Classify a frame-id jump using the receiver-side event that caused it.
 ///
-/// A live-edge collapse is a deliberate local discard, not packet loss. Once
-/// recovery is already active, skipped deltas are also not a new loss event;
-/// counting either as network loss feeds the Host's recovery/bitrate loop with
-/// a false positive and can create another IDR burst.
+/// A live-edge discard, when produced by an older caller, is a deliberate
+/// local discard, not packet loss. Once recovery is already active, skipped
+/// deltas are also not a new loss event; counting either as network loss feeds
+/// the Host's recovery/bitrate loop with a false positive and can create
+/// another IDR burst.
 pub fn classify_frame_gap(
     previous: Option<u16>,
     current: u16,
@@ -100,11 +103,9 @@ pub fn classify_frame_gap(
 
 /// Decide whether a completed AU may enter MediaCodec after a frame-id jump.
 ///
-/// Feeding a delta after a local live-edge collapse is unsafe because its
-/// reference chain may include one of the deliberately discarded AUs. A
-/// keyframe is independently decodable and remains eligible. A single actual
-/// network loss is retained as a concealment opportunity; larger holes wait
-/// for a recovery keyframe.
+/// This remains the safety gate for an explicit local discard or a frame-id
+/// gap. The normal completion path no longer creates a live-edge discard, so
+/// ordered delta AUs remain eligible for MediaCodec.
 pub fn should_feed_frame(reason: FrameGapReason, keyframe: bool) -> bool {
     match reason {
         FrameGapReason::None => true,
@@ -139,7 +140,12 @@ impl ReceiverPressure {
     }
 }
 
-/// Advance the stale-frame hysteresis state without requiring a decoder.
+/// Advance stale-frame telemetry without requiring a decoder.
+///
+/// A frame that arrives late is still a valid reference input. The decoder
+/// output pump is responsible for discarding old decoded images, while the
+/// input side must not request an IDR merely because wall-clock age crossed a
+/// display budget.
 pub fn stale_streak_advance(
     consecutive_stale: u32,
     is_keyframe: bool,
@@ -149,7 +155,7 @@ pub fn stale_streak_advance(
         return (0, false);
     }
     let next = consecutive_stale.saturating_add(1);
-    (next, next >= STALE_RESYNC_THRESHOLD)
+    (next, false)
 }
 
 pub fn recovery_request_suppressed(now_us: u64, suppressed_until_us: u64) -> bool {
@@ -952,8 +958,8 @@ mod tests {
     }
 
     #[test]
-    fn third_consecutive_stale_frame_engages_resync() {
-        assert_eq!(stale_streak_advance(2, false, true), (3, true));
+    fn stale_frames_do_not_break_the_decoder_reference_chain() {
+        assert_eq!(stale_streak_advance(2, false, true), (3, false));
     }
 
     #[test]
@@ -975,11 +981,14 @@ mod tests {
     }
 
     #[test]
-    fn live_edge_selection_collapses_a_large_batch_to_the_newest_frame() {
+    fn live_edge_selection_preserves_a_large_batch_for_decoder_references() {
         let frames = (10..20).collect::<Vec<_>>();
         let selection = select_live_edge_frames(frames);
-        assert_eq!(selection.frames.as_slice(), [19]);
-        assert_eq!(selection.discarded, 9);
+        assert_eq!(
+            selection.frames.as_slice(),
+            [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(selection.discarded, 0);
     }
 
     #[test]
