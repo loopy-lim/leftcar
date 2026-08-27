@@ -263,6 +263,8 @@ impl ControlServer {
                     max_capture_queue_wait_us: 0,
                     encode_output_us: 0,
                     max_encode_output_us: 0,
+                    packetization_us: 0,
+                    max_packetization_us: 0,
                     send_block_us: 0,
                     max_send_block_us: 0,
                     send_pace_us: 0,
@@ -276,10 +278,26 @@ impl ControlServer {
                     first_encode_ms: 0,
                     first_send_ms: 0,
                     current_bitrate: 0,
+                    encoder_mode: "unknown".into(),
+                    encoder_id: "unknown".into(),
+                    encoder_hardware_accelerated: None,
+                    encoder_preset: "unknown".into(),
+                    encoder_profile: "unknown".into(),
+                    encoder_applied_properties: Vec::new(),
+                    encoder_unsupported_properties: Vec::new(),
+                    encoder_rejected_properties: Vec::new(),
+                    encoder_fallback_reason: None,
+                    quality_hint: None,
+                    quality_override: None,
+                    quality_adaptation_checks: 0,
+                    quality_adaptation_changes: 0,
+                    quality_adaptation_rejections: 0,
+                    quality_adaptation_last_status: "not_checked".into(),
                     capture_interval_p95_us: 0,
                     capture_to_encode_p95_us: 0,
                     capture_queue_wait_p95_us: 0,
                     encode_output_p95_us: 0,
+                    packetization_p95_us: 0,
                     encode_output_interval_p95_us: 0,
                     send_block_p95_us: 0,
                     send_pace_p95_us: 0,
@@ -359,6 +377,8 @@ impl ControlServer {
                     max_capture_queue_wait_us: metrics.max_capture_queue_wait_us,
                     encode_output_us: metrics.encode_output_us,
                     max_encode_output_us: metrics.max_encode_output_us,
+                    packetization_us: metrics.packetization_us,
+                    max_packetization_us: metrics.max_packetization_us,
                     send_block_us: metrics.send_block_us,
                     max_send_block_us: metrics.max_send_block_us,
                     send_pace_us: metrics.send_pace_us,
@@ -374,10 +394,26 @@ impl ControlServer {
                     first_encode_ms: metrics.first_encode_ms,
                     first_send_ms: metrics.first_send_ms,
                     current_bitrate: metrics.current_bitrate,
+                    encoder_mode: metrics.encoder_mode,
+                    encoder_id: metrics.encoder_id,
+                    encoder_hardware_accelerated: metrics.encoder_hardware_accelerated,
+                    encoder_preset: metrics.encoder_preset,
+                    encoder_profile: metrics.encoder_profile,
+                    encoder_applied_properties: metrics.encoder_applied_properties,
+                    encoder_unsupported_properties: metrics.encoder_unsupported_properties,
+                    encoder_rejected_properties: metrics.encoder_rejected_properties,
+                    encoder_fallback_reason: metrics.encoder_fallback_reason,
+                    quality_hint: metrics.quality_hint,
+                    quality_override: metrics.quality_override,
+                    quality_adaptation_checks: metrics.quality_adaptation_checks,
+                    quality_adaptation_changes: metrics.quality_adaptation_changes,
+                    quality_adaptation_rejections: metrics.quality_adaptation_rejections,
+                    quality_adaptation_last_status: metrics.quality_adaptation_last_status,
                     capture_interval_p95_us: metrics.capture_interval_p95_us,
                     capture_to_encode_p95_us: metrics.capture_to_encode_p95_us,
                     capture_queue_wait_p95_us: metrics.capture_queue_wait_p95_us,
                     encode_output_p95_us: metrics.encode_output_p95_us,
+                    packetization_p95_us: metrics.packetization_p95_us,
                     encode_output_interval_p95_us: metrics.encode_output_interval_p95_us,
                     send_block_p95_us: metrics.send_block_p95_us,
                     send_pace_p95_us: metrics.send_pace_p95_us,
@@ -457,6 +493,28 @@ impl ControlServer {
             .ok_or_else(|| format!("session {session_id} ended while changing input"))?;
         session.input_enabled = enabled;
         Ok(())
+    }
+
+    pub fn set_session_quality(
+        &self,
+        session_id: u32,
+        quality: Option<f32>,
+    ) -> Result<(), String> {
+        if let Some(value) = quality {
+            if !(0.25..=0.5).contains(&value) {
+                return Err("quality override must be between 0.25 and 0.50".into());
+            }
+        }
+        let handle = {
+            let state = self.sessions.lock().unwrap();
+            state
+                .live
+                .get(&session_id)
+                .filter(|session| !session.backend_released)
+                .map(|session| session.handle)
+                .ok_or_else(|| format!("no such session {session_id}"))?
+        };
+        self.backend.set_quality_override(handle, quality)
     }
 
     /// Operator-forced termination: stop the capture session and tell the
@@ -981,6 +1039,8 @@ mod tests {
                 max_capture_queue_wait_us: 0,
                 encode_output_us: 0,
                 max_encode_output_us: 0,
+                packetization_us: 0,
+                max_packetization_us: 0,
                 send_block_us: 0,
                 max_send_block_us: 0,
                     send_pace_us: 0,
@@ -994,10 +1054,26 @@ mod tests {
                 first_encode_ms: 25,
                 first_send_ms: 26,
                 current_bitrate: 12_000_000,
+                encoder_mode: "unknown".into(),
+                encoder_id: "unknown".into(),
+                encoder_hardware_accelerated: None,
+                encoder_preset: "unknown".into(),
+                encoder_profile: "unknown".into(),
+                encoder_applied_properties: Vec::new(),
+                encoder_unsupported_properties: Vec::new(),
+                encoder_rejected_properties: Vec::new(),
+                encoder_fallback_reason: None,
+                quality_hint: None,
+                quality_override: None,
+                quality_adaptation_checks: 0,
+                quality_adaptation_changes: 0,
+                quality_adaptation_rejections: 0,
+                quality_adaptation_last_status: "not_checked".into(),
                 capture_interval_p95_us: 16_667,
                 capture_to_encode_p95_us: 8_000,
                 capture_queue_wait_p95_us: 1_000,
                 encode_output_p95_us: 7_000,
+                packetization_p95_us: 0,
                 encode_output_interval_p95_us: 0,
                 send_block_p95_us: 1_000,
                 send_pace_p95_us: 0,

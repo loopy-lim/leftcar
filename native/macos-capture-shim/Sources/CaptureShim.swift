@@ -1,9 +1,9 @@
-// CaptureShim: real macOS screen capture -> H.264 -> low-latency UDP, as a C-ABI dylib.
+// CaptureShim: real macOS screen capture -> H.264/HEVC -> low-latency UDP, as a C-ABI dylib.
 //
 // Path (docs/02 §4, H16-H18; rebuild design 2026-08-18):
 //   SCShareableContent (selected display) -> SCStream (420v IOSurface frames)
-//   -> VTCompressionSession (H.264 Main, realtime, no B-frames)
-//   -> MTU-bounded UDP datagrams (CFG + fragmented H.264 access units).
+//   -> VTCompressionSession (H.264/HEVC, low-latency, no B-frames)
+//   -> MTU-bounded UDP datagrams (CFG/CF2 + fragmented access units).
 //
 // v2: handle table — multiple concurrent sessions (multi-display /
 // multi-viewer), parameterized fps/bitrate, JSON stats, auto-stop on
@@ -18,12 +18,17 @@ import CoreGraphics
 import IOSurface
 import Security
 import Darwin
+import OSLog
 
 // MARK: - C ABI surface (v2, handle-based)
 
 private let registryLock = NSLock()
 private var registry: [UInt32: CaptureSession] = [:]
 private var nextHandle: UInt32 = 1
+private let leftcarPerformanceLogger = Logger(
+    subsystem: "leftcar.ll3.kr",
+    category: "performance"
+)
 
 private enum CaptureBackendKind: String {
     case screenCaptureKit
@@ -91,16 +96,275 @@ enum VideoCodecKind: String {
     }
 }
 
-func preferredVideoCodec(width: UInt32, height: UInt32, contentMode: String) -> VideoCodecKind {
-    // The 4K path is latency-bound on the Mac, not bandwidth-bound on the
-    // tested LAN. H.264 has the faster hardware path on this machine and is
-    // also the codec used by the interactive profile. Keep H.264 as the
-    // low-latency remote-display default until a capability probe can prove a
-    // faster alternative on the current hardware.
+enum H264ProfileKind: Equatable {
+    case high
+    case main
+}
+
+enum H264EntropyModeKind: Equatable {
+    case cavlc
+    case cabac
+}
+
+enum EncoderPresetKind: Equatable {
+    case highSpeed
+    case videoConferencing
+}
+
+struct EncoderQualityPolicy: Equatable {
+    let initialHint: Float?
+    let supportsQualityProperty: Bool
+}
+
+enum EncoderMode: String, Equatable {
+    case ave
+    case rtvc
+}
+
+struct EncoderSessionPolicy: Equatable {
+    let mode: EncoderMode
+    let codec: VideoCodecKind
+}
+
+struct EncoderCandidateDescriptor: Equatable {
+    let id: String
+    let codec: VideoCodecKind
+    let hardware: Bool
+    let performanceRating: Int
+}
+
+enum EncoderSpecificationEntry: Equatable {
+    case requireHardware
+    case encoderID(String)
+    case enableLowLatencyRateControl
+}
+
+enum EncoderOptionalProperty: String, CaseIterable {
+    case prioritizeSpeed = "PrioritizeEncodingSpeedOverQuality"
+    case maximumRealTimeFrameRate = "MaximumRealTimeFrameRate"
+    case suggestedLookAheadFrameCount = "SuggestedLookAheadFrameCount"
+    case maximizePowerEfficiency = "MaximizePowerEfficiency"
+    case quality = "Quality"
+}
+
+func encoderSessionPolicies(
+    width: UInt32,
+    height: UInt32,
+    contentMode: String
+) -> [EncoderSessionPolicy] {
+    let isUltraHD = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    if isUltraHD && contentMode.lowercased() == StreamContentMode.video.rawValue {
+        return [
+            EncoderSessionPolicy(mode: .ave, codec: .h264),
+            EncoderSessionPolicy(mode: .rtvc, codec: .h264),
+        ]
+    }
+    return [EncoderSessionPolicy(mode: .rtvc, codec: .h264)]
+}
+
+func preferredHardwareEncoderID(
+    codec: VideoCodecKind,
+    candidates: [EncoderCandidateDescriptor]
+) -> String? {
+    candidates
+        .filter { $0.codec == codec && $0.hardware }
+        .sorted {
+            if $0.performanceRating == $1.performanceRating { return $0.id < $1.id }
+            return $0.performanceRating > $1.performanceRating
+        }
+        .first?.id
+}
+
+func encoderSpecificationPlan(
+    mode: EncoderMode,
+    encoderID: String?
+) -> [EncoderSpecificationEntry]? {
+    switch mode {
+    case .ave:
+        guard let encoderID else { return nil }
+        return [.requireHardware, .encoderID(encoderID)]
+    case .rtvc:
+        return [.requireHardware, .enableLowLatencyRateControl]
+    }
+}
+
+func hardwareEncoderVerified(
+    queryStatus: OSStatus,
+    queriedHardware: Bool?,
+    requireHardware: Bool
+) -> Bool {
+    if queryStatus == noErr {
+        return queriedHardware == true
+    }
+    return queryStatus == kVTPropertyNotSupportedErr && requireHardware
+}
+
+func leftcarPerfLogLine(
+    captureCallbacks: Int64,
+    encodeOutputCallbacks: Int64,
+    captureFps: UInt32,
+    encodeOutputFps: UInt32,
+    encodeOutputIntervalP50Us: UInt64,
+    encodeOutputIntervalP95Us: UInt64,
+    encodeOutputP95Us: UInt64,
+    queueOldestUs: UInt64,
+    encoderMode: String,
+    encoderID: String
+) -> String {
+    "LeftcarPerf captureCallbacks=\(captureCallbacks) "
+        + "encodeOutputCallbacks=\(encodeOutputCallbacks) "
+        + "captureFps=\(captureFps) encodeOutputFps=\(encodeOutputFps) "
+        + "encodeOutputIntervalP50Us=\(encodeOutputIntervalP50Us) "
+        + "encodeOutputIntervalP95Us=\(encodeOutputIntervalP95Us) "
+        + "encodeOutputP95Us=\(encodeOutputP95Us) queueOldestUs=\(queueOldestUs) "
+        + "encoderMode=\(encoderMode) encoderID=\(encoderID)"
+}
+
+func optionalPropertyPlan(
+    mode: EncoderMode,
+    supported: Set<EncoderOptionalProperty>
+) -> [EncoderOptionalProperty] {
+    guard mode == .ave else { return [] }
+    return EncoderOptionalProperty.allCases.filter(supported.contains)
+}
+
+struct EncoderConfigurationReport {
+    let mode: EncoderMode
+    private(set) var applied: [String] = []
+    private(set) var unsupported: [String] = []
+    private(set) var rejected: [String] = []
+
+    mutating func recordApplied(_ key: String) { applied.append(key) }
+    mutating func recordUnsupported(_ key: String) { unsupported.append(key) }
+    mutating func recordRejected(_ key: String, status: OSStatus) {
+        rejected.append("\(key)=\(status)")
+    }
+}
+
+func requiredH264Profile(mode: EncoderMode) -> H264ProfileKind {
+    _ = mode
+    return .main
+}
+
+func requiredH264EntropyMode(mode: EncoderMode) -> H264EntropyModeKind {
+    _ = mode
+    return .cabac
+}
+
+func initialEncoderQuality(
+    mode: EncoderMode,
+    width: UInt32,
+    height: UInt32
+) -> Float? {
+    let isUltraHD = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    return mode == .ave && isUltraHD ? 0.25 : nil
+}
+
+private func availableEncoderDescriptors() -> [EncoderCandidateDescriptor] {
+    var rawList: CFArray?
+    guard VTCopyVideoEncoderList(nil, &rawList) == noErr,
+          let rows = rawList as? [[String: Any]] else {
+        return []
+    }
+    return rows.compactMap { row in
+        guard let id = row[kVTVideoEncoderList_EncoderID as String] as? String,
+              let codecNumber = row[kVTVideoEncoderList_CodecType as String] as? NSNumber else {
+            return nil
+        }
+        let codecType = CMVideoCodecType(codecNumber.uint32Value)
+        let codec: VideoCodecKind
+        switch codecType {
+        case kCMVideoCodecType_H264: codec = .h264
+        case kCMVideoCodecType_HEVC: codec = .hevc
+        default: return nil
+        }
+        return EncoderCandidateDescriptor(
+            id: id,
+            codec: codec,
+            hardware: (row[kVTVideoEncoderList_IsHardwareAccelerated as String] as? NSNumber)?.boolValue ?? false,
+            performanceRating: (row[kVTVideoEncoderList_PerformanceRating as String] as? NSNumber)?.intValue ?? 0
+        )
+    }
+}
+
+func captureMinimumFrameTimeSeconds(fps: UInt32) -> Double {
+    1.0 / Double(max(1, fps))
+}
+
+func captureQueueDepth() -> Int {
+    3
+}
+
+func encoderQualityPolicy(
+    codec: VideoCodecKind,
+    width: UInt32,
+    height: UInt32
+) -> EncoderQualityPolicy {
+    let isUltraHd = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    guard isUltraHd, codec == .h264 || codec == .hevc else {
+        return EncoderQualityPolicy(initialHint: nil, supportsQualityProperty: false)
+    }
+    // Keep one quality state for both codecs. VideoToolbox may reject the
+    // generic quality property on a particular hardware encoder; callers
+    // still apply the corresponding bitrate scale as a real fallback.
+    return EncoderQualityPolicy(initialHint: 0.5, supportsQualityProperty: true)
+}
+
+func preferredH264Profile(lowLatency: Bool) -> H264ProfileKind {
+    lowLatency ? .high : .main
+}
+
+func preferredH264Profile(
+    lowLatency: Bool,
+    width: UInt32,
+    height: UInt32,
+    contentMode: String
+) -> H264ProfileKind {
+    let isUltraHd = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    if lowLatency,
+       isUltraHd,
+       contentMode.lowercased() == StreamContentMode.video.rawValue {
+        // High adds tools that are useful for offline compression but costly
+        // on the 4K real-time path. Main keeps CABAC and the low-latency
+        // reference model while avoiding the High-only transform workload.
+        return .main
+    }
+    return preferredH264Profile(lowLatency: lowLatency)
+}
+
+func preferredH264EntropyMode(
+    width: UInt32,
+    height: UInt32,
+    contentMode: String
+) -> H264EntropyModeKind {
+    // The M1 Max hardware encoder was more stable with its CABAC path in the
+    // 4K moving-wallpaper A/B. Keep this explicit so a future OS default
+    // change cannot silently switch the production profile.
     _ = width
     _ = height
     _ = contentMode
-    return .h264
+    return .cabac
+}
+
+func preferredEncoderPreset(contentMode: String) -> EncoderPresetKind {
+    contentMode.lowercased() == StreamContentMode.video.rawValue
+        ? .highSpeed
+        : .videoConferencing
+}
+
+func encoderCandidateOrder(
+    width: UInt32,
+    height: UInt32,
+    contentMode: String
+) -> [VideoCodecKind] {
+    _ = width
+    _ = height
+    _ = contentMode
+    return [.h264]
+}
+
+func preferredVideoCodec(width: UInt32, height: UInt32, contentMode: String) -> VideoCodecKind {
+    encoderCandidateOrder(width: width, height: height, contentMode: contentMode).first ?? .h264
 }
 
 func codecParameterSetCount(_ codec: VideoCodecKind) -> Int {
@@ -137,9 +401,15 @@ func recoveryPacingBitrate(
             (safeBytes * 8 * 1_000_000 + recoveryBudgetUs - 1) / recoveryBudgetUs
         )
     )
+    // A 4K high-motion IDR can be 160-250KiB. At the ordinary 40-80Mbps
+    // recovery cap, that single AU occupies the pacing queue for multiple
+    // frame periods and causes a self-sustaining IDR/recovery loop. Use a
+    // short LAN burst only for these large boundaries; small recovery frames
+    // retain the gentler cap so they do not create needless Wi-Fi spikes.
+    let largeAccessUnitBurstFloor = safeBytes >= 160 * 1024 ? 120_000_000 : 40_000_000
     return min(
-        max(max(1, targetBitrate), max(40_000_000, requiredBitrate)),
-        80_000_000
+        max(max(1, targetBitrate), max(largeAccessUnitBurstFloor, requiredBitrate)),
+        160_000_000
     )
 }
 
@@ -149,9 +419,15 @@ struct EncoderLatencyPolicy {
     let allowFrameReordering: Bool
     let maxFrameDelayCount: Int
     let suggestedLookAheadFrameCount: Int
+    let qualityHint: Float?
+    let maximumRealTimeFrameRate: UInt32
 }
 
-func encoderLatencyPolicy(width: UInt32, height: UInt32) -> EncoderLatencyPolicy {
+func encoderLatencyPolicy(
+    width: UInt32,
+    height: UInt32,
+    fps: UInt32 = 60
+) -> EncoderLatencyPolicy {
     let highResolution = width >= 2_560 && height >= 1_440
     return EncoderLatencyPolicy(
         // Three outstanding 4K jobs preserve enough parallelism for a 60fps
@@ -161,8 +437,73 @@ func encoderLatencyPolicy(width: UInt32, height: UInt32) -> EncoderLatencyPolicy
         usesLowLatencyRateControl: true,
         allowFrameReordering: false,
         maxFrameDelayCount: 0,
-        suggestedLookAheadFrameCount: 0
+        suggestedLookAheadFrameCount: 0,
+        // Keep the high-change 4K path inside the frame budget. This is a
+        // VideoToolbox quality hint, not a bitrate change; the configured
+        // bitrate still controls the wire size and quality floor.
+        qualityHint: width >= 3_840 && height >= 2_160 ? 0.5 : nil,
+        maximumRealTimeFrameRate: max(1, min(fps, 90))
     )
+}
+
+// Both capture backends deliver an IOSurface-backed bi-planar 4:2:0 surface.
+// Tell VideoToolbox that this is the source format at session creation time so
+// the hardware encoder can keep the native surface path on high-change 4K
+// frames instead of negotiating a format on the first submission.
+func encoderSourcePixelFormat() -> OSType {
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+}
+
+func adaptiveEncoderQualityHint(
+    current: Float,
+    encodeOutputP95Us: UInt64,
+    captureQueueWaitP95Us: UInt64,
+    receiverLoss: UInt64,
+    renderedFps: UInt32?,
+    targetFps: UInt32
+) -> Float {
+    let floor: Float = 0.25
+    let ceiling: Float = 0.5
+    let renderBelowTarget = renderedFps.map {
+        $0 > 0 && $0 * 10 < max(1, targetFps) * 9
+    } ?? false
+    let overloaded = encodeOutputP95Us > 20_000
+        || captureQueueWaitP95Us > 8_000
+        || receiverLoss > 0
+        || renderBelowTarget
+    if overloaded {
+        return max(floor, current - 0.25)
+    }
+
+    let hasHeadroom = encodeOutputP95Us > 0
+        && encodeOutputP95Us <= 13_000
+        && captureQueueWaitP95Us <= 2_000
+        && receiverLoss == 0
+        && renderedFps.map { $0 >= targetFps } == true
+    guard hasHeadroom else { return current }
+    let rounded = (Double(current) + 0.05) * 100.0
+    return min(ceiling, Float(rounded.rounded() / 100.0))
+}
+
+// VideoToolbox quality is not a runtime-mutable property on every hardware
+// encoder. Keep a deterministic bitrate mapping alongside the hint so a
+// rejected quality-property update still produces a real spatial-quality
+// reduction on the wire. Normal quality (0.50) preserves the existing target;
+// the low band (0.25) spends 55% of that target and intermediate steps are
+// restored gradually as headroom returns.
+func adaptiveQualityBitrateScale(qualityHint: Float) -> Double {
+    let normalized = max(0.0, min(1.0, (Double(qualityHint) - 0.25) / 0.25))
+    return 0.55 + (normalized * 0.45)
+}
+
+/// Convert the Host's intervention slider into the same quality band used by
+/// the automatic controller. Zero releases the session back to Auto; the
+/// manual range intentionally stops at the normal 0.50 hint so an operator
+/// can trade spatial quality for frame continuity without asking this encoder
+/// path to exceed its proven low-latency budget.
+func manualQualityHintFromSliderPercent(_ percent: Int32) -> Float? {
+    guard percent == 0 || (25...50).contains(percent) else { return nil }
+    return percent == 0 ? nil : Float(percent) / 100.0
 }
 
 func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
@@ -177,18 +518,106 @@ func fecParityCount(
     guard dataCount > 1 else { return 0 }
     if recovery {
         // Recovery IDRs are the only path that can restore a broken codec
-        // reference chain. Protect full groups against a two-datagram Wi-Fi
-        // burst; a short tail gets one shard to avoid waste.
-        return dataCount >= 4 ? 2 : 1
+        // reference chain. Protect a full eight-fragment group against a
+        // two-datagram Wi-Fi burst; shortened groups have one parity shard
+        // and must not receive an unsupported second.
+        return dataCount == 8 ? 2 : 1
     }
     if reduced {
-        // Video deltas use the same two-shard budget for a full group as the
-        // normal path. A short tail still gets one shard, which is enough to
-        // avoid promoting one lost tail fragment into an IDR recovery burst.
-        return dataCount >= 4 ? 2 : 1
+        // Video deltas use one shard for a full group. Recovery IDRs retain
+        // the stronger two-shard protection below; deltas must not spend a
+        // quarter of their wire budget on parity on an otherwise clean LAN.
+        return 1
     }
     if dataCount == 8 { return 2 }
     return 1
+}
+
+/// Return the exact data+parity wire multiplier for one access unit. The
+/// reduced video policy is intentionally one parity shard per group of eight;
+/// short groups keep their one-shard protection and therefore have a slightly
+/// higher multiplier than a full group.
+func udpFecOverheadScale(
+    dataFragmentCount: Int,
+    contentMode: String,
+    isKeyframe: Bool
+) -> Double {
+    guard dataFragmentCount > 1 else { return 1.0 }
+    let reducedParity = contentMode.lowercased() == StreamContentMode.video.rawValue
+        && !isKeyframe
+    var dataCount = 0
+    var parityCount = 0
+    for base in stride(from: 0, to: dataFragmentCount, by: 8) {
+        let groupCount = min(dataFragmentCount - base, 8)
+        dataCount += groupCount
+        parityCount += fecParityCount(
+            dataCount: groupCount,
+            reduced: reducedParity,
+            recovery: isKeyframe
+        )
+    }
+    guard dataCount > 0 else { return 1.0 }
+    return Double(dataCount + parityCount) / Double(dataCount)
+}
+
+/// Raise the UDP pacing budget to carry FEC without slowing the primary video
+/// stream below its configured encoder bitrate. This is based on the actual
+/// AU fragment count, rather than a fixed 25% reserve that over-paces the
+/// common eight-fragment video-delta group.
+func udpPacingBitrate(
+    targetBitrate: Int,
+    dataFragmentCount: Int,
+    contentMode: String,
+    isKeyframe: Bool
+) -> Int {
+    let safeTarget = max(1, targetBitrate)
+    let scale = udpFecOverheadScale(
+        dataFragmentCount: dataFragmentCount,
+        contentMode: contentMode,
+        isKeyframe: isKeyframe
+    )
+    let scaled = (Double(safeTarget) * scale).rounded(.up)
+    guard scaled < Double(Int.max) else { return Int.max }
+    return max(safeTarget, Int(scaled))
+}
+
+/// Keep a large delta inside one frame period without turning it into a
+/// Wi-Fi burst. The payload size already includes the encoder's real output;
+/// reserve the selected FEC overhead and use a bounded burst floor so a
+/// 20-40KiB high-motion frame does not take several frame periods at the
+/// normal ABR bitrate. This is pacing only: the encoder bitrate remains the
+/// quality controller's responsibility.
+func highMotionPacingBitrate(
+    targetBitrate: Int,
+    accessUnitBytes: Int,
+    fps: UInt32,
+    fecOverheadScale: Double = 1.25
+) -> Int {
+    let safeBytes = UInt64(max(1, accessUnitBytes))
+    let safeFps = UInt64(max(1, fps))
+    let safeScale = max(1.0, fecOverheadScale)
+    let requiredBitrate = UInt64(
+        (Double(safeBytes) * 8.0 * Double(safeFps) * safeScale).rounded(.up)
+    )
+    let burstFloor = UInt64(max(max(1, targetBitrate), 24_000_000))
+    return Int(max(burstFloor, min(requiredBitrate, 120_000_000)))
+}
+
+/// Select the high-motion pacer whenever one AU plus its FEC budget would
+/// occupy more than one frame period at the current encoder bitrate. The
+/// previous fixed 24KiB threshold missed common 1080p video AUs around 20-23KiB
+/// and left them on a 4.4Mbps path that took multiple frame periods to drain.
+func shouldUseHighMotionPacing(
+    accessUnitBytes: Int,
+    targetBitrate: Int,
+    fps: UInt32,
+    fecOverheadScale: Double = 1.25
+) -> Bool {
+    guard accessUnitBytes > 0, targetBitrate > 0, fps > 0 else { return false }
+    let requiredBitrate = UInt64(
+        (Double(accessUnitBytes) * 8.0 * Double(fps) * max(1.0, fecOverheadScale)).rounded(.up)
+    )
+    return requiredBitrate > UInt64(targetBitrate)
 }
 
 func udpDatagramIntervalUs(
@@ -196,15 +625,57 @@ func udpDatagramIntervalUs(
     isKeyframe: Bool,
     accessUnitBytes: Int = 0,
     targetBitrate: Int,
-    fps: UInt32
+    fps: UInt32,
+    contentMode: String = StreamContentMode.interactive.rawValue,
+    dataFragmentCount: Int = 0
 ) -> UInt64 {
-    let pacingBitrate = isKeyframe
-        ? recoveryPacingBitrate(
+    // Callers that do not have an AU shape (for example, config packets and
+    // pure policy tests) retain the historical 25% motion reserve. The media
+    // path always passes the real fragment count and uses the exact multiplier.
+    let hasFragmentCount = dataFragmentCount > 0
+    let fecScale = hasFragmentCount
+        ? udpFecOverheadScale(
+            dataFragmentCount: dataFragmentCount,
+            contentMode: contentMode,
+            isKeyframe: isKeyframe
+        )
+        : 1.25
+    let wireTargetBitrate = hasFragmentCount
+        ? udpPacingBitrate(
             targetBitrate: targetBitrate,
-            bytes: max(bytes, accessUnitBytes),
-            fps: fps
+            dataFragmentCount: dataFragmentCount,
+            contentMode: contentMode,
+            isKeyframe: isKeyframe
         )
         : max(1, targetBitrate)
+    let pacingBitrate: Int
+    if isKeyframe {
+        let recoveryBytes = Int(
+            min(
+                Double(Int.max),
+                (Double(max(1, max(bytes, accessUnitBytes))) * fecScale).rounded(.up)
+            )
+        )
+        pacingBitrate = recoveryPacingBitrate(
+            targetBitrate: wireTargetBitrate,
+            bytes: recoveryBytes,
+            fps: fps
+        )
+    } else if shouldUseHighMotionPacing(
+        accessUnitBytes: accessUnitBytes,
+        targetBitrate: wireTargetBitrate,
+        fps: fps,
+        fecOverheadScale: fecScale
+    ) {
+        pacingBitrate = highMotionPacingBitrate(
+            targetBitrate: wireTargetBitrate,
+            accessUnitBytes: accessUnitBytes,
+            fps: fps,
+            fecOverheadScale: fecScale
+        )
+    } else {
+        pacingBitrate = wireTargetBitrate
+    }
     let safeBytes = UInt64(max(1, bytes))
     let safeBitrate = UInt64(max(1, pacingBitrate))
     let interval = (safeBytes * 8 * 1_000_000 + safeBitrate - 1) / safeBitrate
@@ -228,8 +699,46 @@ func shouldRecoverAfterNetworkOverflow(
     !incomingIsKeyframe && !keyframeQueued && !keyframeInFlight
 }
 
+func shouldPrioritizeNetworkKeyframe(isKeyframe: Bool) -> Bool {
+    isKeyframe
+}
+
+/// Keep the media queue behind an encoded keyframe until that boundary has
+/// actually been written. VideoToolbox callbacks can finish older deltas
+/// after the keyframe callback; allowing those deltas into the queue early
+/// sends an older reference chain after the recovery boundary.
+func networkAwaitingKeyframeAfterEnqueue(
+    currentAwaitingKeyframe: Bool,
+    isKeyframe: Bool,
+    isRecoveryKeyframe: Bool
+) -> Bool {
+    // Periodic encoder IDRs are normal video traffic. Only a requested
+    // recovery IDR opens a send-side boundary; making every GOP keyframe set
+    // this flag would discard the following deltas at every GOP interval.
+    currentAwaitingKeyframe || isRecoveryKeyframe
+}
+
+func networkAwaitingKeyframeAfterSend(
+    currentAwaitingKeyframe: Bool,
+    isKeyframe: Bool,
+    isRecoveryKeyframe: Bool,
+    sendSucceeded: Bool
+) -> Bool {
+    if (isKeyframe || isRecoveryKeyframe) && sendSucceeded {
+        return false
+    }
+    return currentAwaitingKeyframe
+}
+
+/// Codec configuration is a decoder setup boundary, not a per-GOP marker.
+/// Recovery requests clear `csdSent`, so the next recovery IDR still carries
+/// SPS/PPS without forcing the viewer to discard deltas for every normal GOP.
+func shouldSendCodecConfig(csdSent: Bool) -> Bool {
+    !csdSent
+}
+
 func shouldOffloadEncodedSample(width: UInt32, height: UInt32) -> Bool {
-    width >= 3_840 && height >= 2_160
+    max(width, height) >= 2_560 && min(width, height) >= 1_440
 }
 
 private func nativePixelSize(for displayID: CGDirectDisplayID) -> (width: Int, height: Int) {
@@ -628,6 +1137,7 @@ private func startCaptureSession(
         reg[h] = session
         return h
     }
+    session.startPerformanceLogging()
     return handle
 }
 
@@ -712,6 +1222,26 @@ public func leftcarCaptureSetInputEnabledV1(handle: UInt32, enabled: Int32) -> I
     return 0
 }
 
+@_cdecl("leftcar_capture_set_quality_v1")
+public func leftcarCaptureSetQualityV1(handle: UInt32, qualityPercent: Int32) -> Int32 {
+    guard qualityPercent == 0 || (25...50).contains(qualityPercent) else {
+        setLastError("quality override must be 0 (auto) or between 25 and 50")
+        return -2
+    }
+    let session = withRegistry { $0[handle] }
+    guard let session else {
+        setLastError("quality session handle not found: \(handle)")
+        return -1
+    }
+    let quality = manualQualityHintFromSliderPercent(qualityPercent)
+    if let error = session.setQualityOverride(quality) {
+        setLastError(error)
+        return -3
+    }
+    setLastError("")
+    return 0
+}
+
 extension UnsafePointer where Pointee == CChar {
     /// Read a C string safely (nil-check + UTF-8 decode).
     func loadedCString() -> String? {
@@ -769,6 +1299,8 @@ private final class LegacyCGDisplayStreamAPI {
     let start: CGStreamStartFn
     let stop: CGStreamStopFn
     let showCursorKey: NSString
+    let minimumFrameTimeKey: NSString
+    let queueDepthKey: NSString
 
     init?() {
         guard let library = dlopen(
@@ -779,7 +1311,15 @@ private final class LegacyCGDisplayStreamAPI {
         let startSymbol = dlsym(library, "CGDisplayStreamStart"),
         let stopSymbol = dlsym(library, "CGDisplayStreamStop"),
         let showCursorSymbol = dlsym(library, "kCGDisplayStreamShowCursor"),
+        let minimumFrameTimeSymbol = dlsym(library, "kCGDisplayStreamMinimumFrameTime"),
+        let queueDepthSymbol = dlsym(library, "kCGDisplayStreamQueueDepth"),
         let showCursorKey = showCursorSymbol
+            .assumingMemoryBound(to: Optional<CFString>.self)
+            .pointee,
+        let minimumFrameTimeKey = minimumFrameTimeSymbol
+            .assumingMemoryBound(to: Optional<CFString>.self)
+            .pointee,
+        let queueDepthKey = queueDepthSymbol
             .assumingMemoryBound(to: Optional<CFString>.self)
             .pointee else {
             return nil
@@ -789,6 +1329,8 @@ private final class LegacyCGDisplayStreamAPI {
         self.start = unsafeBitCast(startSymbol, to: CGStreamStartFn.self)
         self.stop = unsafeBitCast(stopSymbol, to: CGStreamStopFn.self)
         self.showCursorKey = unsafeBitCast(showCursorKey, to: NSString.self)
+        self.minimumFrameTimeKey = unsafeBitCast(minimumFrameTimeKey, to: NSString.self)
+        self.queueDepthKey = unsafeBitCast(queueDepthKey, to: NSString.self)
     }
 
     deinit {
@@ -848,11 +1390,72 @@ private func appendRollingSample(_ value: UInt64, to samples: inout [UInt64]) {
     }
 }
 
-private func percentile95(_ samples: [UInt64]) -> UInt64 {
+private func percentile(_ samples: [UInt64], quantile: Double) -> UInt64 {
     guard !samples.isEmpty else { return 0 }
     let sorted = samples.sorted()
-    let index = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)
+    let boundedQuantile = min(1.0, max(0.0, quantile))
+    let index = min(sorted.count - 1, Int(ceil(Double(sorted.count) * boundedQuantile)) - 1)
     return sorted[max(0, index)]
+}
+
+private func percentile95(_ samples: [UInt64]) -> UInt64 {
+    percentile(samples, quantile: 0.95)
+}
+
+final class PerformanceLogTicker {
+    private let interval: DispatchTimeInterval
+    private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
+    private let handler: () -> Void
+    private var timer: DispatchSourceTimer?
+
+    init(
+        interval: DispatchTimeInterval,
+        queue: DispatchQueue,
+        handler: @escaping () -> Void
+    ) {
+        self.interval = interval
+        self.queue = queue
+        self.handler = handler
+        queue.setSpecific(key: queueKey, value: ())
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        synchronized {
+            guard timer == nil else { return false }
+            let source = DispatchSource.makeTimerSource(queue: queue)
+            source.schedule(
+                deadline: .now() + interval,
+                repeating: interval,
+                leeway: .milliseconds(1)
+            )
+            source.setEventHandler(handler: handler)
+            timer = source
+            source.activate()
+            return true
+        }
+    }
+
+    func stop() {
+        synchronized {
+            guard let source = timer else { return }
+            timer = nil
+            source.setEventHandler {}
+            source.cancel()
+        }
+    }
+
+    deinit {
+        stop()
+    }
+
+    private func synchronized<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return body()
+        }
+        return queue.sync(execute: body)
+    }
 }
 
 final class CaptureSession {
@@ -914,7 +1517,17 @@ final class CaptureSession {
     private let backend: CaptureBackendKind
     private let mediaTransport: MediaTransportKind
     private let contentMode: StreamContentMode
+    private var performanceLogTicker: PerformanceLogTicker?
     private var codecKind: VideoCodecKind = .h264
+    private var encoderID = "not_ready"
+    private var encoderHardwareAccelerated: Bool?
+    private var encoderPreset = "not_applied"
+    private var encoderProfile = "not_applied"
+    private var encoderMode = "not_ready"
+    private var encoderAppliedProperties: [String] = []
+    private var encoderUnsupportedProperties: [String] = []
+    private var encoderRejectedProperties: [String] = []
+    private var encoderFallbackReason: String?
     private var csdSent = false
 
     // The encoder callback must never wait behind network transmission. Keep at
@@ -988,6 +1601,10 @@ final class CaptureSession {
     private var maxCaptureQueueWaitUs: UInt64 = 0
     private var lastEncodeOutputUs: UInt64 = 0
     private var maxEncodeOutputUs: UInt64 = 0
+    private var lastPacketizationUs: UInt64 = 0
+    private var maxPacketizationUs: UInt64 = 0
+    private var lastPacketizationQueueWaitUs: UInt64 = 0
+    private var maxPacketizationQueueWaitUs: UInt64 = 0
     private var lastSendBlockUs: UInt64 = 0
     private var maxSendBlockUs: UInt64 = 0
     private var lastSendPaceUs: UInt64 = 0
@@ -999,6 +1616,8 @@ final class CaptureSession {
     private var captureToEncodeSamplesUs: [UInt64] = []
     private var captureQueueWaitSamplesUs: [UInt64] = []
     private var encodeOutputSamplesUs: [UInt64] = []
+    private var packetizationSamplesUs: [UInt64] = []
+    private var packetizationQueueWaitSamplesUs: [UInt64] = []
     private var sendBlockSamplesUs: [UInt64] = []
     private var sendPaceSamplesUs: [UInt64] = []
     private var stoppedReason = ""
@@ -1026,9 +1645,19 @@ final class CaptureSession {
     private var lastFps: UInt32 = 0
     private var lastEncodeOutputFps: UInt32 = 0
     private var lastKbps: UInt32 = 0
+    private var lastPerfLogNs: UInt64 = 0
     private var forceKeyframe = false
     private var recoveryKeyframePending = false
     private var currentAverageBitrate = 0
+    private var currentQualityHint: Float?
+    private var manualQualityHint: Float?
+    private var qualityAdaptationChecks: Int64 = 0
+    private var qualityAdaptationChanges: Int64 = 0
+    private var qualityAdaptationRejections: Int64 = 0
+    private var qualityAdaptationLastStatus = "not_checked"
+    private var qualityAdaptationLastEncodeP95Us: UInt64 = 0
+    private var qualityAdaptationLastQueueP95Us: UInt64 = 0
+    private var qualityAdaptationLastReceiverLoss: UInt64 = 0
     private var lastAdaptedDropped: Int64 = 0
     private var receiverFrameGaps: UInt32 = 0
     private var receiverInputDrops: UInt32 = 0
@@ -1086,6 +1715,16 @@ final class CaptureSession {
         self.mediaTransport = mediaTransport
         self.contentMode = contentMode
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
+        performanceLogTicker = PerformanceLogTicker(
+            interval: .seconds(1),
+            queue: DispatchQueue(label: "leftcar.performance", qos: .utility)
+        ) { [weak self] in
+            _ = self?.statsJSON()
+        }
+    }
+
+    deinit {
+        performanceLogTicker?.stop()
     }
 
     // MARK: Setup
@@ -1179,7 +1818,8 @@ final class CaptureSession {
     private func paceUdpDatagram(
         bytes: Int,
         isKeyframe: Bool = false,
-        accessUnitBytes: Int = 0
+        accessUnitBytes: Int = 0,
+        dataFragmentCount: Int = 0
     ) {
         guard mediaTransport == .udp else { return }
         stateLock.lock()
@@ -1193,7 +1833,9 @@ final class CaptureSession {
             isKeyframe: isKeyframe,
             accessUnitBytes: accessUnitBytes,
             targetBitrate: bitrate,
-            fps: fps
+            fps: fps,
+            contentMode: contentMode.rawValue,
+            dataFragmentCount: dataFragmentCount
         )
         let now = DispatchTime.now().uptimeNanoseconds
         let deadline = max(now, nextUdpSendNs)
@@ -1439,6 +2081,101 @@ final class CaptureSession {
         return true
     }
 
+    /// Apply an operator-selected quality cap to the live encoder. VideoToolbox
+    /// may reject the quality property after the session is prepared, so the
+    /// matching bitrate scale is applied in the same encode queue as the
+    /// automatic controller. Passing nil releases the cap and resumes Auto.
+    func setQualityOverride(_ quality: Float?) -> String? {
+        let policy = encoderQualityPolicy(
+            codec: codecKind,
+            width: outWidth,
+            height: outHeight
+        )
+        guard policy.initialHint != nil else {
+            return "manual quality override is available for 4K video sessions only"
+        }
+        if let quality, !(0.25...0.5).contains(quality) {
+            return "quality override must be between 0.25 and 0.50"
+        }
+        guard let compressionSession = session else {
+            return "encoder session is not ready"
+        }
+
+        stateLock.lock()
+        let current = currentQualityHint ?? 0.5
+        let currentBitrate = max(1, currentAverageBitrate)
+        let canApplyGenericQuality = encoderAppliedProperties.contains(
+            EncoderOptionalProperty.quality.rawValue
+        )
+        stateLock.unlock()
+
+        guard let quality else {
+            stateLock.lock()
+            manualQualityHint = nil
+            qualityAdaptationLastStatus = "auto"
+            stateLock.unlock()
+            return nil
+        }
+
+        let targetBitrate = max(
+            1_000_000,
+            Int(
+                (Double(currentBitrate)
+                    * adaptiveQualityBitrateScale(qualityHint: quality)
+                    / adaptiveQualityBitrateScale(qualityHint: current)).rounded()
+            )
+        )
+        let (qualityStatus, bitrateStatus) = encodeQueue.sync {
+            let qualityStatus: OSStatus
+            if canApplyGenericQuality {
+                qualityStatus = VTSessionSetProperty(
+                    compressionSession,
+                    key: kVTCompressionPropertyKey_Quality,
+                    value: quality as CFNumber
+                )
+            } else {
+                qualityStatus = -1
+            }
+            var bitrateStatus: OSStatus = noErr
+            if targetBitrate != currentBitrate {
+                bitrateStatus = VTSessionSetProperty(
+                    compressionSession,
+                    key: kVTCompressionPropertyKey_AverageBitRate,
+                    value: targetBitrate as CFNumber
+                )
+                if bitrateStatus == noErr {
+                    let hardLimitBytes = max(1, Int(Double(targetBitrate) / 8.0 * 1.25))
+                    _ = VTSessionSetProperty(
+                        compressionSession,
+                        key: kVTCompressionPropertyKey_DataRateLimits,
+                        value: [hardLimitBytes, 1] as CFArray
+                    )
+                }
+            }
+            return (qualityStatus, bitrateStatus)
+        }
+
+        guard qualityStatus == noErr || bitrateStatus == noErr else {
+            return "quality override rejected by the encoder (quality=\(qualityStatus), bitrate=\(bitrateStatus))"
+        }
+
+        stateLock.lock()
+        manualQualityHint = quality
+        currentQualityHint = quality
+        if bitrateStatus == noErr {
+            currentAverageBitrate = targetBitrate
+        }
+        qualityAdaptationChanges &+= 1
+        qualityAdaptationLastStatus = qualityStatus == noErr
+            ? "manual"
+            : "manual_bitrate_fallback"
+        if qualityStatus != noErr {
+            qualityAdaptationRejections &+= 1
+        }
+        stateLock.unlock()
+        return nil
+    }
+
     private func startInputReceiver(fd: Int32) {
         inputQueue.sync {
             guard inputReadSource == nil else { return }
@@ -1480,6 +2217,29 @@ final class CaptureSession {
         // viewer can disappear immediately after the UDP reachability proof;
         // waiting for feedback to arm this timer would leak that session.
         armReceiverHealthCheck()
+    }
+
+    func startPerformanceLogging() {
+        stateLock.lock()
+        let shouldStart = running && !stopRequested
+        let ticker = performanceLogTicker
+        stateLock.unlock()
+        guard shouldStart, let ticker, ticker.start() else { return }
+
+        stateLock.lock()
+        let shouldCancel = stopRequested || performanceLogTicker !== ticker
+        stateLock.unlock()
+        if shouldCancel {
+            ticker.stop()
+        }
+    }
+
+    private func stopPerformanceLogging() {
+        stateLock.lock()
+        let ticker = performanceLogTicker
+        performanceLogTicker = nil
+        stateLock.unlock()
+        ticker?.stop()
     }
 
     private func armFirstFrameWatchdog() {
@@ -1642,10 +2402,17 @@ final class CaptureSession {
         // online documentation described the cursor as visible by default.
         // Resolve the obsoleted key dynamically alongside CGDisplayStream and
         // opt in explicitly so the Host cursor remains part of the video.
-        let properties = NSDictionary(
-            object: kCFBooleanTrue!,
-            forKey: api.showCursorKey
-        ) as CFDictionary
+        let properties: NSDictionary = [
+            api.showCursorKey: kCFBooleanTrue!,
+            // CGDisplayStream interprets this as a maximum update rate. It
+            // cannot manufacture frames when the display is idle, but an
+            // explicit 60fps ceiling keeps the legacy path aligned with the
+            // ScreenCaptureKit configuration and avoids an OS-selected rate.
+            api.minimumFrameTimeKey: NSNumber(
+                value: captureMinimumFrameTimeSeconds(fps: fps)
+            ),
+            api.queueDepthKey: NSNumber(value: captureQueueDepth())
+        ]
         guard let cgStream = api.create(
             displayID,
             Int(outWidth),
@@ -1674,11 +2441,12 @@ final class CaptureSession {
     }
 
     func stop() {
-        stopInputReceiver()
-        inputQueue.async { [weak self] in self?.releaseInjectedInput() }
         stateLock.lock()
         stopRequested = true
         stateLock.unlock()
+        stopPerformanceLogging()
+        stopInputReceiver()
+        inputQueue.async { [weak self] in self?.releaseInjectedInput() }
         networkLock.lock()
         pendingConfig = nil
         pendingFrames.removeAll(keepingCapacity: true)
@@ -1806,6 +2574,7 @@ final class CaptureSession {
         sock = -1
         stateLock.unlock()
 
+        stopPerformanceLogging()
         if staleSocket >= 0 {
             close(staleSocket)
         }
@@ -2045,7 +2814,8 @@ final class CaptureSession {
         ) { [weak self] status, _, encodedSample in
             guard status == noErr, let encodedSample = encodedSample else {
                 NSLog(
-                    "Leftcar H.264 output failed %@: status=%d",
+                    "Leftcar %@ output failed %@: status=%d",
+                    self?.codecKind.rawValue.uppercased() ?? "video",
                     self?.targetLabel ?? "unknown",
                     status
                 )
@@ -2058,9 +2828,20 @@ final class CaptureSession {
                 return
             }
             guard let self else { return }
+            let encoderCallbackNs = DispatchTime.now().uptimeNanoseconds
+            self.recordEncoderCallback(pts: trackedPts, callbackNs: encoderCallbackNs)
             let process = { [weak self] in
                 guard let self else { return }
-                self.handleEncoded(encodedSample, requestedKeyframe: requestKeyframe)
+                let packetizationStartNs = DispatchTime.now().uptimeNanoseconds
+                self.recordPacketizationQueueWait(
+                    startNs: packetizationStartNs,
+                    callbackNs: encoderCallbackNs
+                )
+                self.handleEncoded(
+                    encodedSample,
+                    requestedKeyframe: requestKeyframe,
+                    packetizationStartNs: packetizationStartNs
+                )
                 self.completeEncodeSlot()
             }
             if shouldOffloadEncodedSample(width: self.outWidth, height: self.outHeight) {
@@ -2080,7 +2861,12 @@ final class CaptureSession {
                 adaptBitrateIfNeeded()
             }
         } else {
-            NSLog("Leftcar H.264 submit failed %@: status=%d", targetLabel, status)
+            NSLog(
+                "Leftcar %@ submit failed %@: status=%d",
+                codecKind.rawValue.uppercased(),
+                targetLabel,
+                status
+            )
             stateLock.lock()
             encodeSubmitFailures &+= 1
             captureNsByPts.removeValue(forKey: pts.value)
@@ -2184,6 +2970,134 @@ final class CaptureSession {
         stateLock.unlock()
     }
 
+    private func adaptQualityIfNeeded(
+        session: VTCompressionSession,
+        receiverLoss: UInt64
+    ) {
+        stateLock.lock()
+        qualityAdaptationChecks &+= 1
+        qualityAdaptationLastReceiverLoss = receiverLoss
+        stateLock.unlock()
+        guard encoderQualityPolicy(
+            codec: codecKind,
+            width: outWidth,
+            height: outHeight
+        ).initialHint != nil else {
+            stateLock.lock()
+            qualityAdaptationLastStatus = "unsupported"
+            stateLock.unlock()
+            return
+        }
+        stateLock.lock()
+        guard let current = currentQualityHint else {
+            qualityAdaptationLastStatus = "no_hint"
+            stateLock.unlock()
+            return
+        }
+        if manualQualityHint != nil {
+            qualityAdaptationLastStatus = "manual"
+            stateLock.unlock()
+            return
+        }
+        let currentBitrate = currentAverageBitrate
+        let canApplyGenericQuality = encoderAppliedProperties.contains(
+            EncoderOptionalProperty.quality.rawValue
+        )
+        let encodeP95Us = percentile95(encodeOutputSamplesUs)
+        let queueP95Us = percentile95(captureQueueWaitSamplesUs)
+        qualityAdaptationLastEncodeP95Us = encodeP95Us
+        qualityAdaptationLastQueueP95Us = queueP95Us
+        NSLog(
+            "Leftcar %@ adaptive quality check: current=%.2f encodeP95=%d queueP95=%d receiverLoss=%d render=%d",
+            codecKind.rawValue.uppercased(),
+            current,
+            encodeP95Us,
+            queueP95Us,
+            receiverLoss,
+            receiverRenderedFps ?? 0
+        )
+        let next = adaptiveEncoderQualityHint(
+            current: current,
+            encodeOutputP95Us: encodeP95Us,
+            captureQueueWaitP95Us: queueP95Us,
+            receiverLoss: receiverLoss,
+            renderedFps: receiverRenderedFps,
+            targetFps: fps
+        )
+        stateLock.unlock()
+        guard next != current else {
+            stateLock.lock()
+            qualityAdaptationLastStatus = "stable"
+            stateLock.unlock()
+            return
+        }
+
+        let qualityStatus: OSStatus
+        if canApplyGenericQuality {
+            qualityStatus = VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_Quality,
+                value: next as CFNumber
+            )
+        } else {
+            qualityStatus = -1
+        }
+        let currentScale = adaptiveQualityBitrateScale(qualityHint: current)
+        let nextScale = adaptiveQualityBitrateScale(qualityHint: next)
+        let targetBitrate = max(
+            1_000_000,
+            Int((Double(max(1, currentBitrate)) * nextScale / currentScale).rounded())
+        )
+        var bitrateStatus: OSStatus = noErr
+        if targetBitrate != currentBitrate {
+            bitrateStatus = VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_AverageBitRate,
+                value: targetBitrate as CFNumber
+            )
+            if bitrateStatus == noErr {
+                let hardLimitBytes = max(1, Int(Double(targetBitrate) / 8.0 * 1.25))
+                _ = VTSessionSetProperty(
+                    session,
+                    key: kVTCompressionPropertyKey_DataRateLimits,
+                    value: [hardLimitBytes, 1] as CFArray
+                )
+            }
+        }
+        guard qualityStatus == noErr || bitrateStatus == noErr else {
+            stateLock.lock()
+            qualityAdaptationRejections &+= 1
+            qualityAdaptationLastStatus = "rejected"
+            stateLock.unlock()
+            NSLog(
+                "Leftcar %@ adaptive quality rejected: quality=%d bitrate=%d",
+                codecKind.rawValue.uppercased(),
+                qualityStatus,
+                bitrateStatus
+            )
+            return
+        }
+        stateLock.lock()
+        currentQualityHint = next
+        if bitrateStatus == noErr {
+            currentAverageBitrate = targetBitrate
+        }
+        qualityAdaptationChanges &+= 1
+        qualityAdaptationLastStatus = qualityStatus == noErr
+            ? "changed"
+            : "changed_bitrate_fallback"
+        if qualityStatus != noErr {
+            qualityAdaptationRejections &+= 1
+        }
+        stateLock.unlock()
+        NSLog(
+            "Leftcar %@ adaptive quality: %.2f -> %.2f bitrate=%d",
+            codecKind.rawValue.uppercased(),
+            current,
+            next
+        )
+    }
+
     private func adaptBitrateIfNeeded() {
         guard let session else { return }
         stateLock.lock()
@@ -2217,6 +3131,7 @@ final class CaptureSession {
             || (!recoveryBurstGrace && newReceiverLoss > 0)
             || receiverLatencyHigh
         let current = currentAverageBitrate
+        let qualityHintForBitrate = manualQualityHint ?? currentQualityHint
         let highMotion = contentMode == .video && highMotionUntilNs > nowNs
         if congested {
             stableBitrateWindows = 0
@@ -2238,6 +3153,8 @@ final class CaptureSession {
             consecutiveRaiseSteps += 1
         }
         stateLock.unlock()
+
+        adaptQualityIfNeeded(session: session, receiverLoss: newReceiverLoss)
 
         guard current > 0 else { return }
         let activeCount = max(1, withRegistry { $0.count })
@@ -2274,8 +3191,17 @@ final class CaptureSession {
             minCeiling = activeCount > 1 ? 8_000_000 : 24_000_000
             maxCeiling = activeCount > 1 ? 28_000_000 : 60_000_000
         }
-        let floorBitrate = Int(min(max(pixelsPerSecond * 0.035, Double(minFloor)), Double(maxFloor)))
-        let ceilingBitrate = Int(min(max(pixelsPerSecond * 0.14, Double(minCeiling)), Double(maxCeiling)))
+        let qualityScale = qualityHintForBitrate
+            .map(adaptiveQualityBitrateScale)
+            ?? 1.0
+        let floorBitrate = Int(min(
+            max(pixelsPerSecond * 0.035 * qualityScale, Double(minFloor) * qualityScale),
+            Double(maxFloor) * qualityScale
+        ))
+        let ceilingBitrate = Int(min(
+            max(pixelsPerSecond * 0.14 * qualityScale, Double(minCeiling) * qualityScale),
+            Double(maxCeiling) * qualityScale
+        ))
         let target: Int
         if congestionConfirmed {
             target = max(floorBitrate, Int(Double(current) * 0.80))
@@ -2336,22 +3262,24 @@ final class CaptureSession {
     }
 
     @available(macOS 26.0, *)
-    private func applyVideoConferencingPresetIfAvailable(
-        to session: VTCompressionSession
+    private func applyEncoderPresetIfAvailable(
+        to session: VTCompressionSession,
+        preset: EncoderPresetKind,
+        supportedPresets: NSDictionary?,
+        report: inout EncoderConfigurationReport
     ) -> Bool {
-        var rawPresets: Unmanaged<CFTypeRef>?
-        let copyStatus = VTSessionCopyProperty(
-            session,
-            key: kVTCompressionPropertyKey_SupportedPresetDictionaries,
-            allocator: nil,
-            valueOut: &rawPresets
-        )
-        guard copyStatus == noErr,
-              let rawPresets,
-              let presets = rawPresets.takeRetainedValue() as? NSDictionary,
-              let settings = presets.object(
-                  forKey: kVTCompressionPreset_VideoConferencing as String
-              ) as? NSDictionary else {
+        let presetKey: String
+        let reportKey: String
+        switch preset {
+        case .highSpeed:
+            presetKey = kVTCompressionPreset_HighSpeed as String
+            reportKey = "HighSpeed"
+        case .videoConferencing:
+            presetKey = kVTCompressionPreset_VideoConferencing as String
+            reportKey = "VideoConferencing"
+        }
+        guard let settings = supportedPresets?.object(forKey: presetKey) as? NSDictionary else {
+            report.recordUnsupported(reportKey)
             return false
         }
         let status = VTSessionSetProperties(
@@ -2359,9 +3287,10 @@ final class CaptureSession {
             propertyDictionary: settings as CFDictionary
         )
         if status != noErr {
-            NSLog("Leftcar VideoConferencing preset rejected: status=%d", status)
+            report.recordRejected(reportKey, status: status)
             return false
         }
+        report.recordApplied(reportKey)
         return true
     }
 
@@ -2390,113 +3319,288 @@ final class CaptureSession {
         }
         let avgBitrate = min(max(idealBits, Double(minRate)), Double(maxRate))
 
-        // A software fallback is much slower for an interactive remote
-        // display and would otherwise be invisible behind the same API.
-        // Require a hardware encoder so an unsupported codec fails clearly
-        // instead of silently adding frame latency. H.264 is the low-latency
-        // default for 4K and smaller profiles on the tested hardware.
-        var encoderSpecificationValues: [String: Any] = [
-            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
-        ]
-        if #available(macOS 11.3, *), latencyPolicy.usesLowLatencyRateControl {
-            // VideoToolbox documents this as the encoder-selection switch for
-            // conferencing and cloud-gaming workloads. It disables lookahead
-            // and B-frame reordering before the first frame is submitted.
-            encoderSpecificationValues[
-                kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String
-            ] = true
-        }
-        let encoderSpecification = encoderSpecificationValues as CFDictionary
-        let preferred = preferredVideoCodec(
+        let policies = encoderSessionPolicies(
             width: UInt32(w),
             height: UInt32(h),
             contentMode: contentMode.rawValue
         )
-        let candidates: [VideoCodecKind] = preferred == .hevc ? [.hevc, .h264] : [.h264]
-        var lastFailure = "no codec candidate"
+        let availableEncoders = availableEncoderDescriptors()
+        var lastFailure = "no encoder session policy"
+        var aveFallbackReason: String?
 
-        for candidate in candidates {
+        for policy in policies {
+            let requestedEncoderID: String?
+            switch policy.mode {
+            case .ave:
+                guard let encoderID = preferredHardwareEncoderID(
+                    codec: .h264,
+                    candidates: availableEncoders
+                ) else {
+                    lastFailure = "AVE H.264 hardware encoder unavailable"
+                    aveFallbackReason = lastFailure
+                    NSLog("Leftcar %@", lastFailure)
+                    continue
+                }
+                requestedEncoderID = encoderID
+            case .rtvc:
+                requestedEncoderID = nil
+            }
+
+            guard let specificationPlan = encoderSpecificationPlan(
+                mode: policy.mode,
+                encoderID: requestedEncoderID
+            ) else {
+                lastFailure = "\(policy.mode.rawValue.uppercased()) encoder specification unavailable"
+                if policy.mode == .ave { aveFallbackReason = lastFailure }
+                NSLog("Leftcar %@", lastFailure)
+                continue
+            }
+            let requireHardware = specificationPlan.contains(.requireHardware)
+            var encoderSpecificationValues: [String: Any] = [:]
+            for entry in specificationPlan {
+                switch entry {
+                case .requireHardware:
+                    encoderSpecificationValues[
+                        kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String
+                    ] = true
+                case let .encoderID(encoderID):
+                    encoderSpecificationValues[
+                        kVTVideoEncoderSpecification_EncoderID as String
+                    ] = encoderID
+                case .enableLowLatencyRateControl:
+                    if #available(macOS 11.3, *) {
+                        encoderSpecificationValues[
+                            kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String
+                        ] = true
+                    }
+                }
+            }
+
             var s: VTCompressionSession?
-            let codecType: CMVideoCodecType = candidate == .hevc
-                ? kCMVideoCodecType_HEVC
-                : kCMVideoCodecType_H264
             let status = VTCompressionSessionCreate(
                 allocator: nil,
                 width: w,
                 height: h,
-                codecType: codecType,
-                encoderSpecification: encoderSpecification,
-                imageBufferAttributes: nil,
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: encoderSpecificationValues as CFDictionary,
+                imageBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: encoderSourcePixelFormat(),
+                ] as CFDictionary,
                 compressedDataAllocator: nil,
                 outputCallback: nil,
                 refcon: nil,
                 compressionSessionOut: &s
             )
             guard status == noErr, let s = s else {
-                lastFailure = "\(candidate.rawValue) VTCompressionSessionCreate failed: \(status)"
+                lastFailure = "\(policy.mode.rawValue.uppercased()) H.264 VTCompressionSessionCreate failed: \(status)"
+                if policy.mode == .ave { aveFallbackReason = lastFailure }
                 NSLog("Leftcar %@", lastFailure)
                 continue
             }
 
-            let presetApplied = applyVideoConferencingPresetIfAvailable(to: s)
+            var rawSupportedProperties: CFDictionary?
+            let supportedPropertyStatus = VTSessionCopySupportedPropertyDictionary(
+                s,
+                supportedPropertyDictionaryOut: &rawSupportedProperties
+            )
+            let supportedPropertyKeys: Set<String>
+            if supportedPropertyStatus == noErr, let rawSupportedProperties {
+                supportedPropertyKeys = Set(
+                    (rawSupportedProperties as NSDictionary).allKeys.compactMap { $0 as? String }
+                )
+            } else {
+                supportedPropertyKeys = []
+            }
+
+            var supportedPresets: NSDictionary?
+            if #available(macOS 26.0, *) {
+                var rawPresets: Unmanaged<CFTypeRef>?
+                if VTSessionCopyProperty(
+                    s,
+                    key: kVTCompressionPropertyKey_SupportedPresetDictionaries,
+                    allocator: nil,
+                    valueOut: &rawPresets
+                ) == noErr, let rawPresets {
+                    supportedPresets = rawPresets.takeRetainedValue() as? NSDictionary
+                }
+            }
+
+            var report = EncoderConfigurationReport(mode: policy.mode)
+            let presetKind: EncoderPresetKind = policy.mode == .ave
+                ? .highSpeed
+                : .videoConferencing
+            let presetApplied: Bool
+            if #available(macOS 26.0, *) {
+                presetApplied = applyEncoderPresetIfAvailable(
+                    to: s,
+                    preset: presetKind,
+                    supportedPresets: supportedPresets,
+                    report: &report
+                )
+            } else {
+                report.recordUnsupported(
+                    presetKind == .highSpeed ? "HighSpeed" : "VideoConferencing"
+                )
+                presetApplied = false
+            }
+
             let realTimeStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_RealTime,
                 value: true as CFBoolean
             )
-            var profileStatus: OSStatus
-            switch candidate {
-            case .hevc:
-                profileStatus = VTSessionSetProperty(
-                    s,
-                    key: kVTCompressionPropertyKey_ProfileLevel,
-                    value: kVTProfileLevel_HEVC_Main_AutoLevel
-                )
-            case .h264:
-                profileStatus = VTSessionSetProperty(
-                    s,
-                    key: kVTCompressionPropertyKey_ProfileLevel,
-                    value: kVTProfileLevel_H264_Main_AutoLevel
-                )
-                if profileStatus != noErr {
-                    profileStatus = VTSessionSetProperty(
-                        s,
-                        key: kVTCompressionPropertyKey_ProfileLevel,
-                        value: kVTProfileLevel_H264_Baseline_AutoLevel
-                    )
-                }
-            }
             let noReorderStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_AllowFrameReordering,
-                value: latencyPolicy.allowFrameReordering as CFBoolean
+                value: false as CFBoolean
             )
-            // This is an interactive remote display, not an offline encode. Ask
-            // VideoToolbox to spend its budget on encode latency and keep no
-            // additional frame-delay queue in front of the callback.
-            VTSessionSetProperty(
+            let profile = requiredH264Profile(mode: policy.mode)
+            let profileStatus = VTSessionSetProperty(
                 s,
-                key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-                value: true as CFBoolean
+                key: kVTCompressionPropertyKey_ProfileLevel,
+                value: profile == .main
+                    ? kVTProfileLevel_H264_Main_AutoLevel
+                    : kVTProfileLevel_H264_High_AutoLevel
             )
-            VTSessionSetProperty(
+            let entropyMode = requiredH264EntropyMode(mode: policy.mode)
+            let entropyStatus = VTSessionSetProperty(
                 s,
-                key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-                value: latencyPolicy.maxFrameDelayCount as CFNumber
+                key: kVTCompressionPropertyKey_H264EntropyMode,
+                value: entropyMode == .cabac
+                    ? kVTH264EntropyMode_CABAC
+                    : kVTH264EntropyMode_CAVLC
             )
-            if #available(macOS 15.0, *) {
-                VTSessionSetProperty(
-                    s,
-                    key: kVTCompressionPropertyKey_SuggestedLookAheadFrameCount,
-                    value: latencyPolicy.suggestedLookAheadFrameCount as CFNumber
-                )
+            let expectedFrameRateStatus = VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                value: Int32(fps) as CFNumber
+            )
+            guard realTimeStatus == noErr,
+                  noReorderStatus == noErr,
+                  profileStatus == noErr,
+                  entropyStatus == noErr,
+                  expectedFrameRateStatus == noErr else {
+                VTCompressionSessionInvalidate(s)
+                lastFailure = "\(policy.mode.rawValue.uppercased()) mandatory H.264 setup failed: realtime=\(realTimeStatus) noReorder=\(noReorderStatus) profile=\(profileStatus) entropy=\(entropyStatus) expectedFps=\(expectedFrameRateStatus)"
+                if policy.mode == .ave { aveFallbackReason = lastFailure }
+                NSLog("Leftcar %@", lastFailure)
+                continue
             }
-            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: Int(avgBitrate) as CFNumber)
+
+            var supportedOptionalProperties = Set<EncoderOptionalProperty>()
+            if #available(macOS 11.0, *), supportedPropertyKeys.contains(
+                kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String
+            ) {
+                supportedOptionalProperties.insert(.prioritizeSpeed)
+            }
+            if #available(macOS 15.0, *) {
+                if supportedPropertyKeys.contains(
+                    kVTCompressionPropertyKey_MaximumRealTimeFrameRate as String
+                ) {
+                    supportedOptionalProperties.insert(.maximumRealTimeFrameRate)
+                }
+                if supportedPropertyKeys.contains(
+                    kVTCompressionPropertyKey_SuggestedLookAheadFrameCount as String
+                ) {
+                    supportedOptionalProperties.insert(.suggestedLookAheadFrameCount)
+                }
+            }
+            if supportedPropertyKeys.contains(
+                kVTCompressionPropertyKey_MaximizePowerEfficiency as String
+            ) {
+                supportedOptionalProperties.insert(.maximizePowerEfficiency)
+            }
+            if supportedPropertyKeys.contains(kVTCompressionPropertyKey_Quality as String) {
+                supportedOptionalProperties.insert(.quality)
+            }
+
+            if policy.mode == .ave {
+                let optionalPlan = optionalPropertyPlan(
+                    mode: policy.mode,
+                    supported: supportedOptionalProperties
+                )
+                for property in EncoderOptionalProperty.allCases where !optionalPlan.contains(property) {
+                    report.recordUnsupported(property.rawValue)
+                }
+                for property in optionalPlan {
+                    let propertyStatus: OSStatus
+                    switch property {
+                    case .prioritizeSpeed:
+                        if #available(macOS 11.0, *) {
+                            propertyStatus = VTSessionSetProperty(
+                                s,
+                                key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                                value: true as CFBoolean
+                            )
+                        } else {
+                            propertyStatus = kVTPropertyNotSupportedErr
+                        }
+                    case .maximumRealTimeFrameRate:
+                        if #available(macOS 15.0, *) {
+                            propertyStatus = VTSessionSetProperty(
+                                s,
+                                key: kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
+                                value: Int32(latencyPolicy.maximumRealTimeFrameRate) as CFNumber
+                            )
+                        } else {
+                            propertyStatus = kVTPropertyNotSupportedErr
+                        }
+                    case .suggestedLookAheadFrameCount:
+                        if #available(macOS 15.0, *) {
+                            propertyStatus = VTSessionSetProperty(
+                                s,
+                                key: kVTCompressionPropertyKey_SuggestedLookAheadFrameCount,
+                                value: 0 as CFNumber
+                            )
+                        } else {
+                            propertyStatus = kVTPropertyNotSupportedErr
+                        }
+                    case .maximizePowerEfficiency:
+                        propertyStatus = VTSessionSetProperty(
+                            s,
+                            key: kVTCompressionPropertyKey_MaximizePowerEfficiency,
+                            value: false as CFBoolean
+                        )
+                    case .quality:
+                        let quality = initialEncoderQuality(
+                            mode: policy.mode,
+                            width: UInt32(w),
+                            height: UInt32(h)
+                        ) ?? 0.25
+                        propertyStatus = VTSessionSetProperty(
+                            s,
+                            key: kVTCompressionPropertyKey_Quality,
+                            value: quality as CFNumber
+                        )
+                    }
+                    if propertyStatus == noErr {
+                        report.recordApplied(property.rawValue)
+                    } else {
+                        report.recordRejected(property.rawValue, status: propertyStatus)
+                    }
+                }
+            }
+
+            let averageBitrateStatus = VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_AverageBitRate,
+                value: Int(avgBitrate) as CFNumber
+            )
+            if averageBitrateStatus != noErr {
+                NSLog("Leftcar average bitrate rejected: status=%d", averageBitrateStatus)
+            }
             // DataRateLimits is expressed as [bytes, seconds], while
             // AverageBitRate is expressed in bits per second. Keep a small
             // 1-second headroom without allowing multi-second bursts.
             let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
-            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [hardLimitBytes, 1] as CFArray)
+            let dataRateStatus = VTSessionSetProperty(
+                s,
+                key: kVTCompressionPropertyKey_DataRateLimits,
+                value: [hardLimitBytes, 1] as CFArray
+            )
+            if dataRateStatus != noErr {
+                NSLog("Leftcar data rate limit rejected: status=%d", dataRateStatus)
+            }
             // Recovery happens through the authenticated IDR request path
             // (viewer IDR datagram -> kVTEncodeFrameOptionKey_ForceKeyFrame).
             // A periodic UDP IDR would re-introduce the one-second resync ceiling
@@ -2505,87 +3609,194 @@ final class CaptureSession {
             let nominalKeyframeInterval = mediaTransport.usesTCP
                 ? max(1, fps * 60)
                 : 3600
-            VTSessionSetProperty(
+            let keyframeIntervalStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 value: nominalKeyframeInterval as CFNumber
             )
-            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: Int32(fps) as CFNumber)
+            if keyframeIntervalStatus != noErr {
+                NSLog("Leftcar keyframe interval rejected: status=%d", keyframeIntervalStatus)
+            }
 
             let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(s)
-            guard realTimeStatus == noErr,
-                  profileStatus == noErr,
-                  noReorderStatus == noErr,
-                  prepareStatus == noErr else {
+            guard prepareStatus == noErr else {
                 VTCompressionSessionInvalidate(s)
-                lastFailure = "VideoToolbox \(candidate.rawValue) low-latency setup failed: realtime=\(realTimeStatus) profile=\(profileStatus) noReorder=\(noReorderStatus) prepare=\(prepareStatus)"
+                lastFailure = "\(policy.mode.rawValue.uppercased()) prepare failed: \(prepareStatus)"
+                if policy.mode == .ave { aveFallbackReason = lastFailure }
                 NSLog("Leftcar %@", lastFailure)
                 continue
             }
+
+            var selectedEncoderID: String?
+            var encoderIDValue: Unmanaged<CFTypeRef>?
+            let encoderIDStatus = VTSessionCopyProperty(
+                s,
+                key: kVTCompressionPropertyKey_EncoderID,
+                allocator: nil,
+                valueOut: &encoderIDValue
+            )
+            if encoderIDStatus == noErr, let encoderIDValue {
+                selectedEncoderID = encoderIDValue.takeRetainedValue() as? String
+            }
+            var selectedHardware: Bool?
+            var hardwareStatus: OSStatus = kVTPropertyNotSupportedErr
+            if #available(macOS 10.9, *) {
+                var hardwareValue: Unmanaged<CFTypeRef>?
+                hardwareStatus = VTSessionCopyProperty(
+                    s,
+                    key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                    allocator: nil,
+                    valueOut: &hardwareValue
+                )
+                if hardwareStatus == noErr, let hardwareValue {
+                    selectedHardware = (hardwareValue.takeRetainedValue() as? NSNumber)?.boolValue
+                }
+            }
+            let hardwareVerified = hardwareEncoderVerified(
+                queryStatus: hardwareStatus,
+                queriedHardware: selectedHardware,
+                requireHardware: requireHardware
+            )
+            if hardwareStatus == kVTPropertyNotSupportedErr, requireHardware {
+                selectedHardware = true
+            }
+            guard encoderIDStatus == noErr,
+                  let selectedEncoderID,
+                  hardwareVerified else {
+                VTCompressionSessionInvalidate(s)
+                lastFailure = "\(policy.mode.rawValue.uppercased()) encoder verification failed: encoderIDStatus=\(encoderIDStatus) hardwareStatus=\(hardwareStatus) hardware=\(selectedHardware.map(String.init(describing:)) ?? "unknown")"
+                if policy.mode == .ave { aveFallbackReason = lastFailure }
+                NSLog("Leftcar %@", lastFailure)
+                continue
+            }
+            if policy.mode == .ave, selectedEncoderID != requestedEncoderID {
+                VTCompressionSessionInvalidate(s)
+                lastFailure = "AVE encoder identity mismatch: requested=\(requestedEncoderID ?? "unknown") actual=\(selectedEncoderID)"
+                aveFallbackReason = lastFailure
+                NSLog("Leftcar %@", lastFailure)
+                continue
+            }
+
+            let presetLabel: String
+            if presetApplied {
+                presetLabel = presetKind == .highSpeed ? "high-speed" : "video-conferencing"
+            } else {
+                presetLabel = "default"
+            }
             stateLock.lock()
             currentAverageBitrate = Int(avgBitrate)
+            currentQualityHint = initialEncoderQuality(
+                mode: policy.mode,
+                width: UInt32(w),
+                height: UInt32(h)
+            ) ?? 0.50
+            encoderID = selectedEncoderID
+            encoderHardwareAccelerated = selectedHardware
+            encoderPreset = presetLabel
+            encoderProfile = "main"
+            encoderMode = policy.mode.rawValue
+            encoderAppliedProperties = report.applied
+            encoderUnsupportedProperties = report.unsupported
+            encoderRejectedProperties = report.rejected
+            encoderFallbackReason = aveFallbackReason
             stateLock.unlock()
-            codecKind = candidate
+            codecKind = .h264
             NSLog(
-                "Leftcar hardware %@ low-latency encoder ready %@: %dx%d bitrate=%d inFlight=%d preset=%@",
-                candidate.rawValue.uppercased(),
+                "Leftcar hardware H264 %@ encoder ready %@: %dx%d bitrate=%d inFlight=%d encoderID=%@ hardware=%@ profile=main entropy=cabac preset=%@",
+                policy.mode.rawValue.uppercased(),
                 targetLabel,
                 w,
                 h,
                 Int(avgBitrate),
                 latencyPolicy.maxEncodeInFlight,
-                presetApplied ? "video-conferencing" : "default"
+                selectedEncoderID,
+                selectedHardware.map(String.init(describing:)) ?? "unknown",
+                presetLabel
             )
             session = s
             return
         }
 
+        stateLock.lock()
+        encoderFallbackReason = aveFallbackReason
+        stateLock.unlock()
         markStopped(lastFailure)
     }
 
     // MARK: Packetization & TCP Transmission
 
+    private func recordEncoderCallback(pts: Int64, callbackNs: UInt64) {
+        stateLock.lock()
+        encodeOutputCallbacks &+= 1
+        rateWindowEncodeOutputCallbacks &+= 1
+        if let previous = lastEncodeOutputCallbackNs, callbackNs >= previous {
+            appendRollingSample(
+                (callbackNs - previous) / 1_000,
+                to: &encodeOutputIntervalSamplesUs
+            )
+        }
+        lastEncodeOutputCallbackNs = callbackNs
+        if firstEncodeNs == nil {
+            firstEncodeNs = callbackNs
+            lifecycleState = "waiting_first_send"
+            NSLog("Leftcar first encoded frame %@", targetLabel)
+        }
+        if let captureNs = captureNsByPts[pts] {
+            let elapsedUs = (callbackNs &- captureNs) / 1_000
+            lastCaptureToEncodeUs = elapsedUs
+            maxCaptureToEncodeUs = max(maxCaptureToEncodeUs, elapsedUs)
+            appendRollingSample(elapsedUs, to: &captureToEncodeSamplesUs)
+        }
+        if let submitNs = encodeSubmitNsByPts[pts] {
+            let elapsedUs = (callbackNs &- submitNs) / 1_000
+            lastEncodeOutputUs = elapsedUs
+            maxEncodeOutputUs = max(maxEncodeOutputUs, elapsedUs)
+            appendRollingSample(elapsedUs, to: &encodeOutputSamplesUs)
+        }
+        stateLock.unlock()
+    }
+
+    private func recordPacketizationQueueWait(startNs: UInt64, callbackNs: UInt64) {
+        guard startNs >= callbackNs else { return }
+        let elapsedUs = (startNs - callbackNs) / 1_000
+        stateLock.lock()
+        lastPacketizationQueueWaitUs = elapsedUs
+        maxPacketizationQueueWaitUs = max(maxPacketizationQueueWaitUs, elapsedUs)
+        appendRollingSample(elapsedUs, to: &packetizationQueueWaitSamplesUs)
+        stateLock.unlock()
+    }
+
+    private func recordPacketizationDuration(startNs: UInt64) {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        guard nowNs >= startNs else { return }
+        let elapsedUs = (nowNs - startNs) / 1_000
+        stateLock.lock()
+        lastPacketizationUs = elapsedUs
+        maxPacketizationUs = max(maxPacketizationUs, elapsedUs)
+        appendRollingSample(elapsedUs, to: &packetizationSamplesUs)
+        stateLock.unlock()
+    }
+
     private func handleEncoded(
         _ sample: CMSampleBuffer,
-        requestedKeyframe: Bool
+        requestedKeyframe: Bool,
+        packetizationStartNs: UInt64
     ) {
+        defer {
+            recordPacketizationDuration(startNs: packetizationStartNs)
+        }
         guard isRunning else {
             if requestedKeyframe {
                 clearRecoveryEncodeGate()
             }
             return
         }
-        let encodeNs = DispatchTime.now().uptimeNanoseconds
         let encodedPts = CMSampleBufferGetPresentationTimeStamp(sample).value
         stateLock.lock()
-        encodeOutputCallbacks &+= 1
-        rateWindowEncodeOutputCallbacks &+= 1
-        if let previous = lastEncodeOutputCallbackNs, encodeNs >= previous {
-            appendRollingSample(
-                (encodeNs - previous) / 1_000,
-                to: &encodeOutputIntervalSamplesUs
-            )
-        }
-        lastEncodeOutputCallbackNs = encodeNs
-        if firstEncodeNs == nil {
-            firstEncodeNs = encodeNs
-            lifecycleState = "waiting_first_send"
-            NSLog("Leftcar first encoded frame %@", targetLabel)
-        }
         let auId = encodeAuIdByPts.removeValue(forKey: encodedPts)
         let captureWallMs = captureWallMsByPts.removeValue(forKey: encodedPts)
-        if let captureNs = captureNsByPts.removeValue(forKey: encodedPts) {
-            let elapsedUs = (encodeNs &- captureNs) / 1_000
-            lastCaptureToEncodeUs = elapsedUs
-            maxCaptureToEncodeUs = max(maxCaptureToEncodeUs, elapsedUs)
-            appendRollingSample(elapsedUs, to: &captureToEncodeSamplesUs)
-        }
-        if let submitNs = encodeSubmitNsByPts.removeValue(forKey: encodedPts) {
-            let elapsedUs = (encodeNs &- submitNs) / 1_000
-            lastEncodeOutputUs = elapsedUs
-            maxEncodeOutputUs = max(maxEncodeOutputUs, elapsedUs)
-            appendRollingSample(elapsedUs, to: &encodeOutputSamplesUs)
-        }
+        captureNsByPts.removeValue(forKey: encodedPts)
+        encodeSubmitNsByPts.removeValue(forKey: encodedPts)
         stateLock.unlock()
         guard let auId, let captureWallMs else {
             // An output callback arriving after its bookkeeping window is
@@ -2612,7 +3823,7 @@ final class CaptureSession {
         let isKeyframe = notSync != true
 
         stateLock.lock()
-        let shouldSendConfig = !csdSent || isKeyframe
+        let shouldSendConfig = shouldSendCodecConfig(csdSent: csdSent)
         if shouldSendConfig {
             // Reserve this config send while holding the lock so concurrent
             // VideoToolbox callbacks do not all enqueue the same CSD packet.
@@ -2745,10 +3956,32 @@ final class CaptureSession {
             pendingConfig = config
         }
         if let frame {
-            if networkAwaitingKeyframe {
+            if shouldPrioritizeNetworkKeyframe(isKeyframe: isKeyframe) {
+                // A keyframe is an independent decoder boundary. Never make
+                // it wait behind stale deltas that may already have filled
+                // the pacing queue; once it is queued, the next delta either
+                // follows this boundary or triggers a later recovery.
+                pendingFrames.removeAll(keepingCapacity: true)
+                networkAwaitingKeyframe = networkAwaitingKeyframeAfterEnqueue(
+                    currentAwaitingKeyframe: networkAwaitingKeyframe,
+                    isKeyframe: true,
+                    isRecoveryKeyframe: isRecoveryKeyframe
+                )
+                pendingFrames.append(
+                    PendingEncodedFrame(
+                        data: frame,
+                        isKeyframe: true,
+                        isRecoveryKeyframe: isRecoveryKeyframe
+                    )
+                )
+            } else if networkAwaitingKeyframe {
                 if isKeyframe {
                     pendingFrames.removeAll(keepingCapacity: true)
-                    networkAwaitingKeyframe = false
+                    networkAwaitingKeyframe = networkAwaitingKeyframeAfterEnqueue(
+                        currentAwaitingKeyframe: networkAwaitingKeyframe,
+                        isKeyframe: true,
+                        isRecoveryKeyframe: isRecoveryKeyframe
+                    )
                     pendingFrames.append(
                         PendingEncodedFrame(
                             data: frame,
@@ -2803,7 +4036,11 @@ final class CaptureSession {
                 }
                 stateLock.unlock()
                 if isKeyframe {
-                    networkAwaitingKeyframe = false
+                    networkAwaitingKeyframe = networkAwaitingKeyframeAfterEnqueue(
+                        currentAwaitingKeyframe: networkAwaitingKeyframe,
+                        isKeyframe: true,
+                        isRecoveryKeyframe: isRecoveryKeyframe
+                    )
                     pendingFrames.append(
                         PendingEncodedFrame(
                             data: frame,
@@ -2848,6 +4085,11 @@ final class CaptureSession {
             let frame = pendingFrames.isEmpty ? nil : pendingFrames.removeFirst()
             if frame?.isKeyframe == true {
                 networkKeyframeInFlight = true
+                // A recovery boundary must not inherit pacing debt from stale
+                // deltas. Those bytes are no longer useful once the boundary
+                // is available, and carrying their deadline directly turns a
+                // short LAN burst into another latency spike.
+                nextUdpSendNs = DispatchTime.now().uptimeNanoseconds
             }
             if config == nil && frame == nil {
                 networkDrainScheduled = false
@@ -2863,13 +4105,21 @@ final class CaptureSession {
                 writePacket(config)
             }
             if let frame {
-                writePacket(
+                let sendSucceeded = writePacket(
                     frame.data,
                     isFrame: true,
                     isKeyframe: frame.isKeyframe,
                     isRecoveryKeyframe: frame.isRecoveryKeyframe
                 )
                 networkLock.lock()
+                if frame.isKeyframe {
+                    networkAwaitingKeyframe = networkAwaitingKeyframeAfterSend(
+                        currentAwaitingKeyframe: networkAwaitingKeyframe,
+                        isKeyframe: true,
+                        isRecoveryKeyframe: frame.isRecoveryKeyframe,
+                        sendSucceeded: sendSucceeded
+                    )
+                }
                 networkKeyframeInFlight = false
                 networkLock.unlock()
             }
@@ -3514,12 +4764,13 @@ final class CaptureSession {
     /// stay below 1,200 bytes to avoid IP fragmentation on Wi-Fi and Tailscale.
     /// On a local queue overflow, recover from a fresh IDR instead of blocking
     /// subsequent video behind a lost packet.
+    @discardableResult
     private func writePacket(
         _ data: Data,
         isFrame: Bool = false,
         isKeyframe: Bool = false,
         isRecoveryKeyframe: Bool = false
-    ) {
+    ) -> Bool {
         stateLock.lock()
         let fd = sock
         stateLock.unlock()
@@ -3527,7 +4778,7 @@ final class CaptureSession {
             if isRecoveryKeyframe {
                 clearRecoveryEncodeGate()
             }
-            return
+            return false
         }
 
         let sendStart = DispatchTime.now().uptimeNanoseconds
@@ -3547,7 +4798,7 @@ final class CaptureSession {
                     clearRecoveryEncodeGate()
                 }
                 requestRecoveryKeyframe()
-                return
+                return false
             }
             let maxPayload = 1_167 // 1,200-byte datagram - 33-byte L2 wire header
             let payloadCount = data.count - 21
@@ -3557,7 +4808,7 @@ final class CaptureSession {
                     clearRecoveryEncodeGate()
                 }
                 requestRecoveryKeyframe()
-                return
+                return false
             }
             var sendWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
             var primaryDatagrams = [Data]()
@@ -3643,7 +4894,13 @@ final class CaptureSession {
                 paceUdpDatagram(
                     bytes: datagram.count,
                     isKeyframe: isKeyframe,
-                    accessUnitBytes: isKeyframe ? data.count : 0
+                    // Pacing protects the socket regardless of profile. The
+                    // fast interactive profile can still carry a moving
+                    // video window, and its 4.4Mbps target was previously
+                    // allowed to drain 20-25KiB AUs over several frame
+                    // periods because this value was passed as zero.
+                    accessUnitBytes: data.count,
+                    dataFragmentCount: fragmentCount
                 )
                 let syscallStart = DispatchTime.now().uptimeNanoseconds
                 let sent = sendMediaDatagram(datagram, fd: fd)
@@ -3696,7 +4953,7 @@ final class CaptureSession {
                 clearRecoveryEncodeGate()
             }
             requestRecoveryKeyframe()
-            return
+            return false
         }
         let sendPaceUs = (DispatchTime.now().uptimeNanoseconds &- sendStart) / 1_000
         stateLock.lock()
@@ -3725,6 +4982,7 @@ final class CaptureSession {
         if isFrame && isRecoveryKeyframe {
             recoveryKeyframeDidSend()
         }
+        return true
     }
 
     // MARK: Stats
@@ -3758,6 +5016,10 @@ final class CaptureSession {
         let maxCaptureQueueWaitUs = maxCaptureQueueWaitUs
         let encodeOutputUs = lastEncodeOutputUs
         let maxEncodeOutputUs = maxEncodeOutputUs
+        let packetizationUs = lastPacketizationUs
+        let maxPacketizationUs = maxPacketizationUs
+        let packetizationQueueWaitUs = lastPacketizationQueueWaitUs
+        let maxPacketizationQueueWaitUs = maxPacketizationQueueWaitUs
         let sendBlockUs = lastSendBlockUs
         let maxSendBlockUs = maxSendBlockUs
         let sendPaceUs = lastSendPaceUs
@@ -3793,15 +5055,42 @@ final class CaptureSession {
         let reportedKbps = lastKbps
         let error = stoppedReason
         let codec = codecKind.rawValue
+        let reportedEncoderID = encoderID
+        let reportedEncoderHardware: Any = encoderHardwareAccelerated
+            .map { NSNumber(value: $0) } ?? NSNull()
+        let reportedEncoderPreset = encoderPreset
+        let reportedEncoderProfile = encoderProfile
+        let reportedEncoderMode = encoderMode
+        let reportedEncoderAppliedProperties = encoderAppliedProperties
+        let reportedEncoderUnsupportedProperties = encoderUnsupportedProperties
+        let reportedEncoderRejectedProperties = encoderRejectedProperties
+        let reportedEncoderFallbackReason: Any = encoderFallbackReason ?? NSNull()
         let firstCaptureMs = firstCaptureNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let firstEncodeMs = firstEncodeNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let firstSendMs = firstSendNs.map { ($0 &- createdNs) / 1_000_000 } ?? 0
         let currentBitrate = currentAverageBitrate
+        let qualityHintValue: Any = currentQualityHint
+            .map { NSNumber(value: $0) } ?? NSNull()
+        let qualityOverrideValue: Any = manualQualityHint
+            .map { NSNumber(value: $0) } ?? NSNull()
+        let qualityChecks = qualityAdaptationChecks
+        let qualityChanges = qualityAdaptationChanges
+        let qualityRejections = qualityAdaptationRejections
+        let qualityStatus = qualityAdaptationLastStatus
+        let qualityLastEncodeP95Us = qualityAdaptationLastEncodeP95Us
+        let qualityLastQueueP95Us = qualityAdaptationLastQueueP95Us
+        let qualityLastReceiverLoss = qualityAdaptationLastReceiverLoss
         let captureIntervalP95Us = percentile95(captureIntervalSamplesUs)
+        let encodeOutputIntervalP50Us = percentile(
+            encodeOutputIntervalSamplesUs,
+            quantile: 0.50
+        )
         let encodeOutputIntervalP95Us = percentile95(encodeOutputIntervalSamplesUs)
         let captureToEncodeP95Us = percentile95(captureToEncodeSamplesUs)
         let captureQueueWaitP95Us = percentile95(captureQueueWaitSamplesUs)
         let encodeOutputP95Us = percentile95(encodeOutputSamplesUs)
+        let packetizationP95Us = percentile95(packetizationSamplesUs)
+        let packetizationQueueWaitP95Us = percentile95(packetizationQueueWaitSamplesUs)
         let sendBlockP95Us = percentile95(sendBlockSamplesUs)
         let sendPaceP95Us = percentile95(sendPaceSamplesUs)
         let receiverStaleInputDropsValue: Any = receiverStaleInputDrops
@@ -3828,6 +5117,28 @@ final class CaptureSession {
         let queueSnapshot = networkQueueSnapshot(frames: pendingFrames, nowNs: nowNs)
         networkLock.unlock()
 
+        stateLock.lock()
+        let shouldLogPerf = nowNs >= lastPerfLogNs
+            && nowNs - lastPerfLogNs >= 1_000_000_000
+        if shouldLogPerf { lastPerfLogNs = nowNs }
+        stateLock.unlock()
+
+        if shouldLogPerf {
+            let perfLogLine = leftcarPerfLogLine(
+                captureCallbacks: captureCallbacks,
+                encodeOutputCallbacks: encodeOutputCallbacks,
+                captureFps: reportedCaptureFps,
+                encodeOutputFps: reportedEncodeOutputFps,
+                encodeOutputIntervalP50Us: encodeOutputIntervalP50Us,
+                encodeOutputIntervalP95Us: encodeOutputIntervalP95Us,
+                encodeOutputP95Us: encodeOutputP95Us,
+                queueOldestUs: queueSnapshot.oldestAgeUs,
+                encoderMode: reportedEncoderMode,
+                encoderID: reportedEncoderID
+            )
+            leftcarPerformanceLogger.notice("\(perfLogLine, privacy: .public)")
+        }
+
         let obj: [String: Any] = [
             "frames": framesEncoded,
             "dropped": framesDropped,
@@ -3852,17 +5163,38 @@ final class CaptureSession {
             "encodeSubmitFailures": encodeSubmitFailures,
             "encodeInFlight": currentEncodeInFlight,
             "codec": codec,
+            "encoderID": reportedEncoderID,
+            "encoderHardwareAccelerated": reportedEncoderHardware,
+            "encoderPreset": reportedEncoderPreset,
+            "encoderProfile": reportedEncoderProfile,
+            "encoderMode": reportedEncoderMode,
+            "encoderAppliedProperties": reportedEncoderAppliedProperties,
+            "encoderUnsupportedProperties": reportedEncoderUnsupportedProperties,
+            "encoderRejectedProperties": reportedEncoderRejectedProperties,
+            "encoderFallbackReason": reportedEncoderFallbackReason,
             "captureBackend": backend.rawValue,
             "mediaTransport": mediaTransport.rawValue,
             "firstCaptureMs": firstCaptureMs,
             "firstEncodeMs": firstEncodeMs,
             "firstSendMs": firstSendMs,
             "currentBitrate": currentBitrate,
+            "qualityHint": qualityHintValue,
+            "qualityOverride": qualityOverrideValue,
+            "qualityAdaptationChecks": qualityChecks,
+            "qualityAdaptationChanges": qualityChanges,
+            "qualityAdaptationRejections": qualityRejections,
+            "qualityAdaptationLastStatus": qualityStatus,
+            "qualityAdaptationLastEncodeP95Us": qualityLastEncodeP95Us,
+            "qualityAdaptationLastQueueP95Us": qualityLastQueueP95Us,
+            "qualityAdaptationLastReceiverLoss": qualityLastReceiverLoss,
             "captureIntervalP95Us": captureIntervalP95Us,
+            "encodeOutputIntervalP50Us": encodeOutputIntervalP50Us,
             "encodeOutputIntervalP95Us": encodeOutputIntervalP95Us,
             "captureToEncodeP95Us": captureToEncodeP95Us,
             "captureQueueWaitP95Us": captureQueueWaitP95Us,
             "encodeOutputP95Us": encodeOutputP95Us,
+            "packetizationP95Us": packetizationP95Us,
+            "packetizationQueueWaitP95Us": packetizationQueueWaitP95Us,
             "sendBlockP95Us": sendBlockP95Us,
             "sendPaceP95Us": sendPaceP95Us,
             "lastAuBytes": lastAuBytes,
@@ -3882,6 +5214,10 @@ final class CaptureSession {
             "maxCaptureQueueWaitUs": maxCaptureQueueWaitUs,
             "encodeOutputUs": encodeOutputUs,
             "maxEncodeOutputUs": maxEncodeOutputUs,
+            "packetizationUs": packetizationUs,
+            "maxPacketizationUs": maxPacketizationUs,
+            "packetizationQueueWaitUs": packetizationQueueWaitUs,
+            "maxPacketizationQueueWaitUs": maxPacketizationQueueWaitUs,
             "sendBlockUs": sendBlockUs,
             "maxSendBlockUs": maxSendBlockUs,
             "sendPaceUs": sendPaceUs,

@@ -69,6 +69,7 @@ pub fn run() {
             request_input_permission,
             open_system_settings,
             set_session_input,
+            set_session_quality,
             force_stop_session,
             begin_pairing,
             cancel_pairing,
@@ -313,6 +314,15 @@ fn set_session_input(
     enabled: bool,
 ) -> Result<(), String> {
     state.set_session_input(session, enabled)
+}
+
+#[tauri::command]
+fn set_session_quality(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    session: u32,
+    quality: Option<f32>,
+) -> Result<(), String> {
+    state.set_session_quality(session, quality)
 }
 
 #[tauri::command]

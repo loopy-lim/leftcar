@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   /* Light Mode (Default) - Ultra-Simple Dark & White Monochrome */
   --bg-canvas: #fafafa;
@@ -739,6 +741,47 @@ html, body, #root {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.quality-override-item {
+  grid-column: 1 / -1;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.quality-override-heading,
+.quality-override-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quality-override-heading {
+  justify-content: space-between;
+}
+
+.quality-override-controls input[type="range"] {
+  flex: 1;
+  min-width: 120px;
+  accent-color: var(--accent-blue);
+}
+
+.quality-override-endpoint,
+.quality-override-help {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.quality-override-endpoint {
+  min-width: 24px;
+}
+
+.quality-override-help {
+  line-height: 1.4;
+}
+
+.quality-auto-button {
+  margin-left: 4px;
 }
 
 .stream-card-footer {

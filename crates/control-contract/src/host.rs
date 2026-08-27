@@ -292,6 +292,10 @@ pub struct StatsInfo {
     pub max_capture_queue_wait_us: u64,
     pub encode_output_us: u64,
     pub max_encode_output_us: u64,
+    #[serde(default)]
+    pub packetization_us: u64,
+    #[serde(default)]
+    pub max_packetization_us: u64,
     pub send_block_us: u64,
     pub max_send_block_us: u64,
     #[serde(default)]
@@ -311,10 +315,46 @@ pub struct StatsInfo {
     pub first_encode_ms: u64,
     pub first_send_ms: u64,
     pub current_bitrate: u32,
+    #[serde(default)]
+    pub encoder_mode: String,
+    #[serde(default, rename = "encoderID")]
+    pub encoder_id: String,
+    #[serde(default)]
+    pub encoder_hardware_accelerated: Option<bool>,
+    #[serde(default)]
+    pub encoder_preset: String,
+    #[serde(default)]
+    pub encoder_profile: String,
+    #[serde(default)]
+    pub encoder_applied_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_unsupported_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_rejected_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_fallback_reason: Option<String>,
+    /// Current VideoToolbox quality hint. `None` means the selected encoder
+    /// does not expose the adaptive quality controller.
+    #[serde(default)]
+    pub quality_hint: Option<f32>,
+    /// A non-None value means the operator has paused the automatic quality
+    /// controller and selected a session-local quality cap from the Host UI.
+    #[serde(default)]
+    pub quality_override: Option<f32>,
+    #[serde(default)]
+    pub quality_adaptation_checks: i64,
+    #[serde(default)]
+    pub quality_adaptation_changes: i64,
+    #[serde(default)]
+    pub quality_adaptation_rejections: i64,
+    #[serde(default)]
+    pub quality_adaptation_last_status: String,
     pub capture_interval_p95_us: u64,
     pub capture_to_encode_p95_us: u64,
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
+    #[serde(default)]
+    pub packetization_p95_us: u64,
     #[serde(default)]
     pub encode_output_interval_p95_us: u64,
     pub send_block_p95_us: u64,
@@ -505,6 +545,10 @@ pub struct SessionView {
     pub max_capture_queue_wait_us: u64,
     pub encode_output_us: u64,
     pub max_encode_output_us: u64,
+    #[serde(default)]
+    pub packetization_us: u64,
+    #[serde(default)]
+    pub max_packetization_us: u64,
     pub send_block_us: u64,
     pub max_send_block_us: u64,
     #[serde(default)]
@@ -524,10 +568,42 @@ pub struct SessionView {
     pub first_encode_ms: u64,
     pub first_send_ms: u64,
     pub current_bitrate: u32,
+    #[serde(default)]
+    pub encoder_mode: String,
+    #[serde(default, rename = "encoderID")]
+    pub encoder_id: String,
+    #[serde(default)]
+    pub encoder_hardware_accelerated: Option<bool>,
+    #[serde(default)]
+    pub encoder_preset: String,
+    #[serde(default)]
+    pub encoder_profile: String,
+    #[serde(default)]
+    pub encoder_applied_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_unsupported_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_rejected_properties: Vec<String>,
+    #[serde(default)]
+    pub encoder_fallback_reason: Option<String>,
+    #[serde(default)]
+    pub quality_hint: Option<f32>,
+    #[serde(default)]
+    pub quality_override: Option<f32>,
+    #[serde(default)]
+    pub quality_adaptation_checks: i64,
+    #[serde(default)]
+    pub quality_adaptation_changes: i64,
+    #[serde(default)]
+    pub quality_adaptation_rejections: i64,
+    #[serde(default)]
+    pub quality_adaptation_last_status: String,
     pub capture_interval_p95_us: u64,
     pub capture_to_encode_p95_us: u64,
     pub capture_queue_wait_p95_us: u64,
     pub encode_output_p95_us: u64,
+    #[serde(default)]
+    pub packetization_p95_us: u64,
     #[serde(default)]
     pub encode_output_interval_p95_us: u64,
     pub send_block_p95_us: u64,
@@ -678,6 +754,8 @@ mod stream_control_tests {
                 max_capture_queue_wait_us: 0,
                 encode_output_us: 0,
                 max_encode_output_us: 0,
+                packetization_us: 0,
+                max_packetization_us: 0,
                 send_block_us: 0,
                 max_send_block_us: 0,
                 send_pace_us: 0,
@@ -693,10 +771,26 @@ mod stream_control_tests {
                 first_encode_ms: 25,
                 first_send_ms: 26,
                 current_bitrate: 12_000_000,
+                encoder_mode: "ave".into(),
+                encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
+                encoder_hardware_accelerated: Some(true),
+                encoder_preset: "high-speed".into(),
+                encoder_profile: "main".into(),
+                encoder_applied_properties: vec!["HighSpeed".into(), "Quality".into()],
+                encoder_unsupported_properties: vec!["SuggestedLookAheadFrameCount".into()],
+                encoder_rejected_properties: vec![],
+                encoder_fallback_reason: None,
+                quality_hint: None,
+                quality_override: None,
+                quality_adaptation_checks: 0,
+                quality_adaptation_changes: 0,
+                quality_adaptation_rejections: 0,
+                quality_adaptation_last_status: "not_checked".into(),
                 capture_interval_p95_us: 16_667,
                 capture_to_encode_p95_us: 8_000,
                 capture_queue_wait_p95_us: 1_000,
                 encode_output_p95_us: 7_000,
+                packetization_p95_us: 0,
                 encode_output_interval_p95_us: 11_111,
                 send_block_p95_us: 1_000,
                 send_pace_p95_us: 0,
@@ -725,6 +819,10 @@ mod stream_control_tests {
         };
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("\"sourceName\""));
+        assert!(s.contains("\"encoderMode\":\"ave\""));
+        assert!(s.contains("\"encoderID\":\"com.apple.videotoolbox.videoencoder.ave.avc\""));
+        assert!(s.contains("\"encoderHardwareAccelerated\":true"));
+        assert!(s.contains("\"encoderAppliedProperties\":[\"HighSpeed\",\"Quality\"]"));
     }
 
     #[test]
@@ -759,6 +857,8 @@ mod stream_control_tests {
             max_capture_queue_wait_us: 0,
             encode_output_us: 0,
             max_encode_output_us: 0,
+            packetization_us: 0,
+            max_packetization_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
             send_pace_us: 0,
@@ -772,10 +872,26 @@ mod stream_control_tests {
             first_encode_ms: 25,
             first_send_ms: 26,
             current_bitrate: 12_000_000,
+            encoder_mode: "ave".into(),
+            encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
+            encoder_hardware_accelerated: Some(true),
+            encoder_preset: "high-speed".into(),
+            encoder_profile: "main".into(),
+            encoder_applied_properties: vec!["HighSpeed".into(), "Quality".into()],
+            encoder_unsupported_properties: vec!["SuggestedLookAheadFrameCount".into()],
+            encoder_rejected_properties: vec![],
+            encoder_fallback_reason: None,
+            quality_hint: None,
+            quality_override: None,
+            quality_adaptation_checks: 0,
+            quality_adaptation_changes: 0,
+            quality_adaptation_rejections: 0,
+            quality_adaptation_last_status: "not_checked".into(),
             capture_interval_p95_us: 16_667,
             capture_to_encode_p95_us: 8_000,
             capture_queue_wait_p95_us: 1_000,
             encode_output_p95_us: 7_000,
+            packetization_p95_us: 0,
             encode_output_interval_p95_us: 11_111,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
@@ -806,5 +922,9 @@ mod stream_control_tests {
         assert!(s.contains("\"recoveryFramesDropped\""));
         assert!(s.contains("\"lastAuFragments\""));
         assert!(s.contains("\"sentDatagrams\""));
+        assert!(s.contains("\"encoderMode\":\"ave\""));
+        assert!(s.contains("\"encoderID\":\"com.apple.videotoolbox.videoencoder.ave.avc\""));
+        assert!(s.contains("\"encoderHardwareAccelerated\":true"));
+        assert!(s.contains("\"encoderAppliedProperties\":[\"HighSpeed\",\"Quality\"]"));
     }
 }

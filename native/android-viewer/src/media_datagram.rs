@@ -103,15 +103,25 @@ pub fn classify_frame_gap(
 
 /// Decide whether a completed AU may enter MediaCodec after a frame-id jump.
 ///
-/// This remains the safety gate for an explicit local discard or a frame-id
-/// gap. The normal completion path no longer creates a live-edge discard, so
-/// ordered delta AUs remain eligible for MediaCodec.
+/// A large missing-AU hole is treated as a broken reference chain. A single
+/// missing AU stays eligible for the live decode path; if the hardware decoder
+/// rejects the following delta, feed_and_render escalates to a real resync.
 pub fn should_feed_frame(reason: FrameGapReason, keyframe: bool) -> bool {
     match reason {
         FrameGapReason::None => true,
+        // A single lost delta is preferable to a 250-750ms IDR stall. The
+        // hardware decoder can conceal that missing reference; if it rejects
+        // the following AU, feed_and_render escalates to a real resync.
         FrameGapReason::NetworkLoss { missing } => keyframe || missing == 1,
         FrameGapReason::LiveEdgeDiscard { .. } | FrameGapReason::RecoverySkip { .. } => keyframe,
     }
+}
+
+/// Decide when a frame-id gap is large enough to flush the decoder. One
+/// missing AU should stay on the live path so a transient Wi-Fi loss does not
+/// turn into a full GOP-sized frame-rate collapse.
+pub fn should_resync_after_network_loss(missing: u16, keyframe: bool) -> bool {
+    !keyframe && missing >= 2
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +174,23 @@ pub fn recovery_request_suppressed(now_us: u64, suppressed_until_us: u64) -> boo
 
 pub fn stale_frame_budget_ms(network_rtt_ms: Option<u64>) -> u64 {
     BASE_STALE_FRAME_BUDGET_MS + network_rtt_ms.unwrap_or(0).saturating_div(2).min(120)
+}
+
+/// Convert a rendered-frame counter delta into a rate for the actual feedback
+/// interval. The media loop can be delayed by FEC/reassembly or a decoder
+/// wake-up, so treating every feedback packet as exactly one second makes the
+/// Host see false 1-30 FPS dips even while the Surface is rendering steadily.
+pub fn rendered_fps_from_feedback(
+    rendered_frames: u64,
+    previous_rendered_frames: u64,
+    elapsed_ms: u64,
+) -> u16 {
+    if elapsed_ms == 0 {
+        return 0;
+    }
+    let delta = rendered_frames.saturating_sub(previous_rendered_frames);
+    let fps = (u128::from(delta) * 1_000 + u128::from(elapsed_ms) - 1) / u128::from(elapsed_ms);
+    fps.min(u128::from(u16::MAX)) as u16
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -963,6 +990,14 @@ mod tests {
     }
 
     #[test]
+    fn rendered_feedback_rate_uses_elapsed_interval() {
+        assert_eq!(rendered_fps_from_feedback(30, 0, 500), 60);
+        assert_eq!(rendered_fps_from_feedback(31, 30, 1_000), 1);
+        assert_eq!(rendered_fps_from_feedback(30, 0, 1_000), 30);
+        assert_eq!(rendered_fps_from_feedback(30, 0, 0), 0);
+    }
+
+    #[test]
     fn fresh_frame_resets_the_streak() {
         assert_eq!(stale_streak_advance(2, false, false), (0, false));
     }
@@ -1126,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn one_real_missing_delta_can_still_be_fed_for_decoder_concealment() {
+    fn one_real_missing_delta_stays_on_the_live_decode_path() {
         assert!(should_feed_frame(
             FrameGapReason::NetworkLoss { missing: 1 },
             false
@@ -1135,5 +1170,8 @@ mod tests {
             FrameGapReason::NetworkLoss { missing: 2 },
             false
         ));
+        assert!(!should_resync_after_network_loss(1, false));
+        assert!(should_resync_after_network_loss(2, false));
+        assert!(!should_resync_after_network_loss(99, true));
     }
 }

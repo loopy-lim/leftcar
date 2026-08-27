@@ -9,6 +9,7 @@
 //!   leftcar_capture_input_permission_v1() -> granted
 //!   leftcar_capture_request_input_permission_v1() -> granted
 //!   leftcar_capture_set_input_enabled_v1(handle, enabled)
+//!   leftcar_capture_set_quality_v1(handle, quality_percent)
 //!   leftcar_capture_has_persistent_access_v1() -> granted
 
 use crate::backend::CaptureBackend;
@@ -130,6 +131,9 @@ impl FfiBackend {
                 )
                 .map_err(|e| e.to_string())?;
             let _ = lib
+                .get::<unsafe extern "C" fn(u32, i32) -> i32>(b"leftcar_capture_set_quality_v1")
+                .map_err(|e| e.to_string())?;
+            let _ = lib
                 .get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_has_persistent_access_v1")
                 .map_err(|e| e.to_string())?;
         }
@@ -181,6 +185,123 @@ fn macos_capture_backends(persistent_access: bool) -> Vec<CaptureBackendInfo> {
         },
         automatic,
     ]
+}
+
+fn string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("bad stats json: {e}"))?;
+    Ok(StatsInfo {
+        frames: v["frames"].as_i64().unwrap_or(0),
+        bytes: v["bytes"].as_i64().unwrap_or(0),
+        state: v["state"].as_str().unwrap_or("unknown").into(),
+        fps: v["fps"].as_u64().unwrap_or(0) as u32,
+        kbps: v["kbps"].as_u64().unwrap_or(0) as u32,
+        fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
+        capture_fps: v["captureFps"].as_u64().unwrap_or(0) as u32,
+        encode_submit_fps: v["encodeSubmitFps"].as_u64().unwrap_or(0) as u32,
+        encode_output_fps: v["encodeOutputFps"].as_u64().unwrap_or(0) as u32,
+        rendered_fps: v["receiverRenderedFps"].as_u64().map(|value| value as u32),
+        capture_callbacks: v["captureCallbacks"].as_i64().unwrap_or(0),
+        encode_output_callbacks: v["encodeOutputCallbacks"].as_i64().unwrap_or(0),
+        encode_submit_failures: v["encodeSubmitFailures"].as_i64().unwrap_or(0),
+        encode_in_flight: v["encodeInFlight"].as_u64().unwrap_or(0) as u32,
+        dropped: v["dropped"].as_i64().unwrap_or(0),
+        network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
+        network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
+        recovery_frames_dropped: v["recoveryFramesDropped"].as_i64().unwrap_or(0),
+        udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
+        udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
+        recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
+        recovery_requests_suppressed: v["recoveryRequestsSuppressed"].as_i64().unwrap_or(0),
+        capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
+        capture_to_encode_us: v["captureToEncodeUs"].as_u64().unwrap_or(0),
+        max_capture_to_encode_us: v["maxCaptureToEncodeUs"].as_u64().unwrap_or(0),
+        capture_queue_wait_us: v["captureQueueWaitUs"].as_u64().unwrap_or(0),
+        max_capture_queue_wait_us: v["maxCaptureQueueWaitUs"].as_u64().unwrap_or(0),
+        encode_output_us: v["encodeOutputUs"].as_u64().unwrap_or(0),
+        max_encode_output_us: v["maxEncodeOutputUs"].as_u64().unwrap_or(0),
+        packetization_us: v["packetizationUs"].as_u64().unwrap_or(0),
+        max_packetization_us: v["maxPacketizationUs"].as_u64().unwrap_or(0),
+        send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
+        max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
+        send_pace_us: v["sendPaceUs"].as_u64().unwrap_or(0),
+        max_send_pace_us: v["maxSendPaceUs"].as_u64().unwrap_or(0),
+        pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
+        pending_frame_bytes: v["pendingFrameBytes"].as_u64().unwrap_or(0),
+        pending_frame_oldest_age_us: v["pendingFrameOldestAgeUs"].as_u64().unwrap_or(0),
+        capture_backend: v["captureBackend"]
+            .as_str()
+            .unwrap_or("screenCaptureKit")
+            .into(),
+        media_transport: v["mediaTransport"].as_str().unwrap_or("udp").into(),
+        first_capture_ms: v["firstCaptureMs"].as_u64().unwrap_or(0),
+        first_encode_ms: v["firstEncodeMs"].as_u64().unwrap_or(0),
+        first_send_ms: v["firstSendMs"].as_u64().unwrap_or(0),
+        current_bitrate: v["currentBitrate"].as_u64().unwrap_or(0) as u32,
+        encoder_mode: v["encoderMode"].as_str().unwrap_or("unknown").into(),
+        encoder_id: v["encoderID"].as_str().unwrap_or("unknown").into(),
+        encoder_hardware_accelerated: v["encoderHardwareAccelerated"].as_bool(),
+        encoder_preset: v["encoderPreset"].as_str().unwrap_or("unknown").into(),
+        encoder_profile: v["encoderProfile"].as_str().unwrap_or("unknown").into(),
+        encoder_applied_properties: string_array(&v, "encoderAppliedProperties"),
+        encoder_unsupported_properties: string_array(&v, "encoderUnsupportedProperties"),
+        encoder_rejected_properties: string_array(&v, "encoderRejectedProperties"),
+        encoder_fallback_reason: v["encoderFallbackReason"].as_str().map(str::to_owned),
+        quality_hint: v["qualityHint"].as_f64().map(|value| value as f32),
+        quality_override: v["qualityOverride"].as_f64().map(|value| value as f32),
+        quality_adaptation_checks: v["qualityAdaptationChecks"].as_i64().unwrap_or(0),
+        quality_adaptation_changes: v["qualityAdaptationChanges"].as_i64().unwrap_or(0),
+        quality_adaptation_rejections: v["qualityAdaptationRejections"].as_i64().unwrap_or(0),
+        quality_adaptation_last_status: v["qualityAdaptationLastStatus"]
+            .as_str()
+            .unwrap_or("not_checked")
+            .into(),
+        capture_interval_p95_us: v["captureIntervalP95Us"].as_u64().unwrap_or(0),
+        capture_to_encode_p95_us: v["captureToEncodeP95Us"].as_u64().unwrap_or(0),
+        capture_queue_wait_p95_us: v["captureQueueWaitP95Us"].as_u64().unwrap_or(0),
+        encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
+        packetization_p95_us: v["packetizationP95Us"].as_u64().unwrap_or(0),
+        encode_output_interval_p95_us: v["encodeOutputIntervalP95Us"].as_u64().unwrap_or(0),
+        send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
+        send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
+        last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),
+        last_au_fragments: v["lastAuFragments"].as_u64().unwrap_or(0) as u32,
+        last_au_parity: v["lastAuParity"].as_u64().unwrap_or(0) as u32,
+        last_au_datagrams: v["lastAuDatagrams"].as_u64().unwrap_or(0) as u32,
+        last_au_expected_datagrams: v["lastAuExpectedDatagrams"].as_u64().unwrap_or(0) as u32,
+        last_au_send_us: v["lastAuSendUs"].as_u64().unwrap_or(0),
+        last_au_is_keyframe: v["lastAuIsKeyframe"].as_bool().unwrap_or(false),
+        max_au_bytes: v["maxAuBytes"].as_u64().unwrap_or(0),
+        max_au_fragments: v["maxAuFragments"].as_u64().unwrap_or(0) as u32,
+        sent_datagrams: v["sentDatagrams"].as_i64().unwrap_or(0),
+        sent_parity_datagrams: v["sentParityDatagrams"].as_i64().unwrap_or(0),
+        receiver_frame_gaps: v["receiverFrameGaps"].as_i64().unwrap_or(0),
+        receiver_input_drops: v["receiverInputDrops"].as_i64().unwrap_or(0),
+        receiver_incomplete_aus: v["receiverIncompleteAus"]
+            .as_i64()
+            .or_else(|| v["receiverIncompleteAUs"].as_i64())
+            .unwrap_or(0),
+        receiver_stale_frames: v["receiverStaleFrames"].as_i64().unwrap_or(0),
+        receiver_stale_input_drops: v["receiverStaleInputDrops"].as_i64(),
+        receiver_output_burst_discards: v["receiverOutputBurstDiscards"].as_i64().unwrap_or(0),
+        receiver_rtt_ms: v["receiverRttMs"].as_u64().map(|value| value as u32),
+        receiver_wire_ms: v["receiverWireMs"].as_u64().map(|value| value as u32),
+        receiver_feedback_age_ms: v["receiverFeedbackAgeMs"].as_u64(),
+        error: v["error"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 impl CaptureBackend for FfiBackend {
@@ -400,93 +521,7 @@ impl CaptureBackend for FfiBackend {
                 .map_err(|e| e.to_string())?;
             let ptr = f(handle);
             let json = Self::take_string(ptr).ok_or("stats returned null")?;
-            let v: serde_json::Value =
-                serde_json::from_str(&json).map_err(|e| format!("bad stats json: {e}"))?;
-            Ok(StatsInfo {
-                frames: v["frames"].as_i64().unwrap_or(0),
-                bytes: v["bytes"].as_i64().unwrap_or(0),
-                state: v["state"].as_str().unwrap_or("unknown").into(),
-                fps: v["fps"].as_u64().unwrap_or(0) as u32,
-                kbps: v["kbps"].as_u64().unwrap_or(0) as u32,
-                fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
-                capture_fps: v["captureFps"].as_u64().unwrap_or(0) as u32,
-                encode_submit_fps: v["encodeSubmitFps"].as_u64().unwrap_or(0) as u32,
-                encode_output_fps: v["encodeOutputFps"].as_u64().unwrap_or(0) as u32,
-                rendered_fps: v["receiverRenderedFps"].as_u64().map(|value| value as u32),
-                capture_callbacks: v["captureCallbacks"].as_i64().unwrap_or(0),
-                encode_output_callbacks: v["encodeOutputCallbacks"].as_i64().unwrap_or(0),
-                encode_submit_failures: v["encodeSubmitFailures"].as_i64().unwrap_or(0),
-                encode_in_flight: v["encodeInFlight"].as_u64().unwrap_or(0) as u32,
-                dropped: v["dropped"].as_i64().unwrap_or(0),
-                network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
-                network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
-                recovery_frames_dropped: v["recoveryFramesDropped"].as_i64().unwrap_or(0),
-                udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
-                udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
-                recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
-                recovery_requests_suppressed: v["recoveryRequestsSuppressed"].as_i64().unwrap_or(0),
-                capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
-                capture_to_encode_us: v["captureToEncodeUs"].as_u64().unwrap_or(0),
-                max_capture_to_encode_us: v["maxCaptureToEncodeUs"].as_u64().unwrap_or(0),
-                capture_queue_wait_us: v["captureQueueWaitUs"].as_u64().unwrap_or(0),
-                max_capture_queue_wait_us: v["maxCaptureQueueWaitUs"].as_u64().unwrap_or(0),
-                encode_output_us: v["encodeOutputUs"].as_u64().unwrap_or(0),
-                max_encode_output_us: v["maxEncodeOutputUs"].as_u64().unwrap_or(0),
-                send_block_us: v["sendBlockUs"].as_u64().unwrap_or(0),
-                max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
-                send_pace_us: v["sendPaceUs"].as_u64().unwrap_or(0),
-                max_send_pace_us: v["maxSendPaceUs"].as_u64().unwrap_or(0),
-                pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
-                pending_frame_bytes: v["pendingFrameBytes"].as_u64().unwrap_or(0),
-                pending_frame_oldest_age_us: v["pendingFrameOldestAgeUs"].as_u64().unwrap_or(0),
-                capture_backend: v["captureBackend"]
-                    .as_str()
-                    .unwrap_or("screenCaptureKit")
-                    .into(),
-                media_transport: v["mediaTransport"].as_str().unwrap_or("udp").into(),
-                first_capture_ms: v["firstCaptureMs"].as_u64().unwrap_or(0),
-                first_encode_ms: v["firstEncodeMs"].as_u64().unwrap_or(0),
-                first_send_ms: v["firstSendMs"].as_u64().unwrap_or(0),
-                current_bitrate: v["currentBitrate"].as_u64().unwrap_or(0) as u32,
-                capture_interval_p95_us: v["captureIntervalP95Us"].as_u64().unwrap_or(0),
-                capture_to_encode_p95_us: v["captureToEncodeP95Us"].as_u64().unwrap_or(0),
-                capture_queue_wait_p95_us: v["captureQueueWaitP95Us"].as_u64().unwrap_or(0),
-                encode_output_p95_us: v["encodeOutputP95Us"].as_u64().unwrap_or(0),
-                encode_output_interval_p95_us: v["encodeOutputIntervalP95Us"].as_u64().unwrap_or(0),
-                send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
-                send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
-                last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),
-                last_au_fragments: v["lastAuFragments"].as_u64().unwrap_or(0) as u32,
-                last_au_parity: v["lastAuParity"].as_u64().unwrap_or(0) as u32,
-                last_au_datagrams: v["lastAuDatagrams"].as_u64().unwrap_or(0) as u32,
-                last_au_expected_datagrams: v["lastAuExpectedDatagrams"]
-                    .as_u64()
-                    .unwrap_or(0) as u32,
-                last_au_send_us: v["lastAuSendUs"].as_u64().unwrap_or(0),
-                last_au_is_keyframe: v["lastAuIsKeyframe"].as_bool().unwrap_or(false),
-                max_au_bytes: v["maxAuBytes"].as_u64().unwrap_or(0),
-                max_au_fragments: v["maxAuFragments"].as_u64().unwrap_or(0) as u32,
-                sent_datagrams: v["sentDatagrams"].as_i64().unwrap_or(0),
-                sent_parity_datagrams: v["sentParityDatagrams"].as_i64().unwrap_or(0),
-                receiver_frame_gaps: v["receiverFrameGaps"].as_i64().unwrap_or(0),
-                receiver_input_drops: v["receiverInputDrops"].as_i64().unwrap_or(0),
-                receiver_incomplete_aus: v["receiverIncompleteAus"]
-                    .as_i64()
-                    .or_else(|| v["receiverIncompleteAUs"].as_i64())
-                    .unwrap_or(0),
-                receiver_stale_frames: v["receiverStaleFrames"].as_i64().unwrap_or(0),
-                receiver_stale_input_drops: v["receiverStaleInputDrops"].as_i64(),
-                receiver_output_burst_discards: v["receiverOutputBurstDiscards"]
-                    .as_i64()
-                    .unwrap_or(0),
-                receiver_rtt_ms: v["receiverRttMs"].as_u64().map(|value| value as u32),
-                receiver_wire_ms: v["receiverWireMs"].as_u64().map(|value| value as u32),
-                receiver_feedback_age_ms: v["receiverFeedbackAgeMs"].as_u64(),
-                error: v["error"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-            })
+            parse_stats_json(&json)
         }
     }
 
@@ -532,6 +567,32 @@ impl CaptureBackend for FfiBackend {
             Err(message)
         }
     }
+
+    fn set_quality_override(&self, handle: u32, quality: Option<f32>) -> Result<(), String> {
+        let lib = self.lib()?;
+        let quality_percent = quality
+            .map(|value| (value * 100.0).round() as i32)
+            .unwrap_or(0);
+        unsafe {
+            let function: Symbol<unsafe extern "C" fn(u32, i32) -> i32> = lib
+                .get(b"leftcar_capture_set_quality_v1")
+                .map_err(|error| error.to_string())?;
+            let result = function(handle, quality_percent);
+            if result == 0 {
+                return Ok(());
+            }
+            let error_function: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
+                .get(b"leftcar_capture_last_error_v2")
+                .map_err(|error| error.to_string())?;
+            let pointer = error_function();
+            let message = if pointer.is_null() {
+                format!("set quality override failed with rc={result}")
+            } else {
+                CStr::from_ptr(pointer).to_string_lossy().into_owned()
+            };
+            Err(message)
+        }
+    }
 }
 
 pub fn default_dylib_path() -> Option<PathBuf> {
@@ -548,6 +609,31 @@ pub fn dylib_report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_stats_json_preserves_encoder_diagnostics() {
+        let stats = parse_stats_json(
+            r#"{
+  "frames":1,
+  "bytes":2,
+  "state":"running",
+  "encoderMode":"ave",
+  "encoderID":"com.apple.videotoolbox.videoencoder.ave.avc",
+  "encoderHardwareAccelerated":true,
+  "encoderPreset":"high-speed",
+  "encoderProfile":"main",
+  "encoderAppliedProperties":["HighSpeed","Quality"],
+  "encoderUnsupportedProperties":["SuggestedLookAheadFrameCount"],
+  "encoderRejectedProperties":["Quality=-12900"],
+  "encoderFallbackReason":null
+}"#,
+        )
+        .unwrap();
+        assert_eq!(stats.encoder_mode, "ave");
+        assert_eq!(stats.encoder_hardware_accelerated, Some(true));
+        assert_eq!(stats.encoder_applied_properties, ["HighSpeed", "Quality"]);
+        assert_eq!(stats.encoder_rejected_properties, ["Quality=-12900"]);
+    }
 
     #[test]
     fn missing_dylib_reports_error() {

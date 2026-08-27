@@ -50,6 +50,9 @@ pub trait CaptureBackend: Send + Sync {
     fn set_input_enabled(&self, _handle: u32, _enabled: bool) -> Result<(), String> {
         Err("remote input is unavailable in this capture backend".into())
     }
+    fn set_quality_override(&self, _handle: u32, _quality: Option<f32>) -> Result<(), String> {
+        Err("manual quality override is unavailable in this capture backend".into())
+    }
 }
 
 /// In-memory backend for tests and UI development without the shim dylib.
@@ -131,6 +134,8 @@ impl CaptureBackend for FakeBackend {
             max_capture_queue_wait_us: 0,
             encode_output_us: 0,
             max_encode_output_us: 0,
+            packetization_us: 0,
+            max_packetization_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
             send_pace_us: 0,
@@ -144,10 +149,26 @@ impl CaptureBackend for FakeBackend {
             first_encode_ms: 25,
             first_send_ms: 26,
             current_bitrate: 12_000_000,
+            encoder_mode: "unknown".into(),
+            encoder_id: "unknown".into(),
+            encoder_hardware_accelerated: None,
+            encoder_preset: "unknown".into(),
+            encoder_profile: "unknown".into(),
+            encoder_applied_properties: Vec::new(),
+            encoder_unsupported_properties: Vec::new(),
+            encoder_rejected_properties: Vec::new(),
+            encoder_fallback_reason: None,
+            quality_hint: None,
+            quality_override: None,
+            quality_adaptation_checks: 0,
+            quality_adaptation_changes: 0,
+            quality_adaptation_rejections: 0,
+            quality_adaptation_last_status: "not_checked".into(),
             capture_interval_p95_us: 16_667,
             capture_to_encode_p95_us: 8_000,
             capture_queue_wait_p95_us: 1_000,
             encode_output_p95_us: 7_000,
+            packetization_p95_us: 0,
             encode_output_interval_p95_us: 11_111,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
@@ -184,6 +205,14 @@ impl CaptureBackend for FakeBackend {
     }
 
     fn set_input_enabled(&self, handle: u32, _enabled: bool) -> Result<(), String> {
+        if handle == 7 {
+            Ok(())
+        } else {
+            Err("no such handle".into())
+        }
+    }
+
+    fn set_quality_override(&self, handle: u32, _quality: Option<f32>) -> Result<(), String> {
         if handle == 7 {
             Ok(())
         } else {

@@ -20,87 +20,14 @@ import {
   X,
 } from "lucide-react";
 import { trayStatus, type HostSnapshotView } from "./hostState";
+import SessionInspector from "./SessionInspector";
+import type { SessionRow } from "./sessionTypes";
 import PairingPanel from "./PairingPanel";
 import {
   createTerminationNotice,
   isTerminalSession,
   type TerminationNotice,
 } from "./streamTermination";
-
-interface SessionRow {
-  session: number;
-  sourceIndex: number;
-  sourceName: string;
-  viewerAddr: string;
-  state: string;
-  fps: number;
-  kbps: number;
-  fpsTarget?: number;
-  captureFps?: number;
-  encodeSubmitFps?: number;
-  encodeOutputFps?: number;
-  renderedFps?: number | null;
-  captureCallbacks?: number;
-  encodeOutputCallbacks?: number;
-  encodeSubmitFailures?: number;
-  encodeInFlight?: number;
-  inputEnabled: boolean;
-  inputRateHz: number;
-  dropped?: number;
-  networkDropped?: number;
-  networkQueueDropped?: number;
-  recoveryFramesDropped?: number;
-  recoveryKeyframes?: number;
-  recoveryRequestsSuppressed?: number;
-  udpSendFailures?: number;
-  captureQueueDropped?: number;
-  captureToEncodeUs?: number;
-  maxCaptureToEncodeUs?: number;
-  captureQueueWaitUs?: number;
-  maxCaptureQueueWaitUs?: number;
-  encodeOutputUs?: number;
-  maxEncodeOutputUs?: number;
-  sendBlockUs?: number;
-  maxSendBlockUs?: number;
-  pendingFrame?: number;
-  pendingFrameBytes?: number;
-  pendingFrameOldestAgeUs?: number;
-  frames?: number;
-  bytes?: number;
-  captureBackend?: string;
-  mediaTransport?: string;
-  firstCaptureMs?: number;
-  firstEncodeMs?: number;
-  firstSendMs?: number;
-  currentBitrate?: number;
-  captureIntervalP95Us?: number;
-  captureToEncodeP95Us?: number;
-  captureQueueWaitP95Us?: number;
-  encodeOutputP95Us?: number;
-  encodeOutputIntervalP95Us?: number;
-  sendBlockP95Us?: number;
-  sendPaceP95Us?: number;
-  lastAuBytes?: number;
-  lastAuFragments?: number;
-  lastAuParity?: number;
-  lastAuDatagrams?: number;
-  lastAuExpectedDatagrams?: number;
-  lastAuSendUs?: number;
-  lastAuIsKeyframe?: boolean;
-  maxAuBytes?: number;
-  maxAuFragments?: number;
-  sentDatagrams?: number;
-  sentParityDatagrams?: number;
-  receiverFrameGaps?: number;
-  receiverInputDrops?: number;
-  receiverIncompleteAus?: number;
-  receiverStaleFrames?: number;
-  receiverOutputBurstDiscards?: number;
-  receiverRttMs?: number | null;
-  receiverWireMs?: number | null;
-  receiverFeedbackAgeMs?: number | null;
-  error?: string | null;
-}
 
 function hostErrorMessage(cause: unknown): string {
   const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
@@ -597,6 +524,8 @@ interface StreamsListViewProps {
   showInspector: boolean;
   onToggleInspector: () => void;
   onToggleInput: (session: SessionRow) => Promise<void>;
+  onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
+  qualityBusy: number | null;
   onForceStop: (session: SessionRow) => void;
 }
 
@@ -607,6 +536,8 @@ function StreamsListView({
   showInspector,
   onToggleInspector,
   onToggleInput,
+  onSetQuality,
+  qualityBusy,
   onForceStop,
 }: StreamsListViewProps) {
   return (
@@ -640,6 +571,8 @@ function StreamsListView({
             inputBusy={inputBusy === session.session}
             showInspector={showInspector}
             onToggleInput={onToggleInput}
+            onSetQuality={onSetQuality}
+            qualityBusy={qualityBusy === session.session}
             onForceStop={onForceStop}
           />
         ))}
@@ -662,6 +595,7 @@ function Dashboard() {
   } = useHostStatus();
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
+  const [qualityBusy, setQualityBusy] = useState<number | null>(null);
   const [showInspector, setShowInspector] = useState(false);
   const [showPairingModal, setShowPairingModal] = useState(false);
   const [pendingStopSession, setPendingStopSession] = useState<SessionRow | null>(null);
@@ -743,6 +677,22 @@ function Dashboard() {
     }
   };
 
+  const setSessionQuality = async (session: SessionRow, quality: number | null) => {
+    setQualityBusy(session.session);
+    try {
+      await invoke("set_session_quality", {
+        session: session.session,
+        quality,
+      });
+      setInputActionError(null);
+      await refresh();
+    } catch (cause) {
+      setInputActionError(hostErrorMessage(cause));
+    } finally {
+      setQualityBusy(null);
+    }
+  };
+
   const forceStopSession = async (session: SessionRow) => {
     setInputBusy(session.session);
     try {
@@ -808,6 +758,8 @@ function Dashboard() {
             showInspector={showInspector}
             onToggleInspector={() => setShowInspector((prev) => !prev)}
             onToggleInput={toggleSessionInput}
+            onSetQuality={setSessionQuality}
+            qualityBusy={qualityBusy}
             onForceStop={setPendingStopSession}
           />
         ) : (
@@ -846,6 +798,8 @@ interface SessionCardProps {
   inputBusy: boolean;
   showInspector: boolean;
   onToggleInput: (session: SessionRow) => Promise<void>;
+  onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
+  qualityBusy: boolean;
   onForceStop: (session: SessionRow) => void;
 }
 
@@ -855,6 +809,8 @@ function SessionCard({
   inputBusy,
   showInspector,
   onToggleInput,
+  onSetQuality,
+  qualityBusy,
   onForceStop,
 }: SessionCardProps) {
   const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
@@ -864,6 +820,8 @@ function SessionCard({
     : session.mediaTransport === "udp"
       ? "Wi-Fi UDP"
       : session.mediaTransport || "확인 중";
+  const qualitySupported = session.qualityHint != null;
+  const qualityPercent = Math.round((session.qualityOverride ?? session.qualityHint ?? 0.5) * 100);
 
   return (
     <div className="stream-card-item">
@@ -896,7 +854,7 @@ function SessionCard({
           </button>
           <button
             className="btn-stop-stream"
-            disabled={inputBusy}
+            disabled={inputBusy || qualityBusy}
             onClick={() => onForceStop(session)}
             title="이 화면 공유 종료"
             aria-label={`${session.sourceName} 화면 공유 종료`}
@@ -945,168 +903,14 @@ function SessionCard({
       </div>
 
       {showInspector && (
-        <div className="inspector-panel">
-          <span className="inspector-header">연결 상세 정보</span>
-          <div className="inspector-grid">
-            <div className="inspector-item">
-              <span className="inspector-item-label">단계별 FPS (캡처 / 제출 / 출력)</span>
-              <span className="inspector-item-value">
-                {session.captureFps ?? "측정 중"}
-                {" / "}
-                {session.encodeSubmitFps ?? session.fps}
-                {" / "}
-                {session.encodeOutputFps ?? "측정 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">실제 Android 렌더 FPS</span>
-              <span className="inspector-item-value">
-                {session.renderedFps != null ? `${session.renderedFps} FPS` : "feedback 대기 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">인코더 제출 실패 / in-flight</span>
-              <span className="inspector-item-value">
-                {session.encodeSubmitFailures ?? 0}
-                {" / "}
-                {session.encodeInFlight ?? 0}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">인코더 출력 간격 p95</span>
-              <span className="inspector-item-value">
-                {session.encodeOutputIntervalP95Us != null
-                  ? `${(session.encodeOutputIntervalP95Us / 1000).toFixed(1)}ms`
-                  : "측정 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">화면 가져오기</span>
-              <span className="inspector-item-value">
-                {session.captureToEncodeUs !== undefined
-                  ? `${(session.captureToEncodeUs / 1000).toFixed(1)}ms`
-                  : "<2ms"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">처리 대기</span>
-              <span className="inspector-item-value">
-                {session.captureQueueWaitUs !== undefined
-                  ? `${(session.captureQueueWaitUs / 1000).toFixed(1)}ms`
-                  : "0.1ms"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">영상 처리</span>
-              <span className="inspector-item-value">
-                {session.encodeOutputUs !== undefined
-                  ? `${(session.encodeOutputUs / 1000).toFixed(1)}ms`
-                  : "<2ms"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">네트워크 전송</span>
-              <span className="inspector-item-value">
-                {session.sendBlockUs !== undefined
-                  ? `${(session.sendBlockUs / 1000).toFixed(1)}ms`
-                  : "0.2ms"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">실제 전송 경로</span>
-              <span className="inspector-item-value">{transportLabel}</span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">수신 RTT / 디코더</span>
-              <span className="inspector-item-value">
-                {session.receiverRttMs != null ? `${session.receiverRttMs}ms` : "측정 중"}
-                {" / "}
-                {session.receiverWireMs != null ? `${session.receiverWireMs}ms` : "측정 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">수신 손실 / feedback</span>
-              <span className="inspector-item-value">
-                {(session.receiverFrameGaps ?? 0) + (session.receiverIncompleteAus ?? 0)}
-                {" / "}
-                {session.receiverFeedbackAgeMs != null
-                  ? `${session.receiverFeedbackAgeMs}ms 전`
-                  : "대기 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">Host 큐 드롭</span>
-              <span className="inspector-item-value">
-                일반 {Math.max(0, (session.networkQueueDropped ?? 0) - (session.recoveryFramesDropped ?? 0))}
-                {" / 복구 "}
-                {session.recoveryFramesDropped ?? 0}
-                {" / 캡처 "}
-                {session.captureQueueDropped ?? 0}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">Host 큐 점유 / oldest</span>
-              <span className="inspector-item-value">
-                {session.pendingFrameBytes ?? 0}B
-                {" / "}
-                {((session.pendingFrameOldestAgeUs ?? 0) / 1000).toFixed(1)}ms
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">최근 AU burst</span>
-              <span className="inspector-item-value">
-                {session.lastAuBytes !== undefined
-                  ? `${(session.lastAuBytes / 1024).toFixed(0)}KB · ${session.lastAuFragments ?? 0} + ${session.lastAuParity ?? 0}개 · ${((session.lastAuSendUs ?? 0) / 1000).toFixed(1)}ms`
-                  : "측정 중"}
-                {session.lastAuIsKeyframe ? " · IDR" : ""}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">UDP datagram</span>
-              <span className="inspector-item-value">
-                {session.sentDatagrams ?? 0}개 전송 · 실패 {session.udpSendFailures ?? 0}
-                {" · parity "}
-                {session.sentParityDatagrams ?? 0}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">복구 요청 / IDR</span>
-              <span className="inspector-item-value">
-                {session.recoveryRequestsSuppressed ?? 0} 억제 / {session.recoveryKeyframes ?? 0}회
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">느린 경우 화면 처리 / 전송</span>
-              <span className="inspector-item-value">
-                {session.captureToEncodeP95Us
-                  ? `${(session.captureToEncodeP95Us / 1000).toFixed(1)}ms`
-                  : "1.2ms"} / {session.sendBlockP95Us ? `${(session.sendBlockP95Us / 1000).toFixed(1)}ms` : "0.5ms"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">UDP pacing p95</span>
-              <span className="inspector-item-value">
-                {session.sendPaceP95Us !== undefined
-                  ? `${(session.sendPaceP95Us / 1000).toFixed(1)}ms`
-                  : "측정 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">현재 인코더 목표</span>
-              <span className="inspector-item-value">
-                {session.currentBitrate !== undefined
-                  ? `${(session.currentBitrate / 1_000_000).toFixed(1)}Mbps`
-                  : "측정 중"}
-              </span>
-            </div>
-            <div className="inspector-item">
-              <span className="inspector-item-label">화면 처리 방식</span>
-              <span className="inspector-item-value" style={{ textTransform: "capitalize" }}>
-                {session.captureBackend || "ScreenCaptureKit"}
-              </span>
-            </div>
-          </div>
-        </div>
+        <SessionInspector
+          session={session}
+          transportLabel={transportLabel}
+          qualitySupported={qualitySupported}
+          qualityPercent={qualityPercent}
+          qualityBusy={qualityBusy}
+          onSetQuality={onSetQuality}
+        />
       )}
 
       <div className="stream-card-footer">

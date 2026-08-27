@@ -82,8 +82,10 @@ impl CaptureBackend for RecordingBackend {
             max_capture_to_encode_us: 0,
             capture_queue_wait_us: 0,
             max_capture_queue_wait_us: 0,
-            encode_output_us: 0,
-            max_encode_output_us: 0,
+        encode_output_us: 0,
+        max_encode_output_us: 0,
+        packetization_us: 0,
+        max_packetization_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
             send_pace_us: 0,
@@ -97,10 +99,26 @@ impl CaptureBackend for RecordingBackend {
             first_encode_ms: 25,
             first_send_ms: 26,
             current_bitrate: 12_000_000,
+            encoder_mode: "ave".into(),
+            encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
+            encoder_hardware_accelerated: Some(true),
+            encoder_preset: "high-speed".into(),
+            encoder_profile: "main".into(),
+            encoder_applied_properties: vec!["HighSpeed".into(), "Quality".into()],
+            encoder_unsupported_properties: vec!["SuggestedLookAheadFrameCount".into()],
+            encoder_rejected_properties: vec!["Quality=-12900".into()],
+            encoder_fallback_reason: None,
+            quality_hint: None,
+            quality_override: None,
+            quality_adaptation_checks: 0,
+            quality_adaptation_changes: 0,
+            quality_adaptation_rejections: 0,
+            quality_adaptation_last_status: "not_checked".into(),
             capture_interval_p95_us: 16_667,
             capture_to_encode_p95_us: 8_000,
             capture_queue_wait_p95_us: 1_000,
-            encode_output_p95_us: 7_000,
+        encode_output_p95_us: 7_000,
+        packetization_p95_us: 0,
             encode_output_interval_p95_us: 11_111,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
@@ -206,7 +224,32 @@ async fn test_catalog_query() {
 
 #[tokio::test]
 async fn test_full_stream_lifecycle() {
-    let (addr, p) = spawn_test_server().await;
+    let p = pairing();
+    let server = Arc::new(ControlServer::new(
+        Arc::new(RecordingBackend {
+            displays: vec![
+                DisplayInfo {
+                    index: 0,
+                    name: "Main Display".into(),
+                    width: 1920,
+                    height: 1080,
+                },
+                DisplayInfo {
+                    index: 1,
+                    name: "Secondary Display".into(),
+                    width: 2560,
+                    height: 1440,
+                },
+            ],
+            started_ips: Mutex::new(Vec::new()),
+        }),
+        p.clone(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        server.run(listener).await;
+    });
     let mut sock = TcpStream::connect(addr).await.unwrap();
     let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
 
@@ -231,6 +274,22 @@ async fn test_full_stream_lifecycle() {
     assert!(status_resp.contains("\"fps\":90"), "{status_resp}");
     assert!(
         status_resp.contains("\"sourceName\":\"Main Display\""),
+        "{status_resp}"
+    );
+    assert!(
+        status_resp.contains("\"encoderMode\":\"ave\""),
+        "{status_resp}"
+    );
+    assert!(
+        status_resp.contains("\"encoderID\":\"com.apple.videotoolbox.videoencoder.ave.avc\""),
+        "{status_resp}"
+    );
+    assert!(
+        status_resp.contains("\"encoderHardwareAccelerated\":true"),
+        "{status_resp}"
+    );
+    assert!(
+        status_resp.contains("\"encoderAppliedProperties\":[\"HighSpeed\",\"Quality\"]"),
         "{status_resp}"
     );
 

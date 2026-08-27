@@ -584,3 +584,49 @@ ADB를 호출하지 않고 2026-08-26 현재 working tree에서 실행했다. �
   4fps, 166KB IDR burst와 recovery 199회가 발생했지만, 고변화 영상 부하와
   프로파일 효과를 분리하지 못했다. Baseline 결론은 보류하고 동일 영상·
   동일 시간의 Main/Baseline 재실험 대상으로 남긴다.
+
+## 13. 고변화 A/B/C quick matrix (2026-08-27)
+
+동일한 `TB710FU`, `Display 0`, Wi-Fi UDP, 움직이는 배경(`Option+0`)에서
+30초 quick run을 수집했다. 두 Android screenshot의 hash가 달라 실제 화면
+변화를 확인했으며, 아래 수치는 photon-to-photon 지연이 아니라 software
+pipeline 계측이다.
+
+| run | Host capture / encode | Android render | capture age p95 | stall / queue | 결과 |
+| --- | --- | --- | --- | --- | --- |
+| A: 4K RTVC H.264 | 42.79 / 30.69fps | 31.16fps | 929ms | Host log gap 2.81s, Android gap 3.76s, Host queue oldest 1.08s | 실패 |
+| B: 4K AVE H.264 | AVE 표본 없음 | AVE 표본 없음 | 미측정 | `VTCompressionSessionPrepareToEncodeFrames`가 두 번 모두 `kVTSessionMalfunctionErr(-17691)`로 실패하고 RTVC로 fallback | 실패 |
+| C: 1440p RTVC H.264 | 55.23 / 50.68fps | 41.22fps | 217ms | Host log gap 2.04s, queue oldest max 145ms | 실패 |
+
+- A artifact는 `/tmp/leftcar-4k-rtvc-quick-r2.*`이다. encoder output interval
+  p50/p95는 22.0/45.5ms, encode output p95는 41.8ms였다. Android
+  `decoderInputDrops=0`, `outputDrops=1`, `frameGaps=1`이었고 gap id 3394는
+  표본 안에서 recovery IDR과 짝지어지지 않았다.
+- B는 이전 RTVC 세션을 6초 동안 완전히 종료한 뒤에도 같은 AVE prepare
+  실패가 재현됐다. 따라서 이번 run에서는 일시적인 encoder resource 경합으로
+  판정하지 않는다. AVE가 준비되지 않았으므로 fallback RTVC 수치를 AVE
+  성능으로 기록하지 않는다.
+- C artifact는 `/tmp/leftcar-1440-rtvc-quick-r2.*`이다. encoder output
+  interval p50/p95는 17.0/49.3ms, encode output p95는 30.3ms였다. Android
+  rolling 1-second p5는 30.52fps, `decoderInputDrops=0`, `outputDrops=1`,
+  `frameGaps=3`이었다.
+- A와 C 모두 Host encode output이 이미 55fps 미만이므로 transport나 decoder를
+  주원인으로 단정하지 않는다. 동시에 C의 Host 50.68fps보다 Android 41.22fps가
+  더 낮아 수신/reassembly/recovery 구간에도 별도 손실이 있다. 다음 분기는
+  계획대로 AVE HEVC를 별도 빌드로 측정하며, HEVC도 55fps gate를 넘지 못하면
+  단일 세션 4K60 달성을 주장하지 않는다.
+
+### 13.1 AVE HEVC 후속 결과
+
+별도 signed Host에서 4K `video`의 1차 후보를 exact hardware AVE HEVC
+(`com.apple.videotoolbox.videoencoder.ave.hevc`)로 변경했다. Swift 정책,
+CF2 HEVC parameter-set, Rust decoder 계약과 signed-app build는 통과했지만,
+실기기 세션은 H.264와 동일하게 `VTCompressionSessionPrepareToEncodeFrames`에서
+`kVTSessionMalfunctionErr(-17691)`로 실패했다. Host는 설계한 RTVC H.264
+fallback으로 전환했으며 Android에 HEVC frame은 전달되지 않았다.
+
+따라서 HEVC를 RTVC fallback 수치와 비교해 채택하지 않는다. H.264와 HEVC 모두
+AVE prepare 이전 단계까지는 도달하지만 실제 encode sample을 만들지 못했으므로,
+이번 단일-session 계획에서는 H.264 생산 정책을 복원한다. 후속 조사는 AVE
+공통 property/preset을 한 번에 조합하지 말고, 별도 진단 SPEC에서 baseline
+session부터 속성을 하나씩 추가해 `-17691`을 만드는 최초 조합을 찾아야 한다.

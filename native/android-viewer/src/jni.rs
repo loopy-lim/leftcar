@@ -15,7 +15,8 @@ use crate::input_protocol::{
 };
 use crate::media_datagram::{
     classify_frame_gap, parse_fragment, parse_parity, recovery_request_suppressed,
-    select_live_edge_frames, should_feed_frame, stale_frame_budget_ms, stale_streak_advance,
+    rendered_fps_from_feedback, select_live_edge_frames, should_feed_frame,
+    should_resync_after_network_loss, stale_frame_budget_ms, stale_streak_advance,
     CompletedFrameSequencer, FecGroup, FrameFragment, FrameGapReason, FrameReassembler,
     ReassembledFrame, ReceiverPressure, RecoveryRequestGate, RestoredFragment, PARITY_MARKER,
 };
@@ -470,9 +471,22 @@ fn reset_decoder(
 }
 
 /// A missing encoded AU invalidates the reference chain of subsequent delta
-/// frames. Keep the MediaCodec instance running, but wait for the next IDR keyframe
-/// before feeding additional frames to the decoder.
-fn resync_decoder_after_frame_gap(awaiting_keyframe: &mut bool) {
+/// frames. Flush the codec before waiting for the next IDR so any queued
+/// output that was decoded from the damaged chain cannot keep the Surface in a
+/// corrupted state.
+fn resync_decoder_after_frame_gap(
+    decoder: &mut Option<viewer_decoder::AndroidDecoder>,
+    awaiting_keyframe: &mut bool,
+) {
+    if let Some(Err(error)) = decoder.as_mut().map(|decoder| decoder.flush()) {
+        log_info!(
+            "decoder flush during recovery failed: {}; rebuilding",
+            error
+        );
+        if let Some(mut decoder) = decoder.take() {
+            decoder.stop();
+        }
+    }
     *awaiting_keyframe = true;
 }
 
@@ -1242,6 +1256,11 @@ fn spawn_live_stream_renderer(
                 if !viewer_control_token.is_empty()
                     && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL
                 {
+                    let feedback_now = std::time::Instant::now();
+                    let feedback_elapsed_ms = feedback_now
+                        .duration_since(last_latency_probe)
+                        .as_millis()
+                        .max(1) as u64;
                     latency_probe_sequence = latency_probe_sequence.wrapping_add(1);
                     send_latency_probe(
                         &control_socket,
@@ -1250,9 +1269,11 @@ fn spawn_live_stream_renderer(
                         latency_probe_sequence,
                     );
                     let rendered_frames = control_clone.rendered_frames.load(Ordering::Relaxed);
-                    let rendered_fps = rendered_frames
-                        .saturating_sub(last_feedback_rendered_frames)
-                        .min(u64::from(u16::MAX)) as u16;
+                    let rendered_fps = rendered_fps_from_feedback(
+                        rendered_frames,
+                        last_feedback_rendered_frames,
+                        feedback_elapsed_ms,
+                    );
                     last_feedback_rendered_frames = rendered_frames;
                     send_receiver_feedback(
                         &control_socket,
@@ -1263,7 +1284,7 @@ fn spawn_live_stream_renderer(
                         &control_clone,
                         rendered_fps,
                     );
-                    last_latency_probe = std::time::Instant::now();
+                    last_latency_probe = feedback_now;
                     // A probe response that never arrives must decay the
                     // smoothed estimates instead of freezing them: the host's
                     // congestion controller reads these values via LCF1 and a
@@ -1646,7 +1667,7 @@ fn spawn_live_stream_renderer(
                     // frame-id observation epoch. Counting its jump from the
                     // discarded stale frame would be another false loss.
                     last_frame_id = None;
-                    resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                    resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe);
                     request_idr_debounced(
                         &control_socket,
                         peer,
@@ -1682,20 +1703,25 @@ fn spawn_live_stream_renderer(
                             control_clone
                                 .frame_gaps
                                 .store(renderer_stats.frame_gaps, Ordering::Relaxed);
+                            let hard_recovery = should_resync_after_network_loss(missing, keyframe);
                             log_info!(
                                 "UDP access-unit gap detected at id={} reason=networkLoss missing={} hardRecovery={}",
                                 frame.id,
                                 missing,
-                                !keyframe && missing >= 2
+                                hard_recovery
                             );
                             if keyframe {
                                 awaiting_keyframe = false;
-                            } else if missing >= 2 {
-                                // A single missing AU can often be concealed
-                                // by MediaCodec. Do not turn every isolated
-                                // Wi-Fi loss into a keyframe burst; require a
-                                // larger hole or an actual decoder rejection.
-                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                            } else if hard_recovery {
+                                // A larger hole almost certainly invalidates
+                                // the reference chain. Flush only here; a
+                                // single missing AU stays on the live path
+                                // and lets MediaCodec conceal the gap.
+                                last_frame_id = None;
+                                resync_decoder_after_frame_gap(
+                                    &mut decoder,
+                                    &mut awaiting_keyframe,
+                                );
                                 request_idr_debounced(
                                     &control_socket,
                                     peer,
@@ -1721,7 +1747,11 @@ fn spawn_live_stream_renderer(
                                 // live-edge policy. Start one coalesced
                                 // recovery boundary; the outer gate prevents
                                 // another IDR request for this same episode.
-                                resync_decoder_after_frame_gap(&mut awaiting_keyframe);
+                                last_frame_id = None;
+                                resync_decoder_after_frame_gap(
+                                    &mut decoder,
+                                    &mut awaiting_keyframe,
+                                );
                                 request_idr_debounced(
                                     &control_socket,
                                     peer,
@@ -1746,48 +1776,56 @@ fn spawn_live_stream_renderer(
                     }
 
                     if should_feed_frame(gap_reason, keyframe) {
-                        if let Some(dec) = decoder.as_mut() {
-                            if !(awaiting_keyframe && !keyframe) {
-                                match feed_and_render(
-                                    dec,
+                        let outcome = if !(awaiting_keyframe && !keyframe) {
+                            decoder.as_mut().map(|decoder| {
+                                feed_and_render(
+                                    decoder,
                                     &frame,
                                     &mut aus,
                                     fps,
                                     &mut renderer_stats,
                                     &control_clone,
-                                ) {
-                                    FeedOutcome::Queued => {
-                                        awaiting_keyframe = false;
-                                        if keyframe {
-                                            recovery_gate.recovered();
-                                        }
-                                    }
-                                    FeedOutcome::ResyncRequired => {
-                                        resync_decoder_after_frame_gap(&mut awaiting_keyframe);
-                                        request_idr_debounced(
-                                            &control_socket,
-                                            peer,
-                                            &viewer_control_token,
-                                            &mut recovery_gate,
-                                            &control_clone,
-                                        );
-                                    }
-                                    FeedOutcome::FatalError => {
-                                        reset_decoder(
-                                            &mut decoder,
-                                            &mut codec_config,
-                                            &mut awaiting_keyframe,
-                                        );
-                                        request_idr_debounced(
-                                            &control_socket,
-                                            peer,
-                                            &viewer_control_token,
-                                            &mut recovery_gate,
-                                            &control_clone,
-                                        );
-                                    }
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        match outcome {
+                            Some(FeedOutcome::Queued) => {
+                                awaiting_keyframe = false;
+                                if keyframe {
+                                    recovery_gate.recovered();
                                 }
                             }
+                            Some(FeedOutcome::ResyncRequired) => {
+                                last_frame_id = None;
+                                resync_decoder_after_frame_gap(
+                                    &mut decoder,
+                                    &mut awaiting_keyframe,
+                                );
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                    &control_clone,
+                                );
+                            }
+                            Some(FeedOutcome::FatalError) => {
+                                reset_decoder(
+                                    &mut decoder,
+                                    &mut codec_config,
+                                    &mut awaiting_keyframe,
+                                );
+                                request_idr_debounced(
+                                    &control_socket,
+                                    peer,
+                                    &viewer_control_token,
+                                    &mut recovery_gate,
+                                    &control_clone,
+                                );
+                            }
+                            None => {}
                         }
                     }
                 }
