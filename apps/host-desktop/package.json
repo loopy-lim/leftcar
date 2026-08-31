@@ -10,14 +10,12 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@leftcar/ui-tokens": "workspace:*",
     "@tauri-apps/api": "^2",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",
     "qrcode": "^1.5.4",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "tailwind-merge": "^3.6.0"
+    "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

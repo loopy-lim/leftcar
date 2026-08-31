@@ -11,15 +11,20 @@ import {
   RefreshCw,
   ShieldCheck,
   Smartphone,
-  Trash2,
+  Laptop,
 } from "lucide-react";
+import { bannerAlertVariants, buttonVariants } from "./lib/variants";
+import {
+  getTranslation,
+  type SupportedLanguage,
+  type TranslationSchema,
+} from "@leftcar/ui-tokens";
 
 interface PairingSessionView {
   qr_payload: string;
   code: string;
   expires_in_secs: number;
 }
-
 interface PairedDevice {
   device_id: string;
   name: string;
@@ -32,10 +37,10 @@ interface ActiveSession {
   expiresAt: number;
 }
 
-function formatPairedAt(pairedAt: string): string {
+function formatPairedAt(pairedAt: string, language: SupportedLanguage): string {
   const secs = Number(pairedAt.replace(/^unix:/, ""));
   if (!Number.isFinite(secs) || secs <= 0) return pairedAt;
-  return new Date(secs * 1000).toLocaleString("ko-KR", {
+  return new Date(secs * 1000).toLocaleString(language === "ko" ? "ko-KR" : "en-US", {
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
@@ -50,18 +55,21 @@ function formatCountdown(remainingMs: number): string {
   return `${mm}:${ss}`;
 }
 
-function connectionErrorMessage(cause: unknown): string {
+function connectionErrorMessage(cause: unknown, t: TranslationSchema): string {
   const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
   if (message.includes("no lan interface")) {
-    return "연결할 네트워크를 찾지 못했습니다. Wi-Fi 또는 Tailscale 연결을 확인해 주세요.";
+    return t.host.networkNotFoundError;
   }
   if (message.includes("persistence")) {
-    return "기기 연결 정보를 저장하지 못했습니다. 저장 공간과 권한을 확인해 주세요.";
+    return t.host.appServiceInitError;
   }
-  return "연결을 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+  return t.host.connectionCheckError;
 }
 
-export default function PairingPanel() {
+export default function PairingPanel({ language: propLanguage }: { language?: SupportedLanguage }) {
+  const language = propLanguage || (localStorage.getItem("leftcar_lang") as SupportedLanguage) || "ko";
+  const t = getTranslation(language);
+
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [starting, setStarting] = useState(false);
   const [devices, setDevices] = useState<PairedDevice[]>([]);
@@ -96,7 +104,7 @@ export default function PairingPanel() {
         width: 220,
         margin: 1,
         color: {
-          dark: "#0f172a",
+          dark: "#09090b",
           light: "#ffffff",
         },
       });
@@ -107,11 +115,11 @@ export default function PairingPanel() {
       });
       refreshDevices();
     } catch (e) {
-      setError(connectionErrorMessage(e));
+      setError(connectionErrorMessage(e, t));
     } finally {
       setStarting(false);
     }
-  }, [refreshDevices]);
+  }, [refreshDevices, t]);
 
   const cancelPairing = useCallback(async () => {
     try {
@@ -137,12 +145,12 @@ export default function PairingPanel() {
         await invoke("revoke_paired_device", { deviceId });
         await refreshDevices();
       } catch (e) {
-        setError(connectionErrorMessage(e));
+        setError(connectionErrorMessage(e, t));
       } finally {
         setRevoking(null);
       }
     },
-    [refreshDevices],
+    [refreshDevices, t],
   );
 
   const revokeAll = useCallback(async () => {
@@ -152,11 +160,11 @@ export default function PairingPanel() {
       await invoke("revoke_all_devices");
       await refreshDevices();
     } catch (e) {
-      setError(connectionErrorMessage(e));
+      setError(connectionErrorMessage(e, t));
     } finally {
       setRevoking(null);
     }
-  }, [refreshDevices]);
+  }, [refreshDevices, t]);
 
   useEffect(() => {
     refreshDevices();
@@ -179,6 +187,8 @@ export default function PairingPanel() {
   );
 
   const expired = session !== null && now >= session.expiresAt;
+  const remainingMs = session ? Math.max(0, session.expiresAt - now) : 0;
+  const progressPercent = session ? Math.max(0, Math.min(100, (remainingMs / (120 * 1000)) * 100)) : 0;
 
   useEffect(() => {
     if (session && expired) {
@@ -189,25 +199,14 @@ export default function PairingPanel() {
   return (
     <div className="pairing-wrapper">
       <div className="pairing-guide">
-        <p className="pairing-guide-title">휴대폰이나 태블릿 연결</p>
+        <p className="pairing-guide-title">{t.host.pairingModalTitle}</p>
         <p className="pairing-guide-sub">
-          Leftcar Viewer에서 이 컴퓨터를 선택하거나 주소를 입력한 뒤, 이 화면의 6자리 번호를 입력하세요.
+          {t.host.pairingPanelGuide}
         </p>
       </div>
 
-      <div className="pairing-security-note">
-        <ShieldCheck size={17} aria-hidden="true" />
-        <div>
-          <strong>안전한 연결을 위해 확인해 주세요</strong>
-          <p>
-            연결 주소와 인증 번호는 한 번만 사용할 수 있고 2분 뒤 만료됩니다. 신뢰하는 같은 Wi-Fi
-            또는 Tailscale에 연결된 기기에서만 진행하세요.
-          </p>
-        </div>
-      </div>
-
       {error && (
-        <div className="banner-alert banner-danger">
+        <div className={bannerAlertVariants({ tone: "danger" })}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
             <AlertTriangle size={15} /> {error}
           </span>
@@ -220,11 +219,11 @@ export default function PairingPanel() {
             <div className="idle-icon-box">
               <QrCode size={22} strokeWidth={2} />
             </div>
-            <p className="idle-title">새 기기 연결하기</p>
-            <p className="idle-sub">2분 동안 한 번만 사용할 수 있는 6자리 연결 코드를 만듭니다.</p>
-            <button onClick={startPairing} className="btn-primary btn-lg" disabled={starting}>
+            <p className="idle-title">{t.host.btnPair}</p>
+            <p className="idle-sub">{t.host.idleHint}</p>
+            <button onClick={startPairing} className={buttonVariants({ variant: "primary", size: "lg" })} disabled={starting}>
               <KeyRound size={15} />
-              {starting ? "연결 코드 만드는 중…" : "연결 코드 만들기"}
+              {starting ? "…" : t.host.btnCreatePairing}
             </button>
           </div>
         ) : expired ? (
@@ -232,11 +231,11 @@ export default function PairingPanel() {
             <div className="idle-icon-box">
               <Clock size={22} strokeWidth={2} />
             </div>
-            <p className="idle-title">연결 코드가 만료되었어요</p>
-            <p className="idle-sub">새 연결 코드를 만든 뒤 다시 시도해 주세요.</p>
-            <button onClick={startPairing} className="btn-primary" disabled={starting}>
+            <p className="idle-title">{t.host.pairingExpiredTitle}</p>
+            <p className="idle-sub">{t.host.pairingExpiredSub}</p>
+            <button onClick={startPairing} className={buttonVariants({ variant: "primary" })} disabled={starting}>
               <RefreshCw size={14} />
-              {starting ? "생성 중…" : "새 연결 코드 생성"}
+              {starting ? "…" : t.host.regenerateCode}
             </button>
           </div>
         ) : (
@@ -244,40 +243,45 @@ export default function PairingPanel() {
             <div className="qr-image-frame">
               <img
                 src={session.qrDataUrl}
-                alt="기기 연결 QR 코드"
+                alt="QR Code"
                 width={190}
                 height={190}
                 className="qr-img"
               />
             </div>
             <div className="code-display-box">
-              <span className="code-label">인증 번호:</span>
+              <span className="code-label">{t.host.pairingCodeLabel}</span>
               <span className="code-value">{session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}</span>
               <button
                 type="button"
                 className="clickable-chip"
                 onClick={copyCode}
-                title="인증 번호 복사"
+                title={t.host.pairingCodeLabel}
                 style={{ marginLeft: 4 }}
               >
                 {copiedCode ? (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 600 }}>
-                    <Check size={13} /> 복사됨
+                    <Check size={13} /> {t.host.copied}
                   </span>
                 ) : (
                   <Copy size={13} style={{ opacity: 0.8 }} />
                 )}
               </button>
             </div>
-            <div className="countdown-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <Clock size={12} /> 남은 시간: {formatCountdown(session.expiresAt - now)}
+            <div className="countdown-container">
+              <div className="countdown-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Clock size={12} /> {t.host.remainingTime} {formatCountdown(remainingMs)}
+              </div>
+              <div className="time-decay-track" aria-hidden="true">
+                <div className="time-decay-bar" style={{ width: `${progressPercent}%` }} />
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-              <button onClick={startPairing} className="btn-ghost btn-sm" title="새 코드로 갱신">
-                <RefreshCw size={12} /> 새 코드
+              <button onClick={startPairing} className={buttonVariants({ variant: "ghost", size: "sm" })} title={t.host.pairingNewCode}>
+                <RefreshCw size={12} /> {t.host.pairingNewCode}
               </button>
-              <button onClick={cancelPairing} className="btn-ghost btn-sm">
-                연결 취소
+              <button onClick={cancelPairing} className={buttonVariants({ variant: "ghost", size: "sm" })}>
+                {t.host.pairingCancel}
               </button>
             </div>
           </div>
@@ -288,7 +292,7 @@ export default function PairingPanel() {
         <div className="section-title-row">
           <div className="section-title-left">
             <ShieldCheck size={15} />
-            <h4>연결을 허용한 기기</h4>
+            <h4>{t.host.pairedDevicesSection}</h4>
             <span className="count-pill">{devices.length}</span>
           </div>
           {devices.length > 0 && (
@@ -297,7 +301,7 @@ export default function PairingPanel() {
               className="btn-danger-outline btn-sm"
               disabled={revoking !== null}
             >
-              {revoking === "all" ? "초기화 중…" : "모든 기기 연결 해제"}
+              {t.host.revokeAll}
             </button>
           )}
         </div>
@@ -308,25 +312,29 @@ export default function PairingPanel() {
               <div key={device.device_id} className="device-row-item">
                 <div className="device-row-main">
                   <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                    <Smartphone size={15} strokeWidth={2} />
+                    {device.name.toLowerCase().includes("pc") || device.name.toLowerCase().includes("mac") ? (
+                      <Laptop size={15} strokeWidth={2} />
+                    ) : (
+                      <Smartphone size={15} strokeWidth={2} />
+                    )}
                     {device.name}
                   </span>
-                  <span className="device-row-date">연결 허용: {formatPairedAt(device.paired_at)}</span>
+                  <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
                 </div>
                 <button
                   onClick={() => revoke(device.device_id)}
                   className="btn-danger-outline"
                   disabled={revoking === device.device_id}
-                  title="이 기기 연결 해제"
+                  title={t.host.revoke}
                 >
-                  {revoking === device.device_id ? "제거 중…" : "연결 해제"}
+                  {t.host.revoke}
                 </button>
               </div>
             ))}
           </div>
         ) : (
           <div className="empty-devices-box">
-            <p>아직 연결을 허용한 기기가 없습니다.</p>
+            <p>{t.host.noPairedDevices}</p>
           </div>
         )}
       </div>

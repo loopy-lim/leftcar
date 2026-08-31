@@ -11,5 +11,11 @@
     "types": ["node"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "apps/*/src/**/*.tsx", "tools/**/*.ts"]
+  "include": [
+    "packages/*/src/**/*.ts",
+    "apps/*/**/*.d.ts",
+    "apps/*/src/**/*.ts",
+    "apps/*/src/**/*.tsx",
+    "tools/**/*.ts"
+  ]
 }
