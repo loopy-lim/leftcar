@@ -48,3 +48,5 @@ export const STREAM_PROFILES = [
 
 export type StreamProfileId = (typeof STREAM_PROFILES)[number]["id"];
 export type StreamProfile = (typeof STREAM_PROFILES)[number];
+
+export { is4KResolution } from "./encoder-experiment";

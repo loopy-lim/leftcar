@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STREAM_PROFILES } from "./stream-profile";
+import { is4KResolution, STREAM_PROFILES } from "./stream-profile";
 
 describe("stream profiles", () => {
   it("provides a video profile that preserves 4K at the minimum 60fps", () => {
@@ -32,5 +32,12 @@ describe("stream profiles", () => {
       contentMode: "interactive",
       role: "fallback",
     });
+  });
+
+  it("uses the existing non-rotating width and height for 4K visibility", () => {
+    expect(is4KResolution(3840, 2160)).toBe(true);
+    expect(is4KResolution(7680, 4320)).toBe(true);
+    expect(is4KResolution(2560, 1440)).toBe(false);
+    expect(is4KResolution(2160, 3840)).toBe(false);
   });
 });

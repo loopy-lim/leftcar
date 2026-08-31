@@ -9,8 +9,11 @@
 use std::ffi::{c_char, CStr};
 
 pub mod input_protocol;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
+#[cfg_attr(test, allow(dead_code))]
 pub mod jni;
+#[cfg(target_os = "android")]
+mod jni_exports;
 #[cfg(target_os = "android")]
 pub mod jni_wrappers;
 pub mod media_datagram;
@@ -21,6 +24,8 @@ pub mod prepared_tcp;
 /// Port preflight used before Android opens a stream Activity. Keeping this
 /// host-testable lets CI exercise the reachability race fix without an APK.
 pub mod prepared_udp;
+pub mod renderer;
+mod socket_tuning;
 pub mod usb_bridge;
 use std::time::Duration;
 
@@ -29,6 +34,96 @@ pub const LEFTCAR_ERR_NULL: i32 = 1;
 pub const LEFTCAR_ERR_STATE: i32 = 2;
 pub const LEFTCAR_ERR_PANIC: i32 = 3;
 pub const LEFTCAR_ERR_INVALID: i32 = 4;
+
+#[cfg(any(target_os = "android", test))]
+pub(crate) const LOCAL_TERMINATION_HOST_UNREACHABLE: i8 = 4;
+#[cfg(any(target_os = "android", test))]
+pub(crate) const LOCAL_TERMINATION_RENDER_STALLED: i8 = 5;
+
+#[cfg(any(target_os = "android", test))]
+pub(crate) const fn cacheable_termination_reason(reason: i8) -> Option<i8> {
+    if reason >= 0 {
+        Some(reason)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn record_first_termination_reason(
+    target: &std::sync::atomic::AtomicI8,
+    reason: i8,
+) -> i8 {
+    if reason < 0 {
+        return target.load(std::sync::atomic::Ordering::SeqCst);
+    }
+    match target.compare_exchange(
+        -1,
+        reason,
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+    ) {
+        Ok(_) => reason,
+        Err(existing) => existing,
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+pub(crate) const fn surface_release_latency_value(value: u64) -> i32 {
+    if value == u64::MAX {
+        0xffff
+    } else if value > 0xfffe {
+        0xfffe
+    } else {
+        value as i32
+    }
+}
+
+#[cfg(test)]
+mod surface_release_latency_tests {
+    use super::*;
+
+    #[test]
+    fn surface_release_latency_preserves_unmeasured_and_clamps_values() {
+        assert_eq!(surface_release_latency_value(u64::MAX), 0xffff);
+        assert_eq!(surface_release_latency_value(42), 42);
+        assert_eq!(surface_release_latency_value(u64::MAX - 1), 0xfffe);
+    }
+}
+
+#[cfg(test)]
+mod local_termination_reason_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI8, Ordering};
+
+    #[test]
+    fn local_termination_reasons_four_and_five_are_cacheable() {
+        assert_eq!(LOCAL_TERMINATION_HOST_UNREACHABLE, 4);
+        assert_eq!(LOCAL_TERMINATION_RENDER_STALLED, 5);
+        assert_eq!(cacheable_termination_reason(-1), None);
+        assert_eq!(
+            cacheable_termination_reason(LOCAL_TERMINATION_HOST_UNREACHABLE),
+            Some(4)
+        );
+        assert_eq!(
+            cacheable_termination_reason(LOCAL_TERMINATION_RENDER_STALLED),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn first_nonnegative_termination_reason_wins_atomically() {
+        let host_first = AtomicI8::new(-1);
+        assert_eq!(record_first_termination_reason(&host_first, 2), 2);
+        assert_eq!(record_first_termination_reason(&host_first, 5), 2);
+        assert_eq!(host_first.load(Ordering::SeqCst), 2);
+
+        let local_four_first = AtomicI8::new(-1);
+        assert_eq!(record_first_termination_reason(&local_four_first, 4), 4);
+        assert_eq!(record_first_termination_reason(&local_four_first, 5), 4);
+        assert_eq!(local_four_first.load(Ordering::SeqCst), 4);
+    }
+}
 
 mod lifecycle {
     pub const ACTIVITY_CREATE: u32 = 1;

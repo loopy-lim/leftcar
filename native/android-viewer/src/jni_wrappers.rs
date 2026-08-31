@@ -56,9 +56,15 @@ extern "C" {
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
     fn leftcar_jni_prepare_port(port: u16, host: *const c_char, transport: *const c_char) -> i32;
+    fn leftcar_jni_prepare_split_port(
+        port: u16,
+        host: *const c_char,
+        transport: *const c_char,
+    ) -> i32;
     fn leftcar_jni_prepare_usb(fd: i32) -> i32;
     fn leftcar_jni_usb_control_port() -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
+    fn leftcar_jni_cancel_prepared_split(port: u16) -> i32;
     fn leftcar_jni_attach_port(
         state: *mut c_void,
         instance: *const c_char,
@@ -68,6 +74,18 @@ extern "C" {
         width: u32,
         height: u32,
         fps: u32,
+    ) -> i32;
+    fn leftcar_jni_attach_split_port(
+        state: *mut c_void,
+        instance: *const c_char,
+        left_surface: *mut c_void,
+        right_surface: *mut c_void,
+        port: u16,
+        host: *const c_char,
+        width: u32,
+        height: u32,
+        fps: u32,
+        decoder_name: *const c_char,
     ) -> i32;
     fn leftcar_jni_surface_changed(
         state: *mut c_void,
@@ -107,7 +125,7 @@ extern "C" {
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
     fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
-    fn leftcar_jni_render_latency(instance: *const c_char) -> i32;
+    fn leftcar_jni_surface_release_latency(instance: *const c_char) -> i32;
 }
 
 // Java signatures:
@@ -159,6 +177,29 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareSplitStream(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+    transport: *mut jobject,
+) -> i32 {
+    if port <= 0 || port >= i32::from(u16::MAX) {
+        return 4;
+    }
+    let host = match unsafe { get_utf(env, host) } {
+        Some(host) => host,
+        None => return 1,
+    };
+    let transport = match unsafe { get_utf(env, transport) } {
+        Some(transport) => transport,
+        None => return 1,
+    };
+    unsafe { leftcar_jni_prepare_split_port(port as u16, host.as_ptr(), transport.as_ptr()) }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareUsb(
     _env: *mut JNIEnv,
     _class: *mut jobject,
@@ -188,322 +229,20 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cancelPrepare
     unsafe { leftcar_jni_cancel_prepared_port(port as u16) }
 }
 
-fn attach_body(env: *mut JNIEnv, state: i64, jstr: *mut jobject, surface: *mut jobject) -> i32 {
-    if unsafe { exception_pending(env) } {
-        return 3;
-    }
-    let c = match unsafe { get_utf(env, jstr) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    let window = unsafe { ANativeWindow_fromSurface(env, surface) };
-    if window.is_null() {
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cancelPreparedSplitStream(
+    _env: *mut JNIEnv,
+    _class: *mut jobject,
+    port: i32,
+) -> i32 {
+    if port <= 0 || port >= i32::from(u16::MAX) {
         return 4;
     }
-    // fromSurface already acquires one ref; the core owns it now and the
-    // detach path releases via leftcar_jni_surface_ref(false).
-    let r = unsafe { leftcar_jni_attach(state as *mut c_void, c.as_ptr(), window) };
-    if r != 0 {
-        unsafe { leftcar_jni_surface_ref(window, false) };
-    }
-    r
+    unsafe { leftcar_jni_cancel_prepared_split(port as u16) }
 }
 
-fn attach_port_body(
-    env: *mut JNIEnv,
-    state: i64,
-    jstr: *mut jobject,
-    surface: *mut jobject,
-    port: i32,
-    host: *mut jobject,
-    width: i32,
-    height: i32,
-    fps: i32,
-) -> i32 {
-    if unsafe { exception_pending(env) } {
-        return 3;
-    }
-    let c = match unsafe { get_utf(env, jstr) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    let host = match unsafe { get_utf(env, host) } {
-        Some(h) => h,
-        None => return 1,
-    };
-    let window = unsafe { ANativeWindow_fromSurface(env, surface) };
-    if window.is_null() {
-        return 4;
-    }
-    let r = unsafe {
-        leftcar_jni_attach_port(
-            state as *mut c_void,
-            c.as_ptr(),
-            window,
-            port as u16,
-            host.as_ptr(),
-            width.max(1) as u32,
-            height.max(1) as u32,
-            fps.clamp(1, 90) as u32,
-        )
-    };
-    if r != 0 {
-        unsafe { leftcar_jni_surface_ref(window, false) };
-    }
-    r
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-    surface: *mut jobject,
-) -> i32 {
-    std::panic::catch_unwind(|| attach_body(env, state, instance, surface)).unwrap_or(3)
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurfacePort(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-    surface: *mut jobject,
-    port: i32,
-    host: *mut jobject,
-    width: i32,
-    height: i32,
-    fps: i32,
-) -> i32 {
-    std::panic::catch_unwind(|| {
-        attach_port_body(
-            env, state, instance, surface, port, host, width, height, fps,
-        )
-    })
-    .unwrap_or(3)
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_surfaceChanged(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-    w: i32,
-    h: i32,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe { leftcar_jni_surface_changed(state as *mut c_void, c.as_ptr(), w as u32, h as u32) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_detachSurface(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe { leftcar_jni_detach(state as *mut c_void, c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_updateWindowEvent(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-    event: i32,
-    monotonic_ms: i64,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe {
-        leftcar_jni_update_window(
-            state as *mut c_void,
-            c.as_ptr(),
-            event as u32,
-            monotonic_ms as u64,
-        )
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendPointer(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-    action: i32,
-    x: f32,
-    y: f32,
-    buttons: i32,
-    action_button: i32,
-    horizontal_scroll: f32,
-    vertical_scroll: f32,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe {
-        leftcar_jni_input_pointer(
-            c.as_ptr(),
-            action as u32,
-            x,
-            y,
-            buttons as u32,
-            action_button as u32,
-            horizontal_scroll,
-            vertical_scroll,
-        )
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendKey(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-    key_code: i32,
-    scan_code: i32,
-    meta_state: i32,
-    down: u8,
-    repeat: i32,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe {
-        leftcar_jni_input_key(
-            c.as_ptr(),
-            key_code as u32,
-            scan_code as u32,
-            meta_state as u32,
-            down != 0,
-            repeat as u32,
-        )
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_releaseInput(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe { leftcar_jni_input_release_all(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_inputStatus(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return -1,
-    };
-    unsafe { leftcar_jni_input_status(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamStats(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i64 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return -1,
-    };
-    unsafe { leftcar_jni_stream_stats(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamLatency(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i64 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return -1,
-    };
-    unsafe { leftcar_jni_stream_latency(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-/// # Safety
-/// JNI supplies a valid environment and Java string reference for the
-/// duration of this call.
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_terminationReason(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return -1,
-    };
-    unsafe { leftcar_jni_termination_reason(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-/// # Safety
-/// JNI supplies a valid environment and Java string reference for the
-/// duration of this call.
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_renderLatency(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 0xffff,
-    };
-    unsafe { leftcar_jni_render_latency(c.as_ptr()) }
-}
-
-#[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_release(
-    env: *mut JNIEnv,
-    _class: *mut jobject,
-    state: i64,
-    instance: *mut jobject,
-) -> i32 {
-    let c = match unsafe { get_utf(env, instance) } {
-        Some(c) => c,
-        None => return 1,
-    };
-    unsafe { leftcar_jni_release(state as *mut c_void, c.as_ptr()) }
-}
+mod attach;
+mod input;
+mod stats;
+mod surface;

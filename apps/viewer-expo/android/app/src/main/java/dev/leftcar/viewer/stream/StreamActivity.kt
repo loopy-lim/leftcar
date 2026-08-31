@@ -3,15 +3,11 @@ package dev.leftcar.viewer.stream
 import android.app.Activity
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.PixelFormat
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
 import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.Surface
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -20,62 +16,11 @@ import android.view.PointerIcon
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.View
-import android.view.Gravity
-import android.view.animation.AccelerateDecelerateInterpolator
-import android.view.animation.DecelerateInterpolator
-import android.graphics.Color
-import android.graphics.Typeface
-import android.widget.PopupWindow
-import android.widget.ImageView
-import android.widget.TextView
-import dev.leftcar.viewer.R
 import dev.leftcar.viewer.shim.ViewerNative
-
-/**
- * Stream window (docs/03 §3.2): one remote source per OS window.
- *
- * Multi-instance: each unique host/port is a document task, while reopening
- * the same stream routes back into its existing task. The decode loop runs
- * entirely in Rust (libleftcar_viewer) — Kotlin only forwards lifecycle +
- * Surface, plus the per-window UDP port from intent extras.
- */
-private class AspectRatioSurfaceView(context: android.content.Context) : SurfaceView(context) {
-    private var videoWidth = 16
-    private var videoHeight = 9
-
-    fun setVideoSize(width: Int, height: Int) {
-        if (width > 0 && height > 0) {
-            videoWidth = width
-            videoHeight = height
-            requestLayout()
-        }
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val maxWidth = View.MeasureSpec.getSize(widthMeasureSpec)
-        val maxHeight = View.MeasureSpec.getSize(heightMeasureSpec)
-        if (maxWidth == 0 || maxHeight == 0) {
-            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-            return
-        }
-        val aspect = videoWidth.toDouble() / videoHeight.toDouble()
-        var width = maxWidth
-        var height = (width / aspect).toInt()
-        if (height > maxHeight) {
-            height = maxHeight
-            width = (height * aspect).toInt()
-        }
-        setMeasuredDimension(width.coerceAtLeast(1), height.coerceAtLeast(1))
-    }
-}
 
 class StreamActivity : Activity(), SurfaceHolder.Callback {
     companion object {
         private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
-        private const val INPUT_STATUS_VISIBLE_MS = 900L
-        private const val INPUT_STATUS_FADE_MS = 320L
-        private const val DEBUG_STATS_VISIBLE_MS = 6_000L
-        private const val DEBUG_STATS_FADE_MS = 420L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
     }
 
@@ -83,82 +28,53 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var host: String = ""
     private var port: Int = 5000
     private var fps: Int = 60
+    private var showFps: Boolean = true
     private var sourceWidth: Int = 1920
     private var sourceHeight: Int = 1080
+    private var splitVertical = false
+    private var splitDecoderName = ""
     private var nativeState: Long = 0
     private var surfaceAttached = false
     private var released = false
-    private var streamSurface: AspectRatioSurfaceView? = null
+    private var streamSurfaces: StreamSurfaces? = null
+    private val createdSurfaceHolders = mutableSetOf<SurfaceHolder>()
     private val surfaceHandler = Handler(Looper.getMainLooper())
     private var surfaceGeneration = 0
     private var surfaceChangeCount = 0
     private var pendingSurfaceAttach: Runnable? = null
     private val tabletCursorHandler = Handler(Looper.getMainLooper())
     private val hideTabletCursorRunnable = Runnable {
-        streamSurface?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
+        streamSurfaces?.left?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
+        streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
     }
-    private val inputStatusHandler = Handler(Looper.getMainLooper())
-    private var inputStatusPopup: PopupWindow? = null
-    private var inputStatusView: ImageView? = null
-    private var lastInputStatus = Int.MIN_VALUE
-    private var debugStatsPopup: PopupWindow? = null
-    private var debugStatsView: TextView? = null
-    private var lastDebugFrames = -1L
-    private var lastDebugSampleMs = 0L
-    private var displayedFps = 0.0
-    private val networkLatencySamples = mutableListOf<Long>()
-    private val renderLatencySamples = mutableListOf<Long>()
-    private val fadeInputStatusRunnable = Runnable {
-        inputStatusView?.animate()
-            ?.alpha(0f)
-            ?.setDuration(INPUT_STATUS_FADE_MS)
-            ?.setInterpolator(AccelerateDecelerateInterpolator())
-            ?.start()
-    }
-    private val fadeDebugStatsRunnable = Runnable {
-        debugStatsView?.animate()
-            ?.alpha(0f)
-            ?.setDuration(DEBUG_STATS_FADE_MS)
-            ?.setInterpolator(AccelerateDecelerateInterpolator())
-            ?.start()
-    }
-    private val inputStatusRunnable = object : Runnable {
-        override fun run() {
-            if (released || isFinishing || isDestroyed) return
-            updateInputStatusIndicator(ViewerNative.inputStatus(instanceId))
-            updateDebugStats(
-                ViewerNative.streamStats(instanceId),
-                ViewerNative.streamLatency(instanceId),
-                ViewerNative.renderLatency(instanceId),
-            )
-            checkHostTermination()
-            inputStatusHandler.postDelayed(this, 250L)
-        }
-    }
+    private var hud: StreamHudController? = null
+    private var terminationHandled = false
 
     /**
-     * The host terminates dead or operator-stopped sessions with an
-     * authenticated LCT1 notice. Close this window and report why instead of
-     * leaving a frozen last frame the user must dismiss manually.
+     * Both Host notices and local renderer watchdogs close the stale Surface.
+     * Only local reasons notify React so it can reconnect with the original port.
      */
-    private fun checkHostTermination() {
-        if (hostTerminationHandled) return
-        val reason = ViewerNative.terminationReason(instanceId)
-        if (reason < 0) return
-        hostTerminationHandled = true
+    private fun handleTermination(reason: Int) {
+        if (terminationHandled) return
+        terminationHandled = true
         val message = when (reason) {
             1 -> "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
             2 -> "컴퓨터에서 이 화면 공유를 종료했습니다."
-            else -> "컴퓨터에서 화면 공유를 종료했습니다."
+            3 -> "컴퓨터에서 화면 공유를 종료했습니다."
+            4 -> "화면 렌더러를 다시 연결하고 있습니다."
+            5 -> "화면 공유를 다시 연결하고 있습니다."
+            else -> "화면 공유를 다시 연결하고 있습니다."
         }
-        android.util.Log.i("LeftcarStream", "host termination reason=$reason: $message")
+        if (reason == 4 || reason == 5) {
+            StreamLauncherModule.emitTermination(port, reason)
+        }
+        android.util.Log.i("LeftcarStream", "stream termination reason=$reason: $message")
         setResult(2, android.content.Intent().putExtra("terminationReason", reason))
         finish()
         android.widget.Toast.makeText(applicationContext, message, android.widget.Toast.LENGTH_LONG)
             .show()
     }
 
-    private var hostTerminationHandled = false
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
@@ -214,7 +130,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun normalizedX(event: MotionEvent, view: View): Float =
-        (event.x / view.width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+        streamSurfaces?.normalizedX(event.x, view)
+            ?: (event.x / view.width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
 
     private fun normalizedY(event: MotionEvent, view: View): Float =
         (event.y / view.height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
@@ -222,216 +139,6 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private fun hideTabletCursor() {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         hideTabletCursorRunnable.run()
-    }
-
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt().coerceAtLeast(1)
-
-    private fun badgeBackground(color: Int): GradientDrawable = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(10).toFloat()
-        setColor(color)
-        setStroke(dp(1), Color.argb(36, 255, 255, 255))
-    }
-
-    private fun revealInputStatusIndicator() {
-        val badge = inputStatusView ?: return
-        inputStatusHandler.removeCallbacks(fadeInputStatusRunnable)
-        badge.animate().cancel()
-        badge.animate()
-            .alpha(0.82f)
-            .setDuration(110L)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction {
-                inputStatusHandler.postDelayed(
-                    fadeInputStatusRunnable,
-                    INPUT_STATUS_VISIBLE_MS,
-                )
-            }
-            .start()
-    }
-
-    private fun updateInputStatusIndicator(status: Int) {
-        if (status == lastInputStatus) return
-        lastInputStatus = status
-        inputStatusView?.apply {
-            when (status) {
-                1 -> {
-                    setImageResource(R.drawable.ic_remote_unlocked)
-                    contentDescription = "원격 마우스와 키보드 입력 가능"
-                }
-                0 -> {
-                    setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = "원격 마우스와 키보드 입력 잠김"
-                }
-                else -> {
-                    setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = "원격 입력 상태 확인 중"
-                }
-            }
-            background = badgeBackground(Color.argb(118, 15, 23, 42))
-        }
-        revealInputStatusIndicator()
-    }
-
-    private fun showInputStatusIndicator() {
-        if (inputStatusPopup != null) return
-        val badge = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER
-            minimumWidth = dp(30)
-            minimumHeight = dp(30)
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            alpha = 0f
-            elevation = dp(2).toFloat()
-        }
-        inputStatusView = badge
-        updateInputStatusIndicator(-1)
-        val popup = PopupWindow(
-            badge,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            false,
-        ).apply {
-            isTouchable = false
-            isFocusable = false
-            isOutsideTouchable = false
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = dp(2).toFloat()
-        }
-        inputStatusPopup = popup
-        window.decorView.post {
-            if (!released && !isFinishing && !isDestroyed) {
-                popup.showAtLocation(
-                    window.decorView,
-                    Gravity.TOP or Gravity.END,
-                    dp(12),
-                    dp(12),
-                )
-                inputStatusHandler.removeCallbacks(inputStatusRunnable)
-                inputStatusHandler.post(inputStatusRunnable)
-            }
-        }
-    }
-
-    private fun updateDebugStats(packed: Long, latency: Long, renderLatency: Int) {
-        val stats = debugStatsView ?: return
-        if (packed == -1L) {
-            stats.text = "SRC $fps / DISPLAY -- Hz  NET --/-- ms  CAP→SCR --/-- ms\n-- FPS  FEED -- ms"
-            return
-        }
-        val rendered = packed and ((1L shl 28) - 1)
-        val stale = (packed ushr 28) and 0x0fff
-        val inputDrops = (packed ushr 40) and 0xff
-        val frameGaps = (packed ushr 48) and 0xff
-        val feedMs = (packed ushr 56) and 0xff
-        val now = SystemClock.elapsedRealtime()
-        if (lastDebugFrames >= 0L && lastDebugSampleMs > 0L) {
-            val elapsed = (now - lastDebugSampleMs).coerceAtLeast(1L)
-            val frameDelta = if (rendered >= lastDebugFrames) {
-                rendered - lastDebugFrames
-            } else {
-                rendered
-            }
-            val sampledFps = (frameDelta * 1_000.0 / elapsed).coerceIn(0.0, 240.0)
-            displayedFps = if (displayedFps == 0.0) {
-                sampledFps
-            } else {
-                displayedFps * 0.65 + sampledFps * 0.35
-            }
-        }
-        lastDebugFrames = rendered
-        lastDebugSampleMs = now
-        val loss = inputDrops + frameGaps
-        val networkRtt = if (latency == -1L) 0xffff else latency and 0xffff
-        addLatencySample(networkLatencySamples, networkRtt)
-        addLatencySample(renderLatencySamples, renderLatency.toLong())
-        // The to-decoder stage estimates are diagnostic detail; the glass-to-
-        // glass capture→screen number is what the user actually feels, so it
-        // leads the second line.
-        val displayHz = window.decorView.display?.refreshRate?.toInt() ?: 0
-        stats.text = "SRC $fps / DISPLAY ${if (displayHz > 0) displayHz else "--"} Hz  " +
-            "NET ${formatLatency(networkLatencySamples)} ms  " +
-            "CAP→SCR ${formatLatency(renderLatencySamples)} ms\n" +
-            "${displayedFps.toInt()} FPS  FEED ${feedMs} ms  " +
-            "SKIP ${stale}  LOSS ${loss}"
-    }
-
-    private fun addLatencySample(samples: MutableList<Long>, value: Long) {
-        if (value == 0xffffL) {
-            // Do not keep displaying a percentile from a probe window that
-            // has already expired in native code.
-            samples.clear()
-            return
-        }
-        samples += value
-        if (samples.size > 40) samples.removeAt(0)
-    }
-
-    /** Compact `p50/p95` display over the most recent ten seconds. */
-    private fun formatLatency(samples: List<Long>): String {
-        if (samples.isEmpty()) return "--/--"
-        val sorted = samples.sorted()
-        fun percentile(percent: Int): Long {
-            val index = ((sorted.size * percent + 99) / 100 - 1).coerceIn(0, sorted.lastIndex)
-            return sorted[index]
-        }
-        return "${percentile(50)}/${percentile(95)}"
-    }
-
-    private fun revealDebugStatsIndicator() {
-        val stats = debugStatsView ?: return
-        inputStatusHandler.removeCallbacks(fadeDebugStatsRunnable)
-        stats.animate().cancel()
-        stats.animate()
-            .alpha(0.76f)
-            .setDuration(130L)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction {
-                inputStatusHandler.postDelayed(
-                    fadeDebugStatsRunnable,
-                    DEBUG_STATS_VISIBLE_MS,
-                )
-            }
-            .start()
-    }
-
-    private fun showDebugStatsIndicator() {
-        if (debugStatsPopup != null) return
-        val stats = TextView(this).apply {
-            setTextColor(Color.argb(196, 255, 255, 255))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setPadding(dp(9), dp(4), dp(9), dp(4))
-            background = badgeBackground(Color.argb(92, 15, 23, 42))
-            alpha = 0f
-            text = "SRC $fps / DISPLAY -- Hz  NET --/-- ms  CAP→SCR --/-- ms\n-- FPS  FEED -- ms"
-            contentDescription = "화면 공유 상세 정보"
-        }
-        debugStatsView = stats
-        val popup = PopupWindow(
-            stats,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            false,
-        ).apply {
-            isTouchable = false
-            isFocusable = false
-            isOutsideTouchable = false
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = dp(1).toFloat()
-        }
-        debugStatsPopup = popup
-        window.decorView.post {
-            if (!released && !isFinishing && !isDestroyed) {
-                popup.showAtLocation(
-                    window.decorView,
-                    Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-                    0,
-                    dp(12),
-                )
-                revealDebugStatsIndicator()
-            }
-        }
     }
 
     private fun updateTabletCursor(event: MotionEvent, view: View) {
@@ -464,8 +171,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
         ) {
-            revealInputStatusIndicator()
-            revealDebugStatsIndicator()
+            hud?.revealInput()
+            hud?.revealStats()
         }
         // Android normally batches/resamples pointer motion around display
         // frames. A remote-control Surface needs the hardware samples early;
@@ -527,8 +234,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             return super.dispatchKeyEvent(event)
         }
         if (event.action == KeyEvent.ACTION_DOWN) {
-            revealInputStatusIndicator()
-            revealDebugStatsIndicator()
+            hud?.revealInput()
+            hud?.revealStats()
         }
         val result = ViewerNative.sendKey(
             instanceId,
@@ -552,53 +259,40 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
 
-        val sv = AspectRatioSurfaceView(this).apply {
-            setVideoSize(sourceWidth, sourceHeight)
-            setBackgroundColor(Color.BLACK)
-            isFocusable = true
-            isFocusableInTouchMode = true
-            // This Activity has an opaque black root. Keep the decoder Surface
-            // above that window buffer; freeform/vendor compositors can otherwise
-            // report rendered codec output while showing only the black root.
-            setZOrderOnTop(true)
-            pointerIcon = PointerIcon.getSystemIcon(this@StreamActivity, PointerIcon.TYPE_NULL)
-        }
-        streamSurface = sv
-        sv.setOnGenericMotionListener { view, event -> forwardPointer(event, view) }
-        sv.setOnTouchListener { view, event ->
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) view.requestFocus()
-            forwardPointer(event, view)
-        }
-        // Keep the decoding Surface tied to the actual window geometry.
-        // A fixed source-sized buffer can be discarded by some freeform
-        // compositors when the task is resized, leaving the window black.
-        sv.holder.setSizeFromLayout()
-        sv.holder.setFormat(PixelFormat.OPAQUE)
-        sv.holder.addCallback(this)
-        sv.holder.setKeepScreenOn(true)
-        val fl = android.widget.FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-        }
-        fl.addView(sv, android.widget.FrameLayout.LayoutParams(
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER))
+        splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
+        splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
+        val surfaces = createStreamSurfaces(
+            this,
+            sourceWidth,
+            sourceHeight,
+            splitVertical,
+            this,
+            { view, event -> forwardPointer(event, view) },
+        )
+        streamSurfaces = surfaces
         android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId port=$port host=$host")
-        if (host.isEmpty()) {
+        if (host.isEmpty() || (splitVertical && splitDecoderName.isEmpty())) {
             // No paired host = no stream. Fail loudly instead of rendering a
             // silently black window the user cannot diagnose.
-            android.util.Log.e("LeftcarStream", "Missing host extra — refusing to attach stream")
-            setResult(1, android.content.Intent().putExtra("error", "missing host"))
+            val error = if (host.isEmpty()) "missing host" else "missing split decoder"
+            android.util.Log.e("LeftcarStream", "$error — refusing to attach stream")
+            setResult(1, android.content.Intent().putExtra("error", error))
             finish()
             return
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
-        setContentView(fl)
-        showInputStatusIndicator()
-        showDebugStatsIndicator()
-        sv.requestFocus()
+        setContentView(surfaces.root)
+        val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: "디스플레이"
+        title = displayName
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            setTaskDescription(android.app.ActivityManager.TaskDescription(displayName))
+        }
+        showFps = intent?.getBooleanExtra("showFps", true) ?: true
+        hud = StreamHudController(this, instanceId, fps, showFps, ::handleTermination)
+        hud?.show()
+        surfaces.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
@@ -610,12 +304,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         val nextHost = newIntent.getStringExtra("host") ?: host
         val nextPort = newIntent.getIntExtra("port", port)
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
+        val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
+        val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val streamConfigurationChanged =
             nextHost != host || nextPort != port || nextFps != fps ||
-                nextWidth != sourceWidth || nextHeight != sourceHeight
+                nextWidth != sourceWidth || nextHeight != sourceHeight ||
+                nextSplitVertical != splitVertical || nextShowFps != showFps
 
         setIntent(newIntent)
         if (streamConfigurationChanged || reconnectRequested) {
@@ -624,7 +321,14 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             // a Host-restart recovery reclaimed the old renderer.
             recreate()
         } else {
-            streamSurface?.requestFocus()
+            val nextDisplayName = newIntent.getStringExtra("displayName")?.takeIf { it.isNotBlank() }
+            if (nextDisplayName != null) {
+                title = nextDisplayName
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    setTaskDescription(android.app.ActivityManager.TaskDescription(nextDisplayName))
+                }
+            }
+            streamSurfaces?.requestFocus()
             window.decorView.post { hideSystemBars() }
         }
     }
@@ -636,7 +340,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onResume() {
         super.onResume()
-        showInputStatusIndicator()
+        hud?.show()
         lifecycleEvent(3) // ACTIVITY_RESUME
     }
 
@@ -644,7 +348,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         super.onWindowFocusChanged(hasFocus)
         lifecycleEvent(if (hasFocus) 4 else 5) // FOCUS_GAIN / FOCUS_LOSS
         if (hasFocus) {
-            streamSurface?.requestFocus()
+            streamSurfaces?.requestFocus()
             window.decorView.post { hideSystemBars() }
         } else {
             hideTabletCursor()
@@ -657,40 +361,67 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         pendingSurfaceAttach = null
     }
 
-    private fun attachStableSurface(holder: SurfaceHolder, generation: Int) {
+    private fun attachStableSurfaces(generation: Int) {
         pendingSurfaceAttach = null
+        val surfaces = streamSurfaces ?: return
         if (
             released || isFinishing || isDestroyed || surfaceAttached ||
-            generation != surfaceGeneration || !holder.surface.isValid
+            generation != surfaceGeneration || !surfaces.allValid() ||
+            createdSurfaceHolders.size != surfaces.holders.size
         ) {
             return
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            holder.surface.setFrameRate(
-                fps.toFloat(),
-                Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                Surface.CHANGE_FRAME_RATE_ALWAYS,
+            surfaces.holders.forEach { holder ->
+                holder.surface.setFrameRate(
+                    fps.toFloat(),
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS,
+                )
+            }
+        }
+        val res = if (splitVertical) {
+            val right = surfaces.right ?: return
+            ViewerNative.attachSplitSurfaces(
+                nativeState,
+                instanceId,
+                surfaces.left.holder.surface,
+                right.holder.surface,
+                port,
+                host,
+                sourceWidth,
+                sourceHeight,
+                fps,
+                splitDecoderName,
+            )
+        } else {
+            ViewerNative.attachSurfacePort(
+                nativeState,
+                instanceId,
+                surfaces.left.holder.surface,
+                port,
+                host,
+                sourceWidth,
+                sourceHeight,
+                fps,
             )
         }
-        val res = ViewerNative.attachSurfacePort(
-            nativeState,
-            instanceId,
-            holder.surface,
-            port,
-            host,
-            sourceWidth,
-            sourceHeight,
-            fps,
-        )
         surfaceAttached = res == 0
+        if (surfaceAttached) {
+            // Native attach clears a retained reason for this logical instance
+            // before creating the new renderer. Only then may the HUD consume
+            // a fresh termination reason.
+            hud?.armTerminationPolling()
+        }
         android.util.Log.i(
             "LeftcarStream",
             "stable Surface attach returned $res after $surfaceChangeCount geometry changes, " +
-                "host=$host, source=${sourceWidth}x${sourceHeight}, fps=$fps",
+                "host=$host, source=${sourceWidth}x${sourceHeight}, fps=$fps, split=$splitVertical",
         )
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        createdSurfaceHolders += holder
         surfaceGeneration += 1
         surfaceChangeCount = 0
         val generation = surfaceGeneration
@@ -699,20 +430,35 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             "LeftcarStream",
             "surfaceCreated: debounce generation=$generation instanceId=$instanceId port=$port",
         )
-        val attach = Runnable { attachStableSurface(holder, generation) }
-        pendingSurfaceAttach = attach
-        surfaceHandler.postDelayed(attach, SURFACE_ATTACH_DEBOUNCE_MS)
+        val surfaceCount = streamSurfaces?.holders?.size ?: 1
+        if (createdSurfaceHolders.size == surfaceCount) {
+            val attach = Runnable { attachStableSurfaces(generation) }
+            pendingSurfaceAttach = attach
+            surfaceHandler.postDelayed(attach, SURFACE_ATTACH_DEBOUNCE_MS)
+        }
         lifecycleEvent(6) // SURFACE_CREATE
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         surfaceChangeCount += 1
         if (surfaceAttached && width > 0 && height > 0) {
-            ViewerNative.surfaceChanged(nativeState, instanceId, width, height)
+            val surfaces = streamSurfaces
+            val fullWidth = if (surfaces?.right != null) {
+                surfaces.left.width + surfaces.right.width
+            } else {
+                width
+            }
+            val fullHeight = if (surfaces?.right != null) {
+                maxOf(surfaces.left.height, surfaces.right.height)
+            } else {
+                height
+            }
+            ViewerNative.surfaceChanged(nativeState, instanceId, fullWidth, fullHeight)
         }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        createdSurfaceHolders -= holder
         surfaceGeneration += 1
         cancelPendingSurfaceAttach()
         android.util.Log.i(
@@ -762,17 +508,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         surfaceGeneration += 1
         cancelPendingSurfaceAttach()
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
-        inputStatusHandler.removeCallbacks(inputStatusRunnable)
-        inputStatusHandler.removeCallbacks(fadeInputStatusRunnable)
-        inputStatusHandler.removeCallbacks(fadeDebugStatsRunnable)
-        inputStatusView?.animate()?.cancel()
-        debugStatsView?.animate()?.cancel()
-        inputStatusPopup?.dismiss()
-        inputStatusPopup = null
-        inputStatusView = null
-        debugStatsPopup?.dismiss()
-        debugStatsPopup = null
-        debugStatsView = null
+        hud?.stop()
+        hud = null
         releaseNetworkLocks()
         ViewerNative.releaseInput(instanceId)
         ViewerNative.release(nativeState, instanceId)

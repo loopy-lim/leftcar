@@ -6,18 +6,39 @@ import {
   type UsbAccessoryState,
 } from "./usb";
 import type { StreamContentMode } from "./stream-profile";
+import {
+  resolveEncoderExperimentForStream,
+  type EncoderExperimentId,
+} from "./encoder-experiment";
+import {
+  VIEWER_UDP_CAPABILITIES,
+  availableUdpStabilityOptions,
+  resolveUdpStabilitySelection,
+  type UdpStabilitySelection,
+} from "./udp-stability";
 
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
-  prepareStream(port: number, host: string, mediaTransport: string): Promise<void>;
+  prepareStream(
+    port: number,
+    host: string,
+    mediaTransport: string,
+    encoderExperiment: EncoderExperimentId,
+  ): Promise<void>;
   openStream(
     port: number,
     host: string,
     width: number,
     height: number,
     fps: number,
+    encoderExperiment: EncoderExperimentId,
+    displayName?: string,
+    showFps?: boolean,
   ): Promise<string>;
-  cancelPreparedStream(port: number): Promise<void>;
+  cancelPreparedStream(
+    port: number,
+    encoderExperiment: EncoderExperimentId,
+  ): Promise<void>;
 }
 
 export interface StartStreamArgs {
@@ -28,14 +49,43 @@ export interface StartStreamArgs {
   fps: number;
   captureBackend: string;
   mediaTransport: "udp" | "adbTcp" | "auto" | string;
+  encoderExperiment: EncoderExperimentId;
+  displayName?: string;
+  showFps?: boolean;
   contentMode?: StreamContentMode;
   viewerIps?: string[];
+  udpStability?: UdpStabilitySelection;
 }
 
 export interface StartedStream {
   session: number;
   viewerIps: string[];
   mediaTransport: ResolvedTransport;
+  encoderExperiment: EncoderExperimentId;
+  udpStability?: UdpStabilitySelection;
+}
+
+export interface RestartedStreamState extends StartedStream {
+  captureBackend: string;
+}
+
+export function replaceRestartedStreamState<
+  T extends RestartedStreamState & { startedAt: number },
+>(
+  streams: readonly T[],
+  previousSession: number,
+  restarted: RestartedStreamState,
+  startedAt: number,
+  endUnownedRestart?: (session: number) => void,
+): T[] {
+  let replaced = false;
+  const next = streams.map((stream) => {
+    if (stream.session !== previousSession) return stream;
+    replaced = true;
+    return { ...stream, ...restarted, startedAt };
+  });
+  if (!replaced) endUnownedRestart?.(restarted.session);
+  return next;
 }
 
 export type StreamControlRequest = <T>(command: string, args?: unknown) => Promise<T>;
@@ -45,6 +95,8 @@ interface StartPreparedStreamInput {
   request?: StreamControlRequest;
   launcher: StreamLauncher;
   host: string;
+  advertisedEncoderExperiments: unknown;
+  advertisedUdpStabilityCapabilities?: unknown;
   args: StartStreamArgs;
 }
 
@@ -71,9 +123,17 @@ export async function startPreparedStream({
   request = control.request.bind(control),
   launcher,
   host,
+  advertisedEncoderExperiments,
+  advertisedUdpStabilityCapabilities,
   args,
 }: StartPreparedStreamInput): Promise<StartedStream> {
   let session: number | null = null;
+  const encoderExperiment = resolveEncoderExperimentForStream(
+    args.encoderExperiment,
+    advertisedEncoderExperiments,
+    args.width,
+    args.height,
+  );
   try {
     const discoveredIps = launcher.getLocalIpv4Addresses
       ? await launcher.getLocalIpv4Addresses().catch(() => [])
@@ -82,7 +142,9 @@ export async function startPreparedStream({
       .filter((address) => typeof address === "string" && address.length > 0)
       .slice(0, 4);
     let usbState = await getUsbState();
-    const requestedTransport = args.mediaTransport.trim().toLowerCase();
+    const requestedTransport = encoderExperiment === "splitVertical"
+      ? "udp"
+      : args.mediaTransport.trim().toLowerCase();
     let usbRequestError: unknown;
     if (
       !usbState.attached &&
@@ -103,12 +165,40 @@ export async function startPreparedStream({
         throw new Error(`USB 액세서리 권한을 허용하지 않아 USB 스트림을 시작하지 못했습니다${detail}`);
       }
     }
-    const mediaTransport = resolveTransport(usbState, args.mediaTransport);
+    const mediaTransport = resolveTransport(usbState, requestedTransport);
+    const udpOptions = availableUdpStabilityOptions(
+      advertisedUdpStabilityCapabilities,
+    );
+    const udpStability = args.udpStability
+      ? resolveUdpStabilitySelection(
+          args.udpStability,
+          advertisedUdpStabilityCapabilities,
+        )
+      : null;
+    if (args.udpStability && udpOptions && !udpStability) {
+      throw new Error("선택한 UDP 안정성 설정을 이 컴퓨터에서 지원하지 않습니다.");
+    }
+    const { udpStability: _requestedUdpStability, ...baseArgs } = args;
     const startArgs = {
-      ...(viewerIps.length > 0 ? { ...args, viewerIps } : args),
+      ...baseArgs,
+      ...(viewerIps.length > 0 ? { viewerIps } : {}),
       mediaTransport,
+      encoderExperiment,
+      ...(mediaTransport === "udp" && udpStability
+        ? {
+            udpStability: {
+              ...udpStability,
+              viewer: VIEWER_UDP_CAPABILITIES,
+            },
+          }
+        : {}),
     };
-    await launcher.prepareStream(args.viewerPort, host, mediaTransport);
+    await launcher.prepareStream(
+      args.viewerPort,
+      host,
+      mediaTransport,
+      encoderExperiment,
+    );
     const started = await request<{ session: number }>("startStream", startArgs);
     session = started.session;
     await launcher.openStream(
@@ -117,13 +207,24 @@ export async function startPreparedStream({
       args.width,
       args.height,
       args.fps,
+      encoderExperiment,
+      args.displayName,
+      args.showFps ?? true,
     );
-    return { session, viewerIps, mediaTransport };
+    return {
+      session,
+      viewerIps,
+      mediaTransport,
+      encoderExperiment,
+      ...(udpStability ? { udpStability } : {}),
+    };
   } catch (error) {
     if (session !== null) {
       await request("stopStream", { session }).catch(() => undefined);
     }
-    await launcher.cancelPreparedStream(args.viewerPort).catch(() => undefined);
+    await launcher
+      .cancelPreparedStream(args.viewerPort, encoderExperiment)
+      .catch(() => undefined);
     throw error;
   }
 }

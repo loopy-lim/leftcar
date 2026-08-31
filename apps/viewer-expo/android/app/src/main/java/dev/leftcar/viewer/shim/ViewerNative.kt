@@ -18,12 +18,15 @@ object ViewerNative {
     external fun start(): Long
     /** Bind the UDP media port before Host reachability proof starts. */
     external fun prepareStream(port: Int, host: String, mediaTransport: String): Int
+    /** Bind both consecutive UDP ports for the exact 4K vertical split. */
+    external fun prepareSplitStream(port: Int, host: String, mediaTransport: String): Int
     /** Claim an Android UsbAccessory fd and start the native mux bridge. */
     external fun prepareUsb(fd: Int): Int
     /** Loopback TCP port used by the JS control client for USB sessions. */
     external fun usbControlPort(): Int
     /** Roll back a prepared port when Host start or Activity launch fails. */
     external fun cancelPreparedStream(port: Int): Int
+    external fun cancelPreparedSplitStream(port: Int): Int
     external fun updateWindowEvent(state: Long, instanceId: String, eventCode: Int, monotonicMs: Long): Int
     /**
      * Attach with an explicit media port + paired host IP. The Rust media
@@ -39,6 +42,18 @@ object ViewerNative {
         width: Int,
         height: Int,
         fps: Int,
+    ): Int
+    external fun attachSplitSurfaces(
+        state: Long,
+        instanceId: String,
+        leftSurface: Surface,
+        rightSurface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        decoderName: String,
     ): Int
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
@@ -73,7 +88,7 @@ object ViewerNative {
      * 3 = ordinary host stop.
      */
     external fun terminationReason(instanceId: String): Int
-    /** Glass-to-glass capture→render latency in ms; 0xffff = unmeasured. */
-    external fun renderLatency(instanceId: String): Int
+    /** Capture to native decoder Surface release approximation; 0xffff = unmeasured. */
+    external fun surfaceReleaseLatency(instanceId: String): Int
     external fun release(state: Long, instanceId: String): Int
 }
