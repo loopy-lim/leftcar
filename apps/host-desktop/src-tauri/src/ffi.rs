@@ -376,10 +376,7 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
             .as_u64()
             .map(|value| value.min(u32::MAX as u64) as u32),
         receiver_feedback_age_ms: v["receiverFeedbackAgeMs"].as_u64(),
-        udp_stability_profile: v["udpStabilityProfile"]
-            .as_str()
-            .unwrap_or("legacy")
-            .into(),
+        udp_stability_profile: v["udpStabilityProfile"].as_str().unwrap_or("legacy").into(),
         udp_burst_datagrams: bounded_u32(&v, "udpBurstDatagrams"),
         udp_pacing_rate_multiplier: bounded_u32(&v, "udpPacingRateMultiplier").max(1),
         udp_fec_parity_shards: bounded_u32(&v, "udpFecParityShards"),
@@ -388,17 +385,9 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         receiver_media_datagrams: v["receiverMediaDatagrams"].as_u64().unwrap_or(0),
         receiver_data_datagrams: v["receiverDataDatagrams"].as_u64().unwrap_or(0),
         receiver_parity_datagrams: v["receiverParityDatagrams"].as_u64().unwrap_or(0),
-        receiver_fec_restored_fragments: v["receiverFecRestoredFragments"]
-            .as_u64()
-            .unwrap_or(0),
-        receiver_unrecoverable_fec_groups: bounded_u32(
-            &v,
-            "receiverUnrecoverableFecGroups",
-        ),
-        receiver_max_missing_data_fragments: bounded_u32(
-            &v,
-            "receiverMaxMissingDataFragments",
-        ),
+        receiver_fec_restored_fragments: v["receiverFecRestoredFragments"].as_u64().unwrap_or(0),
+        receiver_unrecoverable_fec_groups: bounded_u32(&v, "receiverUnrecoverableFecGroups"),
+        receiver_max_missing_data_fragments: bounded_u32(&v, "receiverMaxMissingDataFragments"),
         receiver_one_frame_gap_events: bounded_u32(&v, "receiverOneFrameGapEvents"),
         receiver_multi_frame_gap_events: bounded_u32(&v, "receiverMultiFrameGapEvents"),
         receiver_paired_idr_episodes: bounded_u32(&v, "receiverPairedIdrEpisodes"),
@@ -436,29 +425,15 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         split_test_injected_drops: v["splitTestInjectedDrops"].as_i64().unwrap_or(0),
         split_flow_active_leases: bounded_u32(&v, "splitFlowActiveLeases"),
         split_flow_capacity: bounded_u32(&v, "splitFlowCapacity"),
-        split_pre_encode_admission_drops: v["splitPreEncodeAdmissionDrops"]
-            .as_i64()
-            .unwrap_or(0),
+        split_pre_encode_admission_drops: v["splitPreEncodeAdmissionDrops"].as_i64().unwrap_or(0),
         split_encoded_queue_depth: bounded_u32(&v, "splitEncodedQueueDepth"),
-        split_encoded_queue_oldest_us: v["splitEncodedQueueOldestUs"]
-            .as_u64()
-            .unwrap_or(0),
-        split_recovery_boundary_discards: v["splitRecoveryBoundaryDiscards"]
-            .as_i64()
-            .unwrap_or(0),
-        split_post_encode_delta_drops: v["splitPostEncodeDeltaDrops"]
-            .as_i64()
-            .unwrap_or(0),
+        split_encoded_queue_oldest_us: v["splitEncodedQueueOldestUs"].as_u64().unwrap_or(0),
+        split_recovery_boundary_discards: v["splitRecoveryBoundaryDiscards"].as_i64().unwrap_or(0),
+        split_post_encode_delta_drops: v["splitPostEncodeDeltaDrops"].as_i64().unwrap_or(0),
         split_wire_pairs_attempted: v["splitWirePairsAttempted"].as_i64().unwrap_or(0),
-        split_wire_pair_send_failures: v["splitWirePairSendFailures"]
-            .as_i64()
-            .unwrap_or(0),
-        split_keyframe_gap_recoveries: v["splitKeyframeGapRecoveries"]
-            .as_i64()
-            .unwrap_or(0),
-        split_delta_gap_recoveries: v["splitDeltaGapRecoveries"]
-            .as_i64()
-            .unwrap_or(0),
+        split_wire_pair_send_failures: v["splitWirePairSendFailures"].as_i64().unwrap_or(0),
+        split_keyframe_gap_recoveries: v["splitKeyframeGapRecoveries"].as_i64().unwrap_or(0),
+        split_delta_gap_recoveries: v["splitDeltaGapRecoveries"].as_i64().unwrap_or(0),
         error: v["error"]
             .as_str()
             .filter(|s| !s.is_empty())

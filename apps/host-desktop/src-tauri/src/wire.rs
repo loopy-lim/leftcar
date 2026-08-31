@@ -348,7 +348,7 @@ mod tests {
     fn lan_media_datagram_budget_stays_below_ethernet_mtu() {
         assert_eq!(MAX_DATAGRAM, 1_400);
         assert_eq!(MAX_MEDIA_PAYLOAD, 1_367);
-        assert!(MAX_DATAGRAM + 28 <= 1_500);
+        const { assert!(MAX_DATAGRAM + 28 <= 1_500) }
     }
 
     #[test]

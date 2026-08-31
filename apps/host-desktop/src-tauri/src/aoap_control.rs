@@ -107,11 +107,7 @@ fn handle_device(server: &Arc<ControlServer>, device: nusb::DeviceInfo) {
     }
 }
 
-fn should_start_accessory(
-    handshake_requested: bool,
-    has_link: bool,
-    is_accessory: bool,
-) -> bool {
+fn should_start_accessory(handshake_requested: bool, has_link: bool, is_accessory: bool) -> bool {
     handshake_requested && !has_link && !is_accessory
 }
 

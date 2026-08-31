@@ -287,12 +287,13 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
     assert!(response.contains("\"burstDatagrams\":2"), "{response}");
     assert!(response.contains("\"fecParityShards\":4"), "{response}");
 
-    let applied = recorder.started_udp_stability.lock().unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].applied, UdpStabilityProfile::Stable);
-    assert_eq!(applied[0].burst_datagrams, 2);
-    assert_eq!(applied[0].fec_parity_shards, 4);
-    drop(applied);
+    {
+        let applied = recorder.started_udp_stability.lock().unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].applied, UdpStabilityProfile::Stable);
+        assert_eq!(applied[0].burst_datagrams, 2);
+        assert_eq!(applied[0].fec_parity_shards, 4);
+    }
 
     let status = send_request(&mut sock, "getStatus", "{}", &token).await;
     assert!(status.contains("\"udpStability\""), "{status}");

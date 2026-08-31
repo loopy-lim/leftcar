@@ -280,8 +280,7 @@ impl AccessoryLink {
             .div_ceil(endpoints.in_packet_size)
             .saturating_mul(endpoints.in_packet_size);
 
-        let (tx, writer_rx) =
-            mpsc::sync_channel::<usb_mux::MuxFrame>(AOAP_MEDIA_CHANNEL_CAPACITY);
+        let (tx, writer_rx) = mpsc::sync_channel::<usb_mux::MuxFrame>(AOAP_MEDIA_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(64);
         let (media_tx, media_rx) = mpsc::sync_channel(AOAP_MEDIA_CHANNEL_CAPACITY);
         let reader_interface = interface.clone();

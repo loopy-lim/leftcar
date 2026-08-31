@@ -63,10 +63,7 @@ fn normalize_content_mode(value: &str) -> Option<&'static str> {
     }
 }
 
-fn validate_split_start(
-    input: &StartStreamInput,
-    concrete_transport: &str,
-) -> Result<(), String> {
+fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> Result<(), String> {
     if input.encoder_experiment != EncoderExperiment::SplitVertical {
         return Ok(());
     }
@@ -572,8 +569,7 @@ impl ControlServer {
                     receiver_data_datagrams: metrics.receiver_data_datagrams,
                     receiver_parity_datagrams: metrics.receiver_parity_datagrams,
                     receiver_fec_restored_fragments: metrics.receiver_fec_restored_fragments,
-                    receiver_unrecoverable_fec_groups: metrics
-                        .receiver_unrecoverable_fec_groups,
+                    receiver_unrecoverable_fec_groups: metrics.receiver_unrecoverable_fec_groups,
                     receiver_max_missing_data_fragments: metrics
                         .receiver_max_missing_data_fragments,
                     receiver_one_frame_gap_events: metrics.receiver_one_frame_gap_events,
@@ -892,9 +888,7 @@ impl ControlServer {
                         return err(&format!("unsupported content mode: {}", input.content_mode))
                     }
                 };
-                if input.udp_stability.is_some()
-                    && !matches!(requested_transport, "udp" | "auto")
-                {
+                if input.udp_stability.is_some() && !matches!(requested_transport, "udp" | "auto") {
                     return err("UDP 안정성 설정은 UDP 또는 자동 전송에서만 사용할 수 있습니다");
                 }
                 let udp_stability = match resolve_udp_stability(
