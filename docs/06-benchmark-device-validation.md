@@ -156,6 +156,12 @@ Host 화면을 검정/흰색으로 전환하고 frame ID를 표시한다.
 - thin/bold font
 - 100%, 125%, 150%, 200% scale
 
+K1은 H.264 4:2:0 경로를 먼저 고정하고 `35Mbps`, `45Mbps`, `60Mbps`를
+각각 실행한다. 각 실행에서 실제 3840x2160@60 설정, codec/profile,
+pixel format, 유효 encoder output FPS를 확인하고 8-16px 영문/한글 OCR 결과와
+빨강/파랑 chroma edge 확대 이미지를 함께 보관한다. 이 비교가 만족스럽지 않을
+때에만 같은 패턴으로 HEVC를 다음 최적화 후보로 앞당긴다.
+
 ### 4.4 Resize Grid
 
 - aspect ratio marker
@@ -256,14 +262,39 @@ uncertainty가 5ms보다 크면 세부 stage 합을 단정하지 않는다.
 | --- | --- |
 | S1 | 1080p60 x1 |
 | S2 | 1440p60 x1 |
+| K1 | 4K60 x1 |
+| K2-A | 4K60 x1 + 1440p30 x1 |
+| K2-B | 4K60 x1 + 1080p30 x2 |
 | M2 | 1080p30 x2 |
 | M4 | 1080p30 x4 |
 | F4 | 1440p60 x1 + 720p15 x3 |
 | M6 | 720p15 x6, 탐색 전용이며 v1 요구가 아님 |
 
-각 profile에서 decoder create 성공만 보지 않는다. 10분 rendered FPS, drop, Surface visibility, resource 사용을 측정한다.
+각 profile에서 decoder create 성공만 보지 않는다. 10분 rendered FPS, drop, Surface visibility, resource 사용을 측정한다. K2-A와 K2-B는 서로 다른 부하 profile이며 한쪽 결과를 다른 쪽으로 외삽하지 않는다.
 
-### 7.3 focus/size pattern
+### 7.3 K1/K2 4K 판정
+
+K1은 S1과 같은 필수 실기기 증거 profile이다.
+
+- source, capture, encoder 입력, decoder 출력이 모두 실제 3840x2160이고 목표가
+  60fps인지 먼저 확인한다. silent downscale 결과는 K1이 아니다.
+- `Option+0` 고변화 바탕화면을 포함한 10분 구간에서 유효 encoder output과
+  Viewer 표시가 각각 평균 59fps 이상이어야 한다. 이 기준은 59.94Hz 장치의
+  nominal 60fps를 허용하기 위한 측정 오차 범위이지 55fps급 출력을 60fps로
+  부르기 위한 완화 기준이 아니다.
+- 초기 대비 10분 마지막 1분의 지연 중앙값이 16ms 넘게 증가하거나 0fps 정지가
+  발생하면 실패다.
+- TCP run은 16MiB access-unit 상한을 사용하고 frame-too-large 종료가 없어야 한다.
+- software timestamp의 마지막 지점은 패널 표시가 아니라 MediaCodec의 Surface
+  release이므로 `captureToSurfaceReleaseMs`로 기록한다. true glass-to-glass는
+  5절의 카메라 절차로만 판정한다.
+
+K2-A와 K2-B는 K1 통과 뒤 실행한다. 주 4K stream의 동일한 59fps 기준과
+source 격리를 유지하면서 보조 stream의 실제 FPS, 주 stream bitrate 감소량,
+텍스트 품질을 별도로 기록한다. 둘 중 하나만 통과하면 통과한 변형만 지원 범위로
+표시한다.
+
+### 7.4 focus/size pattern
 
 - 모두 같은 크기
 - 한 창 크게, 세 창 작게
@@ -317,7 +348,7 @@ probe 단계:
 - encoder output: 동일 pre-encoded access unit replay와 live encode 두 종류
 - decoder: 동일 Rust `AMediaCodec` path
 - window count: 1, 2, 4
-- profile: S1, M4, F4
+- profile: S1, K1, K2-A, K2-B, M4, F4
 - network profile: clean, normal, busy, bad, outage
 
 ### 9.2 결과 표
@@ -497,4 +528,3 @@ waiver에는 원인, 사용자 영향, 만료 버전, 회복 계획이 있어야
 > Galaxy XR는 8K60이라 4개 창도 문제없다.
 
 > 로그상 decode가 4ms라 전체 지연도 4ms다.
-

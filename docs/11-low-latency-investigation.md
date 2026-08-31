@@ -630,3 +630,351 @@ AVE prepare 이전 단계까지는 도달하지만 실제 encode sample을 만�
 이번 단일-session 계획에서는 H.264 생산 정책을 복원한다. 후속 조사는 AVE
 공통 property/preset을 한 번에 조합하지 말고, 별도 진단 SPEC에서 baseline
 session부터 속성을 하나씩 추가해 `-17691`을 만드는 최초 조합을 찾아야 한다.
+
+## 14. 실제 AVE 원인 분리와 1440p60 입력 격리 (2026-08-27)
+
+이 절은 같은 `TB710FU`, Wi-Fi UDP, `Display 0`, 움직이는 배경(`Option+0`)에서
+후속 signed Host를 반복 설치해 얻은 결과다. 설치 전에 Swift dylib를 명시적으로
+다시 만들고, 저장소 산출물과 `/Applications/Leftcar Host.app` 번들 리소스의
+SHA-256이 같은지 확인했다. 기존 `tools/dev-host-macos.zsh`가 오래된 dylib를
+그대로 번들하던 문제도 이 과정에서 수정했다.
+
+### 14.1 `-17691`의 실제 원인
+
+- `VTCompressionSessionPrepareToEncodeFrames`는 필수 단계가 아니므로 AVE에서는
+  첫 프레임까지 prepare를 미루었다. AVE 첫 제출 전에는 in-flight를 1로 두고,
+  실제 output이 확인된 뒤 설정값 3으로 복원했다.
+- signed standalone probe에서 AVE 선택 속성을 하나씩 추가한 결과
+  `PrioritizeEncodingSpeedOverQuality`, `MaximumRealTimeFrameRate`,
+  `MaximizePowerEfficiency`, `Quality`는 실제 encode까지 성공했다.
+  `SuggestedLookAheadFrameCount=0`만 setter가 성공한 뒤 첫 4K 제출에서
+  `kVTSessionMalfunctionErr(-17691)`를 만들었다. 따라서 광고된 지원 여부와
+  무관하게 이 키를 AVE 계획에서 제외했다.
+- 수정된 dylib를 실제 Host에 포함하자 AVE H.264 direct IOSurface 제출은
+  fallback 없이 성공했다. 다만 `/tmp/leftcar-4k-ave-direct-quick.*`에서 Host
+  capture/output과 Android render가 모두 약 21.25fps, capture age p95가
+  186ms라 생산 후보로는 실패했다.
+- 동일한 4K synthetic 고변화 probe에서 AVE는 약 28.4fps, H.264 RTVC는
+  약 64.3fps였다. 따라서 4K `video`도 RTVC H.264를 먼저 선택하도록 복원했다.
+
+### 14.2 CGDisplayStream 표면 입력 A/B
+
+CGDisplayStream이 제공한 IOSurface를 인코더가 오래 잡아 캡처가 느려지는지
+확인하기 위해 direct, `VTPixelTransferSession`, CPU plane copy를 분리했다.
+standalone 4K RTVC probe의 CPU copy 준비시간은 p50 0.42ms였고 output은
+65.07fps였다. 실제 Host에서는 해상도별 결과가 달랐다.
+
+| 경로 | Host capture / output | Android render | age p95 | 판정 |
+| --- | --- | --- | --- | --- |
+| 1440p RTVC CPU copy, 1차 | 59.91 / 59.91fps | 59.97fps | 25ms | encoder 경로 통과 |
+| 1440p RTVC CPU copy, 최종 반복 | 59.97 / 59.83fps | 58.72fps | 102ms | Host 통과, Wi-Fi 구간 변동 |
+| 4K RTVC H.264 CPU copy | 59.96 / 46.54fps | 46.53fps | 67ms | direct보다 느려 폐기 |
+| 4K RTVC HEVC CPU copy | 59.95 / 42.77fps | 42.59fps | 64ms | H.264보다 느려 폐기 |
+| 4K RTVC H.264 direct, 최종 | 59.96 / 48.55fps | 48.59fps | 61ms | 현재 4K 최선, 60fps 미달 |
+
+- 1440p CPU copy 1차 artifact는 `/tmp/leftcar-1440-rtvc-cpucopy.*`이다.
+  output interval p50/p95 16.68/19.06ms, encode output p95 14.26ms,
+  input preparation p95 약 3.0ms, output/decoder drop과 frame gap은 모두 0이었다.
+- 최종 바이너리 반복 artifact는
+  `/tmp/leftcar-1440-final-cpucopy-62hz-repeat.*`이다. Host는 계속 60fps를
+  출력했지만 Android는 output drop 4, decoder input drop 1, frame gap 1과
+  age spike를 보여 end-to-end 60fps를 안정적으로 통과했다고 주장하지 않는다.
+- 최종 4K artifact는 `/tmp/leftcar-4k-final-h264-direct-62hz.*`이다.
+  input preparation p95 1us, output interval p50/p95 20.49/22.62ms,
+  encode output p95 21.54ms였고 output/decoder drop과 frame gap은 0이었다.
+  캡처가 60fps여도 단일 RTVC H.264 output이 약 48.6fps이므로 4K60 완료가 아니다.
+- HEVC RTVC는 실제
+  `com.apple.videotoolbox.videoencoder.hevc.rtvc`와 Android HEVC decoder로
+  연결됐지만 H.264보다 느렸다. 최종 생산 정책은 H.264로 복원했다.
+
+### 14.3 최종 정책과 남은 경계
+
+- 60fps 캡처 요청은 CGDisplayStream 스케줄 여유를 위해 최소 간격을
+  `1/62s`로 설정한다. 이 변경으로 Host capture는 1440p와 4K 모두 약
+  59.96fps까지 올라갔다.
+- 1440p CGDisplayStream + RTVC는 pool-backed CPU copy를 사용한다. 4K는
+  실제 A/B에서 CPU copy가 더 느렸으므로 direct IOSurface를 유지한다.
+- AVE는 직접 입력 실패 시에만 VTPixelTransfer 기반 staging을 한 번 시도하고,
+  첫 output 전 재시도까지 실패하면 다음 정책으로 이동한다.
+- 최종 4K와 1440p 표본에서 counter가 0에 머문 실제 정지는 재현되지 않았다.
+  다만 macOS native performance ticker가 고부하의 `.utility` 큐에서 최대 약
+  2초 늦어진 구간을 분석기가 증거 공백으로 보수 판정해
+  `zeroFpsStallDetected=true`가 남았다. 이는 counter 증가로 확인한 실제
+  0fps 정지와 구분해야 하며, 최종 180초/600초 acceptance 전에 ticker QoS와
+  수집 연속성을 별도 보강해야 한다.
+- 현재 증거로 확정할 수 있는 것은 **Host 1440p60 encoder 경로 달성**과
+  **4K의 첫 병목이 약 48.6fps인 RTVC encoder output**이라는 점이다.
+  안정적인 end-to-end 1440p60과 4K60은 아직 완료 조건을 만족하지 않는다.
+
+### 14.4 최종 설치본 회귀 확인
+
+- 독립 코드 리뷰에서 확인된 첫 RTVC 런타임 실패 경로는 encoder session별
+  generation/output counter로 판정하도록 바꿨다. 첫 출력 전 RTVC가 실패하면
+  다음 AVE 정책으로 넘어가며, 무효화된 이전 session의 늦은 callback은 새
+  session 상태를 변경하지 않는다. 이 전환은 Swift 정책 테스트로 검증했으며,
+  의도적으로 RTVC를 고장 내는 실기기 fault injection은 수행하지 않았다.
+- `tools/dev-host-macos.zsh`는 fresh source dylib, Tauri bundle dylib, 설치된
+  `/Applications/Leftcar Host.app` dylib를 각각 byte 비교한다. 2026-08-27 최종
+  설치에서 세 파일 SHA-256은 모두
+  `500fee5d1a866d4f28145b7c49dc60b6ec8a85b6132a31f1e30ef5f4e2359b85`로
+  일치했고 strict deep codesign 검증도 통과했다.
+- 최종 설치본을 TB710FU와 Wi-Fi UDP로 연결하고 움직이는 workspace에서 약
+  1분간 1440p60을 다시 실행했다. 최종 UI snapshot은 capture/submit/output
+  `60/60/60fps`, Android render `60fps`, submit failure `0`, UDP send failure
+  `0`, encoder output interval p95 `19.6ms`, RTVC H.264 hardware를 기록했다.
+  0fps counter 정지나 stream 종료는 재현되지 않았다.
+- 같은 snapshot에 receiver loss `13`, 일반/복구/capture drop `27/1/21`이
+  남았다. 따라서 이번 표본은 **최종 설치본의 1440p60 정상 경로와 정지 회귀
+  미재현** 증거이지, 장시간 무드롭 또는 모든 Wi-Fi 조건의 60fps acceptance
+  증거는 아니다.
+
+## 15. 4K 단일 인코더 실험 매트릭스 (2026-08-28)
+
+### 15.1 증거 경계 교정
+
+- 14.1의 standalone RTVC 약 64.3fps는 당시 callback 수에 dropped callback이
+  포함된 synthetic 계측이다. 이번 구현에서 valid sample만 output으로 세고
+  dropped/failed callback을 별도 집계하도록 고쳤으므로, 그 수치를 4K 유효
+  encoder output 또는 실기기 60fps 증거로 사용하지 않는다.
+- source/build 증거로는 Swift 정책 실행, shim dylib 컴파일, Rust contract/Host
+  테스트, Viewer/Desktop 테스트, React Doctor 100/100, release APK assemble와
+  v2 서명 검증을 각각 통과했다. 이 결과는 아래 physical stream 결과와 분리한다.
+- 설치된 Host는 Display 0을 `3840x2160`으로 광고했고, 새 Viewer APK는
+  `3840 x 2160, 60 FPS`와 `auto`, `rateControl`, `adaptiveQp`, `encoderPool`
+  선택지를 표시했다. 각 실기기 run에서 Desktop의 requested/applied 값이
+  일치해 silent fallback은 없었다.
+- 이 Mac의 exact encoder ID는
+  `com.apple.videotoolbox.videoencoder.h264.rtvc`이다. 해당 encoder는
+  `UsingHardwareAcceleratedVideoEncoder` 조회에
+  `kVTPropertyNotSupportedErr(-12900)`을 반환하므로, capability는
+  require-hardware create specification과 exact RTVC encoder ID로 확인했다.
+
+### 15.2 180초 매트릭스와 600초 soak
+
+같은 TB710FU, 4K clarity profile, Wi-Fi UDP, 움직이는 workspace(`Option+0`)에서
+누적 counter delta로 계산했다. `rateControl`은 최선 후보라 600초를 수집했고,
+나머지 두 profile은 180초를 수집했다.
+
+| 실험 | 시간 | Host capture / output 평균 | Android render 평균 | output interval p95 | encode output p95 | Android age p95 | output / decoder drop | 새 frame gap | 판정 |
+| --- | ---: | --- | --- | ---: | ---: | ---: | --- | ---: | --- |
+| `rateControl` | 600s | 60.00 / 48.66fps | 48.64fps | 22.19ms | 21.27ms | 47ms | 3 / 0 | 10 | 55fps 미달, recovery 미검증 |
+| `adaptiveQp` | 180s | 60.00 / 48.77fps | 48.77fps | 21.99ms | 21.20ms | 46ms | 0 / 0 | 0 | 55fps 미달 |
+| `encoderPool` | 180s | 60.00 / 41.53fps | 41.53fps | 25.69ms | 20.93ms | 52ms | 0 / 0 | 0 | 55fps 미달 |
+
+- `adaptiveQp`는 Base QP를 모든 frame에 적용했고 QP 42까지 다섯 번 조정했지만
+  VideoToolbox submit/callback 경로가 약 21ms 아래로 내려가지 않았다.
+- `encoderPool`은 `IOSurfacePixelTransferStaging`을 실제 적용했다. input
+  preparation p95가 약 4.3ms 추가되면서 direct input보다 약 7fps 느려졌다.
+- 세 profile 모두 Host queue oldest가 처음부터 끝까지 0이고 단조 증가하지
+  않았다. Android render 평균도 Host output 평균을 거의 그대로 따라갔다.
+  따라서 이 매트릭스의 첫 4K throughput 병목은 UDP나 decoder가 아니라 단일
+  RTVC H.264 encode 경로다.
+- `rateControl` soak의 Host output p5는 47.67fps였고 stream은 600초 동안
+  종료되지 않았다. 그러나 output drop 3과 frame gap 10이 생겼으며 gap frame
+  ID가 수집 구간의 recovery IDR과 짝지어지지 않아
+  `recoveryVerified=false`다.
+- 수집기의 strict stall 판정은 Host 2.07초, Android 3.09초까지의 native log
+  표본 공백 때문에 세 run에서 보수적으로 true가 됐다. 누적 counter는 계속
+  증가했고 실제 session exit는 없었지만, log 연속성 gate도 통과했다고
+  주장하지 않는다.
+
+원본 artifact는 `/tmp/leftcar-4k60-rateControl-soak.*`,
+`/tmp/leftcar-4k60-adaptiveQp-final-r2.*`,
+`/tmp/leftcar-4k60-encoderPool-final-r2.*`에 있다.
+
+임시 catalog/capability 로그를 제거한 최종 Host도 다시 서명·설치했다. source,
+bundle, installed dylib의 SHA-256은 모두
+`b9e9a7160eba89c6aee47fe3941b31fad94f8dd4f7080f25f2571e5ab4ff0a0b`로
+일치했다. 이 최종 설치본의 30초 smoke는 Host 59.96/46.96fps, Android
+46.94fps, age p95 49ms, queue oldest 0, output/decoder drop 0, 새 frame gap 0을
+기록했다. artifact는 `/tmp/leftcar-4k60-final-installed-smoke.*`이며 기능 회귀는
+없었지만 4K60 throughput은 다시 실패했다.
+
+### 15.3 결론과 다음 경계
+
+Phase A의 세 단일-session 경로는 모두 최종 4K60 gate를 실패했다.
+`rateControl`은 현재 가장 빠르고 queue age가 누적되지 않는 fallback이지만,
+약 49fps를 60fps로 광고할 수는 없다. QP/bitrate 조정은 화질과 wire size를
+바꿔도 21ms encoder frame budget을 해소하지 못했고, pixel transfer는 오히려
+느렸다.
+
+따라서 다음 단계는 같은 단일 RTVC session의 속성을 더 바꾸는 작업이 아니라
+Phase B로 분리한다. 후보는 4K frame을 두 hardware encode session에 공간 분할해
+각 session의 pixel rate를 낮춘 뒤 Viewer에서 동기 합성하는 경로와, 별도
+hardware/scaler encoder 경로다. 이 구조는 packet/header 계약, keyframe과
+recovery 경계, Android dual decoder/surface 합성, glass-to-glass latency를 새
+SPEC과 실기기 gate로 검증하기 전에는 생산 기능으로 간주하지 않는다.
+
+## 16. 4K 수직 분할 dual-surface 실기기 검증 (2026-08-29)
+
+Phase B의 첫 후보로 exact `3840x2160@60` frame을 좌우 `1920x2160` 타일로
+나누고, 두 RTVC H.264 hardware session과 두 Wi-Fi UDP/FEC port로 전송했다.
+Android는 두 `c2.qti.avc.decoder.low_latency` decoder가 각 SurfaceView에 직접
+출력한다. 앱 소유 GL/Vulkan 합성이나 CPU frame copy는 추가하지 않았으며 두
+타일은 frame ID와 presentation time으로 짝을 맞춰 표시한다.
+
+### 16.1 복구 폭주의 원인과 수정
+
+- 손실 당시 Host의 `udpSendFailures=0`인데 Android tile loss만 증가했다.
+  Android 기본 receive buffer는 `229376` bytes여서, 큰 paired IDR과 FEC burst를
+  담기에는 작았다. split media socket마다 `SO_RCVBUF=4MiB`를 요청하고 AF41
+  traffic class를 적용했다. TB710FU의 실제 커널 적용값은 좌우 모두 `8388608`
+  bytes였다.
+- 복구 IDR pacing은 큰 AU에서 최소 120Mbps, 최대 160Mbps까지 올라가던 정책을
+  두 frame budget 기반 최소 24Mbps, 최대 64Mbps로 제한했다. 두 타일은 한쪽
+  손실에도 같은 generation의 paired IDR을 요청하고 둘 다 도착한 뒤 재개한다.
+- 최종 세션의 최초 IDR generation 24는 right `04:38:40.158`, left
+  `04:38:40.182`에 도착해 24ms 안에 재개됐다. 이전 workspace 전환 실험의
+  paired recovery도 좌우 29ms 안에 완료됐다. 이후 고변화 30초 구간에서
+  `gaps=0`, `inputDrops=0`, `incomplete=0`, receiver loss L0/R0,
+  UDP send failure 0을 확인했다. 따라서 이 표본에서는 한 번 깨진 뒤 계속
+  깨지는 recovery storm이 재현되지 않았다.
+
+### 16.2 최종 CAVLC run과 남은 throughput 경계
+
+- 속도 우선 split tile은 H.264 Main + CAVLC를 사용한다. CABAC 대비 계산량을
+  줄이려는 선택이며, 같은 장면의 quick A/B에서 처리량 자체는 거의 같고
+  bandwidth는 약 3% 늘었다. CAVLC는 60fps 해결책이 아니라 낮은 encode cost를
+  위한 정책이다.
+- 강제 base QP 42 A/B는 움직이는 화면에서 38~41fps로 더 느려지고 화질도
+  눈에 띄게 저하돼 폐기했다. 최종 설치본은 강제 QP를 적용하지 않는다. 기존의
+  사용자가 선택하는 `adaptiveQp` 실험 경로만 독립적으로 유지한다.
+- 최종 signed Host와 TB710FU에서 움직이는 workspace를 30초 측정한 결과 Host는
+  capture/submit/output `60/48/48fps`, Android는 left/right/combined
+  `47/48/47fps`였다. 타일 동기화는 p95 8.2ms, max 16.5ms였고 최근 AU는
+  67KB, `60+15` datagram, 15.3ms, 현재 전송량 40.6Mbps였다.
+- Host queue의 일반/복구 drop과 UDP failure는 모두 0이지만 capture drop은
+  1333이었다. 이는 encoder output이 약 48fps에 머물 때 최신 frame을 유지하려고
+  60fps capture 중 오래된 pending frame을 버린 결과다. 양쪽 decoder/render가
+  Host output을 따라오므로 현재 첫 throughput 병목은 Wi-Fi나 Android 합성이
+  아니라 두 RTVC tile encoder의 합산 output이다.
+
+따라서 이번 구현은 **복구 안정성과 약 48fps의 무손실 dual-surface 경로**는
+확인했지만, 요구한 4K60 acceptance는 실패했다. 60fps throughput 전제부터
+통과하지 않아 180초/600초 무손실 gate를 성공으로 기록하지 않는다. 다음 성능
+분기는 두 encoder callback/packetize를 서로 다른 queue와 core에 완전히 분리한
+뒤, 각 tile standalone과 동시 실행의 output 차이를 측정해 shared RTVC 자원
+병목인지 현재 직렬 orchestration 병목인지 구분해야 한다.
+
+### 16.3 소스 구조
+
+구현과 함께 거대 파일을 책임별로 나눴다. macOS transport는 공통 lifecycle,
+입력 처리, UDP/FEC packet write, split transport로 분리했고, Android renderer와
+JNI export, desktop diagnostic UI도 각각 하위 폴더/컴포넌트로 분리했다. 현재
+macOS transport 파일은 각각 853, 284, 336, 245줄이며 동작 변경과 파일 이동은
+동일한 정책·split pipeline 테스트로 검증한다.
+
+## 17. dual AVE 전환과 4K60 실기기 A/B (2026-08-29)
+
+### 17.1 인코더 병목 분리
+
+타일 standalone/동시 실행 probe를
+`tools/codec-probe/TileEncoderThroughputProbe.swift`로 고정했다. 한 RTVC
+1920x2160 session은 60fps를 처리했지만 두 RTVC session을 동시에 실행하면
+약 37~48fps로 떨어졌다. 최종 12초 moving 재검증에서도 dual RTVC는 좌우
+각 629/720 valid, 41.30fps, dropped callback 91이었다. 같은 입력의 dual exact
+AVE는 좌우 각 720/720 valid, submission 중 59.82fps, dropped/failed callback
+0이었다.
+
+책임별 파일 분리와 최종 재빌드 뒤 같은 `dualAve 12 moving` probe를 다시
+실행했다. 좌우 모두 accepted/valid `720/720`, submission 중
+`59.811fps`, admission/drop/failure `0/0/0`이었고 encoder ID도 양쪽
+`com.apple.videotoolbox.videoencoder.ave.avc`로 유지됐다.
+
+따라서 제품 `splitVertical` 기본은 dual AVE로 바꿨다. startup에서 두 exact
+AVE session이 생성되는 것만 보지 않고 두 session에 forced-IDR probe frame을 먼저
+동시에 제출해 유효 callback을 모두 받는지 검사한다. 하나라도 allocation/submit/
+callback에 실패하면 capability를 광고하지 않는다. dual RTVC와 mirror-left는
+`LEFTCAR_SPLIT_ENCODER_DIAGNOSTIC_MODE` 진단에서만 선택할 수 있다. 제품 Host
+지표에서 좌우 encoder ID는 모두
+`com.apple.videotoolbox.videoencoder.ave.avc`로 확인했다.
+
+### 17.2 physical throughput와 동기화
+
+TB710FU, direct Wi-Fi UDP, 실제 `3840x2160@60`, 움직이는 AeroSpace workspace
+0에서 dual AVE Host는 capture/submit/output `60/60/60fps`를 유지했다. 첫
+210초 표본은 Android 좌우/결합이 대부분 59~61fps, start 2초를 제외한 right
+207개 window 평균이 render/joined 각각 59.643fps였다. UDP send failure,
+receiver loss, input drop, incomplete AU는 모두 0이었다. pair-ready p95 최대는
+9.113ms였지만 max 18.751ms와 timeout 15, unmatched output 28이 남았다.
+
+두 worker event를 한 번에 drain하고, 큰 타일의 초과 fragment를 먼저 보낸 뒤
+좌우 tail을 인접시키는 packet interleave를 적용했다. receiver의 timeout은 한
+frame period에 4ms만 더한 20.7ms로 제한했다. 4ms 표본은 123초 동안 평균
+59.512fps였고 정기 IDR 전까지 timeout 0을 유지했다. 한 번의 실제 Wi-Fi gap은
+paired IDR로 복구됐지만 해당 window가 41fps까지 내려갔고 복구 IDR 수신까지
+164ms가 걸렸다. 즉 steady-state 4K60 throughput은 확보했지만 무손실 600초와
+항상 두 frame 이내 recovery는 아직 주장하지 않는다.
+
+### 17.3 폐기한 recovery A/B
+
+Android의 실제 `SO_RCVBUF=8388608`을 근거로 split recovery aggregate pacing을
+64Mbps에서 160Mbps로 올려 봤다. IDR 수신 자체는 약 100~150ms였지만 오른쪽
+MediaCodec input slot이 고갈되어 `inputDrops`가 20~30대로 늘고 paired recovery
+loop가 반복되며 3~6fps까지 내려갔다. 이 변경은 즉시 폐기했고 single/split 모두
+검증된 64Mbps 상한으로 복구했다. decoder expiry grace 8ms도 output 보유량을
+늘릴 위험 때문에 채택하지 않고 4ms를 유지한다.
+
+### 17.4 책임별 파일 분리
+
+새 기능을 한 파일에 누적하지 않았다. `CaptureShim.swift`는 registry/access
+facade 126줄로 두고 C ABI export 428줄과 delegate/type 128줄을 별도 파일로
+옮겼다. capture setup 951줄은 socket setup 378줄, control 182줄, backend
+261줄, lifecycle 173줄로 나눴다. encoder의 packetization/network queue/viewer
+control과 frame queue/startup/input/submission/recovery/QP/bitrate/lifecycle도
+각각 독립 extension 파일로 분리했다.
+
+Android single renderer는 launcher 110줄, worker 494줄, presentation 204줄,
+frame queue 209줄, network 188줄로 나눴다. split tile worker도 본체 430줄과
+helper 308줄로 분리했고 JNI wrapper 658줄은 facade 249줄과 attach/surface/
+input/stats 모듈로 나눴다. 새로 변경한 capture/encoder/renderer 핵심 파일은
+모두 500줄 이하이며, `EncoderPolicy.swift`는 core 483줄, session selection
+242줄, submission state 193줄, experiment policy 185줄, setup attempt 444줄,
+optional property 적용 123줄로 정리했다.
+
+### 17.5 독립 리뷰 이후 live-edge/decoder fail-closed 보강
+
+- split packetization 결과는 좌/우 `PendingEncodedFrame` 두 개를 일반 배열에
+  개별 append하지 않고 `PendingNetworkPair` 하나로 보관한다. video profile은
+  미전송 pair를 최대 1개만 유지한다. 포화 시 미전송 delta dependency chain을
+  전부 버리고 paired IDR을 한 번만 요청하며, 이미 큐에 있는 recovery IDR은
+  보존한다. 따라서 일시적인 UDP pacing 지연이 stale pair와 메모리를 무제한으로
+  누적시키지 않는다.
+- Android는 `MediaCodecList`에서 software codec을 제외하고 H.264
+  `1920x2160@60`과 `maxSupportedInstances >= 2`를 모두 만족하는 codec 이름을
+  얻어 native split session에 전달한다. Rust decoder는 이 exact name만 생성하고
+  split 경로에서는 MIME/type fallback을 금지한다. 두 번째 decoder 구성이나
+  실제 codec-name 검증이 실패해도 software 경로로 내려가지 않고 session을
+  명시적으로 실패시킨다.
+- pair coordinator는 타일별 unmatched MediaCodec output을 1개만 보유하고 새
+  output이 오면 이전 것을 즉시 discard한다. `joinedRendered`는 두 worker에
+  release command를 넣은 시점이 아니라 좌/우
+  `AMediaCodec_releaseOutputBufferAtTime` 성공 ACK가 모두 도착한 뒤에만 증가한다.
+  ACK 추적도 4 pair로 제한했다.
+- callback pair expiry는 경계와 정확히 같은 시각에도 만료되도록 `>=`로 고쳤다.
+  Swift split/network 정책 테스트, Rust decoder/presentation 테스트, Android
+  debug/release Kotlin compile, architecture check에서 이 경계를 회귀 검사한다.
+- 이 보강 뒤 release APK를 다시 빌드·설치했지만, Android 재부팅 뒤 사용자 저장소가
+  `RUNNING_LOCKED`인 동안에는 앱 launch와 화면 capture가 불가능하다. 따라서 아래
+  clean 고변화 실기기 수치는 잠금 해제 후 새로 기록하며, 이전 210초 표본을 새
+  binary의 최종 acceptance로 재사용하지 않는다.
+- 최종 정적 gate는 React Doctor `100 / 100`, TypeScript typecheck,
+  Vitest 21 files/292 tests, contract 4 tests, architecture check, Rust workspace
+  전체 테스트, Android `aarch64-linux-android` check/release build, Swift
+  policy/split tests를 모두 통과했다. release APK assemble은 427 task를 새로
+  실행해 통과했고 `HA2D6EMP` 덮어 설치도 `Success`였다.
+- `pm path`에서 다시 pull한 기기 설치 APK의 SHA-256도 아래 release APK와
+  정확히 같았다. package는 `leftcar.ll3.kr`, version `0.1.1`,
+  last update `2026-08-29 07:01:51`이다.
+- 최종 native library SHA-256은
+  `0e2c44b22deb33e05c8db669cb4c4b9cd9fd82f103aca75155a241a72e069993`,
+  APK 안의 strip 완료 library는
+  `9a68deba4e2024d2d8595973650171e5a88640eb93975fc37e232b3bb7f445ff`다.
+  release APK와 Downloads 전달본
+  `Leftcar-Viewer-0.1.1-20260829-dual-ave-reviewed.apk`의 SHA-256은 모두
+  `250a21de7a70f05fec66a6b469bb66e9fcf235bb4da8ead422d2a6f5d9b2cc14`다.
+  APK는 v2 서명이 유효한 내부 debug certificate 산출물이다.
+- 최신 Host shim/source bundle/설치본 SHA-256은 모두
+  `2808f40b8cec9aa117f4d5626df98a0a87955196987d3af9af10054f143d9966`이고,
+  설치된 `/Applications/Leftcar Host.app`은 deep/strict codesign 검증을
+  통과했다.
