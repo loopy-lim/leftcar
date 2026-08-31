@@ -16,10 +16,11 @@ before the encoder rate controller collapses the transmitted frame rate. When
 the same stream is healthy again, it must step back up to its original 4K
 target without user intervention.
 
-The viewer must not close and reopen its Activity for this quality transition.
-The visible window remains in place while the native renderer and Host session
-are rebound. A user-visible reconnect error is reserved for a failed bounded
-rebind, not for an expected quality change.
+The viewer must not close and reopen its Activity for this quality transition
+or for its bounded retry. The visible window remains in place while the native
+renderer and Host session are rebound. A user-visible reconnect error is
+reserved for a failed bounded rebind after the on-screen retry state has been
+shown, not for an expected quality change.
 
 ## Product behavior
 
@@ -120,6 +121,11 @@ for a rebind. The native renderer releases the old decoder, retains the
 Surface, and accepts the new generation only after a valid config/keyframe.
 Old-generation packets are discarded.
 
+The decoder is configured once with `KEY_MAX_WIDTH` and `KEY_MAX_HEIGHT` at
+the source target, so every later transition stays on the same Surface under
+`FEATURE_AdaptivePlayback`: a mid-stream picture-size change is absorbed
+through `INFO_OUTPUT_FORMAT_CHANGED` without a second `configure()`.
+
 The controller permits one rebind per session at a time. On success it clears
 the indicator and publishes the new dimensions. On failure it retries once
 after the existing bounded delay; only then does it use the current
@@ -127,6 +133,41 @@ Activity-finish/error behavior. Host/operator reasons 1 through 3 continue to
 finish the Activity immediately. Host-unreachable reason 4 retains its
 existing bounded reconnect behavior until same-window rebind has a verified
 control peer.
+
+## Prior art
+
+Surveyed primary sources (product code, protocol specs, one measurement
+paper) on 2026-08-31:
+
+- Adaptation order. Parsec, GeForce NOW, and Stadia adapt bitrate/QP first
+  and treat resolution as the last knob. The Stadia measurement paper
+  (arXiv:2009.09786) shows where that ends: sustained sub-required bandwidth
+  produced visible resolution flapping for over 200 seconds. This design's
+  resolution fallback with an ABR floor is the deliberate counter-design:
+  spend one clean transition instead of holding a collapsing 4K rate
+  controller.
+- Asymmetric hysteresis. GCC (draft-ietf-rmcat-gcc) decreases once with a
+  multiplicative back-off, increases at most 8% per second, and holds
+  between the two; hls.js gates up-switches behind a headroom factor
+  (`abrBandWidthUpFactor` 0.7) and a minimum switch interval. The
+  2-degraded / 4-stable window split plus the five-second cooldown follow
+  the same down-fast/up-slow shape.
+- Same-window transitions. MediaCodec documents mid-stream picture-size
+  changes for H.264/H.265 under `FEATURE_AdaptivePlayback`; Moonlight
+  reconfigures its decoder on the same Surface in the field (a graduated
+  flush -> restart -> reset ladder; the Activity never closes). On the host
+  side, VideoToolbox has no mid-session dimension contract, and libwebrtc,
+  OBS, and FFmpeg all recreate the compression session on size change;
+  NVENC's reconfigure API formalizes the companion rule of forcing an IDR
+  as the first frame of the new generation. VT session recreation plus the
+  keyframe-gated publish in this design matches those conventions.
+- Quality change is not reconnect. RDP specifies in-stream surface
+  create/delete messages for live layout changes and reserves the
+  cookie-based auto-reconnect as the user-visible failure path. RustDesk
+  applies quality in place (`set_quality`) with a bounded service switch as
+  fallback, and its client discards stale frames via a generation counter.
+  Both mirror the separation between bounded rebind and user-visible
+  reconnect error used here.
 
 ## Files and ownership
 
@@ -161,8 +202,10 @@ formatting operation is permitted.
   1440p if the source supports it.
 - If an upshift fails, the fallback stream remains active and the stability
   counter restarts.
-- If rebind and its one retry fail, the old Activity behavior reports the
-  error; no infinite restart loop is allowed.
+- If rebind and its one retry fail, the Activity remains visible with a
+  non-interactive retry state and a single explicit retry action; it never
+  closes itself or starts a second Activity. No infinite automatic restart
+  loop is allowed.
 - Explicit split requests and the neighboring split experiment remain outside
   this policy and are not changed by automatic resolution control.
 
