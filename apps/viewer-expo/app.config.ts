@@ -20,12 +20,17 @@ const config: LeftcarExpoConfig = {
   userInterfaceStyle: "automatic",
   icon: "./assets/branding/leftcar-viewer-icon-source.png",
   splash: {
-    image: "./assets/branding/leftcar-viewer-icon-source.png",
+    image: "./assets/branding/leftcar-viewer-icon-foreground.png",
     resizeMode: "contain",
-    backgroundColor: "#080B1D",
+    backgroundColor: "#09090B",
   },
   android: {
     package: "leftcar.ll3.kr",
+    adaptiveIcon: {
+      foregroundImage: "./assets/branding/leftcar-viewer-icon-foreground.png",
+      monochromeImage: "./assets/branding/leftcar-viewer-icon-monochrome.png",
+      backgroundColor: "#09090B",
+    },
   },
   plugins: [
     "expo-router",
