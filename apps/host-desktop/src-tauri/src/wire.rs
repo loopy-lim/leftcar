@@ -4,11 +4,11 @@
 //! authentication and reliable input sequencing. Keeping those rules here
 //! prevents a Windows host from subtly diverging from the macOS shim.
 
-pub const MAX_DATAGRAM: usize = 1_200;
+pub const MAX_DATAGRAM: usize = 1_400;
 const MEDIA_HEADER: usize = 17;
-// Reserve four bytes beyond the legacy LT header: two bytes for the FEC
-// length prefix and room for the larger parity envelope.
-pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - MEDIA_HEADER - 4;
+// Keep the legacy host inside the Android receiver's V2 payload stride. This
+// lets both wire versions share one bounded contiguous reassembly layout.
+pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - 33;
 pub const PARITY_HEADER: usize = 19;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +343,13 @@ fn annex_b_nals(data: &[u8]) -> impl Iterator<Item = &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_media_datagram_budget_stays_below_ethernet_mtu() {
+        assert_eq!(MAX_DATAGRAM, 1_400);
+        assert_eq!(MAX_MEDIA_PAYLOAD, 1_367);
+        assert!(MAX_DATAGRAM + 28 <= 1_500);
+    }
 
     #[test]
     fn media_fragments_stay_under_mtu_and_preserve_au() {

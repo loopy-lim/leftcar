@@ -14,6 +14,10 @@ pub const ACCESSORY_MANUFACTURER: &str = "Leftcar";
 pub const ACCESSORY_MODEL: &str = "LeftcarHost";
 pub const ACCESSORY_VERSION: &str = "1";
 
+// Keep both directions bounded by bytes as well as frame count. With the
+// 16 MiB 4K access-unit ceiling, two queued media frames use at most 32 MiB.
+const AOAP_MEDIA_CHANNEL_CAPACITY: usize = 2;
+
 const REQUEST_GET_PROTOCOL: u8 = 51;
 const REQUEST_SEND_STRING: u8 = 52;
 const REQUEST_START: u8 = 53;
@@ -276,9 +280,10 @@ impl AccessoryLink {
             .div_ceil(endpoints.in_packet_size)
             .saturating_mul(endpoints.in_packet_size);
 
-        let (tx, writer_rx) = mpsc::sync_channel::<usb_mux::MuxFrame>(256);
+        let (tx, writer_rx) =
+            mpsc::sync_channel::<usb_mux::MuxFrame>(AOAP_MEDIA_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(64);
-        let (media_tx, media_rx) = mpsc::sync_channel(256);
+        let (media_tx, media_rx) = mpsc::sync_channel(AOAP_MEDIA_CHANNEL_CAPACITY);
         let reader_interface = interface.clone();
         let writer_interface = interface;
         let reader = thread::Builder::new()
@@ -376,6 +381,12 @@ fn write_bulk_loop(interface: Interface, endpoint: u8, receiver: Receiver<usb_mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aoap_media_queues_are_bounded_for_4k() {
+        assert_eq!(AOAP_MEDIA_CHANNEL_CAPACITY, 2);
+        assert_eq!(usb_mux::MAX_FRAME_BYTES, 16 * 1024 * 1024);
+    }
 
     #[test]
     fn accessory_string_is_utf16le_with_nul() {

@@ -3,7 +3,8 @@ mod input;
 
 use crate::backend::CaptureBackend;
 use crate::wire::{self, InputDecision, InputSequencer};
-use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
+use control_contract::host::{CaptureBackendInfo, DisplayInfo, EncoderExperiment, StatsInfo};
+use control_contract::udp_stability::AppliedUdpStability;
 use input::InputInjector;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -25,7 +26,7 @@ pub(super) struct Monitor {
     pub name: String,
 }
 
-const MAX_TCP_MEDIA_FRAME: usize = 2 * 1024 * 1024;
+const MAX_TCP_MEDIA_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(super) enum MediaSender {
@@ -185,6 +186,8 @@ impl CaptureBackend for WindowsBackend {
         capture_backend: &str,
         media_transport: &str,
         _content_mode: &str,
+        _encoder_experiment: EncoderExperiment,
+        _udp_stability: &AppliedUdpStability,
     ) -> Result<u32, String> {
         if !matches!(media_transport, "udp" | "usb") {
             return Err("Windows backend supports Wi-Fi UDP or USB AOAP media".into());
@@ -654,6 +657,20 @@ fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {
         fps: 0,
         kbps: 0,
         fps_target: fps,
+        encoder_experiment_diagnostics_available: false,
+        encoder_experiment_requested: "auto".into(),
+        encoder_experiment_applied: "rateControl".into(),
+        encoder_experiment_fallback_reason: None,
+        encoder_frame_drops: 0,
+        encoder_frame_drop_fps: 0,
+        valid_encode_output_fps: 0,
+        encode_submit_call_p50_us: 0,
+        encode_submit_call_p95_us: 0,
+        encoder_callback_p50_us: 0,
+        encoder_callback_p95_us: 0,
+        packetization_in_flight: 0,
+        base_frame_qp: None,
+        base_frame_qp_changes: 0,
         capture_fps: 0,
         encode_submit_fps: 0,
         encode_output_fps: 0,
@@ -736,6 +753,7 @@ fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {
         receiver_rtt_ms: None,
         receiver_wire_ms: None,
         receiver_feedback_age_ms: None,
+        ..StatsInfo::default()
     }
 }
 

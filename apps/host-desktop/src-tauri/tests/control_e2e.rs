@@ -1,4 +1,5 @@
-use control_contract::host::DisplayInfo;
+use control_contract::host::{DisplayInfo, EncoderExperiment};
+use control_contract::udp_stability::{AppliedUdpStability, UdpStabilityProfile};
 use leftcar_host_desktop::backend::{CaptureBackend, FakeBackend, SharedBackend};
 use leftcar_host_desktop::control::{ControlServer, StatsInfo};
 use leftcar_host_desktop::pairing::PairingServer;
@@ -22,6 +23,7 @@ fn fake_backend() -> SharedBackend {
                 height: 1440,
             },
         ],
+        encoder_experiment: Mutex::new(EncoderExperiment::Auto),
     })
 }
 
@@ -29,6 +31,7 @@ fn fake_backend() -> SharedBackend {
 struct RecordingBackend {
     displays: Vec<DisplayInfo>,
     started_ips: Mutex<Vec<String>>,
+    started_udp_stability: Mutex<Vec<AppliedUdpStability>>,
 }
 
 impl CaptureBackend for RecordingBackend {
@@ -46,8 +49,14 @@ impl CaptureBackend for RecordingBackend {
         _capture_backend: &str,
         _media_transport: &str,
         _content_mode: &str,
+        _encoder_experiment: EncoderExperiment,
+        udp_stability: &AppliedUdpStability,
     ) -> Result<u32, String> {
         self.started_ips.lock().unwrap().push(ip.to_owned());
+        self.started_udp_stability
+            .lock()
+            .unwrap()
+            .push(udp_stability.clone());
         Ok(7)
     }
     fn stop(&self, _handle: u32) -> Result<(), String> {
@@ -61,6 +70,20 @@ impl CaptureBackend for RecordingBackend {
             fps: 90,
             kbps: 12000,
             fps_target: 60,
+            encoder_experiment_diagnostics_available: false,
+            encoder_experiment_requested: "auto".into(),
+            encoder_experiment_applied: "rateControl".into(),
+            encoder_experiment_fallback_reason: None,
+            encoder_frame_drops: 0,
+            encoder_frame_drop_fps: 0,
+            valid_encode_output_fps: 90,
+            encode_submit_call_p50_us: 0,
+            encode_submit_call_p95_us: 0,
+            encoder_callback_p50_us: 0,
+            encoder_callback_p95_us: 0,
+            packetization_in_flight: 0,
+            base_frame_qp: None,
+            base_frame_qp_changes: 0,
             capture_fps: 90,
             encode_submit_fps: 90,
             encode_output_fps: 90,
@@ -82,10 +105,10 @@ impl CaptureBackend for RecordingBackend {
             max_capture_to_encode_us: 0,
             capture_queue_wait_us: 0,
             max_capture_queue_wait_us: 0,
-        encode_output_us: 0,
-        max_encode_output_us: 0,
-        packetization_us: 0,
-        max_packetization_us: 0,
+            encode_output_us: 0,
+            max_encode_output_us: 0,
+            packetization_us: 0,
+            max_packetization_us: 0,
             send_block_us: 0,
             max_send_block_us: 0,
             send_pace_us: 0,
@@ -117,8 +140,8 @@ impl CaptureBackend for RecordingBackend {
             capture_interval_p95_us: 16_667,
             capture_to_encode_p95_us: 8_000,
             capture_queue_wait_p95_us: 1_000,
-        encode_output_p95_us: 7_000,
-        packetization_p95_us: 0,
+            encode_output_p95_us: 7_000,
+            packetization_p95_us: 0,
             encode_output_interval_p95_us: 11_111,
             send_block_p95_us: 1_000,
             send_pace_p95_us: 0,
@@ -143,6 +166,7 @@ impl CaptureBackend for RecordingBackend {
             receiver_rtt_ms: None,
             receiver_wire_ms: None,
             receiver_feedback_age_ms: None,
+            ..StatsInfo::default()
         })
     }
 }
@@ -220,6 +244,112 @@ async fn test_catalog_query() {
     assert!(resp.contains("\"width\":1920"), "{resp}");
     assert!(resp.contains("\"platform\":\"test\""), "{resp}");
     assert!(resp.contains("\"captureBackends\""), "{resp}");
+    assert!(resp.contains("\"id\":\"auto\""), "{resp}");
+    assert!(resp.contains("\"id\":\"rateControl\""), "{resp}");
+    assert!(resp.contains("\"id\":\"adaptiveQp\""), "{resp}");
+    assert!(resp.contains("\"id\":\"encoderPool\""), "{resp}");
+    assert!(resp.contains("\"udpStabilityCapabilities\""), "{resp}");
+    assert!(resp.contains("\"fecParityOptions\":[2,4]"), "{resp}");
+    assert!(!resp.contains("splitHorizontal"), "{resp}");
+}
+
+#[tokio::test]
+async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
+    let p = pairing();
+    let recorder = Arc::new(RecordingBackend {
+        displays: vec![DisplayInfo {
+            index: 0,
+            name: "Main".into(),
+            width: 3840,
+            height: 2160,
+        }],
+        started_ips: Mutex::new(Vec::new()),
+        started_udp_stability: Mutex::new(Vec::new()),
+    });
+    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        server.run(listener).await;
+    });
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let token = pair_over_socket(&mut sock, &p, "viewer-udp-stability").await;
+
+    let response = send_request(
+        &mut sock,
+        "startStream",
+        r#"{"sourceIndex":0,"viewerPort":5000,"width":3840,"height":2160,"fps":60,"udpStability":{"profile":"stable","viewer":{"version":1,"maxFecParityShards":4,"splitFeedbackBytes":120}}}"#,
+        &token,
+    )
+    .await;
+    assert!(response.contains("\"ok\":true"), "{response}");
+    assert!(response.contains("\"applied\":\"stable\""), "{response}");
+    assert!(response.contains("\"burstDatagrams\":2"), "{response}");
+    assert!(response.contains("\"fecParityShards\":4"), "{response}");
+
+    let applied = recorder.started_udp_stability.lock().unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].applied, UdpStabilityProfile::Stable);
+    assert_eq!(applied[0].burst_datagrams, 2);
+    assert_eq!(applied[0].fec_parity_shards, 4);
+    drop(applied);
+
+    let status = send_request(&mut sock, "getStatus", "{}", &token).await;
+    assert!(status.contains("\"udpStability\""), "{status}");
+    assert!(status.contains("\"fecParityShards\":4"), "{status}");
+}
+
+#[tokio::test]
+async fn encoder_experiment_is_carried_to_session_and_reserved_profiles_are_rejected() {
+    let (addr, p) = spawn_test_server().await;
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let token = pair_over_socket(&mut sock, &p, "viewer-encoder-experiment").await;
+
+    let start = send_request(
+        &mut sock,
+        "startStream",
+        r#"{"sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"adaptiveQp"}"#,
+        &token,
+    )
+    .await;
+    assert!(start.contains("\"ok\":true"), "{start}");
+
+    let status = send_request(&mut sock, "getStatus", "{}", &token).await;
+    assert!(
+        status.contains("\"encoderExperimentRequested\":\"adaptiveQp\""),
+        "{status}"
+    );
+    assert!(
+        status.contains("\"encoderExperimentApplied\":\"adaptiveQp\""),
+        "{status}"
+    );
+    assert!(
+        status.contains("\"encoderExperimentDiagnosticsAvailable\":true"),
+        "{status}"
+    );
+
+    let session: serde_json::Value = serde_json::from_str(&start).unwrap();
+    let session_id = session["result"]["session"].as_u64().unwrap();
+    let _ = send_request(
+        &mut sock,
+        "stopStream",
+        &format!(r#"{{"session":{session_id}}}"#),
+        &token,
+    )
+    .await;
+
+    let reserved = send_request(
+        &mut sock,
+        "startStream",
+        r#"{"sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"splitHorizontal"}"#,
+        &token,
+    )
+    .await;
+    assert!(reserved.contains("\"ok\":false"), "{reserved}");
+    assert!(
+        reserved.contains("unsupported encoder experiment"),
+        "{reserved}"
+    );
 }
 
 #[tokio::test]
@@ -242,6 +372,7 @@ async fn test_full_stream_lifecycle() {
                 },
             ],
             started_ips: Mutex::new(Vec::new()),
+            started_udp_stability: Mutex::new(Vec::new()),
         }),
         p.clone(),
     ));
@@ -290,6 +421,10 @@ async fn test_full_stream_lifecycle() {
     );
     assert!(
         status_resp.contains("\"encoderAppliedProperties\":[\"HighSpeed\",\"Quality\"]"),
+        "{status_resp}"
+    );
+    assert!(
+        status_resp.contains("\"encoderExperimentDiagnosticsAvailable\":false"),
         "{status_resp}"
     );
 
@@ -427,6 +562,7 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
             height: 1080,
         }],
         started_ips: Mutex::new(Vec::new()),
+        started_udp_stability: Mutex::new(Vec::new()),
     });
     let server = Arc::new(ControlServer::new(recorder.clone(), p.clone()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

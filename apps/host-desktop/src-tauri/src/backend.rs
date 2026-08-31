@@ -1,8 +1,13 @@
 //! Capture backend abstraction: the macOS shim FFI implementation and the
 //! in-memory test fake share this trait (design §Tauri 호스트).
 
-use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
+use control_contract::host::{
+    phase_a_encoder_experiments, CaptureBackendInfo, DisplayInfo, EncoderExperiment,
+    EncoderExperimentInfo, StatsInfo,
+};
+use control_contract::udp_stability::AppliedUdpStability;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 pub trait CaptureBackend: Send + Sync {
     fn platform(&self) -> &'static str {
@@ -14,6 +19,14 @@ pub trait CaptureBackend: Send + Sync {
             label: "ScreenCaptureKit".into(),
             hint: "default capture backend".into(),
         }]
+    }
+    fn encoder_experiments(&self) -> Result<Vec<EncoderExperimentInfo>, String> {
+        Ok(vec![EncoderExperimentInfo {
+            id: EncoderExperiment::Auto,
+            label: "Automatic".into(),
+            hint: "Host-selected encoder policy".into(),
+            requires_reconnect: true,
+        }])
     }
     fn supports_capture_backend(&self, id: &str) -> bool {
         self.capture_backends()
@@ -33,6 +46,8 @@ pub trait CaptureBackend: Send + Sync {
         capture_backend: &str,
         media_transport: &str,
         content_mode: &str,
+        encoder_experiment: EncoderExperiment,
+        udp_stability: &AppliedUdpStability,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
     /// Stop while telling a still-live viewer why (LCT1 wire code). The
@@ -58,6 +73,7 @@ pub trait CaptureBackend: Send + Sync {
 /// In-memory backend for tests and UI development without the shim dylib.
 pub struct FakeBackend {
     pub displays: Vec<DisplayInfo>,
+    pub encoder_experiment: Mutex<EncoderExperiment>,
 }
 
 impl CaptureBackend for FakeBackend {
@@ -71,6 +87,10 @@ impl CaptureBackend for FakeBackend {
             label: "ScreenCaptureKit".into(),
             hint: "test backend".into(),
         }]
+    }
+
+    fn encoder_experiments(&self) -> Result<Vec<EncoderExperimentInfo>, String> {
+        Ok(phase_a_encoder_experiments())
     }
 
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
@@ -88,7 +108,10 @@ impl CaptureBackend for FakeBackend {
         _capture_backend: &str,
         _media_transport: &str,
         _content_mode: &str,
+        encoder_experiment: EncoderExperiment,
+        _udp_stability: &AppliedUdpStability,
     ) -> Result<u32, String> {
+        *self.encoder_experiment.lock().unwrap() = encoder_experiment;
         Ok(7)
     }
 
@@ -111,6 +134,33 @@ impl CaptureBackend for FakeBackend {
             fps: 90,
             kbps: 12000,
             fps_target: 60,
+            encoder_experiment_diagnostics_available: true,
+            encoder_experiment_requested: {
+                let experiment = *self.encoder_experiment.lock().unwrap();
+                experiment.as_str().into()
+            },
+            encoder_experiment_applied: {
+                let experiment = *self.encoder_experiment.lock().unwrap();
+                match experiment {
+                    EncoderExperiment::Auto => EncoderExperiment::RateControl.as_str(),
+                    _ => experiment.as_str(),
+                }
+                .into()
+            },
+            encoder_experiment_fallback_reason: None,
+            encoder_frame_drops: 0,
+            encoder_frame_drop_fps: 0,
+            valid_encode_output_fps: 90,
+            encode_submit_call_p50_us: 0,
+            encode_submit_call_p95_us: 0,
+            encoder_callback_p50_us: 0,
+            encoder_callback_p95_us: 0,
+            packetization_in_flight: 0,
+            base_frame_qp: {
+                (*self.encoder_experiment.lock().unwrap() == EncoderExperiment::AdaptiveQp)
+                    .then_some(32)
+            },
+            base_frame_qp_changes: 0,
             capture_fps: 90,
             encode_submit_fps: 90,
             encode_output_fps: 90,
@@ -193,6 +243,7 @@ impl CaptureBackend for FakeBackend {
             receiver_rtt_ms: None,
             receiver_wire_ms: None,
             receiver_feedback_age_ms: None,
+            ..StatsInfo::default()
         })
     }
 

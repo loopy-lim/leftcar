@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Globe,
   Info,
   Laptop,
   Monitor,
@@ -19,6 +20,12 @@ import {
   Tv,
   X,
 } from "lucide-react";
+import {
+  getTranslation,
+  interpolate,
+  type SupportedLanguage,
+  type TranslationSchema,
+} from "@leftcar/ui-tokens";
 import { trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
@@ -28,21 +35,27 @@ import {
   isTerminalSession,
   type TerminationNotice,
 } from "./streamTermination";
+import {
+  bannerAlertVariants,
+  buttonVariants,
+  controlToggleVariants,
+  statusPillVariants,
+  terminationNoticeVariants,
+} from "./lib/variants";
 
-function hostErrorMessage(cause: unknown): string {
+function hostErrorMessage(cause: unknown, t: TranslationSchema): string {
   const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
   if (message.includes("permission") || message.includes("not authorized")) {
-    return "화면 공유 권한이 필요합니다. 시스템 설정에서 Leftcar를 허용해 주세요.";
+    return t.host.screenPermissionError;
   }
   if (message.includes("no lan interface")) {
-    return "연결할 네트워크를 찾지 못했습니다. Wi-Fi 또는 Tailscale 연결을 확인해 주세요.";
+    return t.host.networkNotFoundError;
   }
   if (message.includes("invoke") || message.includes("initialization")) {
-    return "앱 서비스를 시작할 수 없습니다. Leftcar를 완전히 종료한 뒤 다시 실행해 주세요.";
+    return t.host.appServiceInitError;
   }
-  return "연결 상태를 확인하지 못했습니다. 잠시 후 새로고침해 주세요.";
+  return t.host.connectionCheckError;
 }
-
 interface StatusView {
   sessions: SessionRow[];
 }
@@ -61,7 +74,7 @@ export default function App() {
   return <Dashboard />;
 }
 
-function useHostStatus() {
+function useHostStatus(t: TranslationSchema) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
@@ -132,9 +145,9 @@ function useHostStatus() {
       setControlPort(actualControlPort);
       setLastUpdated(new Date());
     } catch (cause) {
-      setError(hostErrorMessage(cause));
+      setError(hostErrorMessage(cause, t));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
@@ -172,8 +185,11 @@ interface DashboardHeaderProps {
   sessionCount: number;
   themeMode: ThemeMode;
   themeLabel: string;
+  language: SupportedLanguage;
+  t: TranslationSchema;
   onPair: () => void;
   onTheme: () => void;
+  onToggleLanguage: () => void;
   onRefresh: () => void;
 }
 
@@ -182,8 +198,11 @@ function DashboardHeader({
   sessionCount,
   themeMode,
   themeLabel,
+  language,
+  t,
   onPair,
   onTheme,
+  onToggleLanguage,
   onRefresh,
 }: DashboardHeaderProps) {
   return (
@@ -193,33 +212,68 @@ function DashboardHeader({
           <Monitor size={17} strokeWidth={2.4} aria-hidden="true" />
         </div>
         <div className="host-title-group">
-          <h1>Leftcar</h1>
-          <span className="host-version-badge">내 컴퓨터</span>
+          <h1>{t.host.headerTitle}</h1>
+          <span className="host-version-badge">{t.common.myComputer}</span>
         </div>
       </div>
       <div className="host-header-right">
-        <div className={`host-status-pill ${isStreaming ? "pill-active" : "pill-idle"}`}>
+        <div className={statusPillVariants({ state: isStreaming ? "active" : "idle" })}>
           <span className="status-dot" />
-          <span>{isStreaming ? `${sessionCount}개 화면 공유 중` : "연결 준비됨"}</span>
+          <span>
+            {isStreaming
+              ? interpolate(t.host.statusStreaming, { count: sessionCount })
+              : t.host.statusIdle}
+          </span>
         </div>
-        <button className="btn-primary" onClick={onPair} title="새 기기 연결 (⌘P)">
-          <QrCode size={14} />
-          <span>새 기기 연결</span>
-          <span className="kbd-shortcut" style={{ marginLeft: 2, opacity: 0.85, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>⌘P</span>
-        </button>
         <button
-          className="btn-icon"
-          onClick={onTheme}
-          title={`테마: ${themeLabel}`}
-          aria-label={`테마 변경: 현재 ${themeLabel}`}
+          className={buttonVariants({ variant: "primary" })}
+          onClick={onPair}
+          title={`${t.host.btnPair} (${t.host.shortcutPair})`}
         >
-          {themeMode === "light" ? <Sun size={15} /> : themeMode === "dark" ? <Moon size={15} /> : <Laptop size={15} />}
+          <QrCode size={14} />
+          <span>{t.host.btnPair}</span>
+          <span
+            className="kbd-shortcut"
+            style={{
+              marginLeft: 2,
+              opacity: 0.85,
+              background: "rgba(255,255,255,0.2)",
+              color: "inherit",
+              borderColor: "rgba(255,255,255,0.3)",
+            }}
+          >
+            {t.host.shortcutPair}
+          </span>
         </button>
         <button
-          className="btn-icon"
+          className={buttonVariants({ variant: "icon" })}
+          onClick={onToggleLanguage}
+          title={t.common.toggleLanguage}
+          aria-label={t.common.toggleLanguage}
+          style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 6px" }}
+        >
+          <Globe size={13} />
+          <span style={{ fontSize: 11, fontWeight: 700 }}>{language === "ko" ? "EN" : "한국어"}</span>
+        </button>
+        <button
+          className={buttonVariants({ variant: "icon" })}
+          onClick={onTheme}
+          title={`${t.common.theme}: ${themeLabel}`}
+          aria-label={`${t.common.theme}: ${themeLabel}`}
+        >
+          {themeMode === "light" ? (
+            <Sun size={15} />
+          ) : themeMode === "dark" ? (
+            <Moon size={15} />
+          ) : (
+            <Laptop size={15} />
+          )}
+        </button>
+        <button
+          className={buttonVariants({ variant: "icon" })}
           onClick={onRefresh}
-          title="새로고침 (⌘R)"
-          aria-label="연결 상태 새로고침"
+          title={`${t.common.refresh} (${t.host.shortcutRefresh})`}
+          aria-label={t.common.refresh}
         >
           <RefreshCw size={14} />
         </button>
@@ -234,11 +288,21 @@ interface DashboardFooterProps {
   inputPermission: boolean;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
+  language: SupportedLanguage;
+  t: TranslationSchema;
   onCopyPort: () => void;
   onRequestPermission: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
+  const { t, language } = props;
+  const platformLabel =
+    props.platform === "macos"
+      ? t.common.myMac
+      : props.platform === "windows"
+        ? t.common.windowsPc
+        : t.common.myComputer;
+
   return (
     <footer className="host-footer">
       <div className="footer-status-info">
@@ -246,12 +310,13 @@ function DashboardFooter(props: DashboardFooterProps) {
           type="button"
           className="clickable-chip"
           onClick={props.onCopyPort}
-          title="로컬 제어 포트 복사하기"
+          title={t.host.footerStatusLabel}
         >
-          연결 포트: <strong>:{props.controlPort}</strong>{" "}
+          {t.host.footerStatusLabel} <strong>{t.host.statusNormal}</strong>{" "}
           {props.copiedToast ? (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontWeight: 600 }}>
-              <Check size={13} strokeWidth={2.5} /> 복사됨!
+              <Check size={13} strokeWidth={2.5} />{" "}
+              {interpolate(t.host.portCopied, { port: props.controlPort })}
             </span>
           ) : (
             <Copy size={12} style={{ opacity: 0.7 }} />
@@ -262,41 +327,49 @@ function DashboardFooter(props: DashboardFooterProps) {
           type="button"
           className="clickable-chip"
           onClick={props.onRequestPermission}
-          title={props.inputPermission ? "원격 제어 활성화됨" : "클릭하여 권한 허용"}
+          title={props.inputPermission ? t.host.permApproved : t.host.permRequired}
         >
-          원격 조작:{" "}
+          {t.host.remoteControlLabel}{" "}
           {props.inputPermission ? (
             <strong style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-              <ShieldCheck size={13} /> 승인됨
+              <ShieldCheck size={13} /> {t.host.permApproved}
             </strong>
           ) : (
             <strong style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-              <ShieldAlert size={13} /> 권한 필요
+              <ShieldAlert size={13} /> {t.host.permRequired}
             </strong>
           )}
         </button>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <span className="footer-timestamp">
-          {props.platform === "macos" ? "Mac" : props.platform === "windows" ? "Windows PC" : "컴퓨터"} · 최근 확인: {props.lastUpdated.toLocaleTimeString("ko-KR")}
+          {platformLabel} · {t.host.lastUpdated} {props.lastUpdated.toLocaleTimeString(language === "ko" ? "ko-KR" : "en-US")}
         </span>
       </div>
     </footer>
   );
 }
 
-function PairingModal({ onClose }: { onClose: () => void }) {
+function PairingModal({
+  onClose,
+  language,
+  t,
+}: {
+  onClose: () => void;
+  language: SupportedLanguage;
+  t: TranslationSchema;
+}) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
-          <h3>새 기기 연결</h3>
-          <button className="btn-close" onClick={onClose} aria-label="기기 연결 창 닫기">
+          <h3>{t.host.pairingModalTitle}</h3>
+          <button className={buttonVariants({ variant: "close" })} onClick={onClose} aria-label={t.host.pairingModalCloseAria}>
             <X size={15} />
           </button>
         </div>
         <div className="modal-scroll-area">
-          <PairingPanel />
+          <PairingPanel language={language} />
         </div>
       </div>
     </div>
@@ -306,11 +379,13 @@ function PairingModal({ onClose }: { onClose: () => void }) {
 function StopStreamModal({
   session,
   busy,
+  t,
   onCancel,
   onConfirm,
 }: {
   session: SessionRow;
   busy: boolean;
+  t: TranslationSchema;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -323,29 +398,24 @@ function StopStreamModal({
     >
       <div className="modal-window stop-stream-modal">
         <div className="modal-title-bar">
-          <h3 id="stop-stream-title">화면 공유를 종료할까요?</h3>
-          <button className="btn-close" disabled={busy} onClick={onCancel} aria-label="종료 확인 창 닫기">
+          <h3 id="stop-stream-title">{t.host.stopModalTitle}</h3>
+          <button className={buttonVariants({ variant: "close" })} disabled={busy} onClick={onCancel} aria-label={t.common.close}>
             <X size={15} />
           </button>
         </div>
         <div className="stop-stream-modal-body">
           <div className="stop-stream-target">
             <strong>{session.sourceName}</strong>
-            <span>연결된 기기: {session.viewerAddr}</span>
+            <span>{interpolate(t.host.stopModalConnectedDevice, { addr: session.viewerAddr })}</span>
           </div>
           <p className="stop-stream-summary">
-            종료하면 다음 작업을 즉시 수행합니다.
+            {t.host.stopModalSummary}
           </p>
-          <ul className="stop-stream-effects">
-            <li>화면 공유와 영상 전송을 즉시 중지합니다.</li>
-            <li>원격 조작을 끄고 눌려 있는 키와 마우스 버튼을 해제합니다.</li>
-            <li>연결된 기기에 종료 사실을 알리고 연결 정보를 정리합니다.</li>
-          </ul>
           <div className="stop-stream-actions">
-            <button className="btn-ghost" disabled={busy} onClick={onCancel}>계속 공유</button>
-            <button className="btn-danger" disabled={busy} onClick={onConfirm}>
+            <button className={buttonVariants({ variant: "ghost" })} disabled={busy} onClick={onCancel}>{t.host.btnKeepStreaming}</button>
+            <button className={buttonVariants({ variant: "danger" })} disabled={busy} onClick={onConfirm}>
               <Square size={13} fill="currentColor" />
-              {busy ? "종료 중…" : "화면 공유 종료"}
+              {busy ? t.host.stopping : t.host.btnConfirmStop}
             </button>
           </div>
         </div>
@@ -356,16 +426,20 @@ function StopStreamModal({
 
 function TerminationBanner({
   notice,
+  language,
+  t,
   onDismiss,
 }: {
   notice: TerminationNotice;
+  language: SupportedLanguage;
+  t: TranslationSchema;
   onDismiss: () => void;
 }) {
   return (
     <section
-      className={`termination-notice termination-${notice.tone}`}
+      className={terminationNoticeVariants({ tone: notice.tone === "danger" ? "danger" : "default" })}
       role={notice.tone === "danger" ? "alert" : "status"}
-      aria-label="최근 화면 공유 종료 상태"
+      aria-label={notice.title}
     >
       <span className="termination-notice-icon" aria-hidden="true">
         {notice.tone === "danger" ? (
@@ -378,15 +452,15 @@ function TerminationBanner({
         <div className="termination-notice-heading">
           <strong>{notice.title}</strong>
           <time dateTime={notice.observedAt.toISOString()}>
-            {notice.observedAt.toLocaleTimeString("ko-KR")}
+            {notice.observedAt.toLocaleTimeString(language === "ko" ? "ko-KR" : "en-US")}
           </time>
         </div>
         <span className="termination-notice-target">
-          {notice.sourceName} · 연결된 기기 {notice.viewerAddr}
+          {notice.sourceName} · {interpolate(t.host.connectedDevice, { addr: notice.viewerAddr })}
         </span>
-        <p><b>종료 이유:</b> {notice.detail}</p>
+        <p><b>{t.host.terminationReasonLabel}</b> {notice.detail}</p>
       </div>
-      <button className="btn-close" onClick={onDismiss} aria-label="종료 상태 알림 닫기">
+      <button className={buttonVariants({ variant: "close" })} onClick={onDismiss} aria-label={t.common.close}>
         <X size={15} />
       </button>
     </section>
@@ -399,6 +473,7 @@ interface SystemAlertBannersProps {
   inputPermission: boolean;
   platform: HostSnapshotView["platform"];
   inputBusy: number | "permission" | null;
+  t: TranslationSchema;
   onRequestPermission: () => void;
   onOpenAccessibility: () => void;
 }
@@ -409,13 +484,14 @@ function SystemAlertBanners({
   inputPermission,
   platform,
   inputBusy,
+  t,
   onRequestPermission,
   onOpenAccessibility,
 }: SystemAlertBannersProps) {
   return (
     <>
       {error && (
-        <div className="banner-alert banner-danger">
+        <div className={bannerAlertVariants({ tone: "danger" })}>
           <div className="banner-text">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <AlertTriangle size={16} /> {error}
@@ -423,58 +499,58 @@ function SystemAlertBanners({
           </div>
           {platform === "macos" && error.includes("Remote Desktop") && (
             <button
-              className="btn-ghost btn-sm"
+              className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "remote_desktop" })}
             >
-              Remote Desktop 설정 열기
+              {t.host.openRemoteDesktopSettings}
             </button>
           )}
           {platform === "macos" && error.includes("권한") && !error.includes("Remote Desktop") && (
             <button
-              className="btn-ghost btn-sm"
+              className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
             >
-              화면 기록 설정 열기
+              {t.host.openScreenCaptureSettings}
             </button>
           )}
         </div>
       )}
 
       {inputActionError && (
-        <div className="banner-alert banner-danger">
+        <div className={bannerAlertVariants({ tone: "danger" })}>
           <div className="banner-text">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <AlertTriangle size={16} /> {inputActionError}
             </span>
           </div>
           {platform === "macos" && (
-            <button className="btn-ghost btn-sm" onClick={onOpenAccessibility}>
-              설정 열기
+            <button className={buttonVariants({ variant: "ghost", size: "sm" })} onClick={onOpenAccessibility}>
+              {t.host.btnOpenSettings}
             </button>
           )}
         </div>
       )}
 
       {!inputPermission && platform === "macos" && (
-        <div className="banner-alert banner-warning">
+        <div className={bannerAlertVariants({ tone: "warning" })}>
           <div className="banner-text">
-            <strong>원격 조작 권한 필요</strong>
-            <p>연결한 휴대폰이나 태블릿에서 마우스와 키보드를 사용하려면 손쉬운 사용 권한이 필요합니다.</p>
+            <strong>{t.host.inputPermBannerTitle}</strong>
+            <p>{t.host.inputPermBannerDesc}</p>
           </div>
           <div className="banner-actions">
             <button
-              className="btn-primary btn-sm"
+              className={buttonVariants({ variant: "primary", size: "sm" })}
               disabled={inputBusy === "permission"}
               onClick={onRequestPermission}
             >
-              {inputBusy === "permission" ? "확인 중…" : "권한 허용"}
+              {inputBusy === "permission" ? t.host.checkingPerm : t.host.btnGrantPerm}
             </button>
             <button
-              className="btn-ghost btn-sm"
+              className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={onOpenAccessibility}
-              title="macOS 손쉬운 사용 설정 열기"
+              title={t.host.btnOpenSettings}
             >
-              설정 열기
+              {t.host.btnOpenSettings}
             </button>
           </div>
         </div>
@@ -484,10 +560,12 @@ function SystemAlertBanners({
 }
 
 interface IdleStudioViewProps {
+  controlPort: number;
+  t: TranslationSchema;
   onOpenPairing: () => void;
 }
 
-function IdleStudioView({ onOpenPairing }: IdleStudioViewProps) {
+function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
   return (
     <div className="idle-center-container">
       <div className="idle-center-card">
@@ -495,22 +573,24 @@ function IdleStudioView({ onOpenPairing }: IdleStudioViewProps) {
           <Monitor size={26} strokeWidth={2} />
         </div>
         <div className="idle-center-text">
-          <h2>기기 연결을 기다리는 중</h2>
-          <p>
-            휴대폰이나 태블릿에서 Leftcar Viewer 앱을 열고<br />
-            이 컴퓨터를 선택하거나 주소를 입력한 뒤 연결 코드를 입력하세요.
-          </p>
+          <h2>{t.host.idleTitle}</h2>
+          <p>{t.host.idleDesc}</p>
         </div>
 
-        <button className="btn-primary btn-lg" onClick={onOpenPairing} title="새 기기 연결 (⌘P)">
+        <div className="idle-status-chip">
+          <span className="status-dot" />
+          <span>{t.host.idleStatusReady}</span>
+        </div>
+
+        <button className={buttonVariants({ variant: "primary", size: "lg" })} onClick={onOpenPairing} title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})`}>
           <QrCode size={15} />
-          <span>연결 코드 만들기</span>
-          <span className="kbd-shortcut" style={{ marginLeft: 4, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>⌘P</span>
+          <span>{t.host.btnCreatePairing}</span>
+          <span className="kbd-shortcut" style={{ marginLeft: 4, background: "rgba(255,255,255,0.2)", color: "inherit", borderColor: "rgba(255,255,255,0.3)" }}>{t.host.shortcutPair}</span>
         </button>
 
         <span className="idle-center-hint">
           <Info size={12} />
-          같은 Wi-Fi 또는 Tailscale 네트워크의 기기에서 연결할 수 있습니다
+          {t.host.idleHint}
         </span>
       </div>
     </div>
@@ -522,6 +602,7 @@ interface StreamsListViewProps {
   inputPermission: boolean;
   inputBusy: number | "permission" | null;
   showInspector: boolean;
+  t: TranslationSchema;
   onToggleInspector: () => void;
   onToggleInput: (session: SessionRow) => Promise<void>;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
@@ -534,6 +615,7 @@ function StreamsListView({
   inputPermission,
   inputBusy,
   showInspector,
+  t,
   onToggleInspector,
   onToggleInput,
   onSetQuality,
@@ -544,20 +626,20 @@ function StreamsListView({
     <div className="streams-section">
       <div className="streams-section-header">
         <div className="streams-header-left">
-          <h2>공유 중인 화면 ({sessions.length})</h2>
+          <h2>{interpolate(t.host.activeSectionTitle, { count: sessions.length })}</h2>
           <span className="live-badge-pulse">
-            <span className="status-dot" /> 공유 중
+            <span className="status-dot" /> {t.host.liveBadge}
           </span>
         </div>
         <button
-          className="btn-link"
+          className={buttonVariants({ variant: "link" })}
           onClick={onToggleInspector}
           style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
         >
           {showInspector ? (
-            <>세부 지표 숨기기 <ChevronUp size={14} /></>
+            <>{t.host.hideMetrics} <ChevronUp size={14} /></>
           ) : (
-            <>세부 지표 보기 <ChevronDown size={14} /></>
+            <>{t.host.showMetrics} <ChevronDown size={14} /></>
           )}
         </button>
       </div>
@@ -570,6 +652,7 @@ function StreamsListView({
             inputPermission={inputPermission}
             inputBusy={inputBusy === session.session}
             showInspector={showInspector}
+            t={t}
             onToggleInput={onToggleInput}
             onSetQuality={onSetQuality}
             qualityBusy={qualityBusy === session.session}
@@ -582,6 +665,24 @@ function StreamsListView({
 }
 
 function Dashboard() {
+  const [language, setLanguage] = useState<SupportedLanguage>(() => {
+    const saved = localStorage.getItem("leftcar_lang") as SupportedLanguage | null;
+    if (saved === "ko" || saved === "en") return saved;
+    const navLang = navigator.language?.toLowerCase() || "ko";
+    return navLang.startsWith("en") ? "en" : "ko";
+  });
+
+  useEffect(() => {
+    localStorage.setItem("leftcar_lang", language);
+    document.documentElement.lang = language;
+  }, [language]);
+
+  const toggleLanguage = useCallback(() => {
+    setLanguage((prev) => (prev === "ko" ? "en" : "ko"));
+  }, []);
+
+  const t = getTranslation(language);
+
   const {
     sessions,
     terminationNotice,
@@ -592,7 +693,7 @@ function Dashboard() {
     controlPort,
     lastUpdated,
     refresh,
-  } = useHostStatus();
+  } = useHostStatus(t);
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
   const [qualityBusy, setQualityBusy] = useState<number | null>(null);
@@ -637,7 +738,7 @@ function Dashboard() {
     try {
       await invoke("open_system_settings", { pane: "accessibility" });
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause));
+      setInputActionError(hostErrorMessage(cause, t));
     }
   };
 
@@ -647,15 +748,13 @@ function Dashboard() {
       const granted = await invoke<boolean>("request_input_permission");
       if (!granted) {
         await invoke("open_system_settings", { pane: "accessibility" }).catch(() => {});
-        setInputActionError(
-          "macOS 시스템 설정의 '개인정보 보호 및 보안 > 손쉬운 사용'에서 Leftcar Host를 허용해 주세요.",
-        );
+        setInputActionError(t.host.permissionErrorGuide);
       } else {
         setInputActionError(null);
       }
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause));
+      setInputActionError(hostErrorMessage(cause, t));
     } finally {
       setInputBusy(null);
     }
@@ -671,7 +770,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause));
+      setInputActionError(hostErrorMessage(cause, t));
     } finally {
       setInputBusy(null);
     }
@@ -687,7 +786,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause));
+      setInputActionError(hostErrorMessage(cause, t));
     } finally {
       setQualityBusy(null);
     }
@@ -701,7 +800,7 @@ function Dashboard() {
       await refresh();
       setPendingStopSession(null);
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause));
+      setInputActionError(hostErrorMessage(cause, t));
     } finally {
       setInputBusy(null);
     }
@@ -721,7 +820,12 @@ function Dashboard() {
     });
   };
 
-  const themeLabel = theme === "light" ? "라이트 모드" : theme === "dark" ? "다크 모드" : "시스템 동기화";
+  const themeLabel =
+    theme === "light"
+      ? t.common.themeLight
+      : theme === "dark"
+        ? t.common.themeDark
+        : t.common.themeSystem;
 
   return (
     <div className="host-window">
@@ -730,14 +834,22 @@ function Dashboard() {
         sessionCount={sessions.length}
         themeMode={theme}
         themeLabel={themeLabel}
+        language={language}
+        t={t}
         onPair={() => setShowPairingModal(true)}
         onTheme={toggleTheme}
+        onToggleLanguage={toggleLanguage}
         onRefresh={() => void refresh()}
       />
 
       <main className="host-body">
         {terminationNotice && (
-          <TerminationBanner notice={terminationNotice} onDismiss={dismissTerminationNotice} />
+          <TerminationBanner
+            notice={terminationNotice}
+            language={language}
+            t={t}
+            onDismiss={dismissTerminationNotice}
+          />
         )}
 
         <SystemAlertBanners
@@ -746,6 +858,7 @@ function Dashboard() {
           inputPermission={inputPermission}
           platform={platform}
           inputBusy={inputBusy}
+          t={t}
           onRequestPermission={requestInputPermission}
           onOpenAccessibility={openAccessibilitySettings}
         />
@@ -756,6 +869,7 @@ function Dashboard() {
             inputPermission={inputPermission}
             inputBusy={inputBusy}
             showInspector={showInspector}
+            t={t}
             onToggleInspector={() => setShowInspector((prev) => !prev)}
             onToggleInput={toggleSessionInput}
             onSetQuality={setSessionQuality}
@@ -764,6 +878,8 @@ function Dashboard() {
           />
         ) : (
           <IdleStudioView
+            controlPort={controlPort}
+            t={t}
             onOpenPairing={() => setShowPairingModal(true)}
           />
         )}
@@ -775,15 +891,24 @@ function Dashboard() {
         inputPermission={inputPermission}
         platform={platform}
         lastUpdated={lastUpdated}
+        language={language}
+        t={t}
         onCopyPort={copyPortInfo}
         onRequestPermission={requestInputPermission}
       />
 
-      {showPairingModal && <PairingModal onClose={() => setShowPairingModal(false)} />}
+      {showPairingModal && (
+        <PairingModal
+          language={language}
+          t={t}
+          onClose={() => setShowPairingModal(false)}
+        />
+      )}
       {pendingStopSession && (
         <StopStreamModal
           session={pendingStopSession}
           busy={inputBusy === pendingStopSession.session}
+          t={t}
           onCancel={() => setPendingStopSession(null)}
           onConfirm={() => void forceStopSession(pendingStopSession)}
         />
@@ -797,6 +922,7 @@ interface SessionCardProps {
   inputPermission: boolean;
   inputBusy: boolean;
   showInspector: boolean;
+  t: TranslationSchema;
   onToggleInput: (session: SessionRow) => Promise<void>;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
   qualityBusy: boolean;
@@ -808,6 +934,7 @@ function SessionCard({
   inputPermission,
   inputBusy,
   showInspector,
+  t,
   onToggleInput,
   onSetQuality,
   qualityBusy,
@@ -815,11 +942,12 @@ function SessionCard({
 }: SessionCardProps) {
   const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
   const encodeOutputFps = session.encodeOutputFps ?? session.fps;
-  const transportLabel = session.mediaTransport === "usb"
-    ? "USB (AOAP)"
-    : session.mediaTransport === "udp"
-      ? "Wi-Fi UDP"
-      : session.mediaTransport || "확인 중";
+  const transportLabel =
+    session.mediaTransport === "usb"
+      ? t.host.cableUsb
+      : session.mediaTransport === "udp"
+        ? t.host.wifiWireless
+        : session.mediaTransport || t.host.unknownTransport;
   const qualitySupported = session.qualityHint != null;
   const qualityPercent = Math.round((session.qualityOverride ?? session.qualityHint ?? 0.5) * 100);
 
@@ -835,39 +963,41 @@ function SessionCard({
               <h3>{session.sourceName}</h3>
               <span className="session-tag">#{session.session}</span>
             </div>
-            <span className="stream-card-target">연결된 기기: {session.viewerAddr}</span>
+            <span className="stream-card-target">
+              {interpolate(t.host.connectedDevice, { addr: session.viewerAddr })}
+            </span>
           </div>
         </div>
 
         <div className="stream-card-action">
           <button
-            className={`btn-control-toggle ${session.inputEnabled ? "toggle-active" : ""}`}
+            className={controlToggleVariants({ active: session.inputEnabled })}
             disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy}
             onClick={() => void onToggleInput(session)}
-            title={session.inputEnabled ? "원격 마우스/키보드 입력 허용 중" : "원격 입력 켜기"}
+            title={session.inputEnabled ? t.host.remoteInputAllowed : t.host.remoteInputOff}
           >
             {inputBusy
-              ? "처리 중…"
+              ? t.host.remoteInputProcessing
               : session.inputEnabled
-                ? "원격 조작 허용됨"
-                : "원격 조작 끔"}
+                ? t.host.remoteInputAllowed
+                : t.host.remoteInputOff}
           </button>
           <button
-            className="btn-stop-stream"
+            className={buttonVariants({ variant: "stop" })}
             disabled={inputBusy || qualityBusy}
             onClick={() => onForceStop(session)}
-            title="이 화면 공유 종료"
-            aria-label={`${session.sourceName} 화면 공유 종료`}
+            title={t.host.stopThisStream}
+            aria-label={`${session.sourceName} ${t.host.stopShare}`}
           >
             <Square size={12} fill="currentColor" />
-            공유 종료
+            {t.host.stopShare}
           </button>
         </div>
       </div>
 
       <div className="stream-card-metrics-grid">
         <div className="metric-card">
-          <span className="metric-card-label">인코더 출력</span>
+          <span className="metric-card-label">{t.host.encoderOutput}</span>
           <span className="metric-card-value font-emerald">
             <span className="signal-bars" aria-hidden="true">
               <span className="bar bar-1 active" />
@@ -879,24 +1009,24 @@ function SessionCard({
         </div>
 
         <div className="metric-card">
-          <span className="metric-card-label">전송량</span>
+          <span className="metric-card-label">{t.host.bitrate}</span>
           <span className="metric-card-value">{bitrateMbps} Mbps</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-card-label">연결 상태</span>
+          <span className="metric-card-label">{t.host.connectionStatus}</span>
           <span className="metric-card-value font-blue">
-            {session.state === "running" ? "정상 연결" : "상태 확인 중"}
+            {session.state === "running" ? t.host.statusRunning : t.host.statusChecking}
           </span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-card-label">전송 안정성</span>
+          <span className="metric-card-label">{t.host.transferStability}</span>
           <span className="metric-card-value">
             {session.dropped ? (
-              <span className="font-rose">놓친 화면 {session.dropped}개</span>
+              <span className="font-rose">{interpolate(t.host.droppedFrames, { count: session.dropped })}</span>
             ) : (
-              <span className="font-emerald">안정적</span>
+              <span className="font-emerald">{t.host.stabilityStable}</span>
             )}
           </span>
         </div>
@@ -916,10 +1046,10 @@ function SessionCard({
       <div className="stream-card-footer">
         <div className="stream-termination-policy">
           <Info size={12} />
-          <span>직접 종료하거나 연결된 기기가 6초 동안 응답하지 않으면 안전하게 연결을 정리합니다.</span>
+          <span>{t.host.autoCleanupPolicy}</span>
         </div>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
-          {session.state === "running" ? "화면 공유 중" : "상태 확인 중"}
+          {session.state === "running" ? t.host.liveBadge : t.host.statusChecking}
         </span>
       </div>
     </div>

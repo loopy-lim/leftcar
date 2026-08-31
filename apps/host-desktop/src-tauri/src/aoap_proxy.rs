@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = usb_mux::MAX_FRAME_BYTES;
 const READ_BUFFER_BYTES: usize = 16 * 1024;
 
 static ACTIVE_PROXY: std::sync::OnceLock<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> =
@@ -175,6 +175,7 @@ mod tests {
 
     #[test]
     fn length_prefix_decoder_roundtrip() {
+        assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
         let mut decoder = LengthPrefixDecoder::default();
         let mut wire = Vec::new();
         wire.extend_from_slice(&4u32.to_be_bytes());
