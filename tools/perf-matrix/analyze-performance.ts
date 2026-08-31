@@ -10,6 +10,10 @@ export interface HostPerfSample {
   encodeOutputIntervalP95Us?: number;
   encodeOutputP95Us?: number;
   queueOldestUs?: number;
+  encoderWatchdogRestarts?: number;
+  encoderWatchdogTerminations?: number;
+  encoderLateCallbacks?: number;
+  encoderWatchdogOldestUs?: number;
   encoderMode?: string;
   encoderID?: string;
 }
@@ -161,6 +165,16 @@ export function parseHostLog(text: string): HostPerfSample[] {
     const encodeOutputIntervalP95Us = nonnegativeNumber(tokens, "encodeOutputIntervalP95Us");
     const encodeOutputP95Us = nonnegativeNumber(tokens, "encodeOutputP95Us");
     const queueOldestUs = nonnegativeNumber(tokens, "queueOldestUs");
+    const encoderWatchdogRestarts = nonnegativeSafeInteger(tokens.encoderWatchdogRestarts);
+    const encoderWatchdogTerminations = nonnegativeSafeInteger(tokens.encoderWatchdogTerminations);
+    const encoderLateCallbacks = nonnegativeSafeInteger(tokens.encoderLateCallbacks);
+    const encoderWatchdogOldestUs = nonnegativeSafeInteger(tokens.encoderWatchdogOldestUs);
+    const malformedWatchdogToken = (
+      (tokens.encoderWatchdogRestarts !== undefined && encoderWatchdogRestarts === undefined) ||
+      (tokens.encoderWatchdogTerminations !== undefined && encoderWatchdogTerminations === undefined) ||
+      (tokens.encoderLateCallbacks !== undefined && encoderLateCallbacks === undefined) ||
+      (tokens.encoderWatchdogOldestUs !== undefined && encoderWatchdogOldestUs === undefined)
+    );
     if (
       !Number.isFinite(timestampMs) ||
       captureCallbacks === undefined ||
@@ -168,7 +182,8 @@ export function parseHostLog(text: string): HostPerfSample[] {
       encodeOutputIntervalP50Us === undefined ||
       encodeOutputIntervalP95Us === undefined ||
       encodeOutputP95Us === undefined ||
-      queueOldestUs === undefined
+      queueOldestUs === undefined ||
+      malformedWatchdogToken
     ) {
       throw new Error("parse error: malformed LeftcarPerf record");
     }
@@ -183,6 +198,10 @@ export function parseHostLog(text: string): HostPerfSample[] {
       encodeOutputIntervalP95Us,
       encodeOutputP95Us,
       queueOldestUs,
+      encoderWatchdogRestarts,
+      encoderWatchdogTerminations,
+      encoderLateCallbacks,
+      encoderWatchdogOldestUs,
       encoderMode: tokens.encoderMode,
       encoderID: tokens.encoderID,
     });

@@ -9,7 +9,7 @@
  * - Kotlin shim contains no business-layer markers (network/codec policy)
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 const ROOT = process.cwd();
 let failures = 0;
@@ -87,22 +87,44 @@ for (const folder of [
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
 const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
+const JUNIT_IMPORT = /^import org\.junit\./;
+
+function isAndroidJvmUnitTestSource(file: string, androidProjectRoot: string): boolean {
+  const projectRelativePath = relative(androidProjectRoot, file).replaceAll("\\", "/");
+  return /^app\/src\/test\/(?:java|kotlin)\/.+\.kt$/.test(projectRelativePath);
+}
+
 for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "apps/viewer-expo/android")]) {
   for (const file of walk(folder)) {
     if (!file.endsWith(".kt")) continue;
     const text = readFileSync(file, "utf8");
     for (const line of text.split("\n")) {
       const m = line.match(/^import\s+(.+)$/);
-      if (m && !KOTLIN_ALLOW.test(line)) {
+      const allowsJvmUnitTestJUnit = isAndroidJvmUnitTestSource(file, folder) && JUNIT_IMPORT.test(line);
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestJUnit) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,
         );
       }
     }
-    // no codec/network policy in the shim (docs/09 §14 금지 타협)
-    if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text)) {
+    // SplitDecoderCapability is the narrow Android platform-query boundary:
+    // it may inspect MediaCodecList but must never construct a decoder. All
+    // decoder lifecycle and fallback policy remain in the Rust core.
+    const isSplitDecoderCapability = file.endsWith("/SplitDecoderCapability.kt");
+    if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text) && !isSplitDecoderCapability) {
       fail("kotlin-no-policy", `${file}: codec/network symbols belong to the Rust core`);
+    }
+    if (
+      isSplitDecoderCapability &&
+      (/createDecoderByType|createByCodecName|MediaCodec\.create/.test(text) ||
+        !/maxSupportedInstances\s*<\s*2/.test(text) ||
+        !/areSizeAndRateSupported\(1_920, 2_160, 60\.0\)/.test(text))
+    ) {
+      fail(
+        "kotlin-split-capability-only",
+        `${file}: capability shim must only verify dual 1920x2160@60 hardware support`,
+      );
     }
   }
 }
@@ -128,6 +150,13 @@ const streamActivity = readFileSync(
   ),
   "utf8",
 );
+const streamSurfaceLayout = readFileSync(
+  join(
+    ROOT,
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamSurfaceLayout.kt",
+  ),
+  "utf8",
+);
 if (!/StreamActivity[^>]+documentLaunchMode="intoExisting"/.test(expoManifest)) {
   fail("stream-task-reuse", "Expo StreamActivity must reuse an existing document task");
 }
@@ -146,10 +175,11 @@ if (!/override fun onNewIntent\(newIntent: Intent\)/.test(streamActivity)) {
 // 5. StreamActivity's root is opaque black. On freeform/vendor compositors a media
 // overlay Surface can remain behind that root even while MediaCodec reports
 // rendered output, producing a fully black stream window.
-if (!/setZOrderOnTop\(true\)/.test(streamActivity)) {
+const streamSurfaceSources = `${streamActivity}\n${streamSurfaceLayout}`;
+if (!/setZOrderOnTop\(true\)/.test(streamSurfaceSources)) {
   fail("stream-surface-z-order", "decoder Surface must stay above the opaque Activity root");
 }
-if (/setZOrderMediaOverlay\(true\)/.test(streamActivity)) {
+if (/setZOrderMediaOverlay\(true\)/.test(streamSurfaceSources)) {
   fail("stream-surface-z-order", "media-overlay z-order is hidden behind the opaque Activity root");
 }
 

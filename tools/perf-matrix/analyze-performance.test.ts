@@ -149,7 +149,7 @@ describe("log parsers", () => {
     const text = JSON.stringify({
       timestamp: "2026-08-27T10:00:00.500Z",
       eventMessage:
-        "LeftcarPerf captureCallbacks=60 encodeOutputCallbacks=59 captureFps=60 encodeOutputFps=59 encodeOutputIntervalP50Us=16600 encodeOutputIntervalP95Us=18000 encodeOutputP95Us=24000 queueOldestUs=2100 encoderMode=hevc encoderID=com.apple.videotoolbox.videoencoder",
+        "LeftcarPerf captureCallbacks=60 encodeOutputCallbacks=59 captureFps=60 encodeOutputFps=59 encodeOutputIntervalP50Us=16600 encodeOutputIntervalP95Us=18000 encodeOutputP95Us=24000 queueOldestUs=2100 encoderWatchdogRestarts=2 encoderWatchdogTerminations=1 encoderLateCallbacks=3 encoderWatchdogOldestUs=250000 encoderMode=hevc encoderID=com.apple.videotoolbox.videoencoder",
     });
 
     expect(parseHostLog(text)).toEqual([
@@ -161,6 +161,10 @@ describe("log parsers", () => {
         encodeOutputIntervalP95Us: 18_000,
         encodeOutputP95Us: 24_000,
         queueOldestUs: 2_100,
+        encoderWatchdogRestarts: 2,
+        encoderWatchdogTerminations: 1,
+        encoderLateCallbacks: 3,
+        encoderWatchdogOldestUs: 250_000,
         encoderMode: "hevc",
         encoderID: "com.apple.videotoolbox.videoencoder",
       }),
