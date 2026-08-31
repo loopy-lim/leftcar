@@ -2,7 +2,8 @@ import "../global.css";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { colors } from "../src/theme";
+import { useAppTheme } from "../src/theme";
+import { LanguageProvider, useAppLanguage } from "../src/i18n";
 import { initializeRustra } from "../src/rustra";
 
 initializeRustra();
@@ -15,23 +16,26 @@ const queryClient = new QueryClient({
   },
 });
 
-export default function RootLayout() {
+function NavigationStack() {
+  const { colors, isDark } = useAppTheme();
+  const { t } = useAppLanguage();
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <StatusBar style="dark" />
+    <>
+      <StatusBar style={isDark ? "light" : "dark"} />
       <Stack
         screenOptions={{
           headerStyle: {
-            backgroundColor: colors.light.bgSurface,
+            backgroundColor: colors.bgSurface,
           },
-          headerTintColor: colors.light.textPrimary,
+          headerTintColor: colors.textPrimary,
           headerTitleStyle: {
             fontWeight: "700",
             fontSize: 15,
           },
           headerShadowVisible: false,
           contentStyle: {
-            backgroundColor: colors.light.bgCanvas,
+            backgroundColor: colors.bgCanvas,
           },
         }}
       >
@@ -44,25 +48,34 @@ export default function RootLayout() {
         <Stack.Screen
           name="host"
           options={{
-            title: "컴퓨터 연결",
-            headerBackTitle: "뒤로",
+            title: t.viewer.navHost,
+            headerBackTitle: t.common.back,
           }}
         />
         <Stack.Screen
           name="catalog"
           options={{
-            title: "화면 선택",
-            headerBackTitle: "뒤로",
+            title: t.viewer.navCatalog,
+            headerBackTitle: t.common.back,
           }}
         />
         <Stack.Screen
           name="pairing"
           options={{
-            title: "연결 승인",
-            headerBackTitle: "뒤로",
+            title: t.viewer.navPairing,
+            headerBackTitle: t.common.back,
           }}
         />
       </Stack>
+    </>
+  );
+}
+export default function RootLayout() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <LanguageProvider>
+        <NavigationStack />
+      </LanguageProvider>
     </QueryClientProvider>
   );
 }

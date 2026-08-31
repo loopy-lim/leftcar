@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Pressable,
   ScrollView,
@@ -12,6 +12,8 @@ import { router, useFocusEffect } from "expo-router";
 import { controlClient, controlHost, disconnectHost } from "../src/session";
 import { clearToken } from "../src/pairing";
 import { isUnauthorizedError, type CatalogView } from "../src/control";
+import { useAppTheme, type ThemeTokens } from "../src/theme";
+import { useAppLanguage } from "../src/i18n";
 
 function openCatalog() {
   router.push("/catalog");
@@ -26,6 +28,10 @@ function openPairing() {
 }
 
 export default function Hub() {
+  const { colors, isDark } = useAppTheme();
+  const { t, language, toggleLanguage } = useAppLanguage();
+  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+
   const [hostAddr, setHostAddr] = useState<string>("");
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
@@ -66,21 +72,30 @@ export default function Hub() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {/* Top App Branding */}
+        {/* Top App Header */}
         <View style={styles.brandHeader}>
           <View style={styles.logoRow}>
             <View style={styles.logoBadge}>
-              <Ionicons name="desktop" size={20} color="#FFFFFF" />
+              <Ionicons name="desktop-outline" size={18} color={colors.btnPrimaryText} />
             </View>
             <View style={styles.titleColumn}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <Text style={styles.appTitle}>Leftcar Viewer</Text>
+              <View style={styles.titleBadgeRow}>
+                <Text style={styles.appTitle}>{t.viewer.brandTitle}</Text>
                 <View style={styles.versionBadge}>
-                  <Text style={styles.versionBadgeText}>Hub</Text>
+                  <Text style={styles.versionBadgeText}>{t.viewer.brandBadge}</Text>
                 </View>
               </View>
-              <Text style={styles.appSubtitle}>내 컴퓨터 화면을 초저지연으로 이어서 보기</Text>
+              <Text style={styles.appSubtitle}>{t.viewer.brandSubtitle}</Text>
             </View>
+            <Pressable
+              onPress={toggleLanguage}
+              style={({ pressed }) => [styles.langToggleBtn, pressed && styles.btnPressed]}
+              accessibilityRole="button"
+              accessibilityLabel={t.common.toggleLanguage}
+            >
+              <Ionicons name="globe-outline" size={13} color={colors.textSecondary} />
+              <Text style={styles.langToggleText}>{language === "ko" ? "EN" : "한국어"}</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -90,7 +105,7 @@ export default function Hub() {
             <View style={styles.cardTopRow}>
               <View style={styles.badgeSuccess}>
                 <View style={styles.dotSuccess} />
-                <Text style={styles.badgeSuccessText}>컴퓨터 연결됨</Text>
+                <Text style={styles.badgeSuccessText}>{t.viewer.connectedBadge}</Text>
               </View>
               <Text style={styles.endpointLabel} numberOfLines={1}>
                 {hostAddr}
@@ -98,21 +113,39 @@ export default function Hub() {
             </View>
 
             <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>열어 볼 화면을 선택하세요</Text>
+              <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
               <Text style={styles.heroDesc}>
-                컴퓨터의 각 디스플레이를 독립된 고화질 창으로 열고 공간에 자유롭게 배치할 수 있습니다.
+                {t.viewer.connectedHeroDesc}
               </Text>
             </View>
 
             <View style={styles.heroActionRow}>
-              <Pressable onPress={openCatalog} style={styles.primaryActionBtn}>
-                <Text style={styles.primaryActionText}>화면 목록 보기 →</Text>
+              <Pressable
+                onPress={openCatalog}
+                style={({ pressed }) => [
+                  styles.primaryActionBtn,
+                  pressed && styles.btnPressed,
+                ]}
+              >
+                <Text style={styles.primaryActionText}>{t.viewer.btnViewDisplays}</Text>
               </Pressable>
-              <Pressable onPress={openHostPicker} style={styles.secondaryActionBtn}>
-                <Text style={styles.secondaryActionText}>컴퓨터 변경</Text>
+              <Pressable
+                onPress={openHostPicker}
+                style={({ pressed }) => [
+                  styles.secondaryActionBtn,
+                  pressed && styles.btnPressed,
+                ]}
+              >
+                <Text style={styles.secondaryActionText}>{t.viewer.btnChangeHost}</Text>
               </Pressable>
-              <Pressable onPress={handleDisconnect} style={styles.disconnectActionBtn}>
-                <Text style={styles.disconnectActionText}>연결 해제</Text>
+              <Pressable
+                onPress={handleDisconnect}
+                style={({ pressed }) => [
+                  styles.disconnectActionBtn,
+                  pressed && styles.btnPressed,
+                ]}
+              >
+                <Text style={styles.disconnectActionText}>{t.common.disconnect}</Text>
               </Pressable>
             </View>
           </View>
@@ -121,25 +154,42 @@ export default function Hub() {
             <View style={styles.cardTopRow}>
               <View style={styles.badgeStandby}>
                 <View style={styles.dotStandby} />
-                <Text style={styles.badgeStandbyText}>연결 대기 중</Text>
+                <Text style={styles.badgeStandbyText}>{t.viewer.standbyBadge}</Text>
               </View>
-              <Text style={styles.networkHintText}>동일 Wi-Fi 권장</Text>
+              <Text style={styles.networkHintText}>{t.viewer.wifiHint}</Text>
             </View>
 
             <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>내 컴퓨터 연결하기</Text>
+              <Text style={styles.heroTitle}>{t.viewer.standbyHeroTitle}</Text>
               <Text style={styles.heroDesc}>
-                동일한 로컬 Wi-Fi 또는 Tailscale 네트워크의 컴퓨터를 자동으로 찾거나 QR 코드로 즉시 페어링하세요.
+                {t.viewer.standbyHeroDesc}
               </Text>
             </View>
 
             <View style={styles.heroActionRow}>
-              <Pressable onPress={openHostPicker} style={styles.primaryActionBtn}>
-                <Text style={styles.primaryActionText}>컴퓨터 찾기 →</Text>
+              <Pressable
+                onPress={openHostPicker}
+                style={({ pressed }) => [
+                  styles.primaryActionBtn,
+                  pressed && styles.btnPressed,
+                ]}
+              >
+                <Text style={styles.primaryActionText}>{t.viewer.btnFindHost}</Text>
               </Pressable>
-              <Pressable onPress={openPairing} style={styles.secondaryActionBtn}>
-                <Ionicons name="qr-code-outline" size={15} color="#09090B" style={{ marginRight: 4 }} />
-                <Text style={styles.secondaryActionText}>QR 연결</Text>
+              <Pressable
+                onPress={openPairing}
+                style={({ pressed }) => [
+                  styles.secondaryActionBtn,
+                  pressed && styles.btnPressed,
+                ]}
+              >
+                <Ionicons
+                  name="qr-code-outline"
+                  size={14}
+                  color={colors.textPrimary}
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={styles.secondaryActionText}>{t.viewer.btnQrConnect}</Text>
               </Pressable>
             </View>
           </View>
@@ -147,39 +197,48 @@ export default function Hub() {
 
         {/* 3-Step Setup Guide */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>간편 3단계 시작 가이드</Text>
+          <Text style={styles.sectionTitle}>{t.viewer.guideTitle}</Text>
 
-          <View style={styles.stepRow}>
-            <View style={styles.stepBadge}>
-              <Text style={styles.stepNum}>1</Text>
+          <View style={styles.stepsContainer}>
+            {/* Step 1 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadgeColumn}>
+                <View style={styles.stepBadge}>
+                  <Text style={styles.stepNum}>1</Text>
+                </View>
+                <View style={styles.stepLine} />
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step1Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step1Desc}</Text>
+              </View>
             </View>
-            <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>컴퓨터 앱 실행</Text>
-              <Text style={styles.stepText}>Mac 또는 PC에서 Leftcar Host Studio를 엽니다.</Text>
-            </View>
-          </View>
 
-          <View style={styles.divider} />
-
-          <View style={styles.stepRow}>
-            <View style={styles.stepBadge}>
-              <Text style={styles.stepNum}>2</Text>
+            {/* Step 2 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadgeColumn}>
+                <View style={styles.stepBadge}>
+                  <Text style={styles.stepNum}>2</Text>
+                </View>
+                <View style={styles.stepLine} />
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step2Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step2Desc}</Text>
+              </View>
             </View>
-            <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>동일 네트워크 확인</Text>
-              <Text style={styles.stepText}>호스트와 뷰어가 동일한 Wi-Fi(5GHz 권장)에 연결되어 있는지 확인합니다.</Text>
-            </View>
-          </View>
 
-          <View style={styles.divider} />
-
-          <View style={styles.stepRow}>
-            <View style={styles.stepBadge}>
-              <Text style={styles.stepNum}>3</Text>
-            </View>
-            <View style={styles.stepInfo}>
-              <Text style={styles.stepName}>화면 연결 & 공간 배치</Text>
-              <Text style={styles.stepText}>[컴퓨터 찾기]를 누르거나 QR 코드를 스캔하여 화면을 엽니다.</Text>
+            {/* Step 3 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadgeColumn}>
+                <View style={styles.stepBadge}>
+                  <Text style={styles.stepNum}>3</Text>
+                </View>
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step3Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step3Desc}</Text>
+              </View>
             </View>
           </View>
         </View>
@@ -188,17 +247,17 @@ export default function Hub() {
         <View style={styles.featureGrid}>
           <View style={styles.featureBox}>
             <View style={styles.featureIconBox}>
-              <Ionicons name="flash" size={16} color="#09090B" />
+              <Ionicons name="flash" size={15} color={colors.textPrimary} />
             </View>
-            <Text style={styles.featureValue}>초저지연 60 FPS</Text>
-            <Text style={styles.featureLabel}>화면을 보면서 즉시 마우스·키보드 조작</Text>
+            <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
+            <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
           </View>
           <View style={styles.featureBox}>
             <View style={styles.featureIconBox}>
-              <Ionicons name="tv" size={16} color="#09090B" />
+              <Ionicons name="tv" size={15} color={colors.textPrimary} />
             </View>
-            <Text style={styles.featureValue}>멀티 디스플레이</Text>
-            <Text style={styles.featureLabel}>모니터마다 개별 공간 창으로 분리 배치</Text>
+            <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
+            <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
           </View>
         </View>
       </ScrollView>
@@ -206,298 +265,334 @@ export default function Hub() {
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#FAFAFA",
-  },
-  root: {
-    flex: 1,
-    backgroundColor: "#FAFAFA",
-  },
-  content: {
-    paddingHorizontal: 18,
-    paddingTop: 14,
-    paddingBottom: 32,
-    gap: 14,
-  },
-  brandHeader: {
-    paddingVertical: 6,
-  },
-  logoRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  logoBadge: {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    backgroundColor: "#09090B",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  titleColumn: {
-    flex: 1,
-    gap: 2,
-  },
-  appTitle: {
-    color: "#09090B",
-    fontSize: 18,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  versionBadge: {
-    backgroundColor: "#F4F4F5",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: 4,
-  },
-  versionBadgeText: {
-    color: "#52525B",
-    fontSize: 10,
-    fontWeight: "700",
-    fontFamily: "monospace",
-  },
-  appSubtitle: {
-    color: "#71717A",
-    fontSize: 12,
-  },
+function createStyles(colors: ThemeTokens, isDark: boolean) {
+  return StyleSheet.create({
+    safeArea: {
+      flex: 1,
+      backgroundColor: colors.bgCanvas,
+    },
+    root: {
+      flex: 1,
+      backgroundColor: colors.bgCanvas,
+    },
+    content: {
+      paddingHorizontal: 18,
+      paddingTop: 14,
+      paddingBottom: 32,
+      gap: 14,
+    },
+    brandHeader: {
+      paddingVertical: 6,
+    },
+    logoRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    logoBadge: {
+      width: 38,
+      height: 38,
+      borderRadius: 9,
+      backgroundColor: colors.btnPrimaryBg,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    titleColumn: {
+      flex: 1,
+      gap: 2,
+    },
+    titleBadgeRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    appTitle: {
+      color: colors.textPrimary,
+      fontSize: 18,
+      fontWeight: "700",
+      letterSpacing: -0.3,
+    },
+    versionBadge: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      paddingHorizontal: 6,
+      paddingVertical: 1,
+      borderRadius: 5,
+    },
+    versionBadgeText: {
+      color: colors.textSecondary,
+      fontSize: 10,
+      fontWeight: "700",
+      fontFamily: "monospace",
+    },
+    appSubtitle: {
+      color: colors.textMuted,
+      fontSize: 12,
+    },
+    langToggleBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+      borderRadius: 7,
+    },
+    langToggleText: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      fontWeight: "700",
+    },
 
-  /* Hero Cards */
-  heroCardConnected: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#D4D4D8",
-    padding: 16,
-    gap: 12,
-  },
-  heroCardStandby: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    padding: 16,
-    gap: 12,
-  },
-  cardTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  badgeSuccess: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#F4F4F5",
-    borderWidth: 1,
-    borderColor: "#D4D4D8",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-  },
-  dotSuccess: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#09090B",
-  },
-  badgeSuccessText: {
-    color: "#09090B",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  badgeStandby: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#F4F4F5",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-  },
-  dotStandby: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#A1A1AA",
-  },
-  badgeStandbyText: {
-    color: "#71717A",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  networkHintText: {
-    color: "#A1A1AA",
-    fontSize: 11,
-  },
-  endpointLabel: {
-    color: "#71717A",
-    fontSize: 12,
-    fontFamily: "monospace",
-    fontVariant: ["tabular-nums"],
-    flex: 1,
-    textAlign: "right",
-  },
-  heroBody: {
-    gap: 3,
-  },
-  heroTitle: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#09090B",
-    letterSpacing: -0.2,
-  },
-  heroDesc: {
-    fontSize: 12,
-    color: "#52525B",
-    lineHeight: 17,
-  },
-  heroActionRow: {
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 4,
-  },
-  primaryActionBtn: {
-    flex: 1,
-    backgroundColor: "#09090B",
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  primaryActionText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  secondaryActionBtn: {
-    backgroundColor: "#F4F4F5",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  secondaryActionText: {
-    color: "#09090B",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  disconnectActionBtn: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  disconnectActionText: {
-    color: "#71717A",
-    fontSize: 12,
-    fontWeight: "600",
-  },
+    /* Hero Cards */
+    heroCardConnected: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.borderCard,
+      padding: 16,
+      gap: 12,
+    },
+    heroCardStandby: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 16,
+      gap: 12,
+    },
+    cardTopRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+    },
+    badgeSuccess: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderCard,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 12,
+    },
+    dotSuccess: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: colors.textPrimary,
+    },
+    badgeSuccessText: {
+      color: colors.textPrimary,
+      fontSize: 11,
+      fontWeight: "700",
+    },
+    badgeStandby: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 12,
+    },
+    dotStandby: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: colors.textDim,
+    },
+    badgeStandbyText: {
+      color: colors.textMuted,
+      fontSize: 11,
+      fontWeight: "600",
+    },
+    networkHintText: {
+      color: colors.textDim,
+      fontSize: 11,
+    },
+    endpointLabel: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontFamily: "monospace",
+      fontVariant: ["tabular-nums"],
+      flex: 1,
+      textAlign: "right",
+    },
+    heroBody: {
+      gap: 3,
+    },
+    heroTitle: {
+      fontSize: 15,
+      fontWeight: "700",
+      color: colors.textPrimary,
+      letterSpacing: -0.2,
+    },
+    heroDesc: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      lineHeight: 17,
+    },
+    heroActionRow: {
+      flexDirection: "row",
+      gap: 8,
+      marginTop: 4,
+    },
+    primaryActionBtn: {
+      flex: 1,
+      backgroundColor: colors.btnPrimaryBg,
+      borderRadius: 8,
+      paddingVertical: 10,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    primaryActionText: {
+      color: colors.btnPrimaryText,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    secondaryActionBtn: {
+      backgroundColor: colors.btnSecondaryBg,
+      borderWidth: 1,
+      borderColor: colors.btnSecondaryBorder,
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    secondaryActionText: {
+      color: colors.btnSecondaryText,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    disconnectActionBtn: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    disconnectActionText: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    btnPressed: {
+      opacity: 0.8,
+      transform: [{ scale: 0.98 }],
+    },
 
-  /* Setup Guide */
-  sectionCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    padding: 16,
-    gap: 12,
-  },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#71717A",
-    textTransform: "uppercase",
-    letterSpacing: 0.04,
-  },
-  stepRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  stepBadge: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: "#09090B",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  stepNum: {
-    color: "#FFFFFF",
-    fontSize: 10,
-    fontWeight: "700",
-    fontFamily: "monospace",
-  },
-  stepInfo: {
-    flex: 1,
-    gap: 1,
-  },
-  stepName: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#09090B",
-  },
-  stepText: {
-    fontSize: 11,
-    color: "#71717A",
-    lineHeight: 15,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: "#F4F4F5",
-    marginLeft: 34,
-  },
+    /* Setup Guide */
+    sectionCard: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 16,
+      gap: 14,
+    },
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: colors.textMuted,
+      textTransform: "uppercase",
+      letterSpacing: 0.04,
+    },
+    stepsContainer: {
+      gap: 0,
+    },
+    stepItem: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 12,
+    },
+    stepBadgeColumn: {
+      alignItems: "center",
+      width: 22,
+    },
+    stepBadge: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      backgroundColor: colors.btnPrimaryBg,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    stepNum: {
+      color: colors.btnPrimaryText,
+      fontSize: 10,
+      fontWeight: "700",
+      fontFamily: "monospace",
+    },
+    stepLine: {
+      width: 1.5,
+      height: 22,
+      backgroundColor: colors.borderSubtle,
+      marginVertical: 2,
+    },
+    stepInfo: {
+      flex: 1,
+      gap: 2,
+      paddingBottom: 10,
+    },
+    stepName: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.textPrimary,
+    },
+    stepText: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 16,
+    },
 
-  /* 2-Column Feature Grid */
-  featureGrid: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  featureBox: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    padding: 14,
-    gap: 4,
-  },
-  featureIconBox: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: "#F4F4F5",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 2,
-  },
-  featureValue: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#09090B",
-    fontVariant: ["tabular-nums"],
-  },
-  featureLabel: {
-    fontSize: 11,
-    color: "#71717A",
-    lineHeight: 15,
-  },
-});
+    /* 2-Column Feature Grid */
+    featureGrid: {
+      flexDirection: "row",
+      gap: 10,
+    },
+    featureBox: {
+      flex: 1,
+      backgroundColor: colors.bgSurface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 14,
+      gap: 4,
+    },
+    featureIconBox: {
+      width: 28,
+      height: 28,
+      borderRadius: 7,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 2,
+    },
+    featureValue: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: colors.textPrimary,
+      fontVariant: ["tabular-nums"],
+    },
+    featureLabel: {
+      fontSize: 11,
+      color: colors.textMuted,
+      lineHeight: 15,
+    },
+  });
+}

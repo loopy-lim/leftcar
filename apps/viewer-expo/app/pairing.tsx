@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -24,6 +24,8 @@ import {
   type QrPayload,
 } from "../src/pairing";
 import { formatErrorMessage } from "../src/control";
+import { useAppTheme, type ThemeTokens } from "../src/theme";
+import { useAppLanguage } from "../src/i18n";
 
 type PairingMode = "qr" | "code";
 
@@ -63,10 +65,12 @@ function OtpPinInput({
   code,
   onChangeCode,
   disabled,
+  colors,
 }: {
   code: string;
   onChangeCode: (val: string) => void;
   disabled: boolean;
+  colors: ThemeTokens;
 }) {
   const inputRef = useRef<TextInput>(null);
   const digits = Array.from({ length: 6 }, (_, i) => code[i] ?? "");
@@ -76,10 +80,10 @@ function OtpPinInput({
   };
 
   return (
-    <Pressable onPress={handleBoxPress} style={styles.otpContainer}>
+    <Pressable onPress={handleBoxPress} style={stylesLocal.otpContainer}>
       <TextInput
         ref={inputRef}
-        style={styles.hiddenTextInput}
+        style={stylesLocal.hiddenTextInput}
         value={code}
         onChangeText={(text) => {
           const cleaned = text.replace(/[^0-9]/g, "").slice(0, 6);
@@ -91,7 +95,7 @@ function OtpPinInput({
         autoFocus={false}
         caretHidden
       />
-      <View style={styles.otpBoxesRow}>
+      <View style={stylesLocal.otpBoxesRow}>
         {digits.map((digit, index) => {
           const isCurrent = index === code.length && !disabled;
           const isFilled = Boolean(digit);
@@ -99,12 +103,26 @@ function OtpPinInput({
             <View
               key={index}
               style={[
-                styles.otpBox,
-                isFilled && styles.otpBoxFilled,
-                isCurrent && styles.otpBoxCurrent,
+                stylesLocal.otpBox,
+                {
+                  backgroundColor: colors.bgSubtle,
+                  borderColor: isCurrent
+                    ? colors.borderFocus
+                    : isFilled
+                      ? colors.borderStrong
+                      : colors.borderSubtle,
+                },
+                isCurrent && stylesLocal.otpBoxActive,
               ]}
             >
-              <Text style={styles.otpDigit}>{digit}</Text>
+              <Text
+                style={[
+                  stylesLocal.otpDigit,
+                  { color: isFilled ? colors.textPrimary : colors.textDim },
+                ]}
+              >
+                {digit || (isCurrent ? "·" : "")}
+              </Text>
             </View>
           );
         })}
@@ -113,19 +131,59 @@ function OtpPinInput({
   );
 }
 
+const stylesLocal = StyleSheet.create({
+  otpContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginVertical: 6,
+    position: "relative",
+  },
+  hiddenTextInput: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+  otpBoxesRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  otpBox: {
+    width: 44,
+    height: 50,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  otpBoxActive: {
+    borderColor: "#4a90e2",
+  },
+  otpDigit: {
+    fontSize: 20,
+    fontWeight: "700",
+    fontFamily: "monospace",
+    fontVariant: ["tabular-nums"],
+  },
+});
+
 export default function Pairing() {
-  const params = useLocalSearchParams<{ endpoint?: string | string[] }>();
-  const routeEndpoint = Array.isArray(params.endpoint) ? params.endpoint[0] : params.endpoint;
-  const initialHost = resolvePairingHost(routeEndpoint, controlHost());
+  const { colors, isDark } = useAppTheme();
+  const { t } = useAppLanguage();
+  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+
+  const params = useLocalSearchParams<{ endpoint?: string }>();
+  const routeEndpoint = params.endpoint?.trim() || "";
+
+  const [permission, requestPermission] = useCameraPermissions();
+
   const [state, dispatch] = useReducer(
     pairingViewReducer,
-    {
-      ...initialPairingViewState,
-      mode: parseHostEndpoint(initialHost) ? "code" : "qr",
-    },
+    initialPairingViewState,
   );
-  const { mode, code, scannedPayload, scannedHost, busy, statusMessage, error } = state;
-  const [permission, requestPermission] = useCameraPermissions();
+  const { mode, code, scannedPayload, scannedHost, busy, statusMessage, error } =
+    state;
+
   const host = scannedHost || resolvePairingHost(routeEndpoint, controlHost());
   const scanningLockRef = useRef(false);
   const hostEndpoint = parseHostEndpoint(host);
@@ -142,7 +200,7 @@ export default function Pairing() {
       if (trimmed.length !== 6) {
         dispatch({
           type: "update",
-          patch: { error: "6자리 인증 코드를 정확히 입력해 주세요." },
+          patch: { error: t.viewer.pinTitle },
         });
         return;
       }
@@ -151,7 +209,7 @@ export default function Pairing() {
         patch: {
           busy: true,
           error: null,
-          statusMessage: "컴퓨터에서 연결을 확인하는 중…",
+          statusMessage: "...",
         },
       });
       try {
@@ -162,7 +220,7 @@ export default function Pairing() {
           await pairWithHostByCode(hostEndpoint.host, hostEndpoint.port, trimmed);
           await connectHost(hostEndpoint.host, hostEndpoint.port);
         } else {
-          throw new Error("연결할 컴퓨터 주소가 없습니다.");
+          throw new Error(t.viewer.notConnectedError);
         }
         router.replace("/catalog");
       } catch (e) {
@@ -171,8 +229,15 @@ export default function Pairing() {
         dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
       }
     },
-    [hostEndpoint, scannedPayload],
+    [hostEndpoint, scannedPayload, t],
   );
+
+  // Auto-submit code when 6 digits are typed and target is ready
+  useEffect(() => {
+    if (code.length === 6 && canSubmitCode && !busy) {
+      void handlePairWithCode(code);
+    }
+  }, [code, canSubmitCode, busy, handlePairWithCode]);
 
   const handleQrScanned = useCallback(
     async (scannedData: string) => {
@@ -183,7 +248,7 @@ export default function Pairing() {
         if (!payload) {
           dispatch({
             type: "update",
-            patch: { error: "Leftcar에서 만든 연결 QR 코드가 아닙니다." },
+            patch: { error: t.viewer.invalidQrError },
           });
           return;
         }
@@ -195,7 +260,7 @@ export default function Pairing() {
             scannedPayload: payload,
             scannedHost: formatHostEndpoint(payload.host, payload.port),
             mode: "code",
-            statusMessage: "QR 코드를 확인했습니다. 컴퓨터 화면의 6자리 번호를 입력해 주세요.",
+            statusMessage: null,
           },
         });
       } catch (e) {
@@ -207,7 +272,7 @@ export default function Pairing() {
         }, 1500);
       }
     },
-    [busy],
+    [busy, t],
   );
 
   return (
@@ -217,12 +282,12 @@ export default function Pairing() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {/* Host Info Strip */}
+        {/* Connected Host Info (if known) */}
         {host ? (
           <View style={styles.hostStrip}>
             <View style={styles.hostDot} />
             <Text style={styles.hostText} numberOfLines={1}>
-              연결 대상: <Text style={styles.hostAddr}>{host}</Text>
+              {t.viewer.connectedHostLabel} <Text style={styles.hostAddr}>{host}</Text>
             </Text>
           </View>
         ) : null}
@@ -238,10 +303,10 @@ export default function Pairing() {
                 <Ionicons
                   name="qr-code-outline"
                   size={14}
-                  color={mode === "qr" ? "#FFFFFF" : "#71717A"}
+                  color={mode === "qr" ? colors.btnPrimaryText : colors.textMuted}
                 />
                 <Text style={[styles.modeTabText, mode === "qr" && styles.modeTabTextActive]}>
-                  QR 코드 스캔
+                  {t.viewer.tabQr}
                 </Text>
               </View>
             </Pressable>
@@ -253,10 +318,10 @@ export default function Pairing() {
                 <Ionicons
                   name="keypad-outline"
                   size={14}
-                  color={mode === "code" ? "#FFFFFF" : "#71717A"}
+                  color={mode === "code" ? colors.btnPrimaryText : colors.textMuted}
                 />
                 <Text style={[styles.modeTabText, mode === "code" && styles.modeTabTextActive]}>
-                  6자리 PIN 입력
+                  {t.viewer.tabPin}
                 </Text>
               </View>
             </Pressable>
@@ -266,7 +331,7 @@ export default function Pairing() {
         {/* Status Alert */}
         {statusMessage && (
           <View style={styles.statusCard}>
-            <ActivityIndicator size="small" color="#09090B" />
+            <ActivityIndicator size="small" color={colors.textPrimary} />
             <Text style={styles.statusText}>{statusMessage}</Text>
           </View>
         )}
@@ -274,7 +339,7 @@ export default function Pairing() {
         {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
-            <Ionicons name="alert-circle" size={16} color="#09090B" />
+            <Ionicons name="alert-circle" size={16} color={colors.textPrimary} />
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
@@ -282,24 +347,24 @@ export default function Pairing() {
         {/* Mode View */}
         {mode === "qr" ? (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>QR 코드 스캔</Text>
+            <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text>
             <Text style={styles.cardDesc}>
-              컴퓨터의 Leftcar Host Studio 화면에 띄운 QR 코드를 비춰 주세요.
+              {t.viewer.qrScanHint}
             </Text>
 
             {!permission ? (
               <View style={styles.cameraBox}>
-                <ActivityIndicator color="#09090B" />
+                <ActivityIndicator color={colors.textPrimary} />
               </View>
             ) : !permission.granted ? (
               <View style={styles.cameraNotice}>
-                <Ionicons name="camera-outline" size={28} color="#09090B" style={{ marginBottom: 4 }} />
-                <Text style={styles.cameraNoticeTitle}>카메라 권한 필요</Text>
+                <Ionicons name="camera-outline" size={28} color={colors.textPrimary} style={{ marginBottom: 4 }} />
+                <Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text>
                 <Text style={styles.cameraNoticeText}>
-                  컴퓨터 화면의 QR 코드를 스캔하려면 카메라 권한이 필요합니다.
+                  {t.viewer.cameraPermDesc}
                 </Text>
                 <Pressable onPress={requestPermission} style={styles.permissionBtn}>
-                  <Text style={styles.permissionBtnText}>권한 허용</Text>
+                  <Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text>
                 </Pressable>
               </View>
             ) : (
@@ -314,9 +379,15 @@ export default function Pairing() {
                   }}
                 >
                   <View style={styles.scanOverlay}>
-                    <View style={styles.scanFrame} />
+                    <View style={styles.scanFrame}>
+                      {/* Corner Brackets */}
+                      <View style={[styles.cornerBracket, styles.cornerTopLeft]} />
+                      <View style={[styles.cornerBracket, styles.cornerTopRight]} />
+                      <View style={[styles.cornerBracket, styles.cornerBottomLeft]} />
+                      <View style={[styles.cornerBracket, styles.cornerBottomRight]} />
+                    </View>
                     <View style={styles.scanHintBox}>
-                      <Text style={styles.scanHintText}>QR 코드를 사각형에 맞추세요</Text>
+                      <Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text>
                     </View>
                   </View>
                 </CameraView>
@@ -325,37 +396,33 @@ export default function Pairing() {
           </View>
         ) : (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>6자리 인증 PIN 번호</Text>
+            <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
             <Text style={styles.cardDesc}>
               {hasCodeTarget
-                ? "컴퓨터 화면에 표시된 6자리 번호를 입력하세요."
-                : "먼저 연결할 컴퓨터 주소를 선택하거나 입력하세요."}
+                ? t.viewer.pinDesc
+                : t.viewer.invalidHostError}
             </Text>
 
             <OtpPinInput
               code={code}
               onChangeCode={(value) => dispatch({ type: "update", patch: { code: value } })}
               disabled={busy}
+              colors={colors}
             />
 
-            {code.length === 6 && !hasCodeTarget ? (
-              <Text style={styles.otpHint}>
-                연결할 컴퓨터 주소가 있어야 연결 승인 버튼이 활성화됩니다.
-              </Text>
-            ) : null}
-
             <Pressable
-              style={[
+              style={({ pressed }) => [
                 styles.primaryBtn,
                 !canSubmitCode && styles.btnDisabled,
+                pressed && canSubmitCode && styles.btnPressed,
               ]}
               onPress={() => handlePairWithCode(code)}
               disabled={!canSubmitCode}
             >
               {busy ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
+                <ActivityIndicator color={colors.btnPrimaryText} size="small" />
               ) : (
-                <Text style={styles.primaryBtnText}>연결 승인하기</Text>
+                <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>
               )}
             </Pressable>
           </View>
@@ -364,17 +431,14 @@ export default function Pairing() {
         {/* Security / Help Card */}
         <View style={styles.tipBox}>
           <View style={styles.tipTitleRow}>
-            <Ionicons name="shield-checkmark-outline" size={15} color="#09090B" />
+            <Ionicons name="shield-checkmark-outline" size={15} color={colors.textPrimary} />
             <Text style={styles.tipTitle}>안전한 기기 페어링</Text>
           </View>
           <Text style={styles.tipText}>
-            • Host 주소와 화면에 표시된 6자리 번호를 확인해야 연결이 허용됩니다.
+            • 6자리 인증 코드는 매번 새로 생성되며 2분 후 만료됩니다.
           </Text>
           <Text style={styles.tipText}>
-            • 6자리 연결 코드는 Host에서 새 연결을 만들 때마다 갱신됩니다.
-          </Text>
-          <Text style={styles.tipText}>
-            • 신뢰하는 동일한 Wi-Fi 네트워크에서만 사용하세요.
+            • 신뢰할 수 있는 동일 Wi-Fi 환경에서만 연결하세요.
           </Text>
         </View>
       </ScrollView>
@@ -382,292 +446,285 @@ export default function Pairing() {
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#FAFAFA",
-  },
-  root: {
-    flex: 1,
-    backgroundColor: "#FAFAFA",
-  },
-  content: {
-    paddingHorizontal: 18,
-    paddingTop: 14,
-    paddingBottom: 32,
-    gap: 14,
-  },
-  hostStrip: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  hostDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#09090B",
-    flexShrink: 0,
-  },
-  hostText: {
-    color: "#71717A",
-    fontSize: 12,
-    flex: 1,
-  },
-  hostAddr: {
-    color: "#09090B",
-    fontWeight: "700",
-    fontFamily: "monospace",
-    fontVariant: ["tabular-nums"],
-  },
-  modeTabsWrapper: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    padding: 3,
-  },
-  modeTabs: {
-    flexDirection: "row",
-    gap: 3,
-  },
-  modeTab: {
-    flex: 1,
-    paddingVertical: 7,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 6,
-  },
-  modeTabActive: {
-    backgroundColor: "#09090B",
-  },
-  modeTabText: {
-    color: "#71717A",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  modeTabTextActive: {
-    color: "#FFFFFF",
-    fontWeight: "700",
-  },
-  tabContentRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  statusCard: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#D4D4D8",
-    borderRadius: 8,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  statusText: {
-    color: "#09090B",
-    fontSize: 12,
-    fontWeight: "600",
-    flex: 1,
-  },
-  errorCard: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#A1A1AA",
-    borderRadius: 8,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  errorText: {
-    color: "#09090B",
-    fontSize: 12,
-    lineHeight: 16,
-    flex: 1,
-    fontWeight: "500",
-  },
-  card: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    borderRadius: 12,
-    padding: 16,
-    gap: 12,
-  },
-  cardTitle: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#09090B",
-  },
-  cardDesc: {
-    fontSize: 12,
-    color: "#52525B",
-    lineHeight: 17,
-  },
-  scannerWrapper: {
-    height: 220,
-    borderRadius: 8,
-    overflow: "hidden",
-    backgroundColor: "#000000",
-  },
-  camera: {
-    flex: 1,
-  },
-  cameraBox: {
-    height: 180,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  scanOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-  },
-  scanFrame: {
-    width: 150,
-    height: 150,
-    borderWidth: 2,
-    borderColor: "#FFFFFF",
-    borderRadius: 10,
-    backgroundColor: "transparent",
-  },
-  scanHintBox: {
-    backgroundColor: "rgba(0,0,0,0.7)",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 4,
-  },
-  scanHintText: {
-    color: "#FFFFFF",
-    fontSize: 10,
-    fontWeight: "500",
-  },
-  cameraNotice: {
-    padding: 20,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-  },
-  cameraNoticeTitle: {
-    color: "#09090B",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  cameraNoticeText: {
-    color: "#71717A",
-    fontSize: 11,
-    textAlign: "center",
-    lineHeight: 16,
-  },
-  permissionBtn: {
-    backgroundColor: "#09090B",
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginTop: 4,
-  },
-  permissionBtnText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-
-  /* OTP PIN Split Boxes */
-  otpContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginVertical: 4,
-    position: "relative",
-  },
-  hiddenTextInput: {
-    position: "absolute",
-    width: 1,
-    height: 1,
-    opacity: 0,
-  },
-  otpBoxesRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  otpBox: {
-    width: 42,
-    height: 48,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    borderColor: "#E4E4E7",
-    backgroundColor: "#FAFAFA",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  otpBoxFilled: {
-    borderColor: "#09090B",
-    backgroundColor: "#FFFFFF",
-  },
-  otpBoxCurrent: {
-    borderColor: "#09090B",
-    backgroundColor: "#FFFFFF",
-  },
-  otpDigit: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#09090B",
-    fontFamily: "monospace",
-    fontVariant: ["tabular-nums"],
-  },
-  otpHint: {
-    color: "#71717A",
-    fontSize: 11,
-    textAlign: "center",
-    lineHeight: 16,
-    marginTop: 2,
-  },
-
-  primaryBtn: {
-    backgroundColor: "#09090B",
-    borderRadius: 8,
-    paddingVertical: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  btnDisabled: {
-    opacity: 0.4,
-  },
-  primaryBtnText: {
-    color: "#FFFFFF",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  tipBox: {
-    backgroundColor: "#F4F4F5",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#E4E4E7",
-    padding: 14,
-    gap: 5,
-  },
-  tipTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  tipTitle: {
-    color: "#09090B",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  tipText: {
-    color: "#71717A",
-    fontSize: 11,
-    lineHeight: 16,
-  },
-});
+function createStyles(colors: ThemeTokens, isDark: boolean) {
+  return StyleSheet.create({
+    safeArea: {
+      flex: 1,
+      backgroundColor: colors.bgCanvas,
+    },
+    root: {
+      flex: 1,
+      backgroundColor: colors.bgCanvas,
+    },
+    content: {
+      paddingHorizontal: 18,
+      paddingTop: 14,
+      paddingBottom: 32,
+      gap: 14,
+    },
+    hostStrip: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    hostDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: colors.textPrimary,
+      flexShrink: 0,
+    },
+    hostText: {
+      color: colors.textMuted,
+      fontSize: 12,
+      flex: 1,
+    },
+    hostAddr: {
+      color: colors.textPrimary,
+      fontWeight: "700",
+      fontFamily: "monospace",
+      fontVariant: ["tabular-nums"],
+    },
+    modeTabsWrapper: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 3,
+    },
+    modeTabs: {
+      flexDirection: "row",
+      gap: 3,
+    },
+    modeTab: {
+      flex: 1,
+      paddingVertical: 7,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 7,
+    },
+    modeTabActive: {
+      backgroundColor: colors.btnPrimaryBg,
+    },
+    modeTabText: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    modeTabTextActive: {
+      color: colors.btnPrimaryText,
+      fontWeight: "700",
+    },
+    tabContentRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    statusCard: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderCard,
+      borderRadius: 10,
+      padding: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    statusText: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      fontWeight: "600",
+      flex: 1,
+    },
+    errorCard: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderStrong,
+      borderRadius: 10,
+      padding: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    errorText: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      lineHeight: 16,
+      flex: 1,
+      fontWeight: "500",
+    },
+    card: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 14,
+      padding: 16,
+      gap: 12,
+    },
+    cardTitle: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: colors.textPrimary,
+    },
+    cardDesc: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      lineHeight: 17,
+    },
+    scannerWrapper: {
+      height: 220,
+      borderRadius: 10,
+      overflow: "hidden",
+      backgroundColor: "#000000",
+    },
+    camera: {
+      flex: 1,
+    },
+    cameraBox: {
+      height: 180,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    scanOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.4)",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+    },
+    scanFrame: {
+      width: 160,
+      height: 160,
+      position: "relative",
+    },
+    cornerBracket: {
+      position: "absolute",
+      width: 20,
+      height: 20,
+      borderColor: "#FFFFFF",
+    },
+    cornerTopLeft: {
+      top: 0,
+      left: 0,
+      borderTopWidth: 3,
+      borderLeftWidth: 3,
+      borderTopLeftRadius: 4,
+    },
+    cornerTopRight: {
+      top: 0,
+      right: 0,
+      borderTopWidth: 3,
+      borderRightWidth: 3,
+      borderTopRightRadius: 4,
+    },
+    cornerBottomLeft: {
+      bottom: 0,
+      left: 0,
+      borderBottomWidth: 3,
+      borderLeftWidth: 3,
+      borderBottomLeftRadius: 4,
+    },
+    cornerBottomRight: {
+      bottom: 0,
+      right: 0,
+      borderBottomWidth: 3,
+      borderRightWidth: 3,
+      borderBottomRightRadius: 4,
+    },
+    scanHintBox: {
+      backgroundColor: "rgba(0,0,0,0.75)",
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 6,
+    },
+    scanHintText: {
+      color: "#FFFFFF",
+      fontSize: 10,
+      fontWeight: "600",
+    },
+    cameraNotice: {
+      padding: 20,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+    },
+    cameraNoticeTitle: {
+      color: colors.textPrimary,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    cameraNoticeText: {
+      color: colors.textMuted,
+      fontSize: 11,
+      textAlign: "center",
+      lineHeight: 16,
+    },
+    permissionBtn: {
+      backgroundColor: colors.btnPrimaryBg,
+      borderRadius: 6,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      marginTop: 4,
+    },
+    permissionBtnText: {
+      color: colors.btnPrimaryText,
+      fontSize: 11,
+      fontWeight: "600",
+    },
+    otpHint: {
+      color: colors.textMuted,
+      fontSize: 11,
+      textAlign: "center",
+      lineHeight: 16,
+      marginTop: 2,
+    },
+    primaryBtn: {
+      backgroundColor: colors.btnPrimaryBg,
+      borderRadius: 8,
+      paddingVertical: 11,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    btnDisabled: {
+      opacity: 0.4,
+    },
+    primaryBtnText: {
+      color: colors.btnPrimaryText,
+      fontSize: 13,
+      fontWeight: "600",
+    },
+    tipBox: {
+      backgroundColor: colors.bgSubtle,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 14,
+      gap: 5,
+    },
+    tipTitleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    tipTitle: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    tipText: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      lineHeight: 16,
+    },
+    btnPressed: {
+      opacity: 0.8,
+      transform: [{ scale: 0.98 }],
+    },
+  });
+}
