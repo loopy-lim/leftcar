@@ -6,7 +6,9 @@
 
 pub const CHANNEL_CONTROL: u8 = 0;
 pub const CHANNEL_MEDIA: u8 = 1;
-pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+/// Matches the reliable TCP and decoder access-unit ceiling. High-complexity
+/// 4K recovery frames can exceed the old 2 MiB limit.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuxFrame {
@@ -162,6 +164,7 @@ mod tests {
 
     #[test]
     fn encode_validates_payload() {
+        assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
         assert_eq!(encode(7, b"x"), Err(EncodeError::InvalidChannel(7)));
         assert_eq!(encode(0, b""), Err(EncodeError::PayloadEmpty));
         let too_large = vec![0; MAX_FRAME_BYTES + 1];

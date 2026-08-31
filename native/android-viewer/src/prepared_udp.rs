@@ -9,7 +9,7 @@
 
 use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::io;
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -18,10 +18,18 @@ use std::time::Duration;
 const CHALLENGE_PREFIX: &[u8] = b"LCH1";
 const MAX_CHALLENGE_BYTES: usize = 128;
 
+pub fn split_ports(base_port: u16) -> Result<(u16, u16), &'static str> {
+    let right_port = base_port
+        .checked_add(1)
+        .ok_or("split stream requires two consecutive ports")?;
+    Ok((base_port, right_port))
+}
+
 pub struct PreparedUdpReceiver {
     socket: UdpSocket,
     expected_host: String,
     token: Arc<Mutex<Vec<u8>>>,
+    peer: Arc<Mutex<Option<SocketAddr>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -41,6 +49,8 @@ impl PreparedUdpReceiver {
         let worker_socket = socket.try_clone()?;
         let token = Arc::new(Mutex::new(Vec::new()));
         let worker_token = Arc::clone(&token);
+        let peer = Arc::new(Mutex::new(None));
+        let worker_peer = Arc::clone(&peer);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_host = expected_host.clone();
@@ -59,6 +69,7 @@ impl PreparedUdpReceiver {
                             let challenge = &packet[..size];
                             *worker_token.lock().unwrap() =
                                 challenge[CHALLENGE_PREFIX.len()..].to_vec();
+                            *worker_peer.lock().unwrap() = Some(peer);
                             let _ = worker_socket.send_to(challenge, peer);
                         }
                         Ok(_) => {
@@ -79,6 +90,7 @@ impl PreparedUdpReceiver {
             socket,
             expected_host,
             token,
+            peer,
             stop,
             worker: Some(worker),
         })
@@ -92,12 +104,13 @@ impl PreparedUdpReceiver {
         &self.expected_host
     }
 
-    pub fn into_socket_and_token(mut self) -> io::Result<(UdpSocket, Vec<u8>)> {
+    pub fn into_socket_and_token(mut self) -> io::Result<(UdpSocket, Vec<u8>, Option<SocketAddr>)> {
         self.stop_worker();
         let _ = self.socket.set_read_timeout(None);
         let token = self.token.lock().unwrap().clone();
+        let peer = *self.peer.lock().unwrap();
         let socket = self.socket.try_clone()?;
-        Ok((socket, token))
+        Ok((socket, token, peer))
     }
 
     fn stop_worker(&mut self) {
@@ -119,6 +132,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn split_ports_are_consecutive_and_bounded() {
+        assert_eq!(split_ports(5002), Ok((5002, 5003)));
+        assert!(split_ports(u16::MAX).is_err());
+    }
+
+    #[test]
     fn echoes_host_challenge_then_hands_socket_to_renderer() {
         let prepared = PreparedUdpReceiver::bind(0, "127.0.0.1".into()).unwrap();
         let port = prepared.port().unwrap();
@@ -133,8 +152,9 @@ mod tests {
         let (size, _) = sender.recv_from(&mut response).unwrap();
         assert_eq!(&response[..size], challenge);
 
-        let (socket, token) = prepared.into_socket_and_token().unwrap();
+        let (socket, token, peer) = prepared.into_socket_and_token().unwrap();
         assert_eq!(token, b"race-free-token");
+        assert_eq!(peer, Some(sender.local_addr().unwrap()));
         socket
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -151,5 +171,13 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn split_media_receive_buffer_holds_a_large_recovery_pair() {
+        assert_eq!(
+            crate::socket_tuning::split_media_receive_buffer_bytes(),
+            4 * 1024 * 1024
+        );
     }
 }

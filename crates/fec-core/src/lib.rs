@@ -1,19 +1,21 @@
 //! Small, dependency-free Reed-Solomon recovery core for media fragments.
 //!
-//! The wire layer groups at most eight media shards and adds up to two parity
+//! The wire layer groups at most eight media shards and adds up to four parity
 //! shards. Every shard is fixed-width for coding and begins with a two-byte
 //! payload length so the final fragment can be restored without ambiguity.
 
 use std::fmt;
 
 const MAX_DATA_SHARDS: usize = 8;
-const MAX_PARITY_SHARDS: usize = 2;
+pub const MAX_PARITY_SHARDS: usize = 4;
+const LEGACY_MAX_PARITY_SHARDS: usize = 2;
 const LENGTH_PREFIX: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FecError {
     EmptyGroup,
     TooManyDataShards(usize),
+    InvalidParityCount(usize),
     ShardTooLarge(usize),
     InvalidShardCount { expected: usize, actual: usize },
     InvalidShardWidth(usize),
@@ -31,6 +33,9 @@ impl fmt::Display for FecError {
                     f,
                     "FEC group has {count} data shards; maximum is {MAX_DATA_SHARDS}"
                 )
+            }
+            Self::InvalidParityCount(count) => {
+                write!(f, "FEC parity count {count} exceeds {MAX_PARITY_SHARDS}")
             }
             Self::ShardTooLarge(size) => write!(f, "FEC shard payload {size} exceeds u16 length"),
             Self::InvalidShardCount { expected, actual } => {
@@ -69,6 +74,23 @@ impl EncodedGroup {
 /// shard; a full group uses two. This keeps the short tail bounded without
 /// spending a second datagram on a tiny final group.
 pub fn encode_group(data: &[Vec<u8>]) -> Result<EncodedGroup, FecError> {
+    encode_group_exact(data, parity_count(data.len()))
+}
+
+/// Encode with a selected parity ceiling. Short tail groups never emit more
+/// than `k - 1` parity shards, while full groups may use all four rows.
+pub fn encode_group_with_parity(
+    data: &[Vec<u8>],
+    parity_count: usize,
+) -> Result<EncodedGroup, FecError> {
+    if parity_count == 0 || parity_count > MAX_PARITY_SHARDS {
+        return Err(FecError::InvalidParityCount(parity_count));
+    }
+    let effective = parity_count.min(data.len().saturating_sub(1));
+    encode_group_exact(data, effective)
+}
+
+fn encode_group_exact(data: &[Vec<u8>], parity_count: usize) -> Result<EncodedGroup, FecError> {
     let k = data.len();
     if k == 0 {
         return Err(FecError::EmptyGroup);
@@ -89,7 +111,6 @@ pub fn encode_group(data: &[Vec<u8>]) -> Result<EncodedGroup, FecError> {
         .iter()
         .map(|payload| pack_shard(payload, width))
         .collect::<Result<Vec<_>, _>>()?;
-    let parity_count = parity_count(k);
     let mut parity = vec![vec![0; width]; parity_count];
     for (parity_index, output) in parity.iter_mut().enumerate() {
         let row = generator_row(k + parity_index, k);
@@ -116,23 +137,35 @@ pub fn decode_group(
     k: usize,
     width: usize,
 ) -> Result<Vec<Vec<u8>>, FecError> {
+    decode_group_with_max_parity(received, k, width, parity_count(k))
+}
+
+/// Decode from a receiver allocation that can hold up to `max_parity` rows.
+/// Missing tail slots are valid, which lets a four-slot receiver decode an
+/// older two-parity sender without changing the media wire format.
+pub fn decode_group_with_max_parity(
+    received: Vec<Option<Vec<u8>>>,
+    k: usize,
+    width: usize,
+    max_parity: usize,
+) -> Result<Vec<Vec<u8>>, FecError> {
     if !(1..=MAX_DATA_SHARDS).contains(&k) {
         return Err(FecError::TooManyDataShards(k));
+    }
+    if max_parity > MAX_PARITY_SHARDS {
+        return Err(FecError::InvalidParityCount(max_parity));
     }
     if width < LENGTH_PREFIX {
         return Err(FecError::InvalidShardWidth(width));
     }
-    let expected = k + parity_count(k);
+    let expected = k + max_parity.min(k.saturating_sub(1));
     if received.len() != expected {
         return Err(FecError::InvalidShardCount {
             expected,
             actual: received.len(),
         });
     }
-    let missing = received.iter().filter(|shard| shard.is_none()).count();
-    if missing > parity_count(k) {
-        return Err(FecError::TooManyMissingShards(missing));
-    }
+    let missing_data = received[..k].iter().filter(|shard| shard.is_none()).count();
     if received.iter().flatten().any(|shard| shard.len() != width) {
         return Err(FecError::InvalidShardWidth(width));
     }
@@ -144,7 +177,7 @@ pub fn decode_group(
         .take(k)
         .collect::<Vec<_>>();
     if selected.len() < k {
-        return Err(FecError::TooManyMissingShards(missing));
+        return Err(FecError::TooManyMissingShards(missing_data));
     }
     let matrix = selected
         .iter()
@@ -173,7 +206,7 @@ pub fn parity_count(k: usize) -> usize {
     match k {
         0 | 1 => 0,
         2..=7 => 1,
-        _ => MAX_PARITY_SHARDS,
+        _ => LEGACY_MAX_PARITY_SHARDS,
     }
 }
 
@@ -205,7 +238,10 @@ fn generator_row(index: usize, k: usize) -> Vec<u8> {
     if index < k {
         return (0..k).map(|column| u8::from(column == index)).collect();
     }
-    let base = (index - k + 1) as u8;
+    // Preserve the legacy parity rows 0 and 1 (bases 1 and 2), then extend
+    // them as a Vandermonde series over the same column points. Bases 4 and 8
+    // make every combination of up to four missing data columns invertible.
+    let base = 1u8 << (index - k);
     (0..k).map(|column| gf_pow(base, column)).collect()
 }
 
@@ -321,5 +357,47 @@ mod tests {
         let encoded = encode_group(&data).expect("encode");
         assert_eq!(encoded.k, 3);
         assert_eq!(encoded.parity.len(), 1);
+    }
+
+    #[test]
+    fn four_parity_recovers_four_missing_data_shards() {
+        let data: Vec<Vec<u8>> = (0..8)
+            .map(|i| (0..1200).map(|offset| (i * 17 + offset) as u8).collect())
+            .collect();
+        let encoded = encode_group_with_parity(&data, 4).expect("encode four parity");
+        assert_eq!(encoded.parity.len(), 4);
+
+        let mut received = encoded.all_shards();
+        for index in [0, 2, 5, 7] {
+            received[index] = None;
+        }
+        let recovered = decode_group_with_max_parity(received, 8, encoded.width, 4)
+            .expect("recover four data shards");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn four_slot_receiver_decodes_legacy_two_parity_group() {
+        let data: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 240]).collect();
+        let encoded = encode_group(&data).expect("legacy encode");
+        let mut received = encoded.all_shards();
+        received.resize(12, None);
+        received[1] = None;
+        received[6] = None;
+
+        let recovered = decode_group_with_max_parity(received, 8, encoded.width, 4)
+            .expect("new decoder accepts legacy parity slots");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn four_parity_rejects_five_missing_data_shards() {
+        let data: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 240]).collect();
+        let encoded = encode_group_with_parity(&data, 4).expect("encode four parity");
+        let mut received = encoded.all_shards();
+        for slot in received.iter_mut().take(5) {
+            *slot = None;
+        }
+        assert!(decode_group_with_max_parity(received, 8, encoded.width, 4).is_err());
     }
 }

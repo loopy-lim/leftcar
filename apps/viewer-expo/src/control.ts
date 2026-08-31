@@ -17,6 +17,8 @@ export interface CatalogView {
   captureBackends: CaptureBackendInfo[];
   mediaHost?: string | null;
   displays: DisplayInfo[];
+  encoderExperiments?: unknown;
+  udpStabilityCapabilities?: unknown;
 }
 
 export interface CaptureBackendInfo {
@@ -43,6 +45,7 @@ export interface SessionView {
   fps: number;
   kbps: number;
   fpsTarget: number;
+  udpStability?: unknown;
   captureFps?: number;
   encodeSubmitFps?: number;
   encodeOutputFps?: number;
@@ -97,6 +100,23 @@ export interface SessionView {
   receiverRttMs?: number | null;
   receiverWireMs?: number | null;
   receiverFeedbackAgeMs?: number | null;
+  udpStabilityProfile?: string;
+  udpBurstDatagrams?: number;
+  udpPacingRateMultiplier?: number;
+  udpFecParityShards?: number;
+  udpAdaptivePacing?: boolean;
+  udpBurstReason?: string;
+  receiverMediaDatagrams?: number;
+  receiverDataDatagrams?: number;
+  receiverParityDatagrams?: number;
+  receiverFecRestoredFragments?: number;
+  receiverUnrecoverableFecGroups?: number;
+  receiverMaxMissingDataFragments?: number;
+  receiverOneFrameGapEvents?: number;
+  receiverMultiFrameGapEvents?: number;
+  receiverPairedIdrEpisodes?: number;
+  receiverSuppressedRecoveryRequests?: number;
+  receiverFecDecodeFailures?: number;
 }
 
 export interface StatusView {

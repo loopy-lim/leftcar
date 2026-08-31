@@ -15,12 +15,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 16 * 1024;
 // TCP is reliable, but the renderer still needs a bounded handoff so a
 // detached Surface cannot turn a transient lifecycle pause into unbounded
 // native memory growth. The renderer drains this queue before decoding.
-const MEDIA_CHANNEL_CAPACITY: usize = 256;
+// The read buffer owns at most one full frame while the renderer queue owns
+// at most two more. Even malicious maximum-size frames therefore remain
+// bounded to 48 MiB per TCP media session instead of a count-only 4 GiB cap.
+const MEDIA_CHANNEL_CAPACITY: usize = 2;
 
 #[cfg(target_os = "android")]
 fn bridge_log(message: &str) {
@@ -297,4 +300,16 @@ fn udp_to_tcp(
         }
     }
     connection_stop.store(true, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_media_frame_and_session_memory_are_bounded_for_4k() {
+        assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MEDIA_CHANNEL_CAPACITY, 2);
+        const { assert!(MAX_FRAME_BYTES * (MEDIA_CHANNEL_CAPACITY + 1) <= 48 * 1024 * 1024) };
+    }
 }

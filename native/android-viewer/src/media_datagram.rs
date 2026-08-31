@@ -20,7 +20,7 @@ pub const PARITY_MARKER: u8 = b'P';
 pub const FRAME_HEADER_V1_LEN: usize = 17;
 pub const FRAME_HEADER_V2_LEN: usize = 33;
 pub const PARITY_HEADER_LEN: usize = 19;
-pub const MAX_DATAGRAM_BYTES: usize = 1_200;
+pub const MAX_DATAGRAM_BYTES: usize = 1_400;
 pub const MAX_FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM_BYTES - FRAME_HEADER_V2_LEN;
 // Four AUs tolerate a short Wi-Fi scheduling/reordering burst. Completed AUs
 // are still returned immediately, so this does not create a playback queue.
@@ -32,7 +32,7 @@ const MAX_AU_BYTES: usize = 16 * 1024 * 1024;
 // large recovery keyframes.
 const CONTIGUOUS_FRAGMENT_LIMIT: usize = 1_024;
 const RECENT_COMPLETED_AUS: usize = 64;
-const COMPLETION_REORDER_WAIT: Duration = Duration::from_millis(3);
+const COMPLETION_REORDER_WAIT: Duration = Duration::from_millis(8);
 const MAX_COMPLETED_REORDER: usize = 3;
 pub const BASE_STALE_FRAME_BUDGET_MS: u64 = 80;
 pub const RECOVERY_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
@@ -103,25 +103,21 @@ pub fn classify_frame_gap(
 
 /// Decide whether a completed AU may enter MediaCodec after a frame-id jump.
 ///
-/// A large missing-AU hole is treated as a broken reference chain. A single
-/// missing AU stays eligible for the live decode path; if the hardware decoder
-/// rejects the following delta, feed_and_render escalates to a real resync.
+/// Any missing delta AU breaks the low-latency reference chain. Keep the last
+/// good Surface image visible while the receiver requests a fresh keyframe
+/// instead of feeding visibly corrupted dependent frames to MediaCodec.
 pub fn should_feed_frame(reason: FrameGapReason, keyframe: bool) -> bool {
     match reason {
         FrameGapReason::None => true,
-        // A single lost delta is preferable to a 250-750ms IDR stall. The
-        // hardware decoder can conceal that missing reference; if it rejects
-        // the following AU, feed_and_render escalates to a real resync.
-        FrameGapReason::NetworkLoss { missing } => keyframe || missing == 1,
+        FrameGapReason::NetworkLoss { .. } => keyframe,
         FrameGapReason::LiveEdgeDiscard { .. } | FrameGapReason::RecoverySkip { .. } => keyframe,
     }
 }
 
-/// Decide when a frame-id gap is large enough to flush the decoder. One
-/// missing AU should stay on the live path so a transient Wi-Fi loss does not
-/// turn into a full GOP-sized frame-rate collapse.
+/// Flush on the first missing delta AU. H.264 low-latency streams use dependent
+/// P-frames, so even one missing reference can smear blocks until the next IDR.
 pub fn should_resync_after_network_loss(missing: u16, keyframe: bool) -> bool {
-    !keyframe && missing >= 2
+    !keyframe && missing > 0
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +185,7 @@ pub fn rendered_fps_from_feedback(
         return 0;
     }
     let delta = rendered_frames.saturating_sub(previous_rendered_frames);
-    let fps = (u128::from(delta) * 1_000 + u128::from(elapsed_ms) - 1) / u128::from(elapsed_ms);
+    let fps = (u128::from(delta) * 1_000).div_ceil(u128::from(elapsed_ms));
     fps.min(u128::from(u16::MAX)) as u16
 }
 
@@ -225,7 +221,7 @@ pub fn parse_parity(datagram: &[u8]) -> Option<ParityFragment<'_>> {
     let base = u16::from_be_bytes(datagram[5..7].try_into().ok()?);
     let total = u16::from_be_bytes(datagram[7..9].try_into().ok()?);
     if !(1..=8).contains(&k)
-        || usize::from(index) >= fec_core::parity_count(usize::from(k))
+        || usize::from(index) >= fec_core::MAX_PARITY_SHARDS.min(usize::from(k).saturating_sub(1))
         || total == 0
         || usize::from(base) + usize::from(k) > usize::from(total)
         || &datagram[9..11] != b"LT"
@@ -254,9 +250,57 @@ pub struct RestoredFragment {
     pub payload: Vec<u8>,
 }
 
+/// Recently completed FEC groups. Data shards normally arrive before their
+/// parity tail, so a complete group can be removed before those parity
+/// datagrams reach the receiver. Remembering the key prevents that harmless
+/// tail from recreating an all-missing group and being reported as loss when
+/// the bounded FEC map evicts it.
+#[derive(Default)]
+pub struct CompletedFecGroups {
+    order: std::collections::VecDeque<(u16, u16)>,
+}
+
+impl CompletedFecGroups {
+    const CAPACITY: usize = 64;
+
+    pub fn contains(&self, key: &(u16, u16)) -> bool {
+        self.order.contains(key)
+    }
+
+    pub fn remember(&mut self, key: (u16, u16)) {
+        if self.contains(&key) {
+            return;
+        }
+        if self.order.len() == Self::CAPACITY {
+            self.order.pop_front();
+        }
+        self.order.push_back(key);
+    }
+
+    pub fn clear(&mut self) {
+        self.order.clear();
+    }
+}
+
+/// Drop receiver-local FEC assembly state at an explicit recovery boundary.
+///
+/// A decoder recovery already has its own gap and IDR telemetry. Treating the
+/// partially assembled groups discarded by that reset as fresh packet loss
+/// feeds the same recovery back into Host adaptation and can hold the UDP
+/// burst at its most conservative value indefinitely.
+pub fn discard_fec_groups(
+    groups: &mut HashMap<(u16, u16), FecGroup>,
+    order: &mut VecDeque<(u16, u16)>,
+) {
+    groups.clear();
+    order.clear();
+}
+
 /// Bounded FEC state for one AU group. Data fragments may arrive before the
 /// parity width is known; they are retained in raw form until a P datagram
 /// supplies the fixed-width shard size.
+pub const MAX_ACTIVE_FEC_GROUPS: usize = 48;
+
 pub struct FecGroup {
     id: u16,
     k: usize,
@@ -273,7 +317,7 @@ pub struct FecGroup {
 impl FecGroup {
     pub fn new(id: u16, k: u8, base: u16, total: u16) -> Option<Self> {
         let k = usize::from(k);
-        let parity = fec_core::parity_count(k);
+        let parity = fec_core::MAX_PARITY_SHARDS.min(k.saturating_sub(1));
         if !(1..=8).contains(&k) || parity == 0 || usize::from(base) + k > usize::from(total) {
             return None;
         }
@@ -340,7 +384,15 @@ impl FecGroup {
     }
 
     pub fn try_restore(&mut self) -> Option<Vec<RestoredFragment>> {
-        let width = self.width?;
+        self.try_restore_result().ok().flatten()
+    }
+
+    pub fn try_restore_result(
+        &mut self,
+    ) -> Result<Option<Vec<RestoredFragment>>, fec_core::FecError> {
+        let Some(width) = self.width else {
+            return Ok(None);
+        };
         let received = self
             .data
             .iter()
@@ -351,7 +403,11 @@ impl FecGroup {
             })
             .chain(self.parity.iter().cloned())
             .collect::<Vec<_>>();
-        let restored = fec_core::decode_group(received, self.k, width).ok()?;
+        if received.iter().flatten().count() < self.k {
+            return Ok(None);
+        }
+        let restored =
+            fec_core::decode_group_with_max_parity(received, self.k, width, self.parity.len())?;
         let mut output = Vec::new();
         for (index, payload) in restored.into_iter().enumerate() {
             if self.data[index].is_none() {
@@ -367,11 +423,18 @@ impl FecGroup {
                 });
             }
         }
-        (!output.is_empty()).then_some(output)
+        Ok((!output.is_empty()).then_some(output))
     }
 
     pub fn is_complete(&self) -> bool {
         self.data.iter().all(Option::is_some)
+    }
+
+    pub fn missing_data_fragments(&self) -> usize {
+        self.data
+            .iter()
+            .filter(|fragment| fragment.is_none())
+            .count()
     }
 }
 
@@ -386,7 +449,7 @@ pub struct ReassembledFrame {
 
 /// Restores short cross-AU UDP reordering without becoming a playback queue.
 /// A genuinely missing frame is skipped after at most three completed AUs or
-/// three milliseconds, whichever comes first.
+/// eight milliseconds, whichever comes first.
 #[derive(Default)]
 pub struct CompletedFrameSequencer {
     last_delivered: Option<u16>,
@@ -764,6 +827,13 @@ impl RecoveryRequestGate {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lan_media_datagram_budget_stays_below_ethernet_mtu() {
+        assert_eq!(MAX_DATAGRAM_BYTES, 1_400);
+        assert_eq!(MAX_FRAGMENT_PAYLOAD, 1_367);
+        const { assert!(MAX_DATAGRAM_BYTES + 28 <= 1_500) };
+    }
+
     fn legacy_datagram(index: u16, count: u16, id: u16, wall: u64, payload: &[u8]) -> Vec<u8> {
         let mut bytes = vec![FRAME_MARKER];
         bytes.extend_from_slice(&index.to_be_bytes());
@@ -841,6 +911,37 @@ mod tests {
     }
 
     #[test]
+    fn four_parity_datagrams_restore_four_lost_fragments() {
+        let payloads = (0..8).map(|i| vec![i as u8; 64]).collect::<Vec<_>>();
+        let encoded = fec_core::encode_group_with_parity(&payloads, 4).unwrap();
+        let mut group = FecGroup::new(79, 8, 0, 8).unwrap();
+        for (index, payload) in payloads.iter().enumerate() {
+            if ![0, 2, 5, 7].contains(&index) {
+                group.push_data(
+                    parse_fragment(&datagram(index as u16, 8, 79, 1, 2, 3, payload)).unwrap(),
+                );
+            }
+        }
+        for (index, parity) in encoded.parity.iter().enumerate() {
+            let datagram = parity_datagram(79, 8, index as u8, 0, 8, 3, parity);
+            let parsed =
+                parse_parity(&datagram).expect("new receiver accepts parity indexes 0 through 3");
+            group.push_parity(parsed);
+        }
+        let restored = group.try_restore_result().unwrap().unwrap();
+        assert_eq!(restored.len(), 4);
+        assert!(group.is_complete());
+    }
+
+    #[test]
+    fn four_k_recovery_window_retains_every_group_in_the_observed_maximum_idr() {
+        // Physical 4K60 split validation reached 317 aggregate fragments,
+        // or at most 40 RS(8, 12) groups on one tile. The receiver must not
+        // evict an early group merely because its parity arrived late.
+        const { assert!(MAX_ACTIVE_FEC_GROUPS >= 40) };
+    }
+
+    #[test]
     fn parity_first_arrival_retries_after_late_data() {
         let payloads = (0..7).map(|i| vec![i as u8; 64]).collect::<Vec<_>>();
         let encoded = fec_core::encode_group(&payloads).unwrap();
@@ -875,6 +976,38 @@ mod tests {
     fn parity_parser_rejects_unknown_group_shape() {
         let packet = parity_datagram(77, 8, 0, 8, 8, 3, &[1; 64]);
         assert!(parse_parity(&packet).is_none());
+    }
+
+    #[test]
+    fn completed_fec_groups_suppress_late_parity_without_growing_forever() {
+        let mut completed = CompletedFecGroups::default();
+        completed.remember((7, 0));
+        completed.remember((7, 0));
+        assert!(completed.contains(&(7, 0)));
+        assert_eq!(completed.order.len(), 1);
+
+        for id in 8..=(8 + CompletedFecGroups::CAPACITY as u16) {
+            completed.remember((id, 0));
+        }
+        assert!(!completed.contains(&(7, 0)));
+        assert_eq!(completed.order.len(), CompletedFecGroups::CAPACITY);
+
+        completed.clear();
+        assert!(!completed.contains(&(72, 0)));
+    }
+
+    #[test]
+    fn recovery_discards_partial_fec_state_without_classifying_network_loss() {
+        let mut groups = HashMap::new();
+        let mut order = VecDeque::new();
+        let key = (7, 0);
+        groups.insert(key, FecGroup::new(7, 8, 0, 8).unwrap());
+        order.push_back(key);
+
+        discard_fec_groups(&mut groups, &mut order);
+
+        assert!(groups.is_empty());
+        assert!(order.is_empty());
     }
 
     #[test]
@@ -1092,6 +1225,34 @@ mod tests {
     }
 
     #[test]
+    fn holds_short_four_k_fec_reordering_within_one_frame() {
+        fn frame(id: u16) -> ReassembledFrame {
+            ReassembledFrame {
+                id,
+                capture_wall_ms: None,
+                encode_wall_ms: None,
+                send_wall_ms: 0,
+                au: vec![id as u8],
+            }
+        }
+
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        assert_eq!(sequencer.push_at(frame(10), start)[0].id, 10);
+        assert!(sequencer
+            .push_at(frame(12), start + Duration::from_millis(1))
+            .is_empty());
+        assert!(sequencer
+            .push_at(frame(13), start + Duration::from_millis(6))
+            .is_empty());
+        let ready = sequencer.push_at(frame(11), start + Duration::from_millis(7));
+        assert_eq!(
+            ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            [11, 12, 13]
+        );
+    }
+
+    #[test]
     fn skips_a_real_gap_without_growing_a_playback_queue() {
         fn frame(id: u16) -> ReassembledFrame {
             ReassembledFrame {
@@ -1109,7 +1270,7 @@ mod tests {
         assert!(sequencer
             .push_at(frame(22), start + Duration::from_millis(1))
             .is_empty());
-        let ready = sequencer.push_at(frame(23), start + Duration::from_millis(4));
+        let ready = sequencer.push_at(frame(23), start + Duration::from_millis(10));
         assert_eq!(
             ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
             [22, 23]
@@ -1161,8 +1322,8 @@ mod tests {
     }
 
     #[test]
-    fn one_real_missing_delta_stays_on_the_live_decode_path() {
-        assert!(should_feed_frame(
+    fn one_real_missing_delta_starts_recovery_before_decode() {
+        assert!(!should_feed_frame(
             FrameGapReason::NetworkLoss { missing: 1 },
             false
         ));
@@ -1170,7 +1331,7 @@ mod tests {
             FrameGapReason::NetworkLoss { missing: 2 },
             false
         ));
-        assert!(!should_resync_after_network_loss(1, false));
+        assert!(should_resync_after_network_loss(1, false));
         assert!(should_resync_after_network_loss(2, false));
         assert!(!should_resync_after_network_loss(99, true));
     }

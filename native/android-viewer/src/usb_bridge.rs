@@ -15,9 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = usb_mux::MAX_FRAME_BYTES;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
-const MEDIA_CHANNEL_CAPACITY: usize = 256;
+// One frame may be assembling in MuxDecoder while two complete frames wait
+// for the renderer: at most 48 MiB of AOAP media payload per session.
+const MEDIA_CHANNEL_CAPACITY: usize = 2;
 
 pub struct UsbBridge {
     stop: Arc<AtomicBool>,
@@ -246,6 +248,13 @@ fn run_control_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aoap_media_memory_is_bounded_for_4k() {
+        assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MEDIA_CHANNEL_CAPACITY, 2);
+        const { assert!(MAX_FRAME_BYTES * (MEDIA_CHANNEL_CAPACITY + 1) <= 48 * 1024 * 1024) };
+    }
 
     #[test]
     fn start_rejects_invalid_fd() {
