@@ -7,12 +7,14 @@ import {
 export const VIEWER_PREFERENCES_KEY = "leftcar.viewerPreferences";
 
 export interface ViewerPreferences {
-  profileId: StreamProfileId;
+  profileId: ViewerProfileSelection;
   showFps: boolean;
 }
 
+export type ViewerProfileSelection = StreamProfileId | "auto";
+
 export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
-  profileId: "balanced",
+  profileId: "auto",
   showFps: true,
 };
 
@@ -34,9 +36,17 @@ export function recommendedStreamProfileId(
   return "latency";
 }
 
-function isStreamProfileId(value: unknown): value is StreamProfileId {
-  return typeof value === "string"
-    && STREAM_PROFILES.some((profile) => profile.id === value);
+export function resolveViewerProfileId(
+  selection: ViewerProfileSelection,
+  display: DisplaySize,
+): StreamProfileId {
+  return selection === "auto" ? recommendedStreamProfileId(display) : selection;
+}
+
+function isViewerProfileSelection(value: unknown): value is ViewerProfileSelection {
+  return value === "auto"
+    || (typeof value === "string"
+      && STREAM_PROFILES.some((profile) => profile.id === value));
 }
 
 export function parseViewerPreferences(raw: string | null): ViewerPreferences {
@@ -44,7 +54,7 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return {
-      profileId: isStreamProfileId(parsed.profileId)
+      profileId: isViewerProfileSelection(parsed.profileId)
         ? parsed.profileId
         : DEFAULT_VIEWER_PREFERENCES.profileId,
       showFps: typeof parsed.showFps === "boolean"
