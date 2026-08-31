@@ -25,7 +25,6 @@ import {
 import {
   STREAM_PROFILES,
   is4KResolution,
-  type StreamProfileId,
 } from "./stream-profile";
 import {
   availableEncoderExperimentsForStreams,
@@ -49,7 +48,9 @@ import { useStreamController } from "./use-stream-controller";
 import {
   DEFAULT_VIEWER_PREFERENCES,
   readViewerPreferences,
+  resolveViewerProfileId,
   writeViewerPreferences,
+  type ViewerProfileSelection,
   type ViewerPreferences,
 } from "./viewer-preferences";
 
@@ -120,12 +121,16 @@ export function useCatalogModel() {
     catalogQuery.data?.mediaHost?.trim() || catalogDisplayHost(host);
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === preferences.profileId) ??
+    STREAM_PROFILES.find((profile) => profile.id === "balanced") ??
     STREAM_PROFILES[0];
 
   const advertisedEncoderExperiments = catalogQuery.data?.encoderExperiments;
-  const fittedDisplayTargets = displays.map((display) =>
-    fitProfileToDisplay(display, selectedProfile),
-  );
+  const fittedDisplayTargets = displays.map((display) => {
+    const profileId = resolveViewerProfileId(preferences.profileId, display);
+    const profile = STREAM_PROFILES.find((candidate) => candidate.id === profileId)
+      ?? selectedProfile;
+    return fitProfileToDisplay(display, profile);
+  });
   const hasActual4KTarget = fittedDisplayTargets.some((target) =>
     is4KResolution(target.width, target.height),
   );
@@ -223,7 +228,7 @@ export function useCatalogModel() {
     void refetchCatalog();
   }, [refetchCatalog]);
 
-  const handleSelectProfile = useCallback((id: StreamProfileId) => {
+  const handleSelectProfile = useCallback((id: ViewerProfileSelection) => {
     setPreferences((current) => ({ ...current, profileId: id }));
   }, []);
 
@@ -268,9 +273,13 @@ export function useCatalogModel() {
       setError(null);
       try {
         const port = allocPort();
+        const profileId = resolveViewerProfileId(preferences.profileId, display);
+        const displayProfile =
+          STREAM_PROFILES.find((profile) => profile.id === profileId) ??
+          selectedProfile;
         const { width, height, fps } = fitProfileToDisplay(
           display,
-          selectedProfile,
+          displayProfile,
         );
         const started = await startPreparedStream({
           control: client,
@@ -290,7 +299,7 @@ export function useCatalogModel() {
             mediaTransport: "auto",
             encoderExperiment,
             displayName: display.name,
-            contentMode: selectedProfile.contentMode,
+            contentMode: displayProfile.contentMode,
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
           },
@@ -304,7 +313,7 @@ export function useCatalogModel() {
           height,
           fps,
           captureBackend: effectiveCaptureBackend,
-          contentMode: selectedProfile.contentMode,
+          contentMode: displayProfile.contentMode,
           encoderExperiment: started.encoderExperiment,
           udpStability: started.udpStability,
           showFps: preferences.showFps,
@@ -326,6 +335,7 @@ export function useCatalogModel() {
       encoderExperiment,
       effectiveUdpStability,
       mediaHost,
+      preferences.profileId,
       preferences.showFps,
       selectedProfile,
     ],

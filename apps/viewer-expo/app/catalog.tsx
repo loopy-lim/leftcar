@@ -20,8 +20,6 @@ import {
 } from "../src/usb";
 import {
   STREAM_PROFILES,
-  type StreamProfile,
-  type StreamProfileId,
 } from "../src/stream-profile";
 import type {
   EncoderExperimentId,
@@ -34,7 +32,11 @@ import type {
   UdpStabilitySelection,
 } from "../src/udp-stability";
 import { fitProfileToDisplay } from "../src/catalog-helpers";
-import { recommendedStreamProfileId } from "../src/viewer-preferences";
+import {
+  recommendedStreamProfileId,
+  resolveViewerProfileId,
+  type ViewerProfileSelection,
+} from "../src/viewer-preferences";
 import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
@@ -131,10 +133,10 @@ interface CatalogHeaderProps {
   error: string | null;
   host: string;
   loading: boolean;
-  profileId: StreamProfileId;
+  profileId: ViewerProfileSelection;
   refreshing: boolean;
   onRefresh: () => void;
-  onSelectProfile: (id: StreamProfileId) => void;
+  onSelectProfile: (id: ViewerProfileSelection) => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
@@ -225,6 +227,20 @@ function CatalogHeader({
       {/* Segmented Quality Control */}
       <View style={styles.qualitySegmentWrapper}>
         <View style={styles.qualitySegmentTabs}>
+          <Pressable
+            onPress={() => onSelectProfile("auto")}
+            style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]}
+            accessibilityRole="button"
+            accessibilityState={{ selected: profileId === "auto" }}
+            accessibilityLabel="자동 추천: 디스플레이별 권장 품질"
+          >
+            <Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>
+              자동 추천
+            </Text>
+            <Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>
+              디스플레이별
+            </Text>
+          </Pressable>
           {STREAM_PROFILES.map((p) => {
             const isSelected = p.id === profileId;
             return (
@@ -453,7 +469,7 @@ interface DisplayListItemProps {
   display: DisplayInfo;
   disabled: boolean;
   isLaunching: boolean;
-  profile: StreamProfile;
+  profileSelection: ViewerProfileSelection;
   onOpen: (display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
@@ -463,14 +479,17 @@ function DisplayListItem({
   display,
   disabled,
   isLaunching,
-  profile,
+  profileSelection,
   onOpen,
   styles,
   colors,
 }: DisplayListItemProps) {
   const { t } = useAppLanguage();
-  const size = fitProfileToDisplay(display, profile);
   const recommendedId = recommendedStreamProfileId(display);
+  const effectiveProfileId = resolveViewerProfileId(profileSelection, display);
+  const profile = STREAM_PROFILES.find((candidate) => candidate.id === effectiveProfileId)
+    ?? STREAM_PROFILES[0];
+  const size = fitProfileToDisplay(display, profile);
   const recommendedProfile = STREAM_PROFILES.find((candidate) => candidate.id === recommendedId);
   const handlePress = useCallback(() => onOpen(display), [display, onOpen]);
   return (
@@ -612,13 +631,13 @@ export default function Catalog() {
         display={item}
         disabled={model.launchingIndex !== null}
         isLaunching={model.launchingIndex === item.index}
-        profile={model.selectedProfile}
+        profileSelection={model.profileId}
         onOpen={model.openDisplay}
         styles={styles}
         colors={colors}
       />
     ),
-    [colors, model.launchingIndex, model.openDisplay, model.selectedProfile, styles],
+    [colors, model.launchingIndex, model.openDisplay, model.profileId, styles],
   );
 
   return (
