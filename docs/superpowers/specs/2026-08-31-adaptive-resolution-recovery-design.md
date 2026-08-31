@@ -1,7 +1,7 @@
 # Adaptive Resolution Recovery Design
 
 - Date: 2026-08-31
-- Status: proposed for review
+- Status: approved in chat
 - Scope: source-sized stream negotiation, 4K/1440p adaptive recovery, and
   same-window Android rebind
 
@@ -64,12 +64,13 @@ The downshift changes dimensions to the fallback target while keeping FPS at
   never downshifts below its source dimensions.
 
 An upshift is deliberately slower than a downshift. A fallback stream must
-have eight consecutive one-second windows with no new receiver loss, encoded
+have four consecutive one-second windows with no new receiver loss, encoded
 and transmitted FPS at or above 95% of the requested FPS, queue age within the
 latency budget, and no active decoder recovery. It then returns to
-`sourceTarget` once. After either transition, a ten-second rebind cooldown
-prevents oscillation. A failed upshift keeps the fallback stream running and
-restarts the stability window; it does not close the Activity.
+`sourceTarget` once. After either transition, a five-second rebind cooldown
+prevents oscillation while keeping recovery responsive. A failed upshift keeps
+the fallback stream running and restarts the stability window; it does not
+close the Activity.
 
 The pure policy must be deterministic and receive observations rather than
 reading VideoToolbox or Android state directly. It returns one of:
@@ -172,7 +173,7 @@ Automated tests must prove:
 1. exact 4K, 1440p, and smaller source fitting without upscaling;
 2. two-window 4K downshift at the exact threshold, no downshift for a smaller
    source, and no transition during the recovery grace period;
-3. eight stable windows plus the ten-second cooldown before one upshift;
+3. four stable windows plus the five-second cooldown before one upshift;
 4. failed upshift/rebind keeps the fallback target and never loops;
 5. Host start/reconfigure responses preserve accepted dimensions and FPS;
 6. Android old-generation packets cannot publish after a same-window rebind;
