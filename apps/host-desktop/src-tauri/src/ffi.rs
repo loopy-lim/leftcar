@@ -13,7 +13,10 @@
 //!   leftcar_capture_has_persistent_access_v1() -> granted
 
 use crate::backend::CaptureBackend;
-use control_contract::host::{CaptureBackendInfo, DisplayInfo, StatsInfo};
+use control_contract::host::{
+    CaptureBackendInfo, DisplayInfo, EncoderExperiment, EncoderExperimentInfo, StatsInfo,
+};
+use control_contract::udp_stability::AppliedUdpStability;
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
@@ -146,26 +149,26 @@ impl FfiBackend {
         unsafe { Ok(&*(&self._lib as *const Library)) }
     }
 
-    fn take_string(ptr: *mut std::ffi::c_char) -> Option<String> {
+    fn take_string(&self, ptr: *mut std::ffi::c_char) -> Option<String> {
         if ptr.is_null() {
             return None;
         }
         let s = unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
-        unsafe { libc_free_string(ptr) };
+        let free = unsafe {
+            self.lib().ok().and_then(|lib| {
+                lib.get::<unsafe extern "C" fn(*mut std::ffi::c_char)>(
+                    b"leftcar_capture_free_string",
+                )
+                .ok()
+            })
+        };
+        if let Some(free) = free {
+            unsafe { free(ptr) };
+        }
         Some(s)
     }
-}
-
-// The shim exports its own free; use it through the same library. To keep
-// borrow rules simple we look the symbol up per call (rare path: stats poll).
-unsafe fn libc_free_string(ptr: *mut std::ffi::c_char) {
-    // best-effort: use free() from libc — the shim allocates with strdup
-    extern "C" {
-        fn free(p: *mut core::ffi::c_void);
-    }
-    free(ptr as *mut core::ffi::c_void);
 }
 
 fn macos_capture_backends(persistent_access: bool) -> Vec<CaptureBackendInfo> {
@@ -197,6 +200,56 @@ fn string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn bounded_u32(value: &serde_json::Value, key: &str) -> u32 {
+    value[key]
+        .as_u64()
+        .map(|number| number.min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
+fn bounded_i32(value: &serde_json::Value, key: &str) -> Option<i32> {
+    value[key]
+        .as_i64()
+        .and_then(|number| i32::try_from(number).ok())
+}
+
+fn parse_encoder_experiments_json(json: &str) -> Result<Vec<EncoderExperimentInfo>, String> {
+    serde_json::from_str(json).map_err(|error| format!("bad encoder experiment json: {error}"))
+}
+
+fn is_supported_encoder_experiment(experiment: EncoderExperiment) -> bool {
+    matches!(
+        experiment,
+        EncoderExperiment::Auto
+            | EncoderExperiment::RateControl
+            | EncoderExperiment::AdaptiveQp
+            | EncoderExperiment::EncoderPool
+            | EncoderExperiment::SplitVertical
+    )
+}
+
+fn has_complete_encoder_experiment_diagnostics(value: &serde_json::Value) -> bool {
+    const REQUIRED_KEYS: [&str; 13] = [
+        "encoderExperimentRequested",
+        "encoderExperimentApplied",
+        "encoderExperimentFallbackReason",
+        "encoderFrameDrops",
+        "encoderFrameDropFps",
+        "validEncodeOutputFps",
+        "encodeSubmitCallP50Us",
+        "encodeSubmitCallP95Us",
+        "encoderCallbackP50Us",
+        "encoderCallbackP95Us",
+        "packetizationInFlight",
+        "baseFrameQp",
+        "baseFrameQpChanges",
+    ];
+
+    value
+        .as_object()
+        .is_some_and(|object| REQUIRED_KEYS.iter().all(|key| object.contains_key(*key)))
+}
+
 fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("bad stats json: {e}"))?;
@@ -204,17 +257,39 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         frames: v["frames"].as_i64().unwrap_or(0),
         bytes: v["bytes"].as_i64().unwrap_or(0),
         state: v["state"].as_str().unwrap_or("unknown").into(),
-        fps: v["fps"].as_u64().unwrap_or(0) as u32,
-        kbps: v["kbps"].as_u64().unwrap_or(0) as u32,
-        fps_target: v["fpsTarget"].as_u64().unwrap_or(0) as u32,
-        capture_fps: v["captureFps"].as_u64().unwrap_or(0) as u32,
-        encode_submit_fps: v["encodeSubmitFps"].as_u64().unwrap_or(0) as u32,
-        encode_output_fps: v["encodeOutputFps"].as_u64().unwrap_or(0) as u32,
+        fps: bounded_u32(&v, "fps"),
+        kbps: bounded_u32(&v, "kbps"),
+        fps_target: bounded_u32(&v, "fpsTarget"),
+        encoder_experiment_diagnostics_available: has_complete_encoder_experiment_diagnostics(&v),
+        encoder_experiment_requested: v["encoderExperimentRequested"]
+            .as_str()
+            .unwrap_or("auto")
+            .into(),
+        encoder_experiment_applied: v["encoderExperimentApplied"]
+            .as_str()
+            .unwrap_or("rateControl")
+            .into(),
+        encoder_experiment_fallback_reason: v["encoderExperimentFallbackReason"]
+            .as_str()
+            .map(str::to_owned),
+        encoder_frame_drops: v["encoderFrameDrops"].as_i64().unwrap_or(0),
+        encoder_frame_drop_fps: bounded_u32(&v, "encoderFrameDropFps"),
+        valid_encode_output_fps: bounded_u32(&v, "validEncodeOutputFps"),
+        encode_submit_call_p50_us: v["encodeSubmitCallP50Us"].as_u64().unwrap_or(0),
+        encode_submit_call_p95_us: v["encodeSubmitCallP95Us"].as_u64().unwrap_or(0),
+        encoder_callback_p50_us: v["encoderCallbackP50Us"].as_u64().unwrap_or(0),
+        encoder_callback_p95_us: v["encoderCallbackP95Us"].as_u64().unwrap_or(0),
+        packetization_in_flight: bounded_u32(&v, "packetizationInFlight"),
+        base_frame_qp: bounded_i32(&v, "baseFrameQp"),
+        base_frame_qp_changes: v["baseFrameQpChanges"].as_i64().unwrap_or(0),
+        capture_fps: bounded_u32(&v, "captureFps"),
+        encode_submit_fps: bounded_u32(&v, "encodeSubmitFps"),
+        encode_output_fps: bounded_u32(&v, "encodeOutputFps"),
         rendered_fps: v["receiverRenderedFps"].as_u64().map(|value| value as u32),
         capture_callbacks: v["captureCallbacks"].as_i64().unwrap_or(0),
         encode_output_callbacks: v["encodeOutputCallbacks"].as_i64().unwrap_or(0),
         encode_submit_failures: v["encodeSubmitFailures"].as_i64().unwrap_or(0),
-        encode_in_flight: v["encodeInFlight"].as_u64().unwrap_or(0) as u32,
+        encode_in_flight: bounded_u32(&v, "encodeInFlight"),
         dropped: v["dropped"].as_i64().unwrap_or(0),
         network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
         network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
@@ -236,7 +311,7 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         max_send_block_us: v["maxSendBlockUs"].as_u64().unwrap_or(0),
         send_pace_us: v["sendPaceUs"].as_u64().unwrap_or(0),
         max_send_pace_us: v["maxSendPaceUs"].as_u64().unwrap_or(0),
-        pending_frame: v["pendingFrame"].as_u64().unwrap_or(0) as u32,
+        pending_frame: bounded_u32(&v, "pendingFrame"),
         pending_frame_bytes: v["pendingFrameBytes"].as_u64().unwrap_or(0),
         pending_frame_oldest_age_us: v["pendingFrameOldestAgeUs"].as_u64().unwrap_or(0),
         capture_backend: v["captureBackend"]
@@ -247,7 +322,7 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         first_capture_ms: v["firstCaptureMs"].as_u64().unwrap_or(0),
         first_encode_ms: v["firstEncodeMs"].as_u64().unwrap_or(0),
         first_send_ms: v["firstSendMs"].as_u64().unwrap_or(0),
-        current_bitrate: v["currentBitrate"].as_u64().unwrap_or(0) as u32,
+        current_bitrate: bounded_u32(&v, "currentBitrate"),
         encoder_mode: v["encoderMode"].as_str().unwrap_or("unknown").into(),
         encoder_id: v["encoderID"].as_str().unwrap_or("unknown").into(),
         encoder_hardware_accelerated: v["encoderHardwareAccelerated"].as_bool(),
@@ -275,14 +350,14 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
         send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
         last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),
-        last_au_fragments: v["lastAuFragments"].as_u64().unwrap_or(0) as u32,
-        last_au_parity: v["lastAuParity"].as_u64().unwrap_or(0) as u32,
-        last_au_datagrams: v["lastAuDatagrams"].as_u64().unwrap_or(0) as u32,
-        last_au_expected_datagrams: v["lastAuExpectedDatagrams"].as_u64().unwrap_or(0) as u32,
+        last_au_fragments: bounded_u32(&v, "lastAuFragments"),
+        last_au_parity: bounded_u32(&v, "lastAuParity"),
+        last_au_datagrams: bounded_u32(&v, "lastAuDatagrams"),
+        last_au_expected_datagrams: bounded_u32(&v, "lastAuExpectedDatagrams"),
         last_au_send_us: v["lastAuSendUs"].as_u64().unwrap_or(0),
         last_au_is_keyframe: v["lastAuIsKeyframe"].as_bool().unwrap_or(false),
         max_au_bytes: v["maxAuBytes"].as_u64().unwrap_or(0),
-        max_au_fragments: v["maxAuFragments"].as_u64().unwrap_or(0) as u32,
+        max_au_fragments: bounded_u32(&v, "maxAuFragments"),
         sent_datagrams: v["sentDatagrams"].as_i64().unwrap_or(0),
         sent_parity_datagrams: v["sentParityDatagrams"].as_i64().unwrap_or(0),
         receiver_frame_gaps: v["receiverFrameGaps"].as_i64().unwrap_or(0),
@@ -294,9 +369,96 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         receiver_stale_frames: v["receiverStaleFrames"].as_i64().unwrap_or(0),
         receiver_stale_input_drops: v["receiverStaleInputDrops"].as_i64(),
         receiver_output_burst_discards: v["receiverOutputBurstDiscards"].as_i64().unwrap_or(0),
-        receiver_rtt_ms: v["receiverRttMs"].as_u64().map(|value| value as u32),
-        receiver_wire_ms: v["receiverWireMs"].as_u64().map(|value| value as u32),
+        receiver_rtt_ms: v["receiverRttMs"]
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32),
+        receiver_wire_ms: v["receiverWireMs"]
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32),
         receiver_feedback_age_ms: v["receiverFeedbackAgeMs"].as_u64(),
+        udp_stability_profile: v["udpStabilityProfile"]
+            .as_str()
+            .unwrap_or("legacy")
+            .into(),
+        udp_burst_datagrams: bounded_u32(&v, "udpBurstDatagrams"),
+        udp_pacing_rate_multiplier: bounded_u32(&v, "udpPacingRateMultiplier").max(1),
+        udp_fec_parity_shards: bounded_u32(&v, "udpFecParityShards"),
+        udp_adaptive_pacing: v["udpAdaptivePacing"].as_bool().unwrap_or(false),
+        udp_burst_reason: v["udpBurstReason"].as_str().unwrap_or("fixed").into(),
+        receiver_media_datagrams: v["receiverMediaDatagrams"].as_u64().unwrap_or(0),
+        receiver_data_datagrams: v["receiverDataDatagrams"].as_u64().unwrap_or(0),
+        receiver_parity_datagrams: v["receiverParityDatagrams"].as_u64().unwrap_or(0),
+        receiver_fec_restored_fragments: v["receiverFecRestoredFragments"]
+            .as_u64()
+            .unwrap_or(0),
+        receiver_unrecoverable_fec_groups: bounded_u32(
+            &v,
+            "receiverUnrecoverableFecGroups",
+        ),
+        receiver_max_missing_data_fragments: bounded_u32(
+            &v,
+            "receiverMaxMissingDataFragments",
+        ),
+        receiver_one_frame_gap_events: bounded_u32(&v, "receiverOneFrameGapEvents"),
+        receiver_multi_frame_gap_events: bounded_u32(&v, "receiverMultiFrameGapEvents"),
+        receiver_paired_idr_episodes: bounded_u32(&v, "receiverPairedIdrEpisodes"),
+        receiver_suppressed_recovery_requests: bounded_u32(
+            &v,
+            "receiverSuppressedRecoveryRequests",
+        ),
+        receiver_fec_decode_failures: bounded_u32(&v, "receiverFecDecodeFailures"),
+        split_direction: v["splitDirection"].as_str().map(str::to_owned),
+        split_preparation_p50_us: v["splitPreparationP50Us"].as_u64().unwrap_or(0),
+        split_preparation_p95_us: v["splitPreparationP95Us"].as_u64().unwrap_or(0),
+        split_pair_admission_drops: v["splitPairAdmissionDrops"].as_i64().unwrap_or(0),
+        encoded_pair_callback_p50_us: v["encodedPairCallbackP50Us"].as_u64().unwrap_or(0),
+        encoded_pair_callback_p95_us: v["encodedPairCallbackP95Us"].as_u64().unwrap_or(0),
+        encoded_pair_timeouts: v["encodedPairTimeouts"].as_i64().unwrap_or(0),
+        encoded_pair_drops: v["encodedPairDrops"].as_i64().unwrap_or(0),
+        left_valid_encode_output_fps: bounded_u32(&v, "leftValidEncodeOutputFps"),
+        right_valid_encode_output_fps: bounded_u32(&v, "rightValidEncodeOutputFps"),
+        left_encoder_frame_drops: v["leftEncoderFrameDrops"].as_i64().unwrap_or(0),
+        right_encoder_frame_drops: v["rightEncoderFrameDrops"].as_i64().unwrap_or(0),
+        left_bitrate_bps: v["leftBitrateBps"].as_u64().unwrap_or(0),
+        right_bitrate_bps: v["rightBitrateBps"].as_u64().unwrap_or(0),
+        aggregate_bitrate_bps: v["aggregateBitrateBps"].as_u64().unwrap_or(0),
+        left_receiver_loss: v["leftReceiverLoss"].as_u64().unwrap_or(0),
+        right_receiver_loss: v["rightReceiverLoss"].as_u64().unwrap_or(0),
+        left_rendered_fps: bounded_u32(&v, "leftRenderedFps"),
+        right_rendered_fps: bounded_u32(&v, "rightRenderedFps"),
+        joined_rendered_fps: bounded_u32(&v, "joinedRenderedFps"),
+        pair_ready_delta_p95_us: v["pairReadyDeltaP95Us"].as_u64().unwrap_or(0),
+        pair_ready_delta_max_us: v["pairReadyDeltaMaxUs"].as_u64().unwrap_or(0),
+        pair_sync_timeouts: v["pairSyncTimeouts"].as_i64().unwrap_or(0),
+        unmatched_output_drops: v["unmatchedOutputDrops"].as_i64().unwrap_or(0),
+        paired_recovery_requests: v["pairedRecoveryRequests"].as_i64().unwrap_or(0),
+        paired_recovery_keyframes: v["pairedRecoveryKeyframes"].as_i64().unwrap_or(0),
+        split_test_injected_drops: v["splitTestInjectedDrops"].as_i64().unwrap_or(0),
+        split_flow_active_leases: bounded_u32(&v, "splitFlowActiveLeases"),
+        split_flow_capacity: bounded_u32(&v, "splitFlowCapacity"),
+        split_pre_encode_admission_drops: v["splitPreEncodeAdmissionDrops"]
+            .as_i64()
+            .unwrap_or(0),
+        split_encoded_queue_depth: bounded_u32(&v, "splitEncodedQueueDepth"),
+        split_encoded_queue_oldest_us: v["splitEncodedQueueOldestUs"]
+            .as_u64()
+            .unwrap_or(0),
+        split_recovery_boundary_discards: v["splitRecoveryBoundaryDiscards"]
+            .as_i64()
+            .unwrap_or(0),
+        split_post_encode_delta_drops: v["splitPostEncodeDeltaDrops"]
+            .as_i64()
+            .unwrap_or(0),
+        split_wire_pairs_attempted: v["splitWirePairsAttempted"].as_i64().unwrap_or(0),
+        split_wire_pair_send_failures: v["splitWirePairSendFailures"]
+            .as_i64()
+            .unwrap_or(0),
+        split_keyframe_gap_recoveries: v["splitKeyframeGapRecoveries"]
+            .as_i64()
+            .unwrap_or(0),
+        split_delta_gap_recoveries: v["splitDeltaGapRecoveries"]
+            .as_i64()
+            .unwrap_or(0),
         error: v["error"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -328,6 +490,35 @@ impl CaptureBackend for FfiBackend {
         macos_capture_backends(persistent_access)
     }
 
+    fn encoder_experiments(&self) -> Result<Vec<EncoderExperimentInfo>, String> {
+        let lib = self.lib()?;
+        unsafe {
+            type CPtr = *mut std::ffi::c_char;
+            let function = match lib
+                .get::<unsafe extern "C" fn() -> CPtr>(b"leftcar_capture_encoder_experiments_v1")
+            {
+                Ok(function) => function,
+                Err(_) => {
+                    return Ok(vec![EncoderExperimentInfo {
+                        id: EncoderExperiment::Auto,
+                        label: "Automatic".into(),
+                        hint: "Host-selected encoder policy".into(),
+                        requires_reconnect: true,
+                    }]);
+                }
+            };
+            let ptr = function();
+            let json = self
+                .take_string(ptr)
+                .ok_or("encoder experiment capability returned null")?;
+            let experiments = parse_encoder_experiments_json(&json)?;
+            Ok(experiments
+                .into_iter()
+                .filter(|entry| is_supported_encoder_experiment(entry.id))
+                .collect())
+        }
+    }
+
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
         let lib = self.lib()?;
         unsafe {
@@ -335,7 +526,7 @@ impl CaptureBackend for FfiBackend {
                 .get(b"leftcar_capture_list_displays")
                 .map_err(|e| e.to_string())?;
             let ptr = f();
-            let json = Self::take_string(ptr).ok_or("list_displays returned null")?;
+            let json = self.take_string(ptr).ok_or("list_displays returned null")?;
             let displays: Vec<DisplayInfo> =
                 serde_json::from_str(&json).map_err(|e| format!("bad display json: {e}"))?;
             if displays.is_empty() {
@@ -365,15 +556,48 @@ impl CaptureBackend for FfiBackend {
         capture_backend: &str,
         media_transport: &str,
         content_mode: &str,
+        encoder_experiment: EncoderExperiment,
+        udp_stability: &AppliedUdpStability,
     ) -> Result<u32, String> {
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
         let c_backend = CString::new(capture_backend).map_err(|_| "backend contains NUL")?;
         let c_transport =
             CString::new(media_transport).map_err(|_| "media transport contains NUL")?;
-        let c_content_mode =
-            CString::new(content_mode).map_err(|_| "content mode contains NUL")?;
+        let c_content_mode = CString::new(content_mode).map_err(|_| "content mode contains NUL")?;
+        let c_encoder_experiment = CString::new(encoder_experiment.as_str())
+            .map_err(|_| "encoder experiment contains NUL")?;
+        let c_udp_profile = CString::new(udp_stability.applied.as_str())
+            .map_err(|_| "UDP stability profile contains NUL")?;
         unsafe {
+            type StartV7 = unsafe extern "C" fn(
+                *const std::ffi::c_char,
+                u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                u8,
+                u8,
+                i32,
+            ) -> u32;
+            type StartV6 = unsafe extern "C" fn(
+                *const std::ffi::c_char,
+                u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+            ) -> u32;
             type StartV5 = unsafe extern "C" fn(
                 *const std::ffi::c_char,
                 u16,
@@ -404,7 +628,59 @@ impl CaptureBackend for FfiBackend {
                 u32,
                 *const std::ffi::c_char,
             ) -> u32;
-            let handle = if let Ok(f) = lib.get::<StartV5>(b"leftcar_capture_start_v5") {
+            let legacy_udp = udp_stability.burst_datagrams == 8
+                && udp_stability.fec_parity_shards == 2
+                && !udp_stability.adaptive_pacing;
+            let v7_handle = if media_transport == "udp" {
+                match lib.get::<StartV7>(b"leftcar_capture_start_v7") {
+                    Ok(f) => Some(f(
+                        c_ip.as_ptr(),
+                        port,
+                        source_index,
+                        w,
+                        h,
+                        fps,
+                        c_backend.as_ptr(),
+                        c_transport.as_ptr(),
+                        c_content_mode.as_ptr(),
+                        c_encoder_experiment.as_ptr(),
+                        c_udp_profile.as_ptr(),
+                        udp_stability.burst_datagrams,
+                        udp_stability.fec_parity_shards,
+                        i32::from(udp_stability.adaptive_pacing),
+                    )),
+                    Err(_) if !legacy_udp => {
+                        return Err(
+                            "capture shim does not support the requested UDP stability profile"
+                                .into(),
+                        );
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            let handle = if let Some(handle) = v7_handle {
+                handle
+            } else if let Ok(f) = lib.get::<StartV6>(b"leftcar_capture_start_v6") {
+                f(
+                    c_ip.as_ptr(),
+                    port,
+                    source_index,
+                    w,
+                    h,
+                    fps,
+                    c_backend.as_ptr(),
+                    c_transport.as_ptr(),
+                    c_content_mode.as_ptr(),
+                    c_encoder_experiment.as_ptr(),
+                )
+            } else if encoder_experiment != EncoderExperiment::Auto {
+                return Err(format!(
+                    "capture shim does not support encoder experiment {}",
+                    encoder_experiment.as_str()
+                ));
+            } else if let Ok(f) = lib.get::<StartV5>(b"leftcar_capture_start_v5") {
                 f(
                     c_ip.as_ptr(),
                     port,
@@ -430,7 +706,7 @@ impl CaptureBackend for FfiBackend {
                     ),
                     Ok(_) => {
                         return Err(
-                            "capture shim does not support the requested content mode".into(),
+                            "capture shim does not support the requested content mode".into()
                         );
                     }
                     Err(_) if media_transport == "udp" && content_mode == "interactive" => {
@@ -453,7 +729,8 @@ impl CaptureBackend for FfiBackend {
                                         u32,
                                         u32,
                                         u32,
-                                    ) -> u32,
+                                    )
+                                        -> u32,
                                 > = lib
                                     .get(b"leftcar_capture_start_v2")
                                     .map_err(|e| e.to_string())?;
@@ -461,7 +738,7 @@ impl CaptureBackend for FfiBackend {
                             }
                             Err(_) => {
                                 return Err(
-                                    "capture shim does not support selectable backends".into(),
+                                    "capture shim does not support selectable backends".into()
                                 );
                             }
                         }
@@ -520,7 +797,7 @@ impl CaptureBackend for FfiBackend {
                 .get(b"leftcar_capture_stats_v2")
                 .map_err(|e| e.to_string())?;
             let ptr = f(handle);
-            let json = Self::take_string(ptr).ok_or("stats returned null")?;
+            let json = self.take_string(ptr).ok_or("stats returned null")?;
             parse_stats_json(&json)
         }
     }
@@ -609,6 +886,7 @@ pub fn dylib_report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use control_contract::host::EncoderExperiment;
 
     #[test]
     fn parse_stats_json_preserves_encoder_diagnostics() {
@@ -633,6 +911,142 @@ mod tests {
         assert_eq!(stats.encoder_hardware_accelerated, Some(true));
         assert_eq!(stats.encoder_applied_properties, ["HighSpeed", "Quality"]);
         assert_eq!(stats.encoder_rejected_properties, ["Quality=-12900"]);
+    }
+
+    #[test]
+    fn parse_encoder_experiment_capabilities_keeps_phase_a_ids() {
+        let capabilities = parse_encoder_experiments_json(
+            r#"[
+                {"id":"auto","label":"Automatic","hint":"automatic","requiresReconnect":true},
+                {"id":"adaptiveQp","label":"Adaptive QP","hint":"qp","requiresReconnect":true},
+                {"id":"splitVertical","label":"4K split","hint":"dual","requiresReconnect":true}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities[0].id, EncoderExperiment::Auto);
+        assert_eq!(capabilities[1].id, EncoderExperiment::AdaptiveQp);
+        assert_eq!(capabilities[2].id, EncoderExperiment::SplitVertical);
+        assert!(capabilities
+            .iter()
+            .all(|entry| is_supported_encoder_experiment(entry.id)));
+        assert!(!is_supported_encoder_experiment(
+            EncoderExperiment::SplitHorizontal
+        ));
+        assert!(capabilities.iter().all(|entry| entry.requires_reconnect));
+    }
+
+    #[test]
+    fn parse_stats_json_maps_new_experiment_metrics_and_old_shim_defaults() {
+        let stats = parse_stats_json(
+            r#"{
+  "frames":1,
+  "bytes":2,
+  "state":"running",
+  "fps":60,
+  "kbps":1000,
+  "fpsTarget":60,
+  "encoderExperimentRequested":"adaptiveQp",
+  "encoderExperimentApplied":"adaptiveQp",
+  "encoderExperimentFallbackReason":null,
+  "encoderFrameDrops":7,
+  "encoderFrameDropFps":8,
+  "validEncodeOutputFps":59,
+  "encodeSubmitCallP50Us":111,
+  "encodeSubmitCallP95Us":222,
+  "encoderCallbackP50Us":333,
+  "encoderCallbackP95Us":444,
+  "packetizationInFlight":2,
+  "baseFrameQp":31,
+  "baseFrameQpChanges":5,
+  "splitFlowActiveLeases":3,
+  "splitFlowCapacity":5,
+  "splitPreEncodeAdmissionDrops":8,
+  "splitEncodedQueueDepth":1,
+  "splitEncodedQueueOldestUs":12300,
+  "splitRecoveryBoundaryDiscards":4,
+  "splitPostEncodeDeltaDrops":0,
+  "splitWirePairsAttempted":600,
+  "splitWirePairSendFailures":2,
+  "splitKeyframeGapRecoveries":1,
+  "splitDeltaGapRecoveries":2,
+  "udpPacingRateMultiplier":2
+}"#,
+        )
+        .unwrap();
+        assert_eq!(stats.encoder_experiment_requested, "adaptiveQp");
+        assert_eq!(stats.encoder_experiment_applied, "adaptiveQp");
+        assert_eq!(stats.encoder_experiment_fallback_reason, None);
+        assert_eq!(stats.encoder_frame_drops, 7);
+        assert_eq!(stats.encoder_frame_drop_fps, 8);
+        assert_eq!(stats.valid_encode_output_fps, 59);
+        assert_eq!(stats.encode_submit_call_p50_us, 111);
+        assert_eq!(stats.encode_submit_call_p95_us, 222);
+        assert_eq!(stats.encoder_callback_p50_us, 333);
+        assert_eq!(stats.encoder_callback_p95_us, 444);
+        assert_eq!(stats.packetization_in_flight, 2);
+        assert_eq!(stats.base_frame_qp, Some(31));
+        assert_eq!(stats.base_frame_qp_changes, 5);
+        assert_eq!(stats.split_flow_active_leases, 3);
+        assert_eq!(stats.split_flow_capacity, 5);
+        assert_eq!(stats.split_pre_encode_admission_drops, 8);
+        assert_eq!(stats.split_encoded_queue_depth, 1);
+        assert_eq!(stats.split_encoded_queue_oldest_us, 12_300);
+        assert_eq!(stats.split_recovery_boundary_discards, 4);
+        assert_eq!(stats.split_post_encode_delta_drops, 0);
+        assert_eq!(stats.split_wire_pairs_attempted, 600);
+        assert_eq!(stats.split_wire_pair_send_failures, 2);
+        assert_eq!(stats.split_keyframe_gap_recoveries, 1);
+        assert_eq!(stats.split_delta_gap_recoveries, 2);
+        assert_eq!(stats.udp_pacing_rate_multiplier, 2);
+        assert!(stats.encoder_experiment_diagnostics_available);
+
+        let old = parse_stats_json(r#"{"state":"running"}"#).unwrap();
+        assert_eq!(old.encoder_experiment_requested, "auto");
+        assert_eq!(old.encoder_experiment_applied, "rateControl");
+        assert_eq!(old.base_frame_qp, None);
+        assert_eq!(old.encoder_frame_drops, 0);
+        assert_eq!(old.split_flow_active_leases, 0);
+        assert_eq!(old.split_wire_pair_send_failures, 0);
+        assert_eq!(old.split_delta_gap_recoveries, 0);
+        assert_eq!(old.udp_pacing_rate_multiplier, 1);
+        assert!(!old.encoder_experiment_diagnostics_available);
+
+        let partial = parse_stats_json(
+            r#"{
+  "encoderExperimentRequested":"adaptiveQp",
+  "encoderExperimentApplied":"adaptiveQp",
+  "encoderFrameDrops":0,
+  "encoderFrameDropFps":0,
+  "validEncodeOutputFps":0,
+  "encodeSubmitCallP50Us":0,
+  "encodeSubmitCallP95Us":0,
+  "encoderCallbackP50Us":0,
+  "encoderCallbackP95Us":0,
+  "packetizationInFlight":0,
+  "baseFrameQp":null,
+  "baseFrameQpChanges":0
+}"#,
+        )
+        .unwrap();
+        assert!(!partial.encoder_experiment_diagnostics_available);
+    }
+
+    #[test]
+    fn parse_stats_json_rejects_out_of_range_base_qp_and_clamps_u32_metrics() {
+        let stats = parse_stats_json(
+            r#"{
+              "encoderFrameDropFps":4294967296,
+              "validEncodeOutputFps":4294967297,
+              "packetizationInFlight":4294967298,
+              "baseFrameQp":2147483648
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(stats.encoder_frame_drop_fps, u32::MAX);
+        assert_eq!(stats.valid_encode_output_fps, u32::MAX);
+        assert_eq!(stats.packetization_in_flight, u32::MAX);
+        assert_eq!(stats.base_frame_qp, None);
     }
 
     #[test]

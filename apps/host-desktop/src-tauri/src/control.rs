@@ -6,7 +6,11 @@
 
 use crate::backend::SharedBackend;
 use control_contract::host::{
-    CatalogView, SessionView, StartStreamInput, StartStreamOutput, StatusView,
+    CatalogView, EncoderExperiment, EncoderExperimentInfo, SessionView, StartStreamInput,
+    StartStreamOutput, StatusView,
+};
+use control_contract::udp_stability::{
+    host_udp_stability_capabilities, resolve_udp_stability, AppliedUdpStability,
 };
 
 pub use control_contract::host::{StatsInfo, StatusView as StatusViewPublic};
@@ -28,6 +32,7 @@ struct Session {
     viewer_addr: String,
     viewer_port: u16,
     media_transport: String,
+    udp_stability: Option<AppliedUdpStability>,
     input_enabled: bool,
     input_rate_hz: u32,
     terminal_since: Option<Instant>,
@@ -55,6 +60,94 @@ fn normalize_content_mode(value: &str) -> Option<&'static str> {
         "interactive" | "latency" => Some("interactive"),
         "video" | "movie" => Some("video"),
         _ => None,
+    }
+}
+
+fn validate_split_start(
+    input: &StartStreamInput,
+    concrete_transport: &str,
+) -> Result<(), String> {
+    if input.encoder_experiment != EncoderExperiment::SplitVertical {
+        return Ok(());
+    }
+    if (input.width, input.height, input.fps) != (3840, 2160, 60)
+        || concrete_transport != "udp"
+        || input.viewer_port == u16::MAX
+    {
+        return Err(
+            "splitVertical requires 3840x2160 at 60fps over direct UDP and two consecutive viewer ports"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn canonical_encoder_experiment(id: EncoderExperiment) -> EncoderExperimentInfo {
+    let (label, hint) = match id {
+        EncoderExperiment::Auto => ("자동", "호스트가 사용 가능한 인코더 경로를 선택합니다."),
+        EncoderExperiment::RateControl => {
+            ("레이트 컨트롤", "고정 레이트 컨트롤 경로를 사용합니다.")
+        }
+        EncoderExperiment::AdaptiveQp => (
+            "적응형 QP",
+            "화면 변화와 인코더 압력에 따라 Base QP를 조절합니다.",
+        ),
+        EncoderExperiment::EncoderPool => {
+            ("인코더 풀", "인코더가 제공하는 픽셀 버퍼 풀을 사용합니다.")
+        }
+        EncoderExperiment::SplitVertical => (
+            "4K 듀얼 인코더",
+            "4K 화면을 좌우 두 하드웨어 인코더와 UDP 포트로 전송합니다.",
+        ),
+        EncoderExperiment::SplitHorizontal => {
+            return EncoderExperimentInfo {
+                id,
+                label: String::new(),
+                hint: String::new(),
+                requires_reconnect: true,
+            }
+        }
+    };
+    EncoderExperimentInfo {
+        id,
+        label: label.into(),
+        hint: hint.into(),
+        requires_reconnect: true,
+    }
+}
+
+fn advertised_encoder_experiments(
+    experiments: Vec<EncoderExperimentInfo>,
+) -> Vec<EncoderExperimentInfo> {
+    let mut normalized = Vec::new();
+    for entry in experiments {
+        let id = match entry.id {
+            EncoderExperiment::Auto
+            | EncoderExperiment::RateControl
+            | EncoderExperiment::AdaptiveQp
+            | EncoderExperiment::EncoderPool => entry.id,
+            EncoderExperiment::SplitHorizontal | EncoderExperiment::SplitVertical => continue,
+        };
+        if normalized
+            .iter()
+            .any(|existing: &EncoderExperimentInfo| existing.id == id)
+        {
+            continue;
+        }
+        normalized.push(canonical_encoder_experiment(id));
+    }
+    normalized
+}
+
+fn encoder_experiment_is_startable(
+    advertised: &[EncoderExperimentInfo],
+    requested: EncoderExperiment,
+    split_diagnostic_enabled: bool,
+) -> bool {
+    match requested {
+        EncoderExperiment::SplitVertical => split_diagnostic_enabled,
+        EncoderExperiment::SplitHorizontal => false,
+        _ => advertised.iter().any(|entry| entry.id == requested),
     }
 }
 
@@ -240,6 +333,20 @@ impl ControlServer {
                     fps: 0,
                     kbps: 0,
                     fps_target: 0,
+                    encoder_experiment_diagnostics_available: false,
+                    encoder_experiment_requested: "auto".into(),
+                    encoder_experiment_applied: "rateControl".into(),
+                    encoder_experiment_fallback_reason: None,
+                    encoder_frame_drops: 0,
+                    encoder_frame_drop_fps: 0,
+                    valid_encode_output_fps: 0,
+                    encode_submit_call_p50_us: 0,
+                    encode_submit_call_p95_us: 0,
+                    encoder_callback_p50_us: 0,
+                    encoder_callback_p95_us: 0,
+                    packetization_in_flight: 0,
+                    base_frame_qp: None,
+                    base_frame_qp_changes: 0,
                     capture_fps: 0,
                     encode_submit_fps: 0,
                     encode_output_fps: 0,
@@ -322,6 +429,7 @@ impl ControlServer {
                     receiver_rtt_ms: None,
                     receiver_wire_ms: None,
                     receiver_feedback_age_ms: None,
+                    ..StatsInfo::default()
                 });
 
                 if let Some(error) = &s.terminal_error {
@@ -352,6 +460,22 @@ impl ControlServer {
                     fps: metrics.fps,
                     kbps: metrics.kbps,
                     fps_target: metrics.fps_target,
+                    udp_stability: s.udp_stability.clone(),
+                    encoder_experiment_diagnostics_available: metrics
+                        .encoder_experiment_diagnostics_available,
+                    encoder_experiment_requested: metrics.encoder_experiment_requested,
+                    encoder_experiment_applied: metrics.encoder_experiment_applied,
+                    encoder_experiment_fallback_reason: metrics.encoder_experiment_fallback_reason,
+                    encoder_frame_drops: metrics.encoder_frame_drops,
+                    encoder_frame_drop_fps: metrics.encoder_frame_drop_fps,
+                    valid_encode_output_fps: metrics.valid_encode_output_fps,
+                    encode_submit_call_p50_us: metrics.encode_submit_call_p50_us,
+                    encode_submit_call_p95_us: metrics.encode_submit_call_p95_us,
+                    encoder_callback_p50_us: metrics.encoder_callback_p50_us,
+                    encoder_callback_p95_us: metrics.encoder_callback_p95_us,
+                    packetization_in_flight: metrics.packetization_in_flight,
+                    base_frame_qp: metrics.base_frame_qp,
+                    base_frame_qp_changes: metrics.base_frame_qp_changes,
                     capture_fps: metrics.capture_fps,
                     encode_submit_fps: metrics.encode_submit_fps,
                     encode_output_fps: metrics.encode_output_fps,
@@ -438,6 +562,64 @@ impl ControlServer {
                     receiver_rtt_ms: metrics.receiver_rtt_ms,
                     receiver_wire_ms: metrics.receiver_wire_ms,
                     receiver_feedback_age_ms: metrics.receiver_feedback_age_ms,
+                    udp_stability_profile: metrics.udp_stability_profile,
+                    udp_burst_datagrams: metrics.udp_burst_datagrams,
+                    udp_pacing_rate_multiplier: metrics.udp_pacing_rate_multiplier,
+                    udp_fec_parity_shards: metrics.udp_fec_parity_shards,
+                    udp_adaptive_pacing: metrics.udp_adaptive_pacing,
+                    udp_burst_reason: metrics.udp_burst_reason,
+                    receiver_media_datagrams: metrics.receiver_media_datagrams,
+                    receiver_data_datagrams: metrics.receiver_data_datagrams,
+                    receiver_parity_datagrams: metrics.receiver_parity_datagrams,
+                    receiver_fec_restored_fragments: metrics.receiver_fec_restored_fragments,
+                    receiver_unrecoverable_fec_groups: metrics
+                        .receiver_unrecoverable_fec_groups,
+                    receiver_max_missing_data_fragments: metrics
+                        .receiver_max_missing_data_fragments,
+                    receiver_one_frame_gap_events: metrics.receiver_one_frame_gap_events,
+                    receiver_multi_frame_gap_events: metrics.receiver_multi_frame_gap_events,
+                    receiver_paired_idr_episodes: metrics.receiver_paired_idr_episodes,
+                    receiver_suppressed_recovery_requests: metrics
+                        .receiver_suppressed_recovery_requests,
+                    receiver_fec_decode_failures: metrics.receiver_fec_decode_failures,
+                    split_direction: metrics.split_direction,
+                    split_preparation_p50_us: metrics.split_preparation_p50_us,
+                    split_preparation_p95_us: metrics.split_preparation_p95_us,
+                    split_pair_admission_drops: metrics.split_pair_admission_drops,
+                    encoded_pair_callback_p50_us: metrics.encoded_pair_callback_p50_us,
+                    encoded_pair_callback_p95_us: metrics.encoded_pair_callback_p95_us,
+                    encoded_pair_timeouts: metrics.encoded_pair_timeouts,
+                    encoded_pair_drops: metrics.encoded_pair_drops,
+                    left_valid_encode_output_fps: metrics.left_valid_encode_output_fps,
+                    right_valid_encode_output_fps: metrics.right_valid_encode_output_fps,
+                    left_encoder_frame_drops: metrics.left_encoder_frame_drops,
+                    right_encoder_frame_drops: metrics.right_encoder_frame_drops,
+                    left_bitrate_bps: metrics.left_bitrate_bps,
+                    right_bitrate_bps: metrics.right_bitrate_bps,
+                    aggregate_bitrate_bps: metrics.aggregate_bitrate_bps,
+                    left_receiver_loss: metrics.left_receiver_loss,
+                    right_receiver_loss: metrics.right_receiver_loss,
+                    left_rendered_fps: metrics.left_rendered_fps,
+                    right_rendered_fps: metrics.right_rendered_fps,
+                    joined_rendered_fps: metrics.joined_rendered_fps,
+                    pair_ready_delta_p95_us: metrics.pair_ready_delta_p95_us,
+                    pair_ready_delta_max_us: metrics.pair_ready_delta_max_us,
+                    pair_sync_timeouts: metrics.pair_sync_timeouts,
+                    unmatched_output_drops: metrics.unmatched_output_drops,
+                    paired_recovery_requests: metrics.paired_recovery_requests,
+                    paired_recovery_keyframes: metrics.paired_recovery_keyframes,
+                    split_test_injected_drops: metrics.split_test_injected_drops,
+                    split_flow_active_leases: metrics.split_flow_active_leases,
+                    split_flow_capacity: metrics.split_flow_capacity,
+                    split_pre_encode_admission_drops: metrics.split_pre_encode_admission_drops,
+                    split_encoded_queue_depth: metrics.split_encoded_queue_depth,
+                    split_encoded_queue_oldest_us: metrics.split_encoded_queue_oldest_us,
+                    split_recovery_boundary_discards: metrics.split_recovery_boundary_discards,
+                    split_post_encode_delta_drops: metrics.split_post_encode_delta_drops,
+                    split_wire_pairs_attempted: metrics.split_wire_pairs_attempted,
+                    split_wire_pair_send_failures: metrics.split_wire_pair_send_failures,
+                    split_keyframe_gap_recoveries: metrics.split_keyframe_gap_recoveries,
+                    split_delta_gap_recoveries: metrics.split_delta_gap_recoveries,
                 });
             }
 
@@ -495,11 +677,7 @@ impl ControlServer {
         Ok(())
     }
 
-    pub fn set_session_quality(
-        &self,
-        session_id: u32,
-        quality: Option<f32>,
-    ) -> Result<(), String> {
+    pub fn set_session_quality(&self, session_id: u32, quality: Option<f32>) -> Result<(), String> {
         if let Some(value) = quality {
             if !(0.25..=0.5).contains(&value) {
                 return Err("quality override must be between 0.25 and 0.50".into());
@@ -624,9 +802,10 @@ impl ControlServer {
                         &input.device_id,
                         &input.device_name,
                     ),
-                    (None, None) => self
-                        .pairing
-                        .pair_by_code(&input.code, &input.device_id, &input.device_name),
+                    (None, None) => {
+                        self.pairing
+                            .pair_by_code(&input.code, &input.device_id, &input.device_name)
+                    }
                     _ => Err(crate::pairing::PairingServerError::PairingFailed),
                 };
                 match res {
@@ -634,8 +813,16 @@ impl ControlServer {
                     Err(_) => err("pairing failed"),
                 }
             }
-            "getCatalog" => match self.backend.list_displays() {
-                Ok(displays) => ok(CatalogView {
+            "getCatalog" => {
+                let displays = match self.backend.list_displays() {
+                    Ok(displays) => displays,
+                    Err(e) => return err(&e),
+                };
+                let encoder_experiments = match self.backend.encoder_experiments() {
+                    Ok(experiments) => advertised_encoder_experiments(experiments),
+                    Err(e) => return err(&e),
+                };
+                ok(CatalogView {
                     platform: self.backend.platform().into(),
                     capture_backends: self.backend.capture_backends(),
                     media_host: crate::local_lan_ip().filter(|address| {
@@ -644,9 +831,10 @@ impl ControlServer {
                             .is_ok_and(|address| address.is_private())
                     }),
                     displays,
-                }),
-                Err(e) => err(&e),
-            },
+                    encoder_experiments,
+                    udp_stability_capabilities: Some(host_udp_stability_capabilities()),
+                })
+            }
             "startStream" => {
                 let input: StartStreamInput = match serde_json::from_value(args) {
                     Ok(v) => v,
@@ -667,6 +855,22 @@ impl ControlServer {
                 {
                     return err("unsupported capture backend");
                 }
+                let advertised = match self.backend.encoder_experiments() {
+                    Ok(experiments) => advertised_encoder_experiments(experiments),
+                    Err(error) => return err(&error),
+                };
+                let split_diagnostic_enabled = std::env::var("LEFTCAR_ENABLE_SPLIT_DIAGNOSTIC")
+                    .is_ok_and(|value| value == "1");
+                if !encoder_experiment_is_startable(
+                    &advertised,
+                    input.encoder_experiment,
+                    split_diagnostic_enabled,
+                ) {
+                    return err(&format!(
+                        "unsupported encoder experiment: {}",
+                        input.encoder_experiment.as_str()
+                    ));
+                }
                 let name = self
                     .backend
                     .list_displays()
@@ -684,14 +888,33 @@ impl ControlServer {
                 };
                 let content_mode = match normalize_content_mode(&input.content_mode) {
                     Some(value) => value,
-                    None => return err(&format!("unsupported content mode: {}", input.content_mode)),
+                    None => {
+                        return err(&format!("unsupported content mode: {}", input.content_mode))
+                    }
                 };
+                if input.udp_stability.is_some()
+                    && !matches!(requested_transport, "udp" | "auto")
+                {
+                    return err("UDP 안정성 설정은 UDP 또는 자동 전송에서만 사용할 수 있습니다");
+                }
+                let udp_stability = match resolve_udp_stability(
+                    input.udp_stability.as_ref(),
+                    &host_udp_stability_capabilities(),
+                ) {
+                    Ok(applied) => applied,
+                    Err(error) => return err(&error),
+                };
+                if let Err(error) = validate_split_start(&input, requested_transport) {
+                    return err(&error);
+                }
 
                 // Do not claim a normal Android USB device merely because a
                 // cable was attached. AOAP negotiation is an explicit stream
                 // request; `auto` may fall back to Wi-Fi, while an explicit
                 // USB request reports the negotiation failure to the viewer.
-                if matches!(requested_transport, "usb" | "auto") {
+                if input.encoder_experiment != EncoderExperiment::SplitVertical
+                    && matches!(requested_transport, "usb" | "auto")
+                {
                     if let Err(error) = crate::aoap_control::ensure_usb_accessory().await {
                         if requested_transport == "usb" {
                             return err(&error);
@@ -723,7 +946,9 @@ impl ControlServer {
                 {
                     wifi_candidates.push(viewer_ip.to_owned());
                 }
-                let attempts = if usb_control {
+                let attempts = if input.encoder_experiment == EncoderExperiment::SplitVertical {
+                    build_attempts("udp", &wifi_candidates)
+                } else if usb_control {
                     build_attempts("usb", &[])
                 } else {
                     build_attempts(requested_transport, &wifi_candidates)
@@ -756,6 +981,8 @@ impl ControlServer {
                         &input.capture_backend,
                         transport,
                         content_mode,
+                        input.encoder_experiment,
+                        &udp_stability,
                     ) {
                         Ok(handle) => match self.wait_for_first_frame(handle).await {
                             Ok(()) => {
@@ -792,6 +1019,8 @@ impl ControlServer {
                                     viewer_addr,
                                     viewer_port: input.viewer_port,
                                     media_transport: transport.into(),
+                                    udp_stability: (transport == "udp")
+                                        .then(|| udp_stability.clone()),
                                     input_enabled: false,
                                     input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
@@ -803,6 +1032,7 @@ impl ControlServer {
                         };
                         ok(StartStreamOutput {
                             session: session_id,
+                            udp_stability: (transport == "udp").then_some(udp_stability),
                         })
                     }
                     None => err(&format!(
@@ -961,6 +1191,55 @@ fn err(error: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_vertical_requires_exact_4k60_udp_and_safe_base_port() {
+        let parse = |width, height, fps, media_transport: &str, viewer_port| {
+            serde_json::from_value::<StartStreamInput>(serde_json::json!({
+                "sourceIndex": 0,
+                "viewerPort": viewer_port,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "mediaTransport": media_transport,
+                "encoderExperiment": "splitVertical"
+            }))
+            .unwrap()
+        };
+        assert!(validate_split_start(&parse(3840, 2160, 60, "udp", 5002), "udp").is_ok());
+        assert!(validate_split_start(&parse(3840, 2160, 60, "tcp", 5002), "tcp").is_err());
+        assert!(validate_split_start(&parse(3840, 2160, 60, "udp", 65535), "udp").is_err());
+        assert!(validate_split_start(&parse(2560, 1440, 60, "udp", 5002), "udp").is_err());
+    }
+
+    #[test]
+    fn product_normalization_hides_split_and_diagnostic_start_is_explicit() {
+        let advertised = advertised_encoder_experiments(vec![
+            canonical_encoder_experiment(EncoderExperiment::Auto),
+            canonical_encoder_experiment(EncoderExperiment::SplitVertical),
+            canonical_encoder_experiment(EncoderExperiment::SplitHorizontal),
+        ]);
+
+        assert_eq!(
+            advertised.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![EncoderExperiment::Auto]
+        );
+        assert!(!encoder_experiment_is_startable(
+            &advertised,
+            EncoderExperiment::SplitVertical,
+            false
+        ));
+        assert!(encoder_experiment_is_startable(
+            &advertised,
+            EncoderExperiment::SplitVertical,
+            true
+        ));
+        assert!(!encoder_experiment_is_startable(
+            &advertised,
+            EncoderExperiment::SplitHorizontal,
+            true
+        ));
+    }
     use crate::backend::{CaptureBackend, FakeBackend};
     use control_contract::host::DisplayInfo;
     use std::sync::{
@@ -976,6 +1255,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
         })
     }
 
@@ -999,6 +1279,8 @@ mod tests {
             _capture_backend: &str,
             _media_transport: &str,
             _content_mode: &str,
+            _encoder_experiment: EncoderExperiment,
+            _udp_stability: &AppliedUdpStability,
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -1016,6 +1298,20 @@ mod tests {
                 fps: 0,
                 kbps: 0,
                 fps_target: 60,
+                encoder_experiment_diagnostics_available: true,
+                encoder_experiment_requested: "auto".into(),
+                encoder_experiment_applied: "rateControl".into(),
+                encoder_experiment_fallback_reason: None,
+                encoder_frame_drops: 0,
+                encoder_frame_drop_fps: 0,
+                valid_encode_output_fps: 0,
+                encode_submit_call_p50_us: 0,
+                encode_submit_call_p95_us: 0,
+                encoder_callback_p50_us: 0,
+                encoder_callback_p95_us: 0,
+                packetization_in_flight: 0,
+                base_frame_qp: None,
+                base_frame_qp_changes: 0,
                 capture_fps: 0,
                 encode_submit_fps: 0,
                 encode_output_fps: 0,
@@ -1043,12 +1339,12 @@ mod tests {
                 max_packetization_us: 0,
                 send_block_us: 0,
                 max_send_block_us: 0,
-                    send_pace_us: 0,
-                    max_send_pace_us: 0,
-                    pending_frame: 0,
-                    pending_frame_bytes: 0,
-                    pending_frame_oldest_age_us: 0,
-                    capture_backend: "screenCaptureKit".into(),
+                send_pace_us: 0,
+                max_send_pace_us: 0,
+                pending_frame: 0,
+                pending_frame_bytes: 0,
+                pending_frame_oldest_age_us: 0,
+                capture_backend: "screenCaptureKit".into(),
                 media_transport: "udp".into(),
                 first_capture_ms: 20,
                 first_encode_ms: 25,
@@ -1098,6 +1394,7 @@ mod tests {
                 receiver_rtt_ms: None,
                 receiver_wire_ms: None,
                 receiver_feedback_age_ms: None,
+                ..StatsInfo::default()
             })
         }
     }
@@ -1316,6 +1613,71 @@ mod tests {
     }
 
     #[test]
+    fn advertised_encoder_experiments_hides_both_split_diagnostics() {
+        let normalized = advertised_encoder_experiments(vec![
+            EncoderExperimentInfo {
+                id: EncoderExperiment::Auto,
+                label: "wrong auto".into(),
+                hint: "wrong auto hint".into(),
+                requires_reconnect: false,
+            },
+            EncoderExperimentInfo {
+                id: EncoderExperiment::SplitHorizontal,
+                label: "reserved".into(),
+                hint: "reserved".into(),
+                requires_reconnect: false,
+            },
+            EncoderExperimentInfo {
+                id: EncoderExperiment::AdaptiveQp,
+                label: "wrong qp".into(),
+                hint: "wrong qp hint".into(),
+                requires_reconnect: false,
+            },
+            EncoderExperimentInfo {
+                id: EncoderExperiment::Auto,
+                label: "duplicate auto".into(),
+                hint: "duplicate auto hint".into(),
+                requires_reconnect: false,
+            },
+            EncoderExperimentInfo {
+                id: EncoderExperiment::SplitVertical,
+                label: "reserved".into(),
+                hint: "reserved".into(),
+                requires_reconnect: false,
+            },
+            EncoderExperimentInfo {
+                id: EncoderExperiment::AdaptiveQp,
+                label: "duplicate qp".into(),
+                hint: "duplicate qp hint".into(),
+                requires_reconnect: false,
+            },
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                EncoderExperimentInfo {
+                    id: EncoderExperiment::Auto,
+                    label: "자동".into(),
+                    hint: "호스트가 사용 가능한 인코더 경로를 선택합니다.".into(),
+                    requires_reconnect: true,
+                },
+                EncoderExperimentInfo {
+                    id: EncoderExperiment::AdaptiveQp,
+                    label: "적응형 QP".into(),
+                    hint: "화면 변화와 인코더 압력에 따라 Base QP를 조절합니다.".into(),
+                    requires_reconnect: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn advertised_encoder_experiments_keeps_empty_input_empty() {
+        assert!(advertised_encoder_experiments(Vec::new()).is_empty());
+    }
+
+    #[test]
     fn auto_attempts_usb_then_udp_then_tcp() {
         let attempts = build_attempts("auto", &["192.168.1.50".into()]);
         assert_eq!(
@@ -1356,6 +1718,7 @@ mod tests {
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),
+                udp_stability: None,
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
@@ -1404,6 +1767,7 @@ mod tests {
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),
+                udp_stability: None,
                 input_enabled: true,
                 input_rate_hz: 120,
                 terminal_since: None,
@@ -1449,6 +1813,7 @@ mod tests {
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),
+                udp_stability: None,
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
