@@ -1,6 +1,6 @@
 # 구현 증거 문서 (EVIDENCE)
 
-기준일: 2026-08-26
+기준일: 2026-09-01
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5 이상을 달성했다고 표기한 항목은 없다.**
 
 ## 요약
@@ -216,3 +216,36 @@
 - **1440p 고모션 표본**: `HA2D6EMP`에서 `2560×1440@60`, H.264, `CgDisplayStream`, Wi-Fi UDP를 60초 유지했다. 캡처는 60fps였지만 후반 Host 표본은 submit 58fps, output 57fps, Android render 53fps였고 `decoderInputDrops=0`이었다. Android 누적 `frameGaps=72`, `outputDrops=320`, `fecRecovered=249`까지 증가해 복구·고모션 구간은 아직 60 unique fps로 판정하지 않는다.
 - **복구 경계 A/B**: queued recovery boundary 보존과 1440p 이상 encoder in-flight 5개 변경 후 별도 30초 표본에서는 Android 로그가 약 56fps 수준으로 유지됐고 Host 상세 표본은 `capture/submit/output/rendered = 60/60/60/60`이었다. 그러나 `frameGaps=9`, `outputDrops=57`, `recoveryFramesDropped=126`이 남아 장시간 무손실·60fps 달성으로 해석할 수 없다.
 - **4K 영상 프로필 비교**: 같은 기기에서 `동영상 우선` 프로필은 실제 `3840×2160@60` HEVC 경로로 시작되었다. Host 표본은 capture 약 39–46fps, output 약 30–35fps, Android render 약 1–37fps, video processing 약 74–80ms였고 UDP send failure는 0이었다. 따라서 이 환경에서 영상 프로필 전환만으로 4K 고모션 병목이 해결되지 않으며, 1440p를 안정적인 fallback으로 유지한다.
+
+## USB 화면 확장 3종 (2026-09-01 구현 기록)
+
+feature/usb-display-extension 브랜치(커밋 `2aaa319`..`441e94f`, 14개 커밋)의 구현 증거다. **모든 항목은 E3(컴파일/단위 테스트) 수준이며 E6/E7의 증거가 아니다.** 물리 게이트(실기기 USB 검증, 60분 soak, BetterDisplay 실기기 동작)는 미수행이며 `docs/usb-physical-validation.md`의 절차로 대기 중이다. `cargo test`와 APK 설치는 이 항목들의 E6/E7 증거가 아니다.
+
+### 1. 전송 방식 배지 (Viewer)
+
+- **구현**: `apps/viewer-expo/src/transport-label.ts`의 `transportBadgeLabel`이 control contract의 `media_transport` 값(`usb`/`udp`/`tcp`/legacy)을 `USB`/`Wi-Fi`/`Wi-Fi (TCP)`/`ADB` 배지 문자열로 매핑한다. `app/catalog.tsx`의 ActiveStream 카드가 `stream.mediaTransport` 기반으로 렌더링한다.
+- **검증 (E3)**: `apps/viewer-expo/src/transport-label.test.ts` 단위 테스트 4개가 매핑 계약을 고정한다. `bun run test`, `bun run typecheck` 통과.
+- **미증명**: 실기기에서 실제 USB/Wi-Fi 전환 시 배지 갱신이 화면에 표시되는 것(검증 2·3의 관찰 항목).
+
+### 2. Host 창 표시 개선 + panic 제거
+
+- **구현**: Host `lib.rs`가 시작 시 main 창 `show()`+`set_focus()`를 보강했고(`tauri.conf.json` `visible: true` 포함), 시작 실패 시 panic 대신 `fatal_startup_error` rfd 오류 대화상자를 표시한다. bind 실패 메시지에 "another Leftcar Host instance may be running" 힌트를 포함한다.
+- **검증 (E3)**: 기존 bind 관련 단위 테스트는 유지되어 통과한다. `fatal_startup_error`는 rfd 대화상자 호출을 수행하므로 자동 검증 범위 밖이며, 대화상자 표시 자체는 자동 테스트로 증명하지 않는다.
+- **미증명**: "창이 안 뜬다"는 실제 사용자 환경에서의 재현·해소 확인.
+
+### 3. 문제 해결 가이드 확장
+
+- **구현**: `packages/ui-tokens/src/i18n.ts`에 "컴퓨터 앱 창이 안 떠요" 항목(`troubleshootHiddenWindow`)의 ko/en 쌍을 추가했다. Host `App.tsx`와 Viewer `host.tsx`가 렌더링한다.
+- **검증 (E3)**: i18n 키는 타입 시스템이 ko/en 쌍 존재를 강제한다. 렌더링은 E3 컴파일·타입 수준까지다. `bun run typecheck` 통과.
+- **미증명**: 실제 화면 렌더링 관찰(E6 수준).
+
+### 4. 가상 디스플레이 실험 (ADR-0005)
+
+- **구현**: `apps/host-desktop/src-tauri/src/virtual_display.rs`가 `betterdisplaycli` 프로세스 실행(create/set/discard, `-namelike` 식별자)을 감싸고, Tauri 커맨드와 Host UI VirtualDisplayCard(옵트인 토글, 기본 꺼짐, macOS 전용)로 노출한다. CLI 계약은 `docs/decisions/0005-virtual-display-via-betterdisplay-cli.md`(ADR-0005)에 고정했다.
+- **검증 (E3)**: CLI 인자 생성 단위 테스트 5개가 ADR-0005의 CLI 계약을 고정한다. Host Tauri crate 전체 테스트 통과.
+- **미증명**: 실제 `betterdisplaycli` 실행, 가상 디스플레이 생성·연결·캡처·제거는 전부 물리 게이트(`docs/usb-physical-validation.md` 검증 6)로 대기다. 위험 대장 R-015의 v1 논골 유지는 변함없으며 이 구현이 정식 기능 승격이 아니다.
+
+### 5. USB 물리 검증 게이트 문서
+
+- **구현**: `docs/usb-physical-validation.md`가 AOAP 핸드셰이크, Wi-Fi failover, USB 자동 복귀, 60분 soak, 인텐트 경로, 가상 디스플레이 CLI의 6개 검증 절차와 합격 기준, 실패 시 진단 가이드, 결과 기록 템플릿을 확정했다.
+- **상태**: 절차 확정, 수행 대기. AOAP CONTROL 시퀀스 표기를 정정했다(START=53, 54 아님). 이 문서의 수행이 완료되기 전까지 AOAP 전송과 가상 디스플레이는 E3 실험 상태로 유지된다.
