@@ -13,6 +13,7 @@ pub mod ffi;
 pub mod pairing;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
+pub mod virtual_display;
 pub mod wire;
 
 use backend::SharedBackend;
