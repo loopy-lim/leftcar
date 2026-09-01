@@ -15,7 +15,7 @@ const config: LeftcarExpoConfig = {
   name: "Leftcar Viewer",
   slug: "leftcar-viewer",
   scheme: "leftcar",
-  version: "0.1.1",
+  version: "0.1.2",
   orientation: "default",
   userInterfaceStyle: "automatic",
   icon: "./assets/branding/leftcar-viewer-icon-source.png",
