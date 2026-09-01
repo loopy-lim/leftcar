@@ -115,6 +115,14 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // The dashboard window can lose its first-show race on slow
+            // AppKit startups. Show+focus defensively; users reported the
+            // app appearing to "not launch" when only the tray existed.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {

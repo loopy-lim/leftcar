@@ -17,7 +17,8 @@
         "height": 540,
         "minWidth": 640,
         "minHeight": 440,
-        "resizable": true
+        "resizable": true,
+        "visible": true
       }
     ],
     "security": { "csp": null }
