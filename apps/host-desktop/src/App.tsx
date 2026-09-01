@@ -561,6 +561,89 @@ function TerminationBanner({
   );
 }
 
+interface VirtualDisplayCardProps {
+  platform: HostSnapshotView["platform"];
+  t: TranslationSchema;
+}
+
+function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
+  const [name, setName] = useState("Leftcar Virtual");
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const createDisplay = async () => {
+    setBusy(true);
+    try {
+      const output = await invoke<string>("create_virtual_display", {
+        name: name.trim(),
+        aspectWidth: 16,
+        aspectHeight: 9,
+      });
+      setCreated(output || t.host.virtualDisplayCreated);
+      setFailure(null);
+    } catch (cause) {
+      setCreated(null);
+      setFailure(
+        interpolate(t.host.virtualDisplayFailed, {
+          error: String(cause instanceof Error ? cause.message : cause),
+        }),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="troubleshoot-card" aria-label={t.host.virtualDisplayExperiment}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+        <Monitor size={16} />
+        <span>{t.host.virtualDisplayExperiment}</span>
+      </div>
+      <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+        {t.host.virtualDisplayHint}
+      </p>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={busy}
+          placeholder="Leftcar Virtual"
+          aria-label={t.host.virtualDisplayExperiment}
+          style={{
+            flex: "1 1 160px",
+            minWidth: 140,
+            padding: "6px 10px",
+            fontSize: 12,
+            color: "var(--text-primary)",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border-card)",
+            borderRadius: 8,
+            outline: "none",
+          }}
+        />
+        <button
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          disabled={busy || platform !== "macos"}
+          onClick={() => void createDisplay()}
+        >
+          {busy ? t.host.statusChecking : t.host.virtualDisplayCreate}
+        </button>
+      </div>
+      {created && (
+        <p className="font-emerald" style={{ fontSize: 11, marginTop: 8, display: "flex", alignItems: "center", gap: 4 }}>
+          <Check size={13} strokeWidth={2.5} /> {created}
+        </p>
+      )}
+      {failure && (
+        <p className="font-rose" style={{ fontSize: 11, marginTop: 8, display: "flex", alignItems: "center", gap: 4 }}>
+          <AlertTriangle size={13} /> {failure}
+        </p>
+      )}
+    </section>
+  );
+}
+
 interface SystemAlertBannersProps {
   error: string | null;
   inputActionError: string | null;
@@ -985,6 +1068,8 @@ function Dashboard() {
             onOpenPairing={() => setShowPairingModal(true)}
           />
         )}
+
+        <VirtualDisplayCard platform={platform} t={t} />
       </main>
 
       <DashboardFooter

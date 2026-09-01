@@ -88,7 +88,8 @@ pub fn run() {
             list_paired_devices,
             revoke_device,
             revoke_paired_device,
-            revoke_all_devices
+            revoke_all_devices,
+            create_virtual_display
         ])
         .setup(move |app| {
             app.manage(server);
@@ -402,6 +403,23 @@ fn revoke_paired_device(
 #[tauri::command]
 fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) -> usize {
     state.revoke_all()
+}
+
+#[tauri::command]
+fn create_virtual_display(
+    name: String,
+    aspect_width: u32,
+    aspect_height: u32,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        virtual_display::create_virtual_display(&name, aspect_width, aspect_height)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (name, aspect_width, aspect_height);
+        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
+    }
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

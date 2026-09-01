@@ -220,6 +220,11 @@ export const translations = {
       remainingTime: "남은 시간:",
       pairingNewCode: "새 코드",
       pairingCancel: "연결 취소",
+      virtualDisplayExperiment: "가상 디스플레이 (실험)",
+      virtualDisplayHint: "BetterDisplay가 필요합니다. 설치 후 CLI 접근을 허용하세요.",
+      virtualDisplayCreate: "16:9 가상 디스플레이 생성",
+      virtualDisplayCreated: "가상 디스플레이 생성됨",
+      virtualDisplayFailed: "생성 실패: {error}",
     },
   },
   en: {
@@ -437,6 +442,11 @@ export const translations = {
       remainingTime: "Remaining Time:",
       pairingNewCode: "New Code",
       pairingCancel: "Cancel",
+      virtualDisplayExperiment: "Virtual Display (Experiment)",
+      virtualDisplayHint: "Requires BetterDisplay. Install it and allow CLI access in its settings.",
+      virtualDisplayCreate: "Create 16:9 virtual display",
+      virtualDisplayCreated: "Virtual display created",
+      virtualDisplayFailed: "Failed: {error}",
     },
   },
 } as const;
