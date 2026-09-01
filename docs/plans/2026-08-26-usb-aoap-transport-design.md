@@ -56,7 +56,7 @@ AOAP는 전송 계층 "교체"가 아니라 기존 wire 프로토콜 위에 새 
 
 | 컴포넌트 | 위치 | 역할 |
 |---|---|---|
-| `aoap_link` | `apps/host-desktop/src-tauri/src/aoap.rs` 신규 | nusb 디바이스 열거 → AOAP 협상(CONTROL 51/52/53/54: GET PROTOCOL/SEND STRING/START) → 인터페이스 재열거 → bulk IN/OUT 확보. hotplug 이벤트 스트림 |
+| `aoap_link` | `apps/host-desktop/src-tauri/src/aoap.rs` 신규 | nusb 디바이스 열거 → AOAP 협상(CONTROL 51/52/53: GET PROTOCOL/SEND STRING/START) → 인터페이스 재열거 → bulk IN/OUT 확보. hotplug 이벤트 스트림 |
 | `usb_mux` | `aoap.rs` 내부 | `[ch:u8][len:u32 BE][payload]` 프레임. ch0=제어(개행 JSON), ch1=미디어(L2 미디어 프레임) |
 | `control.rs` 확장 | 기존 파일 | `MediaTransport::Usb` 추가, startStream 후보 순서 재정의, USB 세션 수명 관리 |
 | CaptureShim | `native/macos-capture-shim` | 미디어 writer를 소켓·bulk OUT 공용 트레이트(`MediaWriter`)로 추상화 |

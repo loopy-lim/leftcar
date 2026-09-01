@@ -33,7 +33,7 @@ AOAP 전송 경로와 가상 디스플레이 실험은 현재 컴파일·단위 
 
 1. 폰이 잠금 해제된 상태에서 케이블을 연결한다. Host 앱이 이미 실행 중이어야 한다(일반 attach에서는 AOAP 협상을 시작하지 않고, 인증된 `requestUsb` 스트림 요청 때 협상한다).
 2. Viewer에서 Host에 연결한 뒤 스트림 시작(USB 우선 선택)으로 `requestUsb`를 유발한다.
-3. Host 로그에서 협상 시퀀스를 확인한다: CONTROL 51(GET PROTOCOL) → 52/53(SEND STRING) → 54(START).
+3. Host 로그에서 협상 시퀀스를 확인한다: CONTROL 51(GET PROTOCOL) → 52(SEND STRING) → 53(START).
 4. GET PROTOCOL 응답값을 기록한다. 응답 0이면 폰이 AOAP 미지원이며 검증 1은 Fail — 실패 시 진단 가이드 4번으로 진행한다.
 5. START 성공 후 폰이 액세서리 모드로 재열거되는지 확인하고 VID/PID를 기록한다.
 
