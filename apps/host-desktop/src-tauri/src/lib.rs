@@ -31,11 +31,22 @@ struct ControlEndpoint {
     port: u16,
 }
 
+/// Report a fatal startup failure without panicking. A message dialog is the
+/// only way to reach users when no window exists yet; without it the app
+/// exits silently and users report "the app does not launch".
+fn fatal_startup_error(message: String) -> ! {
+    eprintln!("Leftcar Host startup failed: {message}");
+    let _ = rfd::MessageDialog::new()
+        .set_title("Leftcar Host")
+        .set_level(rfd::MessageLevel::Error)
+        .set_description(&message)
+        .show();
+    std::process::exit(1);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let backend = platform_backend().unwrap_or_else(|error| {
-        panic!("Leftcar capture backend unavailable: {error}");
-    });
+    let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = backend.clone();
     let pairing = Arc::new(pairing::PairingServer::new(
         "leftcar-host".into(),
@@ -45,9 +56,8 @@ pub fn run() {
         backend.clone(),
         pairing.clone(),
     ));
-    let (control_listener, control_port) = bind_control_listener().unwrap_or_else(|error| {
-        panic!("Leftcar control listener unavailable: {error}");
-    });
+    let (control_listener, control_port) =
+        bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
     start_control_server(server.clone(), control_listener, control_port);
     // AOAP devices re-enumerate after the accessory handshake. Keep discovery
@@ -220,10 +230,14 @@ fn bind_control_listener_at(preferred_port: u16) -> Result<(std::net::TcpListene
         Ok(listener) => listener,
         Err(preferred_error) => {
             eprintln!(
-                "control port {preferred_port} unavailable ({preferred_error}); selecting a free port"
+                "control port {preferred_port} unavailable ({preferred_error}); selecting a free \
+                 port (another Leftcar Host instance may be running)"
             );
             std::net::TcpListener::bind(("0.0.0.0", 0)).map_err(|fallback_error| {
-                format!("port {preferred_port}: {preferred_error}; fallback: {fallback_error}")
+                format!(
+                    "port {preferred_port}: {preferred_error}; fallback: {fallback_error}; \
+                     another Leftcar Host instance may be running"
+                )
             })?
         }
     };
