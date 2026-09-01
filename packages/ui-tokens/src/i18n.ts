@@ -227,6 +227,9 @@ export const translations = {
       virtualDisplayFailed: "생성 실패: {error}",
       virtualDisplayRemove: "제거",
       virtualDisplayRemoved: "가상 디스플레이 제거됨",
+      virtualDisplayToggleDesc: "실험 기능은 기본 꺼짐입니다. 켜면 가상 디스플레이 카드가 나타납니다.",
+      virtualDisplayToggleOn: "켜짐",
+      virtualDisplayToggleOff: "꺼짐",
     },
   },
   en: {
@@ -451,6 +454,9 @@ export const translations = {
       virtualDisplayFailed: "Failed: {error}",
       virtualDisplayRemove: "Remove",
       virtualDisplayRemoved: "Virtual display removed",
+      virtualDisplayToggleDesc: "The experiment is off by default. Turn it on to show the virtual display card.",
+      virtualDisplayToggleOn: "On",
+      virtualDisplayToggleOff: "Off",
     },
   },
 } as const;

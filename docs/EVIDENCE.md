@@ -241,9 +241,9 @@ feature/usb-display-extension 브랜치(커밋 `2aaa319`..`441e94f`, 14개 커�
 
 ### 4. 가상 디스플레이 실험 (ADR-0005)
 
-- **구현**: `apps/host-desktop/src-tauri/src/virtual_display.rs`가 `betterdisplaycli` 프로세스 실행(create/set/discard, `-namelike` 식별자)을 감싸고, Tauri 커맨드와 Host UI VirtualDisplayCard(옵트인 토글, 기본 꺼짐, macOS 전용)로 노출한다. CLI 계약은 `docs/decisions/0005-virtual-display-via-betterdisplay-cli.md`(ADR-0005)에 고정했다.
+- **구현**: `apps/host-desktop/src-tauri/src/virtual_display.rs`가 `betterdisplaycli` 프로세스 실행(create/set/discard, `-namelike` 식별자)을 감싸고, Tauri 커맨드(비동기, 메인 스레드 블로킹 회피)와 Host UI로 노출한다. Host App.tsx의 "가상 디스플레이 (실험)" 옵트인 토글(기본 꺼짐, `leftcar_virtual_display_experiment` 설정 영속화)이 꺼져 있으면 VirtualDisplayCard를 렌더링하지 않아 커맨드 호출 자체가 발생하지 않는다. CLI 계약은 `docs/decisions/0005-virtual-display-via-betterdisplay-cli.md`(ADR-0005)에 고정했다.
 - **검증 (E3)**: CLI 인자 생성 단위 테스트 5개가 ADR-0005의 CLI 계약을 고정한다. Host Tauri crate 전체 테스트 통과.
-- **미증명**: 실제 `betterdisplaycli` 실행, 가상 디스플레이 생성·연결·캡처·제거는 전부 물리 게이트(`docs/usb-physical-validation.md` 검증 6)로 대기다. 위험 대장 R-015의 v1 논골 유지는 변함없으며 이 구현이 정식 기능 승격이 아니다.
+- **미증명**: 실제 `betterdisplaycli` 실행, 가상 디스플레이 생성·연결·캡처·제거는 전부 물리 게이트(`docs/usb-physical-validation.md` 검증 6)로 대기 중이다. 위험 대장 R-015의 v1 논골 유지는 변함없으며 이 구현이 정식 기능 승격이 아니다.
 
 ### 5. USB 물리 검증 게이트 문서
 

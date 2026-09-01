@@ -406,8 +406,10 @@ fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingSer
     state.revoke_all()
 }
 
+/// Async so the blocking `betterdisplaycli` spawn runs off the main thread
+/// (Tauri 2 executes async commands on a separate thread pool).
 #[tauri::command]
-fn create_virtual_display(
+async fn create_virtual_display(
     name: String,
     aspect_width: u32,
     aspect_height: u32,
@@ -423,8 +425,9 @@ fn create_virtual_display(
     }
 }
 
+/// Async so the blocking `betterdisplaycli` spawn runs off the main thread.
 #[tauri::command]
-fn remove_virtual_display(name: String) -> Result<String, String> {
+async fn remove_virtual_display(name: String) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         virtual_display::remove_virtual_display(&name)

@@ -561,6 +561,50 @@ function TerminationBanner({
   );
 }
 
+interface VirtualDisplayExperimentSectionProps {
+  platform: HostSnapshotView["platform"];
+  enabled: boolean;
+  t: TranslationSchema;
+  onToggle: () => void;
+}
+
+/// Opt-in gate for the BetterDisplay experiment (design flow step 1: toggle,
+/// default off). When `enabled` is false the VirtualDisplayCard is not
+/// rendered at all, so no `create_virtual_display`/`remove_virtual_display`
+/// command can be invoked.
+function VirtualDisplayExperimentSection({
+  platform,
+  enabled,
+  t,
+  onToggle,
+}: VirtualDisplayExperimentSectionProps) {
+  return (
+    <>
+      <section className="troubleshoot-card" aria-label={t.host.virtualDisplayExperiment}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+            <Monitor size={16} />
+            <span>{t.host.virtualDisplayExperiment}</span>
+          </div>
+          <button
+            className={controlToggleVariants({ active: enabled })}
+            onClick={onToggle}
+            aria-pressed={enabled}
+            aria-label={t.host.virtualDisplayExperiment}
+            title={enabled ? t.host.virtualDisplayToggleOn : t.host.virtualDisplayToggleOff}
+          >
+            {enabled ? t.host.virtualDisplayToggleOn : t.host.virtualDisplayToggleOff}
+          </button>
+        </div>
+        <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+          {t.host.virtualDisplayToggleDesc}
+        </p>
+      </section>
+      {enabled && <VirtualDisplayCard platform={platform} t={t} />}
+    </>
+  );
+}
+
 interface VirtualDisplayCardProps {
   platform: HostSnapshotView["platform"];
   t: TranslationSchema;
@@ -899,6 +943,21 @@ function Dashboard() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
     return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
   });
+  // Opt-in experiment gate: default off, persisted like the other host settings.
+  const [virtualDisplayExperiment, setVirtualDisplayExperiment] = useState<boolean>(() => {
+    return localStorage.getItem("leftcar_virtual_display_experiment") === "on";
+  });
+
+  const toggleVirtualDisplayExperiment = useCallback(() => {
+    setVirtualDisplayExperiment((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(
+      "leftcar_virtual_display_experiment",
+      virtualDisplayExperiment ? "on" : "off",
+    );
+  }, [virtualDisplayExperiment]);
 
   const isStreaming = sessions.length > 0;
 
@@ -1085,7 +1144,12 @@ function Dashboard() {
           />
         )}
 
-        <VirtualDisplayCard platform={platform} t={t} />
+        <VirtualDisplayExperimentSection
+          platform={platform}
+          enabled={virtualDisplayExperiment}
+          t={t}
+          onToggle={toggleVirtualDisplayExperiment}
+        />
       </main>
 
       <DashboardFooter
