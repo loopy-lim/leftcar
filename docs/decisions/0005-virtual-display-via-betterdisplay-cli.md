@@ -13,7 +13,7 @@ BetterDisplay는 가상 디스플레이 생성을 CLI로 프로그래밍 방식 
 ```text
 betterdisplaycli create -devicetype=virtualscreen -virtualscreenname=<이름> -aspectWidth=<W비율> -aspectHeight=<H비율>   # 생성
 betterdisplaycli set -namelike=<이름> -connected=on   # 연결
-betterdisplaycli discard -virtualscreenname=<이름>   # 제거
+betterdisplaycli discard -namelike=<이름>   # 제거
 ```
 
 생성·연결된 가상 디스플레이는 macOS에서 진짜 모니터로 열거되므로 Leftcar의 기존 list_displays/캡처/스트리밍 경로가 무수정으로 동작할 것으로 기대된다. 이 기대와 정밀 해상도 지정 방식은 실기기 검증 대상이다.
