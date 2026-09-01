@@ -312,21 +312,28 @@ fn request_input_permission(
     state.request_input_permission()
 }
 
+#[cfg(target_os = "macos")]
+fn system_settings_url(pane: Option<&str>) -> &'static str {
+    match pane {
+        Some("screen_capture") | Some("screencapture") => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        Some("remote_desktop") | Some("remotedesktop") => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
+        }
+        Some("internet_sharing") | Some("sharing") => {
+            "x-apple.systempreferences:com.apple.Sharing-Settings.extension"
+        }
+        _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    }
+}
+
 #[tauri::command]
 fn open_system_settings(pane: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let url = match pane.as_deref() {
-            Some("screen_capture") | Some("screencapture") => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-            }
-            Some("remote_desktop") | Some("remotedesktop") => {
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
-            }
-            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-        };
         std::process::Command::new("open")
-            .arg(url)
+            .arg(system_settings_url(pane.as_deref()))
             .spawn()
             .map_err(|e| format!("failed to open macOS settings: {e}"))?;
         Ok(())
@@ -483,5 +490,21 @@ mod tests {
 
         assert_ne!(actual_port, occupied_port);
         assert_ne!(actual_port, 0);
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod system_settings_url_tests {
+    #[test]
+    fn internet_sharing_pane_maps_to_sharing_settings_url() {
+        assert_eq!(
+            super::system_settings_url(Some("internet_sharing")),
+            "x-apple.systempreferences:com.apple.Sharing-Settings.extension"
+        );
+        assert_eq!(
+            super::system_settings_url(None),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        );
     }
 }
