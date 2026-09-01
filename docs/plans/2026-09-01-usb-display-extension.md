@@ -394,6 +394,8 @@ git commit -m "docs(adr): 가상 디스플레이 BetterDisplay CLI 옵트인 실
 
 ### Task 8: createVirtualDisplay/removeVirtualDisplay Tauri 커맨드 (TDD)
 
+> ADR-0005 참조: 아래 CLI 계약은 BetterDisplay 4.3.6 CLI 헬프 기준이다. 정밀 해상도 지정(aspectWidth/aspectHeight 대비 resolutionList)과 연결 계약은 T11 실기기 검증 대상이며, 검증 결과에 따라 인자 구성이 조정될 수 있다.
+
 **Files:**
 - Create: `apps/host-desktop/src-tauri/src/virtual_display.rs`
 - Modify: `apps/host-desktop/src-tauri/src/lib.rs` (mod 선언 + invoke_handler 등록)
@@ -414,17 +416,30 @@ pub const CLI: &str = "betterdisplaycli";
 
 /// Builds the argv for creating a virtual display. Unit-tested; the actual
 /// process spawn is exercised only on a machine with BetterDisplay installed.
-pub fn create_args(width: u32, height: u32, fps: u32) -> Vec<String> {
+pub fn create_args(name: &str, aspect_w: u32, aspect_h: u32) -> Vec<String> {
     vec![
-        "virtual".into(),
-        format!("-create={width}x{height}x{fps}"),
-        "--set-current".into(),
+        "create".into(),
+        "-devicetype=virtualscreen".into(),
+        format!("-virtualscreenname={name}"),
+        format!("-aspectWidth={aspect_w}"),
+        format!("-aspectHeight={aspect_h}"),
+    ]
+}
+
+/// Builds the argv for connecting a virtual display. Unit-tested; the actual
+/// process spawn is exercised only on a machine with BetterDisplay installed.
+pub fn connect_args(name: &str) -> Vec<String> {
+    vec![
+        "set".into(),
+        format!("-namelike={name}"),
+        "-connected=on".into(),
     ]
 }
 
 #[cfg(target_os = "macos")]
-pub fn create_virtual_display(width: u32, height: u32, fps: u32) -> Result<String, String> {
-    run_cli(create_args(width, height, fps))
+pub fn create_virtual_display(name: &str, aspect_w: u32, aspect_h: u32) -> Result<String, String> {
+    run_cli(create_args(name, aspect_w, aspect_h))?;
+    run_cli(connect_args(name))
 }
 
 #[cfg(target_os = "macos")]
@@ -456,8 +471,26 @@ mod tests {
     #[test]
     fn create_args_matches_cli_contract() {
         assert_eq!(
-            create_args(2560, 1440, 60),
-            vec!["virtual".to_string(), "-create=2560x1440x60".to_string(), "--set-current".to_string()]
+            create_args("Leftcar Virtual", 16, 9),
+            vec![
+                "create".to_string(),
+                "-devicetype=virtualscreen".to_string(),
+                "-virtualscreenname=Leftcar Virtual".to_string(),
+                "-aspectWidth=16".to_string(),
+                "-aspectHeight=9".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_args_matches_cli_contract() {
+        assert_eq!(
+            connect_args("Leftcar Virtual"),
+            vec![
+                "set".to_string(),
+                "-namelike=Leftcar Virtual".to_string(),
+                "-connected=on".to_string(),
+            ]
         );
     }
 }
@@ -498,17 +531,17 @@ git commit -m "feat(host): betterdisplaycli 가상 디스플레이 커맨드 코
 ```rust
 #[tauri::command]
 fn create_virtual_display(
-    width: u32,
-    height: u32,
-    fps: u32,
+    name: String,
+    aspect_width: u32,
+    aspect_height: u32,
 ) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        virtual_display::create_virtual_display(width, height, fps)
+        virtual_display::create_virtual_display(&name, aspect_width, aspect_height)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (width, height, fps);
+        let _ = (name, aspect_width, aspect_height);
         Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
     }
 }
@@ -521,7 +554,7 @@ invoke_handler 목록에 `create_virtual_display` 추가.
 ```ts
       virtualDisplayExperiment: "가상 디스플레이 (실험)",
       virtualDisplayHint: "BetterDisplay가 필요합니다. 설치 후 CLI 접근을 허용하세요.",
-      virtualDisplayCreate: "2560×1440@60 생성",
+      virtualDisplayCreate: "16:9 가상 디스플레이 생성",
       virtualDisplayCreated: "가상 디스플레이 생성됨",
       virtualDisplayFailed: "생성 실패: {error}",
 ```
@@ -531,14 +564,14 @@ invoke_handler 목록에 `create_virtual_display` 추가.
 ```ts
       virtualDisplayExperiment: "Virtual Display (Experiment)",
       virtualDisplayHint: "Requires BetterDisplay. Install it and allow CLI access in its settings.",
-      virtualDisplayCreate: "Create 2560×1440@60",
+      virtualDisplayCreate: "Create 16:9 virtual display",
       virtualDisplayCreated: "Virtual display created",
       virtualDisplayFailed: "Failed: {error}",
 ```
 
 **Step 3: App.tsx 설정 섹션에 실험 카드 추가**
 
-기존 encoder 실험 선택 UI 패턴을 따라 카드 추가: 토글 + "생성" 버튼 + 결과/오류 표시. `invoke("create_virtual_display", { width: 2560, height: 1440, fps: 60 })` 호출.
+기존 encoder 실험 선택 UI 패턴을 따라 카드 추가: 토글 + "생성" 버튼 + 결과/오류 표시. `invoke("create_virtual_display", { name: "Leftcar Virtual", aspectWidth: 16, aspectHeight: 9 })` 호출.
 
 **Step 4: 검증**
 
@@ -561,7 +594,7 @@ git commit -m "feat(host): 가상 디스플레이 실험 토글과 Tauri 커맨�
 
 ```rust
 pub fn remove_args(name: &str) -> Vec<String> {
-    vec!["virtual".into(), format!("-destroy={name}")]
+    vec!["discard".into(), format!("-virtualscreenname={name}")]
 }
 ```
 
@@ -572,7 +605,7 @@ pub fn remove_args(name: &str) -> Vec<String> {
     fn remove_args_matches_cli_contract() {
         assert_eq!(
             remove_args("Leftcar Virtual"),
-            vec!["virtual".to_string(), "-destroy=Leftcar Virtual".to_string()]
+            vec!["discard".to_string(), "-virtualscreenname=Leftcar Virtual".to_string()]
         );
     }
 ```

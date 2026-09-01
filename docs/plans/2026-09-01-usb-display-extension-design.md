@@ -47,9 +47,13 @@ USB(AOAP) 전송 경로는 이미 구현돼 있으나(2026-08-26), 세 가지 �
 ### 동작 흐름
 
 1. Host 설정에서 "가상 디스플레이 (실험)" 토글(기본 꺼짐).
-2. Host가 `betterdisplaycli virtual -create=<WxHxF> --set-current` 실행.
-3. 생성된 디스플레이가 카탈로그에 자동 반영(기존 refresh 경로).
+2. Host가 betterdisplaycli로 2단계 실행한다(BetterDisplay 4.3.6 CLI 헬프 기준 실제 계약):
+   - 생성: `betterdisplaycli create -devicetype=virtualscreen -virtualscreenname=<이름> -aspectWidth=<W비율> -aspectHeight=<H비율>`
+   - 연결: `betterdisplaycli set -namelike=<이름> -connected=on`
+3. 생성·연결된 디스플레이가 카탈로그에 자동 반영(기존 refresh 경로).
 4. Android에서 해당 디스플레이를 열면 기존 스트림과 동일하게 동작.
+
+가상 디스플레이의 해상도는 종횡비(`aspectWidth`/`aspectHeight`) 기반으로 결정된다. 2560×1440 같은 정밀 해상도 지정(`resolutionList` 활용 포함)이 실제로 가능한지와 그 조합은 T11 실기기 검증 항목이다.
 
 ### 의존성 정책
 
@@ -59,7 +63,7 @@ USB(AOAP) 전송 경로는 이미 구현돼 있으나(2026-08-26), 세 가지 �
 
 ### 구현 위치
 
-- Host Tauri command 신규: `createVirtualDisplay(width, height, fps)` / `removeVirtualDisplay(name)` — `betterdisplaycli` 프로세스 실행, 실패 시 오류 문자열 반환.
+- Host Tauri command 신규: `createVirtualDisplay(name, aspectWidth, aspectHeight)` / `removeVirtualDisplay(name)` — `betterdisplaycli` 프로세스 실행, 실패 시 오류 문자열 반환.
 - 기존 커맨드 등록부(`lib.rs` invoke_handler)에 추가.
 
 ### ADR-000X (경량)
