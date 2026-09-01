@@ -23,8 +23,16 @@ import {
   isTrustedHost,
   parseHostEndpoint,
 } from "../src/pairing";
+import {
+  clearRecentHosts,
+  getRecentHosts,
+  removeRecentHost,
+  saveRecentHost,
+  type RecentHostItem,
+} from "../src/recent-hosts";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
+import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 
 type NsdNative = {
   startDiscovery(): void;
@@ -39,9 +47,372 @@ interface FoundHost {
   port: number;
 }
 
+function formatRelativeTime(timestamp: number, language: "ko" | "en"): string {
+  const diffSecs = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (diffSecs < 60) {
+    return language === "ko" ? "방금 전" : "Just now";
+  }
+  const diffMins = Math.floor(diffSecs / 60);
+  if (diffMins < 60) {
+    return language === "ko" ? `${diffMins}분 전` : `${diffMins}m ago`;
+  }
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) {
+    return language === "ko" ? `${diffHours}시간 전` : `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return language === "ko" ? `${diffDays}일 전` : `${diffDays}d ago`;
+}
+
+interface DiscoveredHostsSectionProps {
+  hosts: FoundHost[];
+  busy: boolean;
+  nsdAvailable: boolean;
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onConnect: (target: string, port?: number) => void;
+}
+
+function DiscoveredHostsSection({
+  hosts,
+  busy,
+  nsdAvailable,
+  t,
+  styles,
+  colors,
+  onConnect,
+}: DiscoveredHostsSectionProps) {
+  return (
+    <View style={styles.sectionCard}>
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>{t.viewer.searchTitle}</Text>
+        {nsdAvailable && (
+          <View style={styles.scanningBadge}>
+            <ActivityIndicator size="small" color={colors.textPrimary} />
+            <Text style={styles.scanningText}>{t.viewer.searching}</Text>
+          </View>
+        )}
+      </View>
+
+      {hosts.length > 0 ? (
+        <View style={styles.hostList}>
+          {hosts.map((h) => (
+            <Pressable
+              key={h.host}
+              style={({ pressed }) => [
+                styles.hostItem,
+                pressed && styles.itemPressed,
+              ]}
+              onPress={() => onConnect(h.host, h.port)}
+              disabled={busy}
+            >
+              <View style={styles.hostIconBox}>
+                <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
+              </View>
+              <View style={styles.hostInfo}>
+                <Text style={styles.hostName} numberOfLines={1}>
+                  {h.name || t.common.myComputer}
+                </Text>
+                <Text style={styles.hostAddr} numberOfLines={1}>
+                  {h.port === 7777 ? h.host : `${h.host}:${h.port}`}
+                </Text>
+              </View>
+              <View style={styles.connectChip}>
+                <Text style={styles.connectChipText}>{t.common.connect}</Text>
+              </View>
+            </Pressable>
+          ))}
+        </View>
+      ) : (
+        <View style={styles.emptyBox}>
+          <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
+          <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
+          <Text style={styles.emptyText}>
+            {t.viewer.emptyHostsDesc}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+interface RecentHostsSectionProps {
+  recentHosts: RecentHostItem[];
+  busy: boolean;
+  language: "ko" | "en";
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onConnect: (target: string, port?: number) => void;
+  onRemoveHost: (item: RecentHostItem) => void;
+  onClearAll: () => void;
+}
+
+function RecentHostsSection({
+  recentHosts,
+  busy,
+  language,
+  t,
+  styles,
+  colors,
+  onConnect,
+  onRemoveHost,
+  onClearAll,
+}: RecentHostsSectionProps) {
+  if (recentHosts.length === 0) return null;
+
+  return (
+    <View style={styles.sectionCard}>
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>{t.viewer.recentHostsTitle}</Text>
+        <Pressable onPress={onClearAll} hitSlop={6}>
+          <Text style={styles.clearAllText}>{t.viewer.clearRecentHosts}</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.hostList}>
+        {recentHosts.map((item) => (
+          <View key={`${item.host}:${item.port}`} style={styles.recentItem}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.recentItemClickable,
+                pressed && styles.itemPressed,
+              ]}
+              onPress={() => onConnect(item.host, item.port)}
+              disabled={busy}
+            >
+              <View style={styles.recentIconBox}>
+                <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
+              </View>
+              <View style={styles.hostInfo}>
+                <Text style={styles.hostName} numberOfLines={1}>
+                  {item.name || item.host}
+                </Text>
+                <Text style={styles.hostAddr} numberOfLines={1}>
+                  {item.port === 7777 ? item.host : `${item.host}:${item.port}`} ·{" "}
+                  {interpolate(t.viewer.lastConnected, {
+                    time: formatRelativeTime(item.lastConnected, language),
+                  })}
+                </Text>
+              </View>
+              <View style={styles.connectChip}>
+                <Text style={styles.connectChipText}>{t.common.connect}</Text>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => onRemoveHost(item)}
+              style={styles.recentDeleteBtn}
+              accessibilityLabel={t.viewer.deleteHost}
+              hitSlop={8}
+            >
+              <Ionicons name="close" size={15} color={colors.textDim} />
+            </Pressable>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+interface ManualIpSectionProps {
+  ip: string;
+  busy: boolean;
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onChangeIp: (text: string) => void;
+  onClearIp: () => void;
+  onConnect: () => void;
+}
+
+function ManualIpSection({
+  ip,
+  busy,
+  t,
+  styles,
+  colors,
+  onChangeIp,
+  onClearIp,
+  onConnect,
+}: ManualIpSectionProps) {
+  return (
+    <View style={styles.sectionCard}>
+      <Text style={styles.sectionTitle}>{t.viewer.manualTitle}</Text>
+      <Text style={styles.fieldDesc}>
+        {t.viewer.manualDesc}
+      </Text>
+
+      <View style={styles.inputRow}>
+        <TextInput
+          style={styles.textInput}
+          placeholder={t.viewer.manualPlaceholder}
+          placeholderTextColor={colors.textDim}
+          keyboardType="url"
+          autoCapitalize="none"
+          autoCorrect={false}
+          value={ip}
+          onChangeText={onChangeIp}
+        />
+        {ip.length > 0 && (
+          <Pressable onPress={onClearIp} style={styles.clearBtn} aria-label={t.common.cancel}>
+            <Ionicons name="close-circle" size={16} color={colors.textDim} />
+          </Pressable>
+        )}
+      </View>
+
+      {__DEV__ && (
+        <View style={styles.quickChipsRow}>
+          <Pressable onPress={() => onChangeIp("localhost")} style={styles.quickChip}>
+            <Text style={styles.quickChipText}>+ localhost (ADB)</Text>
+          </Pressable>
+          <Pressable onPress={() => onChangeIp("10.0.2.2")} style={styles.quickChip}>
+            <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
+          </Pressable>
+        </View>
+      )}
+
+      <Pressable
+        style={({ pressed }) => [
+          styles.primaryBtn,
+          (!ip.trim() || busy) && styles.btnDisabled,
+          pressed && ip.trim() && !busy && styles.btnPressed,
+        ]}
+        onPress={onConnect}
+        disabled={busy || !ip.trim()}
+      >
+        {busy ? (
+          <ActivityIndicator color={colors.btnPrimaryText} size="small" />
+        ) : (
+          <Text style={styles.primaryBtnText}>{t.viewer.btnConnectAction}</Text>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
+function TroubleshootingSection({
+  showTroubleshoot,
+  t,
+  styles,
+  colors,
+  onToggle,
+}: {
+  showTroubleshoot: boolean;
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onToggle: () => void;
+}) {
+  return (
+    <View style={styles.sectionCard}>
+      <Pressable
+        style={styles.troubleshootToggle}
+        onPress={onToggle}
+        accessibilityRole="button"
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+          <Ionicons name="help-circle-outline" size={16} color={colors.textSecondary} />
+          <Text style={styles.troubleshootToggleText}>
+            {t.viewer.troubleshootGuideToggle}
+          </Text>
+        </View>
+        <Ionicons
+          name={showTroubleshoot ? "chevron-up" : "chevron-down"}
+          size={15}
+          color={colors.textMuted}
+        />
+      </Pressable>
+
+      {showTroubleshoot && (
+        <View style={styles.troubleshootContent}>
+          <View style={styles.troubleshootItem}>
+            <View style={styles.bulletDot} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootWifi}</Text>
+              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootWifiDesc}</Text>
+            </View>
+          </View>
+
+          <View style={styles.troubleshootItem}>
+            <View style={styles.bulletDot} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootAp}</Text>
+              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootApDesc}</Text>
+            </View>
+          </View>
+
+          <View style={styles.troubleshootItem}>
+            <View style={styles.bulletDot} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootManual}</Text>
+              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootManualDesc}</Text>
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function PairingManagementSection({
+  hasStoredToken,
+  t,
+  styles,
+  colors,
+  onClearToken,
+  onOpenPairing,
+}: {
+  hasStoredToken: boolean;
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onClearToken: () => void;
+  onOpenPairing: () => void;
+}) {
+  return (
+    <View style={styles.sectionCard}>
+      <Text style={styles.sectionTitle}>{t.viewer.rememberTitle}</Text>
+      <Text style={styles.fieldDesc}>
+        {hasStoredToken
+          ? t.viewer.rememberHasToken
+          : t.viewer.rememberNoToken}
+      </Text>
+      <View style={styles.pairingActionRow}>
+        {hasStoredToken && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.dangerBtn,
+              pressed && styles.btnPressed,
+            ]}
+            onPress={onClearToken}
+          >
+            <Text style={styles.dangerBtnText}>{t.viewer.btnClearToken}</Text>
+          </Pressable>
+        )}
+        <Pressable
+          style={({ pressed }) => [
+            styles.secondaryBtn,
+            pressed && styles.btnPressed,
+          ]}
+          onPress={onOpenPairing}
+        >
+          <Ionicons
+            name="qr-code-outline"
+            size={14}
+            color={colors.textPrimary}
+            style={{ marginRight: 4 }}
+          />
+          <Text style={styles.secondaryBtnText}>{t.viewer.btnNewPair}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 export default function Host() {
   const { colors, isDark } = useAppTheme();
-  const { t } = useAppLanguage();
+  const { t, language } = useAppLanguage();
   const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
 
   const [ip, setIp] = useState("");
@@ -49,9 +420,12 @@ export default function Host() {
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundHost>>({});
   const [hasStoredToken, setHasStoredToken] = useState(false);
+  const [recentHosts, setRecentHosts] = useState<RecentHostItem[]>([]);
+  const [showTroubleshoot, setShowTroubleshoot] = useState(false);
 
   useEffect(() => {
     void getStoredToken().then((token) => setHasStoredToken(!!token));
+    void getRecentHosts().then(setRecentHosts);
   }, []);
 
   const handleClearToken = useCallback(async () => {
@@ -60,6 +434,16 @@ export default function Host() {
     setHasStoredToken(false);
     Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc);
   }, [t]);
+
+  const handleRemoveRecentHost = useCallback(async (hostItem: RecentHostItem) => {
+    const updated = await removeRecentHost(hostItem.host, hostItem.port);
+    setRecentHosts(updated);
+  }, []);
+
+  const handleClearAllRecent = useCallback(async () => {
+    await clearRecentHosts();
+    setRecentHosts([]);
+  }, []);
 
   useEffect(() => {
     if (!nsd) return;
@@ -108,6 +492,11 @@ export default function Host() {
         }
       }
       if (lastError) throw lastError;
+
+      // Save to recent hosts on successful network connection
+      const matched = Object.values(found).find((h) => h.host === target);
+      void saveRecentHost(target, port, matched?.name).then(setRecentHosts);
+
       try {
         await controlClient()?.request<CatalogView>("getCatalog");
         setHasStoredToken(true);
@@ -134,7 +523,7 @@ export default function Host() {
     } finally {
       setBusy(false);
     }
-  }, [t]);
+  }, [found, t]);
 
   const hosts = Object.values(found);
 
@@ -154,7 +543,6 @@ export default function Host() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {/* Error Alert */}
         {error && (
           <View style={styles.errorCard}>
             <Ionicons name="alert-circle" size={16} color={colors.textPrimary} />
@@ -162,148 +550,55 @@ export default function Host() {
           </View>
         )}
 
-        {/* Nearby Auto Discovered Hosts */}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionTitle}>{t.viewer.searchTitle}</Text>
-            {nsd && (
-              <View style={styles.scanningBadge}>
-                <ActivityIndicator size="small" color={colors.textPrimary} />
-                <Text style={styles.scanningText}>{t.viewer.searching}</Text>
-              </View>
-            )}
-          </View>
+        <DiscoveredHostsSection
+          hosts={hosts}
+          busy={busy}
+          nsdAvailable={Boolean(nsd)}
+          t={t}
+          styles={styles}
+          colors={colors}
+          onConnect={doConnect}
+        />
 
-          {hosts.length > 0 ? (
-            <View style={styles.hostList}>
-              {hosts.map((h) => (
-                <Pressable
-                  key={h.host}
-                  style={({ pressed }) => [
-                    styles.hostItem,
-                    pressed && styles.itemPressed,
-                  ]}
-                  onPress={() => doConnect(h.host, h.port)}
-                  disabled={busy}
-                >
-                  <View style={styles.hostIconBox}>
-                    <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
-                  </View>
-                  <View style={styles.hostInfo}>
-                    <Text style={styles.hostName} numberOfLines={1}>
-                      {h.name || t.common.myComputer}
-                    </Text>
-                    <Text style={styles.hostAddr} numberOfLines={1}>
-                      {h.port === 7777 ? h.host : `${h.host}:${h.port}`}
-                    </Text>
-                  </View>
-                  <View style={styles.connectChip}>
-                    <Text style={styles.connectChipText}>{t.common.connect}</Text>
-                  </View>
-                </Pressable>
-              ))}
-            </View>
-          ) : (
-            <View style={styles.emptyBox}>
-              <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
-              <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
-              <Text style={styles.emptyText}>
-                {t.viewer.emptyHostsDesc}
-              </Text>
-            </View>
-          )}
-        </View>
+        <RecentHostsSection
+          recentHosts={recentHosts}
+          busy={busy}
+          language={language}
+          t={t}
+          styles={styles}
+          colors={colors}
+          onConnect={doConnect}
+          onRemoveHost={handleRemoveRecentHost}
+          onClearAll={handleClearAllRecent}
+        />
 
-        {/* Manual IP Entry */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.viewer.manualTitle}</Text>
-          <Text style={styles.fieldDesc}>
-            {t.viewer.manualDesc}
-          </Text>
+        <ManualIpSection
+          ip={ip}
+          busy={busy}
+          t={t}
+          styles={styles}
+          colors={colors}
+          onChangeIp={setIp}
+          onClearIp={() => setIp("")}
+          onConnect={connectManual}
+        />
 
-          <View style={styles.inputRow}>
-            <TextInput
-              style={styles.textInput}
-              placeholder={t.viewer.manualPlaceholder}
-              placeholderTextColor={colors.textDim}
-              keyboardType="url"
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={ip}
-              onChangeText={setIp}
-            />
-            {ip.length > 0 && (
-              <Pressable onPress={() => setIp("")} style={styles.clearBtn} aria-label={t.common.cancel}>
-                <Ionicons name="close-circle" size={16} color={colors.textDim} />
-              </Pressable>
-            )}
-          </View>
+        <TroubleshootingSection
+          showTroubleshoot={showTroubleshoot}
+          t={t}
+          styles={styles}
+          colors={colors}
+          onToggle={() => setShowTroubleshoot((prev) => !prev)}
+        />
 
-          {__DEV__ && (
-            <View style={styles.quickChipsRow}>
-              <Pressable onPress={() => setIp("localhost")} style={styles.quickChip}>
-                <Text style={styles.quickChipText}>+ localhost (ADB)</Text>
-              </Pressable>
-              <Pressable onPress={() => setIp("10.0.2.2")} style={styles.quickChip}>
-                <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
-              </Pressable>
-            </View>
-          )}
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.primaryBtn,
-              (!ip.trim() || busy) && styles.btnDisabled,
-              pressed && ip.trim() && !busy && styles.btnPressed,
-            ]}
-            onPress={connectManual}
-            disabled={busy || !ip.trim()}
-          >
-            {busy ? (
-              <ActivityIndicator color={colors.btnPrimaryText} size="small" />
-            ) : (
-              <Text style={styles.primaryBtnText}>{t.viewer.btnConnectAction}</Text>
-            )}
-          </Pressable>
-        </View>
-
-        {/* Pairing Management */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.viewer.rememberTitle}</Text>
-          <Text style={styles.fieldDesc}>
-            {hasStoredToken
-              ? t.viewer.rememberHasToken
-              : t.viewer.rememberNoToken}
-          </Text>
-          <View style={styles.pairingActionRow}>
-            {hasStoredToken && (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.dangerBtn,
-                  pressed && styles.btnPressed,
-                ]}
-                onPress={handleClearToken}
-              >
-                <Text style={styles.dangerBtnText}>{t.viewer.btnClearToken}</Text>
-              </Pressable>
-            )}
-            <Pressable
-              style={({ pressed }) => [
-                styles.secondaryBtn,
-                pressed && styles.btnPressed,
-              ]}
-              onPress={() => router.push("/pairing")}
-            >
-              <Ionicons
-                name="qr-code-outline"
-                size={14}
-                color={colors.textPrimary}
-                style={{ marginRight: 4 }}
-              />
-              <Text style={styles.secondaryBtnText}>{t.viewer.btnNewPair}</Text>
-            </Pressable>
-          </View>
-        </View>
+        <PairingManagementSection
+          hasStoredToken={hasStoredToken}
+          t={t}
+          styles={styles}
+          colors={colors}
+          onClearToken={handleClearToken}
+          onOpenPairing={() => router.push("/pairing")}
+        />
       </ScrollView>
     </SafeAreaView>
   );
@@ -362,6 +657,11 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       textTransform: "uppercase",
       letterSpacing: 0.04,
     },
+    clearAllText: {
+      fontSize: 11,
+      fontWeight: "600",
+      color: colors.textMuted,
+    },
     scanningBadge: {
       flexDirection: "row",
       alignItems: "center",
@@ -385,10 +685,43 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       alignItems: "center",
       gap: 12,
     },
+    recentItem: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      overflow: "hidden",
+    },
+    recentItemClickable: {
+      flex: 1,
+      padding: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+    },
+    recentDeleteBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 14,
+      alignItems: "center",
+      justifyContent: "center",
+    },
     hostIconBox: {
       width: 36,
       height: 36,
       borderRadius: 8,
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
+    },
+    recentIconBox: {
+      width: 32,
+      height: 32,
+      borderRadius: 7,
       backgroundColor: colors.bgSurface,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
@@ -499,6 +832,45 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.btnPrimaryText,
       fontSize: 13,
       fontWeight: "600",
+    },
+    troubleshootToggle: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingVertical: 2,
+    },
+    troubleshootToggleText: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    troubleshootContent: {
+      gap: 10,
+      paddingTop: 6,
+      borderTopWidth: 1,
+      borderTopColor: colors.borderSubtle,
+    },
+    troubleshootItem: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 8,
+    },
+    bulletDot: {
+      width: 5,
+      height: 5,
+      borderRadius: 2.5,
+      backgroundColor: colors.textPrimary,
+      marginTop: 6,
+    },
+    troubleshootItemTitle: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    troubleshootItemDesc: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      lineHeight: 15,
     },
     pairingActionRow: {
       flexDirection: "row",

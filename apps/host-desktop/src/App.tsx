@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Copy,
   Globe,
+  HelpCircle,
   Info,
   Laptop,
   Monitor,
@@ -18,6 +19,7 @@ import {
   Square,
   Sun,
   Tv,
+  Wifi,
   X,
 } from "lucide-react";
 import {
@@ -82,6 +84,7 @@ function useHostStatus(t: TranslationSchema) {
   const [inputPermission, setInputPermission] = useState(false);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
+  const [lanIp, setLanIp] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const priorActiveSessions = useRef(new Map<number, SessionRow>());
   const seenTerminations = useRef(new Set<string>());
@@ -89,11 +92,12 @@ function useHostStatus(t: TranslationSchema) {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission, hostPlatform, actualControlPort] = await Promise.all([
+      const [status, permission, hostPlatform, actualControlPort, actualLanIp] = await Promise.all([
         invoke<StatusView>("get_status"),
         invoke<boolean>("get_input_permission"),
         invoke<HostSnapshotView["platform"]>("get_host_platform"),
         invoke<number>("get_control_port"),
+        invoke<string | null>("get_lan_ip").catch(() => null),
       ]);
       const statusSessions = status.sessions || [];
       const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
@@ -143,6 +147,7 @@ function useHostStatus(t: TranslationSchema) {
       setInputPermission(permission);
       setPlatform(hostPlatform);
       setControlPort(actualControlPort);
+      setLanIp(actualLanIp);
       setLastUpdated(new Date());
     } catch (cause) {
       setError(hostErrorMessage(cause, t));
@@ -175,6 +180,7 @@ function useHostStatus(t: TranslationSchema) {
     inputPermission,
     platform,
     controlPort,
+    lanIp,
     lastUpdated,
     refresh,
   };
@@ -188,6 +194,7 @@ interface DashboardHeaderProps {
   language: SupportedLanguage;
   t: TranslationSchema;
   onPair: () => void;
+  onHelp: () => void;
   onTheme: () => void;
   onToggleLanguage: () => void;
   onRefresh: () => void;
@@ -201,6 +208,7 @@ function DashboardHeader({
   language,
   t,
   onPair,
+  onHelp,
   onTheme,
   onToggleLanguage,
   onRefresh,
@@ -247,6 +255,14 @@ function DashboardHeader({
         </button>
         <button
           className={buttonVariants({ variant: "icon" })}
+          onClick={onHelp}
+          title={`${t.host.btnHelp} (${t.host.shortcutHelp})`}
+          aria-label={t.host.btnHelp}
+        >
+          <HelpCircle size={15} />
+        </button>
+        <button
+          className={buttonVariants({ variant: "icon" })}
           onClick={onToggleLanguage}
           title={t.common.toggleLanguage}
           aria-label={t.common.toggleLanguage}
@@ -284,13 +300,14 @@ function DashboardHeader({
 
 interface DashboardFooterProps {
   controlPort: number;
+  lanIp: string | null;
   copiedToast: boolean;
   inputPermission: boolean;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   language: SupportedLanguage;
   t: TranslationSchema;
-  onCopyPort: () => void;
+  onCopyAddress: () => void;
   onRequestPermission: () => void;
 }
 
@@ -303,20 +320,24 @@ function DashboardFooter(props: DashboardFooterProps) {
         ? t.common.windowsPc
         : t.common.myComputer;
 
+  const addressText = props.lanIp
+    ? `${props.lanIp}:${props.controlPort}`
+    : `:${props.controlPort}`;
+
   return (
     <footer className="host-footer">
       <div className="footer-status-info">
         <button
           type="button"
           className="clickable-chip"
-          onClick={props.onCopyPort}
-          title={t.host.footerStatusLabel}
+          onClick={props.onCopyAddress}
+          title={t.host.computerAddressLabel}
         >
-          {t.host.footerStatusLabel} <strong>{t.host.statusNormal}</strong>{" "}
+          {t.host.computerAddressLabel} <strong>{addressText}</strong>{" "}
           {props.copiedToast ? (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontWeight: 600 }}>
               <Check size={13} strokeWidth={2.5} />{" "}
-              {interpolate(t.host.portCopied, { port: props.controlPort })}
+              {interpolate(t.host.addressCopied, { address: addressText })}
             </span>
           ) : (
             <Copy size={12} style={{ opacity: 0.7 }} />
@@ -347,6 +368,68 @@ function DashboardFooter(props: DashboardFooterProps) {
         </span>
       </div>
     </footer>
+  );
+}
+
+function TroubleshootingModal({
+  onClose,
+  t,
+}: {
+  onClose: () => void;
+  t: TranslationSchema;
+}) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 480 }}>
+        <div className="modal-title-bar">
+          <h3>{t.host.troubleshootTitle}</h3>
+          <button className={buttonVariants({ variant: "close" })} onClick={onClose} aria-label={t.host.troubleshootCloseAria}>
+            <X size={15} />
+          </button>
+        </div>
+        <div className="modal-scroll-area" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <Wifi size={16} />
+              <span>{t.host.troubleshootWifi}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootWifiDesc}
+            </p>
+          </div>
+
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <AlertTriangle size={16} />
+              <span>{t.host.troubleshootAp}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootApDesc}
+            </p>
+          </div>
+
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <ShieldCheck size={16} />
+              <span>{t.host.troubleshootFirewall}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootFirewallDesc}
+            </p>
+          </div>
+
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <Monitor size={16} />
+              <span>{t.host.troubleshootPerm}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootPermDesc}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -691,6 +774,7 @@ function Dashboard() {
     inputPermission,
     platform,
     controlPort,
+    lanIp,
     lastUpdated,
     refresh,
   } = useHostStatus(t);
@@ -699,6 +783,7 @@ function Dashboard() {
   const [qualityBusy, setQualityBusy] = useState<number | null>(null);
   const [showInspector, setShowInspector] = useState(false);
   const [showPairingModal, setShowPairingModal] = useState(false);
+  const [showHelpModal, setShowHelpModal] = useState(false);
   const [pendingStopSession, setPendingStopSession] = useState<SessionRow | null>(null);
   const [copiedToast, setCopiedToast] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -721,10 +806,14 @@ function Dashboard() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setShowPairingModal(false);
+        setShowHelpModal(false);
         if (inputBusy === null) setPendingStopSession(null);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setShowPairingModal((prev) => !prev);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        setShowHelpModal((prev) => !prev);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
         e.preventDefault();
         void refresh();
@@ -806,8 +895,9 @@ function Dashboard() {
     }
   };
 
-  const copyPortInfo = () => {
-    void navigator.clipboard.writeText(`:${controlPort}`);
+  const copyAddressInfo = () => {
+    const textToCopy = lanIp ? `${lanIp}:${controlPort}` : `:${controlPort}`;
+    void navigator.clipboard.writeText(textToCopy);
     setCopiedToast(true);
     setTimeout(() => setCopiedToast(false), 2000);
   };
@@ -837,6 +927,7 @@ function Dashboard() {
         language={language}
         t={t}
         onPair={() => setShowPairingModal(true)}
+        onHelp={() => setShowHelpModal(true)}
         onTheme={toggleTheme}
         onToggleLanguage={toggleLanguage}
         onRefresh={() => void refresh()}
@@ -887,13 +978,14 @@ function Dashboard() {
 
       <DashboardFooter
         controlPort={controlPort}
+        lanIp={lanIp}
         copiedToast={copiedToast}
         inputPermission={inputPermission}
         platform={platform}
         lastUpdated={lastUpdated}
         language={language}
         t={t}
-        onCopyPort={copyPortInfo}
+        onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
       />
 
@@ -902,6 +994,12 @@ function Dashboard() {
           language={language}
           t={t}
           onClose={() => setShowPairingModal(false)}
+        />
+      )}
+      {showHelpModal && (
+        <TroubleshootingModal
+          t={t}
+          onClose={() => setShowHelpModal(false)}
         />
       )}
       {pendingStopSession && (

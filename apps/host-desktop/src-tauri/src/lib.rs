@@ -65,6 +65,7 @@ pub fn run() {
             get_status,
             get_host_platform,
             get_control_port,
+            get_lan_ip,
             get_input_permission,
             request_input_permission,
             open_system_settings,
@@ -265,6 +266,11 @@ fn get_host_platform(state: tauri::State<'_, std::sync::Arc<control::ControlServ
 #[tauri::command]
 fn get_control_port(state: tauri::State<'_, ControlEndpoint>) -> u16 {
     state.port
+}
+
+#[tauri::command]
+fn get_lan_ip() -> Option<String> {
+    local_lan_ip()
 }
 
 #[tauri::command]

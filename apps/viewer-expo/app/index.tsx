@@ -12,6 +12,7 @@ import { router, useFocusEffect } from "expo-router";
 import { controlClient, controlHost, disconnectHost } from "../src/session";
 import { clearToken } from "../src/pairing";
 import { isUnauthorizedError, type CatalogView } from "../src/control";
+import { getRecentHosts, type RecentHostItem } from "../src/recent-hosts";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -34,6 +35,7 @@ export default function Hub() {
 
   const [hostAddr, setHostAddr] = useState<string>("");
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [lastHost, setLastHost] = useState<RecentHostItem | null>(null);
 
   const checkConnection = useCallback(() => {
     const client = controlClient();
@@ -50,6 +52,9 @@ export default function Hub() {
   useFocusEffect(
     useCallback(() => {
       checkConnection();
+      void getRecentHosts().then((hosts) => {
+        setLastHost(hosts[0] ?? null);
+      });
       const client = controlClient();
       if (client) {
         client.request<CatalogView>("getCatalog").catch((e) => {
@@ -165,6 +170,23 @@ export default function Hub() {
                 {t.viewer.standbyHeroDesc}
               </Text>
             </View>
+
+            {lastHost && (
+              <Pressable
+                onPress={openHostPicker}
+                style={({ pressed }) => [
+                  styles.recentQuickStrip,
+                  pressed && styles.btnPressed,
+                ]}
+                accessibilityRole="button"
+              >
+                <Ionicons name="time-outline" size={13} color={colors.textSecondary} />
+                <Text style={styles.recentQuickText} numberOfLines={1}>
+                  {t.viewer.recentHostsTitle}: <Text style={{ fontWeight: "700", color: colors.textPrimary }}>{lastHost.name || lastHost.host}</Text>
+                </Text>
+                <Ionicons name="chevron-forward" size={13} color={colors.textDim} />
+              </Pressable>
+            )}
 
             <View style={styles.heroActionRow}>
               <Pressable
@@ -488,6 +510,22 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.textMuted,
       fontSize: 12,
       fontWeight: "600",
+    },
+    recentQuickStrip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+    },
+    recentQuickText: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      flex: 1,
     },
     btnPressed: {
       opacity: 0.8,
