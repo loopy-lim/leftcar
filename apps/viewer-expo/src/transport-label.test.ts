@@ -2,19 +2,19 @@ import { describe, expect, it } from "vitest";
 import { transportBadgeLabel } from "./transport-label";
 
 describe("transportBadgeLabel", () => {
-  it("usb이면 USB를 반환한다", () => {
+  it("returns USB for the usb transport", () => {
     expect(transportBadgeLabel("usb")).toBe("USB");
   });
 
-  it("udp이면 Wi-Fi를 반환한다", () => {
+  it("returns Wi-Fi for the udp transport", () => {
     expect(transportBadgeLabel("udp")).toBe("Wi-Fi");
   });
 
-  it("tcp이면 Wi-Fi (TCP)를 반환한다", () => {
+  it("returns Wi-Fi (TCP) for the tcp transport", () => {
     expect(transportBadgeLabel("tcp")).toBe("Wi-Fi (TCP)");
   });
 
-  it("adbTcp와 기타 값은 ADB를 반환한다", () => {
+  it("falls back to ADB for adbTcp and unknown values", () => {
     expect(transportBadgeLabel("adbTcp")).toBe("ADB");
     expect(transportBadgeLabel("anything-else")).toBe("ADB");
   });
