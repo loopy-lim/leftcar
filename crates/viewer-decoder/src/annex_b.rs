@@ -113,6 +113,23 @@ pub struct VideoDecoderConfig<'a> {
     pub fps: u32,
     pub codec_name: Option<&'a str>,
     pub allow_mime_fallback: bool,
+    /// Source-resolution bound for mid-stream picture-size changes
+    /// (`KEY_MAX_WIDTH`/`KEY_MAX_HEIGHT`). Declaring it at configure time
+    /// preallocates surface output for every adaptive target so a 4K to
+    /// 1440p (or back) transition stays on the same Surface under
+    /// adaptive playback.
+    pub max_frame_size: Option<(u32, u32)>,
+}
+
+/// Union of the declared source bound and the active frame size. A malformed
+/// bound smaller than the active frame must never clip the currently
+/// decodable size.
+pub fn decoder_max_frame_size(
+    max_frame_size: Option<(u32, u32)>,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    max_frame_size.map(|(max_w, max_h)| (max_w.max(width), max_h.max(height)))
 }
 
 impl CodecConfig {

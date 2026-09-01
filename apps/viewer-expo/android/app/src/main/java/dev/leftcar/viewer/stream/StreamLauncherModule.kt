@@ -231,11 +231,14 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("splitDecoderName", decoderName)
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: true)
-                // A recovery reuses the existing document task and port, but
-                // the old renderer was reclaimed before Host start. Force
-                // that task to recreate its Surface/decoder on re-entry.
+                // A recovery reuses the existing document task and port. The
+                // Activity keeps its Surface and swaps only the native
+                // renderer when this intent is delivered via onNewIntent.
                 putExtra("reconnect", true)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+                // `intoExisting` in the manifest plus SINGLE_TOP routes a
+                // retry to the existing Activity instance and onNewIntent;
+                // it must not create a second window/task.
+                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
             val ctx = getReactApplicationContext().getCurrentActivity()
             if (ctx != null) {

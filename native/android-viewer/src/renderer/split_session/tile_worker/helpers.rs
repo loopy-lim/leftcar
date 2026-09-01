@@ -192,6 +192,7 @@ pub(super) fn process_frame(
                 fps,
                 codec_name: Some(decoder_name),
                 allow_mime_fallback: false,
+                max_frame_size: Some((1_920, 2_160)),
             })
         };
         let created = match created {

@@ -5,6 +5,7 @@ import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { clearToken } from "./pairing";
 import {
+  reconfigurePreparedStream,
   startPreparedStream,
   type StreamLauncher,
 } from "./launch-stream";
@@ -44,6 +45,11 @@ import {
   requestWithReconnect,
 } from "./catalog-helpers";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
+import {
+  fallbackTargetFor,
+  type AdaptiveQualityState,
+  type AdaptiveTarget,
+} from "./adaptive-resolution";
 import { useStreamController } from "./use-stream-controller";
 import {
   DEFAULT_VIEWER_PREFERENCES,
@@ -204,9 +210,9 @@ export function useCatalogModel() {
         args: {
           sourceIndex: active.sourceIndex,
           viewerPort: active.port,
-          width: active.width,
-          height: active.height,
-          fps: active.fps,
+          width: active.activeTarget.width,
+          height: active.activeTarget.height,
+          fps: active.activeTarget.fps,
           captureBackend,
           mediaTransport: "auto",
           encoderExperiment: active.encoderExperiment,
@@ -215,13 +221,50 @@ export function useCatalogModel() {
           showFps: active.showFps ?? preferences.showFps,
         },
       });
-      return { ...restarted, captureBackend };
+      return {
+        ...restarted,
+        captureBackend,
+        width: restarted.width ?? active.activeTarget.width,
+        height: restarted.height ?? active.activeTarget.height,
+        fps: restarted.fps ?? active.activeTarget.fps,
+        qualityState: active.qualityState,
+      };
     },
     [catalogQuery.data, host, preferences.showFps, refetchCatalog],
   );
 
+  const reconfigureActiveStream = useCallback(
+    async (
+      active: ActiveStream,
+      target: AdaptiveTarget,
+      qualityState: AdaptiveQualityState,
+    ): Promise<RestoredStream> => {
+      if (!launcher) {
+        throw new Error("화면 해상도를 다시 연결할 기능을 시작할 수 없습니다");
+      }
+      const currentCatalog = catalogQuery.data;
+      const currentMediaHost = currentCatalog?.mediaHost?.trim()
+        ? catalogDisplayHost(currentCatalog.mediaHost.trim())
+        : catalogDisplayHost(host);
+      const control = controlClient() ?? (await reconnectHost());
+      const reconfigured = await reconfigurePreparedStream({
+        control,
+        launcher,
+        host: currentMediaHost,
+        active,
+        target,
+        qualityState,
+      });
+      return {
+        ...reconfigured,
+        captureBackend: active.captureBackend,
+      };
+    },
+    [catalogQuery.data, host],
+  );
+
   const { addStream, applyUdpStability, removeStream, streams } =
-    useStreamController(setError, restoreActiveStream);
+    useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
 
   const handleRefresh = useCallback(() => {
     setError(null);
@@ -309,9 +352,17 @@ export function useCatalogModel() {
           session: started.session,
           sourceIndex: display.index,
           sourceName: display.name,
-          width,
-          height,
-          fps,
+          width: started.width ?? width,
+          height: started.height ?? height,
+          fps: started.fps ?? fps,
+          sourceTarget: { width, height, fps },
+          activeTarget: {
+            width: started.width ?? width,
+            height: started.height ?? height,
+            fps: started.fps ?? fps,
+          },
+          fallbackTarget: fallbackTargetFor({ width, height, fps }),
+          qualityState: started.qualityState ?? "native",
           captureBackend: effectiveCaptureBackend,
           contentMode: displayProfile.contentMode,
           encoderExperiment: started.encoderExperiment,

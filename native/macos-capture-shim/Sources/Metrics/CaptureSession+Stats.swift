@@ -359,6 +359,8 @@ extension CaptureSession {
             "firstEncodeMs": firstEncodeMs,
             "firstSendMs": firstSendMs,
             "currentBitrate": currentBitrate,
+            "bitrateFloorCollapseCount": bitrateFloorCollapseCount,
+            "bitrateFloorCollapseLastReason": bitrateFloorCollapseLastReason,
             "qualityHint": qualityHintValue,
             "qualityOverride": qualityOverrideValue,
             "qualityAdaptationChecks": qualityChecks,

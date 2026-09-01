@@ -39,6 +39,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var streamSurfaces: StreamSurfaces? = null
     private val createdSurfaceHolders = mutableSetOf<SurfaceHolder>()
     private val surfaceHandler = Handler(Looper.getMainLooper())
+    private val recoveryHandler = Handler(Looper.getMainLooper())
+    private val recoveryRetryPolicy = StreamRecoveryRetryPolicy()
     private var surfaceGeneration = 0
     private var surfaceChangeCount = 0
     private var pendingSurfaceAttach: Runnable? = null
@@ -49,6 +51,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
     private var hud: StreamHudController? = null
     private var terminationHandled = false
+    private var recoveryRetryRunnable: Runnable? = null
+    private var recoveryFallbackEmitted = false
 
     /**
      * Both Host notices and local renderer watchdogs close the stale Surface.
@@ -65,14 +69,101 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             5 -> "화면 공유를 다시 연결하고 있습니다."
             else -> "화면 공유를 다시 연결하고 있습니다."
         }
-        if (reason == 4 || reason == 5) {
+        if (reason == 4) {
             StreamLauncherModule.emitTermination(port, reason)
         }
         android.util.Log.i("LeftcarStream", "stream termination reason=$reason: $message")
+        if (isSameWindowRecoveryReason(reason)) {
+            if (reason == 5) {
+                // Keep the visible Activity and Surface alive. First retry the
+                // renderer directly on the same port; only exhaust the short
+                // native budget before asking React/Host to recreate the session.
+                hud?.showRebindIndicator("화면을 같은 창에서 다시 연결하는 중")
+                scheduleRenderRecovery()
+            } else {
+                // A complete Wi-Fi outage tears down the Host session, so the
+                // React controller owns the reconnect. Retain this Activity so
+                // its existing window can receive the next stream intent.
+                recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+                recoveryRetryRunnable = null
+                recoveryRetryPolicy.reset()
+                recoveryFallbackEmitted = false
+                hud?.showRebindIndicator("컴퓨터 연결을 같은 창에서 다시 연결하는 중")
+            }
+            return
+        }
         setResult(2, android.content.Intent().putExtra("terminationReason", reason))
         finish()
         android.widget.Toast.makeText(applicationContext, message, android.widget.Toast.LENGTH_LONG)
             .show()
+    }
+
+    private fun scheduleRenderRecovery() {
+        if (released || isFinishing || isDestroyed) return
+        val attempt = recoveryRetryPolicy.nextAttempt()
+        if (attempt == null) {
+            if (!recoveryFallbackEmitted) {
+                recoveryFallbackEmitted = true
+                android.util.Log.w(
+                    "LeftcarStream",
+                    "local render recovery exhausted; requesting React/Host retry " +
+                        "instanceId=$instanceId port=$port",
+                )
+                StreamLauncherModule.emitTermination(port, 5)
+            }
+            return
+        }
+        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+        val retry = Runnable {
+            recoveryRetryRunnable = null
+            attemptRenderRecovery(attempt)
+        }
+        recoveryRetryRunnable = retry
+        recoveryHandler.postDelayed(retry, attempt.delayMs)
+    }
+
+    private fun attemptRenderRecovery(attempt: RebindRetryAttempt) {
+        if (released || isFinishing || isDestroyed) return
+        val surface = streamSurfaces?.left?.holder?.surface
+        if (nativeState == 0L || surface == null || !surface.isValid) {
+            android.util.Log.w(
+                "LeftcarStream",
+                "local render recovery attempt=${attempt.number} skipped: Surface unavailable",
+            )
+            scheduleRenderRecovery()
+            return
+        }
+        val result = ViewerNative.rebindSurfacePort(
+            nativeState,
+            instanceId,
+            surface,
+            port,
+            host,
+            sourceWidth,
+            sourceHeight,
+            fps,
+        )
+        surfaceAttached = result == 0
+        android.util.Log.i(
+            "LeftcarStream",
+            "local render recovery attempt=${attempt.number} result=$result " +
+                "port=$port source=${sourceWidth}x$sourceHeight fps=$fps",
+        )
+        if (result == 0) {
+            terminationHandled = false
+            recoveryFallbackEmitted = false
+            hud?.onRebindFinished(true)
+        } else {
+            hud?.onRebindFinished(false)
+            scheduleRenderRecovery()
+        }
+    }
+
+    private fun markRenderHealthy() {
+        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+        recoveryRetryRunnable = null
+        recoveryRetryPolicy.reset()
+        recoveryFallbackEmitted = false
     }
 
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
@@ -290,7 +381,14 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             setTaskDescription(android.app.ActivityManager.TaskDescription(displayName))
         }
         showFps = intent?.getBooleanExtra("showFps", true) ?: true
-        hud = StreamHudController(this, instanceId, fps, showFps, ::handleTermination)
+        hud = StreamHudController(
+            this,
+            instanceId,
+            fps,
+            showFps,
+            ::handleTermination,
+            ::markRenderHealthy,
+        )
         hud?.show()
         surfaces.requestFocus()
         hideSystemBars()
@@ -316,10 +414,51 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
 
         setIntent(newIntent)
         if (streamConfigurationChanged || reconnectRequested) {
-            // Recreate inside the same document task so the native decoder and
-            // Surface are rebuilt with the new stream configuration or after
-            // a Host-restart recovery reclaimed the old renderer.
-            recreate()
+            host = nextHost
+            port = nextPort
+            fps = nextFps
+            showFps = nextShowFps
+            sourceWidth = nextWidth
+            sourceHeight = nextHeight
+            splitVertical = nextSplitVertical
+            splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
+            if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {
+                val surface = streamSurfaces?.left?.holder?.surface
+                val result = if (surface != null && nativeState != 0L && !released) {
+                    ViewerNative.rebindSurfacePort(
+                        nativeState,
+                        instanceId,
+                        surface,
+                        port,
+                        host,
+                        sourceWidth,
+                        sourceHeight,
+                        fps,
+                    )
+                } else {
+                    -1
+                }
+                surfaceAttached = result == 0
+                hud?.onRebindFinished(result == 0)
+                if (result == 0) {
+                    terminationHandled = false
+                    recoveryRetryPolicy.reset()
+                    recoveryFallbackEmitted = false
+                }
+                if (result != 0) {
+                    // Leave the Activity and Surface visible. The controller's
+                    // bounded retry can deliver another intent to this same
+                    // instance without opening a second window.
+                    android.util.Log.w(
+                        "LeftcarStream",
+                        "same-window rebind failed result=$result; retaining Activity",
+                    )
+                }
+            } else {
+                surfaceGeneration += 1
+                cancelPendingSurfaceAttach()
+                hud?.showRebindIndicator("화면을 다시 연결할 준비 중")
+            }
         } else {
             val nextDisplayName = newIntent.getStringExtra("displayName")?.takeIf { it.isNotBlank() }
             if (nextDisplayName != null) {
@@ -411,7 +550,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             // Native attach clears a retained reason for this logical instance
             // before creating the new renderer. Only then may the HUD consume
             // a fresh termination reason.
+            hud?.resetTerminationPolling()
             hud?.armTerminationPolling()
+            hud?.clearRebindIndicator()
         }
         android.util.Log.i(
             "LeftcarStream",
@@ -507,6 +648,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         }
         surfaceGeneration += 1
         cancelPendingSurfaceAttach()
+        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+        recoveryRetryRunnable = null
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         hud?.stop()
         hud = null

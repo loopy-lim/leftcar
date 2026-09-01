@@ -211,7 +211,7 @@ describe("startPreparedStream", () => {
     });
   });
 
-  it("falls back from the split diagnostic wire ID to auto on one receiver port", async () => {
+  it("keeps a capability-backed split selection on direct UDP", async () => {
     const { control, launcher } = harness();
     const splitArgs: StartStreamArgs = {
       ...args,
@@ -229,13 +229,13 @@ describe("startPreparedStream", () => {
       }),
     ).resolves.toMatchObject({
       mediaTransport: "udp",
-      encoderExperiment: "auto",
+      encoderExperiment: "splitVertical",
     });
     expect(launcher.prepareStream).toHaveBeenCalledWith(
       5003,
       "192.168.0.134",
       "udp",
-      "auto",
+      "splitVertical",
     );
     expect(launcher.openStream).toHaveBeenCalledWith(
       5003,
@@ -243,9 +243,35 @@ describe("startPreparedStream", () => {
       3840,
       2160,
       60,
-      "auto",
+      "splitVertical",
       undefined,
       true,
+    );
+  });
+
+  it("surfaces preparation failures for an explicitly selected split path", async () => {
+    const { control, launcher } = harness();
+    launcher.prepareStream = vi.fn(async () => {
+      throw new Error("dual decoder unavailable");
+    });
+
+    await expect(
+      startPreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        advertisedEncoderExperiments,
+        args: {
+          ...args,
+          mediaTransport: "udp",
+          encoderExperiment: "splitVertical",
+        },
+      }),
+    ).rejects.toThrow("dual decoder unavailable");
+    expect(launcher.prepareStream).toHaveBeenCalledTimes(1);
+    expect(control.request).not.toHaveBeenCalledWith(
+      "startStream",
+      expect.anything(),
     );
   });
 
@@ -395,6 +421,84 @@ describe("startPreparedStream", () => {
       mediaTransport: "udp",
       viewerIps: ["192.168.0.42"],
     });
+  });
+
+  it("automatically selects split AVE for a capability-backed 4K UDP stream", async () => {
+    const { control, launcher } = harness();
+    await expect(
+      startPreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        advertisedEncoderExperiments,
+        args: {
+          ...args,
+          mediaTransport: "udp",
+          encoderExperiment: "auto",
+        },
+      }),
+    ).resolves.toMatchObject({
+      mediaTransport: "udp",
+      encoderExperiment: "splitVertical",
+    });
+    expect(control.request).toHaveBeenCalledWith("startStream", expect.objectContaining({
+      mediaTransport: "udp",
+      encoderExperiment: "splitVertical",
+    }));
+    expect(launcher.prepareStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      "udp",
+      "splitVertical",
+    );
+  });
+
+  it("falls back to the single hardware path when automatic split preparation is unavailable", async () => {
+    const { control, launcher } = harness();
+    launcher.prepareStream = vi.fn(async (_port, _host, _transport, experiment) => {
+      if (experiment === "splitVertical") {
+        throw new Error("dual decoder unavailable");
+      }
+    });
+
+    await expect(
+      startPreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        advertisedEncoderExperiments,
+        args: {
+          ...args,
+          mediaTransport: "udp",
+          encoderExperiment: "auto",
+        },
+      }),
+    ).resolves.toMatchObject({
+      mediaTransport: "udp",
+      encoderExperiment: "auto",
+    });
+    expect(launcher.prepareStream).toHaveBeenNthCalledWith(
+      1,
+      5003,
+      "192.168.0.134",
+      "udp",
+      "splitVertical",
+    );
+    expect(launcher.cancelPreparedStream).toHaveBeenCalledWith(
+      5003,
+      "splitVertical",
+    );
+    expect(launcher.prepareStream).toHaveBeenNthCalledWith(
+      2,
+      5003,
+      "192.168.0.134",
+      "udp",
+      "auto",
+    );
+    expect(control.request).toHaveBeenCalledWith("startStream", expect.objectContaining({
+      mediaTransport: "udp",
+      encoderExperiment: "auto",
+    }));
   });
 
   it("uses one replacement boundary for successful restore and transport results", () => {

@@ -2,7 +2,7 @@
 
 use control_contract::host::{
     phase_a_encoder_experiments, AddNumbersInput, AddNumbersOutput, CatalogView, PairingOfferView,
-    StartStreamInput, StartStreamOutput,
+    ReconfigureStreamInput, StartStreamInput, StartStreamOutput,
 };
 
 #[test]
@@ -319,6 +319,10 @@ fn udp_stability_contract_roundtrips_requested_and_applied_settings() {
 
     let output = StartStreamOutput {
         session: 7,
+        width: 3840,
+        height: 2160,
+        fps: 60,
+        quality_state: "native".into(),
         udp_stability: Some(AppliedUdpStability {
             requested: UdpStabilityProfile::Stable,
             applied: UdpStabilityProfile::Stable,
@@ -332,4 +336,25 @@ fn udp_stability_contract_roundtrips_requested_and_applied_settings() {
     assert!(encoded.contains("\"udpStability\""));
     let decoded: StartStreamOutput = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded.udp_stability.unwrap().fec_parity_shards, 4);
+}
+
+#[test]
+fn adaptive_target_receipt_and_reconfigure_payload_roundtrip() {
+    let output: StartStreamOutput = serde_json::from_str(
+        r#"{"session":42,"width":3840,"height":2160,"fps":60,"qualityState":"native"}"#,
+    )
+    .unwrap();
+    assert_eq!((output.width, output.height, output.fps), (3840, 2160, 60));
+    assert_eq!(output.quality_state, "native");
+
+    let input: ReconfigureStreamInput = serde_json::from_str(
+        r#"{"session":42,"width":2560,"height":1440,"fps":60,"qualityState":"fallback"}"#,
+    )
+    .unwrap();
+    assert_eq!(input.session, 42);
+    assert_eq!((input.width, input.height, input.fps), (2560, 1440, 60));
+    assert_eq!(input.quality_state, "fallback");
+    assert!(serde_json::to_string(&input)
+        .unwrap()
+        .contains("\"qualityState\":\"fallback\""));
 }

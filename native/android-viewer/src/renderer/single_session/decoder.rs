@@ -103,6 +103,7 @@ pub(super) fn handle_codec_config_packet(
                         fps,
                         codec_name: Some(codec_name),
                         allow_mime_fallback: true,
+                        max_frame_size: Some((width, height)),
                     },
                 )
             };

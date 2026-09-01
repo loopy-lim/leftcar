@@ -295,6 +295,11 @@ final class CaptureSession {
     // minute.
      var consecutiveCongestedWindows = 0
      var consecutiveRaiseSteps = 0
+    // Adaptive-resolution interaction: the count and reason of congestion
+    // windows where the bitrate floor consumed the whole 4K budget, so Host
+    // status can distinguish `resolution_changed` from `bitrate_changed`.
+     var bitrateFloorCollapseCount: Int64 = 0
+     var bitrateFloorCollapseLastReason = "none"
      var healthCheckScheduled = false
     // Single-session VideoToolbox submissions stay owned by this ledger until
     // callback, synchronous submit failure, or watchdog reclaim wins the slot.

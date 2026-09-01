@@ -133,6 +133,26 @@ extension CaptureSession {
         let target: Int
         if congestionConfirmed {
             target = max(floorBitrate, Int(Double(current) * 0.80))
+            // The congestion floor has consumed the 4K bitrate budget: the
+            // rate controller cannot restore the frame rate on its own.
+            // Record the hand-off so the Viewer's resolution policy sees a
+            // floor-collapse signal instead of an ordinary bitrate window.
+            if adaptiveBitrateFloorDecision(
+                activeWidth: Int(outWidth),
+                activeHeight: Int(outHeight),
+                floorBitrate: floorBitrate,
+                currentBitrate: target
+            ) == .downshiftTo1440p {
+                stateLock.lock()
+                bitrateFloorCollapseCount &+= 1
+                bitrateFloorCollapseLastReason = "floor_reached_4k"
+                stateLock.unlock()
+                NSLog(
+                    "Leftcar %@ adaptive bitrate floor collapse: 4K fallback requested at %d bps",
+                    codecKind.rawValue.uppercased(),
+                    target
+                )
+            }
         } else if highMotion {
             // Raise the budget as soon as a sustained high-change scene is
             // observed. This avoids waiting through eight stable windows,

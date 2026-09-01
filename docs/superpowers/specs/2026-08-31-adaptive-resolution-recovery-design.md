@@ -223,7 +223,8 @@ Automated tests must prove:
 7. existing Rust, Swift, TypeScript, Kotlin, architecture, and Android build
    gates; React Doctor `100 / 100` after any React/React Native change.
 
-Physical verification uses only Lenovo Yoga Tab `192.168.0.18:40607`:
+Physical verification uses only the Lenovo Yoga Tab (`192.168.0.18`; its adb
+port rotates, so match by IP):
 
 - an exact 4K moving source starts at 3840x2160, then steps to 2560x1440 if
   sustained congestion is observed;
@@ -243,3 +244,75 @@ proves the adaptive policy and the connected device's observed behavior.
 - Upscaling a source in automatic mode.
 - Claiming panel or photon-level FPS from software counters.
 - Resetting or overwriting unrelated dirty worktree changes.
+
+## Physical verification results (2026-08-31/09-01, Lenovo Yoga Tab run only)
+
+Executed against `192.168.0.18` (TB522FU untouched). Evidence:
+`/tmp/leftcar-adaptive-host.jsonl` (5,759 one-second getStatus records),
+`/tmp/leftcar-adaptive-logcat.log` (325,981 lines),
+`/tmp/leftcar-adaptive-pid.log`, summary in `/tmp/leftcar-adaptive-summary.md`.
+
+- Non-4K negative check: **passed.** Session 5 (1080p profile) emitted 113
+  records, all `1920x1080` with `qualityState=native`; zero 4K requests.
+- 4K organic downshift: **not fired.** Session 4 (3840x2160, 564 samples)
+  never met the trigger (receiver gap increase AND encodeOutputFps < 54):
+  loss events existed (gaps 0->26, paired IDR episodes 0->38, recovery
+  keyframes 0->39, suppressed recovery requests 0->10) but encoder FPS was
+  57-60 at every loss sample, and `qualityState` stayed `native` throughout.
+- Upshift: not exercised — no downshift ever produced a fallback stream.
+- Same-window rebind / PID invariance: not observed — no rebind occurred.
+- No reason-5 finish/reopen loop appeared (all restarts were manual).
+
+Two structural findings explain the absence, both measured and code-traced:
+
+1. **The observer and the stream cannot stay awake together.** The adaptive
+   loop lives in viewer JS (`use-stream-controller.ts` 1s react-query
+   refetch). While native `StreamActivity` is foreground, React Native timers
+   suspend — measured zero `:7777` control traffic across 12 lsof samples and
+   nettop connection samples. Conversely, bringing MainActivity forward
+   detaches the stream Surface immediately (logcat 02:58:36.883), the native
+   renderer's LCF1 feedback stops, and the host health check kills the session
+   after 5s of feedback silence
+   (`CaptureSession+Lifecycle.swift` receiver-health check): measured focus
+   at 02:58:41.6, session gone 02:58:46-47 (~5.2s). The earlier session 2
+   congestion episode (02:11:26-31, two+ consecutive trigger windows) went
+   unobserved for the same reason.
+2. **Raw-RPC reconfigure races the viewer's auto-restore.** `reconfigureStream`
+   stops the old capture first, which notifies reason=3; the native layer
+   finishes the window without telling JS (`StreamActivity.kt` reasons 1-3 are
+   local), the JS hostStatus poll then observes a stats-less session as
+   unhealthy and its auto-restore issues `stopStream`, deleting the session
+   from the live map — so the final reconfigure lookup fails
+   (`"session N ended during reconfigure"`, reproduced 02:25:31, session 3).
+   The designed JS path (`reconfigurePreparedStream`) has no claim that closes
+   this window either.
+
+The adaptive policy itself (Swift state machine, tests) behaved as designed
+wherever it ran; the gap is that nothing awake owns the observation loop for a
+live stream.
+
+## Direction correction: host-driven transitions
+
+The original design assigned the observation loop to
+`use-stream-controller.ts`. The physical results above supersede that
+assignment: a JS-timer observer is dormant exactly when the stream is alive,
+and forcing it awake kills the stream. Future work should move the trigger to
+the layer that already has every congestion signal while the session lives:
+
+- The capture shim (which already hosts `AdaptiveResolutionPolicy` and the
+  receiver-loss telemetry) publishes a resolution-transition request over the
+  existing authenticated control channel instead of, or ahead of, any JS
+  polling.
+- Host `control.rs` gains a host-driven reconfigure mode that suppresses the
+  reason=3 viewer-facing stop while swapping capture targets, keeping the
+  session in the live map throughout.
+- Native `StreamActivity`/android-viewer consumes the transition like a
+  reason-4/5-style bounded rebind (same Surface, generation-gated publish),
+  reporting success/failure so a failed upshift keeps the fallback target.
+- Viewer JS keeps only status display (`qualityState`), removing the hot-path
+  polling dependency.
+
+This keeps the design's thresholds, cooldowns, and failure semantics
+unchanged; only the ownership of observation and initiation moves. The
+revision remains out of scope until a follow-up change implements it; the
+implemented JS-loop hunks stay as-is in the working tree.

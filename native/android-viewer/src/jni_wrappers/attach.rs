@@ -162,6 +162,53 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_rebindSurfacePort(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    surface: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+    width: i32,
+    height: i32,
+    fps: i32,
+) -> i32 {
+    if port <= 0 || port > i32::from(u16::MAX) {
+        return 4;
+    }
+    let instance = match unsafe { get_utf(env, instance) } {
+        Some(instance) => instance,
+        None => return 1,
+    };
+    let host = match unsafe { get_utf(env, host) } {
+        Some(host) => host,
+        None => return 1,
+    };
+    let window = unsafe { ANativeWindow_fromSurface(env, surface) };
+    if window.is_null() {
+        return 4;
+    }
+    let result = unsafe {
+        leftcar_jni_rebind_port(
+            state as *mut c_void,
+            instance.as_ptr(),
+            window,
+            port as u16,
+            host.as_ptr(),
+            width.max(1) as u32,
+            height.max(1) as u32,
+            fps.clamp(1, 90) as u32,
+        )
+    };
+    if result != 0 {
+        unsafe { leftcar_jni_surface_ref(window, false) };
+    }
+    result
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSplitSurfaces(
     env: *mut JNIEnv,
     _class: *mut jobject,

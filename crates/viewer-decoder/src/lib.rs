@@ -58,6 +58,29 @@ mod tests {
     }
 
     #[test]
+    fn decoder_max_frame_size_prefers_explicit_source_bound() {
+        assert_eq!(
+            decoder_max_frame_size(Some((3840, 2160)), 2560, 1440),
+            Some((3840, 2160))
+        );
+    }
+
+    #[test]
+    fn decoder_max_frame_size_without_bound_is_none() {
+        assert_eq!(decoder_max_frame_size(None, 2560, 1440), None);
+    }
+
+    #[test]
+    fn decoder_max_frame_size_covers_active_when_bound_is_smaller() {
+        // A malformed bound below the active frame must never clip the
+        // currently decodable size; the max is the union of both.
+        assert_eq!(
+            decoder_max_frame_size(Some((1280, 720)), 2560, 1440),
+            Some((2560, 1440))
+        );
+    }
+
+    #[test]
     fn extract_config_none_without_sps_pps() {
         let delta = au(&[&[0x41, 0x9A]]);
         assert!(extract_config(&[&delta]).is_none());

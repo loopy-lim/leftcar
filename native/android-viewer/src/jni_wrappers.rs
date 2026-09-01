@@ -75,6 +75,16 @@ extern "C" {
         height: u32,
         fps: u32,
     ) -> i32;
+    fn leftcar_jni_rebind_port(
+        state: *mut c_void,
+        instance: *const c_char,
+        surface: *mut c_void,
+        port: u16,
+        host: *const c_char,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> i32;
     fn leftcar_jni_attach_split_port(
         state: *mut c_void,
         instance: *const c_char,

@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 pub(super) const RENDER_IDR_DEADLINE: Duration = Duration::from_millis(250);
 pub(super) const RENDER_REBUILD_DEADLINE: Duration = Duration::from_millis(750);
-pub(super) const RENDER_TERMINATE_DEADLINE: Duration = Duration::from_secs(3);
+pub(super) const RENDER_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(1_500);
+pub(super) const RENDER_MAX_RECOVERY_RETRIES: u8 = 4;
+pub(super) const RENDER_TERMINATE_DEADLINE: Duration = Duration::from_secs(12);
 pub(super) const MISSED_CONTROL_PROBE_LIMIT: u8 = 3;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -42,6 +44,8 @@ pub(super) struct RenderHealthState {
     incident_started_at: Option<Instant>,
     idr_requested: bool,
     decoder_rebuilt: bool,
+    recovery_attempts: u8,
+    last_recovery_at: Option<Instant>,
     terminated: bool,
 }
 
@@ -70,6 +74,9 @@ impl RenderHealthState {
         if !access_units_advanced {
             return RenderHealthAction::None;
         }
+        if self.terminated {
+            return RenderHealthAction::None;
+        }
 
         let incident_started_at = *self.incident_started_at.get_or_insert(now);
         let incident_age = now.saturating_duration_since(incident_started_at);
@@ -77,8 +84,16 @@ impl RenderHealthState {
             self.terminated = true;
             return RenderHealthAction::TerminateRenderStalled;
         }
-        if incident_age >= RENDER_REBUILD_DEADLINE && !self.decoder_rebuilt {
+        let recovery_retry_due = self.last_recovery_at.is_none_or(|last| {
+            now.saturating_duration_since(last) >= RENDER_RECOVERY_RETRY_INTERVAL
+        });
+        if incident_age >= RENDER_REBUILD_DEADLINE
+            && recovery_retry_due
+            && self.recovery_attempts < RENDER_MAX_RECOVERY_RETRIES
+        {
             self.decoder_rebuilt = true;
+            self.recovery_attempts = self.recovery_attempts.saturating_add(1);
+            self.last_recovery_at = Some(now);
             return RenderHealthAction::RebuildDecoder;
         }
         if incident_age >= RENDER_IDR_DEADLINE && !self.idr_requested {
@@ -92,6 +107,8 @@ impl RenderHealthState {
         self.incident_started_at = None;
         self.idr_requested = false;
         self.decoder_rebuilt = false;
+        self.recovery_attempts = 0;
+        self.last_recovery_at = None;
         self.terminated = false;
     }
 }
@@ -222,6 +239,42 @@ mod tests {
         assert_eq!(
             health.observe(start + Duration::from_secs(4), 8, 0),
             RenderHealthAction::None
+        );
+    }
+
+    #[test]
+    fn stalled_render_retries_decoder_before_using_the_long_grace_deadline() {
+        let start = Instant::now();
+        let mut health = RenderHealthState::default();
+
+        assert_eq!(health.observe(start, 1, 0), RenderHealthAction::None);
+        assert_eq!(
+            health.observe(start + RENDER_IDR_DEADLINE, 2, 0),
+            RenderHealthAction::RequestIdr
+        );
+        assert_eq!(
+            health.observe(start + RENDER_REBUILD_DEADLINE, 3, 0),
+            RenderHealthAction::RebuildDecoder
+        );
+        assert_eq!(
+            health.observe(start + Duration::from_millis(2_250), 4, 0),
+            RenderHealthAction::RebuildDecoder
+        );
+        assert_eq!(
+            health.observe(start + Duration::from_millis(3_750), 5, 0),
+            RenderHealthAction::RebuildDecoder
+        );
+        assert_eq!(
+            health.observe(start + Duration::from_millis(5_250), 6, 0),
+            RenderHealthAction::RebuildDecoder
+        );
+        assert_eq!(
+            health.observe(start + Duration::from_secs(6), 7, 0),
+            RenderHealthAction::None
+        );
+        assert_eq!(
+            health.observe(start + Duration::from_secs(12), 8, 0),
+            RenderHealthAction::TerminateRenderStalled
         );
     }
 

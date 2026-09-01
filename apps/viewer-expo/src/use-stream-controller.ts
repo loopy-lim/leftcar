@@ -9,6 +9,15 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert } from "react-native";
 import { replaceRestartedStreamState } from "./launch-stream";
+import {
+  createAdaptiveResolutionState,
+  observeAdaptiveResolution,
+  recordAdaptiveResolutionResult,
+  type AdaptiveQualityState,
+  type AdaptiveResolutionAction,
+  type AdaptiveResolutionState,
+  type AdaptiveTarget,
+} from "./adaptive-resolution";
 import { requestWithReconnect } from "./catalog-helpers";
 import { controlHost } from "./session";
 import { shouldSwitchTransport } from "./transport-switch";
@@ -33,12 +42,22 @@ import type { UdpStabilitySelection } from "./udp-stability";
 export function useStreamController(
   setError: Dispatch<SetStateAction<string | null>>,
   restoreStream: (active: ActiveStream) => Promise<RestoredStream>,
+  reconfigureStream?: (
+    active: ActiveStream,
+    target: AdaptiveTarget,
+    qualityState: AdaptiveQualityState,
+  ) => Promise<RestoredStream>,
 ) {
   const [streams, setStreams] = useState<ActiveStream[]>([]);
   const heartbeatInFlight = useRef(new Set<number>());
   const lastRestartAt = useRef(new Map<number, number>());
   const notifiedTerminations = useRef(new Set<number>());
   const streamsRef = useRef<ActiveStream[]>([]);
+  const adaptiveStates = useRef(new Map<number, AdaptiveResolutionState>());
+  const adaptiveLoss = useRef(new Map<number, number>());
+  const adaptiveRecovery = useRef(new Map<number, number>());
+  const adaptiveRebinds = useRef(new Set<number>());
+  const reconfigureStreamRef = useRef(reconfigureStream);
   const updateStreams = useCallback(
     (transition: (previous: ActiveStream[]) => ActiveStream[]) => {
       const next = transition(streamsRef.current);
@@ -64,7 +83,7 @@ export function useStreamController(
   const statusQuery = useQuery({
     queryKey: ["host-status", host],
     queryFn: () => requestWithReconnect<StatusView>("getStatus"),
-    refetchInterval: 2_000,
+    refetchInterval: 1_000,
     staleTime: 1_000,
   });
   const statusView = statusQuery.data;
@@ -106,6 +125,30 @@ export function useStreamController(
   useEffect(() => {
     restartStreamRef.current = restartStream;
   }, [restartStream]);
+
+  useEffect(() => {
+    reconfigureStreamRef.current = reconfigureStream;
+  }, [reconfigureStream]);
+
+  useEffect(() => {
+    const activeIds = new Set(streams.map((stream) => stream.session));
+    for (const active of streams) {
+      if (!adaptiveStates.current.has(active.session)) {
+        adaptiveStates.current.set(
+          active.session,
+          createAdaptiveResolutionState(active.sourceTarget),
+        );
+      }
+    }
+    for (const session of adaptiveStates.current.keys()) {
+      if (!activeIds.has(session)) {
+        adaptiveStates.current.delete(session);
+        adaptiveLoss.current.delete(session);
+        adaptiveRecovery.current.delete(session);
+        adaptiveRebinds.current.delete(session);
+      }
+    }
+  }, [streams]);
 
   useEffect(() => {
     const subscription = subscribeStreamTermination((event) => {
@@ -205,6 +248,106 @@ export function useStreamController(
     }
   }, [restartStream, statusView, streams, updateStreams]);
 
+  const runAdaptiveRebind = useCallback(
+    async (
+      active: ActiveStream,
+      state: AdaptiveResolutionState,
+      action: Exclude<AdaptiveResolutionAction, { kind: "keep" }>,
+    ) => {
+      const reconfigure = reconfigureStreamRef.current;
+      if (!reconfigure || adaptiveRebinds.current.has(active.session)) return;
+      adaptiveRebinds.current.add(active.session);
+      const pendingQualityState: AdaptiveQualityState =
+        action.kind === "downshift" ? "fallback" : "native";
+      try {
+        const restarted = await reconfigure(active, action.target, pendingQualityState);
+        const acceptedTarget = {
+          width: restarted.width ?? action.target.width,
+          height: restarted.height ?? action.target.height,
+          fps: restarted.fps ?? action.target.fps,
+        };
+        const result = recordAdaptiveResolutionResult(
+          state,
+          action,
+          true,
+          Date.now(),
+        );
+        adaptiveStates.current.set(active.session, result.state);
+        updateStreams((previous) => previous.map((item) => {
+          if (item.session !== active.session) return item;
+          return {
+            ...item,
+            ...restarted,
+            width: acceptedTarget.width,
+            height: acceptedTarget.height,
+            fps: acceptedTarget.fps,
+            activeTarget: acceptedTarget,
+            qualityState: restarted.qualityState ?? result.state.qualityState,
+          };
+        }));
+        setError(null);
+      } catch (error) {
+        const result = recordAdaptiveResolutionResult(
+          state,
+          action,
+          false,
+          Date.now(),
+        );
+        adaptiveStates.current.set(active.session, result.state);
+        setError(
+          `해상도 전환에 실패했습니다. 현재 화면에서 다시 시도할 수 있습니다: ${String(
+            error instanceof Error ? error.message : error,
+          )}`,
+        );
+      } finally {
+        adaptiveRebinds.current.delete(active.session);
+      }
+    },
+    [setError, updateStreams],
+  );
+
+  useEffect(() => {
+    if (!statusView || !reconfigureStreamRef.current) return;
+    const sessionsById = new Map(
+      statusView.sessions.map((session) => [session.session, session]),
+    );
+    for (const active of streamsRef.current) {
+      const session = sessionsById.get(active.session);
+      if (!session) continue;
+      const loss =
+        (session.receiverFrameGaps ?? 0) +
+        (session.receiverInputDrops ?? 0) +
+        (session.receiverIncompleteAus ?? 0) +
+        (session.receiverStaleInputDrops ?? session.receiverStaleFrames ?? 0);
+      const recovery =
+        (session.recoveryKeyframes ?? 0) +
+        (session.receiverPairedIdrEpisodes ?? 0) +
+        (session.receiverSuppressedRecoveryRequests ?? 0);
+      const previousLoss = adaptiveLoss.current.get(active.session);
+      const previousRecovery = adaptiveRecovery.current.get(active.session);
+      adaptiveLoss.current.set(active.session, loss);
+      adaptiveRecovery.current.set(active.session, recovery);
+      if (previousLoss === undefined || previousRecovery === undefined) continue;
+      const state = adaptiveStates.current.get(active.session) ??
+        createAdaptiveResolutionState(active.sourceTarget);
+      const observed = observeAdaptiveResolution(state, {
+        nowMs: Date.now(),
+        receiverLossDelta: Math.max(0, loss - previousLoss),
+        encodedFps: session.encodeOutputFps ?? session.fps,
+        transmittedFps: session.fps,
+        requestedFps: active.activeTarget.fps,
+        queueAgeUs: session.pendingFrameOldestAgeUs ?? 0,
+        latencyBudgetUs: 100_000,
+        recoveryActive: recovery > previousRecovery,
+        rebindInFlight: adaptiveRebinds.current.has(active.session),
+      });
+      adaptiveStates.current.set(active.session, observed.state);
+      if (observed.action.kind !== "keep") {
+        void runAdaptiveRebind(active, observed.state, observed.action);
+      }
+    }
+  }, [runAdaptiveRebind, statusView]);
+
   const [usbState, setUsbState] = useState<UsbAccessoryState>({
     attached: false,
     controlPort: 0,
@@ -228,7 +371,11 @@ export function useStreamController(
       for (const active of streamsRef.current) {
         if (
           target === active.mediaTransport ||
-          !shouldSwitchTransport(active.mediaTransport, usbState)
+          !shouldSwitchTransport(
+            active.mediaTransport,
+            usbState,
+            active.encoderExperiment,
+          )
         ) {
           continue;
         }

@@ -6,8 +6,8 @@
 
 use crate::backend::SharedBackend;
 use control_contract::host::{
-    CatalogView, EncoderExperiment, EncoderExperimentInfo, SessionView, StartStreamInput,
-    StartStreamOutput, StatusView,
+    CatalogView, EncoderExperiment, EncoderExperimentInfo, ReconfigureStreamInput,
+    ReconfigureStreamOutput, SessionView, StartStreamInput, StartStreamOutput, StatusView,
 };
 use control_contract::udp_stability::{
     host_udp_stability_capabilities, resolve_udp_stability, AppliedUdpStability,
@@ -29,6 +29,13 @@ struct Session {
     handle: u32,
     source_index: u32,
     source_name: String,
+    width: u32,
+    height: u32,
+    fps_target: u32,
+    quality_state: String,
+    capture_backend: String,
+    content_mode: String,
+    encoder_experiment: EncoderExperiment,
     viewer_addr: String,
     viewer_port: u16,
     media_transport: String,
@@ -122,8 +129,9 @@ fn advertised_encoder_experiments(
             EncoderExperiment::Auto
             | EncoderExperiment::RateControl
             | EncoderExperiment::AdaptiveQp
-            | EncoderExperiment::EncoderPool => entry.id,
-            EncoderExperiment::SplitHorizontal | EncoderExperiment::SplitVertical => continue,
+            | EncoderExperiment::EncoderPool
+            | EncoderExperiment::SplitVertical => entry.id,
+            EncoderExperiment::SplitHorizontal => continue,
         };
         if normalized
             .iter()
@@ -142,7 +150,12 @@ fn encoder_experiment_is_startable(
     split_diagnostic_enabled: bool,
 ) -> bool {
     match requested {
-        EncoderExperiment::SplitVertical => split_diagnostic_enabled,
+        EncoderExperiment::SplitVertical => {
+            split_diagnostic_enabled
+                || advertised
+                    .iter()
+                    .any(|entry| entry.id == EncoderExperiment::SplitVertical)
+        }
         EncoderExperiment::SplitHorizontal => false,
         _ => advertised.iter().any(|entry| entry.id == requested),
     }
@@ -261,6 +274,182 @@ impl ControlServer {
 
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
+    }
+
+    async fn reconfigure_stream(
+        &self,
+        input: ReconfigureStreamInput,
+    ) -> Result<ReconfigureStreamOutput, String> {
+        if input.width == 0
+            || input.height == 0
+            || input.width > 8192
+            || input.height > 8192
+            || input.fps == 0
+            || input.fps > 90
+        {
+            return Err("unsupported stream dimensions or fps".into());
+        }
+        if !matches!(input.quality_state.as_str(), "native" | "fallback" | "downshifting" | "upshifting") {
+            return Err("unsupported quality state".into());
+        }
+        let settled_quality_state = match input.quality_state.as_str() {
+            "fallback" | "downshifting" => "fallback",
+            _ => "native",
+        };
+
+        let previous = {
+            let state = self.sessions.lock().unwrap();
+            let session = state
+                .live
+                .get(&input.session)
+                .filter(|session| !session.backend_released)
+                .ok_or_else(|| format!("no such session {}", input.session))?;
+            let viewer_host = session
+                .viewer_addr
+                .rsplit_once(':')
+                .map(|(host, _)| host.to_owned())
+                .ok_or_else(|| "session viewer address is invalid".to_owned())?;
+            (
+                session.handle,
+                session.source_index,
+                viewer_host,
+                session.viewer_port,
+                session.capture_backend.clone(),
+                session.media_transport.clone(),
+                session.content_mode.clone(),
+                session.encoder_experiment,
+                session.udp_stability.clone(),
+                session.width,
+                session.height,
+                session.fps_target,
+                session.quality_state.clone(),
+            )
+        };
+
+        self.backend.stop(previous.0)?;
+        cleanup_media_transport(&previous.5, previous.3);
+
+        let default_udp_stability = AppliedUdpStability {
+            requested: control_contract::udp_stability::UdpStabilityProfile::Auto,
+            applied: control_contract::udp_stability::UdpStabilityProfile::Auto,
+            burst_datagrams: 0,
+            fec_parity_shards: 0,
+            adaptive_pacing: false,
+            fallback_reason: None,
+        };
+        let udp_stability = previous.8.as_ref().unwrap_or(&default_udp_stability);
+        let replacement_encoder_experiment =
+            if previous.7 == EncoderExperiment::SplitVertical
+                && (input.width != 3_840 || input.height != 2_160)
+            {
+                EncoderExperiment::Auto
+            } else {
+                previous.7
+            };
+        let start_replacement = |width: u32, height: u32, fps: u32, experiment: EncoderExperiment| {
+            self.backend.start(
+                previous.1,
+                &previous.2,
+                previous.3,
+                width,
+                height,
+                fps,
+                &previous.4,
+                &previous.5,
+                &previous.6,
+                experiment,
+                udp_stability,
+            )
+        };
+
+        let replacement = start_replacement(
+            input.width,
+            input.height,
+            input.fps,
+            replacement_encoder_experiment,
+        );
+        let replacement_handle = match replacement {
+                Ok(handle) => match self.wait_for_first_frame(handle).await {
+                    Ok(()) => handle,
+                    Err(error) => {
+                        let _ = self.backend.stop(handle);
+                        cleanup_media_transport(&previous.5, previous.3);
+                        let recovered = match start_replacement(
+                        previous.9,
+                        previous.10,
+                        previous.11,
+                        previous.7,
+                    ) {
+                        Ok(recovered) => match self.wait_for_first_frame(recovered).await {
+                            Ok(()) => Ok(recovered),
+                            Err(recovery_error) => Err(recovery_error),
+                        },
+                        Err(recovery_error) => Err(recovery_error),
+                    };
+                    let mut state = self.sessions.lock().unwrap();
+                    if let Some(session) = state.live.get_mut(&input.session) {
+                        if let Ok(recovered) = recovered {
+                            session.handle = recovered;
+                            session.backend_released = false;
+                        } else {
+                            session.terminal_error = Some(error.clone());
+                            session.terminal_since = Some(Instant::now());
+                            session.backend_released = true;
+                        }
+                    }
+                    return Err(format!("replacement stream startup failed: {error}"));
+                }
+            },
+            Err(error) => {
+                cleanup_media_transport(&previous.5, previous.3);
+                let recovered = match start_replacement(
+                    previous.9,
+                    previous.10,
+                    previous.11,
+                    previous.7,
+                ) {
+                    Ok(recovered) => match self.wait_for_first_frame(recovered).await {
+                        Ok(()) => Ok(recovered),
+                        Err(recovery_error) => Err(recovery_error),
+                    },
+                    Err(recovery_error) => Err(recovery_error),
+                };
+                let mut state = self.sessions.lock().unwrap();
+                if let Some(session) = state.live.get_mut(&input.session) {
+                    if let Ok(recovered) = recovered {
+                        session.handle = recovered;
+                        session.backend_released = false;
+                    } else {
+                        session.terminal_error = Some(error.clone());
+                        session.terminal_since = Some(Instant::now());
+                        session.backend_released = true;
+                    }
+                }
+                return Err(format!("replacement stream failed: {error}"));
+            }
+        };
+
+        let mut state = self.sessions.lock().unwrap();
+        let session = state
+            .live
+            .get_mut(&input.session)
+            .ok_or_else(|| format!("session {} ended during reconfigure", input.session))?;
+        session.handle = replacement_handle;
+        session.width = input.width;
+        session.height = input.height;
+        session.fps_target = input.fps;
+        session.quality_state = settled_quality_state.into();
+        session.encoder_experiment = replacement_encoder_experiment;
+        session.terminal_error = None;
+        session.terminal_since = None;
+        session.backend_released = false;
+        Ok(ReconfigureStreamOutput {
+            session: input.session,
+            width: input.width,
+            height: input.height,
+            fps: input.fps,
+            quality_state: settled_quality_state.into(),
+        })
     }
 
     async fn wait_for_first_frame(&self, handle: u32) -> Result<(), String> {
@@ -453,10 +642,13 @@ impl ControlServer {
                     source_index: s.source_index,
                     source_name: s.source_name.clone(),
                     viewer_addr: s.viewer_addr.clone(),
+                    width: s.width,
+                    height: s.height,
                     state: metrics.state,
                     fps: metrics.fps,
                     kbps: metrics.kbps,
-                    fps_target: metrics.fps_target,
+                    fps_target: s.fps_target,
+                    quality_state: s.quality_state.clone(),
                     udp_stability: s.udp_stability.clone(),
                     encoder_experiment_diagnostics_available: metrics
                         .encoder_experiment_diagnostics_available,
@@ -1010,6 +1202,13 @@ impl ControlServer {
                                     handle,
                                     source_index: input.source_index,
                                     source_name: name,
+                                    width: input.width,
+                                    height: input.height,
+                                    fps_target: input.fps,
+                                    quality_state: "native".into(),
+                                    capture_backend: input.capture_backend.clone(),
+                                    content_mode: content_mode.into(),
+                                    encoder_experiment: input.encoder_experiment,
                                     viewer_addr,
                                     viewer_port: input.viewer_port,
                                     media_transport: transport.into(),
@@ -1026,6 +1225,10 @@ impl ControlServer {
                         };
                         ok(StartStreamOutput {
                             session: session_id,
+                            width: input.width,
+                            height: input.height,
+                            fps: input.fps,
+                            quality_state: "native".into(),
                             udp_stability: (transport == "udp").then_some(udp_stability),
                         })
                     }
@@ -1033,6 +1236,16 @@ impl ControlServer {
                         "all viewer addresses failed: {}",
                         last_error.unwrap_or_else(|| "no viewer addresses".into())
                     )),
+                }
+            }
+            "reconfigureStream" => {
+                let input: ReconfigureStreamInput = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(e) => return err(&format!("bad args: {e}")),
+                };
+                match self.reconfigure_stream(input).await {
+                    Ok(output) => ok(output),
+                    Err(error) => err(&error),
                 }
             }
             "stopStream" => {
@@ -1207,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn product_normalization_hides_split_and_diagnostic_start_is_explicit() {
+    fn product_normalization_keeps_verified_split_and_diagnostic_is_fallback() {
         let advertised = advertised_encoder_experiments(vec![
             canonical_encoder_experiment(EncoderExperiment::Auto),
             canonical_encoder_experiment(EncoderExperiment::SplitVertical),
@@ -1216,9 +1429,9 @@ mod tests {
 
         assert_eq!(
             advertised.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-            vec![EncoderExperiment::Auto]
+            vec![EncoderExperiment::Auto, EncoderExperiment::SplitVertical]
         );
-        assert!(!encoder_experiment_is_startable(
+        assert!(encoder_experiment_is_startable(
             &advertised,
             EncoderExperiment::SplitVertical,
             false
@@ -1229,8 +1442,13 @@ mod tests {
             true
         ));
         assert!(!encoder_experiment_is_startable(
-            &advertised,
+            &[canonical_encoder_experiment(EncoderExperiment::Auto)],
             EncoderExperiment::SplitHorizontal,
+            true
+        ));
+        assert!(encoder_experiment_is_startable(
+            &[canonical_encoder_experiment(EncoderExperiment::Auto)],
+            EncoderExperiment::SplitVertical,
             true
         ));
     }
@@ -1478,9 +1696,35 @@ mod tests {
         )
         .await;
         assert!(line.contains("\"session\":1"), "{line}");
+        assert!(line.contains("\"width\":1920"), "{line}");
+        assert!(line.contains("\"height\":1080"), "{line}");
+        assert!(line.contains("\"qualityState\":\"native\""), "{line}");
+
+        let line = request(
+            &mut sock,
+            "reconfigureStream",
+            r#"{"session":1,"width":2560,"height":1440,"fps":90,"qualityState":"fallback"}"#,
+            &token,
+        )
+        .await;
+        assert!(line.contains("\"session\":1"), "{line}");
+        assert!(line.contains("\"width\":2560"), "{line}");
+        assert!(line.contains("\"height\":1440"), "{line}");
+        assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
+
+        let line = request(
+            &mut sock,
+            "reconfigureStream",
+            r#"{"session":1,"width":0,"height":1440,"fps":90,"qualityState":"fallback"}"#,
+            &token,
+        )
+        .await;
+        assert!(line.contains("\"ok\":false"), "{line}");
 
         let line = request(&mut sock, "getStatus", "{}", &token).await;
         assert!(line.contains("\"state\":\"running\""), "{line}");
+        assert!(line.contains("\"width\":2560"), "{line}");
+        assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
         assert!(line.contains("\"inputEnabled\":false"), "{line}");
         assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
@@ -1607,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn advertised_encoder_experiments_hides_both_split_diagnostics() {
+    fn advertised_encoder_experiments_keeps_vertical_split_and_hides_horizontal_split() {
         let normalized = advertised_encoder_experiments(vec![
             EncoderExperimentInfo {
                 id: EncoderExperiment::Auto,
@@ -1662,6 +1906,12 @@ mod tests {
                     hint: "화면 변화와 인코더 압력에 따라 Base QP를 조절합니다.".into(),
                     requires_reconnect: true,
                 },
+                EncoderExperimentInfo {
+                    id: EncoderExperiment::SplitVertical,
+                    label: "4K 듀얼 인코더".into(),
+                    hint: "4K 화면을 좌우 두 하드웨어 인코더와 UDP 포트로 전송합니다.".into(),
+                    requires_reconnect: true,
+                },
             ]
         );
     }
@@ -1709,6 +1959,13 @@ mod tests {
                 handle: 7,
                 source_index: 0,
                 source_name: "Main".into(),
+                width: 1_920,
+                height: 1_080,
+                fps_target: 60,
+                quality_state: "native".into(),
+                capture_backend: "screenCaptureKit".into(),
+                content_mode: "interactive".into(),
+                encoder_experiment: EncoderExperiment::Auto,
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),
@@ -1758,6 +2015,13 @@ mod tests {
                 handle: 7,
                 source_index: 0,
                 source_name: "Main".into(),
+                width: 1_920,
+                height: 1_080,
+                fps_target: 60,
+                quality_state: "native".into(),
+                capture_backend: "screenCaptureKit".into(),
+                content_mode: "interactive".into(),
+                encoder_experiment: EncoderExperiment::Auto,
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),
@@ -1804,6 +2068,13 @@ mod tests {
                 handle: 7,
                 source_index: 0,
                 source_name: "Main".into(),
+                width: 1_920,
+                height: 1_080,
+                fps_target: 60,
+                quality_state: "native".into(),
+                capture_backend: "screenCaptureKit".into(),
+                content_mode: "interactive".into(),
+                encoder_experiment: EncoderExperiment::Auto,
                 viewer_addr: "192.168.0.2:5001".into(),
                 viewer_port: 5001,
                 media_transport: "udp".into(),

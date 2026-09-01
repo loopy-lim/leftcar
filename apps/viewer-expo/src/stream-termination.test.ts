@@ -18,6 +18,10 @@ function active(session: number, port: number): ActiveStream {
     width: 3840,
     height: 2160,
     fps: 60,
+    sourceTarget: { width: 3840, height: 2160, fps: 60 },
+    activeTarget: { width: 3840, height: 2160, fps: 60 },
+    fallbackTarget: { width: 2560, height: 1440, fps: 60 },
+    qualityState: "native",
     captureBackend: "screenCaptureKit",
     contentMode: "video",
     encoderExperiment: "auto",
@@ -92,13 +96,13 @@ describe("stream termination recovery selection", () => {
 describe("restart failure reduction", () => {
   const streams = [active(11, 5001), active(22, 5002)];
 
-  it("removes only the dead matching stream after a native-triggered restart fails", () => {
+  it("retains the matching stream after a native-triggered restart fails", () => {
     const request: RestartRequest = {
       active: streams[0],
       trigger: "nativeTermination",
     };
 
-    expect(reduceRestartFailure(streams, request)).toEqual([streams[1]]);
+    expect(reduceRestartFailure(streams, request)).toEqual(streams);
   });
 
   it("retains streams after an automatic Host-status restart fails", () => {
@@ -114,7 +118,7 @@ describe("restart failure reduction", () => {
 describe("controller recovery policy", () => {
   const streams = [active(11, 5001), active(22, 5002)];
 
-  it("does not select a removed native stream after settlement clears its claim", () => {
+  it("allows an explicit retry after a failed native stream recovery", () => {
     const nativeRequest: RestartRequest = {
       active: streams[0],
       trigger: "nativeTermination",
@@ -124,13 +128,7 @@ describe("controller recovery policy", () => {
 
     releaseStreamRestore(inFlight, streams[0].session);
 
-    expect(
-      selectRecoverableStream(
-        nextStreams,
-        { port: 5001, reason: 4 },
-        inFlight,
-      ),
-    ).toBeNull();
+    expect(selectRecoverableStream(nextStreams, { port: 5001, reason: 4 }, inFlight)).toEqual(streams[0]);
   });
 
   it("blocks a transport restore while a native restore owns the same session", () => {

@@ -786,10 +786,43 @@ fn default_content_mode() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct StartStreamOutput {
     pub session: u32,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub fps: u32,
+    #[serde(default = "default_quality_state")]
+    pub quality_state: String,
     /// Concrete UDP policy accepted by both peers. Non-UDP sessions and older
     /// hosts omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<AppliedUdpStability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconfigureStreamInput {
+    pub session: u32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    #[serde(default = "default_quality_state")]
+    pub quality_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconfigureStreamOutput {
+    pub session: u32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub quality_state: String,
+}
+
+fn default_quality_state() -> String {
+    "native".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -811,10 +844,16 @@ pub struct SessionView {
     pub source_index: u32,
     pub source_name: String,
     pub viewer_addr: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
     pub state: String,
     pub fps: u32,
     pub kbps: u32,
     pub fps_target: u32,
+    #[serde(default = "default_quality_state")]
+    pub quality_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<AppliedUdpStability>,
     #[serde(default)]

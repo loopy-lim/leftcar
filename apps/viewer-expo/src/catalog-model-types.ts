@@ -1,4 +1,8 @@
 import type { RestartedStreamState } from "./launch-stream";
+import type {
+  AdaptiveQualityState,
+  AdaptiveTarget,
+} from "./adaptive-resolution";
 import type { ResolvedTransport } from "./usb";
 import type { EncoderExperimentId } from "./encoder-experiment";
 import type { StreamProfile } from "./stream-profile";
@@ -12,6 +16,10 @@ export interface ActiveStream {
   width: number;
   height: number;
   fps: number;
+  sourceTarget: AdaptiveTarget;
+  activeTarget: AdaptiveTarget;
+  fallbackTarget: AdaptiveTarget | null;
+  qualityState: AdaptiveQualityState;
   captureBackend: string;
   contentMode: StreamProfile["contentMode"];
   encoderExperiment: EncoderExperimentId;

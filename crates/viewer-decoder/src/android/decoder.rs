@@ -113,6 +113,7 @@ impl AndroidDecoder {
                 fps,
                 codec_name,
                 allow_mime_fallback: true,
+                max_frame_size: None,
             })
         }
     }
@@ -136,6 +137,7 @@ impl AndroidDecoder {
             fps,
             codec_name,
             allow_mime_fallback,
+            ..
         } = config;
         // strip optional Annex-B start codes so both conventions work
         fn strip_sc(b: &[u8]) -> &[u8] {
@@ -222,6 +224,15 @@ impl AndroidDecoder {
                 }
                 AMediaFormat_setInt32(format, c"width".as_ptr(), sw as i32);
                 AMediaFormat_setInt32(format, c"height".as_ptr(), sh as i32);
+                // Declare the adaptive bound so surface output is allocated for
+                // every picture size the stream may switch to. With adaptive
+                // playback enabled by surface configure, a mid-stream size
+                // change then reuses the same Surface without re-configuring.
+                if let Some((max_w, max_h)) = decoder_max_frame_size(config.max_frame_size, sw, sh)
+                {
+                    AMediaFormat_setInt32(format, c"max-width".as_ptr(), max_w as i32);
+                    AMediaFormat_setInt32(format, c"max-height".as_ptr(), max_h as i32);
+                }
                 // Request an input slot large enough for a worst-case IDR. Without
                 // this hint, some vendor codecs size compressed input buffers for
                 // average frames and reject the first high-motion/key frame.

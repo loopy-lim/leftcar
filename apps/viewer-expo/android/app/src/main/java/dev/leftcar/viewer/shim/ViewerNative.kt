@@ -43,6 +43,17 @@ object ViewerNative {
         height: Int,
         fps: Int,
     ): Int
+    /** Replace the renderer while retaining the Activity-owned Surface. */
+    external fun rebindSurfacePort(
+        state: Long,
+        instanceId: String,
+        surface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+    ): Int
     external fun attachSplitSurfaces(
         state: Long,
         instanceId: String,

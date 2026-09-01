@@ -26,6 +26,11 @@ internal class TerminationPollGate {
         armed = true
     }
 
+    fun reset() {
+        armed = false
+        consumed = false
+    }
+
     fun consume(reason: Int): Int? {
         if (!armed || consumed || reason < 0) return null
         consumed = true
@@ -39,6 +44,7 @@ internal class StreamHudController(
     private val sourceFps: Int,
     private val showPersistentFps: Boolean,
     private val onTermination: (Int) -> Unit,
+    private val onRenderedFrame: () -> Unit = {},
 ) {
     companion object {
         private const val INPUT_STATUS_VISIBLE_MS = 900L
@@ -53,7 +59,10 @@ internal class StreamHudController(
     private var lastInputStatus = Int.MIN_VALUE
     private var statsPopup: PopupWindow? = null
     private var statsView: TextView? = null
+    private var rebindPopup: PopupWindow? = null
+    private var rebindView: TextView? = null
     private var renderedFpsSample: RenderedFpsSample? = null
+    private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
     private val terminationPollGate = TerminationPollGate()
     private val persistentFpsOverlay = PersistentFpsOverlay(activity)
@@ -106,6 +115,66 @@ internal class StreamHudController(
         terminationPollGate.armAfterRendererAttached()
     }
 
+    fun resetTerminationPolling() {
+        terminationPollGate.reset()
+        terminationHandled = false
+    }
+
+    fun showRebindIndicator(message: String) {
+        val indicator = rebindView ?: TextView(activity).apply {
+            setTextColor(Color.argb(224, 255, 255, 255))
+            textSize = 12f
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = badgeBackground(Color.argb(168, 15, 23, 42))
+            contentDescription = "화면 공유 재연결 중"
+        }.also { view ->
+            rebindView = view
+            rebindPopup = PopupWindow(
+                view,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                false,
+            ).apply {
+                isTouchable = false
+                isFocusable = false
+                isOutsideTouchable = false
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                elevation = dp(2).toFloat()
+            }
+        }
+        indicator.text = message
+        indicator.alpha = 1f
+        activity.window.decorView.post {
+            val popup = rebindPopup ?: return@post
+            if (!popup.isShowing && !activity.isFinishing && !activity.isDestroyed) {
+                popup.showAtLocation(
+                    activity.window.decorView,
+                    Gravity.CENTER,
+                    0,
+                    0,
+                )
+            }
+        }
+    }
+
+    fun clearRebindIndicator() {
+        rebindPopup?.dismiss()
+        rebindPopup = null
+        rebindView = null
+    }
+
+    fun onRebindFinished(success: Boolean) {
+        if (success) {
+            resetTerminationPolling()
+            armTerminationPolling()
+            clearRebindIndicator()
+        } else {
+            showRebindIndicator("화면을 다시 연결하지 못했습니다. 현재 창에서 재시도합니다")
+        }
+        handler.removeCallbacks(poll)
+        handler.post(poll)
+    }
+
     fun revealInput() {
         val badge = inputView ?: return
         handler.removeCallbacks(fadeInput)
@@ -138,10 +207,13 @@ internal class StreamHudController(
         statsView?.animate()?.cancel()
         inputPopup?.dismiss()
         statsPopup?.dismiss()
+        rebindPopup?.dismiss()
         inputPopup = null
         statsPopup = null
+        rebindPopup = null
         inputView = null
         statsView = null
+        rebindView = null
         persistentFpsOverlay.stop()
     }
 
@@ -220,12 +292,17 @@ internal class StreamHudController(
     private fun updateStats(packed: Long, latency: Long, surfaceReleaseLatency: Int) {
         val stats = statsView ?: return
         if (packed == -1L) {
+            lastRenderedFrames = null
             renderedFpsSample = null
             persistentFpsOverlay.update(null)
             stats.text = "SRC $sourceFps / DISPLAY -- Hz  NET --/-- ms  CAP→SURF --/-- ms\n-- FPS  FEED -- ms"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
+        lastRenderedFrames?.let { previous ->
+            if (rendered > previous) onRenderedFrame()
+        }
+        lastRenderedFrames = rendered
         val stale = (packed ushr 28) and 0x0fff
         val inputDrops = (packed ushr 40) and 0xff
         val frameGaps = (packed ushr 48) and 0xff

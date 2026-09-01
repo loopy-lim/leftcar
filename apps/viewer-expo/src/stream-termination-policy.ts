@@ -45,9 +45,11 @@ export function reduceRestartFailure(
   streams: ActiveStream[],
   request: RestartRequest,
 ): ActiveStream[] {
-  return request.trigger === "nativeTermination"
-    ? streams.filter((stream) => stream.session !== request.active.session)
-    : streams;
+  // A failed bounded rebind keeps the existing logical stream visible so the
+  // same Activity can retry on its current Surface. The caller records the
+  // error and owns the explicit retry action; no automatic loop is created.
+  void request;
+  return streams;
 }
 
 export function claimStreamRestore(

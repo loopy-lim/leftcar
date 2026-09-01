@@ -259,6 +259,76 @@ pub extern "C" fn leftcar_jni_attach_port(
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Replace a live single-stream renderer without releasing the Activity's
+/// Surface. The old worker is joined before Surface ownership is transferred,
+/// so packets from the previous generation cannot publish into the new one.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_rebind_port(
+    state: StatePtr,
+    instance_c: *const c_char,
+    surface: *mut c_void,
+    port: u16,
+    host_c: *const c_char,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let Some(state) = (unsafe { state.as_mut() }) else {
+            return LEFTCAR_ERR_NULL;
+        };
+        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
+            return LEFTCAR_ERR_NULL;
+        };
+        if surface.is_null() || port == 0 {
+            return LEFTCAR_ERR_INVALID;
+        }
+        let host = if host_c.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(host_c) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if !host_is_valid(&host) {
+            return LEFTCAR_ERR_INVALID;
+        }
+        let instance_str = unsafe { CStr::from_ptr(instance_c) }
+            .to_string_lossy()
+            .into_owned();
+        stop_live_stream_renderer(&instance_str, false);
+        reclaim_udp_port(port);
+        let old_surface = state.attached_surface(&instance);
+        if viewer_core::c_abi::stream_detach_surface(state, &instance).is_err() {
+            return LEFTCAR_ERR_STATE;
+        }
+        if let Some(old_surface) = old_surface {
+            unsafe { ANativeWindow_release(old_surface as *mut c_void) };
+        }
+        if viewer_core::c_abi::stream_attach_surface(
+            state,
+            &instance,
+            surface as viewer_core::SurfaceHandle,
+        )
+        .is_err()
+        {
+            return LEFTCAR_ERR_STATE;
+        }
+        spawn_live_stream_renderer(
+            instance_str,
+            surface,
+            port,
+            host,
+            width,
+            height,
+            fps,
+            take_media_bridge(port),
+        );
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
 /// Attach the two SurfaceViews backing an exact 4K60 vertical split stream.
 /// The core tracks the left surface as the logical Activity attachment; the
 /// split renderer owns both decoders and releases the right window itself.

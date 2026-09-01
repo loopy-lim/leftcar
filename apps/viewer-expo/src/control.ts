@@ -1,4 +1,5 @@
 import TcpSocket from "react-native-tcp-socket";
+import type { AdaptiveQualityState } from "./adaptive-resolution";
 
 /**
  * Control-plane client (design §제어평면): viewer pulls from the host's
@@ -41,10 +42,13 @@ export interface SessionView {
   sourceIndex: number;
   sourceName: string;
   viewerAddr: string;
+  width?: number;
+  height?: number;
   state: string;
   fps: number;
   kbps: number;
   fpsTarget: number;
+  qualityState?: AdaptiveQualityState;
   udpStability?: unknown;
   captureFps?: number;
   encodeSubmitFps?: number;
@@ -121,6 +125,22 @@ export interface SessionView {
 
 export interface StatusView {
   sessions: SessionView[];
+}
+
+export interface ReconfigureStreamInput {
+  session: number;
+  width: number;
+  height: number;
+  fps: number;
+  qualityState: AdaptiveQualityState;
+}
+
+export interface ReconfigureStreamOutput {
+  session: number;
+  width: number;
+  height: number;
+  fps: number;
+  qualityState: AdaptiveQualityState;
 }
 
 export interface ControlClient {
