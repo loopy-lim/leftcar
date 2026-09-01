@@ -507,4 +507,32 @@ mod system_settings_url_tests {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         );
     }
+
+    #[test]
+    fn legacy_pane_urls_stay_pinned() {
+        assert_eq!(
+            super::system_settings_url(Some("screen_capture")),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        );
+        assert_eq!(
+            super::system_settings_url(Some("screencapture")),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        );
+        assert_eq!(
+            super::system_settings_url(Some("remote_desktop")),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
+        );
+        assert_eq!(
+            super::system_settings_url(Some("remotedesktop")),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
+        );
+        assert_eq!(
+            super::system_settings_url(Some("accessibility")),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        );
+        assert_eq!(
+            super::system_settings_url(Some("sharing")),
+            "x-apple.systempreferences:com.apple.Sharing-Settings.extension"
+        );
+    }
 }
