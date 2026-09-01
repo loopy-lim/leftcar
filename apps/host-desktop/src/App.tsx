@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
+  AppWindow,
   Check,
   ChevronDown,
   ChevronUp,
@@ -425,6 +426,16 @@ function TroubleshootingModal({
             </div>
             <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
               {t.host.troubleshootPermDesc}
+            </p>
+          </div>
+
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <AppWindow size={16} />
+              <span>{t.host.troubleshootHiddenWindow}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootHiddenWindowDesc}
             </p>
           </div>
         </div>

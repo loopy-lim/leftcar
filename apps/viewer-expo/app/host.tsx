@@ -349,6 +349,14 @@ function TroubleshootingSection({
               <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootManualDesc}</Text>
             </View>
           </View>
+
+          <View style={styles.troubleshootItem}>
+            <View style={styles.bulletDot} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootHiddenWindow}</Text>
+              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootHiddenWindowDesc}</Text>
+            </View>
+          </View>
         </View>
       )}
     </View>
