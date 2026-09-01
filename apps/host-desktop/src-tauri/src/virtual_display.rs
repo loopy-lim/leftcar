@@ -6,6 +6,12 @@
 //! CLI contract (BetterDisplay 4.3.6 help + maintainer examples):
 //! - create: `create -devicetype=virtualscreen -virtualscreenname=<name> -aspectWidth=<w> -aspectHeight=<h>`
 //! - connect: `set -namelike=<name> -connected=on`
+//! - discard: `discard -namelike=<name>`
+//!
+//! Discard deliberately uses `-namelike`: `-virtualscreenname` is not in the
+//! `betterdisplaycli` help identifier list, and an unspecified identifier
+//! discards ALL discardable devices — hence the hard empty-name guard on the
+//! remove path.
 
 /// Builds the argv for creating a virtual display. Unit-tested on every
 /// platform; the actual process spawn is exercised only on a machine with
@@ -32,13 +38,24 @@ pub fn connect_args(name: &str) -> Vec<String> {
 }
 
 /// Guards against an empty `-namelike=` match on later discard calls: a blank
-/// name could match unrelated displays, so creation is rejected up front.
-pub fn validate_name(name: &str) -> Result<(), String> {
-    if name.trim().is_empty() {
+/// name could match unrelated displays (and `discard` without an identifier
+/// removes ALL discardable devices), so blank names are rejected up front.
+/// Returns the trimmed name so every CLI argv uses the exact same spelling
+/// the validation checked.
+pub fn validate_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
         Err("가상 디스플레이 이름을 입력하세요. 빈 이름은 허용되지 않습니다.".into())
     } else {
-        Ok(())
+        Ok(trimmed.to_string())
     }
+}
+
+/// Builds the argv for discarding a virtual display. Unit-tested on every
+/// platform; the actual process spawn is exercised only on a machine with
+/// BetterDisplay installed.
+pub fn remove_args(name: &str) -> Vec<String> {
+    vec!["discard".into(), format!("-namelike={name}")]
 }
 
 #[cfg(target_os = "macos")]
@@ -46,9 +63,15 @@ pub const CLI: &str = "betterdisplaycli";
 
 #[cfg(target_os = "macos")]
 pub fn create_virtual_display(name: &str, aspect_w: u32, aspect_h: u32) -> Result<String, String> {
-    validate_name(name)?;
+    let name = &validate_name(name)?;
     run_cli(create_args(name, aspect_w, aspect_h))?;
     run_cli(connect_args(name))
+}
+
+#[cfg(target_os = "macos")]
+pub fn remove_virtual_display(name: &str) -> Result<String, String> {
+    let name = &validate_name(name)?;
+    run_cli(remove_args(name))
 }
 
 #[cfg(target_os = "macos")]
@@ -111,8 +134,19 @@ mod tests {
     }
 
     #[test]
-    fn valid_name_is_accepted() {
-        assert!(validate_name("Leftcar Virtual").is_ok());
-        assert!(validate_name(" Leftcar ").is_ok());
+    fn valid_name_is_accepted_and_trimmed() {
+        assert_eq!(validate_name("Leftcar Virtual").unwrap(), "Leftcar Virtual");
+        assert_eq!(validate_name(" Leftcar ").unwrap(), "Leftcar");
+    }
+
+    #[test]
+    fn remove_args_matches_cli_contract() {
+        assert_eq!(
+            remove_args("Leftcar Virtual"),
+            vec![
+                "discard".to_string(),
+                "-namelike=Leftcar Virtual".to_string(),
+            ]
+        );
     }
 }

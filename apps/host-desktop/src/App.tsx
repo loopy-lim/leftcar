@@ -572,15 +572,20 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
   const [created, setCreated] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
-  const createDisplay = async () => {
+  const runDisplayCommand = async (
+    command: "create_virtual_display" | "remove_virtual_display",
+    onDone: (output: string) => void,
+  ) => {
     setBusy(true);
     try {
-      const output = await invoke<string>("create_virtual_display", {
-        name: name.trim(),
-        aspectWidth: 16,
-        aspectHeight: 9,
-      });
-      setCreated(output || t.host.virtualDisplayCreated);
+      const output = command === "create_virtual_display"
+        ? await invoke<string>("create_virtual_display", {
+            name: name.trim(),
+            aspectWidth: 16,
+            aspectHeight: 9,
+          })
+        : await invoke<string>("remove_virtual_display", { name: name.trim() });
+      onDone(output);
       setFailure(null);
     } catch (cause) {
       setCreated(null);
@@ -625,9 +630,20 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
         <button
           className={buttonVariants({ variant: "ghost", size: "sm" })}
           disabled={busy || platform !== "macos"}
-          onClick={() => void createDisplay()}
+          onClick={() => void runDisplayCommand("create_virtual_display", (output) => {
+            setCreated(output || t.host.virtualDisplayCreated);
+          })}
         >
           {busy ? t.host.statusChecking : t.host.virtualDisplayCreate}
+        </button>
+        <button
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          disabled={busy || platform !== "macos"}
+          onClick={() => void runDisplayCommand("remove_virtual_display", (output) => {
+            setCreated(output || t.host.virtualDisplayRemoved);
+          })}
+        >
+          {busy ? t.host.statusChecking : t.host.virtualDisplayRemove}
         </button>
       </div>
       {created && (

@@ -225,6 +225,8 @@ export const translations = {
       virtualDisplayCreate: "16:9 가상 디스플레이 생성",
       virtualDisplayCreated: "가상 디스플레이 생성됨",
       virtualDisplayFailed: "생성 실패: {error}",
+      virtualDisplayRemove: "제거",
+      virtualDisplayRemoved: "가상 디스플레이 제거됨",
     },
   },
   en: {
@@ -447,6 +449,8 @@ export const translations = {
       virtualDisplayCreate: "Create 16:9 virtual display",
       virtualDisplayCreated: "Virtual display created",
       virtualDisplayFailed: "Failed: {error}",
+      virtualDisplayRemove: "Remove",
+      virtualDisplayRemoved: "Virtual display removed",
     },
   },
 } as const;

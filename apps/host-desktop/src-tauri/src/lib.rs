@@ -89,7 +89,8 @@ pub fn run() {
             revoke_device,
             revoke_paired_device,
             revoke_all_devices,
-            create_virtual_display
+            create_virtual_display,
+            remove_virtual_display
         ])
         .setup(move |app| {
             app.manage(server);
@@ -418,6 +419,19 @@ fn create_virtual_display(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (name, aspect_width, aspect_height);
+        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
+    }
+}
+
+#[tauri::command]
+fn remove_virtual_display(name: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        virtual_display::remove_virtual_display(&name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
         Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
     }
 }
