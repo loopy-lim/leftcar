@@ -14,6 +14,7 @@ import {
   Monitor,
   Moon,
   QrCode,
+  Radio,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -374,10 +375,14 @@ function DashboardFooter(props: DashboardFooterProps) {
 
 function TroubleshootingModal({
   onClose,
+  platform,
   t,
+  onOpenInternetSharing,
 }: {
   onClose: () => void;
+  platform: HostSnapshotView["platform"];
   t: TranslationSchema;
+  onOpenInternetSharing: () => void;
 }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -437,6 +442,25 @@ function TroubleshootingModal({
             <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
               {t.host.troubleshootHiddenWindowDesc}
             </p>
+          </div>
+
+          <div className="troubleshoot-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+              <Radio size={16} />
+              <span>{t.host.troubleshootNoRouter}</span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+              {t.host.troubleshootNoRouterDesc}
+            </p>
+            {platform === "macos" && (
+              <button
+                className={buttonVariants({ variant: "ghost", size: "sm" })}
+                style={{ marginTop: 8 }}
+                onClick={onOpenInternetSharing}
+              >
+                {t.host.openInternetSharingSettings}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1000,6 +1024,14 @@ function Dashboard() {
     }
   };
 
+  const openInternetSharingSettings = async () => {
+    try {
+      await invoke("open_system_settings", { pane: "internet_sharing" });
+    } catch (cause) {
+      setInputActionError(hostErrorMessage(cause, t));
+    }
+  };
+
   const requestInputPermission = async () => {
     setInputBusy("permission");
     try {
@@ -1175,7 +1207,9 @@ function Dashboard() {
       {showHelpModal && (
         <TroubleshootingModal
           t={t}
+          platform={platform}
           onClose={() => setShowHelpModal(false)}
+          onOpenInternetSharing={openInternetSharingSettings}
         />
       )}
       {pendingStopSession && (
