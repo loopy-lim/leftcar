@@ -4,7 +4,7 @@
 
 Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에서 빠르게 보고, 필요할 때 키보드와 포인터로 조작하는 다중 화면 뷰어다. 컴퓨터마다 Leftcar를 실행하고, Viewer 앱에서 원하는 화면을 별도 창으로 열 수 있다.
 
-설치 가능한 macOS Host와 Android Viewer는 [GitHub Releases](https://github.com/loopy-lim/leftcar/releases)에서 받을 수 있다. Windows x64 Host는 unsigned NSIS 패키지 CI까지 구현했으며, 실제 Windows/GPU와 Android 기기의 E6 검증 및 서명 릴리스는 아직 대기 중이다.
+설치 가능한 macOS Host와 Android Viewer는 [GitHub Releases](https://github.com/loopy-lim/leftcar/releases)에서 받을 수 있다. 최신 릴리스는 `v0.1.2`이며 macOS Apple Silicon DMG, Windows x64 unsigned NSIS 설치판, Android arm64 APK를 제공한다. 바이너리는 아직 서명·공증되지 않아 첫 실행 시 OS 경고 확인이 필요하다.
 
 ## 한 문장 정의
 
@@ -43,8 +43,8 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 현재 상태
 
-- 검증 기준일: 2026-08-22
-- 상태: `v0.1.0` 구현 + QR 페어링 인증 + Android 미디어 수신 보안 + macOS/Windows 세션별 네이티브 원격 입력의 코드·빌드 검증 반영. 입력 지연과 120/180Hz, Windows 실기기 스트리밍 계측은 대기 중이다. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
+- 검증 기준일: 2026-09-01
+- 상태: `v0.1.2` 릴리스 배포 중. QR 페어링 인증 + Android 미디어 수신 보안 + macOS/Windows 세션별 네이티브 원격 입력 + 적응형 해상도 복구 + 단일 인코더 세션 워치독 + UDP 안정화(FEC parity 4)까지 코드·빌드·CI 검증 반영. 입력 지연과 120/180Hz, Windows 실기기 스트리밍 계측은 대기 중이다. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
 - 구현: Rust workspace + Tauri 2 macOS/Windows Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows (코드 및 교차 컴파일 완료, 물리 E6/E7 대기)
