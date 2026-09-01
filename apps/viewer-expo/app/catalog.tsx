@@ -39,6 +39,7 @@ import {
 } from "../src/viewer-preferences";
 import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
+import { transportBadgeLabel } from "../src/transport-label";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -583,9 +584,12 @@ function ActiveStreamItem({
             #{stream.session} {stream.sourceName}
           </Text>
         </View>
-        <Text style={styles.streamPort} numberOfLines={1}>
-          {stream.width} × {stream.height} · {stream.fps} FPS
-        </Text>
+        <View style={styles.streamSpecRow}>
+          <Text style={styles.streamPort} numberOfLines={1}>
+            {stream.width} × {stream.height} · {stream.fps} FPS
+          </Text>
+          <Text style={styles.transportBadge}>{transportBadgeLabel(stream.mediaTransport)}</Text>
+        </View>
       </View>
       <Pressable style={styles.stopBtn} onPress={handleStop}>
         <Text style={styles.stopBtnText}>{t.common.stop}</Text>

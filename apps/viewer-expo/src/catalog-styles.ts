@@ -430,6 +430,22 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
     },
+    transportBadge: {
+      color: colors.textSecondary,
+      fontSize: 10,
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 4,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+      overflow: "hidden",
+    },
+    streamSpecRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
     stopBtn: {
       backgroundColor: colors.bgSubtle,
       borderWidth: 1,
