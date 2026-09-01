@@ -32,3 +32,4 @@ apps/viewer-expo/android/app/libs/arm64-v8a/libleftcar_rustra.so
 apps/viewer-expo/modules/rustra-bridge/build/
 apps/viewer-expo/modules/rustra-bridge/android/build/
 apps/viewer-expo/modules/rustra-bridge/android/src/main/cpp/libs/
+.worktrees/
