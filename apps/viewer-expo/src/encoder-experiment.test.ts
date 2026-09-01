@@ -4,6 +4,7 @@ import {
   availableEncoderExperiments,
   availableEncoderExperimentsForStreams,
   normalizeEncoderExperiments,
+  selectAutomaticEncoderExperiment,
   resolveEncoderExperiment,
   resolveEncoderExperimentForStream,
   type EncoderExperimentInfo,
@@ -51,12 +52,12 @@ describe("encoder experiment selector", () => {
     ]);
   });
 
-  it("hides the split diagnostic wire ID at every product resolution", () => {
+  it("exposes the verified split path only at 4K", () => {
     expect(availableEncoderExperiments(advertised, 3840, 2160)).toEqual(
-      advertised.filter((experiment) => experiment.id !== "splitVertical"),
+      advertised,
     );
     expect(availableEncoderExperiments(advertised, 7680, 4320)).toEqual(
-      advertised.filter((experiment) => experiment.id !== "splitVertical"),
+      advertised,
     );
   });
 
@@ -113,7 +114,7 @@ describe("encoder experiment selector", () => {
     ).toBe("adaptiveQp");
   });
 
-  it("rejects the split diagnostic wire ID even at exact 4K", () => {
+  it("preserves a selected split path at exact 4K", () => {
     expect(
       resolveEncoderExperimentForStream(
         "splitVertical",
@@ -121,13 +122,34 @@ describe("encoder experiment selector", () => {
         3840,
         2160,
       ),
-    ).toBe("auto");
+    ).toBe("splitVertical");
     expect(
       resolveEncoderExperimentForStream(
         "splitVertical",
         advertised,
         4096,
         2160,
+      ),
+    ).toBe("splitVertical");
+  });
+
+  it("lets automatic 4K use split only on direct UDP", () => {
+    expect(
+      selectAutomaticEncoderExperiment("auto", advertised, 3840, 2160, "udp"),
+    ).toBe("splitVertical");
+    expect(
+      selectAutomaticEncoderExperiment("auto", advertised, 3840, 2160, "usb"),
+    ).toBe("auto");
+    expect(
+      selectAutomaticEncoderExperiment("auto", advertised, 3840, 2160, "tcp"),
+    ).toBe("auto");
+    expect(
+      selectAutomaticEncoderExperiment(
+        "auto",
+        advertised.filter((experiment) => experiment.id !== "splitVertical"),
+        3840,
+        2160,
+        "udp",
       ),
     ).toBe("auto");
   });
@@ -157,7 +179,7 @@ describe("encoder experiment selector", () => {
         { width: 2560, height: 1440 },
         { width: 3840, height: 2160 },
       ]),
-    ).toEqual(advertised.filter((experiment) => experiment.id !== "splitVertical"));
+    ).toEqual(advertised);
     expect(
       availableEncoderExperimentsForStreams(advertised, [
         { width: 1920, height: 1080 },

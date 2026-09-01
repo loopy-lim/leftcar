@@ -54,7 +54,12 @@ extension CaptureSession {
         stateLock.unlock()
         guard generationMatches, let mode else { return nil }
         let policies = eligibleEncoderSessionPolicies(
-            encoderSessionPolicies(for: requestedEncoderExperiment),
+            encoderSessionPolicies(
+                for: requestedEncoderExperiment,
+                width: outWidth,
+                height: outHeight,
+                contentMode: contentMode.rawValue
+            ),
             unavailableModes: unavailableEncoderModes
         )
         let hasNextPolicy: Bool
@@ -251,4 +256,3 @@ extension CaptureSession {
         }
     }
 }
-

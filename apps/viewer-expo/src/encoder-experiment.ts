@@ -80,7 +80,7 @@ export function availableEncoderExperiments(
   if (!is4KResolution(width, height)) {
     return available.filter((experiment) => experiment.id === "auto");
   }
-  return available.filter((experiment) => experiment.id !== "splitVertical");
+  return available;
 }
 
 export function availableEncoderExperimentsForStreams(
@@ -114,4 +114,27 @@ export function resolveEncoderExperiment(
   advertised: unknown,
 ): EncoderExperimentId {
   return resolveEncoderExperimentForStream(selected, advertised, 3840, 2160);
+}
+
+export function selectAutomaticEncoderExperiment(
+  selected: EncoderExperimentId,
+  advertised: unknown,
+  width: number,
+  height: number,
+  mediaTransport: string,
+): EncoderExperimentId {
+  const resolved = resolveEncoderExperimentForStream(
+    selected,
+    advertised,
+    width,
+    height,
+  );
+  if (resolved !== "auto" || !is4KResolution(width, height)) return resolved;
+  if (mediaTransport.trim().toLowerCase() !== "udp") return resolved;
+
+  const available = availableEncoderExperiments(advertised, width, height);
+  return available.some((experiment) => experiment.id === "auto")
+    && available.some((experiment) => experiment.id === "splitVertical")
+    ? "splitVertical"
+    : resolved;
 }

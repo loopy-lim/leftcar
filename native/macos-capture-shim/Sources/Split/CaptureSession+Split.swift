@@ -9,6 +9,7 @@ func splitPipelineStartupDecision(
     fps: UInt32,
     mediaTransport: String,
     hasEncoderPixelBufferPool: Bool,
+    dualAveCapabilityAvailable: Bool = false,
     environment: [String: String] = ProcessInfo.processInfo.environment
 ) -> EncoderExperimentStartupDecision {
     encoderExperimentStartupDecision(
@@ -19,6 +20,7 @@ func splitPipelineStartupDecision(
         mediaTransport: mediaTransport,
         hasEncoderPixelBufferPool: hasEncoderPixelBufferPool,
         splitDiagnosticEnabled: splitDiagnosticEnabled(environment: environment)
+            || dualAveCapabilityAvailable
     )
 }
 
@@ -38,7 +40,8 @@ extension CaptureSession {
                 height: outHeight,
                 fps: fps,
                 mediaTransport: mediaTransport.rawValue,
-                hasEncoderPixelBufferPool: splitTilePixelBufferPoolAvailable()
+                hasEncoderPixelBufferPool: splitTilePixelBufferPoolAvailable(),
+                dualAveCapabilityAvailable: dualAveTileEncoderPairAvailable()
             )
             guard case .success = decision else {
                 _ = finishSplitFlowLease(lease)

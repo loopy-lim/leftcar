@@ -19,6 +19,28 @@ struct EncoderSessionPolicy: Equatable {
 }
 
 let phaseARTVCH264EncoderID = "com.apple.videotoolbox.videoencoder.h264.rtvc"
+let phaseAAVEH264EncoderID = "com.apple.videotoolbox.videoencoder.ave.avc"
+
+func encoderSessionVerified(
+    policy: EncoderSessionPolicy,
+    encoderIDStatus: OSStatus,
+    encoderID: String?,
+    expectedEncoderID: String?,
+    hardwareStatus: OSStatus,
+    hardware: Bool?
+) -> Bool {
+    guard policy.codec == .h264,
+          encoderIDStatus == noErr,
+          let expectedEncoderID,
+          encoderID == expectedEncoderID else {
+        return false
+    }
+    return hardwareEncoderVerified(
+        queryStatus: hardwareStatus,
+        queriedHardware: hardware,
+        requireHardware: true
+    )
+}
 
 func phaseARTVCH264EncoderVerified(
     policy: EncoderSessionPolicy,
@@ -27,15 +49,16 @@ func phaseARTVCH264EncoderVerified(
     hardwareStatus: OSStatus,
     hardware: Bool?
 ) -> Bool {
-    policy.mode == .rtvc
-        && policy.codec == .h264
-        && encoderIDStatus == noErr
-        && encoderID == phaseARTVCH264EncoderID
-        && hardwareEncoderVerified(
-            queryStatus: hardwareStatus,
-            queriedHardware: hardware,
-            requireHardware: true
-        )
+    encoderSessionVerified(
+        policy: policy,
+        encoderIDStatus: encoderIDStatus,
+        encoderID: encoderID,
+        expectedEncoderID: policy.mode == .rtvc
+            ? phaseARTVCH264EncoderID
+            : nil,
+        hardwareStatus: hardwareStatus,
+        hardware: hardware
+    )
 }
 
 func encoderPrepareStrategy(mode: EncoderMode) -> EncoderPrepareStrategy {
@@ -110,9 +133,16 @@ func eligibleEncoderSessionPolicies(
 
 func preferredHardwareEncoderID(
     codec: VideoCodecKind,
-    candidates: [EncoderCandidateDescriptor]
+    candidates: [EncoderCandidateDescriptor],
+    preferredID: String? = nil
 ) -> String? {
-    candidates
+    if let preferredID,
+       candidates.contains(where: {
+           $0.id == preferredID && $0.codec == codec && $0.hardware
+       }) {
+        return preferredID
+    }
+    return candidates
         .filter { $0.codec == codec && $0.hardware }
         .sorted {
             if $0.performanceRating == $1.performanceRating { return $0.id < $1.id }

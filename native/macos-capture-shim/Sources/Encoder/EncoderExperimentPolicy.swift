@@ -90,12 +90,13 @@ func advertisedEncoderExperiments(
     rtvcHardwareAvailable: Bool,
     supportsBaseFrameQP: Bool,
     hasEncoderPixelBufferPool: Bool,
-    dualAveTilePairAvailable _: Bool
+    dualAveTilePairAvailable: Bool
 ) -> [EncoderExperiment] {
     guard rtvcHardwareAvailable else { return [] }
     var result: [EncoderExperiment] = [.auto, .rateControl]
     if supportsBaseFrameQP { result.append(.adaptiveQp) }
     if hasEncoderPixelBufferPool { result.append(.encoderPool) }
+    if dualAveTilePairAvailable { result.append(.splitVertical) }
     return result
 }
 
@@ -165,6 +166,22 @@ func encoderSessionPolicies(for experiment: EncoderExperiment) -> [EncoderSessio
     case .splitHorizontal, .splitVertical:
         return []
     }
+}
+
+func encoderSessionPolicies(
+    for experiment: EncoderExperiment,
+    width: UInt32,
+    height: UInt32,
+    contentMode: String
+) -> [EncoderSessionPolicy] {
+    guard experiment == .auto else {
+        return encoderSessionPolicies(for: experiment)
+    }
+    return encoderSessionPolicies(
+        width: width,
+        height: height,
+        contentMode: contentMode
+    )
 }
 
 struct EncoderFramePropertyPlan: Equatable {

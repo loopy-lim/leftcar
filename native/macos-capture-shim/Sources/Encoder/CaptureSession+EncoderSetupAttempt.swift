@@ -33,7 +33,10 @@ extension CaptureSession {
             case .ave:
                 guard let encoderID = preferredHardwareEncoderID(
                     codec: policy.codec,
-                    candidates: availableEncoders
+                    candidates: availableEncoders,
+                    preferredID: policy.mode == .ave && policy.codec == .h264
+                        ? phaseAAVEH264EncoderID
+                        : nil
                 ) else {
                     lastFailure = "AVE \(policy.codec.rawValue.uppercased()) hardware encoder unavailable"
                     aveFallbackReason = lastFailure
@@ -328,26 +331,36 @@ extension CaptureSession {
                     selectedHardware = (hardwareValue.takeRetainedValue() as? NSNumber)?.boolValue
                 }
             }
-            let verifiedRTVCH264 = phaseARTVCH264EncoderVerified(
+            let verifiedEncoder = encoderSessionVerified(
                 policy: policy,
                 encoderIDStatus: encoderIDStatus,
                 encoderID: selectedEncoderID,
+                expectedEncoderID: requestedEncoderID ?? (
+                    policy.mode == .rtvc ? phaseARTVCH264EncoderID : nil
+                ),
                 hardwareStatus: hardwareStatus,
                 hardware: selectedHardware
             )
-            guard let selectedEncoderID, verifiedRTVCH264 else {
+            guard let selectedEncoderID, verifiedEncoder else {
                 VTCompressionSessionInvalidate(s)
                 lastFailure = "\(policy.mode.rawValue.uppercased()) encoder verification failed: encoderIDStatus=\(encoderIDStatus) hardwareStatus=\(hardwareStatus) hardware=\(selectedHardware.map(String.init(describing:)) ?? "unknown")"
                 if policy.mode == .ave { aveFallbackReason = lastFailure }
                 NSLog("Leftcar %@", lastFailure)
                 return .failed(lastFailure)
             }
-            let experimentDecision = encoderExperimentStartupDecision(
-                requested: requestedExperiment,
-                rtvcHardwareAvailable: verifiedRTVCH264,
-                supportsBaseFrameQP: supportsBaseFrameQP,
-                hasEncoderPixelBufferPool: hasEncoderPixelBufferPool
-            )
+            let experimentDecision: EncoderExperimentStartupDecision
+            if policy.mode == .ave {
+                experimentDecision = .success(
+                    applied: appliedEncoderExperiment(requestedExperiment)
+                )
+            } else {
+                experimentDecision = encoderExperimentStartupDecision(
+                    requested: requestedExperiment,
+                    rtvcHardwareAvailable: verifiedEncoder,
+                    supportsBaseFrameQP: supportsBaseFrameQP,
+                    hasEncoderPixelBufferPool: hasEncoderPixelBufferPool
+                )
+            }
             guard case .success(let applied) = experimentDecision else {
                 let reason: String
                 if case let .failure(message) = experimentDecision {
@@ -440,5 +453,4 @@ extension CaptureSession {
             return .installed
     }
 }
-
 

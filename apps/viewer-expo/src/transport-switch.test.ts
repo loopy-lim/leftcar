@@ -10,6 +10,12 @@ describe("shouldSwitchTransport", () => {
     expect(shouldSwitchTransport("udp", { attached: true })).toBe(true);
   });
 
+  it("keeps a 4K split stream on its required UDP pair", () => {
+    expect(
+      shouldSwitchTransport("udp", { attached: true }, "splitVertical"),
+    ).toBe(false);
+  });
+
   it("keeps USB while the accessory remains attached", () => {
     expect(shouldSwitchTransport("usb", { attached: true })).toBe(false);
   });

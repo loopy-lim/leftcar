@@ -103,7 +103,7 @@ func encoderExperimentCapabilityJSON() -> String {
         verifiedRTVCH264: base.verifiedRTVCH264,
         supportsBaseFrameQP: base.supportsBaseFrameQP,
         hasEncoderPixelBufferPool: base.hasEncoderPixelBufferPool,
-        dualAveTilePairAvailable: false
+        dualAveTilePairAvailable: dualAveTileEncoderPairAvailable()
     )
     let json: String
     if let data = try? JSONSerialization.data(withJSONObject: capabilities),

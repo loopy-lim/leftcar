@@ -588,6 +588,14 @@ struct EncodePolicyTests {
                 EncoderSessionPolicy(mode: .rtvc, codec: .h264),
             ]
         )
+        precondition(
+            encoderSessionPolicies(
+                for: .auto,
+                width: 3_840,
+                height: 2_160,
+                contentMode: "video"
+            ) == video4K
+        )
         precondition(encoderSessionPolicies(for: .splitVertical).isEmpty)
         precondition(
             adaptiveController.observeWindow(
@@ -774,6 +782,26 @@ struct EncodePolicyTests {
             )
         )
         precondition(
+            encoderSessionVerified(
+                policy: EncoderSessionPolicy(mode: .ave, codec: .h264),
+                encoderIDStatus: noErr,
+                encoderID: "com.apple.videotoolbox.videoencoder.ave.avc",
+                expectedEncoderID: "com.apple.videotoolbox.videoencoder.ave.avc",
+                hardwareStatus: noErr,
+                hardware: true
+            )
+        )
+        precondition(
+            !encoderSessionVerified(
+                policy: EncoderSessionPolicy(mode: .ave, codec: .h264),
+                encoderIDStatus: noErr,
+                encoderID: phaseARTVCH264EncoderID,
+                expectedEncoderID: "com.apple.videotoolbox.videoencoder.ave.avc",
+                hardwareStatus: noErr,
+                hardware: true
+            )
+        )
+        precondition(
             encoderExperimentStartupDecision(
                 requested: .auto,
                 rtvcHardwareAvailable: true,
@@ -876,7 +904,7 @@ struct EncodePolicyTests {
                 supportsBaseFrameQP: true,
                 hasEncoderPixelBufferPool: true,
                 dualAveTilePairAvailable: true
-            ) == [.auto, .rateControl, .adaptiveQp, .encoderPool]
+            ) == [.auto, .rateControl, .adaptiveQp, .encoderPool, .splitVertical]
         )
         precondition(
             !advertisedEncoderExperiments(
@@ -905,7 +933,7 @@ struct EncodePolicyTests {
             as! [[String: Any]]
         precondition(
             decodedCapabilities.compactMap { $0["id"] as? String }
-                == ["auto", "rateControl", "adaptiveQp", "encoderPool"]
+                == ["auto", "rateControl", "adaptiveQp", "encoderPool", "splitVertical"]
         )
         precondition(
             decodedCapabilities.allSatisfy {

@@ -12,6 +12,7 @@ describe("resolveTransport", () => {
 
   it("preserves an explicitly requested transport", () => {
     expect(resolveTransport({ attached: false }, "udp")).toBe("udp");
+    expect(resolveTransport({ attached: true }, "udp")).toBe("udp");
     expect(resolveTransport({ attached: false }, "tcp")).toBe("tcp");
     expect(resolveTransport({ attached: true }, "adbTcp")).toBe("adbTcp");
   });

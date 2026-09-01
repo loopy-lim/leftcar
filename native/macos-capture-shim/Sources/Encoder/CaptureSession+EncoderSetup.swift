@@ -39,7 +39,12 @@ extension CaptureSession {
         stateLock.lock()
         let requestedExperiment = requestedEncoderExperiment
         stateLock.unlock()
-        let policies = encoderSessionPolicies(for: requestedExperiment)
+        let policies = encoderSessionPolicies(
+            for: requestedExperiment,
+            width: UInt32(w),
+            height: UInt32(h),
+            contentMode: contentMode.rawValue
+        )
         let availableEncoders = availableEncoderDescriptors()
         var lastFailure = "no encoder session policy"
         stateLock.lock()
@@ -77,5 +82,4 @@ extension CaptureSession {
     }
 
 }
-
 

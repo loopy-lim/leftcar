@@ -35,7 +35,7 @@ export function resolveTransport(
   // media path; its recovery/FEC/ABR policy is responsible for handling loss.
   // Explicit TCP/UDP/ADB TCP requests remain explicit so diagnostics and
   // compatibility tools cannot be rewritten.
-  if (state.attached && (normalized === "auto" || normalized === "udp" || normalized === "wifi")) {
+  if (state.attached && normalized === "auto") {
     return "usb";
   }
   if (normalized === "usb" || normalized === "aoap") return "usb";
