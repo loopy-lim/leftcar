@@ -23,7 +23,6 @@ import { controlHost } from "./session";
 import { shouldSwitchTransport } from "./transport-switch";
 import {
   claimStreamRestore,
-  reduceRestartFailure,
   releaseStreamRestore,
   selectRecoverableStream,
   subscribeStreamTermination,
@@ -35,7 +34,7 @@ import {
   subscribeUsbState,
   type UsbAccessoryState,
 } from "./usb";
-import type { StatusView } from "./control";
+import { formatErrorMessage, type StatusView } from "./control";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import type { UdpStabilitySelection } from "./udp-stability";
 
@@ -70,9 +69,7 @@ export function useStreamController(
     (session: number) => {
       void requestWithReconnect("stopStream", { session }).catch((cause) => {
         setError(
-          `소유권이 사라진 화면 공유를 종료하지 못했습니다: ${String(
-            cause instanceof Error ? cause.message : cause,
-          )}`,
+          `소유권이 사라진 화면 공유를 종료하지 못했습니다: ${formatErrorMessage(cause)}`,
         );
       });
     },
@@ -83,7 +80,9 @@ export function useStreamController(
   const statusQuery = useQuery({
     queryKey: ["host-status", host],
     queryFn: () => requestWithReconnect<StatusView>("getStatus"),
-    refetchInterval: 1_000,
+    // 1s samples feed the adaptive-resolution observer only while a stream
+    // is live; the catalog screen falls back to the idle 2s cadence.
+    refetchInterval: streams.length > 0 ? 1_000 : 2_000,
     staleTime: 1_000,
   });
   const statusView = statusQuery.data;
@@ -106,15 +105,12 @@ export function useStreamController(
       setError(null);
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
-    onError: (error, request) => {
-      updateStreams((previous) =>
-        reduceRestartFailure(previous, request),
-      );
-      setError(
-        `화면을 다시 연결하지 못했습니다: ${String(
-          error instanceof Error ? error.message : error,
-        )}`,
-      );
+    onError: (error, _request) => {
+      // A failed bounded rebind keeps the existing logical stream visible so
+      // the same Activity can retry on its current Surface; the caller owns
+      // the explicit retry action and no automatic loop is created.
+      updateStreams((previous) => previous);
+      setError(`화면을 다시 연결하지 못했습니다: ${formatErrorMessage(error)}`);
     },
     onSettled: (_data, _error, request) => {
       releaseStreamRestore(heartbeatInFlight.current, request.active.session);
@@ -184,11 +180,7 @@ export function useStreamController(
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
     onError: (error, active) => {
-      setError(
-        `전송 경로를 바꾸지 못했습니다: ${String(
-          error instanceof Error ? error.message : error,
-        )}`,
-      );
+      setError(`전송 경로를 바꾸지 못했습니다: ${formatErrorMessage(error)}`);
     },
     onSettled: (_data, _error, active) => {
       releaseStreamRestore(heartbeatInFlight.current, active.session);
@@ -295,9 +287,7 @@ export function useStreamController(
         );
         adaptiveStates.current.set(active.session, result.state);
         setError(
-          `해상도 전환에 실패했습니다. 현재 화면에서 다시 시도할 수 있습니다: ${String(
-            error instanceof Error ? error.message : error,
-          )}`,
+          `해상도 전환에 실패했습니다. 현재 화면에서 다시 시도할 수 있습니다: ${formatErrorMessage(error)}`,
         );
       } finally {
         adaptiveRebinds.current.delete(active.session);
@@ -417,11 +407,7 @@ export function useStreamController(
           );
           void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
         } catch (cause) {
-          setError(
-            `UDP 설정을 적용하지 못했습니다: ${String(
-              cause instanceof Error ? cause.message : cause,
-            )}`,
-          );
+          setError(`UDP 설정을 적용하지 못했습니다: ${formatErrorMessage(cause)}`);
           throw cause;
         } finally {
           releaseStreamRestore(heartbeatInFlight.current, active.session);

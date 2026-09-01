@@ -1,6 +1,5 @@
 export {
   claimStreamRestore,
-  reduceRestartFailure,
   releaseStreamRestore,
   selectRecoverableStream,
   type LocalStreamTerminationReason,

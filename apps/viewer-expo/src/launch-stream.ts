@@ -1,4 +1,4 @@
-import type { ControlClient } from "./control";
+import type { ControlClient, ReconfigureStreamOutput } from "./control";
 import {
   getUsbState,
   resolveTransport,
@@ -6,9 +6,11 @@ import {
   type UsbAccessoryState,
 } from "./usb";
 import type { StreamContentMode } from "./stream-profile";
-import type {
-  AdaptiveQualityState,
-  AdaptiveTarget,
+import type { ActiveStream } from "./catalog-model-types";
+import {
+  isExact4K,
+  type AdaptiveQualityState,
+  type AdaptiveTarget,
 } from "./adaptive-resolution";
 import {
   resolveEncoderExperimentForStream,
@@ -261,10 +263,12 @@ export async function startPreparedStream({
     );
     return {
       session,
-      ...(typeof started.width === "number" ? { width } : {}),
-      ...(typeof started.height === "number" ? { height } : {}),
-      ...(typeof started.fps === "number" ? { fps } : {}),
-      ...(started.qualityState ? { qualityState: started.qualityState } : {}),
+      // Optional fields stay undefined when the Host omitted them;
+      // JSON drops undefined keys on the wire.
+      width: started.width,
+      height: started.height,
+      fps: started.fps,
+      qualityState: started.qualityState,
       viewerIps,
       mediaTransport,
       encoderExperiment,
@@ -285,15 +289,7 @@ interface ReconfigurePreparedStreamInput {
   control: ControlClient;
   launcher: StreamLauncher;
   host: string;
-  active: RestartedStreamState & {
-    port: number;
-    sourceName: string;
-    contentMode: StreamContentMode;
-    viewerIps: string[];
-    mediaTransport: ResolvedTransport;
-    showFps?: boolean;
-    startedAt?: number;
-  };
+  active: ActiveStream;
   target: AdaptiveTarget;
   qualityState: AdaptiveQualityState;
 }
@@ -306,8 +302,10 @@ export async function reconfigurePreparedStream({
   target,
   qualityState,
 }: ReconfigurePreparedStreamInput): Promise<StartedStream> {
+  // splitVertical requires an exact-4K source; a demoted target falls back
+  // to the automatic single-encoder path.
   const encoderExperiment = active.encoderExperiment === "splitVertical" &&
-    (target.width !== 3840 || target.height !== 2160)
+    !isExact4K(target)
     ? "auto"
     : active.encoderExperiment;
   await launcher.prepareStream(
@@ -317,19 +315,16 @@ export async function reconfigurePreparedStream({
     encoderExperiment,
   );
   try {
-    const accepted = await control.request<{
-      session: number;
-      width: number;
-      height: number;
-      fps: number;
-      qualityState: AdaptiveQualityState;
-    }>("reconfigureStream", {
-      session: active.session,
-      width: target.width,
-      height: target.height,
-      fps: target.fps,
-      qualityState,
-    });
+    const accepted = await control.request<ReconfigureStreamOutput>(
+      "reconfigureStream",
+      {
+        session: active.session,
+        width: target.width,
+        height: target.height,
+        fps: target.fps,
+        qualityState,
+      },
+    );
     await launcher.openStream(
       active.port,
       host,

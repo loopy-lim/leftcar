@@ -25,6 +25,23 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Geometry and transport facts of the live session being reconfigured,
+/// captured before the old backend handle is stopped.
+struct ReconfigureSnapshot {
+    handle: u32,
+    source_index: u32,
+    viewer_host: String,
+    viewer_port: u16,
+    capture_backend: String,
+    media_transport: String,
+    content_mode: String,
+    encoder_experiment: EncoderExperiment,
+    udp_stability: Option<AppliedUdpStability>,
+    width: u32,
+    height: u32,
+    fps_target: u32,
+}
+
 struct Session {
     handle: u32,
     source_index: u32,
@@ -68,6 +85,13 @@ fn normalize_content_mode(value: &str) -> Option<&'static str> {
         "video" | "movie" => Some("video"),
         _ => None,
     }
+}
+
+fn validate_stream_shape(width: u32, height: u32, fps: u32) -> Result<(), String> {
+    if width == 0 || height == 0 || width > 8192 || height > 8192 || fps == 0 || fps > 90 {
+        return Err("unsupported stream dimensions or fps".into());
+    }
+    Ok(())
 }
 
 fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> Result<(), String> {
@@ -276,19 +300,81 @@ impl ControlServer {
         self.control_port.store(port, Ordering::Release);
     }
 
+    /// Restore the previous capture geometry after a failed reconfigure. On
+    /// recovery the session stays live with the restored handle; otherwise it
+    /// becomes a terminal tombstone carrying the original failure.
+    async fn restore_previous_stream(
+        &self,
+        session_id: u32,
+        previous: &ReconfigureSnapshot,
+        failure: &str,
+    ) -> Result<u32, String> {
+        let recovered = self.start_replacement_from_snapshot(
+            previous,
+            previous.width,
+            previous.height,
+            previous.fps_target,
+        );
+        let recovered = match recovered {
+            Ok(handle) => self.wait_for_first_frame(handle).await.map(|_| handle),
+            Err(recovery_error) => Err(recovery_error),
+        };
+        let mut state = self.sessions.lock().unwrap();
+        if let Some(session) = state.live.get_mut(&session_id) {
+            match recovered {
+                Ok(recovered) => {
+                    session.handle = recovered;
+                    session.backend_released = false;
+                }
+                Err(_) => {
+                    session.terminal_error = Some(failure.to_owned());
+                    session.terminal_since = Some(Instant::now());
+                    session.backend_released = true;
+                }
+            }
+        }
+        recovered.map_err(|_| format!("replacement stream failed: {failure}"))
+    }
+
+    fn start_replacement_from_snapshot(
+        &self,
+        previous: &ReconfigureSnapshot,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<u32, String> {
+        let default_udp_stability = AppliedUdpStability {
+            requested: control_contract::udp_stability::UdpStabilityProfile::Auto,
+            applied: control_contract::udp_stability::UdpStabilityProfile::Auto,
+            burst_datagrams: 0,
+            fec_parity_shards: 0,
+            adaptive_pacing: false,
+            fallback_reason: None,
+        };
+        let udp_stability = previous
+            .udp_stability
+            .as_ref()
+            .unwrap_or(&default_udp_stability);
+        self.backend.start(
+            previous.source_index,
+            &previous.viewer_host,
+            previous.viewer_port,
+            width,
+            height,
+            fps,
+            &previous.capture_backend,
+            &previous.media_transport,
+            &previous.content_mode,
+            previous.encoder_experiment,
+            udp_stability,
+        )
+    }
+
     async fn reconfigure_stream(
         &self,
         input: ReconfigureStreamInput,
     ) -> Result<ReconfigureStreamOutput, String> {
-        if input.width == 0
-            || input.height == 0
-            || input.width > 8192
-            || input.height > 8192
-            || input.fps == 0
-            || input.fps > 90
-        {
-            return Err("unsupported stream dimensions or fps".into());
-        }
+        validate_stream_shape(input.width, input.height, input.fps)?;
         if !matches!(input.quality_state.as_str(), "native" | "fallback" | "downshifting" | "upshifting") {
             return Err("unsupported quality state".into());
         }
@@ -309,122 +395,56 @@ impl ControlServer {
                 .rsplit_once(':')
                 .map(|(host, _)| host.to_owned())
                 .ok_or_else(|| "session viewer address is invalid".to_owned())?;
-            (
-                session.handle,
-                session.source_index,
+            ReconfigureSnapshot {
+                handle: session.handle,
+                source_index: session.source_index,
                 viewer_host,
-                session.viewer_port,
-                session.capture_backend.clone(),
-                session.media_transport.clone(),
-                session.content_mode.clone(),
-                session.encoder_experiment,
-                session.udp_stability.clone(),
-                session.width,
-                session.height,
-                session.fps_target,
-                session.quality_state.clone(),
-            )
+                viewer_port: session.viewer_port,
+                capture_backend: session.capture_backend.clone(),
+                media_transport: session.media_transport.clone(),
+                content_mode: session.content_mode.clone(),
+                encoder_experiment: session.encoder_experiment,
+                udp_stability: session.udp_stability.clone(),
+                width: session.width,
+                height: session.height,
+                fps_target: session.fps_target,
+            }
         };
 
-        self.backend.stop(previous.0)?;
-        cleanup_media_transport(&previous.5, previous.3);
+        self.backend.stop(previous.handle)?;
+        cleanup_media_transport(&previous.media_transport, previous.viewer_port);
 
-        let default_udp_stability = AppliedUdpStability {
-            requested: control_contract::udp_stability::UdpStabilityProfile::Auto,
-            applied: control_contract::udp_stability::UdpStabilityProfile::Auto,
-            burst_datagrams: 0,
-            fec_parity_shards: 0,
-            adaptive_pacing: false,
-            fallback_reason: None,
-        };
-        let udp_stability = previous.8.as_ref().unwrap_or(&default_udp_stability);
         let replacement_encoder_experiment =
-            if previous.7 == EncoderExperiment::SplitVertical
+            if previous.encoder_experiment == EncoderExperiment::SplitVertical
                 && (input.width != 3_840 || input.height != 2_160)
             {
                 EncoderExperiment::Auto
             } else {
-                previous.7
+                previous.encoder_experiment
             };
-        let start_replacement = |width: u32, height: u32, fps: u32, experiment: EncoderExperiment| {
-            self.backend.start(
-                previous.1,
-                &previous.2,
-                previous.3,
-                width,
-                height,
-                fps,
-                &previous.4,
-                &previous.5,
-                &previous.6,
-                experiment,
-                udp_stability,
-            )
-        };
 
-        let replacement = start_replacement(
+        let replacement_handle = match self.start_replacement_from_snapshot(
+            &previous,
             input.width,
             input.height,
             input.fps,
-            replacement_encoder_experiment,
-        );
-        let replacement_handle = match replacement {
-                Ok(handle) => match self.wait_for_first_frame(handle).await {
-                    Ok(()) => handle,
-                    Err(error) => {
-                        let _ = self.backend.stop(handle);
-                        cleanup_media_transport(&previous.5, previous.3);
-                        let recovered = match start_replacement(
-                        previous.9,
-                        previous.10,
-                        previous.11,
-                        previous.7,
-                    ) {
-                        Ok(recovered) => match self.wait_for_first_frame(recovered).await {
-                            Ok(()) => Ok(recovered),
-                            Err(recovery_error) => Err(recovery_error),
-                        },
-                        Err(recovery_error) => Err(recovery_error),
-                    };
-                    let mut state = self.sessions.lock().unwrap();
-                    if let Some(session) = state.live.get_mut(&input.session) {
-                        if let Ok(recovered) = recovered {
-                            session.handle = recovered;
-                            session.backend_released = false;
-                        } else {
-                            session.terminal_error = Some(error.clone());
-                            session.terminal_since = Some(Instant::now());
-                            session.backend_released = true;
-                        }
-                    }
+        ) {
+            Ok(handle) => match self.wait_for_first_frame(handle).await {
+                Ok(()) => handle,
+                Err(error) => {
+                    let _ = self.backend.stop(handle);
+                    cleanup_media_transport(&previous.media_transport, previous.viewer_port);
+                    let _ = self
+                        .restore_previous_stream(input.session, &previous, &error)
+                        .await;
                     return Err(format!("replacement stream startup failed: {error}"));
                 }
             },
             Err(error) => {
-                cleanup_media_transport(&previous.5, previous.3);
-                let recovered = match start_replacement(
-                    previous.9,
-                    previous.10,
-                    previous.11,
-                    previous.7,
-                ) {
-                    Ok(recovered) => match self.wait_for_first_frame(recovered).await {
-                        Ok(()) => Ok(recovered),
-                        Err(recovery_error) => Err(recovery_error),
-                    },
-                    Err(recovery_error) => Err(recovery_error),
-                };
-                let mut state = self.sessions.lock().unwrap();
-                if let Some(session) = state.live.get_mut(&input.session) {
-                    if let Ok(recovered) = recovered {
-                        session.handle = recovered;
-                        session.backend_released = false;
-                    } else {
-                        session.terminal_error = Some(error.clone());
-                        session.terminal_since = Some(Instant::now());
-                        session.backend_released = true;
-                    }
-                }
+                cleanup_media_transport(&previous.media_transport, previous.viewer_port);
+                let _ = self
+                    .restore_previous_stream(input.session, &previous, &error)
+                    .await;
                 return Err(format!("replacement stream failed: {error}"));
             }
         };
@@ -1028,14 +1048,8 @@ impl ControlServer {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
                 };
-                if input.width == 0
-                    || input.height == 0
-                    || input.width > 8192
-                    || input.height > 8192
-                    || input.fps == 0
-                    || input.fps > 90
-                {
-                    return err("unsupported stream dimensions or fps");
+                if let Err(e) = validate_stream_shape(input.width, input.height, input.fps) {
+                    return err(&e);
                 }
                 if !self
                     .backend

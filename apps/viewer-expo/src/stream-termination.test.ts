@@ -2,11 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ActiveStream } from "./catalog-model-types";
 import {
   claimStreamRestore,
-  reduceRestartFailure,
   releaseStreamRestore,
   selectRecoverableStream,
   subscribeStreamTermination,
-  type RestartRequest,
 } from "./stream-termination";
 
 function active(session: number, port: number): ActiveStream {
@@ -93,42 +91,15 @@ describe("stream termination recovery selection", () => {
   });
 });
 
-describe("restart failure reduction", () => {
-  const streams = [active(11, 5001), active(22, 5002)];
-
-  it("retains the matching stream after a native-triggered restart fails", () => {
-    const request: RestartRequest = {
-      active: streams[0],
-      trigger: "nativeTermination",
-    };
-
-    expect(reduceRestartFailure(streams, request)).toEqual(streams);
-  });
-
-  it("retains streams after an automatic Host-status restart fails", () => {
-    const request: RestartRequest = {
-      active: streams[0],
-      trigger: "hostStatus",
-    };
-
-    expect(reduceRestartFailure(streams, request)).toEqual(streams);
-  });
-});
-
 describe("controller recovery policy", () => {
   const streams = [active(11, 5001), active(22, 5002)];
 
   it("allows an explicit retry after a failed native stream recovery", () => {
-    const nativeRequest: RestartRequest = {
-      active: streams[0],
-      trigger: "nativeTermination",
-    };
     const inFlight = new Set([streams[0].session]);
-    const nextStreams = reduceRestartFailure(streams, nativeRequest);
 
     releaseStreamRestore(inFlight, streams[0].session);
 
-    expect(selectRecoverableStream(nextStreams, { port: 5001, reason: 4 }, inFlight)).toEqual(streams[0]);
+    expect(selectRecoverableStream(streams, { port: 5001, reason: 4 }, inFlight)).toEqual(streams[0]);
   });
 
   it("blocks a transport restore while a native restore owns the same session", () => {

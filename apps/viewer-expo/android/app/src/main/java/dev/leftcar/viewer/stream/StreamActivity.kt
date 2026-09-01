@@ -133,30 +133,50 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             scheduleRenderRecovery()
             return
         }
-        val result = ViewerNative.rebindSurfacePort(
-            nativeState,
-            instanceId,
-            surface,
-            port,
-            host,
-            sourceWidth,
-            sourceHeight,
-            fps,
-        )
-        surfaceAttached = result == 0
+        val result = rebindOnSameSurface()
         android.util.Log.i(
             "LeftcarStream",
             "local render recovery attempt=${attempt.number} result=$result " +
                 "port=$port source=${sourceWidth}x$sourceHeight fps=$fps",
         )
         if (result == 0) {
-            terminationHandled = false
-            recoveryFallbackEmitted = false
             hud?.onRebindFinished(true)
         } else {
             hud?.onRebindFinished(false)
             scheduleRenderRecovery()
         }
+    }
+
+    /**
+     * Swap the live renderer onto the current Surface and geometry. Shared by
+     * the render-recovery retry and the same-window stream intent: both own
+     * the success bookkeeping (reset termination state, notify the HUD), so
+     * the two call sites cannot drift.
+     */
+    private fun rebindOnSameSurface(): Int {
+        val surface = streamSurfaces?.left?.holder?.surface
+        val result = if (nativeState != 0L && !released && surface != null && surface.isValid) {
+            ViewerNative.rebindSurfacePort(
+                nativeState,
+                instanceId,
+                surface,
+                port,
+                host,
+                sourceWidth,
+                sourceHeight,
+                fps,
+            )
+        } else {
+            -1
+        }
+        surfaceAttached = result == 0
+        if (result == 0) {
+            terminationHandled = false
+            recoveryFallbackEmitted = false
+            recoveryRetryPolicy.reset()
+        }
+        hud?.onRebindFinished(result == 0)
+        return result
     }
 
     private fun markRenderHealthy() {
@@ -423,28 +443,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             splitVertical = nextSplitVertical
             splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
             if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {
-                val surface = streamSurfaces?.left?.holder?.surface
-                val result = if (surface != null && nativeState != 0L && !released) {
-                    ViewerNative.rebindSurfacePort(
-                        nativeState,
-                        instanceId,
-                        surface,
-                        port,
-                        host,
-                        sourceWidth,
-                        sourceHeight,
-                        fps,
-                    )
-                } else {
-                    -1
-                }
-                surfaceAttached = result == 0
-                hud?.onRebindFinished(result == 0)
-                if (result == 0) {
-                    terminationHandled = false
-                    recoveryRetryPolicy.reset()
-                    recoveryFallbackEmitted = false
-                }
+                val result = rebindOnSameSurface()
                 if (result != 0) {
                     // Leave the Activity and Surface visible. The controller's
                     // bounded retry can deliver another intent to this same

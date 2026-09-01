@@ -48,7 +48,7 @@ const REBIND_COOLDOWN_MS = 5_000;
 const CONGESTION_FPS_RATIO = 0.9;
 const HEALTHY_FPS_RATIO = 0.95;
 
-function isExact4K(target: AdaptiveTarget): boolean {
+export function isExact4K(target: AdaptiveTarget): boolean {
   return target.width === 3_840 && target.height === 2_160;
 }
 

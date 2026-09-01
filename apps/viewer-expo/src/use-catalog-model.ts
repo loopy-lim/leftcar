@@ -192,7 +192,9 @@ export function useCatalogModel() {
         currentCatalog,
         active.captureBackend,
       );
-      const currentMediaHost = currentCatalog.mediaHost?.trim()
+      // Re-resolve from the just-fetched catalog: the media host can differ
+      // from the cached `mediaHost` computed at render time.
+      const refreshedMediaHost = currentCatalog.mediaHost?.trim()
         ? catalogDisplayHost(currentCatalog.mediaHost.trim())
         : catalogDisplayHost(host);
       await requestWithReconnect("stopStream", { session: active.session }).catch(
@@ -203,7 +205,7 @@ export function useCatalogModel() {
         control,
         request: requestWithReconnect,
         launcher,
-        host: currentMediaHost,
+        host: refreshedMediaHost,
         advertisedEncoderExperiments: currentCatalog.encoderExperiments,
         advertisedUdpStabilityCapabilities:
           currentCatalog.udpStabilityCapabilities,
@@ -242,15 +244,11 @@ export function useCatalogModel() {
       if (!launcher) {
         throw new Error("화면 해상도를 다시 연결할 기능을 시작할 수 없습니다");
       }
-      const currentCatalog = catalogQuery.data;
-      const currentMediaHost = currentCatalog?.mediaHost?.trim()
-        ? catalogDisplayHost(currentCatalog.mediaHost.trim())
-        : catalogDisplayHost(host);
       const control = controlClient() ?? (await reconnectHost());
       const reconfigured = await reconfigurePreparedStream({
         control,
         launcher,
-        host: currentMediaHost,
+        host: mediaHost,
         active,
         target,
         qualityState,
@@ -260,7 +258,7 @@ export function useCatalogModel() {
         captureBackend: active.captureBackend,
       };
     },
-    [catalogQuery.data, host],
+    [mediaHost],
   );
 
   const { addStream, applyUdpStability, removeStream, streams } =
@@ -324,6 +322,7 @@ export function useCatalogModel() {
           display,
           displayProfile,
         );
+        const sourceTarget = { width, height, fps };
         const started = await startPreparedStream({
           control: client,
           request: requestWithReconnect,
@@ -347,21 +346,22 @@ export function useCatalogModel() {
             showFps: preferences.showFps,
           },
         });
+        const acceptedTarget = {
+          width: started.width ?? width,
+          height: started.height ?? height,
+          fps: started.fps ?? fps,
+        };
         addStream({
           port,
           session: started.session,
           sourceIndex: display.index,
           sourceName: display.name,
-          width: started.width ?? width,
-          height: started.height ?? height,
-          fps: started.fps ?? fps,
-          sourceTarget: { width, height, fps },
-          activeTarget: {
-            width: started.width ?? width,
-            height: started.height ?? height,
-            fps: started.fps ?? fps,
-          },
-          fallbackTarget: fallbackTargetFor({ width, height, fps }),
+          width: acceptedTarget.width,
+          height: acceptedTarget.height,
+          fps: acceptedTarget.fps,
+          sourceTarget,
+          activeTarget: acceptedTarget,
+          fallbackTarget: fallbackTargetFor(sourceTarget),
           qualityState: started.qualityState ?? "native",
           captureBackend: effectiveCaptureBackend,
           contentMode: displayProfile.contentMode,

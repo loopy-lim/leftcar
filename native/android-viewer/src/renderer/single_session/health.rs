@@ -43,7 +43,6 @@ pub(super) struct RenderHealthState {
     last_rendered_frames: u64,
     incident_started_at: Option<Instant>,
     idr_requested: bool,
-    decoder_rebuilt: bool,
     recovery_attempts: u8,
     last_recovery_at: Option<Instant>,
     terminated: bool,
@@ -80,7 +79,7 @@ impl RenderHealthState {
 
         let incident_started_at = *self.incident_started_at.get_or_insert(now);
         let incident_age = now.saturating_duration_since(incident_started_at);
-        if incident_age >= RENDER_TERMINATE_DEADLINE && !self.terminated {
+        if incident_age >= RENDER_TERMINATE_DEADLINE {
             self.terminated = true;
             return RenderHealthAction::TerminateRenderStalled;
         }
@@ -91,7 +90,6 @@ impl RenderHealthState {
             && recovery_retry_due
             && self.recovery_attempts < RENDER_MAX_RECOVERY_RETRIES
         {
-            self.decoder_rebuilt = true;
             self.recovery_attempts = self.recovery_attempts.saturating_add(1);
             self.last_recovery_at = Some(now);
             return RenderHealthAction::RebuildDecoder;
@@ -106,7 +104,6 @@ impl RenderHealthState {
     fn reset_incident(&mut self) {
         self.incident_started_at = None;
         self.idr_requested = false;
-        self.decoder_rebuilt = false;
         self.recovery_attempts = 0;
         self.last_recovery_at = None;
         self.terminated = false;
