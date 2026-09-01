@@ -122,6 +122,8 @@ export const translations = {
       troubleshootManualDesc: "자동 검색이 안 될 때 컴퓨터 화면 하단의 IP 주소를 직접 입력하세요.",
       troubleshootHiddenWindow: "컴퓨터 앱 창이 안 떠요",
       troubleshootHiddenWindowDesc: "창 닫기는 종료가 아니라 숨기기입니다. macOS 메뉴 막대 우측 상단의 Leftcar 아이콘 → 'Leftcar Host 열기'.",
+      troubleshootNoRouter: "공유기 없이 연결 (맥 핫스팟)",
+      troubleshootNoRouterDesc: "공유기가 없을 때는 맥의 시스템 설정 > 일반 > 공유 > 인터넷 공유에서 Wi-Fi 핫스팟을 켜고, 이 기기를 그 핫스팟에 연결하세요.",
     },
     host: {
       headerTitle: "화면 공유 호스트",
@@ -352,6 +354,8 @@ export const translations = {
       troubleshootManualDesc: "If auto-discovery fails, directly enter the IP shown at the bottom of the computer screen.",
       troubleshootHiddenWindow: "Computer app window does not appear",
       troubleshootHiddenWindowDesc: "Closing the window hides it. Use the Leftcar icon at the right end of the macOS menu bar → 'Open Leftcar Host'.",
+      troubleshootNoRouter: "Connect without a router (Mac hotspot)",
+      troubleshootNoRouterDesc: "With no router, turn on Internet Sharing under System Settings > General > Sharing on your Mac, then join that hotspot from this device.",
     },
     host: {
       headerTitle: "Screen Sharing Host",
