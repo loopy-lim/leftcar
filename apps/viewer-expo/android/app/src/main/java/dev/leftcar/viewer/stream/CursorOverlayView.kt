@@ -4,6 +4,7 @@ import android.app.Activity
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.view.Choreographer
 import android.view.Gravity
@@ -94,6 +95,7 @@ internal class CursorOverlayView(
         choreographer.removeFrameCallback(frameCallback)
         popup?.dismiss()
         popup = null
+        hide()
     }
 
     /**
@@ -147,12 +149,16 @@ internal class CursorOverlayView(
         lastSequence = sequence
         lastVisible = true
         visibility = VISIBLE
-        translationX = video.first + x / 65535f * (video.third - cursorWidthPx())
-        translationY = video.second + y / 65535f * (video.fourth - cursorHeightPx())
+        // A video rect narrower than the cursor must not push the arrow
+        // backwards past the rect's leading edge.
+        translationX = video.left + x / 65535f *
+            (video.width().coerceAtLeast(cursorWidthPx().toFloat()) - cursorWidthPx())
+        translationY = video.top + y / 65535f *
+            (video.height().coerceAtLeast(cursorHeightPx().toFloat()) - cursorHeightPx())
     }
 
-    /** Centered aspect-fit rect (offsetX, offsetY, width, height) in the host frame. */
-    private fun videoRect(parent: ViewGroup): QuadF? {
+    /** Centered aspect-fit rect of the source video inside the host frame. */
+    private fun videoRect(parent: ViewGroup): RectF? {
         if (sourceWidth <= 0 || sourceHeight <= 0) return null
         val scale = min(
             parent.width / sourceWidth.toFloat(),
@@ -160,11 +166,11 @@ internal class CursorOverlayView(
         )
         val width = sourceWidth * scale
         val height = sourceHeight * scale
-        return QuadF(
+        return RectF(
             (parent.width - width) / 2f,
             (parent.height - height) / 2f,
-            width,
-            height,
+            (parent.width + width) / 2f,
+            (parent.height + height) / 2f,
         )
     }
 
@@ -196,5 +202,3 @@ internal class CursorOverlayView(
         canvas.drawPath(arrow, strokePaint)
     }
 }
-
-private data class QuadF(val first: Float, val second: Float, val third: Float, val fourth: Float)
