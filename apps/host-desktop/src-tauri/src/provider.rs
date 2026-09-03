@@ -79,6 +79,9 @@ impl BetterDisplayProvider {
 }
 
 /// PATH probe shared by provider availability checks.
+// The only non-test caller sits in a macOS-cfg'd block, so the plain Windows
+// lib build would flag this as dead; tests still exercise it everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn which_succeeds(binary: &str) -> bool {
     std::process::Command::new("which")
         .arg(binary)
@@ -197,6 +200,9 @@ impl Default for BetterDisplayProvider {
 /// Calls the Swift shim built from `tools/cgvd-shim/`; never promotes to the
 /// default provider without a separate ADR.
 pub struct CgvdProvider {
+    // Only macOS-cfg'd methods read the path; on other platforms it is
+    // written but never read, which would fail Windows `clippy -D warnings`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     binary_path: String,
 }
 
