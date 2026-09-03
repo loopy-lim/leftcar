@@ -83,7 +83,10 @@ mod tests {
         assert_eq!(parse_cursor_sample(&[], token), None);
         assert_eq!(parse_cursor_sample(&[0u8; 13], token), None);
         let packet = encode(1, 0, 0, false, token);
-        assert_eq!(parse_cursor_sample(&packet[..packet.len() - 1], token), None);
+        assert_eq!(
+            parse_cursor_sample(&packet[..packet.len() - 1], token),
+            None
+        );
         let mut foreign = encode(1, 0, 0, false, token);
         foreign[0] = b'X';
         assert_eq!(parse_cursor_sample(&foreign, token), None);

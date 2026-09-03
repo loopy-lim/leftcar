@@ -166,8 +166,12 @@ fn apply_cursor_sample(control: &RendererControl, sample: CursorSample) {
     }
     control.cursor_x.store(sample.x, Ordering::SeqCst);
     control.cursor_y.store(sample.y, Ordering::SeqCst);
-    control.cursor_visible.store(sample.visible, Ordering::SeqCst);
-    control.cursor_sequence.store(sample.sequence, Ordering::SeqCst);
+    control
+        .cursor_visible
+        .store(sample.visible, Ordering::SeqCst);
+    control
+        .cursor_sequence
+        .store(sample.sequence, Ordering::SeqCst);
     control.cursor_active.store(1, Ordering::SeqCst);
 }
 

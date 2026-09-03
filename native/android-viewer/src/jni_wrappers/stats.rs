@@ -16,6 +16,9 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_inputStatus(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+/// JNI supplies a valid environment and Java string reference for the
+/// duration of this call.
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cursorState(
     env: *mut JNIEnv,
     _class: *mut jobject,
