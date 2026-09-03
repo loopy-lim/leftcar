@@ -91,6 +91,13 @@ extension CaptureSession {
                 sendInputStatus(fd: fd)
                 continue
             }
+            if message == Data("LCDON".utf8) || message == Data("LCDOFF".utf8) {
+                // Token-authenticated above, same frame class as IDR/BYE.
+                // Older hosts never match these and drop the datagram, which
+                // is exactly the design's backward-compatibility behavior.
+                handleCursorStreamCommand(message, fd: fd, destination: source)
+                continue
+            }
             if message.count == 16,
                message.prefix(4) == Data("LCP1".utf8) {
                 sendLatencyProbeResponse(message, fd: fd, destination: source)
@@ -163,6 +170,12 @@ extension CaptureSession {
                 if messageBytes == Array("IDR".utf8) {
                     beginNetworkRecovery()
                     sendInputStatus(fd: fd)
+                    continue
+                }
+                if messageBytes == Array("LCDON".utf8)
+                    || messageBytes == Array("LCDOFF".utf8) {
+                    let message = Data(messageBytes)
+                    handleCursorStreamCommand(message, fd: fd, destination: nil)
                     continue
                 }
                 if messageBytes.count == 16,

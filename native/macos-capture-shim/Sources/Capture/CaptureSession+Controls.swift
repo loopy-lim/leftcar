@@ -168,6 +168,19 @@ extension CaptureSession {
             inputReadSource = source
             source.resume()
         }
+        // A reconnect replaces the session token (fresh LCH1 handshake). The
+        // LCD1 coordinator embeds the token in every encoded packet and stays
+        // silent until one is installed, so a stale stream must rebind here.
+        // An active stream keeps its enable state; the next polling tick
+        // flushes the newest observation under the new token.
+        cursorLock.lock()
+        let hadCoordinator = cursorCoordinator != nil
+        cursorLock.unlock()
+        if hadCoordinator {
+            cursorLock.lock()
+            cursorCoordinator?.setToken(viewerControlToken)
+            cursorLock.unlock()
+        }
     }
 
      func stopInputReceiver() {

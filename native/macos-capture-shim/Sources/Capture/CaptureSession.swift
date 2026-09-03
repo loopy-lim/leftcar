@@ -58,6 +58,20 @@ final class CaptureSession {
      var lastPointerPosition = CGPoint.zero
      var horizontalScrollRemainder: Int32 = 0
      var verticalScrollRemainder: Int32 = 0
+    // Cursor plane (LCD1). Protected by cursorLock; the CGEvent tap callback
+    // writes observations and the polling timer drains them. The coordinator
+    // is a value type under the single-owner contract: only this lock domain
+    // holds and mutates it, so the sequence space never forks.
+     let cursorLock = NSLock()
+     var cursorCoordinator: CursorStreamCoordinator?
+     var cursorStreamEnabled = false
+     var cursorEventTap: CFMachPort?
+     var cursorEventTapSource: CFRunLoopSource?
+     var cursorPollingTimer: DispatchSourceTimer?
+    // Viewer's ephemeral control port learned from the LCDON datagram; UDP
+    // LCD1 responses must go back there, not the media target.
+     var cursorStreamDestination: sockaddr_in?
+     var cursorStreamFD: Int32 = -1
      var stream: SCStream?
      var streamHandler: CaptureOutputHandler?
      var cgStream: CGDisplayStream?
@@ -410,6 +424,10 @@ final class CaptureSession {
     }
 
     deinit {
+        // The tap holds an unowned reference to this session via its
+        // userInfo. Normal stops already removed it in teardownCursorStream;
+        // this guard covers abnormal teardown paths that skip stop().
+        teardownCursorStream()
         performanceLogTicker?.stop()
     }
 
