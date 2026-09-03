@@ -13,8 +13,9 @@ private API를 직접 부른다: macOS 버전이 오르면 언제든 파손될 �
 ## 빌드
 
 ```zsh
-cd tools/cgvd-shim && swift build
-# 바이너리: .build/debug/cgvd-shim (배포는 --release)
+cd tools/cgvd-shim && swift build -c release
+# 바이너리: .build/release/cgvd-shim — CgvdProvider 기본 탐색 경로
+# (provider.rs DEFAULT_SHIM_PATH: tools/cgvd-shim/.build/release/cgvd-shim)와 일치
 ```
 
 ## stdout 계약 (한 줄 — Rust `parse_cgvd_line`이 이 형식을 파싱한다)
@@ -43,8 +44,8 @@ cd tools/cgvd-shim && swift build
 ## 실행 예
 
 ```zsh
-.build/debug/cgvd-shim probe    # 어떤 세션에서든 가능 (클래스 존재만 묻는다)
-.build/debug/cgvd-shim create   # 반드시 GUI 세션(터미널 앱)에서
+.build/release/cgvd-shim probe    # 어떤 세션에서든 가능 (클래스 존재만 묻는다)
+.build/release/cgvd-shim create   # 반드시 GUI 세션(터미널 앱)에서
 ```
 
 **create 실측은 반드시 터미널 앱(Ghostty/Terminal 등)에서.** SSH·Claude 자동화

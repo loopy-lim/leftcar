@@ -58,6 +58,11 @@ impl VirtualDisplayProvider for MockProvider {
 pub struct TabletDisplaySession {
     pub provider: Arc<dyn VirtualDisplayProvider>,
     pub display: VirtualDisplay,
+    /// Recorded at start from the same probe that picks the caffeinate flag:
+    /// true means the assertion degraded to `-i` (battery), which the UI
+    /// surfaces as a stability warning. Cfg-independent (false off macOS) so
+    /// the status contract and this struct are identical on every target.
+    pub on_battery: bool,
     #[cfg(target_os = "macos")]
     pub assertion: Option<crate::power_assertion::PowerAssertion>,
     pub state: ModeState,
@@ -71,15 +76,20 @@ impl TabletDisplaySession {
         spec: &DisplaySpec,
     ) -> Result<Self, ProviderError> {
         if !provider.available() {
-            return Err(ProviderError::EngineUnavailable(format!(
-                "{} 엔진을 사용할 수 없습니다.",
-                provider.name()
-            )));
+            // Bare engine name: message() already carries the "사용할 수 없습니다"
+            // sentence — duplicating it here produced
+            // "...사용할 수 없습니다: <name> 엔진을 사용할 수 없습니다."
+            return Err(ProviderError::EngineUnavailable(provider.name().into()));
         }
         let display = provider.create(spec)?;
+        // The battery probe exists only on macOS; off it there is no battery to
+        // degrade on, so the field stays false and the UI shows no warning.
+        #[cfg(target_os = "macos")]
+        let on_battery = crate::power_assertion::PowerAssertion::on_battery();
+        #[cfg(not(target_os = "macos"))]
+        let on_battery = false;
         #[cfg(target_os = "macos")]
         let assertion = {
-            let on_battery = crate::power_assertion::PowerAssertion::on_battery();
             // Assertion failure degrades to None instead of failing the whole
             // session: streaming without power defense beats no stream at all.
             crate::power_assertion::PowerAssertion::acquire(on_battery).ok()
@@ -87,6 +97,7 @@ impl TabletDisplaySession {
         Ok(Self {
             provider,
             display,
+            on_battery,
             #[cfg(target_os = "macos")]
             assertion,
             state: ModeState::Streaming,
@@ -152,18 +163,33 @@ pub async fn read_lid_closed() -> Option<bool> {
 /// for UI display only, never a control branch. An indeterminate lid reading
 /// (spawn failure, timeout, unparseable output) reports `streaming` — the
 /// label may only advance to `clamshell` when the lid is provably closed.
-pub fn reported_status(state: &ModeState, lid_closed: Option<bool>) -> String {
-    match state {
-        ModeState::Idle => "idle".to_string(),
-        ModeState::Creating => "creating".to_string(),
-        ModeState::Failed(detail) => format!("failed: {detail}"),
+///
+/// Battery rides the same string as a `;battery` suffix on the live states
+/// only. Rationale: the Tauri command returns `Result<String, String>`, and
+/// existing builds of the UI already parse the bare prefixes, so extending
+/// the string keeps old parsers working (they match exact strings like
+/// "streaming" and fall through to their else branch otherwise) while the
+/// current UI opt-in reads the suffix. Idle/Creating/Failed never carry it:
+/// with no live session the warning would outlive its cause.
+pub fn reported_status(state: &ModeState, lid_closed: Option<bool>, on_battery: bool) -> String {
+    // The suffix is meaningful only while the session is live — Streaming or
+    // an active clamshell; the warning must not linger after stop.
+    let base = match state {
+        ModeState::Idle => return "idle".to_string(),
+        ModeState::Creating => return "creating".to_string(),
+        ModeState::Failed(detail) => return format!("failed: {detail}"),
         // A stored ClamshellActive (defensive; no code path produces it
         // today) reports clamshell regardless of a fresh lid reading.
-        ModeState::ClamshellActive => "clamshell".to_string(),
+        ModeState::ClamshellActive => "clamshell",
         ModeState::Streaming => match lid_closed {
-            Some(true) => "clamshell".to_string(),
-            Some(false) | None => "streaming".to_string(),
+            Some(true) => "clamshell",
+            Some(false) | None => "streaming",
         },
+    };
+    if on_battery {
+        format!("{base};battery")
+    } else {
+        base.to_string()
     }
 }
 
@@ -218,7 +244,7 @@ mod tests {
     #[test]
     fn streaming_with_closed_lid_reports_clamshell() {
         assert_eq!(
-            reported_status(&ModeState::Streaming, Some(true)),
+            reported_status(&ModeState::Streaming, Some(true), false),
             "clamshell"
         );
     }
@@ -226,7 +252,7 @@ mod tests {
     #[test]
     fn streaming_with_open_lid_reports_streaming() {
         assert_eq!(
-            reported_status(&ModeState::Streaming, Some(false)),
+            reported_status(&ModeState::Streaming, Some(false), false),
             "streaming"
         );
     }
@@ -235,21 +261,59 @@ mod tests {
     fn indeterminate_lid_reading_never_claims_clamshell() {
         // Spawn failure/timeout/parse miss degrade to None: the label may
         // only advance when the lid is provably closed.
-        assert_eq!(reported_status(&ModeState::Streaming, None), "streaming");
+        assert_eq!(
+            reported_status(&ModeState::Streaming, None, false),
+            "streaming"
+        );
+    }
+
+    #[test]
+    fn battery_suffix_rides_the_live_states_only() {
+        assert_eq!(
+            reported_status(&ModeState::Streaming, Some(false), true),
+            "streaming;battery"
+        );
+        assert_eq!(
+            reported_status(&ModeState::Streaming, Some(true), true),
+            "clamshell;battery"
+        );
+        // Idle/Creating/Failed carry no suffix: with no live session (or
+        // before the session exists / after it failed) a battery warning
+        // would outlive its cause.
+        assert_eq!(reported_status(&ModeState::Idle, None, true), "idle");
+        assert_eq!(
+            reported_status(&ModeState::Creating, None, true),
+            "creating"
+        );
+        assert_eq!(
+            reported_status(&ModeState::Failed("boom".into()), None, true),
+            "failed: boom"
+        );
+    }
+
+    #[test]
+    fn ac_power_reports_no_battery_suffix() {
+        assert_eq!(
+            reported_status(&ModeState::Streaming, Some(true), false),
+            "clamshell"
+        );
     }
 
     #[test]
     fn stored_states_report_verbatim() {
-        assert_eq!(reported_status(&ModeState::Idle, None), "idle");
-        assert_eq!(reported_status(&ModeState::Creating, None), "creating");
+        assert_eq!(reported_status(&ModeState::Idle, None, false), "idle");
+        assert_eq!(
+            reported_status(&ModeState::Creating, None, false),
+            "creating"
+        );
         // A stored ClamshellActive (never produced today) must still report
         // clamshell, lid reading or not.
         assert_eq!(
-            reported_status(&ModeState::ClamshellActive, Some(false)),
+            reported_status(&ModeState::ClamshellActive, Some(false), false),
             "clamshell"
         );
         assert_eq!(
-            reported_status(&ModeState::Failed("boom".into()), Some(true)),
+            reported_status(&ModeState::Failed("boom".into()), Some(true), false),
             "failed: boom"
         );
     }

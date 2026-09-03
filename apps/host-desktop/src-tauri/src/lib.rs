@@ -535,6 +535,8 @@ async fn tablet_display_stop(
 /// branches on it. The reported decision lives in the pure
 /// `clamshell_mode::reported_status` (tested without any spawn); an
 /// indeterminate lid reading degrades to "streaming", never "clamshell".
+/// The battery flag recorded at start rides the same string as a
+/// ";battery" suffix (design: 배터리 `-i` 강등 + UI 경고).
 #[tauri::command]
 async fn tablet_display_status(
     state: tauri::State<'_, TabletSessionRegistry>,
@@ -543,11 +545,11 @@ async fn tablet_display_status(
     {
         // Block scope (not drop()) so the MutexGuard's borrow provably ends
         // before the await below — the tauri command future must be Send.
-        let session_state = {
+        let (session_state, on_battery) = {
             let guard = state.lock().map_err(|error| error.to_string())?;
             match guard.as_ref() {
-                Some(session) => session.state.clone(),
-                None => clamshell_mode::ModeState::Idle,
+                Some(session) => (session.state.clone(), session.on_battery),
+                None => (clamshell_mode::ModeState::Idle, false),
             }
         };
         // Probe outside the registry lock so a (capped) ioreg hang cannot
@@ -557,7 +559,11 @@ async fn tablet_display_status(
         } else {
             None
         };
-        Ok(clamshell_mode::reported_status(&session_state, lid_closed))
+        Ok(clamshell_mode::reported_status(
+            &session_state,
+            lid_closed,
+            on_battery,
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {

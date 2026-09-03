@@ -613,22 +613,28 @@ interface VirtualDisplayCardProps {
 type TabletSessionUiState = "Idle" | "Streaming" | "Clamshell" | "Creating" | "Failed";
 
 type ParsedTabletStatus =
-  | { state: "Idle"; clamshell: null }
-  | { state: "Streaming"; clamshell: false }
-  | { state: "Clamshell"; clamshell: true }
-  | { state: "Creating"; clamshell: null }
-  | { state: "Failed"; clamshell: null; detail: string };
+  | { state: "Idle"; clamshell: null; onBattery: false }
+  | { state: "Streaming"; clamshell: false; onBattery: boolean }
+  | { state: "Clamshell"; clamshell: true; onBattery: boolean }
+  | { state: "Creating"; clamshell: null; onBattery: false }
+  | { state: "Failed"; clamshell: null; detail: string; onBattery: false };
 
 /// `tablet_display_status` returns one flat string
-/// ("idle" | "streaming" | "clamshell" | "creating" | "failed: <detail>"); parse
-/// it once so the card matches on a discriminated union instead of raw substrings.
+/// ("idle" | "streaming" | "clamshell" | "creating" | "failed: <detail>",
+/// optionally suffixed ";battery" while a session is live on battery power);
+/// parse it once so the card matches on a discriminated union instead of raw
+/// substrings.
 function parseTabletStatus(raw: string): ParsedTabletStatus {
-  if (raw === "streaming") return { state: "Streaming", clamshell: false };
-  if (raw === "clamshell") return { state: "Clamshell", clamshell: true };
-  if (raw === "creating") return { state: "Creating", clamshell: null };
-  if (raw === "idle") return { state: "Idle", clamshell: null };
-  const detail = raw.startsWith("failed: ") ? raw.slice("failed: ".length) : raw;
-  return { state: "Failed", clamshell: null, detail };
+  // The battery suffix rides the live states only (backend contract); strip
+  // it first so the base-state matching below stays exact-string.
+  const onBattery = raw.endsWith(";battery");
+  const base = onBattery ? raw.slice(0, -";battery".length) : raw;
+  if (base === "streaming") return { state: "Streaming", clamshell: false, onBattery };
+  if (base === "clamshell") return { state: "Clamshell", clamshell: true, onBattery };
+  if (base === "creating") return { state: "Creating", clamshell: null, onBattery: false };
+  if (base === "idle") return { state: "Idle", clamshell: null, onBattery: false };
+  const detail = base.startsWith("failed: ") ? base.slice("failed: ".length) : base;
+  return { state: "Failed", clamshell: null, detail, onBattery: false };
 }
 
 function tabletPillLabel(state: TabletSessionUiState, t: TranslationSchema): string {
@@ -644,20 +650,39 @@ function tabletPillLabel(state: TabletSessionUiState, t: TranslationSchema): str
   }
 }
 
+/// The three tablet-session fields arrive together from one
+/// `tablet_display_status` parse and always change together, so they live as a
+/// single state object (kept consistent by construction) instead of parallel
+/// useStates that must be updated in lockstep.
+interface TabletSessionView {
+  state: TabletSessionUiState;
+  clamshell: boolean | null;
+  onBattery: boolean;
+}
+
+const IDLE_TABLET_SESSION: TabletSessionView = {
+  state: "Idle",
+  clamshell: null,
+  onBattery: false,
+};
+
 function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
   const [name, setName] = useState("Leftcar Virtual");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [sessionState, setSessionState] = useState<TabletSessionUiState>("Idle");
-  const [clamshell, setClamshell] = useState<boolean | null>(null);
+  const [tabletSession, setTabletSession] = useState<TabletSessionView>(IDLE_TABLET_SESSION);
   const didSyncStatus = useRef(false);
+  const { state: sessionState, clamshell, onBattery } = tabletSession;
 
   const syncSessionStatus = useCallback(async () => {
     try {
       const parsed = parseTabletStatus(await invoke<string>("tablet_display_status"));
-      setSessionState(parsed.state);
-      setClamshell(parsed.clamshell);
+      setTabletSession({
+        state: parsed.state,
+        clamshell: parsed.clamshell,
+        onBattery: parsed.onBattery,
+      });
       if (parsed.state === "Failed") {
         setCreated(null);
         setFailure(parsed.detail);
@@ -701,12 +726,11 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
       });
       setCreated(t.host.tabletDisplayStarted);
       setFailure(null);
-      setSessionState("Streaming");
+      setTabletSession({ state: "Streaming", clamshell: false, onBattery: false });
       await syncSessionStatus();
     } catch (cause) {
       setCreated(null);
-      setSessionState("Idle");
-      setClamshell(null);
+      setTabletSession(IDLE_TABLET_SESSION);
       // Provider errors arrive pre-localized; show them verbatim.
       setFailure(String(cause instanceof Error ? cause.message : cause));
       // "Already running" and lock errors mean the backend state we reset away
@@ -723,8 +747,7 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
       await invoke<string>("tablet_display_stop");
       setCreated(t.host.tabletDisplayStopped);
       setFailure(null);
-      setSessionState("Idle");
-      setClamshell(null);
+      setTabletSession(IDLE_TABLET_SESSION);
       await syncSessionStatus();
     } catch (cause) {
       setCreated(null);
@@ -781,6 +804,21 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
       {clamshell === true && (
         <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
           {t.host.tabletDisplayClamshellHint}
+        </p>
+      )}
+      {onBattery && (sessionState === "Streaming" || sessionState === "Clamshell") && (
+        <p
+          style={{
+            fontSize: 11,
+            marginTop: 4,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            color: "var(--text-secondary)",
+          }}
+          role="status"
+        >
+          <AlertTriangle size={13} /> {t.host.tabletDisplayBattery}
         </p>
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
