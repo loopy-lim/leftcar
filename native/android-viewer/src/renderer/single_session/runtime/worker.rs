@@ -254,6 +254,9 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
+                if control_clone.cursor_requested.load(Ordering::SeqCst) {
+                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
+                }
             }
             continue;
         }
@@ -537,6 +540,9 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
+                if control_clone.cursor_requested.load(Ordering::SeqCst) {
+                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
+                }
                 continue;
             }
             // Keep accepting responses on the legacy media socket during a

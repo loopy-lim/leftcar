@@ -71,6 +71,13 @@ mod tests {
     }
 
     #[test]
+    fn same_length_wrong_token_is_rejected() {
+        let token = b"session-token";
+        let packet = encode(3, 1, 2, true, token);
+        assert_eq!(parse_cursor_sample(&packet, b"session-tokeN"), None);
+    }
+
+    #[test]
     fn truncated_or_foreign_packets_are_rejected() {
         let token = b"nonce";
         assert_eq!(parse_cursor_sample(&[], token), None);

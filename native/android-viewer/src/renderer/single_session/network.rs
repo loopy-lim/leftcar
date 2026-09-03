@@ -1,4 +1,5 @@
 use super::*;
+use crate::cursor_protocol::{parse_cursor_sample, CursorSample};
 
 pub(super) struct MediaBatch {
     pub(super) count: usize,
@@ -148,7 +149,19 @@ pub(super) fn consume_viewer_response(
             .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
         return true;
     }
+    if let Some(sample) = parse_cursor_sample(packet, token) {
+        apply_cursor_sample(control, sample);
+        return true;
+    }
     false
+}
+
+fn apply_cursor_sample(control: &RendererControl, sample: CursorSample) {
+    control.cursor_x.store(sample.x, Ordering::SeqCst);
+    control.cursor_y.store(sample.y, Ordering::SeqCst);
+    control.cursor_visible.store(sample.visible, Ordering::SeqCst);
+    control.cursor_sequence.store(sample.sequence, Ordering::SeqCst);
+    control.cursor_active.store(1, Ordering::SeqCst);
 }
 
 pub(super) fn configure_single_session_sockets(
