@@ -25,12 +25,12 @@ const STRING_MANUFACTURER: u16 = 0;
 const STRING_MODEL: u16 = 1;
 const STRING_VERSION: u16 = 3;
 
+/// AOAP SEND STRING (control request 52) payloads are zero-terminated UTF-8
+/// (256-byte max). Android stores these verbatim as the accessory identity
+/// that both `accessory_filter.xml` and `UsbAccessoryModule` match against.
 pub fn encode_accessory_string(value: &str) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(value.len() * 2 + 2);
-    for unit in value.encode_utf16() {
-        encoded.extend_from_slice(&unit.to_le_bytes());
-    }
-    encoded.extend_from_slice(&[0, 0]);
+    let mut encoded = value.as_bytes().to_vec();
+    encoded.push(0);
     encoded
 }
 
@@ -388,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn accessory_string_is_utf16le_with_nul() {
-        assert_eq!(encode_accessory_string("AB"), vec![0x41, 0, 0x42, 0, 0, 0]);
-        assert_eq!(encode_accessory_string("레"), vec![0x08, 0xB8, 0, 0]);
+    fn accessory_string_is_zero_terminated_utf8() {
+        assert_eq!(encode_accessory_string("AB"), b"AB\0".to_vec());
+        assert_eq!(encode_accessory_string("Leftcar"), b"Leftcar\0".to_vec());
     }
 
     #[test]

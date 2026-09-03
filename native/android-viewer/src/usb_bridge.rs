@@ -20,6 +20,49 @@ const READ_BUFFER_BYTES: usize = 64 * 1024;
 // One frame may be assembling in MuxDecoder while two complete frames wait
 // for the renderer: at most 48 MiB of AOAP media payload per session.
 const MEDIA_CHANNEL_CAPACITY: usize = 2;
+// Matches the capture shim's `udpMediaFragmentPayloadBytes`: the reliable
+// TCP-style media frames arriving over AOAP carry one whole access unit,
+// while the native renderer only consumes shim-shaped UDP datagrams. We
+// re-segment into the same 1,400-byte datagrams (33-byte fragment header).
+const FRAGMENT_DATAGRAM_BYTES: usize = 1_400;
+const FRAGMENT_HEADER_BYTES: usize = 33;
+const FRAGMENT_PAYLOAD_BYTES: usize = FRAGMENT_DATAGRAM_BYTES - FRAGMENT_HEADER_BYTES;
+
+/// Split one whole access-unit frame (L2 logical layout: marker, AU id,
+/// "L2", capture/encode wall clocks, H.264 payload) into the shim's
+/// fragmented UDP datagram shape so the renderer's existing fragment
+/// pipeline can consume it. Mirrors the shim's `writePacket(isFrame: true)`
+/// fragmentation exactly, minus parity (reliable transports send none).
+pub(crate) fn fragment_au_frame(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if payload.len() <= FRAGMENT_HEADER_BYTES
+        || payload[0] != b'G'
+        || payload[3] != b'L'
+        || payload[4] != b'2'
+    {
+        return None;
+    }
+    let body = &payload[21..];
+    if body.is_empty() {
+        return None;
+    }
+    let count = body.len().div_ceil(FRAGMENT_PAYLOAD_BYTES);
+    let header = &payload[1..21];
+    // The renderer only echoes this field back; it never interprets it
+    // locally, so zero keeps the shape valid without a host clock source.
+    let send_wall_ms_be = [0u8; 8];
+    let mut datagrams = Vec::with_capacity(count);
+    for (index, chunk) in body.chunks(FRAGMENT_PAYLOAD_BYTES).enumerate() {
+        let mut datagram = Vec::with_capacity(FRAGMENT_HEADER_BYTES + chunk.len());
+        datagram.push(b'G');
+        datagram.extend_from_slice(&(index as u16).to_be_bytes());
+        datagram.extend_from_slice(&(count as u16).to_be_bytes());
+        datagram.extend_from_slice(header);
+        datagram.extend_from_slice(&send_wall_ms_be);
+        datagram.extend_from_slice(chunk);
+        datagrams.push(datagram);
+    }
+    Some(datagrams)
+}
 
 pub struct UsbBridge {
     stop: Arc<AtomicBool>,
@@ -150,6 +193,18 @@ fn read_accessory(
                 // renderer so the authenticated IDR/input/feedback path can
                 // use the same session token on USB as on UDP/TCP.
             }
+            // Whole access units exceed the renderer's datagram buffers, so
+            // they must re-enter it as shim-shaped fragments.
+            if frame.channel == usb_mux::CHANNEL_MEDIA {
+                if let Some(datagrams) = fragment_au_frame(&frame.payload) {
+                    for datagram in datagrams {
+                        if media_tx.send(datagram).is_err() {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+            }
             if target.send(frame.payload).is_err() {
                 return;
             }
@@ -259,5 +314,45 @@ mod tests {
     #[test]
     fn start_rejects_invalid_fd() {
         assert!(UsbBridge::start(-1).is_err());
+    }
+
+    fn l2_frame(body_len: usize) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(21 + body_len);
+        frame.push(b'G');
+        frame.extend_from_slice(&[0x34, 0x12]); // AU id LE
+        frame.extend_from_slice(b"L2");
+        frame.extend_from_slice(&[0u8; 16]); // capture/encode wall clocks
+        frame.extend(std::iter::repeat_n(0xABu8, body_len));
+        frame
+    }
+
+    #[test]
+    fn fragment_au_splits_large_frame_into_shim_datagrams() {
+        let payload = l2_frame(3_000);
+        let datagrams = fragment_au_frame(&payload).expect("L2 frame fragments");
+        assert!(datagrams.len() >= 2);
+        for (index, datagram) in datagrams.iter().enumerate() {
+            assert_eq!(datagram[0], b'G');
+            assert!(datagram.len() <= FRAGMENT_DATAGRAM_BYTES);
+            assert_eq!(&datagram[1..3], &(index as u16).to_be_bytes());
+            assert_eq!(&datagram[3..5], &(datagrams.len() as u16).to_be_bytes());
+            // L2 header minus marker is preserved verbatim.
+            assert_eq!(&datagram[5..25], &payload[1..21]);
+        }
+        // Reassembled payload matches the original body order.
+        let reassembled: Vec<u8> = datagrams
+            .iter()
+            .flat_map(|datagram| datagram[FRAGMENT_HEADER_BYTES..].to_vec())
+            .collect();
+        assert_eq!(reassembled, payload[21..]);
+    }
+
+    #[test]
+    fn fragment_au_passes_through_non_l2_payloads() {
+        assert!(fragment_au_frame(b"CFG-rest").is_none());
+        assert!(fragment_au_frame(b"LCH1-token").is_none());
+        let mut short = vec![b'G'];
+        short.extend_from_slice(b"L2");
+        assert!(fragment_au_frame(&short).is_none());
     }
 }
