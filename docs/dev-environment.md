@@ -29,6 +29,17 @@
 - 세션과 무관한 확인은 가능하다: objc 런타임 클래스 존재 확인(`cgvd-exist`),
   컴파일, 단위 테스트, 파일/프로세스 관찰 등.
 
+### 추가 전제(2026-09-03 실측): 활성 화면이 물리적으로 켜져 있어야 한다
+
+- 이 노트북은 **덮개를 닫고 화면 공유(Screen Sharing)로 원격 사용**하는 경우가 있다.
+  클램쉘 닫힘(`AppleClamshellState=Yes`)+콘솔 로그인 화면 상태에서는 **GUI 터미널에서
+  실행해도** `CGGetActiveDisplayList`가 0을 반환한다 — WindowServer가 활성
+  디스플레이를 아예 갖지 않기 때문이다. Aerospace option+1..9 전환은 화면 공유
+  세션 안의 워크스페이스 전환일 뿐 활성 출력을 만들지 못한다.
+- 디스플레이 관련 실측(cgvd-spark 2단계 등) 전 확인 명령:
+  `ioreg -r -k AppleClamshellState | grep ClamshellState` (Yes면 덮개 닫힘),
+  `pmset -g systemstate`. **덮개를 열거나 외장 모니터를 켠 뒤 실행할 것.**
+
 ## 실측 절차 인덱스
 
 | 대상 | 절차 | 실행 주체 |
