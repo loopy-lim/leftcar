@@ -55,6 +55,13 @@ case "$mode" in
       -o "$output" \
       "${framework_args[@]}"
     ;;
+  cursor-test)
+    /usr/bin/xcrun swiftc -O \
+      "${shim_sources[@]}" \
+      "$shim_root/Tests/CursorStreamTests.swift" \
+      -o "$output" \
+      "${framework_args[@]}"
+    ;;
   tile-throughput-probe)
     /usr/bin/xcrun swiftc -O \
       "${shim_sources[@]}" \
