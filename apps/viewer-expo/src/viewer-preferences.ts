@@ -9,6 +9,7 @@ export const VIEWER_PREFERENCES_KEY = "leftcar.viewerPreferences";
 export interface ViewerPreferences {
   profileId: ViewerProfileSelection;
   showFps: boolean;
+  localCursor: boolean;
 }
 
 export type ViewerProfileSelection = StreamProfileId | "auto";
@@ -16,6 +17,7 @@ export type ViewerProfileSelection = StreamProfileId | "auto";
 export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   profileId: "auto",
   showFps: true,
+  localCursor: false,
 };
 
 export interface ViewerPreferencesStore {
@@ -60,6 +62,9 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
       showFps: typeof parsed.showFps === "boolean"
         ? parsed.showFps
         : DEFAULT_VIEWER_PREFERENCES.showFps,
+      localCursor: typeof parsed.localCursor === "boolean"
+        ? parsed.localCursor
+        : DEFAULT_VIEWER_PREFERENCES.localCursor,
     };
   } catch {
     return { ...DEFAULT_VIEWER_PREFERENCES };
@@ -85,6 +90,7 @@ export async function writeViewerPreferences(
     JSON.stringify({
       profileId: preferences.profileId,
       showFps: preferences.showFps,
+      localCursor: preferences.localCursor,
     }),
   );
 }

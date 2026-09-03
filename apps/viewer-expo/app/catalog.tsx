@@ -8,6 +8,7 @@ import {
   Switch,
   Text,
   View,
+  type ViewStyle,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -130,6 +131,87 @@ function DisplayAspectMiniature({
   );
 }
 
+const OPTION_ROW_STYLE: ViewStyle = {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+interface ViewerOptionsCardProps {
+  showFps: boolean;
+  onToggleFps: (showFps: boolean) => void;
+  localCursor: boolean;
+  onToggleCursor: (localCursor: boolean) => void;
+  colors: ThemeTokens;
+}
+
+function ViewerOptionsCard({
+  showFps,
+  onToggleFps,
+  localCursor,
+  onToggleCursor,
+  colors,
+}: ViewerOptionsCardProps) {
+  const cardStyle = {
+    gap: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+    backgroundColor: colors.bgSurface,
+    padding: 12,
+  };
+  const switchColor = {
+    trackColor: { false: colors.borderCard, true: colors.btnPrimaryBg },
+    thumbColor: colors.btnPrimaryText,
+  };
+
+  return (
+    <View style={cardStyle}>
+      <View style={{ gap: 2 }}>
+        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+          시청 옵션
+        </Text>
+        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
+          스트림 창의 FPS 표시와 원격 커서 렌더링 방식을 선택합니다.
+        </Text>
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+            실제 FPS 항상 표시
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+            새로 여는 스트림 창의 오른쪽 아래에 표시합니다.
+          </Text>
+        </View>
+        <Switch
+          value={showFps}
+          onValueChange={onToggleFps}
+          accessibilityLabel="실제 FPS 항상 표시"
+          {...switchColor}
+        />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+            원격 커서 로컬 표시
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+            Mac 커서를 화면 속 영상 대신 오버레이로 그려 입력 반응 속도를 높입니다.
+          </Text>
+        </View>
+        <Switch
+          value={localCursor}
+          onValueChange={onToggleCursor}
+          accessibilityLabel="원격 커서 로컬 표시"
+          {...switchColor}
+        />
+      </View>
+    </View>
+  );
+}
+
 interface CatalogHeaderProps {
   error: string | null;
   host: string;
@@ -140,6 +222,8 @@ interface CatalogHeaderProps {
   onSelectProfile: (id: ViewerProfileSelection) => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
+  localCursor: boolean;
+  onToggleCursor: (localCursor: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -163,6 +247,8 @@ function CatalogHeader({
   onSelectProfile,
   showFps,
   onToggleFps,
+  localCursor,
+  onToggleCursor,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -285,49 +371,13 @@ function CatalogHeader({
 
       {showAdvanced && hasAdvancedOptions ? (
         <View style={styles.advancedSectionContainer}>
-          <View
-            style={{
-              gap: 10,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: colors.borderSubtle,
-              backgroundColor: colors.bgSurface,
-              padding: 12,
-            }}
-          >
-            <View style={{ gap: 2 }}>
-              <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-                시청 옵션
-              </Text>
-              <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-                스트림 창에 실제 렌더링 FPS를 항상 표시할지 선택합니다.
-              </Text>
-            </View>
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-              }}
-            >
-              <View style={{ flex: 1, gap: 2 }}>
-                <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-                  실제 FPS 항상 표시
-                </Text>
-                <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-                  새로 여는 스트림 창의 오른쪽 아래에 표시합니다.
-                </Text>
-              </View>
-              <Switch
-                value={showFps}
-                onValueChange={onToggleFps}
-                accessibilityLabel="실제 FPS 항상 표시"
-                trackColor={{ false: colors.borderCard, true: colors.btnPrimaryBg }}
-                thumbColor={colors.btnPrimaryText}
-              />
-            </View>
-          </View>
+          <ViewerOptionsCard
+            showFps={showFps}
+            onToggleFps={onToggleFps}
+            localCursor={localCursor}
+            onToggleCursor={onToggleCursor}
+            colors={colors}
+          />
 
           {encoderExperiments.length > 1 ? (
             <View
@@ -668,6 +718,8 @@ export default function Catalog() {
             onSelectProfile={model.handleSelectProfile}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
+            localCursor={model.localCursor}
+            onToggleCursor={model.handleToggleCursor}
             encoderExperiments={model.selectedEncoderExperiments}
             encoderExperiment={model.effectiveNextEncoderExperiment}
             onSelectEncoderExperiment={model.handleSelectEncoderExperiment}
