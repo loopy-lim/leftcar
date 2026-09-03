@@ -79,14 +79,20 @@ print("== CGVirtualDisplay spark probe ==")
 print("macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
 print("before: \(displayListDescription())")
 
+let sessionDict = CGSessionCopyCurrentDictionary()
+if sessionDict != nil {
+    Probe.note("CGSession 존재 — GUI 로그인 세션 소속 프로세스다.")
+} else {
+    Probe.note("CGSession nil — GUI 세션 밖(SSH 등). 생성은 실패 가능성이 높지만 결과를 확인하기 위해 시도한다.")
+}
+
 var activeCount: UInt32 = 0
 CGGetActiveDisplayList(0, nil, &activeCount)
 if activeCount == 0 {
-    print("SESSION-NOT-GUI: 활성 디스플레이 0 — 이 프로세스는 WindowServer 세션에 붙지 못했다.")
-    print("  생성/모드 실측은 GUI 터미널(터미널 앱)에서 run-probe.zsh로 실행할 것.")
-    print("  참고: 클래스 존재 여부 실측은 세션과 무관하며 별도 스크립트(cgvd-exist)가 담당한다.")
-    print("== RESULT: 세션 제약으로 생성 실측 불가 (API 불가 판정 아님) ==")
-    exit(2)
+    // 0이어도 중단하지 않는다: 가상 디스플레이 생성이 세션의 첫 디스플레이가 될 수
+    // 있고(클램쉘/헤드리스에서의 생성 가능성이 이 스파크의 측정 항목 중 하나),
+    // 실제로 2026-09-02 BetterDisplay CLI 생성이 이 머신에서 성공한 전례가 있다.
+    Probe.note("활성 디스플레이 0 — 클램쉘/헤드리스 상태로 보인다. 그래도 생성을 시도한다.")
 }
 
 // 1920x1200 (WUXGA, 16:10) — Leftcar의 태블릿 기본값과 동일하게 픽셀 지정.
@@ -107,7 +113,23 @@ descriptor.serialNum = 0x20260903
 
 let vd = CGVirtualDisplay(descriptor: descriptor)
 guard vd.displayID != 0 else {
-    print("== RESULT: CGVirtualDisplay 생성 실패 — macOS 26에서 apply 전 단계 불가 판정 (GUI 세션에서 재확인 요망) ==")
+    print("== RESULT: CGVirtualDisplay 생성 실패 (displayID=0) ==")
+    // 실패 원인 3갈래 자동 분류:
+    //   A) SSH 계열 세션 (CGSession nil) → GUI 터미널에서 재실행 필요
+    //   B) 활성 프레임버퍼 0 (클램쉘/헤드리스) → 덮개를 열거나 외장 모니터 연결 후 재실행
+    //   C) 그 외 → API 자체 문제 가능성 (A·B 해소 후에도 실패하면 판정)
+    let sessionOut = CGSessionCopyCurrentDictionary() == nil
+    var fbCount = 0
+    let match = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOFramebuffer"))
+    if match != 0 { fbCount = 1; IOObjectRelease(match) }
+    print("  진단: CGSession nil=\(sessionOut), IOKit IOFramebuffer 활성=\(fbCount)")
+    if sessionOut {
+        print("  분류 A: 이 프로세스는 GUI 로그인 세션 밖(SSH 등) — GUI 터미널에서 재실행할 것")
+    } else if fbCount == 0 {
+        print("  분류 B: 활성 프레임버퍼 없음(클램쉘 닫힘/헤드리스) — 덮개 개방 또는 외장 모니터 후 재실행")
+    } else {
+        print("  분류 C: GUI 세션 + 활성 프레임버퍼인데 생성 실패 — API 레벨 문제로 판정")
+    }
     exit(1)
 }
 let displayID = vd.displayID
