@@ -22,12 +22,14 @@ cd tools/cgvd-shim && swift build
 | 서브커맨드 | 출력 | 종료 코드 |
 |---|---|---|
 | `probe` | `EXISTS` / `MISSING` | 항상 0 (MISSING도 정상 답) |
-| `create` | `OK <displayID>` | 0 |
+| `create` | `OK <displayID>` | 0 — 등록·요청 모드까지 폴링 확인 후 출력 |
+| `create` | `FAILED registration timeout displayID=<id>` | 1 — 2초 내 활성 등록 미확인 |
+| `create` | `FAILED mode timeout displayID=<id>` | 1 — 2초 내 요청 크기 모드 미도달 |
 | `create` | `UNAVAILABLE session` | 1 — GUI 로그인 세션 밖 실행 (분류 A) |
 | `create` | `NOACTIVE` | 1 — 활성 화면 0개, 덮개 개방/외장 모니터 필요 (분류 B) |
 | `create` | `FAILED displayID=0` | 1 — 세션·화면 정상인데 생성 실패, API 문제 (분류 C) |
 | `create` | `FAILED private API missing on this macOS` | 1 — 클래스 부재 (probe가 MISSING인 상태로 create 실행) |
-| `create` | `FAILED settings` | 1 — 생성은 됐는데 요청 크기 모드 적용 실패 |
+| `create` | `FAILED settings displayID=<id>` | 1 — 생성은 됐는데 요청 크기 모드 적용 실패 (고아 추적용 id) |
 | `create` | `FAILED usage: ...` | 2 — 플래그 오류 |
 | `remove` | `FAILED remove is not implemented yet by design (R-015 experiment scope)` | 3 |
 
@@ -56,9 +58,13 @@ cd tools/cgvd-shim && swift build
   스파크는 `swiftc -import-objc-header`를 썼지만 SwiftPM에는 모듈맵이 정석이고,
   `cSettings`의 `-I` 플래그가 그 경로를 건넨다.
 - **스레드**: 스파크는 `DispatchQueue.main` + AppKit main thread 세마포어로
-  runloop을 살렸다. CLI에는 runloop이 없으므로 전용 직렬 큐 + `queue.sync {}`
-  배수 + 0.5초 안정화 대기로 단순화했다. 스파크는 성공/실패가 큐 선택과
-  무관함을 이미 A/B로 확인했다(리서치 §2 표).
+  runloop을 살렸다. CLI에는 runloop이 없으므로 전용 직렬 큐로 단순화했다.
+  스파크 A/B가 확인한 큐 무관성은 **실패 경로**(헤드리스 displayID=0이 두
+  큐에서 동일)뿐이다 — 이 큐에서의 성공 경로는 실측 대상이며, 고정 대기 대신
+  등록·모드 폴링(최대 2초, 100ms 간격)으로 확인해 OK의 의미를 "생성자
+  반환"이 아니라 "등록+요청 모드 확인"으로 강화했다.
+- **argv 되돌림 없음**: 개행이 섞인 서브커맨드를 그대로 출력하면 계약 한
+  줄이 두 줄로 깨진다. `FAILED unknown subcommand`로 고정해 출력했다.
 - **시리얼**: 상수 `0x20260903`. 이름 파생 해시보다 재현 가능성이 낫다.
 - **`probe`는 4종 전부 확인**: descriptor만 보면 create이 쓰는 나머지 클래스가
   빠진 macOS를 EXISTS로 오판한다. `NSClassFromString` 조회라 파손 시에도

@@ -4,8 +4,10 @@
 //
 // stdout 계약 (반드시 한 줄 — Task 4 parse_cgvd_line이 이 형식을 파싱한다):
 //   probe   -> "EXISTS" | "MISSING"
-//   create  -> "OK <displayID>" | "NOACTIVE" | "UNAVAILABLE <detail>" | "FAILED <detail>"
+//   create  -> "OK <displayID>" (등록+요청 모드 확인 후) | "NOACTIVE" |
+//              "UNAVAILABLE <detail>" | "FAILED <detail>"
 //   remove  -> "FAILED remove is not implemented yet by design (R-015 experiment scope)"
+// argv 되돌림 금지: 개행 섞인 인자가 계약을 두 줄로 깨뜨린다.
 //
 // 종료 코드: 0 성공 / 1 환경·엔진 실패 / 2 사용법 오류 / 3 remove 미구현(설계상)
 
@@ -75,6 +77,33 @@ func parseCreateOptions(_ arguments: [String]) -> CreateOptions? {
     return options
 }
 
+/// 조건이 참이 될 때까지 최대 timeout초 동안 interval 간격으로 묻는다.
+/// 고정 대기보다 정확하다 — 빠른 환경에선 즉시 통과, 느린 환경에선 여유를
+/// 주고, 끝내 확인이 안 되면 "된 셈 치고" 진행하지 않는다.
+func poll(upTo timeout: TimeInterval, interval: TimeInterval = 0.1, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while true {
+        if condition() { return true }
+        if Date() >= deadline { return false }
+        Thread.sleep(forTimeInterval: interval)
+    }
+}
+
+/// 생성자가 반환했다는 것은 등록 보장이 아니다 — WindowServer 등록을 폴링으로
+/// 확인한다.
+func pollRegistration(displayID: CGDirectDisplayID) -> Bool {
+    poll(upTo: 2.0) { CGDisplayIsActive(displayID) != 0 }
+}
+
+/// 적용을 요청한 모드가 실제 표시 상태가 됐는지 확인한다. 시스템이 다른
+/// 배율·모드를 강제하면 요청 픽셀이 안 맞으므로 확인 실패로 답한다.
+func pollRequestedMode(displayID: CGDirectDisplayID, width: Int, height: Int) -> Bool {
+    poll(upTo: 2.0) {
+        guard let mode = CGDisplayCopyDisplayMode(displayID) else { return false }
+        return mode.width == width && mode.height == height
+    }
+}
+
 func runCreate(_ arguments: [String]) -> Never {
     guard let options = parseCreateOptions(arguments) else {
         fail("FAILED usage: cgvd-shim create [--name=<n>] [--width=<w>] [--height=<h>]", code: 2)
@@ -93,7 +122,7 @@ func runCreate(_ arguments: [String]) -> Never {
         fail("FAILED private API missing on this macOS", code: 1)
     }
 
-    // 분류 B: 활성 화면 0개는 생성 자체를 막는다 (스패크 2026-09-03 확정 —
+    // 분류 B: 활성 화면 0개는 생성 자체를 막는다 (스파크 2026-09-03 확정 —
     // 클램쉘 닫힘+모니터 전원 꺼짐에서 displayID=0, BetterDisplay CLI abort 동일).
     var activeCount: UInt32 = 0
     CGGetActiveDisplayList(0, nil, &activeCount)
@@ -118,16 +147,14 @@ func runCreate(_ arguments: [String]) -> Never {
     descriptor.serialNum = 0x20260903
 
     // CLI에는 runloop이 없으므로 스파크의 main 큐 대신 전용 직렬 큐를 쓴다.
-    // 콜백 수신용일 뿐 동기화 지점이 필요하다: 생성 직후 큐를 한 번 비우고
-    // 짧게 안정화해 WindowServer 등록을 기다린다 (스파크의 1초 대기 축소판).
+    // 스파크 A/B는 실패 경로(헤드리스 displayID=0)에서만 큐 무관을 확인했다 —
+    // 이 큐에서의 성공 경로는 실측 대상이며, 등록 폴링(아래)이 그 검증을 대신한다.
     let virtualDisplay = CGVirtualDisplay(descriptor: descriptor)
     let displayID = virtualDisplay.displayID
     guard displayID != 0 else {
         // 분류 C: 세션(A)과 활성 화면(B)이 정상인데도 실패 — API 레벨 문제.
         fail("FAILED displayID=0", code: 1)
     }
-    queue.sync {} // 이미 적재된 WindowServer 블록 배수
-    Thread.sleep(forTimeInterval: 0.5) // 등록 지연은 큐 밖에서 온다
 
     // Leftcar 계약은 픽셀 기반 1x (EVIDENCE.md 정정 기록) — HiDPI off,
     // 요청 크기 모드 정확히 1개. 적용 실패는 엔진 실패로 분류한다.
@@ -138,10 +165,21 @@ func runCreate(_ arguments: [String]) -> Never {
     ]
     guard virtualDisplay.apply(settings) else {
         // 디스플레이는 생성됐지만 요청 크기를 보장 못 한다 — OK로 거짓말하지
-        // 않고 실패로 분류한다 (Task 4에서 EngineFailed로 매핑).
-        fail("FAILED settings", code: 1)
+        // 않고 실패로 분류한다 (Task 4에서 EngineFailed로 매핑). displayID를
+        // 남겨 호출자가 고아 디스플레이를 추적할 수 있게 한다 — remove는
+        // 설계상 미구현이고 프로세스 종료 후 생존 여부도 미실측이다.
+        fail("FAILED settings displayID=\(displayID)", code: 1)
     }
-    Thread.sleep(forTimeInterval: 0.5) // 모드가 표시 상태로 굳은 뒤 종료
+
+    // 생성자 반환과 apply 참은 등록 보장이 아니다 — WindowServer 등록과
+    // 요청 모드 도달을 폴링으로 확인한 뒤에만 OK를 말한다. 타임아웃이면
+    // "된 셈 치고" OK를 출력하지 않는다.
+    guard pollRegistration(displayID: displayID) else {
+        fail("FAILED registration timeout displayID=\(displayID)", code: 1)
+    }
+    guard pollRequestedMode(displayID: displayID, width: options.width, height: options.height) else {
+        fail("FAILED mode timeout displayID=\(displayID)", code: 1)
+    }
 
     print("OK \(displayID)")
     exit(0)
@@ -173,5 +211,7 @@ case "create":
 case "remove":
     runRemove()
 default:
-    fail("FAILED unknown subcommand \(arguments[1])", code: 2)
+    // 서브커맨드를 그대로 되돌리지 않는다 — argv에 개행이 섞이면 계약 한 줄이
+    // 두 줄로 깨져 호출자의 파싱을 오염시킨다 (리뷰에서 재현된 사례).
+    fail("FAILED unknown subcommand", code: 2)
 }
