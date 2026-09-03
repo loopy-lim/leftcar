@@ -1,0 +1,4 @@
+module CGVD {
+    header "CGVD.h"
+    export *
+}

@@ -14,6 +14,9 @@ pub mod pairing;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod virtual_display;
+pub mod provider;
+pub mod power_assertion;
+pub mod clamshell_mode;
 pub mod wire;
 
 use backend::SharedBackend;
@@ -90,12 +93,16 @@ pub fn run() {
             revoke_paired_device,
             revoke_all_devices,
             create_virtual_display,
-            remove_virtual_display
+            remove_virtual_display,
+            tablet_display_start,
+            tablet_display_stop,
+            tablet_display_status
         ])
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
+            app.manage(TabletSessionRegistry::new(None));
             warm_display_catalog(warmup_backend);
 
             let show_item =
@@ -439,6 +446,132 @@ async fn remove_virtual_display(name: String) -> Result<String, String> {
     }
 }
 
+/// Validates the provider kind sent from the UI. CGVD stays opt-in behind the
+/// `cgvirtualdisplay` kind; R-015 forbids promoting it to the default.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn provider_kind_error(kind: &str) -> Option<String> {
+    match kind {
+        "betterdisplay" | "cgvirtualdisplay" => None,
+        other => Some(format!("지원하지 않는 엔진입니다: {other}")),
+    }
+}
+
+/// Shared per-app session slot: one tablet display session at a time.
+type TabletSessionRegistry = std::sync::Mutex<Option<clamshell_mode::TabletDisplaySession>>;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn provider_for_kind(kind: &str) -> std::sync::Arc<dyn provider::VirtualDisplayProvider> {
+    match kind {
+        "cgvirtualdisplay" => std::sync::Arc::new(provider::CgvdProvider::new()),
+        _ => std::sync::Arc::new(provider::BetterDisplayProvider::new()),
+    }
+}
+
+/// Async so blocking engine spawns run off the main thread (same rationale as
+/// create_virtual_display above).
+#[tauri::command]
+async fn tablet_display_start(
+    state: tauri::State<'_, TabletSessionRegistry>,
+    provider_kind: String,
+    name: String,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(error) = provider_kind_error(&provider_kind) {
+            return Err(error);
+        }
+        let mut guard = state.lock().map_err(|error| error.to_string())?;
+        if guard.is_some() {
+            return Err("태블릿 화면 세션이 이미 실행 중입니다.".into());
+        }
+        let session = clamshell_mode::TabletDisplaySession::start(
+            provider_for_kind(&provider_kind),
+            &provider::DisplaySpec {
+                name,
+                width,
+                height,
+            },
+        )
+        .map_err(|error| error.message())?;
+        *guard = Some(session);
+        Ok("태블릿 화면 세션 시작됨".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, provider_kind, name, width, height);
+        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
+    }
+}
+
+/// Async so the blocking engine teardown spawn runs off the main thread.
+#[tauri::command]
+async fn tablet_display_stop(
+    state: tauri::State<'_, TabletSessionRegistry>,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut guard = state.lock().map_err(|error| error.to_string())?;
+        match guard.take() {
+            Some(session) => {
+                drop(session); // Drop removes the VD and kills caffeinate.
+                Ok("태블릿 화면 세션을 정리했습니다.".into())
+            }
+            None => Ok("실행 중인 세션이 없습니다.".into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
+    }
+}
+
+/// Async (matching tablet_display_start/stop): while streaming, the reported
+/// string is derived by probing `ioreg` for the lid state, which is a real
+/// process spawn that must not run on the main thread. The lid read is UI
+/// display only — the stored ModeState is never mutated and no control path
+/// branches on it. The reported decision lives in the pure
+/// `clamshell_mode::reported_status` (tested without any spawn); an
+/// indeterminate lid reading degrades to "streaming", never "clamshell".
+/// The battery flag recorded at start rides the same string as a
+/// ";battery" suffix (design: 배터리 `-i` 강등 + UI 경고).
+#[tauri::command]
+async fn tablet_display_status(
+    state: tauri::State<'_, TabletSessionRegistry>,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Block scope (not drop()) so the MutexGuard's borrow provably ends
+        // before the await below — the tauri command future must be Send.
+        let (session_state, on_battery) = {
+            let guard = state.lock().map_err(|error| error.to_string())?;
+            match guard.as_ref() {
+                Some(session) => (session.state.clone(), session.on_battery),
+                None => (clamshell_mode::ModeState::Idle, false),
+            }
+        };
+        // Probe outside the registry lock so a (capped) ioreg hang cannot
+        // block start/stop on the same mutex.
+        let lid_closed = if session_state == clamshell_mode::ModeState::Streaming {
+            clamshell_mode::read_lid_closed().await
+        } else {
+            None
+        };
+        Ok(clamshell_mode::reported_status(
+            &session_state,
+            lid_closed,
+            on_battery,
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
+    }
+}
+
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.
 /// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
 fn advertise_mdns(port: u16) -> Result<(), String> {
@@ -483,5 +616,13 @@ mod tests {
 
         assert_ne!(actual_port, occupied_port);
         assert_ne!(actual_port, 0);
+    }
+
+    #[test]
+    fn provider_kind_selects_the_registered_engines() {
+        assert!(super::provider_kind_error("betterdisplay").is_none());
+        assert!(super::provider_kind_error("cgvirtualdisplay").is_none());
+        let unknown = super::provider_kind_error("duet").unwrap();
+        assert!(unknown.contains("지원하지 않는"));
     }
 }

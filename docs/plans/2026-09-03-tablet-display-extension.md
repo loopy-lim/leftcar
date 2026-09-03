@@ -44,6 +44,7 @@ pub struct DisplaySpec {
 /// Handle to a display a provider created.
 pub struct VirtualDisplay {
     pub name: String,
+    pub cgvd_display_id: Option<u32>,
 }
 
 /// Failure causes map 1:1 to UI guidance (spark 3-way classification).
@@ -226,7 +227,7 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
             )?;
             Ok(create)
         })
-        .map(|_| VirtualDisplay { name })
+        .map(|_| VirtualDisplay { name, cgvd_display_id: None })
     }
 
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError> {
@@ -505,7 +506,7 @@ impl VirtualDisplayProvider for CgvdProvider {
                 &format!("--width={width}"),
                 &format!("--height={height}"),
             ])?;
-            Ok(VirtualDisplay { name: spec.name.clone() })
+            Ok(VirtualDisplay { name: spec.name.clone(), cgvd_display_id: None })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -697,7 +698,7 @@ impl VirtualDisplayProvider for MockProvider {
     fn create(&self, spec: &DisplaySpec) -> Result<VirtualDisplay, ProviderError> {
         self.create_result.clone()?;
         self.created.lock().unwrap().push(spec.name.clone());
-        Ok(VirtualDisplay { name: spec.name.clone() })
+        Ok(VirtualDisplay { name: spec.name.clone(), cgvd_display_id: None })
     }
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError> {
         self.removed.lock().unwrap().push(display.name.clone());

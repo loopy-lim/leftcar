@@ -94,7 +94,7 @@ Idle ──start()──> Creating ──성공──> Streaming ──덮개 �
 2. 유일 화면 모드: 1 중 덮개 닫기 → VD 생존 + 스트리밍 지속 + USB 키보드/마우스 동작
 3. 태블릿 터치: `inputEnabled` 옵트인 → LCI1 주입이 VD 위에서 동작 (EVIDENCE.md:158 갭)
 4. 절전 방어: 덮개 닫힘 10분 후 세션 생존 + assertion 확인
-5. 결과는 `docs/EVIDENCE.md`, `docs/usb-physical-validation.md`에 E등급 기록
+5. 절차·합격 기준·진단 가이드는 `docs/tablet-display-physical-validation.md`(정식 절차)를 따르고, 결과는 `docs/EVIDENCE.md`에 E등급 기록
 
 React 게이트: UI 변경 후 `npx -y react-doctor@latest . --verbose` 100/100.
 

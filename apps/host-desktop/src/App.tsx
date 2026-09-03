@@ -570,8 +570,8 @@ interface VirtualDisplayExperimentSectionProps {
 
 /// Opt-in gate for the BetterDisplay experiment (design flow step 1: toggle,
 /// default off). When `enabled` is false the VirtualDisplayCard is not
-/// rendered at all, so no `create_virtual_display`/`remove_virtual_display`
-/// command can be invoked.
+/// rendered at all, so no virtual display or tablet session command can be
+/// invoked.
 function VirtualDisplayExperimentSection({
   platform,
   enabled,
@@ -610,11 +610,154 @@ interface VirtualDisplayCardProps {
   t: TranslationSchema;
 }
 
+type TabletSessionUiState = "Idle" | "Streaming" | "Clamshell" | "Creating" | "Failed";
+
+type ParsedTabletStatus =
+  | { state: "Idle"; clamshell: null; onBattery: false }
+  | { state: "Streaming"; clamshell: false; onBattery: boolean }
+  | { state: "Clamshell"; clamshell: true; onBattery: boolean }
+  | { state: "Creating"; clamshell: null; onBattery: false }
+  | { state: "Failed"; clamshell: null; detail: string; onBattery: false };
+
+/// `tablet_display_status` returns one flat string
+/// ("idle" | "streaming" | "clamshell" | "creating" | "failed: <detail>",
+/// optionally suffixed ";battery" while a session is live on battery power);
+/// parse it once so the card matches on a discriminated union instead of raw
+/// substrings.
+function parseTabletStatus(raw: string): ParsedTabletStatus {
+  // The battery suffix rides the live states only (backend contract); strip
+  // it first so the base-state matching below stays exact-string.
+  const onBattery = raw.endsWith(";battery");
+  const base = onBattery ? raw.slice(0, -";battery".length) : raw;
+  if (base === "streaming") return { state: "Streaming", clamshell: false, onBattery };
+  if (base === "clamshell") return { state: "Clamshell", clamshell: true, onBattery };
+  if (base === "creating") return { state: "Creating", clamshell: null, onBattery: false };
+  if (base === "idle") return { state: "Idle", clamshell: null, onBattery: false };
+  const detail = base.startsWith("failed: ") ? base.slice("failed: ".length) : base;
+  return { state: "Failed", clamshell: null, detail, onBattery: false };
+}
+
+function tabletPillLabel(state: TabletSessionUiState, t: TranslationSchema): string {
+  switch (state) {
+    case "Streaming":
+      return t.host.tabletDisplayStreaming;
+    case "Clamshell":
+      return t.host.tabletDisplayClamshell;
+    case "Creating":
+      return t.host.statusChecking;
+    default:
+      return t.host.tabletDisplayIdle;
+  }
+}
+
+/// The three tablet-session fields arrive together from one
+/// `tablet_display_status` parse and always change together, so they live as a
+/// single state object (kept consistent by construction) instead of parallel
+/// useStates that must be updated in lockstep.
+interface TabletSessionView {
+  state: TabletSessionUiState;
+  clamshell: boolean | null;
+  onBattery: boolean;
+}
+
+const IDLE_TABLET_SESSION: TabletSessionView = {
+  state: "Idle",
+  clamshell: null,
+  onBattery: false,
+};
+
 function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
   const [name, setName] = useState("Leftcar Virtual");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [tabletSession, setTabletSession] = useState<TabletSessionView>(IDLE_TABLET_SESSION);
+  const didSyncStatus = useRef(false);
+  const { state: sessionState, clamshell, onBattery } = tabletSession;
+
+  const syncSessionStatus = useCallback(async () => {
+    try {
+      const parsed = parseTabletStatus(await invoke<string>("tablet_display_status"));
+      setTabletSession({
+        state: parsed.state,
+        clamshell: parsed.clamshell,
+        onBattery: parsed.onBattery,
+      });
+      if (parsed.state === "Failed") {
+        setCreated(null);
+        setFailure(parsed.detail);
+      }
+    } catch {
+      // Best-effort sync; transient bridge errors must not overwrite the
+      // failure line, and non-macOS platforms skip the call entirely.
+    }
+  }, []);
+
+  // Sync once on mount so a session that survived a reload shows live state.
+  useEffect(() => {
+    if (didSyncStatus.current || platform !== "macos") return;
+    didSyncStatus.current = true;
+    void syncSessionStatus();
+  }, [platform, syncSessionStatus]);
+
+  // While a session is live, poll the backend so the pill can observe the
+  // lid closing: `tablet_display_status` derives clamshell from ioreg per
+  // call, and without polling it would never be asked again after start.
+  // Idle/Failed clear the interval — lid info is meaningless without a
+  // session — and unmount cleanup stops the loop.
+  const sessionLive =
+    sessionState === "Streaming" || sessionState === "Clamshell" || sessionState === "Creating";
+  useEffect(() => {
+    if (!sessionLive) return;
+    const interval = setInterval(() => {
+      void syncSessionStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [sessionLive, syncSessionStatus]);
+
+  const startSession = async () => {
+    setBusy(true);
+    try {
+      await invoke<string>("tablet_display_start", {
+        providerKind: "betterdisplay",
+        name: name.trim(),
+        width: 1920,
+        height: 1200,
+      });
+      setCreated(t.host.tabletDisplayStarted);
+      setFailure(null);
+      setTabletSession({ state: "Streaming", clamshell: false, onBattery: false });
+      await syncSessionStatus();
+    } catch (cause) {
+      setCreated(null);
+      setTabletSession(IDLE_TABLET_SESSION);
+      // Provider errors arrive pre-localized; show them verbatim.
+      setFailure(String(cause instanceof Error ? cause.message : cause));
+      // "Already running" and lock errors mean the backend state we reset away
+      // may still exist — reconcile from the source of truth.
+      await syncSessionStatus();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopSession = async () => {
+    setBusy(true);
+    try {
+      await invoke<string>("tablet_display_stop");
+      setCreated(t.host.tabletDisplayStopped);
+      setFailure(null);
+      setTabletSession(IDLE_TABLET_SESSION);
+      await syncSessionStatus();
+    } catch (cause) {
+      setCreated(null);
+      setFailure(String(cause instanceof Error ? cause.message : cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pillActive = sessionState === "Streaming" || sessionState === "Clamshell";
 
   const runDisplayCommand = async (
     command: "create_virtual_display" | "remove_virtual_display",
@@ -644,14 +787,56 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
   };
 
   return (
-    <section className="troubleshoot-card" aria-label={t.host.virtualDisplayExperiment}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-        <Monitor size={16} />
-        <span>{t.host.virtualDisplayExperiment}</span>
+    <section className="troubleshoot-card" aria-label={t.host.tabletDisplayTitle}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Monitor size={16} />
+          <span>{t.host.tabletDisplayTitle}</span>
+        </div>
+        <div className={statusPillVariants({ state: pillActive ? "active" : "idle" })}>
+          <span className="status-dot" />
+          <span>{tabletPillLabel(sessionState, t)}</span>
+        </div>
       </div>
       <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
         {t.host.virtualDisplayHint}
       </p>
+      {clamshell === true && (
+        <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+          {t.host.tabletDisplayClamshellHint}
+        </p>
+      )}
+      {onBattery && (sessionState === "Streaming" || sessionState === "Clamshell") && (
+        <p
+          style={{
+            fontSize: 11,
+            marginTop: 4,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            color: "var(--text-secondary)",
+          }}
+          role="status"
+        >
+          <AlertTriangle size={13} /> {t.host.tabletDisplayBattery}
+        </p>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+        <button
+          className={buttonVariants({ variant: "primary", size: "sm" })}
+          disabled={busy || platform !== "macos" || sessionState === "Streaming" || sessionState === "Clamshell" || sessionState === "Creating"}
+          onClick={() => void startSession()}
+        >
+          {t.host.tabletDisplayStart}
+        </button>
+        <button
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          disabled={busy || platform !== "macos" || sessionState === "Idle" || sessionState === "Failed"}
+          onClick={() => void stopSession()}
+        >
+          {t.host.tabletDisplayStop}
+        </button>
+      </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
         <input
           value={name}
