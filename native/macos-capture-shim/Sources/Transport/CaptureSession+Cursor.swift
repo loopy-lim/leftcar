@@ -71,7 +71,8 @@ extension CaptureSession {
                 // observation will ever flow. Fail closed: keep the cursor
                 // embedded in the video instead of hiding it behind a stream
                 // that stays silent.
-                print("cursor event tap unavailable; LCD1 stream stays off for \(targetLabel)")
+                NSLog("Leftcar cursor event tap unavailable; LCD1 stream stays off %@",
+                      targetLabel)
                 setCursorStreamEnabled(false)
                 return
             }
@@ -136,6 +137,12 @@ extension CaptureSession {
     /// unaffected. macOS may still require the process to be trusted for
     /// event listening, in which case tapCreate returns nil and the caller
     /// fails closed.
+    ///
+    /// The check-then-install two-step is single-threaded by construction:
+    /// every enable/disable flows through `setCursorStreamEnabled`, whose
+    /// command callers all run serialized on `inputQueue`, and the stop path
+    /// drains that queue (`stopInputReceiver`'s sync cancel) before tearing
+    /// the tap down — so check and store can never interleave.
      func installCursorEventTap() -> Bool {
         cursorLock.lock()
         let existing = cursorEventTap
@@ -145,6 +152,11 @@ extension CaptureSession {
             | (1 << CGEventType.leftMouseDragged.rawValue)
             | (1 << CGEventType.rightMouseDragged.rawValue)
             | (1 << CGEventType.otherMouseDragged.rawValue)
+        // Retained, not unretained: the callback runs on the main run loop
+        // and can still be queued there while the stop path tears the tap
+        // down from another thread. The retain must be balanced exactly once
+        // — in removeCursorEventTap on success, here on failure.
+        let userInfo = Unmanaged.passRetained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -156,8 +168,11 @@ extension CaptureSession {
                 CursorEventTapBridge.handle(type: type, event: event, userInfo: userInfo)
                 return nil
             },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else { return false }
+            userInfo: userInfo
+        ) else {
+            Unmanaged<CaptureSession>.fromOpaque(userInfo).release()
+            return false
+        }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
@@ -168,6 +183,18 @@ extension CaptureSession {
         return true
     }
 
+    /// Removes the tap without ever racing its callbacks. `CGEvent.tapEnable`
+    /// and `CFMachPortInvalidate` stop future deliveries, but callback frames
+    /// already dispatched onto the main run loop can still be pending while
+    /// main is stalled. The tap was created with `passRetained(self)`, so the
+    /// session outlives those frames; the release is scheduled as a main
+    /// run loop block, which same-mode FIFO orders behind every already
+    /// queued tap callback. Waiting synchronously for that block would hang
+    /// the stop path on a wedged main loop, and an unconditional
+    /// `DispatchQueue.main.sync` could self-deadlock when teardown itself
+    /// runs on main — scheduling the release on main sidesteps both. The
+    /// block only drops the retain and never touches session memory, so it
+    /// stays safe even if it fires after dealloc.
      func removeCursorEventTap() {
         cursorLock.lock()
         let tap = cursorEventTap
@@ -184,6 +211,18 @@ extension CaptureSession {
         // disabled tap installed until that reference drained; an explicit
         // invalidation keeps teardown deterministic.
         CFMachPortInvalidate(tap)
+        var context = CFMachPortContext(
+            version: 0,
+            info: nil,
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        CFMachPortGetContext(tap, &context)
+        guard let userInfo = context.info else { return }
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+            Unmanaged<CaptureSession>.fromOpaque(userInfo).release()
+        }
     }
 
     /// macOS disables an event tap when its run loop stalls or another
@@ -198,6 +237,11 @@ extension CaptureSession {
     }
 
      func startCursorPollingTimer() {
+        // Check-then-install on the timer is single-threaded by construction:
+        // the timer lives on `inputQueue`, and every enable/disable flows
+        // through `setCursorStreamEnabled` whose command callers run
+        // serialized there (the stop path sync-cancels first), so two
+        // invocations can never interleave between check and store.
         cursorLock.lock()
         let existing = cursorPollingTimer
         cursorLock.unlock()
@@ -256,6 +300,13 @@ extension CaptureSession {
     /// Capture content rect the coordinator normalizes against. The output
     /// dimensions stand in until capture has published real bounds — LCDON
     /// can arrive between control-receiver start and first capture setup.
+    /// That fallback mixes output pixels with screen points; the existing
+    /// input path (`pointerPosition` in CaptureSession+Input) inherits the
+    /// same limitation, so this is not a regression, but on a scaled Retina
+    /// display the pre-capture fallback would skew normalization.
+    /// Frozen after first observation: the coordinator keeps its creation
+    /// bounds for the stream's lifetime, so a later display reconfiguration
+    /// degrades to stale-frame normalization rather than misfiring.
     private func capturedContentRect() -> CGRect {
         inputLock.lock()
         let bounds = inputBounds

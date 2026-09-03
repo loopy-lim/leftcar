@@ -168,11 +168,12 @@ extension CaptureSession {
             inputReadSource = source
             source.resume()
         }
-        // A reconnect replaces the session token (fresh LCH1 handshake). The
-        // LCD1 coordinator embeds the token in every encoded packet and stays
-        // silent until one is installed, so a stale stream must rebind here.
-        // An active stream keeps its enable state; the next polling tick
-        // flushes the newest observation under the new token.
+        // Defensive token rebinding, not a live reconnect path: sessions own
+        // one socket for their whole lifetime and startInputReceiver runs
+        // once. The LCD1 coordinator stays silent until a token is installed
+        // and embeds it in every packet, so if a future reconnect ever
+        // replaces the session token, a live cursor stream rebinds here
+        // instead of streaming packets the viewer would reject.
         cursorLock.lock()
         let hadCoordinator = cursorCoordinator != nil
         cursorLock.unlock()
