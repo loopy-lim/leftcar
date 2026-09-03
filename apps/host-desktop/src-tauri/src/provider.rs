@@ -294,6 +294,10 @@ impl CgvdProvider {
         self.classify_stdout(status, &stdout, &stderr)
     }
 
+    // The only non-test caller (create) is macOS-cfg'd, and remove() goes
+    // through spawn_shim directly, so the plain Windows lib build would flag
+    // this stub as dead; keeping it preserves the uniform call surface.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[cfg(not(target_os = "macos"))]
     fn run_shim(&self, _args: &[&str]) -> Result<u32, ProviderError> {
         Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
