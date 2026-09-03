@@ -1,7 +1,7 @@
 ---
 date: 2026-09-03T12:45:33+09:00
 researcher: loopy-lim
-git_commit: d4afeb8d021901eb41bf515f0f4db14dde807d52
+git_commit: 7b40e19f1d60e909875b075ff04e7db38ce677f4
 branch: main
 repository: leftcar
 topic: "다방면 다음 작업 후보 조사 (진행 상태·미완료·검증 게이트·리서치 기반)"
@@ -9,6 +9,7 @@ tags: [research, codebase, roadmap, evidence, virtual-display, transport, usb-ao
 status: complete
 last_updated: 2026-09-03
 last_updated_by: loopy-lim
+last_updated_note: "Added follow-up research for 가상 디스플레이 제외 잔여 작업 확정 (스파크 완료·A1 해소 반영)"
 ---
 
 # 리서치: 다음 작업 후보 다방면 조사
@@ -132,3 +133,43 @@ leftcar에는 `thoughts/` 디렉토리가 없다. 동일 역할 문서는 전부
 2. 설계 크레이트 8종의 프로덕션 연결이 목표인가 — 현재 native shim 경로가 실기 검증을 통과한 상태에서 "연결"이 실제 이득인지 판단 필요 (ADR 후보).
 3. 커서 분리 채널 설계 — UDP 사이드 채널(OpenDisplay 방식) vs 기존 제어 채널(LCS1/LCI1) 확장.
 4. v0.2 릴리스 범위 — hardening 플랜의 어디까지를 v0.2.0에 포함할지 (서명/notarization 없이 태그할지).
+
+## Follow-up Research [2026-09-03T20:05+09:00]
+
+후속 상황: 이 문서 작성 후 (1) OpenDisplay 비교 문서가 커밋됐고 (`ecb46bb`), (2) CGVirtualDisplay 스파크 실측이 완료됐다 (`70b81e7` 도구 + `408bb82`/`7b40e19` 문서). 사용자 판정으로 **가상 디스플레이 계열은 이미 만들어 둔 것이 있으므로 이후 논의에서 제외**한다.
+
+가상 디스플레이를 제외하면 남는 작업은 다음과 같다.
+
+### 남은 작업 (가상 디스플레이 제외)
+
+**A. 코드만으로 가능 (기기 불필요)**
+
+| 순위 | 작업 | 근거 |
+|---|---|---|
+| 1 | **커서 분리 설계+구현** — `showsCursor = true` 해제 + 커서 좌표 역방향 스트림. 리서치 2건이 일치하는 최상위 격차이며 참고 구현(OpenDisplay: 캡처 숨김 + UDP 9001 사이드 채널 로컬 렌더)까지 확보됨. 설계 결정 1건 필요: UDP 사이드 채널 vs LCS1/LCI1 제어 채널 확장 | `native/macos-capture-shim/Sources/Capture/CaptureSession+Backend.swift:102`, `docs/research/2026-08-25_remote-screen-display-pipelines.md` |
+| 2 | **transport-quic 구현 또는 G2 보류 선언** — 크레이트 전체 placeholder, H14 red 테스트만 존재. QUIC reliable stream + DATAGRAM은 L5 loopback으로 기기 없이 검증 가능. 반대로 기기 제약을 문서로 명시하고 bake-off 보류를 선언하는 선택지도 유효 | `crates/transport-quic/src/lib.rs:3-21`, `docs/09-risk-register.md:119-136` (Q-003·Q-007) |
+| 3 | **설계 크레이트 8종 프로덕션 연결** — 구조적 부채. 단, native shim 경로가 실기 검증을 통과한 상태라 이득 판단이 먼저 (ADR 후보) | `apps/host-desktop/src-tauri/Cargo.toml:30-34`, `crates/host-core/src/lib.rs:1,15` |
+| 4 | **ADR 상태 정리** — 0001~0004 "제안" 중 실제 구현된 0001/0002의 승격 검토 | `docs/decisions/` 각 파일 3행 |
+
+**B. 실기 게이트 (절차 문서화 완료, 수행 대기)**
+
+| 항목 | 근거 |
+|---|---|
+| T11 검증 4: 60분 USB soak (폰 `HA2D6EMP` 필요) | `docs/usb-physical-validation.md:143` |
+| 입력 주입 실기 검증 (`inputEnabled=false` 표본) | `docs/EVIDENCE.md:158` |
+| 1440p 고모션 60 unique fps 판정 (frameGaps=72, outputDrops=320 잔존) | `docs/EVIDENCE.md:216` |
+| glass-to-glass p50/p95 (240fps 카메라 200 sample) | `docs/EVIDENCE.md:68` |
+| 90fps 기본값 재노출 판정 (90Hz 소스 재검증) | `docs/EVIDENCE.md:157` |
+| macOS notarization + v0.2 릴리스 서명 | `docs/EVIDENCE.md:159` |
+| Windows 물리 E6/E7, NSIS CI artifact | `docs/EVIDENCE.md:79` |
+
+### 추천
+
+기기 없이 바로 착수 가능하면서 사용자 체감 가치가 가장 큰 것은 **커서 분리**다. 설계 결정(UDP 사이드 채널 vs 제어 채널 확장)만 내리면 구현 경로가 명확하다. 그다음은 QUIC 구현(또는 의도적 보류 선언)으로 ADR-0004를 전진시키는 것.
+
+B군은 폰·모니터·시간이 필요한 물리 작업이라 코드 세션과 분리해서 수행하는 것이 낫다.
+
+### Follow-up 미해결 질문
+
+1. 커서 분리 채널: UDP 사이드 채널(OpenDisplay 선례, 구현 단순) vs LCS1/LCI1 제어 채널 확장(단일 연결, 회선 제어 통합) — 어느 쪽으로 갈지.
+2. v0.2.0 태그에 포함할 범위 — hardening 플랜 중 코드 작업(자동 재연결 등)만 포함하고 서명/notarization은 v0.3으로 미룰지.
