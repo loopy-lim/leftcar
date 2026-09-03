@@ -411,16 +411,16 @@ fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingSer
 #[tauri::command]
 async fn create_virtual_display(
     name: String,
-    aspect_width: u32,
-    aspect_height: u32,
+    width: u32,
+    height: u32,
 ) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        virtual_display::create_virtual_display(&name, aspect_width, aspect_height)
+        virtual_display::create_virtual_display(&name, width, height)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (name, aspect_width, aspect_height);
+        let _ = (name, width, height);
         Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
     }
 }

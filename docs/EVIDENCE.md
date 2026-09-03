@@ -242,8 +242,10 @@ feature/usb-display-extension 브랜치(커밋 `2aaa319`..`441e94f`, 14개 커�
 ### 4. 가상 디스플레이 실험 (ADR-0005)
 
 - **구현**: `apps/host-desktop/src-tauri/src/virtual_display.rs`가 `betterdisplaycli` 프로세스 실행(create/set/discard, `-namelike` 식별자)을 감싸고, Tauri 커맨드(비동기, 메인 스레드 블로킹 회피)와 Host UI로 노출한다. Host App.tsx의 "가상 디스플레이 (실험)" 옵트인 토글(기본 꺼짐, `leftcar_virtual_display_experiment` 설정 영속화)이 꺼져 있으면 VirtualDisplayCard를 렌더링하지 않아 커맨드 호출 자체가 발생하지 않는다. CLI 계약은 `docs/decisions/0005-virtual-display-via-betterdisplay-cli.md`(ADR-0005)에 고정했다.
-- **검증 (E3)**: CLI 인자 생성 단위 테스트 5개가 ADR-0005의 CLI 계약을 고정한다. Host Tauri crate 전체 테스트 통과.
-- **미증명**: 실제 `betterdisplaycli` 실행, 가상 디스플레이 생성·연결·캡처·제거는 전부 물리 게이트(`docs/usb-physical-validation.md` 검증 6)로 대기 중이다. 위험 대장 R-015의 v1 논골 유지는 변함없으며 이 구현이 정식 기능 승격이 아니다.
+- **2026-09-02 실기기 정정**: ADR-0005의 `aspectWidth/aspectHeight=16/9`(비율 숫자) 계약은 잘못된 것이었다. CLI는 이 값을 픽셀로 해석하고, HiDPI 기본·자유 multiplier 조합에서 16x9 요청이 6400x4000 백킹 스토어(UI 논리 3200x2000)를 만들어 스트리밍 시 UI가 지나치게 작아졌다. 실기 검증으로 확정한 올바른 계약은 픽셀 지정 + HiDPI off + multiplier 1x 고정이며, 이를 `create_args`와 `validate_dimensions`(800px 미만 비율 숫자 입력 거부)로 코드에 반영했다. 앱 기본값도 태블릿 16:10에 맞춰 1920x1200(WUXGA)으로 바꿨다.
+- **검증 (E3)**: CLI 인자 생성 단위 테스트 6개가 정정된 CLI 계약을 고정한다. Host Tauri crate 전체 테스트 통과(65 lib + 10 e2e).
+- **검증 (E6, 실기기)**: 정정된 계약과 동일한 argv로 `betterdisplaycli create`→`set -connected=on`을 실행해 `system_profiler`에서 `1920 x 1200 (WUXGA)`, `UI Looks like: 1920 x 1200 @ 60.00Hz`를 확인했고, `discard -namelike`로 제거 확인. 다만 이는 CLI 직접 실행이며 앱 UI(토글→카드→버튼) 경유의 최종 확인은 여전히 사용자 수동 확인 대상이다. 앱 UI 자동 클릭 검증은 시도했으나 이 자동화 셸이 GUI 세션(System Events)과 통신할 수 없어(-10827) 불가능했고, 대신 WebKit localStorage DB에 실험 토글 플래그(`leftcar_virtual_display_experiment=on`)를 주입해 카드 표시 조건만 준비했다.
+- **미증명**: 앱 UI 경유 생성→Leftcar 스트리밍 캡처→태블릿 렌더링까지의 전 경로(사용자가 모달에서 카드 확인 → 생성 버튼 → 태블릿에서 스트림 열어 UI 크기 확인). 위험 대장 R-015의 v1 논골 유지는 변함없으며 이 구현이 정식 기능 승격이 아니다.
 
 ### 5. USB 물리 검증 게이트 문서
 

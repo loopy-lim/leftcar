@@ -3,10 +3,18 @@
 //! Leftcar never bundles BetterDisplay. We only shell out to
 //! `betterdisplaycli` when the user explicitly enables the experiment.
 //!
-//! CLI contract (BetterDisplay 4.3.6 help + maintainer examples):
-//! - create: `create -devicetype=virtualscreen -virtualscreenname=<name> -aspectWidth=<w> -aspectHeight=<h>`
+//! CLI contract (BetterDisplay 4.3.6, verified on-device 2026-09-02):
+//! - create: `create -devicetype=virtualscreen -virtualscreenname=<name>
+//!   -aspectWidth=<w> -aspectHeight=<h> -virtualScreenHiDPI=off
+//!   -multiplierStep=1 -limitMultiplierSize=on -multiplierMinWidth=<w>
+//!   -multiplierMinHeight=<h> -multiplierMaxWidth=<w> -multiplierMaxHeight=<h>`
 //! - connect: `set -namelike=<name> -connected=on`
 //! - discard: `discard -namelike=<name>`
+//!
+//! Despite the name, `aspectWidth/aspectHeight` are PIXEL dimensions, not
+//! ratio numbers: with HiDPI on and a free multiplier, `16x9` produced a
+//! 6400x4000 backing store whose UI looked tiny when streamed to a tablet.
+//! HiDPI off plus a 1x-only multiplier yields exactly one WxH mode.
 //!
 //! Discard deliberately uses `-namelike`: `-virtualscreenname` is not in the
 //! `betterdisplaycli` help identifier list, and an unspecified identifier
@@ -16,13 +24,20 @@
 /// Builds the argv for creating a virtual display. Unit-tested on every
 /// platform; the actual process spawn is exercised only on a machine with
 /// BetterDisplay installed.
-pub fn create_args(name: &str, aspect_w: u32, aspect_h: u32) -> Vec<String> {
+pub fn create_args(name: &str, width: u32, height: u32) -> Vec<String> {
     vec![
         "create".into(),
         "-devicetype=virtualscreen".into(),
         format!("-virtualscreenname={name}"),
-        format!("-aspectWidth={aspect_w}"),
-        format!("-aspectHeight={aspect_h}"),
+        format!("-aspectWidth={width}"),
+        format!("-aspectHeight={height}"),
+        "-virtualScreenHiDPI=off".into(),
+        "-multiplierStep=1".into(),
+        "-limitMultiplierSize=on".into(),
+        format!("-multiplierMinWidth={width}"),
+        format!("-multiplierMinHeight={height}"),
+        format!("-multiplierMaxWidth={width}"),
+        format!("-multiplierMaxHeight={height}"),
     ]
 }
 
@@ -51,6 +66,20 @@ pub fn validate_name(name: &str) -> Result<String, String> {
     }
 }
 
+/// `aspectWidth/aspectHeight` are pixel dimensions (see module docs), so
+/// ratio-style inputs like 16x9 are rejected before they can create a
+/// degenerate display. The smallest mainstream tablet-pixel size (1280x800)
+/// is the floor.
+pub fn validate_dimensions(width: u32, height: u32) -> Result<(), String> {
+    const MIN_DIMENSION: u32 = 800;
+    if width < MIN_DIMENSION || height < MIN_DIMENSION {
+        return Err(format!(
+            "가로/세로 픽셀은 각각 {MIN_DIMENSION} 이상이어야 합니다 (비율 숫자가 아닌 픽셀 값, 예: 1920x1200)."
+        ));
+    }
+    Ok(())
+}
+
 /// Builds the argv for discarding a virtual display. Unit-tested on every
 /// platform; the actual process spawn is exercised only on a machine with
 /// BetterDisplay installed.
@@ -62,9 +91,10 @@ pub fn remove_args(name: &str) -> Vec<String> {
 pub const CLI: &str = "betterdisplaycli";
 
 #[cfg(target_os = "macos")]
-pub fn create_virtual_display(name: &str, aspect_w: u32, aspect_h: u32) -> Result<String, String> {
+pub fn create_virtual_display(name: &str, width: u32, height: u32) -> Result<String, String> {
     let name = &validate_name(name)?;
-    run_cli(create_args(name, aspect_w, aspect_h))?;
+    validate_dimensions(width, height)?;
+    run_cli(create_args(name, width, height))?;
     run_cli(connect_args(name))
 }
 
@@ -103,15 +133,34 @@ mod tests {
     #[test]
     fn create_args_matches_cli_contract() {
         assert_eq!(
-            create_args("Leftcar Virtual", 16, 9),
+            create_args("Leftcar Virtual", 1920, 1200),
             vec![
                 "create".to_string(),
                 "-devicetype=virtualscreen".to_string(),
                 "-virtualscreenname=Leftcar Virtual".to_string(),
-                "-aspectWidth=16".to_string(),
-                "-aspectHeight=9".to_string(),
+                "-aspectWidth=1920".to_string(),
+                "-aspectHeight=1200".to_string(),
+                "-virtualScreenHiDPI=off".to_string(),
+                "-multiplierStep=1".to_string(),
+                "-limitMultiplierSize=on".to_string(),
+                "-multiplierMinWidth=1920".to_string(),
+                "-multiplierMinHeight=1200".to_string(),
+                "-multiplierMaxWidth=1920".to_string(),
+                "-multiplierMaxHeight=1200".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn pixel_dimensions_reject_ratio_numbers() {
+        // The CLI interprets aspectWidth/Height as pixels: a 16x9 request
+        // would create a 16x9-pixel display (or, with HiDPI multipliers, a
+        // giant HiDPI backing store). Only realistic pixel sizes are valid.
+        assert!(validate_dimensions(16, 9).is_err());
+        assert!(validate_dimensions(1920, 1200).is_ok());
+        assert!(validate_dimensions(3200, 2000).is_ok());
+        assert!(validate_dimensions(0, 1200).is_err());
+        assert!(validate_dimensions(1920, 0).is_err());
     }
 
     #[test]

@@ -625,8 +625,8 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
       const output = command === "create_virtual_display"
         ? await invoke<string>("create_virtual_display", {
             name: name.trim(),
-            aspectWidth: 16,
-            aspectHeight: 9,
+            width: 1920,
+            height: 1200,
           })
         : await invoke<string>("remove_virtual_display", { name: name.trim() });
       onDone(output);

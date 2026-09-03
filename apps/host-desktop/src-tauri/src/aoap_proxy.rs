@@ -73,6 +73,14 @@ fn accept_media_connection(
             Err(_) => return,
         }
     };
+    // BSD/macOS accepted sockets inherit the listener's O_NONBLOCK. The
+    // dedicated reader thread must block: a WouldBlock read is a fatal
+    // error there and would silently strand every shim media frame in the
+    // kernel receive buffer after the first datagram.
+    if let Err(error) = stream.set_nonblocking(false) {
+        eprintln!("USB media proxy stream reset failed: {error}");
+        return;
+    }
     eprintln!("USB media proxy accepted capture shim from {peer}");
     if let Err(error) = bridge_media_stream(stream, sender, receiver, stop) {
         eprintln!("USB media proxy stopped: {error}");
@@ -92,12 +100,22 @@ fn bridge_media_stream(
         let mut decoder = LengthPrefixDecoder::default();
         let mut buffer = [0u8; READ_BUFFER_BYTES];
         let mut stream = reader_stream;
+        let mut forwarded = 0usize;
         loop {
             let size = stream.read(&mut buffer)?;
             if size == 0 {
+                eprintln!("USB media proxy shim->viewer EOF after {forwarded} frames");
                 return Ok(());
             }
             for payload in decoder.feed(&buffer[..size])? {
+                forwarded += 1;
+                if forwarded <= 8 || forwarded.is_multiple_of(500) {
+                    eprintln!(
+                        "USB media proxy shim->viewer frame #{forwarded}: {}B head={:02x?}",
+                        payload.len(),
+                        &payload[..payload.len().min(8)]
+                    );
+                }
                 reader_sender
                     .send(usb_mux::MuxFrame {
                         channel: usb_mux::CHANNEL_MEDIA,
@@ -109,6 +127,7 @@ fn bridge_media_stream(
     });
 
     let mut write_result = Ok(());
+    let mut upstream = 0usize;
     loop {
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             break;
@@ -120,6 +139,14 @@ fn bridge_media_stream(
         };
         if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
             continue;
+        }
+        upstream += 1;
+        if upstream <= 12 || upstream.is_multiple_of(200) {
+            eprintln!(
+                "USB media proxy viewer->shim frame #{upstream}: {}B head={:02x?}",
+                payload.len(),
+                &payload[..payload.len().min(8)]
+            );
         }
         let mut frame = Vec::with_capacity(4 + payload.len());
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
