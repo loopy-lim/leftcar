@@ -21,6 +21,16 @@ pub struct VirtualDisplay {
     pub cgvd_display_id: Option<u32>,
 }
 
+/// Every non-macOS branch answers with this one message so the guidance is
+/// identical whichever provider a caller holds. macOS builds cfg-gate every
+/// use away, hence the lint escape.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const MACOS_ONLY_MESSAGE: &str = "가상 디스플레이는 macOS에서만 지원됩니다.";
+
+/// Dev-built shim location (see tools/cgvd-shim/README.md), relative to the
+/// process cwd.
+const DEFAULT_SHIM_PATH: &str = "tools/cgvd-shim/.build/release/cgvd-shim";
+
 /// Failure causes map 1:1 to UI guidance (spark 3-way classification).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ProviderError {
@@ -130,9 +140,7 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = spec;
-            Err(ProviderError::EngineUnavailable(
-                "가상 디스플레이는 macOS에서만 지원됩니다.".into(),
-            ))
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
         }
     }
 
@@ -150,9 +158,7 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = display;
-            Err(ProviderError::EngineUnavailable(
-                "가상 디스플레이는 macOS에서만 지원됩니다.".into(),
-            ))
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
         }
     }
 }
@@ -165,9 +171,7 @@ fn ensure_engine_premise() -> Result<(), ProviderError> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err(ProviderError::EngineUnavailable(
-            "가상 디스플레이는 macOS에서만 지원됩니다.".into(),
-        ))
+        Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
     }
 }
 
@@ -214,13 +218,19 @@ impl CgvdProvider {
     }
 
     /// Dev-built shim location; built via `swift build -c release` per
-    /// tools/cgvd-shim/README.md.
+    /// tools/cgvd-shim/README.md. `LEFTCAR_CGVD_SHIM` overrides the path so
+    /// a debug build or an alternate checkout can be tested without moving
+    /// files — the same pattern as `LEFTCAR_CAPTURE_DYLIB` in ffi.rs.
     pub fn new() -> Self {
-        Self::with_binary_path("tools/cgvd-shim/.build/release/cgvd-shim")
+        if let Ok(path) = std::env::var("LEFTCAR_CGVD_SHIM") {
+            // An explicit override is authoritative, even when the path does
+            // not exist — availability then fails loudly instead of silently
+            // probing the default.
+            return Self::with_binary_path(&path);
+        }
+        Self::with_binary_path(DEFAULT_SHIM_PATH)
     }
 
-    // review: cap untrusted shim details before embedding in user-facing
-    // ProviderError messages (usage lines are ~60 chars, but be defensive).
     #[cfg(target_os = "macos")]
     fn classify_stdout(
         &self,
@@ -228,6 +238,13 @@ impl CgvdProvider {
         stdout: &str,
         stderr: &str,
     ) -> Result<u32, ProviderError> {
+        // Shim details are untrusted text flowing into user-facing messages —
+        // cap every variant that embeds one (usage lines are ~60 chars, but
+        // be defensive).
+        let exit_label = status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".into());
         let line = stdout.lines().next().unwrap_or("").trim();
         match parse_cgvd_line(line) {
             Ok(display_id) => Ok(display_id),
@@ -239,13 +256,16 @@ impl CgvdProvider {
                     let stderr_tail: String =
                         stderr.lines().rev().take(2).collect::<Vec<_>>().join(" ");
                     Err(ProviderError::EngineFailed(format!(
-                        "shim 출력 없음 (exit={status:?}) {}",
+                        "shim 출력 없음 (exit={exit_label}) {}",
                         Self::truncate_detail(&stderr_tail)
                     )))
                 } else {
                     Err(ProviderError::EngineFailed(Self::truncate_detail(&detail)))
                 }
             }
+            Err(ProviderError::EngineUnavailable(detail)) => Err(ProviderError::EngineUnavailable(
+                Self::truncate_detail(&detail),
+            )),
             Err(other) => Err(other),
         }
     }
@@ -276,11 +296,11 @@ impl CgvdProvider {
 
     #[cfg(not(target_os = "macos"))]
     fn run_shim(&self, _args: &[&str]) -> Result<u32, ProviderError> {
-        Err(ProviderError::EngineUnavailable("macOS 전용입니다.".into()))
+        Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
     }
 
-    // review: cap untrusted shim details before embedding in user-facing
-    // ProviderError messages (usage lines are ~60 chars, but be defensive).
+    // Shim details flow into user-facing ProviderError messages; an
+    // unbounded foreign string could flood the UI, so cap it defensively.
     #[cfg(target_os = "macos")]
     fn truncate_detail(detail: &str) -> String {
         const MAX_CHARS: usize = 200;
@@ -355,42 +375,61 @@ impl VirtualDisplayProvider for CgvdProvider {
         {
             let count = active_display_count();
             ensure_active_display_premise(count)?;
+            // Same shared validators as BetterDisplayProvider: the trait
+            // promises engine-swap transparency, so ratio-style dimensions
+            // and blank names must be rejected with Korean guidance before
+            // the shim ever runs — not as an English shim usage line.
+            let name = super::virtual_display::validate_name(&spec.name)
+                .map_err(ProviderError::EngineFailed)?;
+            super::virtual_display::validate_dimensions(spec.width, spec.height)
+                .map_err(ProviderError::EngineFailed)?;
             let width = spec.width.to_string();
             let height = spec.height.to_string();
             // The displayID is the only handle that exists while shim `remove`
             // stays unimplemented by design (R-015) — keep it on the handle.
             let display_id = self.run_shim(&[
                 "create",
-                &format!("--name={}", spec.name),
+                &format!("--name={name}"),
                 &format!("--width={width}"),
                 &format!("--height={height}"),
             ])?;
             Ok(VirtualDisplay {
-                name: spec.name.clone(),
+                name,
                 cgvd_display_id: Some(display_id),
             })
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = spec;
-            Err(ProviderError::EngineUnavailable("macOS 전용입니다.".into()))
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
         }
     }
 
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError> {
-        // Exit-3 "not implemented" is an intentional design no-op (R-015),
-        // not a creation failure — never surface it as an error to Drop.
         // No active-display premise here: cleanup must not require an active
         // display (BetterDisplayProvider lesson — the lid may be closed by
         // teardown time).
-        match self.run_shim(&["remove", &format!("--name={}", display.name)]) {
-            Ok(_) => Ok(()),
-            Err(ProviderError::EngineFailed(detail))
-                if detail.contains("not implemented yet by design") =>
-            {
-                Ok(())
+        #[cfg(target_os = "macos")]
+        {
+            match self.spawn_shim(&["remove", &format!("--name={}", display.name)]) {
+                // Exit 3 IS the contract: the shim answers the intentional
+                // R-015 "remove is not implemented by design" no-op. Detect
+                // by exit code, never by the prose — detail text is capped
+                // elsewhere and could be cut mid-marker. Never surface this
+                // as an error to Drop.
+                Ok((status, _stdout, _stderr)) if status.code() == Some(3) => Ok(()),
+                Ok((status, stdout, stderr)) => {
+                    self.classify_stdout(status, &stdout, &stderr).map(|_| ())
+                }
+                Err(error) => Err(ProviderError::EngineUnavailable(format!(
+                    "shim 실행 불가: {error}"
+                ))),
             }
-            Err(other) => Err(other),
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = display;
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
         }
     }
 }
@@ -458,6 +497,60 @@ mod tests {
         );
         assert_eq!(parse_cgvd_line("OK 42"), Ok(42));
         assert!(parse_cgvd_line("garbage").is_err());
+    }
+
+    #[test]
+    fn cgvd_parser_pins_multiformat_and_malformed_lines() {
+        // Multi-word FAILED details are part of the shim contract.
+        assert_eq!(
+            parse_cgvd_line("FAILED registration timeout displayID=42"),
+            Err(ProviderError::EngineFailed(
+                "registration timeout displayID=42".into()
+            ))
+        );
+        // A non-numeric OK payload is a contract violation, not a display id.
+        assert!(parse_cgvd_line("OK abc").is_err());
+        // Empty stdout (crash before print) must parse as failure, never as
+        // a silently successful creation.
+        assert!(parse_cgvd_line("").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cgvd_remove_treats_exit3_not_implemented_as_success() {
+        // Pin the shim's exact no-op line (tools/cgvd-shim/main.swift): the
+        // remove() decision is made by exit code, but the prose is part of
+        // the documented contract and must not drift silently. parse_cgvd_line
+        // strips the "FAILED " prefix, so the pinned detail excludes it.
+        let line = "FAILED remove is not implemented yet by design (R-015 experiment scope)";
+        assert_eq!(
+            parse_cgvd_line(line),
+            Err(ProviderError::EngineFailed(
+                "remove is not implemented yet by design (R-015 experiment scope)".into()
+            ))
+        );
+
+        // The exit-code path needs a real process — a stand-in script that
+        // speaks the exact contract line and exits 3 like the shim does.
+        let mut script = std::env::temp_dir();
+        script.push(format!("leftcar-cgvd-exit3-{}.sh", std::process::id()));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' '{line}'\nexit 3\n"),
+        )
+        .expect("write temp shim stand-in");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod temp shim stand-in");
+
+        let provider = CgvdProvider::with_binary_path(script.to_str().expect("utf8 temp path"));
+        let display = VirtualDisplay {
+            name: "tablets".into(),
+            cgvd_display_id: Some(7),
+        };
+        let result = provider.remove(&display);
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
