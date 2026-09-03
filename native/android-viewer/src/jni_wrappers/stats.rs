@@ -16,6 +16,38 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_inputStatus(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_cursorState(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+) -> i64 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return -1,
+    };
+    unsafe { leftcar_jni_cursor_state(c.as_ptr()) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+/// JNI supplies a valid environment and Java string reference for the
+/// duration of this call.
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_setCursorStream(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+    enabled: u8,
+) -> i32 {
+    let c = match unsafe { get_utf(env, instance) } {
+        Some(c) => c,
+        None => return 1,
+    };
+    unsafe { leftcar_jni_set_cursor_stream(c.as_ptr(), enabled != 0) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamStats(
     env: *mut JNIEnv,
     _class: *mut jobject,

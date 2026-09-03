@@ -132,6 +132,8 @@ extern "C" {
     ) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_cursor_state(instance: *const c_char) -> i64;
+    fn leftcar_jni_set_cursor_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
     fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
@@ -150,6 +152,8 @@ extern "C" {
 //   sendKey(String, int, int, int, boolean, int): int
 //   releaseInput(String): int
 //   inputStatus(String): int
+//   cursorState(String): long
+//   setCursorStream(String, boolean): int
 //   streamStats(String): long
 //   streamLatency(String): long
 //   release(long, String): int
