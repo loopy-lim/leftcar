@@ -157,6 +157,13 @@ pub(super) fn consume_viewer_response(
 }
 
 fn apply_cursor_sample(control: &RendererControl, sample: CursorSample) {
+    // UDP may reorder: a stale sample must never overwrite a newer one.
+    // Sequence 0 is the fresh-session sentinel, so the first sample is
+    // always accepted (host sequences start at 1).
+    let current = control.cursor_sequence.load(Ordering::SeqCst);
+    if current != 0 && sample.sequence <= current {
+        return;
+    }
     control.cursor_x.store(sample.x, Ordering::SeqCst);
     control.cursor_y.store(sample.y, Ordering::SeqCst);
     control.cursor_visible.store(sample.visible, Ordering::SeqCst);
