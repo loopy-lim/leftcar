@@ -16,6 +16,9 @@ pub struct DisplaySpec {
 /// Handle to a display a provider created.
 pub struct VirtualDisplay {
     pub name: String,
+    /// CGVD engine's numeric display id — the only recoverable handle while
+    /// shim `remove` is unimplemented by design. None for other engines.
+    pub cgvd_display_id: Option<u32>,
 }
 
 /// Failure causes map 1:1 to UI guidance (spark 3-way classification).
@@ -76,7 +79,7 @@ impl BetterDisplayProvider {
 }
 
 /// PATH probe shared by provider availability checks.
-pub fn which_succeeds(binary: &str) -> bool {
+fn which_succeeds(binary: &str) -> bool {
     std::process::Command::new("which")
         .arg(binary)
         .output()
@@ -116,7 +119,10 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
                 .map_err(ProviderError::EngineFailed)?;
             super::virtual_display::create_virtual_display(&name, spec.width, spec.height)
                 .map_err(ProviderError::EngineFailed)?;
-            Ok(VirtualDisplay { name })
+            Ok(VirtualDisplay {
+                name,
+                cgvd_display_id: None,
+            })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -128,7 +134,10 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
     }
 
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError> {
-        ensure_engine_premise()?;
+        // No active-display premise here: the premise doc scopes it to
+        // creation, and by teardown time the lid may be closed (count == 0)
+        // — requiring it would misclassify cleanup as NoActiveDisplay.
+        // There is nothing to discard when count == 0 anyway.
         #[cfg(target_os = "macos")]
         {
             super::virtual_display::remove_virtual_display(&display.name)
@@ -184,6 +193,202 @@ impl Default for BetterDisplayProvider {
     }
 }
 
+/// EXPERIMENT-ONLY provider behind the CGVD opt-in flag (R-015 논골 유지).
+/// Calls the Swift shim built from `tools/cgvd-shim/`; never promotes to the
+/// default provider without a separate ADR.
+pub struct CgvdProvider {
+    binary_path: String,
+}
+
+impl CgvdProvider {
+    pub fn with_binary_path(binary_path: &str) -> Self {
+        Self {
+            binary_path: binary_path.into(),
+        }
+    }
+
+    /// Dev-built shim location; built via `swift build -c release` per
+    /// tools/cgvd-shim/README.md.
+    pub fn new() -> Self {
+        Self::with_binary_path("tools/cgvd-shim/.build/release/cgvd-shim")
+    }
+
+    // review: cap untrusted shim details before embedding in user-facing
+    // ProviderError messages (usage lines are ~60 chars, but be defensive).
+    #[cfg(target_os = "macos")]
+    fn classify_stdout(
+        &self,
+        status: std::process::ExitStatus,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<u32, ProviderError> {
+        let line = stdout.lines().next().unwrap_or("").trim();
+        match parse_cgvd_line(line) {
+            Ok(display_id) => Ok(display_id),
+            Err(ProviderError::EngineFailed(detail)) => {
+                // Empty stdout means the shim crashed before printing (dyld,
+                // signal) or produced no output at all — the exit status and
+                // the stderr tail are the only diagnosis available then.
+                if line.is_empty() {
+                    let stderr_tail: String =
+                        stderr.lines().rev().take(2).collect::<Vec<_>>().join(" ");
+                    Err(ProviderError::EngineFailed(format!(
+                        "shim 출력 없음 (exit={status:?}) {}",
+                        Self::truncate_detail(&stderr_tail)
+                    )))
+                } else {
+                    Err(ProviderError::EngineFailed(Self::truncate_detail(&detail)))
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Spawns the shim and returns its (status, stdout, stderr) verbatim.
+    /// `probe` speaks a different one-line contract (`EXISTS`/`MISSING`) than
+    /// `create`, so both callers share the spawn but classify separately.
+    #[cfg(target_os = "macos")]
+    fn spawn_shim(
+        &self,
+        args: &[&str],
+    ) -> std::io::Result<(std::process::ExitStatus, String, String)> {
+        let output = std::process::Command::new(&self.binary_path)
+            .args(args)
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Ok((output.status, stdout, stderr))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_shim(&self, args: &[&str]) -> Result<u32, ProviderError> {
+        let (status, stdout, stderr) = self.spawn_shim(args).map_err(|error| {
+            ProviderError::EngineUnavailable(format!("shim 실행 불가: {error}"))
+        })?;
+        self.classify_stdout(status, &stdout, &stderr)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn run_shim(&self, _args: &[&str]) -> Result<u32, ProviderError> {
+        Err(ProviderError::EngineUnavailable("macOS 전용입니다.".into()))
+    }
+
+    // review: cap untrusted shim details before embedding in user-facing
+    // ProviderError messages (usage lines are ~60 chars, but be defensive).
+    #[cfg(target_os = "macos")]
+    fn truncate_detail(detail: &str) -> String {
+        const MAX_CHARS: usize = 200;
+        if detail.chars().count() <= MAX_CHARS {
+            detail.to_string()
+        } else {
+            let truncated: String = detail.chars().take(MAX_CHARS).collect();
+            format!("{truncated}…")
+        }
+    }
+}
+
+impl Default for CgvdProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One-line stdout contract of the shim (see tools/cgvd-shim/README.md).
+/// Kept compiled on every platform so the contract tests run on Windows CI;
+/// the non-macOS build never calls it (the shim is macOS-only).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_cgvd_line(line: &str) -> Result<u32, ProviderError> {
+    let mut parts = line.splitn(2, ' ');
+    match parts.next() {
+        Some("OK") => parts
+            .next()
+            .and_then(|rest| rest.parse::<u32>().ok())
+            .ok_or_else(|| ProviderError::EngineFailed(format!("shim 출력 파싱 실패: {line}"))),
+        Some("NOACTIVE") => Err(ProviderError::NoActiveDisplay),
+        Some("UNAVAILABLE") => Err(ProviderError::EngineUnavailable(
+            parts.next().unwrap_or("").into(),
+        )),
+        Some("FAILED") => Err(ProviderError::EngineFailed(
+            parts.next().unwrap_or("").into(),
+        )),
+        _ => Err(ProviderError::EngineFailed(format!(
+            "shim 출력 파싱 실패: {line}"
+        ))),
+    }
+}
+
+impl VirtualDisplayProvider for CgvdProvider {
+    fn name(&self) -> &'static str {
+        "cgvirtualdisplay"
+    }
+
+    fn available(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            // Cheap disk check first — spawning a missing binary on every
+            // availability poll is wasted work.
+            if !std::path::Path::new(&self.binary_path).exists() {
+                return false;
+            }
+            // probe answers EXISTS/MISSING (always exit 0) — its own contract,
+            // matched literally instead of through parse_cgvd_line.
+            matches!(
+                self.spawn_shim(&["probe"]),
+                Ok((_status, stdout, _stderr))
+                    if stdout.lines().next().map(str::trim) == Some("EXISTS")
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    fn create(&self, spec: &DisplaySpec) -> Result<VirtualDisplay, ProviderError> {
+        #[cfg(target_os = "macos")]
+        {
+            let count = active_display_count();
+            ensure_active_display_premise(count)?;
+            let width = spec.width.to_string();
+            let height = spec.height.to_string();
+            // The displayID is the only handle that exists while shim `remove`
+            // stays unimplemented by design (R-015) — keep it on the handle.
+            let display_id = self.run_shim(&[
+                "create",
+                &format!("--name={}", spec.name),
+                &format!("--width={width}"),
+                &format!("--height={height}"),
+            ])?;
+            Ok(VirtualDisplay {
+                name: spec.name.clone(),
+                cgvd_display_id: Some(display_id),
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = spec;
+            Err(ProviderError::EngineUnavailable("macOS 전용입니다.".into()))
+        }
+    }
+
+    fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError> {
+        // Exit-3 "not implemented" is an intentional design no-op (R-015),
+        // not a creation failure — never surface it as an error to Drop.
+        // No active-display premise here: cleanup must not require an active
+        // display (BetterDisplayProvider lesson — the lid may be closed by
+        // teardown time).
+        match self.run_shim(&["remove", &format!("--name={}", display.name)]) {
+            Ok(_) => Ok(()),
+            Err(ProviderError::EngineFailed(detail))
+                if detail.contains("not implemented yet by design") =>
+            {
+                Ok(())
+            }
+            Err(other) => Err(other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +434,32 @@ mod tests {
         let provider: std::sync::Arc<dyn VirtualDisplayProvider> =
             std::sync::Arc::new(BetterDisplayProvider::new());
         assert_eq!(provider.name(), "betterdisplay");
+    }
+
+    #[test]
+    fn cgvd_output_contract_is_parsed_into_provider_errors() {
+        assert_eq!(
+            parse_cgvd_line("NOACTIVE"),
+            Err(ProviderError::NoActiveDisplay)
+        );
+        assert_eq!(
+            parse_cgvd_line("UNAVAILABLE shim missing"),
+            Err(ProviderError::EngineUnavailable("shim missing".into()))
+        );
+        assert_eq!(
+            parse_cgvd_line("FAILED displayID=0"),
+            Err(ProviderError::EngineFailed("displayID=0".into()))
+        );
+        assert_eq!(parse_cgvd_line("OK 42"), Ok(42));
+        assert!(parse_cgvd_line("garbage").is_err());
+    }
+
+    #[test]
+    fn cgvd_provider_is_object_safe_and_named() {
+        let provider: std::sync::Arc<dyn VirtualDisplayProvider> =
+            std::sync::Arc::new(CgvdProvider::with_binary_path("missing-binary"));
+        assert_eq!(provider.name(), "cgvirtualdisplay");
+        // The injected path does not exist, so availability must be false.
+        assert!(!provider.available());
     }
 }
