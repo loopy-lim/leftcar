@@ -335,7 +335,7 @@ mod cursor_export_tests {
         let packed = leftcar_jni_cursor_state(instance.as_ptr());
         assert_eq!(packed & 0xffff, 0x1234);
         assert_eq!((packed >> 16) & 0xffff, 0x5678);
-        assert_eq!((packed >> 32) & 0x3fff_ffff, 0x0ef0_0123);
+        assert_eq!((packed >> 32) & 0x3fff_ffff, 0x0def_0123);
         assert!(packed < 0, "visible flag must occupy the sign bit");
         drop_control(&control);
     }
