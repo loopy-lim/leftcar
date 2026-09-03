@@ -528,22 +528,36 @@ async fn tablet_display_stop(
     }
 }
 
-/// Sync on purpose: a cheap registry read, no engine spawn to offload.
+/// Async (matching tablet_display_start/stop): while streaming, the reported
+/// string is derived by probing `ioreg` for the lid state, which is a real
+/// process spawn that must not run on the main thread. The lid read is UI
+/// display only — the stored ModeState is never mutated and no control path
+/// branches on it. The reported decision lives in the pure
+/// `clamshell_mode::reported_status` (tested without any spawn); an
+/// indeterminate lid reading degrades to "streaming", never "clamshell".
 #[tauri::command]
-fn tablet_display_status(state: tauri::State<'_, TabletSessionRegistry>) -> Result<String, String> {
+async fn tablet_display_status(
+    state: tauri::State<'_, TabletSessionRegistry>,
+) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let guard = state.lock().map_err(|error| error.to_string())?;
-        Ok(match guard.as_ref() {
-            Some(session) => match session.state {
-                clamshell_mode::ModeState::Streaming => "streaming".into(),
-                clamshell_mode::ModeState::ClamshellActive => "clamshell".into(),
-                clamshell_mode::ModeState::Idle => "idle".into(),
-                clamshell_mode::ModeState::Creating => "creating".into(),
-                clamshell_mode::ModeState::Failed(ref detail) => format!("failed: {detail}"),
-            },
-            None => "idle".into(),
-        })
+        // Block scope (not drop()) so the MutexGuard's borrow provably ends
+        // before the await below — the tauri command future must be Send.
+        let session_state = {
+            let guard = state.lock().map_err(|error| error.to_string())?;
+            match guard.as_ref() {
+                Some(session) => session.state.clone(),
+                None => clamshell_mode::ModeState::Idle,
+            }
+        };
+        // Probe outside the registry lock so a (capped) ioreg hang cannot
+        // block start/stop on the same mutex.
+        let lid_closed = if session_state == clamshell_mode::ModeState::Streaming {
+            clamshell_mode::read_lid_closed().await
+        } else {
+            None
+        };
+        Ok(clamshell_mode::reported_status(&session_state, lid_closed))
     }
     #[cfg(not(target_os = "macos"))]
     {

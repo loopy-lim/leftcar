@@ -675,6 +675,21 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
     void syncSessionStatus();
   }, [platform, syncSessionStatus]);
 
+  // While a session is live, poll the backend so the pill can observe the
+  // lid closing: `tablet_display_status` derives clamshell from ioreg per
+  // call, and without polling it would never be asked again after start.
+  // Idle/Failed clear the interval — lid info is meaningless without a
+  // session — and unmount cleanup stops the loop.
+  const sessionLive =
+    sessionState === "Streaming" || sessionState === "Clamshell" || sessionState === "Creating";
+  useEffect(() => {
+    if (!sessionLive) return;
+    const interval = setInterval(() => {
+      void syncSessionStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [sessionLive, syncSessionStatus]);
+
   const startSession = async () => {
     setBusy(true);
     try {

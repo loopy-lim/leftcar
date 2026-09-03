@@ -119,6 +119,54 @@ pub fn parse_clamshell_state(ioreg_output: &str) -> Option<bool> {
     }
 }
 
+/// Wall-clock budget for one `ioreg` lid probe. Generous for a registry read
+/// (it normally finishes in milliseconds) but short enough that a hung spawn
+/// cannot pile up across the UI's 5-second status polls.
+#[cfg(target_os = "macos")]
+const IOREG_TIMEOUT_MS: u64 = 1000;
+
+/// Reads the lid state by spawning `ioreg -r -k AppleClamshellState`.
+/// macOS-only (the registry key does not exist elsewhere). Any failure —
+/// spawn error, timeout, unparseable output — is indeterminate (`None`),
+/// never an error: the caller degrades to `streaming`.
+#[cfg(target_os = "macos")]
+pub async fn read_lid_closed() -> Option<bool> {
+    let child = tokio::process::Command::new("ioreg")
+        .args(["-r", "-k", "AppleClamshellState"])
+        // Killing on drop makes the timeout enforce itself: a hung ioreg is
+        // reaped when the timed-out future is dropped.
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_millis(IOREG_TIMEOUT_MS), child)
+        .await
+        .ok()?
+        .ok()?;
+    parse_clamshell_state(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Derives the status string `tablet_display_status` reports from the stored
+/// `ModeState` plus a lid reading. Pure and total (never panics), so the
+/// reporting decision is unit-testable without spawning `ioreg`.
+///
+/// The session state is never mutated here: per the design, lid detection is
+/// for UI display only, never a control branch. An indeterminate lid reading
+/// (spawn failure, timeout, unparseable output) reports `streaming` — the
+/// label may only advance to `clamshell` when the lid is provably closed.
+pub fn reported_status(state: &ModeState, lid_closed: Option<bool>) -> String {
+    match state {
+        ModeState::Idle => "idle".to_string(),
+        ModeState::Creating => "creating".to_string(),
+        ModeState::Failed(detail) => format!("failed: {detail}"),
+        // A stored ClamshellActive (defensive; no code path produces it
+        // today) reports clamshell regardless of a fresh lid reading.
+        ModeState::ClamshellActive => "clamshell".to_string(),
+        ModeState::Streaming => match lid_closed {
+            Some(true) => "clamshell".to_string(),
+            Some(false) | None => "streaming".to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +213,45 @@ mod tests {
             panic!("start must fail when creation fails");
         };
         assert_eq!(error, ProviderError::NoActiveDisplay);
+    }
+
+    #[test]
+    fn streaming_with_closed_lid_reports_clamshell() {
+        assert_eq!(
+            reported_status(&ModeState::Streaming, Some(true)),
+            "clamshell"
+        );
+    }
+
+    #[test]
+    fn streaming_with_open_lid_reports_streaming() {
+        assert_eq!(
+            reported_status(&ModeState::Streaming, Some(false)),
+            "streaming"
+        );
+    }
+
+    #[test]
+    fn indeterminate_lid_reading_never_claims_clamshell() {
+        // Spawn failure/timeout/parse miss degrade to None: the label may
+        // only advance when the lid is provably closed.
+        assert_eq!(reported_status(&ModeState::Streaming, None), "streaming");
+    }
+
+    #[test]
+    fn stored_states_report_verbatim() {
+        assert_eq!(reported_status(&ModeState::Idle, None), "idle");
+        assert_eq!(reported_status(&ModeState::Creating, None), "creating");
+        // A stored ClamshellActive (never produced today) must still report
+        // clamshell, lid reading or not.
+        assert_eq!(
+            reported_status(&ModeState::ClamshellActive, Some(false)),
+            "clamshell"
+        );
+        assert_eq!(
+            reported_status(&ModeState::Failed("boom".into()), Some(true)),
+            "failed: boom"
+        );
     }
 
     #[test]

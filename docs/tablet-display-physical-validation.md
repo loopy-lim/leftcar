@@ -88,7 +88,7 @@
 3. 덮개를 닫는다. 내장 패널이 꺼져도 태블릿 화면이 계속 갱신되는지 확인한다.
 4. 덮개 닫힘 직후 `ioreg -r -k AppleClamshellState | grep ClamshellState` → `Yes`를 기록하고, `system_profiler SPDisplaysDataType`로 가상 디스플레이 생존을 확인한다.
 5. 외장 USB 키보드로 타이핑(예: 열려 있는 편집기·Spotlight 검색어)하고 태블릿 화면에 반영되는지 확인한다. USB 마우스 이동·클릭도 반영되는지 확인한다.
-6. 카드 상태 pill 표기를 기록한다(표기용 — 덮개 감지 파싱은 UI 표시 목적이며 동작 판정은 4–5단계의 실측으로 한다).
+6. 카드 상태 pill 표기를 기록한다. 세션 실행 중 카드는 5초마다 상태를 갱신하며, 스트리밍 중 덮개가 닫히면 ioreg 판독에서 `clamshell`(유일 화면 모드)로 표기가 유도된다(표기용 — 덮개 감지는 UI 표시 목적이며 동작 판정은 4–5단계의 실측으로 한다). ioreg를 못 읽으면 표기는 `streaming`에 머문다.
 7. **(B — 앱 종료 시 VD 정리 관찰)** 세션이 실행 중인 상태에서 외장 키보드로 Cmd+Q로 Host 앱을 종료한다. Drop 정리로 가상 디스플레이가 사라지는지, BetterDisplay가 이를 유지하는지 관찰하고 `system_profiler SPDisplaysDataType`으로 재확인한다. 앱 종료로 활성 화면이 0이 될 수 있으므로 관찰 직후 덮개를 다시 열어 복구한다.
 8. **(C — 반복 생성·제거 누적)** 앱을 다시 실행하고 "화면 확장 시작" → "중지"를 5회 반복한다. 매 중지 직후 `system_profiler SPDisplaysDataType`(또는 BetterDisplay UI)에서 남은 가상 디스플레이가 없는지 확인한다 — 중복 시리얼·잔존 디스플레이 누적 여부를 매 회 기록한다.
 
