@@ -116,9 +116,10 @@ AOAP 전송 경로와 가상 디스플레이 실험은 현재 컴파일·단위 
 절차:
 
 1. Host 설정 카드에서 가상 디스플레이 실험 토글을 켠다.
-2. 16:9 가상 디스플레이를 생성한다(`create -devicetype=virtualscreen -virtualscreenname=<이름> -aspectWidth=16 -aspectHeight=9`).
+2. 가상 디스플레이를 생성한다(앱 카드 기본: 1920x1200). CLI로 직접 할 때는 픽셀을 지정한다(`create -devicetype=virtualscreen -virtualscreenname=<이름> -aspectWidth=1920 -aspectHeight=1200 -virtualScreenHiDPI=off -multiplierStep=1 -limitMultiplierSize=on -multiplierMinWidth=1920 -multiplierMinHeight=1200 -multiplierMaxWidth=1920 -multiplierMaxHeight=1200`).
+   > 주의: `aspectWidth/aspectHeight`는 픽셀이다. 비율 숫자(예: 16x9)를 넣으면 HiDPI multiplier가 붙어 의도보다 수 배 큰 백킹 스토어가 만들어진다(2026-09-03 실기 확인).
 3. 생성된 디스플레이를 연결한다(`set -namelike=<이름> -connected=on`).
-4. macOS 시스템 설정 > 디스플레이에서 가상 디스플레이가 열거되는지 확인하고 명칭을 기록한다.
+4. macOS 시스템 설정 > 디스플레이에서 가상 디스플레이가 열거되는지 확인하고 명칭·해상도를 기록한다.
 5. Host 카탈로그(refresh)에 해당 디스플레이가 나타나는지 확인한다.
 6. Viewer에서 해당 디스플레이를 열어 캡처 스트리밍이 되는지 확인한다.
 7. 제거한다(`discard -namelike=<이름>`) 후 macOS 디스플레이 목록에서 사라지는지 확인한다.
@@ -128,7 +129,7 @@ AOAP 전송 경로와 가상 디스플레이 실험은 현재 컴파일·단위 
 
 합격 기준: 생성한 가상 디스플레이가 기존 list_displays/캡처 경로로 스트리밍되고, 제거가 카탈로그와 macOS 디스플레이 목록 양쪽에 반영된다.
 
-미결 항목: 정밀 해상도 지정(`resolutionList`) — `aspectWidth`/`aspectHeight` 종횡비 방식과 비교 검증. 결과에 따라 CLI 인자 구성이 조정될 수 있다.
+미결 항목: 없음 — 정밀 해상도 지정은 2026-09-03 실기 검증으로 해결됐다(픽셀 지정 + HiDPI off + multiplier 1x 고정, `ef76f5f` create_args 참조).
 
 ## 결과 기록 템플릿
 
@@ -141,9 +142,17 @@ AOAP 전송 경로와 가상 디스플레이 실험은 현재 컴파일·단위 
 | 검증 3 USB 자동 복귀 | Pass | 1.8s / 1.5s / 1.7s (3회) | 키프레임부터 재개 확인 |
 | 검증 4 60분 soak | — | (수행 후 기록) | |
 | 검증 5 인텐트 경로 | Pass | cold start 실행됨, onNewIntent 전달됨 | |
-| 검증 6 가상 디스플레이 | Pass | 생성/연결/캡처/제거 모두 성공 | macOS 디스플레이 명칭 기록 |
+| 검증 6 가상 디스플레이 | Partial | 생성/연결/제거 Pass (CLI 경유), 캡처·앱 UI 경로 미수행 | 아래 2026-09-03 기록 참조 |
 
 추가 기록: 폰 모델/OS 버전, 케이블 종류, APK SHA-256, Host 커밋 SHA.
+
+### 2026-09-03 실기 수행 기록
+
+- **환경**: Lenovo TB710FU (adb USB+무선 동시 접속), BetterDisplay 4.3.6 빌드 50119, macOS 26.6.2, Host 커밋 `2884e59`.
+- **검증 1 정정 발견**: AOAP SEND STRING(52)은 zero-terminated **UTF-8**이다. 기존 UTF-16LE 인코딩(`aoap.rs`)은 Android가 accessory identity를 매칭하지 못하게 했고, UTF-8로 정정해 핸드셰이크가 성공했다 (`2884e59`).
+- **검증 6 CLI 계약 정정**: `aspectWidth/aspectHeight`는 종횡비 숫자가 아니라 **픽셀**이다. `-aspectWidth=16 -aspectHeight=9`는 HiDPI 기본·자유 multiplier에서 6400x4000(UI 논리 3200x2000) 디스플레이를 만들었다. 올바른 계약은 픽셀 지정 + `-virtualScreenHiDPI=off` + `-multiplierStep=1 -limitMultiplierSize=on -multiplierMin/Max*=픽셀`이며, 이 argv로 `1920 x 1200 (WUXGA)`, `UI Looks like: 1920 x 1200 @ 60.00Hz` 생성·연결·`discard` 제거를 `system_profiler`로 확인했다 (`ef76f5f`).
+- **미수행**: 검증 6의 캡처·스트리밍 단계(Viewer에서 가상 디스플레이 열기), 앱 UI 경유 생성(자동화 셸이 GUI 세션과 통신 불가 — System Events -10827). 앱 카드에는 실험 토글 플래그를 WebKit localStorage에 주입해 둔 상태이므로 사용자가 모달을 열면 카드가 보인다.
+- **검증 4 soak**: 미수행.
 
 ## 실패 시 진단 가이드
 
