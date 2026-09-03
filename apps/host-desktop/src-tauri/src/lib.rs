@@ -15,6 +15,7 @@ pub mod pairing;
 pub mod windows_backend;
 pub mod virtual_display;
 pub mod provider;
+pub mod power_assertion;
 pub mod wire;
 
 use backend::SharedBackend;
