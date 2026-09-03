@@ -8,6 +8,7 @@
 
 use std::ffi::{c_char, CStr};
 
+pub mod cursor_protocol;
 pub mod input_protocol;
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(test, allow(dead_code))]
