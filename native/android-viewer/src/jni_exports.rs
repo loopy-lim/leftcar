@@ -4,14 +4,48 @@ use crate::jni::*;
 use crate::log_info;
 use crate::net_guard::host_is_valid;
 use crate::prepared_udp::split_ports;
+use crate::usb_bridge::UsbBridge;
+use std::ffi::{c_char, c_void, CStr};
+use std::sync::Arc;
+
+// The renderer session modules are Android-gated in renderer/mod.rs (they
+// drive MediaCodec/ANativeWindow through the decoder). Host test builds only
+// need the registry-based polling exports, so the four session entry points
+// collapse to documented stubs off-Android. No host test may call them.
+#[cfg(target_os = "android")]
 use crate::renderer::single_session::{
     spawn_live_stream_renderer, stop_live_stream_renderer, suppress_resize_recovery,
     suspend_live_stream_renderer,
 };
+#[cfg(target_os = "android")]
 use crate::renderer::split_session::{self, SplitRendererLaunch};
-use crate::usb_bridge::UsbBridge;
-use std::ffi::{c_char, c_void, CStr};
-use std::sync::Arc;
+
+#[cfg(not(target_os = "android"))]
+mod session_stubs {
+    use std::ffi::c_void;
+
+    pub(crate) fn suppress_resize_recovery(_instance_str: &str) {}
+    pub(crate) fn suspend_live_stream_renderer(_instance_str: &str) {}
+    pub(crate) fn stop_live_stream_renderer(_instance_str: &str, _send_bye: bool) {}
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_live_stream_renderer(
+        _instance: String,
+        _surface: *mut c_void,
+        _port: u16,
+        _host: String,
+        _width: u32,
+        _height: u32,
+        _fps: u32,
+        _bridge: Option<crate::jni::MediaBridge>,
+    ) {
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+use session_stubs::{
+    spawn_live_stream_renderer, stop_live_stream_renderer, suppress_resize_recovery,
+    suspend_live_stream_renderer,
+};
 
 mod session_io;
 
@@ -332,7 +366,10 @@ pub extern "C" fn leftcar_jni_rebind_port(
 /// Attach the two SurfaceViews backing an exact 4K60 vertical split stream.
 /// The core tracks the left surface as the logical Activity attachment; the
 /// split renderer owns both decoders and releases the right window itself.
+/// Android-only: the split session drives two hardware decoders, and host
+/// test builds never spawn it.
 #[no_mangle]
+#[cfg(target_os = "android")]
 pub extern "C" fn leftcar_jni_attach_split_port(
     state: StatePtr,
     instance_c: *const c_char,

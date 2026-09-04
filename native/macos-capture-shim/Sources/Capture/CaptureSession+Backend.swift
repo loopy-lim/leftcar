@@ -92,25 +92,11 @@ extension CaptureSession {
         // semaphore wait, leaving the main run loop free to receive replayd's
         // completion callback.
         DispatchQueue.main.async { [self] in
-            let config = SCStreamConfiguration()
-            config.width = Int(outWidth)
-            config.height = Int(outHeight)
-            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-            // Feed VideoToolbox the native bi-planar 4:2:0 surface so the
-            // capture path avoids a BGRA -> YUV conversion per frame.
-            config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            config.showsCursor = true
-            // Split encoding retains the source IOSurface until both tile
-            // submissions finish. Give that mode enough framework surfaces
-            // for its bounded app queue plus encoder in-flight slots; normal
-            // capture keeps the smaller low-memory cushion.
-            config.queueDepth = captureQueueDepth(
-                experiment: requestedEncoderExperiment
-            )
-            config.backgroundColor = CGColor.black
-            if #available(macOS 14.0, *) {
-                config.shouldBeOpaque = true
-            }
+            // The cursor plane is negotiated after creation, so the stream is
+            // born with the embedded cursor. The one shared builder keeps the
+            // creation-time and update-time configuration in lockstep —
+            // updateConfiguration replaces the whole configuration.
+            let config = streamConfiguration(showsCursor: captureEmbedsCursor())
 
             let handler = CaptureOutputHandler(session: self)
             let candidate = SCStream(
@@ -218,8 +204,11 @@ extension CaptureSession {
         // online documentation described the cursor as visible by default.
         // Resolve the obsoleted key dynamically alongside CGDisplayStream and
         // opt in explicitly so the Host cursor remains part of the video.
+        // The legacy stream's cursor property is fixed at creation; the
+        // cursor-plane opt-in refuses this backend rather than silently
+        // ignoring LCDOFF-driven visibility changes.
         let properties: NSDictionary = [
-            api.showCursorKey: kCFBooleanTrue!,
+            api.showCursorKey: captureEmbedsCursor() ? kCFBooleanTrue! : kCFBooleanFalse!,
             // CGDisplayStream interprets this as a maximum update rate. It
             // cannot manufacture frames when the display is idle, but an
             // explicit 60fps ceiling keeps the legacy path aligned with the

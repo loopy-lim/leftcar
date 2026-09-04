@@ -8,11 +8,12 @@
 
 use std::ffi::{c_char, CStr};
 
+pub mod cursor_protocol;
 pub mod input_protocol;
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(test, allow(dead_code))]
 pub mod jni;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod jni_exports;
 #[cfg(target_os = "android")]
 pub mod jni_wrappers;

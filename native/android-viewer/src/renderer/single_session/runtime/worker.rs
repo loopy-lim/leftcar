@@ -254,6 +254,10 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
+                if control_clone.cursor_requested.load(Ordering::SeqCst) {
+                    control_clone.cursor_active.store(0, Ordering::SeqCst);
+                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
+                }
             }
             continue;
         }
@@ -525,6 +529,10 @@ fn run(launch: SingleRendererLaunch) {
                 control_health = ControlHealthState::default();
                 *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
                 control_clone.input.lock().unwrap().reset_session();
+                // Drop any cursor state from a previous session so a
+                // rebind cannot keep showing stale coordinates forever.
+                control_clone.cursor_active.store(-1, Ordering::SeqCst);
+                control_clone.cursor_sequence.store(0, Ordering::SeqCst);
                 if let Err(error) = socket.send_to(packet, peer) {
                     log_info!("failed to echo UDP reachability challenge: {error}");
                 } else {
@@ -537,6 +545,10 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
+                if control_clone.cursor_requested.load(Ordering::SeqCst) {
+                    control_clone.cursor_active.store(0, Ordering::SeqCst);
+                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
+                }
                 continue;
             }
             // Keep accepting responses on the legacy media socket during a

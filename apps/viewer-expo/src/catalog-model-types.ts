@@ -25,6 +25,7 @@ export interface ActiveStream {
   encoderExperiment: EncoderExperimentId;
   udpStability?: UdpStabilitySelection;
   showFps?: boolean;
+  localCursor?: boolean;
   mediaTransport: ResolvedTransport;
   viewerIps: string[];
   startedAt: number;

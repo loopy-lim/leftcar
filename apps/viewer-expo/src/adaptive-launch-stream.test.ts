@@ -67,6 +67,7 @@ describe("adaptive stream receipts", () => {
       "auto",
       "Main",
       true,
+      false,
     );
   });
 
@@ -121,6 +122,7 @@ describe("adaptive stream receipts", () => {
       "auto",
       "Main",
       true,
+      false,
     );
   });
 });

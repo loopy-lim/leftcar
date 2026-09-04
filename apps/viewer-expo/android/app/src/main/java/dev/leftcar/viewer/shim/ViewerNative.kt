@@ -89,6 +89,14 @@ object ViewerNative {
     external fun releaseInput(instanceId: String): Int
     /** -1 waiting/unknown, 0 Host-locked, 1 remote input enabled. */
     external fun inputStatus(instanceId: String): Int
+    /**
+     * Newest LCD1 cursor sample packed into a Long: bits 0..15 x, 16..31 y,
+     * 32..61 sequence (low 30 bits), 63 visible. -1 while the Host has not
+     * opted in or no sample has arrived yet.
+     */
+    external fun cursorState(instanceId: String): Long
+    /** Record the cursor stream opt-in; applied at the next control token. */
+    external fun setCursorStream(instanceId: String, enabled: Boolean): Int
     /** Compact native renderer diagnostics; -1 when the stream is unavailable. */
     external fun streamStats(instanceId: String): Long
     /** LAN RTT + capture/encode/wire-to-decoder stage latency. */

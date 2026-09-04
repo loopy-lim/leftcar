@@ -34,20 +34,34 @@ describe("viewer preferences", () => {
     expect(parseViewerPreferences('{"profileId":"clarity","showFps":"yes"}')).toEqual({
       profileId: "clarity",
       showFps: true,
+      localCursor: false,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({
       profileId: "auto",
       showFps: false,
+      localCursor: false,
     });
   });
 
   it("round-trips preferences through the persistent store", async () => {
     const store = memoryStore();
-    const preferences = { profileId: "video" as const, showFps: false };
+    const preferences = { profileId: "video" as const, showFps: false, localCursor: true };
 
     await writeViewerPreferences(store, preferences);
 
     expect(await readViewerPreferences(store)).toEqual(preferences);
+  });
+
+  it("defaults localCursor to false and persists toggles", async () => {
+    expect(DEFAULT_VIEWER_PREFERENCES.localCursor).toBe(false);
+    expect(parseViewerPreferences(null).localCursor).toBe(false);
+    expect(parseViewerPreferences('{"showFps":true}').localCursor).toBe(false);
+    expect(
+      parseViewerPreferences('{"localCursor":true,"showFps":true}').localCursor,
+    ).toBe(true);
+    expect(
+      parseViewerPreferences('{"localCursor":"yes"}').localCursor,
+    ).toBe(false);
   });
 
   it("recommends a profile from each display's actual pixel size", () => {

@@ -251,3 +251,20 @@ feature/usb-display-extension 브랜치(커밋 `2aaa319`..`441e94f`, 14개 커�
 
 - **구현**: `docs/usb-physical-validation.md`가 AOAP 핸드셰이크, Wi-Fi failover, USB 자동 복귀, 60분 soak, 인텐트 경로, 가상 디스플레이 CLI의 6개 검증 절차와 합격 기준, 실패 시 진단 가이드, 결과 기록 템플릿을 확정했다.
 - **상태**: 절차 확정, 수행 대기. AOAP CONTROL 시퀀스 표기를 정정했다(START=53, 54 아님). 이 문서의 수행이 완료되기 전까지 AOAP 전송과 가상 디스플레이는 E3 실험 상태로 유지된다.
+
+## 커서 분리 (LCD1 위치 스트림) — 2026-09-03~04 구현 기록
+
+feat/cursor-separation 브랜치(커밋 `df24d7a`..`922953d`, 13개 커밋)의 구현 증거다. **모든 항목은 E3(구현·단위 테스트·컴파일) 수준이며 E6/E7의 증거가 아니다.**
+
+- **등급**: E3 — 구현·단위 테스트 완료, 실기 미검증.
+- **계약**: 뷰어 LCDON 옵트인 → 호스트 CGEvent Tap(listen-only) 관측 → 2×FPS coalescing 상태 스트림. 커서가 LCD1 위에 있고 변경될 때만 `LCD1` 패킷을 제어 경로로 보낸다.
+- **층별 구현**:
+  - Rust(뷰어): `native/android-viewer`에 LCD1 커서 위치 패킷 파서(토큰 인증, 최신값 수용)와 인증 수립 후 LCDON 옵트인 전송을 연결하고, 수신 atomics에 최신 샘플만 보관한다.
+  - JNI: 커서 상태 폴링과 옵트인 설정 export를 추가했다.
+  - Kotlin: `CursorOverlayView` 로컬 렌더 오버레이와 Choreographer 폴링을 추가했다.
+  - TypeScript: `viewer-preferences`에 원격 커서 로컬 표시 프리퍼런스와 카탈로그 설정 토글을 추가하고 `openStream localCursor` 파이프로 네이티브까지 전달한다.
+  - Swift(호스트): `CaptureSession+Cursor` LCD1 코디네이터(2×FPS coalescing, 변경 시만 전송), CGEvent Tap 관측, LCDON/LCDOFF 파싱, capture `showsCursor` 전환을 연결했다.
+- **안전장치**: 세션 종료·피드백 타임아웃·shim 해제 시 capture `showsCursor`를 원복해, 뷰어가 LCDOFF 없이 사라져도 비디오 커서를 되돌린다(커서 소실 방지).
+- **검증 (E3)**: `cargo test --workspace`와 `cargo clippy --workspace --tests -- -D warnings` 통과. `npx tsc --noEmit`와 vitest 15개 파일 122개 테스트 통과. React Doctor 85개 파일 스캔에서 finding 0(점수 숫자는 Score API 도달 실패로 미산출). `tools/build_apk.sh` assemble 통과, `cargo check -p android-viewer --target aarch64-linux-android` 교차 컴파일 통과.
+- **미해결 (와이어 간극)**: 뷰어 토글-off가 Rust `cursor_requested` 플래그만 해제하고 와이어 LCDOFF 프레임을 실제로 전송하지 않는다. 호스트 측 원복 경로는 닫혀 있어 커서 소실 위험은 없으나, 토글 off 직후 비디오 커서가 즉시 복귀하지 않을 수 있다.
+- **미검증**: Wi-Fi 실기 지연 체감, 태블릿 오버레이 렌더, TCP 폴백 동작, 위 LCDOFF 간극의 실기 체감 — 다음 실기 세션에서 확인한다.

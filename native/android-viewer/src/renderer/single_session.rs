@@ -19,7 +19,7 @@ use crate::net_guard::peer_allowed;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod decoder;

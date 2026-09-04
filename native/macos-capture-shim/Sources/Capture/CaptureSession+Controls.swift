@@ -168,6 +168,20 @@ extension CaptureSession {
             inputReadSource = source
             source.resume()
         }
+        // Defensive token rebinding, not a live reconnect path: sessions own
+        // one socket for their whole lifetime and startInputReceiver runs
+        // once. The LCD1 coordinator stays silent until a token is installed
+        // and embeds it in every packet, so if a future reconnect ever
+        // replaces the session token, a live cursor stream rebinds here
+        // instead of streaming packets the viewer would reject.
+        cursorLock.lock()
+        let hadCoordinator = cursorCoordinator != nil
+        cursorLock.unlock()
+        if hadCoordinator {
+            cursorLock.lock()
+            cursorCoordinator?.setToken(viewerControlToken)
+            cursorLock.unlock()
+        }
     }
 
      func stopInputReceiver() {

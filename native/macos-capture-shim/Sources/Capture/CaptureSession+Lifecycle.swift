@@ -17,7 +17,13 @@ extension CaptureSession {
         recoveryDropRetryState.clear()
         stateLock.unlock()
         stopPerformanceLogging()
+        // Kill the control receiver first: cancelling the read source (and
+        // waiting out any in-flight drain) guarantees no concurrent LCDON can
+        // reinstall tap or timer behind the teardown. Then restore the
+        // embedded cursor — every stop path funnels through here, so a viewer
+        // that vanished without LCDOFF still gets its cursor back.
         stopInputReceiver()
+        teardownCursorStream()
         inputQueue.async { [weak self] in self?.releaseInjectedInput() }
         networkLock.lock()
         pendingConfig = nil

@@ -221,6 +221,7 @@ export function useCatalogModel() {
           contentMode: active.contentMode,
           udpStability: active.udpStability,
           showFps: active.showFps ?? preferences.showFps,
+          localCursor: active.localCursor ?? preferences.localCursor,
         },
       });
       return {
@@ -232,7 +233,7 @@ export function useCatalogModel() {
         qualityState: active.qualityState,
       };
     },
-    [catalogQuery.data, host, preferences.showFps, refetchCatalog],
+    [catalogQuery.data, host, preferences.showFps, preferences.localCursor, refetchCatalog],
   );
 
   const reconfigureActiveStream = useCallback(
@@ -275,6 +276,10 @@ export function useCatalogModel() {
 
   const handleToggleFps = useCallback((showFps: boolean) => {
     setPreferences((current) => ({ ...current, showFps }));
+  }, []);
+
+  const handleToggleCursor = useCallback((localCursor: boolean) => {
+    setPreferences((current) => ({ ...current, localCursor }));
   }, []);
 
   const handleSelectEncoderExperiment = useCallback(
@@ -344,6 +349,7 @@ export function useCatalogModel() {
             contentMode: displayProfile.contentMode,
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
+            localCursor: preferences.localCursor,
           },
         });
         const acceptedTarget = {
@@ -368,6 +374,7 @@ export function useCatalogModel() {
           encoderExperiment: started.encoderExperiment,
           udpStability: started.udpStability,
           showFps: preferences.showFps,
+          localCursor: preferences.localCursor,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
           startedAt: Date.now(),
@@ -388,6 +395,7 @@ export function useCatalogModel() {
       mediaHost,
       preferences.profileId,
       preferences.showFps,
+      preferences.localCursor,
       selectedProfile,
     ],
   );
@@ -433,7 +441,9 @@ export function useCatalogModel() {
     udpStabilityOptions,
     visibleError,
     handleToggleFps,
+    handleToggleCursor,
     profileId: preferences.profileId,
     showFps: preferences.showFps,
+    localCursor: preferences.localCursor,
   };
 }

@@ -51,7 +51,7 @@ pub fn android_log_info(msg: String) {
 }
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 pub(crate) struct RendererControl {
@@ -99,6 +99,16 @@ pub(crate) struct RendererControl {
     // 2 = operator forced stop, and 3 = ordinary stop. Local watchdogs use
     // 4 = host unreachable and 5 = render stalled. Negative means no notice.
     pub(crate) termination_reason: AtomicI8,
+    // Cursor plane (LCD1). -1 = host has not opted in, 0 = opt-in without a
+    // sample yet, 1 = samples flowing. x/y/sequence hold the newest sample.
+    pub(crate) cursor_active: AtomicI8,
+    pub(crate) cursor_x: AtomicU16,
+    pub(crate) cursor_y: AtomicU16,
+    pub(crate) cursor_visible: AtomicBool,
+    pub(crate) cursor_sequence: AtomicU32,
+    // Viewer-side opt-in flag: when set, LCDON is sent once the authenticated
+    // control token is established (and re-sent after a same-window rebind).
+    pub(crate) cursor_requested: AtomicBool,
 }
 
 impl RendererControl {
@@ -135,6 +145,12 @@ impl RendererControl {
             send_bye: AtomicBool::new(true),
             finished: AtomicBool::new(false),
             termination_reason: AtomicI8::new(-1),
+            cursor_active: AtomicI8::new(-1),
+            cursor_x: AtomicU16::new(0),
+            cursor_y: AtomicU16::new(0),
+            cursor_visible: AtomicBool::new(false),
+            cursor_sequence: AtomicU32::new(0),
+            cursor_requested: AtomicBool::new(false),
         }
     }
 

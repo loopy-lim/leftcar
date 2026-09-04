@@ -246,6 +246,7 @@ describe("startPreparedStream", () => {
       "splitVertical",
       undefined,
       true,
+      false,
     );
   });
 
@@ -299,6 +300,7 @@ describe("startPreparedStream", () => {
       "adaptiveQp",
       "LG UltraFine (1)",
       true,
+      false,
     );
   });
 
@@ -322,6 +324,31 @@ describe("startPreparedStream", () => {
       "adaptiveQp",
       undefined,
       false,
+      false,
+    );
+  });
+
+  it("forwards the local cursor opt-in and defaults it to false for the native arg count", async () => {
+    const { control, launcher } = harness();
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args: { ...args, localCursor: true },
+    });
+
+    expect(launcher.openStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      3840,
+      2160,
+      60,
+      "adaptiveQp",
+      undefined,
+      true,
+      true,
     );
   });
 

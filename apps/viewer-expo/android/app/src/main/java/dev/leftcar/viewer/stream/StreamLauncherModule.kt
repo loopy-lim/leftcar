@@ -196,6 +196,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         encoderExperiment: String,
         displayName: String?,
         showFps: Boolean?,
+        localCursor: Boolean?,
         promise: Promise,
     ) {
         try {
@@ -231,6 +232,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("splitDecoderName", decoderName)
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: true)
+                putExtra("localCursor", localCursor ?: false)
                 // A recovery reuses the existing document task and port. The
                 // Activity keeps its Surface and swaps only the native
                 // renderer when this intent is delivered via onNewIntent.

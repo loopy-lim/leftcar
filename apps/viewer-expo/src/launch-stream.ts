@@ -41,6 +41,7 @@ export interface StreamLauncher {
     encoderExperiment: EncoderExperimentId,
     displayName?: string,
     showFps?: boolean,
+    localCursor?: boolean,
   ): Promise<string>;
   cancelPreparedStream(
     port: number,
@@ -59,6 +60,7 @@ export interface StartStreamArgs {
   encoderExperiment: EncoderExperimentId;
   displayName?: string;
   showFps?: boolean;
+  localCursor?: boolean;
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
@@ -260,6 +262,8 @@ export async function startPreparedStream({
       encoderExperiment,
       args.displayName,
       args.showFps ?? true,
+      // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
+      args.localCursor ?? false,
     );
     return {
       session,
@@ -334,6 +338,7 @@ export async function reconfigurePreparedStream({
       encoderExperiment,
       active.sourceName,
       active.showFps ?? true,
+      active.localCursor ?? false,
     );
     return {
       session: accepted.session,

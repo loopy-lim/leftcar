@@ -236,6 +236,46 @@ pub extern "C" fn leftcar_jni_input_key(
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Pack the newest LCD1 cursor sample for frame-rate polling.
+/// bits 0..15 x, 16..31 y, 32..61 sequence (low 30 bits), 63 visible.
+/// Returns -1 while the host has not opted in or no sample arrived yet.
+/// Coordinates within the screen bounds cannot produce the all-ones payload
+/// (x = y = 0xffff with the top-of-range sequence), so real samples are
+/// distinguishable from the sentinel.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_cursor_state(instance_c: *const c_char) -> i64 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return -1,
+        };
+        if control.cursor_active.load(Ordering::SeqCst) <= 0 {
+            return -1;
+        }
+        let x = i64::from(control.cursor_x.load(Ordering::SeqCst));
+        let y = i64::from(control.cursor_y.load(Ordering::SeqCst));
+        let sequence = u64::from(control.cursor_sequence.load(Ordering::SeqCst)) & 0x3fff_ffff;
+        let visible = i64::from(control.cursor_visible.load(Ordering::SeqCst));
+        x | (y << 16) | ((sequence as i64) << 32) | (visible << 63)
+    });
+    guard.unwrap_or(-1)
+}
+
+/// Record the viewer-side cursor stream opt-in. Applied at the next control
+/// token establishment (attach or same-window rebind).
+#[no_mangle]
+pub extern "C" fn leftcar_jni_set_cursor_stream(instance_c: *const c_char, enabled: bool) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        control.cursor_requested.store(enabled, Ordering::SeqCst);
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i32 {
     let guard = std::panic::catch_unwind(|| {
@@ -247,4 +287,93 @@ pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i3
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod cursor_export_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// Each test installs its own registry key: `install_renderer` replaces
+    /// the entry for a key, and cargo runs tests in parallel threads.
+    fn installed_control(test_key: &str) -> (CString, Arc<RendererControl>) {
+        let control = Arc::new(RendererControl::new_split(51_400, 60));
+        install_renderer(test_key, Arc::clone(&control));
+        (CString::new(test_key).unwrap(), control)
+    }
+
+    fn drop_control(test_key: &str, control: &Arc<RendererControl>) {
+        remove_renderer_if_current(test_key, control);
+        clear_cached_termination(test_key);
+    }
+
+    #[test]
+    fn cursor_state_holds_sentinel_until_opt_in() {
+        const KEY: &str = "cursor-jni-export-tests/sentinel-until-opt-in";
+        let (instance, control) = installed_control(KEY);
+        assert_eq!(leftcar_jni_cursor_state(instance.as_ptr()), -1);
+        control.cursor_active.store(0, Ordering::SeqCst);
+        assert_eq!(leftcar_jni_cursor_state(instance.as_ptr()), -1);
+        drop_control(KEY, &control);
+    }
+
+    #[test]
+    fn cursor_state_packs_sample_distinguishable_from_sentinel() {
+        const KEY: &str = "cursor-jni-export-tests/packing";
+        let (instance, control) = installed_control(KEY);
+        control.cursor_active.store(1, Ordering::SeqCst);
+        control.cursor_x.store(0x1234, Ordering::SeqCst);
+        control.cursor_y.store(0x5678, Ordering::SeqCst);
+        control.cursor_sequence.store(0xCDEF_0123, Ordering::SeqCst);
+        control.cursor_visible.store(true, Ordering::SeqCst);
+        let packed = leftcar_jni_cursor_state(instance.as_ptr());
+        assert_eq!(packed & 0xffff, 0x1234);
+        assert_eq!((packed >> 16) & 0xffff, 0x5678);
+        assert_eq!((packed >> 32) & 0x3fff_ffff, 0x0def_0123);
+        assert!(packed < 0, "visible flag must occupy the sign bit");
+        assert_ne!(packed, -1, "a real sample must not equal the sentinel");
+        drop_control(KEY, &control);
+    }
+
+    #[test]
+    fn cursor_state_stays_sentinel_when_flow_stops_without_opt_out() {
+        const KEY: &str = "cursor-jni-export-tests/sentinel-after-stop";
+        let (instance, control) = installed_control(KEY);
+        control.cursor_active.store(1, Ordering::SeqCst);
+        control.cursor_visible.store(true, Ordering::SeqCst);
+        assert_ne!(leftcar_jni_cursor_state(instance.as_ptr()), -1);
+        // A host opt-out or session teardown drops the stream back to the
+        // waiting sentinel even though stale sample fields remain.
+        control.cursor_active.store(-1, Ordering::SeqCst);
+        assert_eq!(leftcar_jni_cursor_state(instance.as_ptr()), -1);
+        drop_control(KEY, &control);
+    }
+
+    #[test]
+    fn set_cursor_stream_records_opt_in_on_active_renderer() {
+        const KEY: &str = "cursor-jni-export-tests/opt-in-toggle";
+        let (instance, control) = installed_control(KEY);
+        assert!(!control.cursor_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            leftcar_jni_set_cursor_stream(instance.as_ptr(), true),
+            LEFTCAR_OK
+        );
+        assert!(control.cursor_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            leftcar_jni_set_cursor_stream(instance.as_ptr(), false),
+            LEFTCAR_OK
+        );
+        assert!(!control.cursor_requested.load(Ordering::SeqCst));
+        drop_control(KEY, &control);
+    }
+
+    #[test]
+    fn cursor_exports_fail_closed_without_a_renderer() {
+        let missing = CString::new("cursor-jni-export-tests/never-installed").unwrap();
+        assert_eq!(leftcar_jni_cursor_state(missing.as_ptr()), -1);
+        assert_eq!(
+            leftcar_jni_set_cursor_stream(missing.as_ptr(), true),
+            LEFTCAR_ERR_STATE
+        );
+    }
 }

@@ -79,6 +79,12 @@ pub(crate) fn spawn_live_stream_renderer(
         send_bye: AtomicBool::new(true),
         finished: AtomicBool::new(false),
         termination_reason: AtomicI8::new(-1),
+        cursor_active: AtomicI8::new(-1),
+        cursor_x: AtomicU16::new(0),
+        cursor_y: AtomicU16::new(0),
+        cursor_visible: AtomicBool::new(false),
+        cursor_sequence: AtomicU32::new(0),
+        cursor_requested: AtomicBool::new(false),
     });
     let control_clone = Arc::clone(&control);
 

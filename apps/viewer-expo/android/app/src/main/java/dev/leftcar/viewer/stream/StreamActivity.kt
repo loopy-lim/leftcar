@@ -50,6 +50,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
     }
     private var hud: StreamHudController? = null
+    private var cursorOverlay: CursorOverlayView? = null
+    private var localCursorEnabled: Boolean = false
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
@@ -174,6 +176,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             terminationHandled = false
             recoveryFallbackEmitted = false
             recoveryRetryPolicy.reset()
+            // A rebind builds a fresh renderer session, so the host opt-in
+            // (LCDON) must ride again with the new control channel.
+            enableCursorOverlay()
         }
         hud?.onRebindFinished(result == 0)
         return result
@@ -227,6 +232,29 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
                     or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 )
         }
+    }
+
+    /**
+     * 화면 오른쪽 위 입력 배지처럼 커서도 스트림 창 밖 팝업 윈도우로 띄운다 —
+     * 스트림 SurfaceView가 setZOrderOnTop으로 합성돼 창 안 어떤 뷰도 비디오 위를
+     * 그릴 수 없다. attach·재바인드마다 LCDON을 보내 새 호스트 세션에 옵트인을
+     * 다시 알리고, 세션 종료는 BYE가 맡으므로 LCDOFF는 보내지 않는다.
+     */
+    private fun enableCursorOverlay() {
+        if (!localCursorEnabled) return
+        ViewerNative.setCursorStream(instanceId, true)
+        val overlay = cursorOverlay ?: CursorOverlayView(this, instanceId).also { view ->
+            cursorOverlay = view
+        }
+        overlay.setVideoSize(sourceWidth, sourceHeight)
+        overlay.start()
+    }
+
+    private fun disableCursorOverlay() {
+        if (cursorOverlay == null) return
+        ViewerNative.setCursorStream(instanceId, false)
+        cursorOverlay?.stop()
+        cursorOverlay = null
     }
 
     private fun lifecycleEvent(code: Int) {
@@ -395,6 +423,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
         setContentView(surfaces.root)
+        localCursorEnabled = intent?.getBooleanExtra("localCursor", false) ?: false
         val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: "디스플레이"
         title = displayName
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
@@ -423,6 +452,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         val nextPort = newIntent.getIntExtra("port", port)
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
         val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
+        val nextLocalCursor = newIntent.getBooleanExtra("localCursor", localCursorEnabled)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
@@ -430,7 +460,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         val streamConfigurationChanged =
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight ||
-                nextSplitVertical != splitVertical || nextShowFps != showFps
+                nextSplitVertical != splitVertical || nextShowFps != showFps ||
+                nextLocalCursor != localCursorEnabled
 
         setIntent(newIntent)
         if (streamConfigurationChanged || reconnectRequested) {
@@ -438,10 +469,12 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             port = nextPort
             fps = nextFps
             showFps = nextShowFps
+            localCursorEnabled = nextLocalCursor
             sourceWidth = nextWidth
             sourceHeight = nextHeight
             splitVertical = nextSplitVertical
             splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
+            if (!localCursorEnabled) disableCursorOverlay()
             if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {
                 val result = rebindOnSameSurface()
                 if (result != 0) {
@@ -552,6 +585,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             hud?.resetTerminationPolling()
             hud?.armTerminationPolling()
             hud?.clearRebindIndicator()
+            enableCursorOverlay()
         }
         android.util.Log.i(
             "LeftcarStream",
@@ -650,6 +684,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
+        cursorOverlay?.stop()
+        cursorOverlay = null
         hud?.stop()
         hud = null
         releaseNetworkLocks()
