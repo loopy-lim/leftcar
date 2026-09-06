@@ -59,6 +59,66 @@ fn dylib_candidates() -> Vec<PathBuf> {
     v
 }
 
+#[cfg(target_os = "macos")]
+fn managed_mode_library() -> Result<&'static Library, String> {
+    static LIBRARY: std::sync::OnceLock<Result<Library, String>> = std::sync::OnceLock::new();
+    LIBRARY
+        .get_or_init(|| {
+            let mut last_error = "capture dylib not found".to_string();
+            for path in dylib_candidates() {
+                if !path.exists() {
+                    continue;
+                }
+                match unsafe { Library::new(&path) } {
+                    Ok(library) => return Ok(library),
+                    Err(error) => last_error = format!("dlopen {}: {error}", path.display()),
+                }
+            }
+            Err(last_error)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn register_managed_display_mode(
+    display_id: u32,
+    generation: u64,
+    logical_width: u32,
+    logical_height: u32,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Result<(), String> {
+    unsafe {
+        let function: Symbol<unsafe extern "C" fn(u32, u64, u32, u32, u32, u32) -> i32> =
+            managed_mode_library()?
+                .get(b"leftcar_capture_register_managed_display_mode_v1")
+                .map_err(|error| error.to_string())?;
+        let result = function(
+            display_id,
+            generation,
+            logical_width,
+            logical_height,
+            pixel_width,
+            pixel_height,
+        );
+        (result == 0)
+            .then_some(())
+            .ok_or_else(|| format!("managed display mode registration rc={result}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_managed_display_mode(display_id: u32, generation: u64) -> Result<(), String> {
+    unsafe {
+        let function: Symbol<unsafe extern "C" fn(u32, u64)> = managed_mode_library()?
+            .get(b"leftcar_capture_clear_managed_display_mode_v1")
+            .map_err(|error| error.to_string())?;
+        function(display_id, generation);
+    }
+    Ok(())
+}
+
 impl FfiBackend {
     pub fn new() -> Result<Self, String> {
         let mut last_err = "no dylib candidates".to_string();
@@ -323,6 +383,11 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         first_encode_ms: v["firstEncodeMs"].as_u64().unwrap_or(0),
         first_send_ms: v["firstSendMs"].as_u64().unwrap_or(0),
         current_bitrate: bounded_u32(&v, "currentBitrate"),
+        bitrate_floor_collapse_count: v["bitrateFloorCollapseCount"].as_i64().unwrap_or(0),
+        bitrate_floor_collapse_last_reason: v["bitrateFloorCollapseLastReason"]
+            .as_str()
+            .unwrap_or("none")
+            .into(),
         encoder_mode: v["encoderMode"].as_str().unwrap_or("unknown").into(),
         encoder_id: v["encoderID"].as_str().unwrap_or("unknown").into(),
         encoder_hardware_accelerated: v["encoderHardwareAccelerated"].as_bool(),
@@ -878,7 +943,9 @@ mod tests {
   "encoderAppliedProperties":["HighSpeed","Quality"],
   "encoderUnsupportedProperties":["SuggestedLookAheadFrameCount"],
   "encoderRejectedProperties":["Quality=-12900"],
-  "encoderFallbackReason":null
+  "encoderFallbackReason":null,
+  "bitrateFloorCollapseCount":7,
+  "bitrateFloorCollapseLastReason":"resolution_fallback_floor_reached"
 }"#,
         )
         .unwrap();
@@ -886,6 +953,11 @@ mod tests {
         assert_eq!(stats.encoder_hardware_accelerated, Some(true));
         assert_eq!(stats.encoder_applied_properties, ["HighSpeed", "Quality"]);
         assert_eq!(stats.encoder_rejected_properties, ["Quality=-12900"]);
+        assert_eq!(stats.bitrate_floor_collapse_count, 7);
+        assert_eq!(
+            stats.bitrate_floor_collapse_last_reason,
+            "resolution_fallback_floor_reached"
+        );
     }
 
     #[test]

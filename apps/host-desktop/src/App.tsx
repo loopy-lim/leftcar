@@ -33,6 +33,7 @@ import { trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
 import PairingPanel from "./PairingPanel";
+import DisplayManagerCard from "./DisplayManagerCard";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -564,6 +565,7 @@ function TerminationBanner({
 interface VirtualDisplayExperimentSectionProps {
   platform: HostSnapshotView["platform"];
   enabled: boolean;
+  language: SupportedLanguage;
   t: TranslationSchema;
   onToggle: () => void;
 }
@@ -575,17 +577,29 @@ interface VirtualDisplayExperimentSectionProps {
 function VirtualDisplayExperimentSection({
   platform,
   enabled,
+  language,
   t,
   onToggle,
 }: VirtualDisplayExperimentSectionProps) {
+  const label = language === "ko" ? "가상 화면" : "Virtual screen";
+  const purpose = language === "ko"
+    ? "태블릿에서 쓸 추가 작업 화면"
+    : "An extra workspace for your tablet";
+  const advanced = language === "ko" ? "고급 세션 제어" : "Advanced session controls";
   return (
-    <>
-      <section className="troubleshoot-card" aria-label={t.host.virtualDisplayExperiment}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-            <Monitor size={16} />
-            <span>{t.host.virtualDisplayExperiment}</span>
-          </div>
+    <section className="troubleshoot-card" aria-label={label}>
+      <details>
+        <summary className="virtual-screen-summary">
+          <span className="virtual-screen-heading"><Monitor size={16} />{label}</span>
+          <span className="virtual-screen-purpose">{purpose}</span>
+          <ChevronDown className="virtual-screen-chevron" size={15} aria-hidden="true" />
+        </summary>
+        <div className="virtual-screen-content">
+          <div className="virtual-screen-opt-in">
+            <div>
+              <strong>{t.host.virtualDisplayExperiment}</strong>
+              <p>{t.host.virtualDisplayToggleDesc}</p>
+            </div>
           <button
             className={controlToggleVariants({ active: enabled })}
             onClick={onToggle}
@@ -595,13 +609,17 @@ function VirtualDisplayExperimentSection({
           >
             {enabled ? t.host.virtualDisplayToggleOn : t.host.virtualDisplayToggleOff}
           </button>
+          </div>
+          {enabled && <DisplayManagerCard enabled={platform === "macos"} language={language} />}
+          {enabled && (
+            <details className="virtual-screen-advanced">
+              <summary>{advanced}</summary>
+              <VirtualDisplayCard platform={platform} t={t} />
+            </details>
+          )}
         </div>
-        <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-          {t.host.virtualDisplayToggleDesc}
-        </p>
-      </section>
-      {enabled && <VirtualDisplayCard platform={platform} t={t} />}
-    </>
+      </details>
+    </section>
   );
 }
 
@@ -666,8 +684,7 @@ const IDLE_TABLET_SESSION: TabletSessionView = {
   onBattery: false,
 };
 
-function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
-  const [name, setName] = useState("Leftcar Virtual");
+function useVirtualDisplayCard(platform: HostSnapshotView["platform"], t: TranslationSchema) {
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -720,7 +737,7 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
     try {
       await invoke<string>("tablet_display_start", {
         providerKind: "betterdisplay",
-        name: name.trim(),
+        name: "Leftcar Tablet",
         width: 1920,
         height: 1200,
       });
@@ -757,37 +774,14 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
     }
   };
 
+  return { busy, created, failure, sessionState, clamshell, onBattery, startSession, stopSession };
+}
+
+function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
+  const { busy, created, failure, sessionState, clamshell, onBattery, startSession, stopSession } = useVirtualDisplayCard(platform, t);
   const pillActive = sessionState === "Streaming" || sessionState === "Clamshell";
-
-  const runDisplayCommand = async (
-    command: "create_virtual_display" | "remove_virtual_display",
-    onDone: (output: string) => void,
-  ) => {
-    setBusy(true);
-    try {
-      const output = command === "create_virtual_display"
-        ? await invoke<string>("create_virtual_display", {
-            name: name.trim(),
-            width: 1920,
-            height: 1200,
-          })
-        : await invoke<string>("remove_virtual_display", { name: name.trim() });
-      onDone(output);
-      setFailure(null);
-    } catch (cause) {
-      setCreated(null);
-      setFailure(
-        interpolate(t.host.virtualDisplayFailed, {
-          error: String(cause instanceof Error ? cause.message : cause),
-        }),
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
-    <section className="troubleshoot-card" aria-label={t.host.tabletDisplayTitle}>
+    <div className="virtual-session-controls" aria-label={t.host.tabletDisplayTitle}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Monitor size={16} />
@@ -801,26 +795,7 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
       <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
         {t.host.virtualDisplayHint}
       </p>
-      {clamshell === true && (
-        <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-          {t.host.tabletDisplayClamshellHint}
-        </p>
-      )}
-      {onBattery && (sessionState === "Streaming" || sessionState === "Clamshell") && (
-        <p
-          style={{
-            fontSize: 11,
-            marginTop: 4,
-            display: "flex",
-            alignItems: "center",
-            gap: 4,
-            color: "var(--text-secondary)",
-          }}
-          role="status"
-        >
-          <AlertTriangle size={13} /> {t.host.tabletDisplayBattery}
-        </p>
-      )}
+      <VirtualDisplayNotices clamshell={clamshell} onBattery={onBattery} sessionState={sessionState} created={created} failure={failure} t={t} />
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
         <button
           className={buttonVariants({ variant: "primary", size: "sm" })}
@@ -837,55 +812,52 @@ function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
           {t.host.tabletDisplayStop}
         </button>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          disabled={busy}
-          placeholder="Leftcar Virtual"
-          aria-label={t.host.virtualDisplayExperiment}
-          style={{
-            flex: "1 1 160px",
-            minWidth: 140,
-            padding: "6px 10px",
-            fontSize: 12,
-            color: "var(--text-primary)",
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border-card)",
-            borderRadius: 8,
-            outline: "none",
-          }}
-        />
-        <button
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-          disabled={busy || platform !== "macos"}
-          onClick={() => void runDisplayCommand("create_virtual_display", (output) => {
-            setCreated(output || t.host.virtualDisplayCreated);
-          })}
-        >
-          {busy ? t.host.statusChecking : t.host.virtualDisplayCreate}
-        </button>
-        <button
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-          disabled={busy || platform !== "macos"}
-          onClick={() => void runDisplayCommand("remove_virtual_display", (output) => {
-            setCreated(output || t.host.virtualDisplayRemoved);
-          })}
-        >
-          {busy ? t.host.statusChecking : t.host.virtualDisplayRemove}
-        </button>
-      </div>
+    </div>
+  );
+}
+
+interface VirtualDisplayNoticesProps {
+  clamshell: boolean | null;
+  onBattery: boolean;
+  sessionState: TabletSessionUiState;
+  created: string | null;
+  failure: string | null;
+  t: TranslationSchema;
+}
+
+function VirtualDisplayNotices({
+  clamshell,
+  onBattery,
+  sessionState,
+  created,
+  failure,
+  t,
+}: VirtualDisplayNoticesProps) {
+  const live = sessionState === "Streaming" || sessionState === "Clamshell";
+  return (
+    <>
+      {clamshell === true && (
+        <p className="virtual-session-note">{t.host.tabletDisplayClamshellHint}</p>
+      )}
+      {onBattery && live && (
+        <p className="virtual-session-note virtual-session-note-icon" role="status">
+          <AlertTriangle size={13} />
+          {t.host.tabletDisplayBattery}
+        </p>
+      )}
       {created && (
-        <p className="font-emerald" style={{ fontSize: 11, marginTop: 8, display: "flex", alignItems: "center", gap: 4 }}>
-          <Check size={13} strokeWidth={2.5} /> {created}
+        <p className="font-emerald virtual-session-result">
+          <Check size={13} strokeWidth={2.5} />
+          {created}
         </p>
       )}
       {failure && (
-        <p className="font-rose" style={{ fontSize: 11, marginTop: 8, display: "flex", alignItems: "center", gap: 4 }}>
-          <AlertTriangle size={13} /> {failure}
+        <p className="font-rose virtual-session-result">
+          <AlertTriangle size={13} />
+          {failure}
         </p>
       )}
-    </section>
+    </>
   );
 }
 
@@ -1332,6 +1304,7 @@ function Dashboard() {
         <VirtualDisplayExperimentSection
           platform={platform}
           enabled={virtualDisplayExperiment}
+          language={language}
           t={t}
           onToggle={toggleVirtualDisplayExperiment}
         />
@@ -1399,14 +1372,9 @@ function SessionCard({
   qualityBusy,
   onForceStop,
 }: SessionCardProps) {
-  const bitrateMbps = session.kbps > 0 ? (session.kbps / 1000).toFixed(1) : "0.0";
+  const bitrateMbps = Math.max(0, session.kbps / 1000).toFixed(1);
   const encodeOutputFps = session.encodeOutputFps ?? session.fps;
-  const transportLabel =
-    session.mediaTransport === "usb"
-      ? t.host.cableUsb
-      : session.mediaTransport === "udp"
-        ? t.host.wifiWireless
-        : session.mediaTransport || t.host.unknownTransport;
+  const transportLabel = sessionTransportLabel(session, t);
   const qualitySupported = session.qualityHint != null;
   const qualityPercent = Math.round((session.qualityOverride ?? session.qualityHint ?? 0.5) * 100);
 
@@ -1435,11 +1403,7 @@ function SessionCard({
             onClick={() => void onToggleInput(session)}
             title={session.inputEnabled ? t.host.remoteInputAllowed : t.host.remoteInputOff}
           >
-            {inputBusy
-              ? t.host.remoteInputProcessing
-              : session.inputEnabled
-                ? t.host.remoteInputAllowed
-                : t.host.remoteInputOff}
+            {remoteInputLabel(inputBusy, session.inputEnabled, t)}
           </button>
           <button
             className={buttonVariants({ variant: "stop" })}
@@ -1475,18 +1439,14 @@ function SessionCard({
         <div className="metric-card">
           <span className="metric-card-label">{t.host.connectionStatus}</span>
           <span className="metric-card-value font-blue">
-            {session.state === "running" ? t.host.statusRunning : t.host.statusChecking}
+            {sessionStateLabel(session.state, t)}
           </span>
         </div>
 
         <div className="metric-card">
           <span className="metric-card-label">{t.host.transferStability}</span>
           <span className="metric-card-value">
-            {session.dropped ? (
-              <span className="font-rose">{interpolate(t.host.droppedFrames, { count: session.dropped })}</span>
-            ) : (
-              <span className="font-emerald">{t.host.stabilityStable}</span>
-            )}
+            <DroppedFrames dropped={session.dropped} t={t} />
           </span>
         </div>
       </div>
@@ -1508,9 +1468,27 @@ function SessionCard({
           <span>{t.host.autoCleanupPolicy}</span>
         </div>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
-          {session.state === "running" ? t.host.liveBadge : t.host.statusChecking}
+          {sessionStateLabel(session.state, t, true)}
         </span>
       </div>
     </div>
   );
+}
+
+function sessionTransportLabel(session: SessionRow, t: TranslationSchema) {
+  const labels: Record<string, string> = { usb: t.host.cableUsb, udp: t.host.wifiWireless };
+  const transport = session.mediaTransport;
+  return transport ? labels[transport] ?? transport : t.host.unknownTransport;
+}
+function remoteInputLabel(busy: boolean, enabled: boolean, t: TranslationSchema) {
+  if (busy) return t.host.remoteInputProcessing;
+  return enabled ? t.host.remoteInputAllowed : t.host.remoteInputOff;
+}
+function sessionStateLabel(state: string, t: TranslationSchema, badge = false) {
+  if (state === "running") return badge ? t.host.liveBadge : t.host.statusRunning;
+  return t.host.statusChecking;
+}
+function DroppedFrames({ dropped = 0, t }: { dropped?: number; t: TranslationSchema }) {
+  if (dropped > 0) return <span className="font-rose">{interpolate(t.host.droppedFrames, { count: dropped })}</span>;
+  return <span className="font-emerald">{t.host.stabilityStable}</span>;
 }

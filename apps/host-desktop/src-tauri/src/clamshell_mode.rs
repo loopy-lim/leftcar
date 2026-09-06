@@ -202,6 +202,7 @@ mod tests {
             name: "Leftcar Virtual".into(),
             width: 1920,
             height: 1200,
+            scale: 1,
         }
     }
 

@@ -8,17 +8,49 @@
 /// What callers ask a provider to materialize.
 pub struct DisplaySpec {
     pub name: String,
-    /// Pixel dimensions, not ratios (see `virtual_display::validate_dimensions`).
+    /// Logical dimensions requested by the tablet. `scale` determines the
+    /// backing pixel dimensions sent to the provider.
     pub width: u32,
     pub height: u32,
+    pub scale: u8,
+}
+
+impl DisplaySpec {
+    pub fn backing_dimensions(&self) -> Result<(u32, u32), ProviderError> {
+        if !matches!(self.scale, 1 | 2) {
+            return Err(ProviderError::EngineFailed(
+                "HiDPI 배율은 1 또는 2여야 합니다.".into(),
+            ));
+        }
+        let width = self.width.checked_mul(self.scale as u32).ok_or_else(|| {
+            ProviderError::EngineFailed("가상 디스플레이 backing 폭이 너무 큽니다.".into())
+        })?;
+        let height = self.height.checked_mul(self.scale as u32).ok_or_else(|| {
+            ProviderError::EngineFailed("가상 디스플레이 backing 높이가 너무 큽니다.".into())
+        })?;
+        super::virtual_display::validate_dimensions(width, height)
+            .map_err(ProviderError::EngineFailed)?;
+        Ok((width, height))
+    }
 }
 
 /// Handle to a display a provider created.
 pub struct VirtualDisplay {
     pub name: String,
-    /// CGVD engine's numeric display id — the only recoverable handle while
-    /// shim `remove` is unimplemented by design. None for other engines.
+    /// CGVD engine's numeric display id, keyed to its retained shim process.
+    /// None for other engines.
     pub cgvd_display_id: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DisplayInspection {
+    pub display_id: u32,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub x: i32,
+    pub y: i32,
 }
 
 /// Every non-macOS branch answers with this one message so the guidance is
@@ -27,9 +59,7 @@ pub struct VirtualDisplay {
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const MACOS_ONLY_MESSAGE: &str = "가상 디스플레이는 macOS에서만 지원됩니다.";
 
-/// Dev-built shim location (see tools/cgvd-shim/README.md), relative to the
-/// process cwd.
-const DEFAULT_SHIM_PATH: &str = "tools/cgvd-shim/.build/release/cgvd-shim";
+const BUNDLED_SHIM_NAME: &str = "cgvd-shim";
 
 /// Failure causes map 1:1 to UI guidance (spark 3-way classification).
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -63,6 +93,19 @@ pub trait VirtualDisplayProvider: Send + Sync {
     /// True when the engine is installed/reachable. Must not create anything.
     fn available(&self) -> bool;
     fn create(&self, spec: &DisplaySpec) -> Result<VirtualDisplay, ProviderError>;
+    fn place(&self, display: &VirtualDisplay, x: i32, y: i32) -> Result<(), ProviderError> {
+        #[cfg(target_os = "macos")]
+        {
+            super::virtual_display::set_placement(&display.name, x, y)
+                .map(|_| ())
+                .map_err(ProviderError::EngineFailed)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (display, x, y);
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
+        }
+    }
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError>;
 }
 
@@ -88,18 +131,6 @@ impl BetterDisplayProvider {
     }
 }
 
-/// PATH probe shared by provider availability checks.
-// The only non-test caller sits in a macOS-cfg'd block, so the plain Windows
-// lib build would flag this as dead; tests still exercise it everywhere.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn which_succeeds(binary: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(binary)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 impl VirtualDisplayProvider for BetterDisplayProvider {
     fn name(&self) -> &'static str {
         "betterdisplay"
@@ -111,7 +142,7 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
         // cfg-gated: on other platforms the engine is simply absent.
         #[cfg(target_os = "macos")]
         {
-            which_succeeds(super::virtual_display::CLI)
+            super::virtual_display::cli_available()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -128,10 +159,14 @@ impl VirtualDisplayProvider for BetterDisplayProvider {
             // and a blank name could discard ALL discardable devices.
             let name = super::virtual_display::validate_name(&spec.name)
                 .map_err(ProviderError::EngineFailed)?;
-            super::virtual_display::validate_dimensions(spec.width, spec.height)
-                .map_err(ProviderError::EngineFailed)?;
-            super::virtual_display::create_virtual_display(&name, spec.width, spec.height)
-                .map_err(ProviderError::EngineFailed)?;
+            let _ = spec.backing_dimensions()?;
+            super::virtual_display::create_virtual_display_hidpi(
+                &name,
+                spec.width,
+                spec.height,
+                spec.scale,
+            )
+            .map_err(ProviderError::EngineFailed)?;
             Ok(VirtualDisplay {
                 name,
                 cgvd_display_id: None,
@@ -208,12 +243,37 @@ pub struct CgvdProvider {
     // written but never read, which would fail Windows `clippy -D warnings`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     binary_path: String,
+    #[cfg(target_os = "macos")]
+    sessions: std::sync::Mutex<std::collections::HashMap<u32, CgvdSession>>,
+}
+
+#[cfg(target_os = "macos")]
+struct CgvdSession {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    responses: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    next_request_id: u64,
+    generation: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for CgvdSession {
+    fn drop(&mut self) {
+        // Child does not terminate or reap itself on drop. Cover early returns
+        // (including a poisoned registry lock), not only normal removal.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
 }
 
 impl CgvdProvider {
     pub fn with_binary_path(binary_path: &str) -> Self {
         Self {
             binary_path: binary_path.into(),
+            #[cfg(target_os = "macos")]
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -228,46 +288,40 @@ impl CgvdProvider {
             // probing the default.
             return Self::with_binary_path(&path);
         }
-        Self::with_binary_path(DEFAULT_SHIM_PATH)
+        Self::with_binary_path(&default_cgvd_shim_path())
     }
 
     #[cfg(target_os = "macos")]
-    fn classify_stdout(
-        &self,
-        status: std::process::ExitStatus,
-        stdout: &str,
-        stderr: &str,
-    ) -> Result<u32, ProviderError> {
-        // Shim details are untrusted text flowing into user-facing messages —
-        // cap every variant that embeds one (usage lines are ~60 chars, but
-        // be defensive).
-        let exit_label = status
-            .code()
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "signal".into());
-        let line = stdout.lines().next().unwrap_or("").trim();
-        match parse_cgvd_line(line) {
-            Ok(display_id) => Ok(display_id),
-            Err(ProviderError::EngineFailed(detail)) => {
-                // Empty stdout means the shim crashed before printing (dyld,
-                // signal) or produced no output at all — the exit status and
-                // the stderr tail are the only diagnosis available then.
-                if line.is_empty() {
-                    let stderr_tail: String =
-                        stderr.lines().rev().take(2).collect::<Vec<_>>().join(" ");
-                    Err(ProviderError::EngineFailed(format!(
-                        "shim 출력 없음 (exit={exit_label}) {}",
-                        Self::truncate_detail(&stderr_tail)
-                    )))
-                } else {
-                    Err(ProviderError::EngineFailed(Self::truncate_detail(&detail)))
-                }
+    pub(crate) fn inspect_display(display_id: u32) -> Result<DisplayInspection, ProviderError> {
+        use std::time::{Duration, Instant};
+        let path = default_cgvd_shim_path();
+        let mut child = std::process::Command::new(path)
+            .arg("inspect")
+            .arg(format!("--display-id={display_id}"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                ProviderError::EngineUnavailable(format!("shim 실행 불가: {error}"))
+            })?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child
+            .try_wait()
+            .map_err(|error| ProviderError::EngineFailed(format!("inspect 상태 실패: {error}")))?
+            .is_none()
+        {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProviderError::EngineFailed("inspect 응답 시간 초과".into()));
             }
-            Err(ProviderError::EngineUnavailable(detail)) => Err(ProviderError::EngineUnavailable(
-                Self::truncate_detail(&detail),
-            )),
-            Err(other) => Err(other),
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| ProviderError::EngineFailed(format!("inspect 읽기 실패: {error}")))?;
+        let line = String::from_utf8_lossy(&output.stdout);
+        parse_cgvd_inspection(line.trim())
     }
 
     /// Spawns the shim and returns its (status, stdout, stderr) verbatim.
@@ -287,39 +341,222 @@ impl CgvdProvider {
     }
 
     #[cfg(target_os = "macos")]
-    fn run_shim(&self, args: &[&str]) -> Result<u32, ProviderError> {
-        let (status, stdout, stderr) = self.spawn_shim(args).map_err(|error| {
-            ProviderError::EngineUnavailable(format!("shim 실행 불가: {error}"))
-        })?;
-        self.classify_stdout(status, &stdout, &stderr)
-    }
-
-    // The only non-test caller (create) is macOS-cfg'd, and remove() goes
-    // through spawn_shim directly, so the plain Windows lib build would flag
-    // this stub as dead; keeping it preserves the uniform call surface.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    #[cfg(not(target_os = "macos"))]
-    fn run_shim(&self, _args: &[&str]) -> Result<u32, ProviderError> {
-        Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
-    }
-
-    // Shim details flow into user-facing ProviderError messages; an
-    // unbounded foreign string could flood the UI, so cap it defensively.
-    #[cfg(target_os = "macos")]
-    fn truncate_detail(detail: &str) -> String {
-        const MAX_CHARS: usize = 200;
-        if detail.chars().count() <= MAX_CHARS {
-            detail.to_string()
-        } else {
-            let truncated: String = detail.chars().take(MAX_CHARS).collect();
-            format!("{truncated}…")
+    fn spawn_session(
+        &self,
+        args: &[String],
+    ) -> Result<(CgvdSession, String, String), ProviderError> {
+        use std::io::BufRead;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut child = std::process::Command::new(&self.binary_path)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                ProviderError::EngineUnavailable(format!("shim 실행 불가: {error}"))
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ProviderError::EngineFailed("shim stdin을 열 수 없습니다.".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::EngineFailed("shim stdout을 열 수 없습니다.".into()))?;
+        let stderr = child.stderr.take();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                let result = reader.read_line(&mut line).map(|_| line);
+                let done = matches!(&result, Ok(line) if line.is_empty());
+                if tx.send(result).is_err() || done {
+                    break;
+                }
+            }
+        });
+        if let Some(stderr) = stderr {
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stderr);
+                let mut sink = String::new();
+                while reader.read_line(&mut sink).unwrap_or(0) != 0 {
+                    sink.clear();
+                }
+            });
         }
+        // Registration and mode selection each allow two seconds in the shim.
+        let line = rx.recv_timeout(Duration::from_secs(6)).map_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+            ProviderError::EngineFailed("shim READY 응답 시간 초과".into())
+        })?;
+        let session = CgvdSession {
+            child,
+            stdin,
+            responses: rx,
+            next_request_id: 1,
+            generation: args
+                .iter()
+                .find_map(|argument| argument.strip_prefix("--serial="))
+                .and_then(|serial| serial.parse().ok())
+                .unwrap_or(0),
+        };
+        let line = line.map_err(|error| {
+            ProviderError::EngineFailed(format!("shim READY 읽기 실패: {error}"))
+        })?;
+        Ok((session, line, String::new()))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stop_session(&self, display_id: u32) -> Result<(), ProviderError> {
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ProviderError::EngineFailed("CGVD 세션 잠금 실패".into()))?;
+        let session = sessions.get_mut(&display_id).ok_or_else(|| {
+            ProviderError::EngineFailed(format!("관리 중인 displayID가 아닙니다: {display_id}"))
+        })?;
+        if matches!(session.child.try_wait(), Ok(Some(_))) {
+            let generation = session.generation;
+            sessions.remove(&display_id);
+            return crate::ffi::clear_managed_display_mode(display_id, generation)
+                .map_err(ProviderError::EngineFailed);
+        }
+        let stop_result = session
+            .stdin
+            .write_all(b"stop\n")
+            .and_then(|_| session.stdin.flush());
+        if stop_result.is_err() {
+            // Keep ownership if termination cannot be confirmed, allowing retry.
+            session
+                .child
+                .kill()
+                .map_err(|error| ProviderError::EngineFailed(format!("shim 종료 실패: {error}")))?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match session.child.try_wait() {
+                Ok(Some(_)) => {
+                    let generation = session.generation;
+                    sessions.remove(&display_id);
+                    return crate::ffi::clear_managed_display_mode(display_id, generation)
+                        .map_err(ProviderError::EngineFailed);
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Ok(None) => {
+                    session.child.kill().map_err(|error| {
+                        ProviderError::EngineFailed(format!("shim 종료 실패: {error}"))
+                    })?;
+                    session.child.wait().map_err(|error| {
+                        ProviderError::EngineFailed(format!("shim 종료 대기 실패: {error}"))
+                    })?;
+                    let generation = session.generation;
+                    sessions.remove(&display_id);
+                    return crate::ffi::clear_managed_display_mode(display_id, generation)
+                        .map_err(ProviderError::EngineFailed);
+                }
+                Err(error) => {
+                    return Err(ProviderError::EngineFailed(format!(
+                        "shim 상태 확인 실패: {error}"
+                    )))
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn place_session(&self, display_id: u32, x: i32, y: i32) -> Result<(), ProviderError> {
+        use std::io::Write;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ProviderError::EngineFailed("CGVD 세션 잠금 실패".into()))?;
+        let session = sessions.get_mut(&display_id).ok_or_else(|| {
+            ProviderError::EngineFailed(format!("관리 중인 displayID가 아닙니다: {display_id}"))
+        })?;
+        let request_id = session.next_request_id;
+        session.next_request_id = session.next_request_id.wrapping_add(1).max(1);
+        writeln!(session.stdin, "PLACE {request_id} {x} {y}")
+            .and_then(|_| session.stdin.flush())
+            .map_err(|error| {
+                ProviderError::EngineFailed(format!("shim 배치 요청 실패: {error}"))
+            })?;
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ProviderError::EngineFailed(
+                    "shim PLACED 응답 시간 초과".into(),
+                ));
+            }
+            let line = match session.responses.recv_timeout(remaining) {
+                Ok(Ok(line)) if !line.is_empty() => line,
+                Ok(Ok(_)) => {
+                    return Err(ProviderError::EngineFailed("shim 응답 스트림 종료".into()))
+                }
+                Ok(Err(error)) => {
+                    return Err(ProviderError::EngineFailed(format!(
+                        "shim PLACED 읽기 실패: {error}"
+                    )))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(ProviderError::EngineFailed(
+                        "shim PLACED 응답 시간 초과".into(),
+                    ))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ProviderError::EngineFailed("shim 응답 스트림 종료".into()))
+                }
+            };
+            match parse_cgvd_placed(line.trim(), request_id, display_id, x, y) {
+                Err(ProviderError::EngineFailed(detail))
+                    if detail.starts_with("stale request ") =>
+                {
+                    continue
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn abort_session(mut session: CgvdSession) {
+        use std::io::Write;
+        let _ = session.stdin.write_all(b"stop\n");
+        let _ = session.child.kill();
+        let _ = session.child.wait();
     }
 }
 
 impl Default for CgvdProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for CgvdProvider {
+    fn drop(&mut self) {
+        let ids: Vec<u32> = self
+            .sessions
+            .lock()
+            .ok()
+            .map(|sessions| sessions.keys().copied().collect())
+            .unwrap_or_default();
+        for id in ids {
+            let _ = self.stop_session(id);
+        }
     }
 }
 
@@ -330,8 +567,9 @@ impl Default for CgvdProvider {
 fn parse_cgvd_line(line: &str) -> Result<u32, ProviderError> {
     let mut parts = line.splitn(2, ' ');
     match parts.next() {
-        Some("OK") => parts
-            .next()
+        Some("OK") | Some("READY") => line
+            .split_whitespace()
+            .nth(1)
             .and_then(|rest| rest.parse::<u32>().ok())
             .ok_or_else(|| ProviderError::EngineFailed(format!("shim 출력 파싱 실패: {line}"))),
         Some("NOACTIVE") => Err(ProviderError::NoActiveDisplay),
@@ -345,6 +583,155 @@ fn parse_cgvd_line(line: &str) -> Result<u32, ProviderError> {
             "shim 출력 파싱 실패: {line}"
         ))),
     }
+}
+
+fn parse_cgvd_placed(
+    line: &str,
+    request_id: u64,
+    display_id: u32,
+    x: i32,
+    y: i32,
+) -> Result<(), ProviderError> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.first().copied() == Some("FAILED") {
+        let response_id = fields.get(1).and_then(|value| value.parse::<u64>().ok());
+        if response_id != Some(request_id) {
+            return Err(ProviderError::EngineFailed(format!("stale request {line}")));
+        }
+        return Err(ProviderError::EngineFailed(fields[2..].join(" ")));
+    }
+    if fields.len() != 9 || fields[0] != "PLACED" {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim PLACED 응답 파싱 실패: {line}"
+        )));
+    }
+    let response_request = fields[1].parse::<u64>().ok();
+    if response_request != Some(request_id) {
+        return Err(ProviderError::EngineFailed(format!("stale request {line}")));
+    }
+    let actual_id = fields[2].parse::<u32>().ok();
+    let actual_x = fields[3].parse::<i32>().ok();
+    let actual_y = fields[4].parse::<i32>().ok();
+    let actual_width = fields[5].parse::<u32>().ok();
+    let actual_height = fields[6].parse::<u32>().ok();
+    let primary_before = fields[7].parse::<u32>().ok();
+    let primary_after = fields[8].parse::<u32>().ok();
+    if actual_id != Some(display_id)
+        || actual_x != Some(x)
+        || actual_y != Some(y)
+        || actual_width == Some(0)
+        || actual_width.is_none()
+        || actual_height == Some(0)
+        || actual_height.is_none()
+    {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim 배치 검증 불일치: {line}"
+        )));
+    }
+    if primary_before.is_none() || primary_before != primary_after {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim 주 디스플레이 변경 감지: {line}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_cgvd_inspection(line: &str) -> Result<DisplayInspection, ProviderError> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.first().copied() == Some("FAILED") {
+        return Err(ProviderError::EngineFailed(fields[1..].join(" ")));
+    }
+    if fields.len() != 8 || fields[0] != "INSPECT" {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim INSPECT 응답 파싱 실패: {line}"
+        )));
+    }
+    Ok(DisplayInspection {
+        display_id: fields[1].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        logical_width: fields[2].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        logical_height: fields[3].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        pixel_width: fields[4].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        pixel_height: fields[5].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        x: fields[6].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+        y: fields[7].parse().map_err(|_| {
+            ProviderError::EngineFailed(format!("shim INSPECT 응답 파싱 실패: {line}"))
+        })?,
+    })
+}
+
+fn default_cgvd_shim_path() -> String {
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(path) = bundled_cgvd_shim_path(&executable) {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tools/cgvd-shim/.build/release")
+        .join(BUNDLED_SHIM_NAME)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn bundled_cgvd_shim_path(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_dir = executable.parent()?;
+    (macos_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS"))
+        .then(|| {
+            macos_dir
+                .parent()
+                .map(|contents| contents.join("Resources").join(BUNDLED_SHIM_NAME))
+        })
+        .flatten()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_cgvd_ready(line: &str, width: u32, height: u32, scale: u8) -> Result<u32, ProviderError> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.first().copied() != Some("READY") {
+        // Preserve actionable failure classes emitted before a session is ready.
+        parse_cgvd_line(line)?;
+    }
+    if fields.len() != 6 || fields[0] != "READY" {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim READY 응답 파싱 실패: {line}"
+        )));
+    }
+    let values: Vec<u32> = fields[1..]
+        .iter()
+        .map(|value| value.parse().ok())
+        .collect::<Option<_>>()
+        .ok_or_else(|| ProviderError::EngineFailed(format!("shim READY 응답 파싱 실패: {line}")))?;
+    let expected_pixel_width = width
+        .checked_mul(scale as u32)
+        .ok_or_else(|| ProviderError::EngineFailed("검증할 backing 폭이 너무 큽니다.".into()))?;
+    let expected_pixel_height = height
+        .checked_mul(scale as u32)
+        .ok_or_else(|| ProviderError::EngineFailed("검증할 backing 높이가 너무 큽니다.".into()))?;
+    if values[1] != width
+        || values[2] != height
+        || values[3] != expected_pixel_width
+        || values[4] != expected_pixel_height
+    {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim 모드 불일치: logical={}x{}, pixel={}x{}",
+            values[1], values[2], values[3], values[4]
+        )));
+    }
+    if values[0] == 0 {
+        return Err(ProviderError::EngineFailed("shim displayID=0".into()));
+    }
+    Ok(values[0])
 }
 
 impl VirtualDisplayProvider for CgvdProvider {
@@ -387,16 +774,48 @@ impl VirtualDisplayProvider for CgvdProvider {
                 .map_err(ProviderError::EngineFailed)?;
             super::virtual_display::validate_dimensions(spec.width, spec.height)
                 .map_err(ProviderError::EngineFailed)?;
-            let width = spec.width.to_string();
-            let height = spec.height.to_string();
-            // The displayID is the only handle that exists while shim `remove`
-            // stays unimplemented by design (R-015) — keep it on the handle.
-            let display_id = self.run_shim(&[
-                "create",
-                &format!("--name={name}"),
-                &format!("--width={width}"),
-                &format!("--height={height}"),
-            ])?;
+            spec.backing_dimensions()?;
+            let serial = next_cgvd_serial();
+            let args = vec![
+                "create".into(),
+                format!("--name={name}"),
+                format!("--width={}", spec.width),
+                format!("--height={}", spec.height),
+                format!("--scale={}", spec.scale),
+                format!("--serial={serial}"),
+            ];
+            let (session, line, _) = self.spawn_session(&args)?;
+            let display_id =
+                match parse_cgvd_ready(line.trim(), spec.width, spec.height, spec.scale) {
+                    Ok(display_id) => display_id,
+                    Err(error) => {
+                        Self::abort_session(session);
+                        return Err(error);
+                    }
+                };
+            let (pixel_width, pixel_height) = spec.backing_dimensions()?;
+            if let Err(error) = crate::ffi::register_managed_display_mode(
+                display_id,
+                serial as u64,
+                spec.width,
+                spec.height,
+                pixel_width,
+                pixel_height,
+            ) {
+                Self::abort_session(session);
+                return Err(ProviderError::EngineFailed(format!(
+                    "capture HiDPI mode 등록 실패: {error}"
+                )));
+            }
+            let mut sessions = match self.sessions.lock() {
+                Ok(sessions) => sessions,
+                Err(_) => {
+                    let _ = crate::ffi::clear_managed_display_mode(display_id, serial as u64);
+                    Self::abort_session(session);
+                    return Err(ProviderError::EngineFailed("CGVD 세션 잠금 실패".into()));
+                }
+            };
+            sessions.insert(display_id, session);
             Ok(VirtualDisplay {
                 name,
                 cgvd_display_id: Some(display_id),
@@ -415,25 +834,46 @@ impl VirtualDisplayProvider for CgvdProvider {
         // teardown time).
         #[cfg(target_os = "macos")]
         {
-            match self.spawn_shim(&["remove", &format!("--name={}", display.name)]) {
-                // Exit 3 IS the contract: the shim answers the intentional
-                // R-015 "remove is not implemented by design" no-op. Detect
-                // by exit code, never by the prose — detail text is capped
-                // elsewhere and could be cut mid-marker. Never surface this
-                // as an error to Drop.
-                Ok((status, _stdout, _stderr)) if status.code() == Some(3) => Ok(()),
-                Ok((status, stdout, stderr)) => {
-                    self.classify_stdout(status, &stdout, &stderr).map(|_| ())
-                }
-                Err(error) => Err(ProviderError::EngineUnavailable(format!(
-                    "shim 실행 불가: {error}"
-                ))),
-            }
+            let id = display
+                .cgvd_display_id
+                .ok_or_else(|| ProviderError::EngineFailed("CGVD displayID가 없습니다.".into()))?;
+            self.stop_session(id)
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = display;
             Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
+        }
+    }
+
+    fn place(&self, display: &VirtualDisplay, x: i32, y: i32) -> Result<(), ProviderError> {
+        #[cfg(target_os = "macos")]
+        {
+            let id = display
+                .cgvd_display_id
+                .ok_or_else(|| ProviderError::EngineFailed("CGVD displayID가 없습니다.".into()))?;
+            self.place_session(id, x, y)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (display, x, y);
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn next_cgvd_serial() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SERIAL: std::sync::OnceLock<AtomicU32> = std::sync::OnceLock::new();
+    let serial = SERIAL.get_or_init(|| {
+        let bytes = *uuid::Uuid::new_v4().as_bytes();
+        AtomicU32::new(u32::from_ne_bytes(bytes[..4].try_into().unwrap()))
+    });
+    loop {
+        let candidate = serial.fetch_add(1, Ordering::Relaxed);
+        if candidate != 0 {
+            return candidate;
         }
     }
 }
@@ -471,11 +911,13 @@ mod tests {
         // No mocking of PATH here: betterdisplaycli is not on CI's PATH, so
         // available() must be false there — that IS the contract under test.
         let provider = BetterDisplayProvider::new();
-        if which_succeeds("betterdisplaycli") {
-            assert!(provider.available());
-        } else {
-            assert!(!provider.available());
-        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            provider.available(),
+            crate::virtual_display::cli_available()
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(!provider.available());
     }
 
     #[test]
@@ -500,6 +942,7 @@ mod tests {
             Err(ProviderError::EngineFailed("displayID=0".into()))
         );
         assert_eq!(parse_cgvd_line("OK 42"), Ok(42));
+        assert_eq!(parse_cgvd_line("READY 42 1600 1000 3200 2000"), Ok(42));
         assert!(parse_cgvd_line("garbage").is_err());
     }
 
@@ -519,42 +962,127 @@ mod tests {
         assert!(parse_cgvd_line("").is_err());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn cgvd_remove_treats_exit3_not_implemented_as_success() {
-        // Pin the shim's exact no-op line (tools/cgvd-shim/main.swift): the
-        // remove() decision is made by exit code, but the prose is part of
-        // the documented contract and must not drift silently. parse_cgvd_line
-        // strips the "FAILED " prefix, so the pinned detail excludes it.
-        let line = "FAILED remove is not implemented yet by design (R-015 experiment scope)";
+    fn cgvd_placed_ack_requires_matching_request_display_bounds_and_primary() {
         assert_eq!(
-            parse_cgvd_line(line),
+            parse_cgvd_placed("PLACED 9 42 -1600 0 1600 1000 1 1", 9, 42, -1600, 0),
+            Ok(())
+        );
+        assert!(matches!(
+            parse_cgvd_placed("PLACED 8 42 -1600 0 1600 1000 1 1", 9, 42, -1600, 0),
+            Err(ProviderError::EngineFailed(detail)) if detail.starts_with("stale request ")
+        ));
+        assert!(parse_cgvd_placed("PLACED 9 42 -1500 0 1600 1000 1 1", 9, 42, -1600, 0).is_err());
+        assert!(parse_cgvd_placed("PLACED 9 42 -1600 0 1600 1000 1 2", 9, 42, -1600, 0).is_err());
+        assert_eq!(
+            parse_cgvd_placed("FAILED 9 configure code=1001", 9, 42, -1600, 0),
+            Err(ProviderError::EngineFailed("configure code=1001".into()))
+        );
+    }
+
+    #[test]
+    fn cgvd_inspection_contract_includes_logical_pixel_dimensions_and_bounds() {
+        assert_eq!(
+            parse_cgvd_inspection("INSPECT 42 1600 1000 3200 2000 -1600 0"),
+            Ok(DisplayInspection {
+                display_id: 42,
+                logical_width: 1600,
+                logical_height: 1000,
+                pixel_width: 3200,
+                pixel_height: 2000,
+                x: -1600,
+                y: 0,
+            })
+        );
+        assert!(parse_cgvd_inspection("INSPECT 42 malformed").is_err());
+        assert_eq!(
+            parse_cgvd_inspection("FAILED mode unavailable displayID=42"),
             Err(ProviderError::EngineFailed(
-                "remove is not implemented yet by design (R-015 experiment scope)".into()
+                "mode unavailable displayID=42".into()
             ))
         );
+    }
 
-        // The exit-code path needs a real process — a stand-in script that
-        // speaks the exact contract line and exits 3 like the shim does.
-        let mut script = std::env::temp_dir();
-        script.push(format!("leftcar-cgvd-exit3-{}.sh", std::process::id()));
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\nprintf '%s\\n' '{line}'\nexit 3\n"),
-        )
-        .expect("write temp shim stand-in");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod temp shim stand-in");
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cgvd_ready_parser_requires_logical_and_pixel_dimensions() {
+        assert_eq!(
+            parse_cgvd_ready("READY 42 1600 1000 3200 2000", 1600, 1000, 2),
+            Ok(42)
+        );
+        assert!(parse_cgvd_ready("READY 42 3200 2000 6400 4000", 1600, 1000, 2).is_err());
+        assert!(parse_cgvd_ready("READY 0 1600 1000 3200 2000", 1600, 1000, 2).is_err());
+    }
 
-        let provider = CgvdProvider::with_binary_path(script.to_str().expect("utf8 temp path"));
+    #[test]
+    fn cgvd_remove_rejects_an_unmanaged_display_id() {
+        let provider = CgvdProvider::with_binary_path("missing-binary");
         let display = VirtualDisplay {
             name: "tablets".into(),
             cgvd_display_id: Some(7),
         };
-        let result = provider.remove(&display);
-        let _ = std::fs::remove_file(&script);
-        assert_eq!(result, Ok(()));
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            provider.remove(&display),
+            Err(ProviderError::EngineFailed(
+                "관리 중인 displayID가 아닙니다: 7".into()
+            ))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            provider.remove(&display),
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cgvd_session_drop_terminates_a_live_child() {
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let (_tx, responses) = std::sync::mpsc::channel();
+        drop(CgvdSession {
+            child,
+            stdin,
+            responses,
+            next_request_id: 1,
+            generation: 1,
+        });
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "session drop left a child running");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cgvd_remove_reaps_an_already_exited_child() {
+        let provider = CgvdProvider::with_binary_path("unused");
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        child.wait().unwrap();
+        provider.sessions.lock().unwrap().insert(
+            99,
+            CgvdSession {
+                child,
+                stdin,
+                responses: std::sync::mpsc::channel().1,
+                next_request_id: 1,
+                generation: 1,
+            },
+        );
+        assert_eq!(provider.stop_session(99), Ok(()));
+        assert!(provider.sessions.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -565,4 +1093,13 @@ mod tests {
         // The injected path does not exist, so availability must be false.
         assert!(!provider.available());
     }
+}
+#[test]
+fn packaged_cgvd_path_resolves_from_contents_macos() {
+    let executable =
+        std::path::Path::new("/Applications/Leftcar Host.app/Contents/MacOS/leftcar-host-desktop");
+    assert_eq!(
+        bundled_cgvd_shim_path(executable).unwrap(),
+        std::path::Path::new("/Applications/Leftcar Host.app/Contents/Resources/cgvd-shim")
+    );
 }

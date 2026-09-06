@@ -4,12 +4,17 @@
 //
 // stdout 계약 (반드시 한 줄 — Task 4 parse_cgvd_line이 이 형식을 파싱한다):
 //   probe   -> "EXISTS" | "MISSING"
-//   create  -> "OK <displayID>" (등록+요청 모드 확인 후) | "NOACTIVE" |
+//   inspect --display-id=<id>
+//           -> "INSPECT <displayID> <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight> <x> <y>"
+//   create  -> "READY <displayID> <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight>" |
 //              "UNAVAILABLE <detail>" | "FAILED <detail>"
-//   remove  -> "FAILED remove is not implemented yet by design (R-015 experiment scope)"
+//   PLACE <requestID> <x> <y>
+//           -> "PLACED <requestID> <displayID> <x> <y> <width> <height> <primaryBefore> <primaryAfter>" |
+//              "FAILED <requestID> <detail>"
+//   remove  -> "FAILED remove requires a live create session"
 // argv 되돌림 금지: 개행 섞인 인자가 계약을 두 줄로 깨뜨린다.
 //
-// 종료 코드: 0 성공 / 1 환경·엔진 실패 / 2 사용법 오류 / 3 remove 미구현(설계상)
+// 종료 코드: 0 성공 / 1 환경·엔진 실패 / 2 사용법 오류
 
 import Foundation
 import CGVD
@@ -41,12 +46,35 @@ func runProbe() -> Never {
     exit(0)
 }
 
+func runInspect(_ arguments: [String]) -> Never {
+    guard arguments.count == 3,
+          let rawID = arguments[2].split(separator: "=", maxSplits: 1).last,
+          arguments[2].hasPrefix("--display-id="),
+          let displayID = UInt32(rawID), displayID != 0 else {
+        fail("FAILED usage: cgvd-shim inspect --display-id=<id>", code: 2)
+    }
+    guard CGDisplayIsActive(displayID) != 0 else {
+        fail("FAILED inactive displayID=\(displayID)", code: 1)
+    }
+    guard let mode = CGDisplayCopyDisplayMode(displayID) else {
+        fail("FAILED mode unavailable displayID=\(displayID)", code: 1)
+    }
+    let bounds = CGDisplayBounds(displayID)
+    print(
+        "INSPECT \(displayID) \(mode.width) \(mode.height) \(mode.pixelWidth) \(mode.pixelHeight) "
+            + "\(Int(bounds.origin.x)) \(Int(bounds.origin.y))"
+    )
+    exit(0)
+}
+
 // MARK: - create
 
 struct CreateOptions {
     var name = "Leftcar Virtual"
     var width = 1920
     var height = 1200
+    var scale = 1
+    var serial: UInt32 = 0
 }
 
 func parseCreateOptions(_ arguments: [String]) -> CreateOptions? {
@@ -61,7 +89,7 @@ func parseCreateOptions(_ arguments: [String]) -> CreateOptions? {
             if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
             options.name = name
         case "--width":
-            // maxPixels는 2배로 저장하므로 UInt32 오버플로 트랩(=계약 붕괴)을
+            // maxPixels는 scale을 반영하므로 UInt32 오버플로 트랩(=계약 붕괴)을
             // 파싱 단계에서 잘라낸다.
             guard let width = Int(String(pair[1])), width > 0,
                   width <= Int(UInt32.max / 2) else { return nil }
@@ -70,6 +98,12 @@ func parseCreateOptions(_ arguments: [String]) -> CreateOptions? {
             guard let height = Int(String(pair[1])), height > 0,
                   height <= Int(UInt32.max / 2) else { return nil }
             options.height = height
+        case "--scale":
+            guard let scale = Int(String(pair[1])), scale == 1 || scale == 2 else { return nil }
+            options.scale = scale
+        case "--serial":
+            guard let serial = UInt32(String(pair[1])) else { return nil }
+            options.serial = serial
         default:
             return nil
         }
@@ -97,11 +131,72 @@ func pollRegistration(displayID: CGDirectDisplayID) -> Bool {
 
 /// 적용을 요청한 모드가 실제 표시 상태가 됐는지 확인한다. 시스템이 다른
 /// 배율·모드를 강제하면 요청 픽셀이 안 맞으므로 확인 실패로 답한다.
-func pollRequestedMode(displayID: CGDirectDisplayID, width: Int, height: Int) -> Bool {
+func pollRequestedMode(displayID: CGDirectDisplayID, width: Int, height: Int, scale: Int) -> Bool {
     poll(upTo: 2.0) {
         guard let mode = CGDisplayCopyDisplayMode(displayID) else { return false }
         return mode.width == width && mode.height == height
+            && mode.pixelWidth == width * scale && mode.pixelHeight == height * scale
     }
+}
+
+func writeResponse(_ line: String) {
+    FileHandle.standardOutput.write("\(line)\n".data(using: .utf8)!)
+}
+
+func runPlaceCommand(
+    _ command: String,
+    displayID: CGDirectDisplayID,
+    expectedWidth: Int,
+    expectedHeight: Int
+) {
+    let fields = command.split(whereSeparator: { $0.isWhitespace })
+    guard fields.count == 4,
+          fields[0] == "PLACE",
+          let requestID = UInt64(fields[1]),
+          let x = Int32(fields[2]),
+          let y = Int32(fields[3]) else {
+        writeResponse("FAILED 0 invalid PLACE command")
+        return
+    }
+
+    let primaryBefore = CGMainDisplayID()
+    var configuration: CGDisplayConfigRef?
+    let beginResult = CGBeginDisplayConfiguration(&configuration)
+    guard beginResult == .success, let configuration else {
+        writeResponse("FAILED \(requestID) begin code=\(beginResult.rawValue)")
+        return
+    }
+    let configureResult = CGConfigureDisplayOrigin(configuration, displayID, x, y)
+    guard configureResult == .success else {
+        CGCancelDisplayConfiguration(configuration)
+        writeResponse("FAILED \(requestID) configure code=\(configureResult.rawValue)")
+        return
+    }
+    let completeResult = CGCompleteDisplayConfiguration(configuration, .forSession)
+    guard completeResult == .success else {
+        writeResponse("FAILED \(requestID) complete code=\(completeResult.rawValue)")
+        return
+    }
+
+    var observed = CGRect.null
+    let reachedRequestedBounds = poll(upTo: 2.0) {
+        observed = CGDisplayBounds(displayID)
+        return Int32(observed.origin.x) == x && Int32(observed.origin.y) == y
+            && Int(observed.width) == expectedWidth && Int(observed.height) == expectedHeight
+    }
+    let primaryAfter = CGMainDisplayID()
+    guard reachedRequestedBounds else {
+        writeResponse("FAILED \(requestID) bounds timeout actual=\(Int(observed.origin.x)),\(Int(observed.origin.y))")
+        return
+    }
+    guard primaryAfter == primaryBefore else {
+        writeResponse("FAILED \(requestID) primary changed before=\(primaryBefore) after=\(primaryAfter)")
+        return
+    }
+    writeResponse(
+        "PLACED \(requestID) \(displayID) \(Int(observed.origin.x)) \(Int(observed.origin.y)) "
+            + "\(Int(observed.width)) \(Int(observed.height)) \(primaryBefore) \(primaryAfter)"
+    )
 }
 
 func runCreate(_ arguments: [String]) -> Never {
@@ -136,15 +231,15 @@ func runCreate(_ arguments: [String]) -> Never {
     let queue = DispatchQueue(label: "dev.leftcar.cgvd-shim.create")
     descriptor.setDispatchQueue(queue)
     descriptor.name = options.name
-    descriptor.maxPixelsWide = UInt32(options.width * 2)
-    descriptor.maxPixelsHigh = UInt32(options.height * 2)
+    descriptor.maxPixelsWide = UInt32(options.width * options.scale)
+    descriptor.maxPixelsHigh = UInt32(options.height * options.scale)
     descriptor.sizeInMillimeters = CGSize(width: 520, height: 325) // 16:10 24인치급
     descriptor.productID = 0x4C43 // "LC"
     descriptor.vendorID = 0x4C50 // "LP"
-    // 상수 시리얼: 이름 파생 해시보다 단순함이 낫다 — 동일 시리얼 재생성의
-    // 부작용은 아직 실측되지 않았고(작업 10 물리 실측 대상), 실험 범위에서는
-    // 재현 가능한 고정값이 디버깅에 유리하다.
-    descriptor.serialNum = 0x20260903
+    // Rust가 세션마다 생성한 시리얼을 전달한다. 0은 유효한 관리 식별자가
+    // 아니므로 명시적으로 거부한다.
+    guard options.serial != 0 else { fail("FAILED serial must be non-zero", code: 2) }
+    descriptor.serialNum = options.serial
 
     // CLI에는 runloop이 없으므로 스파크의 main 큐 대신 전용 직렬 큐를 쓴다.
     // 스파크 A/B는 실패 경로(헤드리스 displayID=0)에서만 큐 무관을 확인했다 —
@@ -156,44 +251,48 @@ func runCreate(_ arguments: [String]) -> Never {
         fail("FAILED displayID=0", code: 1)
     }
 
-    // Leftcar 계약은 픽셀 기반 1x (EVIDENCE.md 정정 기록) — HiDPI off,
-    // 요청 크기 모드 정확히 1개. 적용 실패는 엔진 실패로 분류한다.
+    // 모드는 논리 크기로 요청하고 hiDPI가 backing pixel을 결정한다. 요청
+    // 값을 backing 크기로 미리 곱하면 HiDPI에서 다시 두 배가 된다.
     let settings = CGVirtualDisplaySettings()
-    settings.hiDPI = 0
+    settings.hiDPI = options.scale == 2 ? 1 : 0
     settings.modes = [
         CGVirtualDisplayMode(width: UInt(options.width), height: UInt(options.height), refreshRate: 60)
     ]
     guard virtualDisplay.apply(settings) else {
-        // 디스플레이는 생성됐지만 요청 크기를 보장 못 한다 — OK로 거짓말하지
-        // 않고 실패로 분류한다 (Task 4에서 EngineFailed로 매핑). displayID를
-        // 남겨 호출자가 고아 디스플레이를 추적할 수 있게 한다 — remove는
-        // 설계상 미구현이고 프로세스 종료 후 생존 여부도 미실측이다.
+        // 프로세스 종료로 생성한 디스플레이를 정리하고 적용 실패를 보고한다.
         fail("FAILED settings displayID=\(displayID)", code: 1)
     }
 
     // 생성자 반환과 apply 참은 등록 보장이 아니다 — WindowServer 등록과
-    // 요청 모드 도달을 폴링으로 확인한 뒤에만 OK를 말한다. 타임아웃이면
-    // "된 셈 치고" OK를 출력하지 않는다.
+    // 논리/픽셀 모드 도달을 모두 확인한 뒤에만 READY를 말한다.
     guard pollRegistration(displayID: displayID) else {
         fail("FAILED registration timeout displayID=\(displayID)", code: 1)
     }
-    guard pollRequestedMode(displayID: displayID, width: options.width, height: options.height) else {
+    guard pollRequestedMode(displayID: displayID, width: options.width, height: options.height, scale: options.scale) else {
         fail("FAILED mode timeout displayID=\(displayID)", code: 1)
     }
 
-    print("OK \(displayID)")
+    guard let mode = CGDisplayCopyDisplayMode(displayID) else {
+        fail("FAILED mode unavailable displayID=\(displayID)", code: 1)
+    }
+    let ready = "READY \(displayID) \(mode.width) \(mode.height) \(mode.pixelWidth) \(mode.pixelHeight)\n"
+    FileHandle.standardOutput.write(ready.data(using: .utf8)!)
+
+    // CGVirtualDisplay의 수명은 이 객체가 살아 있는 동안 관리한다. Rust가
+    // stop을 보내거나 stdin이 EOF가 되면 반환하면서 객체를 해제한다.
+    withExtendedLifetime(virtualDisplay) {
+        while let command = readLine(strippingNewline: true) {
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == "stop" { break }
+            runPlaceCommand(
+                trimmed,
+                displayID: displayID,
+                expectedWidth: options.width,
+                expectedHeight: options.height
+            )
+        }
+    }
     exit(0)
-}
-
-// MARK: - remove (의도적 미구현)
-
-func runRemove() -> Never {
-    // CGVirtualDisplay에는 공개된 파괴 호출이 없고, 객체 해제(또는 프로세스
-    // 종료)가 디스플레이를 없애는지는 아직 실측되지 않았다 — 스파크의 소멸
-    // 관측은 헤드리스 생성 실패로 실행되지 않았다(미해결 질문). 서브프로세스
-    // 수명과 디스플레이 수명의 관계가 정해져야 remove 설계(상주 프로세스
-    // 포함)가 가능하므로, 그 판정은 승격 ADR 범위다. 실험 범위 밖.
-    fail("FAILED remove is not implemented yet by design (R-015 experiment scope)", code: 3)
 }
 
 // MARK: - 진입
@@ -206,10 +305,12 @@ guard arguments.count >= 2 else {
 switch arguments[1] {
 case "probe":
     runProbe()
+case "inspect":
+    runInspect(arguments)
 case "create":
     runCreate(arguments)
 case "remove":
-    runRemove()
+    fail("FAILED remove requires a live create session", code: 2)
 default:
     // 서브커맨드를 그대로 되돌리지 않는다 — argv에 개행이 섞이면 계약 한 줄이
     // 두 줄로 깨져 호출자의 파싱을 오염시킨다 (리뷰에서 재현된 사례).

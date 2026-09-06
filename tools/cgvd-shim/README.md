@@ -18,12 +18,15 @@ cd tools/cgvd-shim && swift build -c release
 # (provider.rs DEFAULT_SHIM_PATH: tools/cgvd-shim/.build/release/cgvd-shim)와 일치
 ```
 
-## stdout 계약 (한 줄 — Rust `parse_cgvd_line`이 이 형식을 파싱한다)
+## stdout 계약 (응답마다 한 줄)
 
 | 서브커맨드 | 출력 | 종료 코드 |
 |---|---|---|
 | `probe` | `EXISTS` / `MISSING` | 항상 0 (MISSING도 정상 답) |
-| `create` | `OK <displayID>` | 0 — 등록·요청 모드까지 폴링 확인 후 출력 |
+| `inspect --display-id=<id>` | `INSPECT <displayID> <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight> <x> <y>` | 0 — 별도 fresh process에서 공개 CoreGraphics 상태를 한 번 조회 |
+| `create` | `READY <displayID> <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight>` | 0 — 등록·논리 모드·backing pixel까지 확인 후 출력하고 stop/EOF까지 상주 |
+| 상주 세션 stdin | `PLACE <requestID> <x> <y>` | `PLACED <requestID> <displayID> <x> <y> <width> <height> <primaryBefore> <primaryAfter>` — 요청 좌표와 실제 bounds가 일치하고 주 디스플레이가 유지된 경우에만 성공 |
+| 상주 세션 stdin | 잘못되거나 적용 실패한 `PLACE` | `FAILED <requestID> <detail>` — 요청별 한 줄 응답, 응답이 없거나 실패하면 Rust provider도 성공으로 처리하지 않음 |
 | `create` | `FAILED registration timeout displayID=<id>` | 1 — 2초 내 활성 등록 미확인 |
 | `create` | `FAILED mode timeout displayID=<id>` | 1 — 2초 내 요청 크기 모드 미도달 |
 | `create` | `UNAVAILABLE session` | 1 — GUI 로그인 세션 밖 실행 (분류 A) |
@@ -32,9 +35,10 @@ cd tools/cgvd-shim && swift build -c release
 | `create` | `FAILED private API missing on this macOS` | 1 — 클래스 부재 (probe가 MISSING인 상태로 create 실행) |
 | `create` | `FAILED settings displayID=<id>` | 1 — 생성은 됐는데 요청 크기 모드 적용 실패 (고아 추적용 id) |
 | `create` | `FAILED usage: ...` | 2 — 플래그 오류 |
-| `remove` | `FAILED remove is not implemented yet by design (R-015 experiment scope)` | 3 |
+| `remove` | `FAILED remove requires a live create session` | 2 — Rust provider가 해당 create 프로세스 stdin에 `stop`을 보냄 |
 
-계약 외 텍스트를 stdout에 쓰지 않는다 — Rust 쪽은 첫 줄만 읽는다.
+계약 외 텍스트를 stdout에 쓰지 않는다. Rust는 첫 `READY` 뒤에도 세션 응답을
+계속 읽으며 각 `PLACE`와 같은 requestID의 한 줄만 해당 요청의 결과로 인정한다.
 진단 3분류(A 세션 밖 / B 클램쉘·헤드리스 / C API 문제)는 스파크의 분류를
 그대로 따른다.
 
@@ -47,6 +51,14 @@ cd tools/cgvd-shim && swift build -c release
 .build/release/cgvd-shim probe    # 어떤 세션에서든 가능 (클래스 존재만 묻는다)
 .build/release/cgvd-shim create   # 반드시 GUI 세션(터미널 앱)에서
 ```
+
+`create`는 성공 응답 후에도 CGVirtualDisplay 객체를 보유한 채 stdin을
+기다린다. 같은 세션에 `PLACE <requestID> <x> <y>`를 보내면 디스플레이를 만든
+소유 프로세스가 배치를 적용한다. Rust provider는 세션별 요청을 직렬화하고
+3초 안에 일치하는 requestID, displayID, 실제 bounds, 보존된 주 디스플레이를
+담은 `PLACED`를 받은 경우만 성공으로 처리한다. 호출자가 `stop` 한 줄을 보내거나
+stdin을 닫으면 객체를 해제하고 종료하므로, displayID별 프로세스 수명과 제거
+대상이 일치한다.
 
 **create 실측은 반드시 터미널 앱(Ghostty/Terminal 등)에서.** SSH·Claude 자동화
 셸은 WindowServer 세션에 붙지 못해 `UNAVAILABLE session`이 나온다. 이것은
@@ -66,18 +78,16 @@ cd tools/cgvd-shim && swift build -c release
   반환"이 아니라 "등록+요청 모드 확인"으로 강화했다.
 - **argv 되돌림 없음**: 개행이 섞인 서브커맨드를 그대로 출력하면 계약 한
   줄이 두 줄로 깨진다. `FAILED unknown subcommand`로 고정해 출력했다.
-- **시리얼**: 상수 `0x20260903`. 이름 파생 해시보다 재현 가능성이 낫다.
+- **시리얼**: Rust provider가 세션마다 0이 아닌 UInt32 시리얼을 생성해
+  전달한다. 이름 해시나 고정값을 사용하지 않아 반복 생성이 충돌하지 않는다.
 - **`probe`는 4종 전부 확인**: descriptor만 보면 create이 쓰는 나머지 클래스가
   빠진 macOS를 EXISTS로 오판한다. `NSClassFromString` 조회라 파손 시에도
   크래시가 아니라 `MISSING`이라는 정상 답을 낸다. `create`도 직접 참조 전에
   같은 조회로 먼저 잘라낸다 — 클래스가 없으면 nil 이니셜이 함정에 빠지기
   때문이다. 링크는 `-weak_framework CoreGraphics`로 약하게 묶어 파손된
   macOS에서도 바이너리 자체는 로드된다(`nm -m`으로 weak external 확인).
-- **remove 미구현은 설계다**: CGVirtualDisplay에는 공개된 파괴 호출이 없다.
-  create이 OK를 출력한 뒤 이 프로세스는 곧 종료되는데, **객체 해제·프로세스
-  종료 후에도 디스플레이가 남아 있는지는 미실측이다** — 스파크의 소멸 관측은
-  헤드리스 생성 실패로 실행되지 않았다. 남아 있으면 spawn-and-exit 모델이
-  그대로 유효하고, 사라진다면 상주 프로세스 설계가 필요하다. 둘 다 승격 ADR이
-  판정할 사항이며, 1차 실측은 작업 10의 물리 생성 테스트다.
+- **수명/제거**: CGVirtualDisplay에는 공개된 파괴 호출이 없으므로 create
+  프로세스가 객체를 보유한다. Rust는 displayID별 프로세스를 stop하고 정상
+  종료를 기다리며, provider Drop도 남은 세션을 정리한다.
 - `Package.swift`의 `.unsafeFlags`는 이 패키지를 다른 SwiftPM 패키지의
   의존성으로 못 쓰게 만들지만, 독립 실행 파일이라 무해하다.

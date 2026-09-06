@@ -199,6 +199,8 @@ impl CaptureBackend for FakeBackend {
             first_encode_ms: 25,
             first_send_ms: 26,
             current_bitrate: 12_000_000,
+            bitrate_floor_collapse_count: 7,
+            bitrate_floor_collapse_last_reason: "resolution_fallback_floor_reached".into(),
             encoder_mode: "unknown".into(),
             encoder_id: "unknown".into(),
             encoder_hardware_accelerated: None,

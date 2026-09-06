@@ -375,7 +375,10 @@ impl ControlServer {
         input: ReconfigureStreamInput,
     ) -> Result<ReconfigureStreamOutput, String> {
         validate_stream_shape(input.width, input.height, input.fps)?;
-        if !matches!(input.quality_state.as_str(), "native" | "fallback" | "downshifting" | "upshifting") {
+        if !matches!(
+            input.quality_state.as_str(),
+            "native" | "fallback" | "downshifting" | "upshifting"
+        ) {
             return Err("unsupported quality state".into());
         }
         let settled_quality_state = match input.quality_state.as_str() {
@@ -414,14 +417,14 @@ impl ControlServer {
         self.backend.stop(previous.handle)?;
         cleanup_media_transport(&previous.media_transport, previous.viewer_port);
 
-        let replacement_encoder_experiment =
-            if previous.encoder_experiment == EncoderExperiment::SplitVertical
-                && (input.width != 3_840 || input.height != 2_160)
-            {
-                EncoderExperiment::Auto
-            } else {
-                previous.encoder_experiment
-            };
+        let replacement_encoder_experiment = if previous.encoder_experiment
+            == EncoderExperiment::SplitVertical
+            && (input.width != 3_840 || input.height != 2_160)
+        {
+            EncoderExperiment::Auto
+        } else {
+            previous.encoder_experiment
+        };
 
         let replacement_handle = match self.start_replacement_from_snapshot(
             &previous,
@@ -646,6 +649,13 @@ impl ControlServer {
                     metrics.error = Some(error.clone());
                 }
 
+                // Android Back/close is an intentional viewer action. Some
+                // backends surface it through their error field, but the
+                // control contract must expose it as an ordinary stop.
+                if metrics.error.as_deref() == Some("viewer closed stream") {
+                    metrics.state = "stopped".into();
+                }
+
                 let terminal = matches!(metrics.state.as_str(), "error" | "stopped" | "unknown");
                 if terminal {
                     let terminal_since = s.terminal_since.get_or_insert(now);
@@ -727,6 +737,8 @@ impl ControlServer {
                     first_encode_ms: metrics.first_encode_ms,
                     first_send_ms: metrics.first_send_ms,
                     current_bitrate: metrics.current_bitrate,
+                    bitrate_floor_collapse_count: metrics.bitrate_floor_collapse_count,
+                    bitrate_floor_collapse_last_reason: metrics.bitrate_floor_collapse_last_reason,
                     encoder_mode: metrics.encoder_mode,
                     encoder_id: metrics.encoder_id,
                     encoder_hardware_accelerated: metrics.encoder_hardware_accelerated,
@@ -1576,6 +1588,8 @@ mod tests {
                 first_encode_ms: 25,
                 first_send_ms: 26,
                 current_bitrate: 12_000_000,
+                bitrate_floor_collapse_count: 7,
+                bitrate_floor_collapse_last_reason: "resolution_fallback_floor_reached".into(),
                 encoder_mode: "unknown".into(),
                 encoder_id: "unknown".into(),
                 encoder_hardware_accelerated: None,
@@ -1740,6 +1754,7 @@ mod tests {
         assert!(line.contains("\"width\":2560"), "{line}");
         assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
         assert!(line.contains("\"inputEnabled\":false"), "{line}");
+        assert!(line.contains("\"bitrateFloorCollapseCount\":7"), "{line}");
         assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
         let line = request(&mut sock, "stopStream", r#"{"session":1}"#, &token).await;
@@ -1998,6 +2013,7 @@ mod tests {
             first.sessions[0].error.as_deref(),
             Some("viewer closed stream")
         );
+        assert_eq!(first.sessions[0].state, "stopped");
 
         server
             .sessions

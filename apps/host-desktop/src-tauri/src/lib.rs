@@ -6,17 +6,18 @@ pub mod aoap;
 pub mod aoap_control;
 pub mod aoap_proxy;
 pub mod backend;
+pub mod clamshell_mode;
 pub mod control;
+pub mod display_management;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod pairing;
+pub mod power_assertion;
+pub mod provider;
+pub mod virtual_display;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
-pub mod virtual_display;
-pub mod provider;
-pub mod power_assertion;
-pub mod clamshell_mode;
 pub mod wire;
 
 use backend::SharedBackend;
@@ -96,13 +97,20 @@ pub fn run() {
             remove_virtual_display,
             tablet_display_start,
             tablet_display_stop,
-            tablet_display_status
+            tablet_display_status,
+            list_managed_displays,
+            add_managed_display,
+            remove_managed_display,
+            set_managed_display_position
         ])
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
             app.manage(TabletSessionRegistry::new(None));
+            app.manage(display_management::DisplayManager::new(Some(
+                display_management::DisplayManager::default_state_path(),
+            )));
             warm_display_catalog(warmup_backend);
 
             let show_item =
@@ -166,8 +174,18 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("tauri run");
+        .build(tauri::generate_context!())
+        .expect("tauri build")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                for error in app
+                    .state::<display_management::DisplayManager>()
+                    .cleanup_all()
+                {
+                    eprintln!("managed display cleanup failed: {error}");
+                }
+            }
+        });
 }
 
 #[cfg(target_os = "macos")]
@@ -416,11 +434,7 @@ fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingSer
 /// Async so the blocking `betterdisplaycli` spawn runs off the main thread
 /// (Tauri 2 executes async commands on a separate thread pool).
 #[tauri::command]
-async fn create_virtual_display(
-    name: String,
-    width: u32,
-    height: u32,
-) -> Result<String, String> {
+async fn create_virtual_display(name: String, width: u32, height: u32) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         virtual_display::create_virtual_display(&name, width, height)
@@ -444,6 +458,76 @@ async fn remove_virtual_display(name: String) -> Result<String, String> {
         let _ = name;
         Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
     }
+}
+
+#[tauri::command]
+fn list_managed_displays(
+    state: tauri::State<'_, display_management::DisplayManager>,
+) -> Vec<display_management::ManagedDisplayView> {
+    state.list()
+}
+
+#[tauri::command]
+async fn add_managed_display(
+    state: tauri::State<'_, display_management::DisplayManager>,
+    provider_kind: String,
+    name: String,
+    width: u32,
+    height: u32,
+    scale: u8,
+    position: String,
+) -> Result<display_management::ManagedDisplayView, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(error) = provider_kind_error(&provider_kind) {
+            return Err(error);
+        }
+        let position = display_management::DisplayPosition::parse(&position)?;
+        let manager = state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager.add(
+                provider_for_kind(&provider_kind),
+                name,
+                width,
+                height,
+                scale,
+                position,
+            )
+        })
+        .await
+        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, provider_kind, name, width, height, scale, position);
+        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
+    }
+}
+
+#[tauri::command]
+async fn remove_managed_display(
+    state: tauri::State<'_, display_management::DisplayManager>,
+    id: String,
+) -> Result<(), String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.remove(&id))
+        .await
+        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
+}
+
+#[tauri::command]
+async fn set_managed_display_position(
+    state: tauri::State<'_, display_management::DisplayManager>,
+    id: String,
+    position: String,
+) -> Result<display_management::ManagedDisplayView, String> {
+    let position = display_management::DisplayPosition::parse(&position)?;
+    let anchor = display_management::active_anchor_rect()
+        .ok_or_else(|| "활성 주 화면이 없어 배치할 수 없습니다.".to_string())?;
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.set_position(&id, position, anchor))
+        .await
+        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
 }
 
 /// Validates the provider kind sent from the UI. CGVD stays opt-in behind the
@@ -492,6 +576,7 @@ async fn tablet_display_start(
                 name,
                 width,
                 height,
+                scale: 1,
             },
         )
         .map_err(|error| error.message())?;
