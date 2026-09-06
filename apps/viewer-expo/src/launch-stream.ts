@@ -24,8 +24,19 @@ import {
   type UdpStabilitySelection,
 } from "./udp-stability";
 
+/**
+ * Physical metrics of the viewer's own screen, reported at stream start so
+ * the Host can size a virtual display to match the tablet.
+ */
+export interface ViewerDisplayMetrics {
+  physicalWidth: number;
+  physicalHeight: number;
+  densityDpi: number;
+}
+
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
+  getDisplayMetrics?(): Promise<ViewerDisplayMetrics>;
   prepareStream(
     port: number,
     host: string,
@@ -65,6 +76,7 @@ export interface StartStreamArgs {
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
+  viewerDisplay?: ViewerDisplayMetrics;
 }
 
 export interface StartedStream {
@@ -232,6 +244,9 @@ export async function startPreparedStream({
     const startArgs = {
       ...baseArgs,
       ...(viewerIps.length > 0 ? { viewerIps } : {}),
+      // Omitted entirely for legacy Hosts — the contract treats a missing
+      // field as the historical wire shape.
+      ...(args.viewerDisplay ? { viewerDisplay: args.viewerDisplay } : {}),
       mediaTransport,
       encoderExperiment,
       ...(mediaTransport === "udp" && udpStability

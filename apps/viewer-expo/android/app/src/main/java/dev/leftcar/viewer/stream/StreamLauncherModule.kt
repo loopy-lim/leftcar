@@ -112,6 +112,39 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         super.invalidate()
     }
 
+    /**
+     * Reports this tablet's physical screen so the Host can size a virtual
+     * display to match. API 30+ reads the true panel resolution from
+     * `maximumWindowMetrics`; older releases fall back to DisplayMetrics.
+     */
+    @ReactMethod
+    fun getDisplayMetrics(promise: Promise) {
+        try {
+            val context: Context = getReactApplicationContext()
+                .getCurrentActivity()
+                ?: getReactApplicationContext()
+            val metrics = context.resources.displayMetrics
+            val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context.getSystemService(android.view.WindowManager::class.java)
+                    ?.maximumWindowMetrics
+                    ?.bounds
+            } else {
+                null
+            }
+            val width = bounds?.width() ?: metrics.widthPixels
+            val height = bounds?.height() ?: metrics.heightPixels
+            promise.resolve(
+                Arguments.createMap().apply {
+                    putInt("physicalWidth", width)
+                    putInt("physicalHeight", height)
+                    putInt("densityDpi", metrics.densityDpi)
+                },
+            )
+        } catch (t: Throwable) {
+            promise.reject("ERR_DISPLAY_METRICS", t.message, t)
+        }
+    }
+
     @ReactMethod
     fun addListener(eventName: String) {}
 

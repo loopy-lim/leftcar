@@ -375,6 +375,56 @@ describe("startPreparedStream", () => {
     expect(calls).toEqual(["usb", "prepare", "start", "cancel"]);
   });
 
+  it("forwards the viewer display metrics in the startStream payload", async () => {
+    const { control, launcher } = harness();
+    const displayArgs: StartStreamArgs = {
+      ...args,
+      viewerDisplay: {
+        physicalWidth: 2800,
+        physicalHeight: 1752,
+        densityDpi: 420,
+      },
+    };
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args: displayArgs,
+    });
+
+    expect(control.request).toHaveBeenCalledWith("startStream", {
+      ...displayArgs,
+      mediaTransport: "udp",
+      viewerIps: ["192.168.0.42"],
+      viewerDisplay: {
+        physicalWidth: 2800,
+        physicalHeight: 1752,
+        densityDpi: 420,
+      },
+    });
+  });
+
+  it("keeps the legacy startStream payload free of viewerDisplay when metrics are unavailable", async () => {
+    const { control, launcher } = harness();
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args,
+    });
+
+    const sent = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls.find(([command]) =>
+      command === "startStream"
+    )?.[1] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("viewerDisplay");
+  });
+
   it("keeps older native launchers compatible when address discovery is absent", async () => {
     const { control, launcher } = harness();
     delete launcher.getLocalIpv4Addresses;

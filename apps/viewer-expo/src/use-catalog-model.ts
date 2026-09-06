@@ -8,6 +8,7 @@ import {
   reconfigurePreparedStream,
   startPreparedStream,
   type StreamLauncher,
+  type ViewerDisplayMetrics,
 } from "./launch-stream";
 import {
   formatErrorMessage,
@@ -61,6 +62,18 @@ import {
 } from "./viewer-preferences";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
+
+/** Best-effort tablet screen probe; older native modules simply omit it. */
+async function readViewerDisplayMetrics(
+  launcherInstance: StreamLauncher | undefined,
+): Promise<ViewerDisplayMetrics | undefined> {
+  if (!launcherInstance?.getDisplayMetrics) return undefined;
+  try {
+    return await launcherInstance.getDisplayMetrics();
+  } catch {
+    return undefined;
+  }
+}
 
 export function useCatalogModel() {
   const [error, setError] = useState<string | null>(null);
@@ -334,6 +347,7 @@ export function useCatalogModel() {
           displayProfile,
         );
         const sourceTarget = { width, height, fps };
+        const viewerDisplay = await readViewerDisplayMetrics(launcher);
         const started = await startPreparedStream({
           control: client,
           request: requestWithReconnect,
@@ -356,6 +370,7 @@ export function useCatalogModel() {
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
+            ...(viewerDisplay ? { viewerDisplay } : {}),
           },
         });
         const acceptedTarget = {
