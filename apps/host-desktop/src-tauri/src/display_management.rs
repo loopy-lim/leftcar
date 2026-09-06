@@ -641,6 +641,60 @@ impl DisplayManager {
         }
         Ok(view)
     }
+    /// 테스트 전용: 레지스트리에 관리 화면 레코드를 직접 심는다. 실기 엔진
+    /// 없이 resize 재사용 경로를 검증할 때 쓴다(`resize_fixture`와 동일한
+    /// 레코드 모양).
+    #[cfg(test)]
+    pub(crate) fn seed_test_display(
+        manager: &DisplayManager,
+        id: &str,
+        name: &str,
+        logical_width: u32,
+        logical_height: u32,
+        scale: u8,
+        provider: Arc<dyn VirtualDisplayProvider>,
+    ) {
+        let record = OwnershipRecord {
+            view: ManagedDisplayView {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                logical_width,
+                logical_height,
+                scale,
+                backing_width: logical_width * u32::from(scale),
+                backing_height: logical_height * u32::from(scale),
+                position: DisplayPosition::Right,
+                provider_kind: provider.name().into(),
+                verified: true,
+            },
+            rect: DisplayRect {
+                x: 1920,
+                y: 0,
+                width: logical_width,
+                height: logical_height,
+            },
+            betterdisplay_tag_id: None,
+            betterdisplay_uuid: None,
+            display_id: None,
+        };
+        manager
+            .registry
+            .lock()
+            .expect("display registry poisoned")
+            .displays
+            .insert(
+                id.to_owned(),
+                ManagedDisplay {
+                    display: VirtualDisplay {
+                        name: name.to_owned(),
+                        cgvd_display_id: None,
+                    },
+                    record,
+                    provider,
+                },
+            );
+    }
+
     pub fn cleanup_all(&self) -> Vec<String> {
         let mut g = self.registry.lock().expect("display registry poisoned");
         let ids: Vec<_> = g.displays.keys().cloned().collect();

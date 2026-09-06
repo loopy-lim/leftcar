@@ -271,6 +271,10 @@ const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ControlServer {
     backend: SharedBackend,
     pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    /// Leftcar 관리 가상 화면 소유권 레지스트리. 제어 채널의 자동 매칭
+    /// (start_stream 준비, resize)이 이 레지스트리를 공유한다 — Tauri UI
+    /// 명령과 동일한 인스턴스여야 소유권 추적이 일관된다.
+    displays: Option<crate::display_management::DisplayManager>,
     control_port: AtomicU16,
     sessions: Mutex<State>,
 }
@@ -288,12 +292,19 @@ impl ControlServer {
         Self {
             backend,
             pairing,
+            displays: None,
             control_port: AtomicU16::new(crate::PREFERRED_CONTROL_PORT),
             sessions: Mutex::new(State {
                 next: 1,
                 live: HashMap::new(),
             }),
         }
+    }
+
+    /// 가상 화면 자동 매칭에 쓸 관리 화면 레지스트리를 붙인다. 없으면(None)
+    /// 자동 매칭이 비활성화되지만 스트림 시작은 정상적으로 계속된다.
+    pub fn set_display_manager(&mut self, displays: crate::display_management::DisplayManager) {
+        self.displays = Some(displays);
     }
 
     pub fn set_control_port(&self, port: u16) {
@@ -1092,6 +1103,9 @@ impl ControlServer {
                     .and_then(|d| d.get(input.source_index as usize).cloned())
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
+                // 뷰어 메트릭 자동 매칭: 관리 가상 화면 준비는 best-effort이며
+                // 실패가 스트림 시작을 막지 않는다 (prepare_viewer_display 참고).
+                self.prepare_viewer_display(&input, Some(&name));
                 let requested_transport = normalize_media_transport(&input.media_transport)
                     .ok_or_else(|| {
                         format!("unsupported media transport: {}", input.media_transport)
@@ -1327,6 +1341,82 @@ impl ControlServer {
 
     pub(crate) fn authorize_token(&self, token: &str) -> bool {
         self.pairing.authorize(token)
+    }
+
+    /// 스트림 시작 전 뷰어 메트릭 자동 매칭으로 관리 가상 화면을 준비한다.
+    ///
+    /// 정책 (docs/plans/2026-09-06-viewer-display-sizing-design.md §1·§4):
+    /// - 매칭은 best-effort다. 준비에 실패해도(관리 화면 없음, 리사이즈 실패,
+    ///   레지스트리 부재) 절대 오류를 반환하지 않고 로그만 남긴다 — 가상 화면
+    ///   크기 매칭이 스트림 시작을 막지 않는다.
+    /// - 요청된 관리 화면(`virtual_display_id`)이 없어도 생성하지 않는다.
+    ///   생성은 호스트 UI(DisplayManagerCard)의 명시적 사용자 동작으로 남긴다.
+    /// - 자동 생성 경로는 없으므로 별도의 세션 종료 정리도 생기지 않는다:
+    ///   관리 화면은 기존 소유 ID로 추적되며 세션 종료 시 즉시 제거하지
+    ///   않는 기존 정책을 유지한다.
+    fn prepare_viewer_display(&self, input: &StartStreamInput, source_name: Option<&str>) {
+        let Some(displays) = self.displays.clone() else {
+            if input.viewer_display.is_some() {
+                eprintln!("viewer display matching skipped: no managed-display registry attached");
+            }
+            return;
+        };
+        let managed = displays.list();
+        let decisions: Vec<_> = managed
+            .iter()
+            .map(|view| crate::display_matching::ManagedDisplayMode {
+                id: &view.id,
+                logical_width: view.logical_width,
+                logical_height: view.logical_height,
+                scale: view.scale,
+            })
+            .collect();
+        let metrics = input.viewer_display.as_ref().map(|msg| {
+            crate::display_matching::ViewerDisplayMetrics {
+                physical_width: msg.physical_width,
+                physical_height: msg.physical_height,
+                density_dpi: msg.density_dpi,
+            }
+        });
+        let preparation = crate::display_matching::prepare_virtual_display(
+            metrics.as_ref(),
+            input.virtual_display_id.as_deref(),
+            source_name,
+            &decisions,
+        );
+        match preparation {
+            crate::display_matching::VirtualDisplayPreparation::NotNeeded => {}
+            crate::display_matching::VirtualDisplayPreparation::Resize {
+                id,
+                width,
+                height,
+                scale,
+            } => {
+                println!(
+                    "viewer display match: resizing managed display {id} to {width}x{height}@{scale}x"
+                );
+                if let Err(error) = displays.resize(&id, width, height, u8::from(scale)) {
+                    // best-effort: 스트림은 기존 소스 크기로 계속된다.
+                    eprintln!(
+                        "viewer display resize of {id} to {width}x{height}@{scale}x failed; \
+                         continuing with the existing source: {error}"
+                    );
+                }
+            }
+            crate::display_matching::VirtualDisplayPreparation::Reuse { id } => {
+                println!("viewer display match: reusing managed display {id}");
+            }
+            crate::display_matching::VirtualDisplayPreparation::LogOnly {
+                width,
+                height,
+                scale,
+            } => {
+                println!(
+                    "viewer display match: no managed display to prepare (creation stays a \
+                     host-UI action); matched size {width}x{height}@{scale}x logged only"
+                );
+            }
+        }
     }
 }
 
@@ -2123,5 +2213,214 @@ mod tests {
         let session = server.snapshot().sessions.remove(0);
         assert!(session.input_enabled);
         assert_eq!(session.input_rate_hz, 120);
+    }
+
+    mod viewer_display_matching {
+        use super::*;
+
+        fn metrics_msg(
+            w: u32,
+            h: u32,
+            dpi: u32,
+        ) -> control_contract::host::ViewerDisplayMetricsMsg {
+            control_contract::host::ViewerDisplayMetricsMsg {
+                physical_width: w,
+                physical_height: h,
+                density_dpi: dpi,
+            }
+        }
+
+        /// 자동 매칭은 기존 소유 정책을 건드리지 않는다: 준비 동작은
+        /// 기존 관리 화면의 재사용·리사이즈까지만이고 세션 종료 시 별도의
+        /// 즉시 제거도 없다. 이 테스트는 resize가 record를 유지하는
+        /// DisplayManager 불변식(Task 3, display_management 테스트 자원 재사용)
+        /// 위에 세워진다.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn preparation_resize_keeps_managed_record_and_id() {
+            // macOS DisplayManager는 관찰 경로가 필요해 빈 레지스트리에서
+            // resize 불변식만 직접 검증한다(ResizeOk 픽스처는
+            // display_management::tests::resize_fixture와 동일한 자원).
+            use crate::provider::{DisplaySpec, VirtualDisplay, VirtualDisplayProvider};
+            struct ResizeOk;
+            impl VirtualDisplayProvider for ResizeOk {
+                fn name(&self) -> &'static str {
+                    "fake"
+                }
+                fn available(&self) -> bool {
+                    true
+                }
+                fn create(
+                    &self,
+                    _: &DisplaySpec,
+                ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
+                    unreachable!()
+                }
+                fn place(
+                    &self,
+                    _: &VirtualDisplay,
+                    _: i32,
+                    _: i32,
+                ) -> Result<(), crate::provider::ProviderError> {
+                    Ok(())
+                }
+                fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
+                    unreachable!()
+                }
+                fn resize(
+                    &self,
+                    _: &VirtualDisplay,
+                    width: u32,
+                    height: u32,
+                    scale: u8,
+                ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError>
+                {
+                    Ok(crate::provider::ResizedDisplayMode {
+                        logical_width: width,
+                        logical_height: height,
+                        pixel_width: width * u32::from(scale),
+                        pixel_height: height * u32::from(scale),
+                    })
+                }
+            }
+            let manager = crate::display_management::DisplayManager::default();
+            crate::display_management::DisplayManager::seed_test_display(
+                &manager,
+                "vd-1",
+                "Tablet [leftcar:vd-1]",
+                1600,
+                1000,
+                2,
+                Arc::new(ResizeOk),
+            );
+            let view = manager.resize("vd-1", 1400, 876, 2).unwrap();
+            assert_eq!((view.logical_width, view.logical_height), (1400, 876));
+            assert_eq!(view.id, "vd-1");
+            // 세션 종료 정리 정책: 준비가 끝나도 화면은 관리 ID로 유지된다.
+            assert_eq!(manager.list().len(), 1);
+        }
+
+        fn server_with_registry() -> ControlServer {
+            let mut server = ControlServer::new(backend(), test_pairing());
+            server.set_display_manager(crate::display_management::DisplayManager::default());
+            server
+        }
+
+        #[tokio::test]
+        async fn start_stream_with_viewer_metrics_proceeds_without_any_managed_display() {
+            // 매칭 대상이 하나도 없어도(레지스트리가 비어 있어도) 스트림은
+            // 기존 소스로 정상 시작된다 — best-effort 정책.
+            let server = Arc::new(server_with_registry());
+            let resp = server
+                .dispatch(
+                    "startStream",
+                    serde_json::json!({
+                        "sourceIndex": 0,
+                        "viewerPort": 5001,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 90,
+                        "viewerDisplay": {
+                            "physicalWidth": 2800,
+                            "physicalHeight": 1752,
+                            "densityDpi": 420
+                        },
+                        "virtualDisplayId": "missing-registry-entry"
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["session"], 1, "{resp}");
+            assert_eq!(resp["result"]["width"], 1920, "{resp}");
+        }
+
+        #[tokio::test]
+        async fn unmatchable_viewer_metrics_still_start_the_stream() {
+            let server = Arc::new(server_with_registry());
+            // 1999×719는 scale 2·scale 1 모두 최소 논리 크기 미달 → 매칭 실패.
+            let resp = server
+                .dispatch(
+                    "startStream",
+                    serde_json::json!({
+                        "sourceIndex": 0,
+                        "viewerPort": 5001,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 90,
+                        "viewerDisplay": metrics_msg(1999, 719, 160)
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["session"], 1, "{resp}");
+        }
+
+        #[tokio::test]
+        async fn start_stream_without_viewer_metrics_still_works_on_legacy_path() {
+            let server = Arc::new(server_with_registry());
+            let resp = server
+                .dispatch(
+                    "startStream",
+                    serde_json::json!({
+                        "sourceIndex": 0,
+                        "viewerPort": 5001,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 90
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["session"], 1, "{resp}");
+        }
+
+        #[tokio::test]
+        async fn start_stream_without_registry_attached_still_works() {
+            // 레지스트리가 없어도(None) 자동 매칭은 건너뛰고 스트림은 시작된다.
+            let server = Arc::new(ControlServer::new(backend(), test_pairing()));
+            let resp = server
+                .dispatch(
+                    "startStream",
+                    serde_json::json!({
+                        "sourceIndex": 0,
+                        "viewerPort": 5001,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 90,
+                        "viewerDisplay": metrics_msg(2800, 1752, 420)
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["session"], 1, "{resp}");
+        }
+
+        #[tokio::test]
+        async fn extension_mode_source_marker_log_only_policy_is_wired() {
+            // 소스가 관리 화면 마커를 가져도 매칭 크기의 관리 화면이 없으면
+            // 생성하지 않는다 — dispatch는 여전히 ok를 반환해야 한다.
+            let server = Arc::new(server_with_registry());
+            let resp = server
+                .dispatch(
+                    "startStream",
+                    serde_json::json!({
+                        "sourceIndex": 0,
+                        "viewerPort": 5001,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 90,
+                        "viewerDisplay": metrics_msg(2800, 1752, 420)
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            // 아무것도 생성/리사이즈되지 않았다.
+            assert!(server.displays.as_ref().unwrap().list().is_empty());
+        }
     }
 }

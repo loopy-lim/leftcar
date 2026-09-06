@@ -28,6 +28,24 @@ pub enum MatchedScale {
     Two,
 }
 
+impl std::fmt::Display for MatchedScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchedScale::One => write!(f, "1"),
+            MatchedScale::Two => write!(f, "2"),
+        }
+    }
+}
+
+impl From<MatchedScale> for u8 {
+    fn from(scale: MatchedScale) -> u8 {
+        match scale {
+            MatchedScale::One => 1,
+            MatchedScale::Two => 2,
+        }
+    }
+}
+
 /// 자동 매칭된 가상 화면 논리 크기와 배율.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchedDisplaySize {
@@ -81,6 +99,140 @@ pub fn match_display_size(metrics: &ViewerDisplayMetrics) -> Option<MatchedDispl
     } else {
         None
     }
+}
+
+/// 매칭을 적용할 수 있는 관리 화면 한 개의 크기 스냅샷.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedDisplayMode<'a> {
+    pub id: &'a str,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub scale: u8,
+}
+
+/// 스트림 시작 전 가상 화면 준비 결정.
+///
+/// 이 결정은 절대 화면 생성을 요구하지 않는다(설계 §4 소유권 안전): 생성은 호스트
+/// UI의 명시적 사용자 동작으로 남고, 제어 채널의 자동 매칭은 기존 관리 화면의
+/// 재사용·리사이즈와 로그까지만 담당한다. 리사이즈 실패가 스트림을 막지 않는
+/// best-effort 정책은 실행 단계(`ControlServer::prepare_viewer_display`)에서
+/// 강제된다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VirtualDisplayPreparation {
+    /// 뷰어 메트릭이 없거나 매칭에 실패해 준비할 것이 없다.
+    NotNeeded,
+    /// 요청된 관리 화면을 매칭 크기로 맞춘다.
+    Resize {
+        id: String,
+        width: u32,
+        height: u32,
+        scale: MatchedScale,
+    },
+    /// 관리 화면이 이미 매칭 크기라 그대로 쓴다.
+    Reuse { id: String },
+    /// 준비할 수 없어 매칭 결과만 로그로 남긴다. 스트림은 기존 소스로 계속된다.
+    LogOnly {
+        width: u32,
+        height: u32,
+        scale: MatchedScale,
+    },
+}
+
+/// 관리 화면 이름에 붙는 소유권 마커(` display_management::add`)에서 관리 ID를
+/// 뽑는다. 카탈로그의 가상 화면 소스 이름이 곧 관리 ID 참조가 된다.
+fn managed_name_marker_id(name: &str) -> Option<&str> {
+    name.rsplit_once("[leftcar:").and_then(|(_, rest)| {
+        let end = rest.find(']')?;
+        let id = &rest[..end];
+        (!id.is_empty()).then_some(id)
+    })
+}
+
+/// 스트림 시작 시 뷰어 메트릭으로 가상 화면 준비를 결정한다 (순수 — 부작용 없음).
+///
+/// - `viewer_display`가 없거나 매칭 실패면 `NotNeeded`: 스트림은 그대로 시작된다.
+/// - `virtual_display_id`가 있으면 그 화면만 대상으로 한다. 없는 ID여도 오류를
+///   내지 않고 `LogOnly`로 폴백한다.
+/// - ID가 없는데 소스가 관리 화면(이름 마커)이면, 매칭 크기와 같은 관리 화면을
+///   재사용한다. 없으면 생성하지 않고 `LogOnly`.
+/// - 소스가 관리 화면이 아니면 준비 자체가 없다(`LogOnly` 로그만).
+pub fn prepare_virtual_display(
+    viewer_display: Option<&ViewerDisplayMetrics>,
+    virtual_display_id: Option<&str>,
+    source_name: Option<&str>,
+    managed: &[ManagedDisplayMode<'_>],
+) -> VirtualDisplayPreparation {
+    let Some(metrics) = viewer_display else {
+        return VirtualDisplayPreparation::NotNeeded;
+    };
+    let Some(matched) = match_display_size(metrics) else {
+        return VirtualDisplayPreparation::NotNeeded;
+    };
+    let same_size = |entry: &ManagedDisplayMode<'_>| {
+        entry.logical_width == matched.logical_width
+            && entry.logical_height == matched.logical_height
+            && entry.scale == scale_u8(matched.scale)
+    };
+    if let Some(id) = virtual_display_id {
+        return managed
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| {
+                if same_size(entry) {
+                    VirtualDisplayPreparation::Reuse {
+                        id: entry.id.to_owned(),
+                    }
+                } else {
+                    VirtualDisplayPreparation::Resize {
+                        id: entry.id.to_owned(),
+                        width: matched.logical_width,
+                        height: matched.logical_height,
+                        scale: matched.scale,
+                    }
+                }
+            })
+            .unwrap_or(VirtualDisplayPreparation::LogOnly {
+                width: matched.logical_width,
+                height: matched.logical_height,
+                scale: matched.scale,
+            });
+    }
+    let Some(source_id) = source_name.and_then(managed_name_marker_id) else {
+        return VirtualDisplayPreparation::LogOnly {
+            width: matched.logical_width,
+            height: matched.logical_height,
+            scale: matched.scale,
+        };
+    };
+    if let Some(entry) = managed.iter().find(|entry| entry.id == source_id) {
+        if same_size(entry) {
+            return VirtualDisplayPreparation::Reuse {
+                id: entry.id.to_owned(),
+            };
+        }
+        return VirtualDisplayPreparation::Resize {
+            id: entry.id.to_owned(),
+            width: matched.logical_width,
+            height: matched.logical_height,
+            scale: matched.scale,
+        };
+    }
+    // 매칭 크기와 같은 관리 화면이 있으면 재사용, 없으면 절대 생성하지 않는다.
+    managed
+        .iter()
+        .find(|entry| same_size(entry))
+        .map(|entry| VirtualDisplayPreparation::Reuse {
+            id: entry.id.to_owned(),
+        })
+        .unwrap_or(VirtualDisplayPreparation::LogOnly {
+            width: matched.logical_width,
+            height: matched.logical_height,
+            scale: matched.scale,
+        })
+}
+
+fn scale_u8(scale: MatchedScale) -> u8 {
+    u8::from(scale)
 }
 
 #[cfg(test)]
@@ -162,5 +314,140 @@ mod tests {
         assert_eq!(match_display_size(&metrics(0, 1200, 160)), None);
         assert_eq!(match_display_size(&metrics(1920, 0, 160)), None);
         assert_eq!(match_display_size(&metrics(1920, 1200, 0)), None);
+    }
+
+    fn managed<'a>(id: &'a str, w: u32, h: u32, scale: u8) -> ManagedDisplayMode<'a> {
+        ManagedDisplayMode {
+            id,
+            logical_width: w,
+            logical_height: h,
+            scale,
+        }
+    }
+
+    #[test]
+    fn explicit_display_id_is_resized_to_the_matched_size() {
+        let managed = [managed("abc", 1600, 1000, 2)];
+        let preparation =
+            prepare_virtual_display(Some(&metrics(2800, 1752, 420)), Some("abc"), None, &managed);
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::Resize {
+                id: "abc".into(),
+                width: 1400,
+                height: 876,
+                scale: MatchedScale::Two
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_display_id_already_matching_size_is_reused() {
+        let managed = [managed("abc", 1400, 876, 2)];
+        let preparation =
+            prepare_virtual_display(Some(&metrics(2800, 1752, 420)), Some("abc"), None, &managed);
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::Reuse { id: "abc".into() }
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_display_id_is_logged_not_created() {
+        // 요청한 관리 화면이 없으면 오류로 스트림을 막지 않는다 — 로그만 남긴다.
+        let managed = [managed("abc", 1600, 1000, 2)];
+        let preparation = prepare_virtual_display(
+            Some(&metrics(2800, 1752, 420)),
+            Some("ghost"),
+            None,
+            &managed,
+        );
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::LogOnly {
+                width: 1400,
+                height: 876,
+                scale: MatchedScale::Two
+            }
+        );
+    }
+
+    #[test]
+    fn extension_mode_source_reuses_same_size_managed_display() {
+        let managed = [managed("abc", 1400, 876, 2), managed("def", 1920, 1080, 1)];
+        let preparation = prepare_virtual_display(
+            Some(&metrics(2800, 1752, 420)),
+            None,
+            Some("Leftcar VD [leftcar:0b1e-4242]"),
+            &managed,
+        );
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::Reuse { id: "abc".into() }
+        );
+    }
+
+    #[test]
+    fn extension_mode_source_without_match_never_creates_or_resizes() {
+        // 소스가 관리 화면이어도 매칭 크기의 관리 화면이 없으면 생성하지 않고
+        // 로그만 남긴다 — 생성은 호스트 UI의 명시적 사용자 동작으로 남는다.
+        let managed = [managed("abc", 1920, 1080, 1)];
+        let preparation = prepare_virtual_display(
+            Some(&metrics(2800, 1752, 420)),
+            None,
+            Some("Leftcar VD [leftcar:0b1e-4242]"),
+            &managed,
+        );
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::LogOnly {
+                width: 1400,
+                height: 876,
+                scale: MatchedScale::Two
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_metrics_without_an_explicit_id_change_nothing_but_the_log() {
+        // 관리 화면이 아니어도 매칭 결과는 로그로 남는다(준비 동작은 없음).
+        let managed = [managed("abc", 1400, 876, 2)];
+        let preparation = prepare_virtual_display(
+            Some(&metrics(2800, 1752, 420)),
+            None,
+            Some("Main"),
+            &managed,
+        );
+        assert_eq!(
+            preparation,
+            VirtualDisplayPreparation::LogOnly {
+                width: 1400,
+                height: 876,
+                scale: MatchedScale::Two
+            }
+        );
+    }
+
+    #[test]
+    fn missing_or_unmatchable_metrics_need_no_preparation() {
+        let managed = [managed("abc", 1400, 876, 2)];
+        assert_eq!(
+            prepare_virtual_display(None, Some("abc"), None, &managed),
+            VirtualDisplayPreparation::NotNeeded
+        );
+        assert_eq!(
+            prepare_virtual_display(Some(&metrics(1999, 719, 160)), Some("abc"), None, &managed),
+            VirtualDisplayPreparation::NotNeeded
+        );
+    }
+
+    #[test]
+    fn managed_name_marker_id_extracts_the_managed_id() {
+        assert_eq!(
+            managed_name_marker_id("Leftcar VD [leftcar:0b1e-4242]"),
+            Some("0b1e-4242")
+        );
+        assert_eq!(managed_name_marker_id("Main"), None);
+        assert_eq!(managed_name_marker_id("Leftcar VD [leftcar:]"), None);
     }
 }

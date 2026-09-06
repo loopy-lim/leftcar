@@ -58,10 +58,16 @@ pub fn run() {
         "leftcar-host".into(),
         pairing::PairingServer::default_store_path(),
     ));
-    let server = Arc::new(control::ControlServer::new(
-        backend.clone(),
-        pairing.clone(),
+    // 제어 채널의 뷰어 메트릭 자동 매칭이 Tauri UI와 동일한 관리 화면
+    // 레지스트리를 공유하게 한다 (소유권 추적 일관성).
+    let display_manager = display_management::DisplayManager::new(Some(
+        display_management::DisplayManager::default_state_path(),
     ));
+    let server = Arc::new({
+        let mut server = control::ControlServer::new(backend.clone(), pairing.clone());
+        server.set_display_manager(display_manager.clone());
+        server
+    });
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -110,9 +116,7 @@ pub fn run() {
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
             app.manage(TabletSessionRegistry::new(None));
-            app.manage(display_management::DisplayManager::new(Some(
-                display_management::DisplayManager::default_state_path(),
-            )));
+            app.manage(display_manager);
             warm_display_catalog(warmup_backend);
 
             let show_item =
