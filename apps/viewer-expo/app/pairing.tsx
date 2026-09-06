@@ -131,6 +131,24 @@ function OtpPinInput({
   );
 }
 
+function PairingModeCard({ mode, permission, requestPermission, code, busy, hasCodeTarget, canSubmitCode, colors, styles, onCodeChange, onSubmit, onQrScanned }: { mode: PairingMode; permission: { granted: boolean } | null | undefined; requestPermission: () => void; code: string; busy: boolean; hasCodeTarget: boolean; canSubmitCode: boolean; colors: ThemeTokens; styles: ReturnType<typeof createStyles>; onCodeChange: (value: string) => void; onSubmit: () => void; onQrScanned: (value: string) => void }) {
+  const { t } = useAppLanguage();
+  if (mode === "code") return <View style={styles.card}>
+    <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
+    <Text style={styles.cardDesc}>{hasCodeTarget ? t.viewer.pinDesc : t.viewer.invalidHostError}</Text>
+    <OtpPinInput code={code} onChangeCode={onCodeChange} disabled={busy} colors={colors} />
+    <Pressable style={({ pressed }) => [styles.primaryBtn, !canSubmitCode && styles.btnDisabled, pressed && canSubmitCode && styles.btnPressed]} onPress={onSubmit} disabled={!canSubmitCode}>
+      {busy ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>}
+    </Pressable>
+  </View>;
+  return <View style={styles.card}>
+    <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text><Text style={styles.cardDesc}>{t.viewer.qrScanHint}</Text>
+    {!permission ? <View style={styles.cameraBox}><ActivityIndicator color={colors.textPrimary} /></View> : !permission.granted ? <View style={styles.cameraNotice}>
+      <Ionicons name="camera-outline" size={28} color={colors.textPrimary} style={{ marginBottom: 4 }} /><Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text><Text style={styles.cameraNoticeText}>{t.viewer.cameraPermDesc}</Text><Pressable onPress={requestPermission} style={styles.permissionBtn}><Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text></Pressable>
+    </View> : <View style={styles.scannerWrapper}><CameraView style={styles.camera} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={(result) => { const value = result.data?.trim(); if (value) onQrScanned(value); }}><View style={styles.scanOverlay}><View style={styles.scanFrame}><View style={[styles.cornerBracket, styles.cornerTopLeft]} /><View style={[styles.cornerBracket, styles.cornerTopRight]} /><View style={[styles.cornerBracket, styles.cornerBottomLeft]} /><View style={[styles.cornerBracket, styles.cornerBottomRight]} /></View><View style={styles.scanHintBox}><Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text></View></View></CameraView></View>}
+  </View>;
+}
+
 const stylesLocal = StyleSheet.create({
   otpContainer: {
     alignItems: "center",
@@ -344,89 +362,7 @@ export default function Pairing() {
           </View>
         )}
 
-        {/* Mode View */}
-        {mode === "qr" ? (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text>
-            <Text style={styles.cardDesc}>
-              {t.viewer.qrScanHint}
-            </Text>
-
-            {!permission ? (
-              <View style={styles.cameraBox}>
-                <ActivityIndicator color={colors.textPrimary} />
-              </View>
-            ) : !permission.granted ? (
-              <View style={styles.cameraNotice}>
-                <Ionicons name="camera-outline" size={28} color={colors.textPrimary} style={{ marginBottom: 4 }} />
-                <Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text>
-                <Text style={styles.cameraNoticeText}>
-                  {t.viewer.cameraPermDesc}
-                </Text>
-                <Pressable onPress={requestPermission} style={styles.permissionBtn}>
-                  <Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text>
-                </Pressable>
-              </View>
-            ) : (
-              <View style={styles.scannerWrapper}>
-                <CameraView
-                  style={styles.camera}
-                  facing="back"
-                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                  onBarcodeScanned={(result) => {
-                    const value = result.data?.trim();
-                    if (value) handleQrScanned(value);
-                  }}
-                >
-                  <View style={styles.scanOverlay}>
-                    <View style={styles.scanFrame}>
-                      {/* Corner Brackets */}
-                      <View style={[styles.cornerBracket, styles.cornerTopLeft]} />
-                      <View style={[styles.cornerBracket, styles.cornerTopRight]} />
-                      <View style={[styles.cornerBracket, styles.cornerBottomLeft]} />
-                      <View style={[styles.cornerBracket, styles.cornerBottomRight]} />
-                    </View>
-                    <View style={styles.scanHintBox}>
-                      <Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text>
-                    </View>
-                  </View>
-                </CameraView>
-              </View>
-            )}
-          </View>
-        ) : (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
-            <Text style={styles.cardDesc}>
-              {hasCodeTarget
-                ? t.viewer.pinDesc
-                : t.viewer.invalidHostError}
-            </Text>
-
-            <OtpPinInput
-              code={code}
-              onChangeCode={(value) => dispatch({ type: "update", patch: { code: value } })}
-              disabled={busy}
-              colors={colors}
-            />
-
-            <Pressable
-              style={({ pressed }) => [
-                styles.primaryBtn,
-                !canSubmitCode && styles.btnDisabled,
-                pressed && canSubmitCode && styles.btnPressed,
-              ]}
-              onPress={() => handlePairWithCode(code)}
-              disabled={!canSubmitCode}
-            >
-              {busy ? (
-                <ActivityIndicator color={colors.btnPrimaryText} size="small" />
-              ) : (
-                <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>
-              )}
-            </Pressable>
-          </View>
-        )}
+        <PairingModeCard mode={mode} permission={permission} requestPermission={requestPermission} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
 
         {/* Security / Help Card */}
         <View style={styles.tipBox}>

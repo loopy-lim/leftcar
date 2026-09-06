@@ -262,7 +262,7 @@ export function useCatalogModel() {
     [mediaHost],
   );
 
-  const { addStream, applyUdpStability, removeStream, streams } =
+  const { addStream, applyUdpStability, removeStream, streams, updateLocalCursor } =
     useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
 
   const handleRefresh = useCallback(() => {
@@ -280,7 +280,13 @@ export function useCatalogModel() {
 
   const handleToggleCursor = useCallback((localCursor: boolean) => {
     setPreferences((current) => ({ ...current, localCursor }));
-  }, []);
+    updateLocalCursor(localCursor);
+    if (launcher?.setCursorStream) {
+      void Promise.all(
+        streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
+      ).catch(() => setError("열린 화면의 커서 설정을 바꾸지 못했습니다."));
+    }
+  }, [setError, streams, updateLocalCursor]);
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {

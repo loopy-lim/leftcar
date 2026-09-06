@@ -16,6 +16,19 @@ export interface RestartRequest {
   trigger: "hostStatus" | "nativeTermination";
 }
 
+export type HostTerminationDisposition =
+  | "viewerClosed"
+  | "feedbackTimeout"
+  | "hostStopped"
+  | null;
+
+export function classifyHostTermination(message: string): HostTerminationDisposition {
+  if (message.trim().toLowerCase() === "viewer closed stream") return "viewerClosed";
+  if (message.includes("feedback timeout")) return "feedbackTimeout";
+  if (message.includes("host operator stopped")) return "hostStopped";
+  return null;
+}
+
 function isLocalStreamTerminationEvent(
   event: unknown,
 ): event is StreamTerminationEvent {

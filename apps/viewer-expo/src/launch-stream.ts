@@ -47,6 +47,7 @@ export interface StreamLauncher {
     port: number,
     encoderExperiment: EncoderExperimentId,
   ): Promise<void>;
+  setCursorStream?(instanceId: string, enabled: boolean): Promise<void>;
 }
 
 export interface StartStreamArgs {

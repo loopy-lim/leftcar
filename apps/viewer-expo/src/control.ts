@@ -104,6 +104,8 @@ export interface SessionView {
   receiverRttMs?: number | null;
   receiverWireMs?: number | null;
   receiverFeedbackAgeMs?: number | null;
+  bitrateFloorCollapseCount?: number;
+  bitrateFloorCollapseLastReason?: string;
   udpStabilityProfile?: string;
   udpBurstDatagrams?: number;
   udpPacingRateMultiplier?: number;

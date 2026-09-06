@@ -2,6 +2,7 @@ import { DeviceEventEmitter } from "react-native";
 import { subscribeStreamTermination as subscribeWithoutNative } from "./stream-termination-policy";
 export {
   claimStreamRestore,
+  classifyHostTermination,
   releaseStreamRestore,
   selectRecoverableStream,
   type LocalStreamTerminationReason,

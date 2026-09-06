@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import type {
   UdpBurstDatagrams,
@@ -88,6 +88,31 @@ function Choice({
   );
 }
 
+function PresetChoices({ options, selection, colors, onChange }: { options: UdpStabilityOptions; selection: UdpStabilitySelection; colors: ThemeTokens; onChange: (selection: UdpStabilitySelection) => void }) {
+  return <View style={{ gap: 8 }}>{options.profiles.map((profile) => {
+    const copy = PRESET_COPY[profile];
+    const active = selection.profile === profile;
+    return <Pressable key={profile} accessibilityRole="button" accessibilityState={{ selected: active }} style={{ gap: 2, borderRadius: 8, borderWidth: 1, borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle, backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle, padding: 12 }} onPress={() => onChange({ profile })}>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: active ? colors.btnPrimaryText : colors.textPrimary }}>{copy.label}</Text>
+      <Text style={{ fontSize: 11, lineHeight: 15, color: active ? colors.btnPrimaryText : colors.textSecondary, opacity: active ? 0.85 : 1 }}>{copy.hint}</Text>
+    </Pressable>;
+  })}</View>;
+}
+
+function DetailChoices({ options, effective, expanded, colors, onToggle, onChange }: { options: UdpStabilityOptions; effective: Required<Omit<UdpStabilitySelection, "profile">>; expanded: boolean; colors: ThemeTokens; onToggle: () => void; onChange: (next: Partial<{ burstDatagrams: UdpBurstDatagrams; fecParityShards: UdpFecParityShards; adaptivePacing: boolean }>) => void }) {
+  const choices = (title: string, children: ReactNode) => <View style={{ gap: 6 }}><Text style={{ fontSize: 11, fontWeight: "600", color: colors.textMuted }}>{title}</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>{children}</View></View>;
+  const detailsAvailable = options.burstDatagrams.length > 1 || options.fecParityShards.length > 1 || options.adaptivePacing;
+  if (!detailsAvailable) return null;
+  return <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: colors.borderSubtle, paddingTop: 10 }}>
+    <Pressable accessibilityRole="button" style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }} onPress={onToggle}><Text style={{ fontSize: 12, fontWeight: "700", color: colors.textSecondary }}>세부 설정</Text><Text style={{ fontSize: 12, fontWeight: "600", color: colors.textMuted }}>{expanded ? "접기" : "열기"}</Text></Pressable>
+    {expanded ? <View style={{ gap: 10 }}>
+      {choices("UDP 묶음 전송", options.burstDatagrams.map((burst) => <Choice key={burst} active={effective.burstDatagrams === burst} label={`${burst}개`} onPress={() => onChange({ burstDatagrams: burst })} colors={colors} />))}
+      {choices("손실 복구 강도", options.fecParityShards.map((parity) => <Choice key={parity} active={effective.fecParityShards === parity} label={parity === 4 ? "강함 (4)" : "표준 (2)"} onPress={() => onChange({ fecParityShards: parity })} colors={colors} />))}
+      {options.adaptivePacing ? choices("상태에 맞춰 자동 조절", <><Choice active={effective.adaptivePacing} label="켜기" onPress={() => onChange({ adaptivePacing: true })} colors={colors} /><Choice active={!effective.adaptivePacing} label="끄기" onPress={() => onChange({ adaptivePacing: false })} colors={colors} /></>) : null}
+    </View> : null}
+  </View>;
+}
+
 export function UdpStabilityControls({
   options,
   selection,
@@ -139,121 +164,9 @@ export function UdpStabilityControls({
         </Text>
       </View>
 
-      <View style={{ gap: 8 }}>
-        {options.profiles.map((profile) => {
-          const copy = PRESET_COPY[profile];
-          const active = selection.profile === profile;
-          return (
-            <Pressable
-              key={profile}
-              accessibilityRole="button"
-              accessibilityState={{ selected: active }}
-              style={{
-                gap: 2,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
-                backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
-                padding: 12,
-              }}
-              onPress={() => onChange({ profile })}
-            >
-              <Text
-                style={{
-                  fontSize: 13,
-                  fontWeight: "700",
-                  color: active ? colors.btnPrimaryText : colors.textPrimary,
-                }}
-              >
-                {copy.label}
-              </Text>
-              <Text
-                style={{
-                  fontSize: 11,
-                  lineHeight: 15,
-                  color: active ? colors.btnPrimaryText : colors.textSecondary,
-                  opacity: active ? 0.85 : 1,
-                }}
-              >
-                {copy.hint}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+      <PresetChoices options={options} selection={selection} colors={colors} onChange={onChange} />
 
-      {(options.burstDatagrams.length > 1
-        || options.fecParityShards.length > 1
-        || options.adaptivePacing) ? (
-        <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: colors.borderSubtle, paddingTop: 10 }}>
-          <Pressable
-            accessibilityRole="button"
-            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
-            onPress={() => setExpanded((current) => !current)}
-          >
-            <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textSecondary }}>세부 설정</Text>
-            <Text style={{ fontSize: 12, fontWeight: "600", color: colors.textMuted }}>
-              {expanded ? "접기" : "열기"}
-            </Text>
-          </Pressable>
-
-          {expanded ? (
-            <View style={{ gap: 10 }}>
-              <View style={{ gap: 6 }}>
-                <Text style={{ fontSize: 11, fontWeight: "600", color: colors.textMuted }}>UDP 묶음 전송</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {options.burstDatagrams.map((burst) => (
-                    <Choice
-                      key={burst}
-                      active={effective.burstDatagrams === burst}
-                      label={`${burst}개`}
-                      onPress={() => selectCustom({ burstDatagrams: burst })}
-                      colors={colors}
-                    />
-                  ))}
-                </View>
-              </View>
-
-              <View style={{ gap: 6 }}>
-                <Text style={{ fontSize: 11, fontWeight: "600", color: colors.textMuted }}>손실 복구 강도</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {options.fecParityShards.map((parity) => (
-                    <Choice
-                      key={parity}
-                      active={effective.fecParityShards === parity}
-                      label={parity === 4 ? "강함 (4)" : "표준 (2)"}
-                      onPress={() => selectCustom({ fecParityShards: parity })}
-                      colors={colors}
-                    />
-                  ))}
-                </View>
-              </View>
-
-              {options.adaptivePacing ? (
-                <View style={{ gap: 6 }}>
-                  <Text style={{ fontSize: 11, fontWeight: "600", color: colors.textMuted }}>
-                    상태에 맞춰 자동 조절
-                  </Text>
-                  <View style={{ flexDirection: "row", gap: 6 }}>
-                    <Choice
-                      active={effective.adaptivePacing}
-                      label="켜기"
-                      onPress={() => selectCustom({ adaptivePacing: true })}
-                      colors={colors}
-                    />
-                    <Choice
-                      active={!effective.adaptivePacing}
-                      label="끄기"
-                      onPress={() => selectCustom({ adaptivePacing: false })}
-                      colors={colors}
-                    />
-                  </View>
-                </View>
-              ) : null}
-            </View>
-          ) : null}
-        </View>
-      ) : null}
+      <DetailChoices options={options} effective={effective} expanded={expanded} colors={colors} onToggle={() => setExpanded((current) => !current)} onChange={selectCustom} />
 
       {reconnectRequired ? (
         <Pressable

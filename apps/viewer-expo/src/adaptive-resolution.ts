@@ -14,12 +14,14 @@ export interface AdaptiveObservation {
   nowMs: number;
   receiverLossDelta: number;
   encodedFps: number;
-  transmittedFps: number;
+  /** Measured transmitted frame rate when a transport counter is available. */
+  transmittedFps?: number;
   requestedFps: number;
   queueAgeUs: number;
   latencyBudgetUs: number;
   recoveryActive: boolean;
   rebindInFlight: boolean;
+  floorCollapseDelta?: number;
 }
 
 export interface AdaptiveResolutionState {
@@ -47,15 +49,35 @@ const UPSHIFT_WINDOWS = 4;
 const REBIND_COOLDOWN_MS = 5_000;
 const CONGESTION_FPS_RATIO = 0.9;
 const HEALTHY_FPS_RATIO = 0.95;
+const FALLBACK_MAX_WIDTH = 2_560;
+const FALLBACK_MAX_HEIGHT = 1_440;
+const FALLBACK_MIN_DIMENSION = 720;
 
 export function isExact4K(target: AdaptiveTarget): boolean {
   return target.width === 3_840 && target.height === 2_160;
 }
 
 export function fallbackTargetFor(sourceTarget: AdaptiveTarget): AdaptiveTarget | null {
-  return isExact4K(sourceTarget)
-    ? { width: 2_560, height: 1_440, fps: sourceTarget.fps }
-    : null;
+  const portrait = sourceTarget.height > sourceTarget.width;
+  const maxWidth = portrait ? FALLBACK_MAX_HEIGHT : FALLBACK_MAX_WIDTH;
+  const maxHeight = portrait ? FALLBACK_MAX_WIDTH : FALLBACK_MAX_HEIGHT;
+  const scaleToFit = Math.min(
+    maxWidth / sourceTarget.width,
+    maxHeight / sourceTarget.height,
+    1,
+  );
+  if (scaleToFit >= 1) return null;
+
+  // Keep the source aspect ratio while aligning both dimensions for codecs.
+  // The minimum is a readability guard for unusually wide/tall sources.
+  const shortSide = Math.min(sourceTarget.width, sourceTarget.height);
+  const scaleToMinimum = FALLBACK_MIN_DIMENSION / shortSide;
+  const scale = Math.min(1, Math.max(scaleToFit, scaleToMinimum));
+  const width = Math.max(2, Math.floor(sourceTarget.width * scale / 2) * 2);
+  const height = Math.max(2, Math.floor(sourceTarget.height * scale / 2) * 2);
+  if (width > maxWidth || height > maxHeight) return null;
+  if (width >= sourceTarget.width && height >= sourceTarget.height) return null;
+  return { width, height, fps: sourceTarget.fps };
 }
 
 export function createAdaptiveResolutionState(
@@ -77,9 +99,14 @@ function isCongested(
 ): boolean {
   const fpsCollapsed =
     observation.encodedFps < observation.requestedFps * CONGESTION_FPS_RATIO ||
-    observation.transmittedFps < observation.requestedFps * CONGESTION_FPS_RATIO;
-  return observation.receiverLossDelta > 0 &&
-    (fpsCollapsed || observation.queueAgeUs > observation.latencyBudgetUs);
+    (observation.transmittedFps !== undefined &&
+      observation.transmittedFps < observation.requestedFps * CONGESTION_FPS_RATIO);
+  // Receiver loss is useful evidence, but encoder/transport queue pressure is
+  // independently actionable when it persists. A low FPS sample by itself is
+  // intentionally ignored so static screens remain idle-safe.
+  return (observation.floorCollapseDelta ?? 0) > 0 ||
+    observation.queueAgeUs > observation.latencyBudgetUs ||
+    (observation.receiverLossDelta > 0 && fpsCollapsed);
 }
 
 function isHealthy(
@@ -87,7 +114,6 @@ function isHealthy(
 ): boolean {
   return observation.receiverLossDelta === 0 &&
     observation.encodedFps >= observation.requestedFps * HEALTHY_FPS_RATIO &&
-    observation.transmittedFps >= observation.requestedFps * HEALTHY_FPS_RATIO &&
     observation.queueAgeUs <= observation.latencyBudgetUs &&
     !observation.recoveryActive;
 }
@@ -114,6 +140,12 @@ export function observeAdaptiveResolution(
 
   if (previous.activeTarget.width === previous.sourceTarget.width &&
     previous.activeTarget.height === previous.sourceTarget.height) {
+    if (observation.nowMs < previous.cooldownUntilMs) {
+      return {
+        state: { ...previous, congestionWindows: 0, stableWindows: 0 },
+        action: { kind: "keep" },
+      };
+    }
     const congestionWindows = isCongested(observation)
       ? previous.congestionWindows + 1
       : 0;
@@ -157,6 +189,7 @@ export function recordAdaptiveResolutionResult(
   action: AdaptiveResolutionAction,
   success: boolean,
   nowMs: number,
+  acceptedTarget?: AdaptiveTarget,
 ): AdaptiveResolutionObservation {
   if (action.kind === "keep") {
     return { state, action };
@@ -176,12 +209,14 @@ export function recordAdaptiveResolutionResult(
       action: { kind: "keep" },
     };
   }
-  const isNative = action.kind === "upshift";
+  const activeTarget = acceptedTarget ? { ...acceptedTarget } : { ...action.target };
+  const acceptedNative = activeTarget.width === state.sourceTarget.width &&
+    activeTarget.height === state.sourceTarget.height;
   return {
     state: {
       ...state,
-      activeTarget: { ...action.target },
-      qualityState: isNative ? "native" : "fallback",
+      activeTarget,
+      qualityState: acceptedNative ? "native" : "fallback",
       congestionWindows: 0,
       stableWindows: 0,
       cooldownUntilMs: nowMs + REBIND_COOLDOWN_MS,

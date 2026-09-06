@@ -40,7 +40,7 @@ export const STREAM_PROFILES = [
     maxWidth: 3840,
     maxHeight: 2160,
     fps: 60,
-    allowUpscale: true,
+    allowUpscale: false,
     contentMode: "interactive",
     hint: "빠르고 안정적인 Wi-Fi에 적합",
   },

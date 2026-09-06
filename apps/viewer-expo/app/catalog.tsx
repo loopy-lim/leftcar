@@ -212,6 +212,28 @@ function ViewerOptionsCard({
   );
 }
 
+function EncoderExperimentChoices({ experiments, selected, requiresReconnect, colors, t, onSelect }: { experiments: EncoderExperimentInfo[]; selected: EncoderExperimentId; requiresReconnect: boolean; colors: ThemeTokens; t: ReturnType<typeof useAppLanguage>["t"]; onSelect: (id: EncoderExperimentId) => void }) {
+  if (experiments.length <= 1) return null;
+  return <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
+    <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 11, color: colors.textMuted, lineHeight: 15 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
+    <View style={{ gap: 8 }}>{experiments.map((experiment) => {
+      const isSelected = experiment.id === selected;
+      return <Pressable key={experiment.id} style={{ minHeight: 44, gap: 3, borderRadius: 8, borderWidth: 1, borderColor: isSelected ? colors.btnPrimaryBg : colors.borderSubtle, backgroundColor: isSelected ? colors.btnPrimaryBg : colors.bgSubtle, paddingHorizontal: 12, paddingVertical: 8 }} onPress={() => onSelect(experiment.id)} accessibilityRole="button" accessibilityState={{ selected: isSelected, disabled: false }} accessibilityLabel={`${experiment.label}: ${experiment.hint}`}>
+        <Text style={{ fontSize: 13, fontWeight: "700", color: isSelected ? colors.btnPrimaryText : colors.textPrimary }}>{experiment.label}</Text>
+        <Text style={{ fontSize: 11, lineHeight: 15, color: isSelected ? colors.btnPrimaryText : colors.textSecondary, opacity: isSelected ? 0.85 : 1 }}>{experiment.hint}</Text>
+      </Pressable>;
+    })}</View>
+  </View>;
+}
+
+function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: ViewerProfileSelection; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
+  return <View style={styles.qualitySegmentWrapper}><View style={styles.qualitySegmentTabs}>
+    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel="자동 추천: 디스플레이별 권장 품질"><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>자동 추천</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>디스플레이별</Text></Pressable>
+    {STREAM_PROFILES.map((p) => { const selected = p.id === profileId; return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{p.label}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{p.detail}</Text></Pressable>; })}
+  </View></View>;
+}
+
+
 interface CatalogHeaderProps {
   error: string | null;
   host: string;
@@ -311,42 +333,7 @@ function CatalogHeader({
         </View>
       ) : null}
 
-      {/* Segmented Quality Control */}
-      <View style={styles.qualitySegmentWrapper}>
-        <View style={styles.qualitySegmentTabs}>
-          <Pressable
-            onPress={() => onSelectProfile("auto")}
-            style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]}
-            accessibilityRole="button"
-            accessibilityState={{ selected: profileId === "auto" }}
-            accessibilityLabel="자동 추천: 디스플레이별 권장 품질"
-          >
-            <Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>
-              자동 추천
-            </Text>
-            <Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>
-              디스플레이별
-            </Text>
-          </Pressable>
-          {STREAM_PROFILES.map((p) => {
-            const isSelected = p.id === profileId;
-            return (
-              <Pressable
-                key={p.id}
-                onPress={() => onSelectProfile(p.id)}
-                style={[styles.qualityTab, isSelected && styles.qualityTabActive]}
-              >
-                <Text style={[styles.qualityTabLabel, isSelected && styles.qualityTabLabelActive]}>
-                  {p.label}
-                </Text>
-                <Text style={[styles.qualityTabDetail, isSelected && styles.qualityTabDetailActive]}>
-                  {p.detail}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
+      <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
 
       {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
       {hasAdvancedOptions ? (
@@ -379,75 +366,7 @@ function CatalogHeader({
             colors={colors}
           />
 
-          {encoderExperiments.length > 1 ? (
-            <View
-              style={{
-                gap: 10,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: colors.borderSubtle,
-                backgroundColor: colors.bgSurface,
-                padding: 12,
-              }}
-            >
-              <View style={{ gap: 2 }}>
-                <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-                  {t.viewer.encoderExperiments}
-                </Text>
-                {requiresReconnect ? (
-                  <Text style={{ fontSize: 11, color: colors.textMuted, lineHeight: 15 }}>
-                    {t.viewer.encoderReconnectNotice}
-                  </Text>
-                ) : null}
-              </View>
-              <View style={{ gap: 8 }}>
-                {encoderExperiments.map((experiment) => {
-                  const isSelected = experiment.id === encoderExperiment;
-                  return (
-                    <Pressable
-                      key={experiment.id}
-                      style={{
-                        minHeight: 44,
-                        gap: 3,
-                        borderRadius: 8,
-                        borderWidth: 1,
-                        borderColor: isSelected ? colors.btnPrimaryBg : colors.borderSubtle,
-                        backgroundColor: isSelected ? colors.btnPrimaryBg : colors.bgSubtle,
-                        paddingHorizontal: 12,
-                        paddingVertical: 8,
-                      }}
-                      onPress={() => onSelectEncoderExperiment(experiment.id)}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: isSelected, disabled: false }}
-                      accessibilityLabel={`${experiment.label}: ${experiment.hint}`}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                        <Text
-                          style={{
-                            fontSize: 13,
-                            fontWeight: "700",
-                            color: isSelected ? colors.btnPrimaryText : colors.textPrimary,
-                          }}
-                        >
-                          {experiment.label}
-                        </Text>
-                      </View>
-                      <Text
-                        style={{
-                          fontSize: 11,
-                          lineHeight: 15,
-                          color: isSelected ? colors.btnPrimaryText : colors.textSecondary,
-                          opacity: isSelected ? 0.85 : 1,
-                        }}
-                      >
-                        {experiment.hint}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-          ) : null}
+          <EncoderExperimentChoices experiments={encoderExperiments} selected={encoderExperiment} requiresReconnect={requiresReconnect} colors={colors} t={t} onSelect={onSelectEncoderExperiment} />
 
           <UdpStabilityControls
             options={udpStabilityOptions}

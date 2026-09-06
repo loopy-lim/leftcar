@@ -40,4 +40,10 @@ describe("stream profiles", () => {
     expect(is4KResolution(2560, 1440)).toBe(false);
     expect(is4KResolution(2160, 3840)).toBe(false);
   });
+
+  it("does not request clarity upscaling without verified source pixels", () => {
+    expect(STREAM_PROFILES.find((profile) => profile.id === "clarity")).toMatchObject({
+      allowUpscale: false,
+    });
+  });
 });

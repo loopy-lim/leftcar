@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ActiveStream } from "./catalog-model-types";
 import {
   claimStreamRestore,
+  classifyHostTermination,
   releaseStreamRestore,
   selectRecoverableStream,
   subscribeStreamTermination,
@@ -88,6 +89,17 @@ describe("stream termination recovery selection", () => {
         new Set([11]),
       ),
     ).toEqual(streams[1]);
+  });
+});
+
+describe("host termination classification", () => {
+  it("classifies the exact viewer close as a silent local completion", () => {
+    expect(classifyHostTermination("viewer closed stream")).toBe("viewerClosed");
+    expect(classifyHostTermination(" viewer closed stream ")).toBe("viewerClosed");
+  });
+
+  it("does not hide unexpected errors that merely mention a viewer", () => {
+    expect(classifyHostTermination("viewer closed stream unexpectedly: decoder failed")).toBeNull();
   });
 });
 

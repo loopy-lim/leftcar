@@ -23,6 +23,7 @@ import { controlHost } from "./session";
 import { shouldSwitchTransport } from "./transport-switch";
 import {
   claimStreamRestore,
+  classifyHostTermination,
   releaseStreamRestore,
   selectRecoverableStream,
   subscribeStreamTermination,
@@ -55,6 +56,7 @@ export function useStreamController(
   const adaptiveStates = useRef(new Map<number, AdaptiveResolutionState>());
   const adaptiveLoss = useRef(new Map<number, number>());
   const adaptiveRecovery = useRef(new Map<number, number>());
+  const adaptiveFloorCollapse = useRef(new Map<number, number>());
   const adaptiveRebinds = useRef(new Set<number>());
   const reconfigureStreamRef = useRef(reconfigureStream);
   const updateStreams = useCallback(
@@ -141,6 +143,7 @@ export function useStreamController(
         adaptiveStates.current.delete(session);
         adaptiveLoss.current.delete(session);
         adaptiveRecovery.current.delete(session);
+        adaptiveFloorCollapse.current.delete(session);
         adaptiveRebinds.current.delete(session);
       }
     }
@@ -203,20 +206,20 @@ export function useStreamController(
       const unhealthy =
         !session || ["error", "stopped", "unknown"].includes(session.state);
       const terminalMessage = session?.error ?? "";
-      const hostTerminated =
-        terminalMessage === "viewer closed stream" ||
-        terminalMessage.includes("feedback timeout") ||
-        terminalMessage.includes("host operator stopped");
-      if (hostTerminated) {
+      const hostTermination = classifyHostTermination(terminalMessage);
+      if (hostTermination) {
         updateStreams((previous) =>
           previous.filter((item) => item.session !== active.session),
         );
         lastRestartAt.current.delete(active.session);
-        if (!notifiedTerminations.current.has(active.session)) {
+        if (
+          hostTermination !== "viewerClosed" &&
+          !notifiedTerminations.current.has(active.session)
+        ) {
           notifiedTerminations.current.add(active.session);
           Alert.alert(
             "화면 공유가 종료되었어요",
-            terminalMessage.includes("feedback timeout")
+            hostTermination === "feedbackTimeout"
               ? "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
               : "컴퓨터에서 이 화면 공유를 종료했습니다.",
           );
@@ -263,6 +266,7 @@ export function useStreamController(
           action,
           true,
           Date.now(),
+          acceptedTarget,
         );
         adaptiveStates.current.set(active.session, result.state);
         updateStreams((previous) => previous.map((item) => {
@@ -274,7 +278,7 @@ export function useStreamController(
             height: acceptedTarget.height,
             fps: acceptedTarget.fps,
             activeTarget: acceptedTarget,
-            qualityState: restarted.qualityState ?? result.state.qualityState,
+            qualityState: result.state.qualityState,
           };
         }));
         setError(null);
@@ -313,22 +317,25 @@ export function useStreamController(
         (session.recoveryKeyframes ?? 0) +
         (session.receiverPairedIdrEpisodes ?? 0) +
         (session.receiverSuppressedRecoveryRequests ?? 0);
+      const floorCollapse = session.bitrateFloorCollapseCount ?? 0;
+      const previousFloorCollapse = adaptiveFloorCollapse.current.get(active.session);
       const previousLoss = adaptiveLoss.current.get(active.session);
       const previousRecovery = adaptiveRecovery.current.get(active.session);
       adaptiveLoss.current.set(active.session, loss);
       adaptiveRecovery.current.set(active.session, recovery);
-      if (previousLoss === undefined || previousRecovery === undefined) continue;
+      adaptiveFloorCollapse.current.set(active.session, floorCollapse);
+      if (previousLoss === undefined || previousRecovery === undefined || previousFloorCollapse === undefined) continue;
       const state = adaptiveStates.current.get(active.session) ??
         createAdaptiveResolutionState(active.sourceTarget);
       const observed = observeAdaptiveResolution(state, {
         nowMs: Date.now(),
         receiverLossDelta: Math.max(0, loss - previousLoss),
         encodedFps: session.encodeOutputFps ?? session.fps,
-        transmittedFps: session.fps,
         requestedFps: active.activeTarget.fps,
         queueAgeUs: session.pendingFrameOldestAgeUs ?? 0,
         latencyBudgetUs: 100_000,
         recoveryActive: recovery > previousRecovery,
+        floorCollapseDelta: Math.max(0, floorCollapse - previousFloorCollapse),
         rebindInFlight: adaptiveRebinds.current.has(active.session),
       });
       adaptiveStates.current.set(active.session, observed.state);
@@ -384,6 +391,9 @@ export function useStreamController(
   const removeStream = useCallback((session: number) => {
     updateStreams((previous) => previous.filter((stream) => stream.session !== session));
   }, [updateStreams]);
+  const updateLocalCursor = useCallback((localCursor: boolean) => {
+    updateStreams((previous) => previous.map((stream) => ({ ...stream, localCursor })));
+  }, [updateStreams]);
   const applyUdpStability = useCallback(
     async (udpStability: UdpStabilitySelection) => {
       const activeStreams = [...streamsRef.current];
@@ -420,5 +430,5 @@ export function useStreamController(
     [endUnownedRestart, host, queryClient, restoreStream, setError, updateStreams],
   );
 
-  return { addStream, applyUdpStability, removeStream, streams };
+  return { addStream, applyUdpStability, removeStream, streams, updateLocalCursor };
 }
