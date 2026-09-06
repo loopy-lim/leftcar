@@ -2,6 +2,9 @@ package dev.leftcar.viewer.stream
 
 import android.content.Intent
 import android.content.Context
+import android.app.ActivityOptions
+import android.graphics.Rect
+import android.os.Build
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -33,6 +36,8 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
 
     companion object {
         private val splitDecoderByPort = ConcurrentHashMap<Int, String>()
+        private val launchedInstances = ConcurrentHashMap.newKeySet<String>()
+        private val liveStreams = ConcurrentHashMap<String, StreamOwnership>()
         private val reactContextLock = Any()
         private var reactContextReference = WeakReference<ReactApplicationContext>(null)
 
@@ -83,6 +88,15 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 }
             } catch (_: IllegalStateException) {
                 // The native-modules queue can disappear during React teardown.
+            }
+        }
+
+        @JvmStatic
+        fun forgetStream(instanceId: String, generation: Long) {
+            val current = liveStreams[instanceId]
+            if (current?.generation == generation) {
+                liveStreams.remove(instanceId, current)
+                launchedInstances.remove(instanceId)
             }
         }
     }
@@ -243,15 +257,111 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
             val ctx = getReactApplicationContext().getCurrentActivity()
+            val firstLaunch = launchedInstances.add(instanceId)
+            val ownershipGeneration = System.nanoTime()
+            liveStreams[instanceId] = StreamOwnership(host, port, ownershipGeneration)
+            intent.putExtra("ownershipGeneration", ownershipGeneration)
+            val launchOptions = if (firstLaunch) initialLaunchOptions(width, height, ctx) else null
             if (ctx != null) {
-                ctx.startActivity(intent)
+                ctx.startActivity(intent, launchOptions)
             } else {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                reactApplicationContext.startActivity(intent)
+                reactApplicationContext.startActivity(intent, launchOptions)
             }
             promise.resolve(instanceId)
         } catch (t: Throwable) {
+            launchedInstances.remove("src-$port")
+            liveStreams.remove("src-$port")
             promise.reject("ERR_STREAM_LAUNCH", t.message, t)
         }
     }
+
+    @ReactMethod
+    fun setCursorStream(instanceId: String, enabled: Boolean, promise: Promise) {
+        val target = liveStreams[instanceId]
+        if (target == null) {
+            promise.reject("ERR_STREAM_NOT_ACTIVE", "화면 공유 창을 찾을 수 없습니다.")
+            return
+        }
+        val host = target.host
+        val port = target.port
+        val intent = Intent(reactApplicationContext, StreamActivity::class.java).apply {
+            data = Uri.Builder().scheme("leftcar-stream").authority("session")
+                .appendPath(host).appendPath(port.toString()).build()
+            putExtra("instance", instanceId)
+            putExtra("host", host)
+            putExtra("port", port)
+            putExtra("ownershipGeneration", target.generation)
+            putExtra("localCursor", enabled)
+            putExtra("reconnect", true)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        try {
+            val context = reactApplicationContext.getCurrentActivity()
+            if (context != null) context.startActivity(intent) else {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                reactApplicationContext.startActivity(intent)
+            }
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("ERR_CURSOR_TOGGLE", t.message, t)
+        }
+    }
+
+    private fun initialLaunchOptions(
+        sourceWidth: Int,
+        sourceHeight: Int,
+        context: Context?,
+    ): android.os.Bundle? {
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+        val packageManager = context.packageManager
+        val freeform = packageManager.hasSystemFeature("android.software.freeform_window_management")
+        val pip = packageManager.hasSystemFeature("android.software.picture_in_picture")
+        if (!freeform && !pip) return null
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val metrics = context.getSystemService(android.view.WindowManager::class.java)
+                ?.currentWindowMetrics ?: return null
+            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+                android.view.WindowInsets.Type.systemBars(),
+            )
+            val bounds = metrics.bounds
+            DisplayGeometry(
+                bounds.width(), bounds.height(), bounds.left, bounds.top,
+                insets.left, insets.top, insets.right, insets.bottom,
+            )
+        } else {
+            val metrics = context.resources.displayMetrics
+            DisplayGeometry(metrics.widthPixels, metrics.heightPixels, 0, 0, 0, 0, 0, 0)
+        }
+        val bounds = initialStreamWindowBounds(
+            sourceWidth,
+            sourceHeight,
+            display.width,
+            display.height,
+            display.leftInset,
+            display.topInset,
+            display.rightInset,
+            display.bottomInset,
+        ) ?: return null
+        val rect = Rect(
+            display.left + bounds.left,
+            display.top + bounds.top,
+            display.left + bounds.right,
+            display.top + bounds.bottom,
+        )
+        return ActivityOptions.makeBasic().setLaunchBounds(rect).toBundle()
+    }
+
+    private data class DisplayGeometry(
+        val width: Int,
+        val height: Int,
+        val left: Int,
+        val top: Int,
+        val leftInset: Int,
+        val topInset: Int,
+        val rightInset: Int,
+        val bottomInset: Int,
+    )
+
+    private data class StreamOwnership(val host: String, val port: Int, val generation: Long)
 }

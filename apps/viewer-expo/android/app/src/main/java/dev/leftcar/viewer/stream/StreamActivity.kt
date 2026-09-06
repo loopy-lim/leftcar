@@ -17,8 +17,16 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.View
 import dev.leftcar.viewer.shim.ViewerNative
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import androidx.xr.runtime.Session
+import androidx.xr.runtime.SessionCreateSuccess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
 
-class StreamActivity : Activity(), SurfaceHolder.Callback {
+class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
         private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
@@ -55,6 +63,49 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
+    private var xrSession: Session? = null
+    private var xrPreferredRatio: Float? = null
+    private var ownershipGeneration: Long = 0L
+    private var xrRatioGeneration = 0L
+    private var xrCreationInFlight: Job? = null
+
+    private fun applyXrPreferredAspectRatio(force: Boolean = false) {
+        if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
+        val ratio = sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
+        if (!force && xrPreferredRatio == ratio) return
+        val generation = ++xrRatioGeneration
+        val existing = xrSession
+        if (existing != null) {
+            runCatching { setXrRatio(existing, ratio) }
+                .onSuccess { xrPreferredRatio = ratio }
+                .onFailure { android.util.Log.i("LeftcarStream", "XR preferred ratio unavailable; keeping system panel size", it) }
+            return
+        }
+        if (xrCreationInFlight?.isActive == true) return
+        xrCreationInFlight = lifecycleScope.launch {
+            val created = runCatching {
+                withContext(Dispatchers.IO) {
+                    Session.create(this@StreamActivity, Dispatchers.Default, this@StreamActivity)
+                }
+            }.onFailure {
+                android.util.Log.i("LeftcarStream", "XR session unavailable; using normal Android window", it)
+            }.getOrNull() as? SessionCreateSuccess ?: return@launch
+            xrSession = created.session
+            if (generation != xrRatioGeneration) {
+                applyXrPreferredAspectRatio(force = true)
+                return@launch
+            }
+            runCatching { setXrRatio(created.session, ratio) }
+                .onSuccess { xrPreferredRatio = ratio }
+                .onFailure { android.util.Log.i("LeftcarStream", "XR preferred ratio rejected; keeping system panel size", it) }
+        }
+    }
+
+    private fun setXrRatio(session: Session, ratio: Float) {
+        // Keep the XR path optional at runtime: the AndroidX API is present in
+        // the APK, while non-XR devices simply never create a Session.
+        SpatialWindowBridge.setPreferredAspectRatio(session, this, ratio)
+    }
 
     /**
      * Both Host notices and local renderer watchdogs close the stale Surface.
@@ -238,7 +289,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
      * 화면 오른쪽 위 입력 배지처럼 커서도 스트림 창 밖 팝업 윈도우로 띄운다 —
      * 스트림 SurfaceView가 setZOrderOnTop으로 합성돼 창 안 어떤 뷰도 비디오 위를
      * 그릴 수 없다. attach·재바인드마다 LCDON을 보내 새 호스트 세션에 옵트인을
-     * 다시 알리고, 세션 종료는 BYE가 맡으므로 LCDOFF는 보내지 않는다.
+     * 다시 알린다. 사용자가 오버레이를 끄면 LCDOFF를 즉시 보내고, 세션 종료는
+     * BYE가 최종 정리를 맡는다.
      */
     private fun enableCursorOverlay() {
         if (!localCursorEnabled) return
@@ -251,7 +303,6 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun disableCursorOverlay() {
-        if (cursorOverlay == null) return
         ViewerNative.setCursorStream(instanceId, false)
         cursorOverlay?.stop()
         cursorOverlay = null
@@ -269,11 +320,26 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun normalizedX(event: MotionEvent, view: View): Float =
-        streamSurfaces?.normalizedX(event.x, view)
-            ?: (event.x / view.width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+        mapAspectFitPoint(
+            event.x,
+            event.y,
+            view.width,
+            view.height,
+            if (streamSurfaces?.right != null) sourceWidth / 2 else sourceWidth,
+            sourceHeight,
+        ).first.let { x ->
+            if (streamSurfaces?.right != null && view === streamSurfaces?.right) 0.5f + x * 0.5f else x * if (streamSurfaces?.right != null) 0.5f else 1f
+        }
 
     private fun normalizedY(event: MotionEvent, view: View): Float =
-        (event.y / view.height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+        mapAspectFitPoint(
+            event.x,
+            event.y,
+            view.width,
+            view.height,
+            if (streamSurfaces?.right != null) sourceWidth / 2 else sourceWidth,
+            sourceHeight,
+        ).second
 
     private fun hideTabletCursor() {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
@@ -397,6 +463,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         fps = (intent?.getIntExtra("fps", 60) ?: 60).coerceIn(1, 90)
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
+        ownershipGeneration = intent?.getLongExtra("ownershipGeneration", 0L) ?: 0L
 
         splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
         splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
@@ -444,6 +511,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
         lifecycleEvent(1) // ACTIVITY_CREATE
+        applyXrPreferredAspectRatio(force = true)
     }
 
     override fun onNewIntent(newIntent: Intent) {
@@ -457,6 +525,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
+        val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
+        val cursorOnly = nextLocalCursor != localCursorEnabled &&
+            nextHost == host && nextPort == port && nextFps == fps &&
+            nextWidth == sourceWidth && nextHeight == sourceHeight &&
+            nextSplitVertical == splitVertical && nextShowFps == showFps
         val streamConfigurationChanged =
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight ||
@@ -464,6 +537,14 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
                 nextLocalCursor != localCursorEnabled
 
         setIntent(newIntent)
+        if (newIntent.hasExtra("ownershipGeneration")) {
+            ownershipGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
+        }
+        if (cursorOnly) {
+            localCursorEnabled = nextLocalCursor
+            if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
+            return
+        }
         if (streamConfigurationChanged || reconnectRequested) {
             host = nextHost
             port = nextPort
@@ -474,6 +555,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
             sourceHeight = nextHeight
             splitVertical = nextSplitVertical
             splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
+            streamSurfaces?.updateVideoSize(sourceWidth, sourceHeight)
+            if (sourceRatioChanged) {
+                xrPreferredRatio = null
+                applyXrPreferredAspectRatio(force = true)
+            }
             if (!localCursorEnabled) disableCursorOverlay()
             if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {
                 val result = rebindOnSameSurface()
@@ -643,13 +729,29 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         lifecycleEvent(8) // SURFACE_DESTROY
         hideTabletCursor()
         ViewerNative.releaseInput(instanceId)
+        // Desktop-mode Back can destroy the Surface before onDestroy. Split
+        // detach intentionally stops silently for resize/rebind, so on a
+        // final Activity finish release the renderer here while its peer and
+        // authentication token are still available; otherwise the later
+        // onDestroy release has no active renderer left to send BYE.
+        val finalActivity = isFinishing
         val res = if (surfaceAttached) {
             surfaceAttached = false
-            ViewerNative.detachSurface(nativeState, instanceId)
+            if (finalActivity && !released) {
+                released = true
+                ViewerNative.release(nativeState, instanceId)
+                0
+            } else {
+                ViewerNative.detachSurface(nativeState, instanceId)
+            }
         } else {
             0
         }
-        android.util.Log.i("LeftcarStream", "detachSurface returned $res; waiting for Surface recreation")
+        android.util.Log.i(
+            "LeftcarStream",
+            "${if (finalActivity) "final release" else "detachSurface"} returned $res; " +
+                "waiting for Surface recreation",
+        )
     }
 
     override fun onPause() {
@@ -691,6 +793,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback {
         releaseNetworkLocks()
         ViewerNative.releaseInput(instanceId)
         ViewerNative.release(nativeState, instanceId)
+        StreamLauncherModule.forgetStream(instanceId, ownershipGeneration)
         super.onDestroy()
     }
 }

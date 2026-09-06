@@ -40,6 +40,11 @@
         android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
         android:resource="@xml/accessory_filter" />
     </activity>
-    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths"/>
+    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths">
+      <!-- Android XR uses the managed home-space 2D panel; the system owns
+           spatial placement while ActivityOptions supplies an initial ratio
+           where the window manager supports launch bounds. -->
+      <property android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE" android:value="XR_ACTIVITY_START_MODE_HOME_SPACE" />
+    </activity>
   </application>
 </manifest>

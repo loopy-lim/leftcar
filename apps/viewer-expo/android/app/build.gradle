@@ -166,6 +166,13 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
     testImplementation("junit:junit:4.13.2")
+    // Jetpack XR Home Space panel sizing; the Activity gates runtime use to XR devices.
+    implementation("androidx.xr.runtime:runtime:1.0.0-beta02")
+    implementation("androidx.xr.scenecore:scenecore:1.0.0-beta02")
+    // Android XR supplies these extension APIs on-device. The official
+    // minified-build setup requires compileOnly so R8 can resolve SceneCore
+    // references without packaging platform classes into the APK.
+    compileOnly("com.android.extensions.xr:extensions-xr:1.3.0")
 
     def isGifEnabled = (findProperty('expo.gif.enabled') ?: "") == "true";
     def isWebpEnabled = (findProperty('expo.webp.enabled') ?: "") == "true";

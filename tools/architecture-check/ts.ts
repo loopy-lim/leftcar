@@ -88,6 +88,22 @@ for (const folder of [
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
 const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
 const JUNIT_IMPORT = /^import org\.junit\./;
+const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
+  "import kotlinx.coroutines.Dispatchers",
+  "import kotlinx.coroutines.Job",
+  "import kotlinx.coroutines.launch",
+  "import kotlinx.coroutines.withContext",
+]);
+
+function isStreamActivityXrCoroutineImport(file: string, line: string): boolean {
+  const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
+  // Session.create is asynchronous and lifecycle-bound. Keep this exception
+  // restricted to the XR Activity boundary and the four scheduling primitives
+  // it needs; network, decoder, and adaptation policy remain in native Rust.
+  return projectRelativePath ===
+      "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamActivity.kt" &&
+    STREAM_ACTIVITY_XR_COROUTINE_IMPORTS.has(line);
+}
 
 function isAndroidJvmUnitTestSource(file: string, androidProjectRoot: string): boolean {
   const projectRelativePath = relative(androidProjectRoot, file).replaceAll("\\", "/");
@@ -101,7 +117,8 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
     for (const line of text.split("\n")) {
       const m = line.match(/^import\s+(.+)$/);
       const allowsJvmUnitTestJUnit = isAndroidJvmUnitTestSource(file, folder) && JUNIT_IMPORT.test(line);
-      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestJUnit) {
+      const allowsStreamActivityXrCoroutine = isStreamActivityXrCoroutineImport(file, line);
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestJUnit && !allowsStreamActivityXrCoroutine) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,

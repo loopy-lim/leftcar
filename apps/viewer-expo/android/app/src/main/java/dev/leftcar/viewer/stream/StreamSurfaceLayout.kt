@@ -15,7 +15,12 @@ internal data class StreamSurfaces(
     val root: View,
     val left: SurfaceView,
     val right: SurfaceView?,
+    private val videoSizeUpdater: (Int, Int) -> Unit = { _, _ -> },
 ) {
+    fun updateVideoSize(width: Int, height: Int) {
+        videoSizeUpdater(width, height)
+        root.requestLayout()
+    }
     val holders: List<SurfaceHolder>
         get() = listOfNotNull(left.holder, right?.holder)
 
@@ -74,7 +79,7 @@ internal fun createStreamSurfaces(
                 ),
             )
         }
-        return StreamSurfaces(root, left, null)
+        return StreamSurfaces(root, left, null) { width, height -> left.setVideoSize(width, height) }
     }
 
     val left = surface()
@@ -108,7 +113,7 @@ internal fun createStreamSurfaces(
             ),
         )
     }
-    return StreamSurfaces(root, left, right)
+    return StreamSurfaces(root, left, right) { width, height -> content.setVideoSize(width, height) }
 }
 
 private fun configureSurface(
