@@ -1,6 +1,7 @@
 # 뷰어 주도 화면 크기 검증 기록
 
-작성일: 2026-09-06. 상태: 코드·자동 검사 완료, 실기 검증(태블릿·Galaxy XR) 미수행.
+작성일: 2026-09-06. 실기 측정: 2026-09-06 (Lenovo TB710FU).
+상태: 코드·자동 검사 완료. 태블릿 자동 매칭·스트림 실측 완료, Galaxy XR·cgvd-shim RESIZE·BetterDisplay 미수행.
 설계: docs/plans/2026-09-06-viewer-display-sizing-design.md (사용자 승인 2026-09-06)
 계획: docs/plans/2026-09-06-viewer-display-sizing.md
 
@@ -46,10 +47,13 @@
 
 ## 미검증 항목 (실기 필요 — 완료 처리하지 않음)
 
-태블릿(Lenovo USB/무선) 연결:
-- [ ] 연결 시 시작 요청의 viewerDisplay 메트릭 실측(물리 px/densityDpi)과 자동 매칭 결과
-      (예: 2800×1752 → 논리 1400×876 scale 2) 확인
+태블릿(Lenovo TB710FU, 192.168.0.19) — 실기 측정 2026-09-06:
+- [x] 연결 시 시작 요청의 viewerDisplay 메트릭 실측과 자동 매칭 결과 확인
+      — 가로 3200×2000, density 400 → 자동 매칭 1600×1000@2x. 승인 공식(물리 ÷ 2,
+      scale 2)과 정확히 일치. 카탈로그에 내장 디스플레이만 있어(1개) LogOnly 분기,
+      관리 화면 생성은 호스트 UI 전용으로 남음 (호스트 stdout 9행).
 - [ ] 관리 화면 재사용/리사이즈 경로가 실제 CGVD 화면에서 도달하는지
+      — 관리 화면이 존재하지 않아 경로 미도달 (측정된 실제 결과, 검증 아님)
 - [ ] 크기 카드에서 프리셋 전환 시 스트림 재시작 없이 해상도 전환되는지와 전환 지연
 - [ ] 직접 입력 범위(640×480~4096×4096) 외 값의 오류 표시와 기존 크기 유지
 - [ ] 180초/10분 관점의 전환 후 안정성(프레임 복구 포함)
@@ -69,3 +73,32 @@ cgvd-shim RESIZE (GUI 세션 필요):
 
 BetterDisplay:
 - [ ] 리사이즈 시도 시 안내 에러 노출 확인 (호스트 UI 연결은 후속)
+
+## 실기 측정 결과 (2026-09-06, Lenovo TB710FU)
+
+- 뷰어 연결: 태블릿 192.168.0.19 → 호스트 192.168.0.134 (제어 :7777, 미디어 :5001).
+  화면 선택 UI에 연결된 컴퓨터·Display 0·3840×2160·60 FPS·"동영상 우선" 표시 확인.
+- 자동 매칭: 시작 요청의 viewerDisplay(3200×2000, density 400) → 1600×1000@2x 매칭.
+  관리 화면 부재로 LogOnly 분기 (stdout: "viewer display match: no managed display to
+  prepare … matched size 1600x1000@2x logged only"). 카탈로그 warm: 1 display(s).
+- 스트림: stderr `Leftcar first capture frame 192.168.0.19:5001: 3840x2160` (23:52:57),
+  `first split media pair sent … bytes=345361`, route=split, split recovery pairs
+  (bytes=243682/466170/442400/235896). H264 적응 비트레이트 48M→38.4M→30.7M→24.6M→
+  19.7M→15.7M→14M 하한 도달 후 회복(15.7M/18.2M), congested=true 구간 정상 동작,
+  14M 하한에서 resolution fallback 요청 반복.
+- 뷰어 화면 전환: `topResumedActivity=…leftcar.ll3.kr/dev.leftcar.viewer.stream.StreamActivity
+  t46` 확인 (2회, 안정). best-effort 정책대로 스트림은 정상 시작.
+- 스크린샷 /tmp/lc_stream.png(3200×2000)은 캡처 성공했으나 Mac이 GUI 세션 밖 상태라
+  데스크톱 콘텐츠 육안 확인은 불가 — 프레임 송수신은 호스트 로그로 입증.
+
+## 알려진 이슈
+
+1. 호스트에 화면 녹화 권한 미부여 → "display catalog warmup deferred" 경고.
+   캡처는 shim dylib(libleftcar_capture.dylib)로 동작하므로 스트림에는 영향 없음.
+2. DMG 번들 실패: bundle_dmg.sh의 AppleScript Finder 장식 단계가 GUI 세션 밖
+   osascript 실행에서 실패 (자동화 셸은 GUI 세션 밖 — Aerospace 환경 특성).
+   .app 번들+서명(identity 3D28D078…)은 성공, 공증은 환경변수 미설정으로 skip.
+   오류: `failed to bundle project: error running bundle_dmg.sh: \`failed to run
+   …/bundle/dmg/bundle_dmg.sh\``
+3. AOAP `claim USB control interface failed: could not be opened for exclusive access`
+   노이즈 — 기존 존재, 본 검증과 무관.
