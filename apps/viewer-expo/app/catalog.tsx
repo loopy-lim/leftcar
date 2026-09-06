@@ -41,6 +41,7 @@ import {
 import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
 import { transportBadgeLabel } from "../src/transport-label";
+import { DisplaySizeCard } from "../src/DisplaySizeCard";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -570,14 +571,25 @@ function ActiveStreamItem({
 function CatalogFooter({
   streams,
   onStop,
+  resizingSession,
+  onResizeVirtualDisplay,
+  onResizeSession,
   styles,
+  colors,
 }: {
   streams: ActiveStream[];
   onStop: (stream: ActiveStream) => void;
+  resizingSession: number | null;
+  onResizeVirtualDisplay: React.ComponentProps<typeof DisplaySizeCard>["onResizeVirtualDisplay"];
+  onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
   styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
 }) {
   const { t } = useAppLanguage();
   if (streams.length === 0) return null;
+  // The card drives the first active stream; multi-stream sizing needs the
+  // host-side managed display listing (Task 8 이후 연결).
+  const primaryStream = streams[0];
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
@@ -589,6 +601,14 @@ function CatalogFooter({
       {streams.map((stream) => (
         <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} styles={styles} />
       ))}
+      <DisplaySizeCard
+        stream={primaryStream}
+        tabletMatch={null}
+        resizing={resizingSession === primaryStream.session}
+        onResizeVirtualDisplay={onResizeVirtualDisplay}
+        onResizeSession={onResizeSession}
+        colors={colors}
+      />
     </View>
   );
 }
@@ -657,7 +677,15 @@ export default function Catalog() {
         renderItem={renderDisplay}
         ListEmptyComponent={<EmptyDisplayList loading={model.loading} styles={styles} colors={colors} />}
         ListFooterComponent={
-          <CatalogFooter streams={model.streams} onStop={model.stopStream} styles={styles} />
+          <CatalogFooter
+            streams={model.streams}
+            onStop={model.stopStream}
+            resizingSession={model.resizingSession}
+            onResizeVirtualDisplay={model.handleResizeVirtualDisplay}
+            onResizeSession={model.handleResizeSession}
+            styles={styles}
+            colors={colors}
+          />
         }
       />
     </SafeAreaView>

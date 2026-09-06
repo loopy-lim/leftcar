@@ -145,6 +145,28 @@ export interface ReconfigureStreamOutput {
   qualityState: AdaptiveQualityState;
 }
 
+/** Viewer → Host: resize a managed virtual display (control-contract host.rs). */
+export interface ResizeVirtualDisplayInput {
+  /** Managed virtual display id (host DisplayManager record id). */
+  id: string;
+  /** Logical (point) width — even aligned. */
+  width: number;
+  /** Logical (point) height — even aligned. */
+  height: number;
+  /** HiDPI multiplier (1 or 2); backing buffer = logical × scale. */
+  scale: number;
+}
+
+/** Host → Viewer: accepted resize with the observed logical and backing sizes. */
+export interface ResizeVirtualDisplayOutput {
+  id: string;
+  logicalWidth: number;
+  logicalHeight: number;
+  scale: number;
+  backingWidth: number;
+  backingHeight: number;
+}
+
 export interface ControlClient {
   request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T>;
   close(): void;

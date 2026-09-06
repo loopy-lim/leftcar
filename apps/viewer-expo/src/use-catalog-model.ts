@@ -45,6 +45,10 @@ import {
   isHubDisplay,
   requestWithReconnect,
 } from "./catalog-helpers";
+import { streamTargetAfterVirtualResize } from "./display-resize";
+import type {
+  ResizeVirtualDisplayOutput,
+} from "./control";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
   fallbackTargetFor,
@@ -78,6 +82,7 @@ async function readViewerDisplayMetrics(
 export function useCatalogModel() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
+  const [resizingSession, setResizingSession] = useState<number | null>(null);
   const [preferences, setPreferences] = useState<ViewerPreferences>(
     DEFAULT_VIEWER_PREFERENCES,
   );
@@ -275,8 +280,14 @@ export function useCatalogModel() {
     [mediaHost],
   );
 
-  const { addStream, applyUdpStability, removeStream, streams, updateLocalCursor } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streams, updateLocalCursor } =
     useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
+  const replaceStreamState = useCallback(
+    (next: ActiveStream) => {
+      patchStream(next.session, () => next);
+    },
+    [patchStream],
+  );
 
   const handleRefresh = useCallback(() => {
     setError(null);
@@ -433,6 +444,78 @@ export function useCatalogModel() {
     [removeStream],
   );
 
+  /**
+   * Resize a managed virtual display, then move the session onto the new
+   * logical size through the existing reconfigure path.
+   *
+   * ID mapping note (Task 8 이후 연결): the viewer has no way to enumerate the
+   * host's managed virtual displays yet — the host-side listing lands with the
+   * Task 6/8 follow-up. Until then the model only exposes this id-taking
+   * function; the card wires a real id once a host-side list query exists.
+   * `handleResizeSession` below covers the interim "change the session size
+   * only" path.
+   */
+  const handleResizeVirtualDisplay = useCallback(
+    async (
+      active: ActiveStream,
+      virtualDisplayId: string,
+      width: number,
+      height: number,
+      scale: 1 | 2,
+      fps: number,
+    ): Promise<boolean> => {
+      setResizingSession(active.session);
+      try {
+        const output = await requestWithReconnect<ResizeVirtualDisplayOutput>(
+          "resizeVirtualDisplay",
+          { id: virtualDisplayId, width, height, scale },
+        );
+        const target = {
+          width: output.logicalWidth,
+          height: output.logicalHeight,
+          fps,
+        };
+        await reconfigureActiveStream(active, target, "native");
+        replaceStreamState(streamTargetAfterVirtualResize(active, target));
+        return true;
+      } catch (cause) {
+        // Keep the previous size on failure — the session stays untouched.
+        setError(`가상 화면 크기 변경에 실패했습니다: ${formatErrorMessage(cause)}`);
+        return false;
+      } finally {
+        setResizingSession(null);
+      }
+    },
+    [reconfigureActiveStream, replaceStreamState],
+  );
+
+  /**
+   * Interim path without a managed-display id: reconfigure the session
+   * resolution only (no host-side virtual display change).
+   */
+  const handleResizeSession = useCallback(
+    async (
+      active: ActiveStream,
+      width: number,
+      height: number,
+      fps: number,
+    ): Promise<boolean> => {
+      setResizingSession(active.session);
+      try {
+        const target = { width, height, fps };
+        await reconfigureActiveStream(active, target, "native");
+        replaceStreamState(streamTargetAfterVirtualResize(active, target));
+        return true;
+      } catch (cause) {
+        setError(`화면 해상도 전환에 실패했습니다: ${formatErrorMessage(cause)}`);
+        return false;
+      } finally {
+        setResizingSession(null);
+      }
+    },
+    [reconfigureActiveStream, replaceStreamState],
+  );
+
   const visibleError = error
     ? error
     : catalogQuery.error
@@ -445,6 +528,8 @@ export function useCatalogModel() {
     effectiveUdpStability,
     handleApplyUdpStability,
     handleRefresh,
+    handleResizeSession,
+    handleResizeVirtualDisplay,
     handleSelectEncoderExperiment,
     handleSelectProfile,
     handleSelectUdpStability,
@@ -466,5 +551,6 @@ export function useCatalogModel() {
     profileId: preferences.profileId,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
+    resizingSession,
   };
 }

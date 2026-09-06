@@ -394,6 +394,10 @@ export function useStreamController(
   const updateLocalCursor = useCallback((localCursor: boolean) => {
     updateStreams((previous) => previous.map((stream) => ({ ...stream, localCursor })));
   }, [updateStreams]);
+  /** In-place state patch for one session (e.g. a user-driven resolution change). */
+  const patchStream = useCallback((session: number, patch: (active: ActiveStream) => ActiveStream) => {
+    updateStreams((previous) => previous.map((stream) => (stream.session === session ? patch(stream) : stream)));
+  }, [updateStreams]);
   const applyUdpStability = useCallback(
     async (udpStability: UdpStabilitySelection) => {
       const activeStreams = [...streamsRef.current];
@@ -430,5 +434,5 @@ export function useStreamController(
     [endUnownedRestart, host, queryClient, restoreStream, setError, updateStreams],
   );
 
-  return { addStream, applyUdpStability, removeStream, streams, updateLocalCursor };
+  return { addStream, applyUdpStability, patchStream, removeStream, streams, updateLocalCursor };
 }
