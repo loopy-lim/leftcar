@@ -583,6 +583,64 @@ impl DisplayManager {
         }
         Ok(view)
     }
+    /// Switches a managed display to a new mode without releasing ownership.
+    /// The rect origin is preserved (only the size follows the new logical
+    /// mode) and every mutation of the record happens strictly after the
+    /// engine confirms the new mode — a failed resize leaves the old record
+    /// untouched.
+    pub fn resize(
+        &self,
+        id: &str,
+        width: u32,
+        height: u32,
+        scale: u8,
+    ) -> Result<ManagedDisplayView, String> {
+        crate::virtual_display::validate_dimensions(width, height)?;
+        crate::virtual_display::validate_scale(scale)?;
+        let mut g = self.registry.lock().map_err(|e| e.to_string())?;
+        let entry = g
+            .displays
+            .get(id)
+            .ok_or_else(|| "관리 중인 디스플레이를 찾을 수 없습니다.".to_string())?;
+        let rect = DisplayRect {
+            x: entry.record.rect.x,
+            y: entry.record.rect.y,
+            width,
+            height,
+        };
+        let mode = entry
+            .provider
+            .resize(&entry.display, width, height, scale)
+            .map_err(|e| e.message())?;
+        place_display(
+            entry.provider.as_ref(),
+            &entry.display,
+            entry.record.betterdisplay_uuid.as_deref(),
+            rect,
+        )
+        .map_err(|e| format!("리사이즈 후 위치 유지에 실패했습니다: {e}"))?;
+        let view = ManagedDisplayView {
+            id: entry.record.view.id.clone(),
+            name: entry.record.view.name.clone(),
+            logical_width: mode.logical_width,
+            logical_height: mode.logical_height,
+            scale,
+            backing_width: mode.pixel_width,
+            backing_height: mode.pixel_height,
+            position: entry.record.view.position,
+            provider_kind: entry.record.view.provider_kind.clone(),
+            verified: true,
+        };
+        let entry = g.displays.get_mut(id).expect("checked above");
+        entry.record.view = view.clone();
+        entry.record.rect = rect;
+        if let Err(error) = self.persist(&g) {
+            return Err(format!(
+                "리사이즈는 적용됐지만 영속 소유권 저장에 실패했습니다: {error}"
+            ));
+        }
+        Ok(view)
+    }
     pub fn cleanup_all(&self) -> Vec<String> {
         let mut g = self.registry.lock().expect("display registry poisoned");
         let ids: Vec<_> = g.displays.keys().cloned().collect();
@@ -891,6 +949,257 @@ mod tests {
         assert!(!manager.list()[0].verified);
         let _ = std::fs::remove_file(path);
     }
+    struct ResizeOk;
+    impl VirtualDisplayProvider for ResizeOk {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn create(
+            &self,
+            _: &DisplaySpec,
+        ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn place(
+            &self,
+            _: &VirtualDisplay,
+            _: i32,
+            _: i32,
+        ) -> Result<(), crate::provider::ProviderError> {
+            Ok(())
+        }
+        fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn resize(
+            &self,
+            _: &VirtualDisplay,
+            width: u32,
+            height: u32,
+            scale: u8,
+        ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError> {
+            Ok(crate::provider::ResizedDisplayMode {
+                logical_width: width,
+                logical_height: height,
+                pixel_width: width * u32::from(scale),
+                pixel_height: height * u32::from(scale),
+            })
+        }
+    }
+    struct ResizeFails;
+    impl VirtualDisplayProvider for ResizeFails {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn create(
+            &self,
+            _: &DisplaySpec,
+        ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn resize(
+            &self,
+            _: &VirtualDisplay,
+            _: u32,
+            _: u32,
+            _: u8,
+        ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError> {
+            Err(crate::provider::ProviderError::EngineFailed(
+                "injected resize failure".into(),
+            ))
+        }
+    }
+    struct ResizePanics;
+    impl VirtualDisplayProvider for ResizePanics {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn create(
+            &self,
+            _: &DisplaySpec,
+        ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
+            unreachable!()
+        }
+        fn resize(
+            &self,
+            _: &VirtualDisplay,
+            _: u32,
+            _: u32,
+            _: u8,
+        ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError> {
+            // Validation must reject before the provider is ever consulted.
+            panic!("resize must not reach the provider for invalid input")
+        }
+    }
+    /// A managed 1600x1000@2x record (rect 1920,0) backed by the given provider.
+    fn resize_fixture(id: &str, provider: Arc<dyn VirtualDisplayProvider>) -> DisplayManager {
+        let mut record = test_record(id);
+        record.view.logical_width = 1600;
+        record.view.logical_height = 1000;
+        record.view.provider_kind = provider.name().into();
+        record.view.verified = true;
+        DisplayManager {
+            registry: Arc::new(Mutex::new(Registry {
+                displays: HashMap::from([(
+                    id.to_string(),
+                    ManagedDisplay {
+                        display: VirtualDisplay {
+                            name: record.view.name.clone(),
+                            cgvd_display_id: None,
+                        },
+                        record,
+                        provider,
+                    },
+                )]),
+            })),
+            state_path: None,
+        }
+    }
+    #[test]
+    fn resize_updates_record_and_preserves_position() {
+        let manager = resize_fixture("r1", Arc::new(ResizeOk));
+        let view = manager.resize("r1", 1280, 800, 1).unwrap();
+        assert_eq!((view.logical_width, view.logical_height), (1280, 800));
+        assert_eq!(view.scale, 1);
+        assert_eq!((view.backing_width, view.backing_height), (1280, 800));
+        assert!(view.verified);
+        assert_eq!(view.id, "r1");
+        assert_eq!(view.position, DisplayPosition::Right);
+        let g = manager.registry.lock().unwrap();
+        let entry = g.displays.get("r1").expect("record kept");
+        // 위치(원점)는 그대로, rect 크기만 새 논리 크기로 따라간다.
+        assert_eq!((entry.record.rect.x, entry.record.rect.y), (1920, 0));
+        assert_eq!(
+            (entry.record.rect.width, entry.record.rect.height),
+            (1280, 800)
+        );
+        assert_eq!(entry.record.view.name, test_record("r1").view.name);
+        assert_eq!(entry.record.view.provider_kind, "fake");
+    }
+    #[test]
+    fn resize_unknown_id_is_rejected() {
+        let manager = resize_fixture("r1", Arc::new(ResizeOk));
+        assert!(manager.resize("missing", 1280, 800, 1).is_err());
+    }
+    #[test]
+    fn resize_validates_before_touching_the_provider() {
+        let manager = resize_fixture("r1", Arc::new(ResizePanics));
+        assert!(manager.resize("r1", 1280, 800, 3).is_err());
+        assert!(manager.resize("r1", 640, 480, 1).is_err());
+        assert!(manager.resize("r1", 0, 800, 1).is_err());
+        let view = &manager.list()[0];
+        assert_eq!(
+            (
+                view.logical_width,
+                view.logical_height,
+                view.scale,
+                view.backing_width,
+                view.backing_height
+            ),
+            (1600, 1000, 2, 3200, 2000)
+        );
+    }
+    #[test]
+    fn resize_failure_keeps_previous_record() {
+        let manager = resize_fixture("r1", Arc::new(ResizeFails));
+        let error = manager.resize("r1", 1280, 800, 1).unwrap_err();
+        assert!(error.contains("injected resize failure"));
+        let view = &manager.list()[0];
+        assert_eq!(
+            (
+                view.logical_width,
+                view.logical_height,
+                view.scale,
+                view.backing_width,
+                view.backing_height,
+                view.verified
+            ),
+            (1600, 1000, 2, 3200, 2000, true)
+        );
+        let g = manager.registry.lock().unwrap();
+        let entry = g.displays.get("r1").expect("record kept");
+        assert_eq!(
+            (entry.record.rect.width, entry.record.rect.height),
+            (1600, 1000)
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn placement_failure_keeps_previous_record() {
+        struct PlaceFails;
+        impl VirtualDisplayProvider for PlaceFails {
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn create(
+                &self,
+                _: &DisplaySpec,
+            ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
+                unreachable!()
+            }
+            fn place(
+                &self,
+                _: &VirtualDisplay,
+                _: i32,
+                _: i32,
+            ) -> Result<(), crate::provider::ProviderError> {
+                Err(crate::provider::ProviderError::EngineFailed(
+                    "injected place failure".into(),
+                ))
+            }
+            fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
+                unreachable!()
+            }
+            fn resize(
+                &self,
+                _: &VirtualDisplay,
+                width: u32,
+                height: u32,
+                scale: u8,
+            ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError>
+            {
+                Ok(crate::provider::ResizedDisplayMode {
+                    logical_width: width,
+                    logical_height: height,
+                    pixel_width: width * u32::from(scale),
+                    pixel_height: height * u32::from(scale),
+                })
+            }
+        }
+        let manager = resize_fixture("r1", Arc::new(PlaceFails));
+        let error = manager.resize("r1", 1280, 800, 1).unwrap_err();
+        assert!(error.contains("위치 유지에 실패"));
+        let view = &manager.list()[0];
+        assert_eq!(
+            (view.logical_width, view.logical_height, view.scale),
+            (1600, 1000, 2)
+        );
+        let g = manager.registry.lock().unwrap();
+        let entry = g.displays.get("r1").expect("record kept");
+        assert_eq!(
+            (entry.record.rect.width, entry.record.rect.height),
+            (1600, 1000)
+        );
+    }
+
     #[cfg(target_os = "macos")]
     fn run_live_manager_smoke(
         provider: impl Fn() -> Arc<dyn VirtualDisplayProvider>,
