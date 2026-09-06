@@ -9,6 +9,7 @@ pub mod backend;
 pub mod clamshell_mode;
 pub mod control;
 pub mod display_management;
+pub mod display_matching;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
