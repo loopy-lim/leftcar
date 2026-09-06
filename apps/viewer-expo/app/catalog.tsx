@@ -574,6 +574,8 @@ function CatalogFooter({
   resizingSession,
   onResizeVirtualDisplay,
   onResizeSession,
+  windowRatio,
+  onSelectWindowRatio,
   styles,
   colors,
 }: {
@@ -582,6 +584,8 @@ function CatalogFooter({
   resizingSession: number | null;
   onResizeVirtualDisplay: React.ComponentProps<typeof DisplaySizeCard>["onResizeVirtualDisplay"];
   onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
+  windowRatio: React.ComponentProps<typeof DisplaySizeCard>["windowRatio"];
+  onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
 }) {
@@ -607,6 +611,8 @@ function CatalogFooter({
         resizing={resizingSession === primaryStream.session}
         onResizeVirtualDisplay={onResizeVirtualDisplay}
         onResizeSession={onResizeSession}
+        windowRatio={windowRatio}
+        onSelectWindowRatio={onSelectWindowRatio}
         colors={colors}
       />
     </View>
@@ -683,6 +689,8 @@ export default function Catalog() {
             resizingSession={model.resizingSession}
             onResizeVirtualDisplay={model.handleResizeVirtualDisplay}
             onResizeSession={model.handleResizeSession}
+            windowRatio={model.windowRatio}
+            onSelectWindowRatio={model.handleSelectWindowAspectRatio}
             styles={styles}
             colors={colors}
           />

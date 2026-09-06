@@ -18,6 +18,10 @@ import {
   type DisplayInfo,
 } from "./control";
 import {
+  WINDOW_ASPECT_RATIO_PRESETS,
+  type WindowAspectRatioPresetId,
+} from "./window-aspect-ratio";
+import {
   allocPort,
   controlClient,
   controlHost,
@@ -83,6 +87,8 @@ export function useCatalogModel() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [resizingSession, setResizingSession] = useState<number | null>(null);
+  const [windowRatio, setWindowRatio] =
+    useState<WindowAspectRatioPresetId | null>(null);
   const [preferences, setPreferences] = useState<ViewerPreferences>(
     DEFAULT_VIEWER_PREFERENCES,
   );
@@ -319,6 +325,30 @@ export function useCatalogModel() {
     [],
   );
 
+  /**
+   * XR 창 비율 프리셋 선택. 네이티브 setWindowAspectRatio가 활성
+   * StreamActivity에 비율을 전달하고, Mac 가상 화면 해상도는 그대로 둔다.
+   * XR이 아닌 기기에서는 네이티브 호출이 실패하므로 조용히 무시하고 선택을
+   * 되돌린다 — 카드는 어떤 기기에서도 비율 행을 노출한다.
+   */
+  const handleSelectWindowAspectRatio = useCallback(
+    (presetId: WindowAspectRatioPresetId) => {
+      const preset = WINDOW_ASPECT_RATIO_PRESETS.find((c) => c.id === presetId);
+      if (!preset) return;
+      const active = streams[0];
+      if (!launcher?.setWindowAspectRatio || !active) {
+        setWindowRatio(presetId);
+        return;
+      }
+      const previous = windowRatio;
+      setWindowRatio(presetId);
+      launcher
+        .setWindowAspectRatio(`src-${active.port}`, preset.ratio)
+        .catch(() => setWindowRatio(previous));
+    },
+    [streams, windowRatio],
+  );
+
   const handleSelectUdpStability = useCallback(
     (selection: UdpStabilitySelection) => {
       setUdpStability(selection);
@@ -533,6 +563,8 @@ export function useCatalogModel() {
     handleSelectEncoderExperiment,
     handleSelectProfile,
     handleSelectUdpStability,
+    handleSelectWindowAspectRatio,
+    windowRatio,
     host,
     launchingIndex,
     loading,

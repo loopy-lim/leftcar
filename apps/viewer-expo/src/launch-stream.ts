@@ -59,6 +59,12 @@ export interface StreamLauncher {
     encoderExperiment: EncoderExperimentId,
   ): Promise<void>;
   setCursorStream?(instanceId: string, enabled: boolean): Promise<void>;
+  /**
+   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. Mac 가상 화면 해상도는
+   * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
+   * 호출부는 best-effort로 이를 무시한다.
+   */
+  setWindowAspectRatio?(instanceId: string, ratio: number): Promise<void>;
 }
 
 export interface StartStreamArgs {

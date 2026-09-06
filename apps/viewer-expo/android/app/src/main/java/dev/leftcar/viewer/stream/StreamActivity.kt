@@ -30,6 +30,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
         private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
+        private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
     }
 
     private var instanceId: String = ""
@@ -65,13 +66,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var recoveryFallbackEmitted = false
     private var xrSession: Session? = null
     private var xrPreferredRatio: Float? = null
+    /**
+     * 사용자가 선택한 창 비율 오버라이드(0 = 미지정 → 소스 비율 사용).
+     * 멤버 변수로 유지되어 config-change/rotation에서 그대로 살아남고,
+     * 프로세스 사망 시에는 onSaveInstanceState로 복원된다.
+     */
+    private var xrWindowRatio: Float = 0f
     private var ownershipGeneration: Long = 0L
     private var xrRatioGeneration = 0L
     private var xrCreationInFlight: Job? = null
 
-    private fun applyXrPreferredAspectRatio(force: Boolean = false) {
+    private fun applyXrPreferredAspectRatio(force: Boolean = false, ratioOverride: Float? = null) {
         if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
-        val ratio = sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
+        val sourceRatio =
+            sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
+        val ratio = ratioOverride ?: sourceRatio
         if (!force && xrPreferredRatio == ratio) return
         val generation = ++xrRatioGeneration
         val existing = xrSession
@@ -92,7 +101,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }.getOrNull() as? SessionCreateSuccess ?: return@launch
             xrSession = created.session
             if (generation != xrRatioGeneration) {
-                applyXrPreferredAspectRatio(force = true)
+                // 생성 도중 더 새 비율 요청이 들어왔으면 최신 상태로 다시 적용.
+                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
                 return@launch
             }
             runCatching { setXrRatio(created.session, ratio) }
@@ -105,6 +115,18 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Keep the XR path optional at runtime: the AndroidX API is present in
         // the APK, while non-XR devices simply never create a Session.
         SpatialWindowBridge.setPreferredAspectRatio(session, this, ratio)
+    }
+
+    /**
+     * 런타임 비율 프리셋 적용 진입점. 활성 Session이 있으면 즉시
+     * setPreferredAspectRatio를 다시 호출하고, 없으면 값을 저장해 다음 Session
+     * 생성 시 사용한다. applyXrPreferredAspectRatio가 아직 XR 기기 검사를
+     * 수행하므로 비 XR 기기에서는 no-op으로 끝난다.
+     */
+    fun applyWindowAspectRatio(ratio: Float) {
+        xrWindowRatio = normalizedAspectRatio(sourceWidth, sourceHeight, ratio)
+        if (xrWindowRatio == xrPreferredRatio) return
+        applyXrPreferredAspectRatio(ratioOverride = xrWindowRatio)
     }
 
     /**
@@ -464,6 +486,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
         ownershipGeneration = intent?.getLongExtra("ownershipGeneration", 0L) ?: 0L
+        // Process-death 이후에도 사용자가 고른 창 비율을 복원한다.
+        xrWindowRatio =
+            savedInstanceState?.getFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio) ?: xrWindowRatio
 
         splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
         splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
@@ -511,7 +536,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
         lifecycleEvent(1) // ACTIVITY_CREATE
-        applyXrPreferredAspectRatio(force = true)
+        applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
+    }
+
+    /** The user-chosen window ratio, when one differs from the source ratio. */
+    private fun requestedRatioOverride(): Float? =
+        xrWindowRatio.takeIf { it > 0f }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio)
     }
 
     override fun onNewIntent(newIntent: Intent) {
@@ -526,6 +560,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
+        val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
         val cursorOnly = nextLocalCursor != localCursorEnabled &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
@@ -539,6 +574,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         setIntent(newIntent)
         if (newIntent.hasExtra("ownershipGeneration")) {
             ownershipGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
+        }
+        if (ratioChangeRequested) {
+            // 비율 프리셋만 바꾸는 호출: 소스 해상도는 그대로 둔다. 값은
+            // 다음 setIntent 이전 스트림 재구성에도 유지된다.
+            applyWindowAspectRatio(newIntent.getFloatExtra(KEY_XR_WINDOW_RATIO, xrWindowRatio))
         }
         if (cursorOnly) {
             localCursorEnabled = nextLocalCursor
@@ -558,7 +598,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             streamSurfaces?.updateVideoSize(sourceWidth, sourceHeight)
             if (sourceRatioChanged) {
                 xrPreferredRatio = null
-                applyXrPreferredAspectRatio(force = true)
+                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
             }
             if (!localCursorEnabled) disableCursorOverlay()
             if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {

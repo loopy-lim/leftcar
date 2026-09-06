@@ -8,6 +8,10 @@ import {
   View,
 } from "react-native";
 import { displaySizePresets, normalizeCustomSize } from "./display-size";
+import {
+  WINDOW_ASPECT_RATIO_PRESETS,
+  type WindowAspectRatioPresetId,
+} from "./window-aspect-ratio";
 import type { ActiveStream } from "./catalog-model-types";
 import type { ThemeTokens } from "./theme";
 
@@ -40,6 +44,10 @@ export interface DisplaySizeCardProps {
     height: number,
     fps: number,
   ) => Promise<boolean>;
+  /** Currently applied XR window ratio preset id, when known. */
+  windowRatio?: WindowAspectRatioPresetId | null;
+  /** Selects an XR window ratio preset; failures are ignored upstream. */
+  onSelectWindowRatio?: (presetId: WindowAspectRatioPresetId) => void;
 }
 
 const MIN_WIDTH = 640;
@@ -117,6 +125,8 @@ export function DisplaySizeCard({
   colors,
   onResizeVirtualDisplay,
   onResizeSession,
+  windowRatio = null,
+  onSelectWindowRatio,
 }: DisplaySizeCardProps) {
   const [customWidth, setCustomWidth] = useState("");
   const [customHeight, setCustomHeight] = useState("");
@@ -252,6 +262,30 @@ export function DisplaySizeCard({
             />
           );
         })}
+      </View>
+
+      <View style={{ gap: 4 }}>
+        <Text
+          style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
+        >
+          화면 비율
+        </Text>
+        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
+          열린 창의 종횡비만 바꿉니다. 컴퓨터 화면 해상도는 그대로 유지됩니다.
+        </Text>
+        <View style={styles.presetRow}>
+          {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (
+            <PresetButton
+              key={preset.id}
+              label={preset.label}
+              detail={preset.ratio < 1 ? "세로" : "가로"}
+              active={windowRatio === preset.id}
+              disabled={resizing || !onSelectWindowRatio}
+              colors={colors}
+              onPress={() => onSelectWindowRatio?.(preset.id)}
+            />
+          ))}
+        </View>
       </View>
 
       <View style={styles.inputRow}>
