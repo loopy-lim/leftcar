@@ -6,6 +6,42 @@ import VideoToolbox
 @main
 struct EncodePolicyTests {
     static func main() {
+        let managedModeTestDisplayID = CGMainDisplayID()
+        precondition(registerManagedDisplayMode(
+            displayID: managedModeTestDisplayID,
+            generation: 1,
+            logicalWidth: 1600,
+            logicalHeight: 1000,
+            pixelWidth: 3200,
+            pixelHeight: 2000
+        ))
+        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000)
+            == NativePixelSize(width: 3200, height: 2000))
+        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1000, logicalHeight: 1600)
+            == NativePixelSize(width: 2000, height: 3200))
+        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 1)
+        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000) == nil)
+        precondition(registerManagedDisplayMode(
+            displayID: managedModeTestDisplayID,
+            generation: 2,
+            logicalWidth: 1920,
+            logicalHeight: 1200,
+            pixelWidth: 1920,
+            pixelHeight: 1200
+        ))
+        precondition(registerManagedDisplayMode(
+            displayID: managedModeTestDisplayID,
+            generation: 3,
+            logicalWidth: 1600,
+            logicalHeight: 1000,
+            pixelWidth: 3200,
+            pixelHeight: 2000
+        ))
+        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 2)
+        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000)
+            == NativePixelSize(width: 3200, height: 2000))
+        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 3)
+
         let overlappingDirtyRegions = dirtyRegionMotionSample(
             rects: [
                 CGRect(x: 0, y: 0, width: 50, height: 50),
@@ -187,6 +223,20 @@ struct EncodePolicyTests {
         precondition(ultraHdPolicy.qualityHint == 0.5)
         precondition(ultraHdPolicy.maximumRealTimeFrameRate == 60)
         precondition(encoderLatencyPolicy(width: 2_560, height: 1_440).qualityHint == nil)
+        let portraitUltraHdPolicy = encoderLatencyPolicy(width: 2_160, height: 3_840)
+        precondition(portraitUltraHdPolicy.maxEncodeInFlight == ultraHdPolicy.maxEncodeInFlight)
+        precondition(portraitUltraHdPolicy.qualityHint == ultraHdPolicy.qualityHint)
+        precondition(isUltraHdDimensions(width: 2_160, height: 3_840))
+        precondition(isUltraHdDimensions(width: 3_840, height: 2_160))
+        precondition(!isUltraHdDimensions(width: 2_560, height: 1_440))
+        precondition(
+            videoBitrateBounds(width: 2_160, height: 3_840, activeCount: 1)
+                == VideoBitrateBounds(minimum: 24_000_000, maximum: 80_000_000)
+        )
+        precondition(
+            videoBitrateBounds(width: 3_840, height: 2_160, activeCount: 1)
+                == videoBitrateBounds(width: 2_160, height: 3_840, activeCount: 1)
+        )
         precondition(
             encoderQualityPolicy(codec: .h264, width: 3_840, height: 2_160)
                 == EncoderQualityPolicy(initialHint: 0.5, supportsQualityProperty: true)

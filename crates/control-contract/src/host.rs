@@ -351,6 +351,10 @@ pub struct StatsInfo {
     pub first_send_ms: u64,
     pub current_bitrate: u32,
     #[serde(default)]
+    pub bitrate_floor_collapse_count: i64,
+    #[serde(default)]
+    pub bitrate_floor_collapse_last_reason: String,
+    #[serde(default)]
     pub encoder_mode: String,
     #[serde(default, rename = "encoderID")]
     pub encoder_id: String,
@@ -949,6 +953,10 @@ pub struct SessionView {
     pub first_send_ms: u64,
     pub current_bitrate: u32,
     #[serde(default)]
+    pub bitrate_floor_collapse_count: i64,
+    #[serde(default)]
+    pub bitrate_floor_collapse_last_reason: String,
+    #[serde(default)]
     pub encoder_mode: String,
     #[serde(default, rename = "encoderID")]
     pub encoder_id: String,
@@ -1436,6 +1444,8 @@ mod stream_control_tests {
             first_encode_ms: 25,
             first_send_ms: 26,
             current_bitrate: 12_000_000,
+            bitrate_floor_collapse_count: 7,
+            bitrate_floor_collapse_last_reason: "resolution_fallback_floor_reached".into(),
             encoder_mode: "ave".into(),
             encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
             encoder_hardware_accelerated: Some(true),
@@ -1500,5 +1510,9 @@ mod stream_control_tests {
         assert!(s.contains("\"encoderHardwareAccelerated\":true"));
         assert!(s.contains("\"encoderAppliedProperties\":[\"HighSpeed\",\"Quality\"]"));
         assert!(s.contains("\"encoderExperimentDiagnosticsAvailable\":true"));
+        assert!(s.contains("\"bitrateFloorCollapseCount\":7"));
+        assert!(
+            s.contains("\"bitrateFloorCollapseLastReason\":\"resolution_fallback_floor_reached\"")
+        );
     }
 }

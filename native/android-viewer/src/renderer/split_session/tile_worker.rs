@@ -116,7 +116,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
     let mut last_feedback = Instant::now();
     let fec_stats = stats.fec(side);
 
-    while !control.stop_requested() {
+    loop {
         while let Ok(command) = commands.try_recv() {
             match command {
                 TileCommand::PresentAt(output, target_ns, generation) => {
@@ -185,8 +185,30 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         send_authenticated(&socket, peer, COMMAND_IDR, &token);
                     }
                 }
-                TileCommand::Stop => break,
+                TileCommand::Stop { send_bye } => {
+                    if send_bye {
+                        if let Some(peer) = peer {
+                            send_authenticated(&socket, peer, b"BYE", &token);
+                            log_info!(
+                                "split {:?} sent stream close signal peer={} authenticated={}",
+                                side,
+                                peer,
+                                !token.is_empty()
+                            );
+                        } else {
+                            log_info!("split {:?} could not send stream close signal: no peer", side);
+                        }
+                    }
+                    break;
+                }
             }
+        }
+
+        // The coordinator sets the shared stop flag before enqueueing the
+        // final Stop command. Check it only after draining commands so the
+        // worker can still authenticate and send the one final BYE.
+        if control.stop_requested() {
+            break;
         }
 
         if wait_for_socket(&socket, 2) {
@@ -290,6 +312,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             }
                         } else if packet.starts_with(b"CFG") || packet.starts_with(b"CF2") {
                             if let Some(next_config) = viewer_decoder::parse_codec_config(packet) {
+                                sequencer.set_codec(next_config.codec);
                                 if next_config.requires_decoder_reset(config.as_ref()) {
                                     decoder = None;
                                     awaiting_keyframe = true;
@@ -393,6 +416,28 @@ fn tile_worker(launch: TileWorkerLaunch) {
                     }
                 }
             }
+        }
+
+        for frame in sequencer.drain_expired() {
+            process_frame(
+                side,
+                frame,
+                fps,
+                window,
+                &mut config,
+                &mut decoder,
+                &mut awaiting_keyframe,
+                &mut last_id,
+                &mut expanded_sequence,
+                &mut last_raw_sequence,
+                &mut frame_gaps,
+                &mut input_drops,
+                &mut input_pressure_started_ns,
+                &decoder_name,
+                &events,
+                &stats,
+                &control,
+            );
         }
 
         if let Some(decoder) = decoder.as_mut() {

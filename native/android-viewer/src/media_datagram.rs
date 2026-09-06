@@ -450,10 +450,20 @@ pub struct ReassembledFrame {
 /// Restores short cross-AU UDP reordering without becoming a playback queue.
 /// A genuinely missing frame is skipped after at most three completed AUs or
 /// eight milliseconds, whichever comes first.
-#[derive(Default)]
 pub struct CompletedFrameSequencer {
     last_delivered: Option<u16>,
     pending: HashMap<u16, (Instant, ReassembledFrame)>,
+    codec: viewer_decoder::VideoCodec,
+}
+
+impl Default for CompletedFrameSequencer {
+    fn default() -> Self {
+        Self {
+            last_delivered: None,
+            pending: HashMap::new(),
+            codec: viewer_decoder::VideoCodec::H264,
+        }
+    }
 }
 
 impl CompletedFrameSequencer {
@@ -462,14 +472,70 @@ impl CompletedFrameSequencer {
         self.pending.clear();
     }
 
+    pub fn establish_epoch(&mut self, last_delivered: u16) {
+        self.last_delivered = Some(last_delivered);
+        self.pending.clear();
+    }
+
+    pub fn set_codec(&mut self, codec: viewer_decoder::VideoCodec) {
+        self.codec = codec;
+    }
+
+    pub fn drain_expired(&mut self) -> Vec<ReassembledFrame> {
+        self.drain_expired_at(Instant::now())
+    }
+
+    fn drain_expired_at(&mut self, now: Instant) -> Vec<ReassembledFrame> {
+        // A cleared epoch is waiting for an independently decodable boundary.
+        // Never advance it from a delta merely because the reorder timer elapsed;
+        // that would make a slightly later recovery IDR look stale.
+        if self.last_delivered.is_none() {
+            return Vec::new();
+        }
+        let waited_long_enough = self
+            .pending
+            .values()
+            .any(|(received_at, _)| now.duration_since(*received_at) >= COMPLETION_REORDER_WAIT);
+        if !waited_long_enough {
+            return Vec::new();
+        }
+        self.drain_next_available()
+    }
+
     pub fn push(&mut self, frame: ReassembledFrame) -> Vec<ReassembledFrame> {
         self.push_at(frame, Instant::now())
     }
 
     fn push_at(&mut self, frame: ReassembledFrame, now: Instant) -> Vec<ReassembledFrame> {
         let Some(last) = self.last_delivered else {
-            self.last_delivered = Some(frame.id);
-            return vec![frame];
+            if is_random_access_au(&frame.au, self.codec) {
+                self.last_delivered = Some(frame.id);
+                let mut expected = frame.id.wrapping_add(1);
+                let mut contiguous = Vec::with_capacity(MAX_COMPLETED_REORDER);
+                while self.pending.contains_key(&expected) {
+                    contiguous.push(expected);
+                    expected = expected.wrapping_add(1);
+                }
+                self.pending.retain(|id, _| contiguous.contains(id));
+                let mut ready = vec![frame];
+                self.drain_contiguous(&mut ready);
+                return ready;
+            }
+            if !self.pending.contains_key(&frame.id) {
+                while self.pending.len() >= MAX_COMPLETED_REORDER {
+                    let Some(oldest) = self
+                        .pending
+                        .iter()
+                        .min_by_key(|(_, (received_at, _))| *received_at)
+                        .map(|(id, _)| *id)
+                    else {
+                        break;
+                    };
+                    self.pending.remove(&oldest);
+                }
+                self.pending.insert(frame.id, (now, frame));
+            }
+            return self.drain_expired_at(now);
         };
         let distance = frame.id.wrapping_sub(last);
         if distance == 0 || distance > i16::MAX as u16 {
@@ -491,20 +557,27 @@ impl CompletedFrameSequencer {
             return ready;
         }
 
-        let last = self.last_delivered.expect("initialized above");
-        let Some(next_id) = self
-            .pending
-            .keys()
-            .copied()
-            .min_by_key(|id| id.wrapping_sub(last))
-        else {
-            return ready;
+        self.drain_next_available()
+    }
+
+    fn drain_next_available(&mut self) -> Vec<ReassembledFrame> {
+        let next_id = match self.last_delivered {
+            Some(last) => self
+                .pending
+                .keys()
+                .copied()
+                .min_by_key(|id| id.wrapping_sub(last)),
+            None => self.pending.keys().copied().min(),
         };
-        if let Some((_, frame)) = self.pending.remove(&next_id) {
-            self.last_delivered = Some(frame.id);
-            ready.push(frame);
-            self.drain_contiguous(&mut ready);
-        }
+        let Some(next_id) = next_id else {
+            return Vec::new();
+        };
+        let Some((_, frame)) = self.pending.remove(&next_id) else {
+            return Vec::new();
+        };
+        self.last_delivered = Some(frame.id);
+        let mut ready = vec![frame];
+        self.drain_contiguous(&mut ready);
         ready
     }
 
@@ -521,6 +594,18 @@ impl CompletedFrameSequencer {
             ready.push(frame);
         }
     }
+}
+
+fn is_random_access_au(au: &[u8], codec: viewer_decoder::VideoCodec) -> bool {
+    viewer_decoder::split_annexb(au)
+        .iter()
+        .any(|nal| match codec {
+            viewer_decoder::VideoCodec::H264 => {
+                viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR)
+            }
+            viewer_decoder::VideoCodec::Hevc => viewer_decoder::hevc_nal_type(nal.bytes)
+                .is_some_and(|nal_type| matches!(nal_type, 19..=21)),
+        })
 }
 
 enum PartialPayload {
@@ -1213,6 +1298,7 @@ mod tests {
 
         let start = Instant::now();
         let mut sequencer = CompletedFrameSequencer::default();
+        sequencer.establish_epoch(9);
         assert_eq!(sequencer.push_at(frame(10), start)[0].id, 10);
         assert!(sequencer
             .push_at(frame(12), start + Duration::from_millis(1))
@@ -1238,6 +1324,7 @@ mod tests {
 
         let start = Instant::now();
         let mut sequencer = CompletedFrameSequencer::default();
+        sequencer.establish_epoch(9);
         assert_eq!(sequencer.push_at(frame(10), start)[0].id, 10);
         assert!(sequencer
             .push_at(frame(12), start + Duration::from_millis(1))
@@ -1266,6 +1353,7 @@ mod tests {
 
         let start = Instant::now();
         let mut sequencer = CompletedFrameSequencer::default();
+        sequencer.establish_epoch(19);
         assert_eq!(sequencer.push_at(frame(20), start)[0].id, 20);
         assert!(sequencer
             .push_at(frame(22), start + Duration::from_millis(1))
@@ -1275,6 +1363,135 @@ mod tests {
             ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
             [22, 23]
         );
+    }
+
+    #[test]
+    fn expires_a_lone_completed_frame_without_another_push() {
+        fn frame(id: u16) -> ReassembledFrame {
+            ReassembledFrame {
+                id,
+                capture_wall_ms: None,
+                encode_wall_ms: None,
+                send_wall_ms: 0,
+                au: vec![0, 0, 0, 1, 0x41],
+            }
+        }
+
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        sequencer.establish_epoch(40);
+        assert!(sequencer
+            .push_at(frame(42), start + Duration::from_millis(1))
+            .is_empty());
+        let ready = sequencer.drain_expired_at(start + Duration::from_millis(10));
+        assert_eq!(ready.iter().map(|frame| frame.id).collect::<Vec<_>>(), [42]);
+    }
+
+    #[test]
+    fn recovery_idr_arriving_after_delta_starts_the_new_epoch() {
+        fn frame(id: u16, nal: u8) -> ReassembledFrame {
+            ReassembledFrame {
+                id,
+                capture_wall_ms: None,
+                encode_wall_ms: None,
+                send_wall_ms: 0,
+                au: vec![0, 0, 0, 1, nal],
+            }
+        }
+
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        assert!(sequencer.push_at(frame(49, 0x41), start).is_empty());
+        assert!(sequencer
+            .push_at(frame(51, 0x41), start + Duration::from_millis(1))
+            .is_empty());
+        assert!(sequencer
+            .drain_expired_at(start + Duration::from_millis(10))
+            .is_empty());
+        let ready = sequencer.push_at(frame(50, 0x65), start + Duration::from_millis(12));
+        assert_eq!(
+            ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            [50, 51]
+        );
+        assert!(sequencer
+            .drain_expired_at(start + Duration::from_millis(20))
+            .is_empty());
+    }
+
+    #[test]
+    fn cleared_epoch_bounds_thousands_of_deltas_while_waiting_for_idr() {
+        fn delta(id: u16) -> ReassembledFrame {
+            ReassembledFrame {
+                id,
+                capture_wall_ms: None,
+                encode_wall_ms: None,
+                send_wall_ms: 0,
+                au: vec![0, 0, 0, 1, 0x41],
+            }
+        }
+
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        for id in 1..=1_000 {
+            assert!(sequencer
+                .push_at(delta(id), start + Duration::from_micros(u64::from(id)))
+                .is_empty());
+            assert!(sequencer.pending.len() <= MAX_COMPLETED_REORDER);
+        }
+        assert_eq!(sequencer.pending.len(), MAX_COMPLETED_REORDER);
+    }
+
+    #[test]
+    fn late_recovery_idr_discards_noncontiguous_deltas_across_wrap() {
+        fn frame(id: u16, nal: u8) -> ReassembledFrame {
+            ReassembledFrame {
+                id,
+                capture_wall_ms: None,
+                encode_wall_ms: None,
+                send_wall_ms: 0,
+                au: vec![0, 0, 0, 1, nal],
+            }
+        }
+
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        for (offset, id) in [8, 9, 10, u16::MAX, 0].into_iter().enumerate() {
+            assert!(sequencer
+                .push_at(
+                    frame(id, 0x41),
+                    start + Duration::from_micros(offset as u64)
+                )
+                .is_empty());
+        }
+        let ready = sequencer.push_at(frame(u16::MAX - 1, 0x65), start);
+        assert_eq!(
+            ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            [u16::MAX - 1, u16::MAX, 0]
+        );
+        assert!(sequencer.pending.is_empty());
+    }
+
+    #[test]
+    fn random_access_detection_is_codec_specific() {
+        let h264_pps_with_nri_one = [0, 0, 0, 1, 0x28, 0x01];
+        let h264_idr = [0, 0, 0, 1, 0x65, 0x01];
+        let hevc_idr = [0, 0, 0, 1, 0x28, 0x01];
+        assert!(!is_random_access_au(
+            &h264_pps_with_nri_one,
+            viewer_decoder::VideoCodec::H264
+        ));
+        assert!(is_random_access_au(
+            &h264_idr,
+            viewer_decoder::VideoCodec::H264
+        ));
+        assert!(is_random_access_au(
+            &hevc_idr,
+            viewer_decoder::VideoCodec::Hevc
+        ));
+        assert!(!is_random_access_au(
+            &h264_idr,
+            viewer_decoder::VideoCodec::Hevc
+        ));
     }
 
     #[test]

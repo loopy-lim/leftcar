@@ -35,7 +35,10 @@ export function createTerminationNotice(
   let detail = "연결된 기기 또는 컴퓨터의 요청으로 화면 공유를 마쳤습니다.";
   let tone: TerminationTone = "neutral";
 
-  if (normalized.includes("operator stopped")) {
+  if (normalized === "viewer closed stream") {
+    title = "연결된 기기에서 화면 공유를 종료했습니다";
+    detail = "연결된 기기에서 뒤로 가기 또는 닫기를 선택해 화면 공유를 마쳤습니다.";
+  } else if (normalized.includes("operator stopped")) {
     title = "컴퓨터에서 화면 공유를 종료했습니다";
     detail = "영상 전송과 원격 조작을 중지하고 연결된 기기에 종료 사실을 알렸습니다.";
   } else if (normalized.includes("feedback timeout") || normalized.includes("connection lost")) {

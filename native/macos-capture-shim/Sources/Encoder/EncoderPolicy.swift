@@ -42,6 +42,28 @@ struct EncoderQualityPolicy: Equatable {
     let supportsQualityProperty: Bool
 }
 
+struct VideoBitrateBounds: Equatable {
+    let minimum: Int
+    let maximum: Int
+}
+
+func isUltraHdDimensions(width: UInt32, height: UInt32) -> Bool {
+    max(width, height) >= 3_840 && min(width, height) >= 2_160
+}
+
+func videoBitrateBounds(width: UInt32, height: UInt32, activeCount: Int) -> VideoBitrateBounds {
+    if isUltraHdDimensions(width: width, height: height) {
+        return VideoBitrateBounds(
+            minimum: activeCount > 1 ? 18_000_000 : 24_000_000,
+            maximum: activeCount > 1 ? 56_000_000 : 80_000_000
+        )
+    }
+    return VideoBitrateBounds(
+        minimum: activeCount > 1 ? 7_000_000 : 8_000_000,
+        maximum: activeCount > 1 ? 20_000_000 : 28_000_000
+    )
+}
+
 enum EncoderExperiment: String, Equatable {
     case auto
     case rateControl
@@ -252,7 +274,7 @@ func encoderQualityPolicy(
     width: UInt32,
     height: UInt32
 ) -> EncoderQualityPolicy {
-    let isUltraHd = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    let isUltraHd = isUltraHdDimensions(width: width, height: height)
     guard isUltraHd, codec == .h264 || codec == .hevc else {
         return EncoderQualityPolicy(initialHint: nil, supportsQualityProperty: false)
     }
@@ -342,7 +364,7 @@ func encoderLatencyPolicy(
     height: UInt32,
     fps: UInt32 = 60
 ) -> EncoderLatencyPolicy {
-    let highResolution = width >= 2_560 && height >= 1_440
+    let highResolution = max(width, height) >= 2_560 && min(width, height) >= 1_440
     return EncoderLatencyPolicy(
         // Three outstanding 4K jobs preserve enough parallelism for a 60fps
         // hardware encoder while bounding the amount of pre-display work to
@@ -355,7 +377,7 @@ func encoderLatencyPolicy(
         // Keep the high-change 4K path inside the frame budget. This is a
         // VideoToolbox quality hint, not a bitrate change; the configured
         // bitrate still controls the wire size and quality floor.
-        qualityHint: width >= 3_840 && height >= 2_160 ? 0.5 : nil,
+        qualityHint: isUltraHdDimensions(width: width, height: height) ? 0.5 : nil,
         maximumRealTimeFrameRate: max(1, min(fps, 90))
     )
 }

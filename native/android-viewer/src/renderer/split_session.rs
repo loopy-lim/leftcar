@@ -14,6 +14,7 @@ use std::time::Duration;
 
 mod tile_worker;
 
+use super::split_final_stop_flags;
 use tile_worker::{monotonic_ns, spawn_tile_worker, TileWorkerLaunch};
 
 pub(crate) struct SplitRendererLaunch {
@@ -111,7 +112,7 @@ enum TileCommand {
     Discard(viewer_decoder::ReadyOutput),
     EnterRecovery,
     RequestIdr,
-    Stop,
+    Stop { send_bye: bool },
 }
 
 pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
@@ -299,8 +300,20 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                 &mut ready_at,
                 presentation_generation,
             );
-            let _ = left_tx.send(TileCommand::Stop);
-            let _ = right_tx.send(TileCommand::Stop);
+            let send_bye = control.send_bye.load(Ordering::SeqCst);
+            let termination_reason = control.termination_reason();
+            log_info!(
+                "split shutdown requested sendBye={} terminationReason={}",
+                send_bye,
+                termination_reason
+            );
+            let stop_flags = split_final_stop_flags(send_bye, termination_reason);
+            let _ = left_tx.send(TileCommand::Stop {
+                send_bye: stop_flags[0],
+            });
+            let _ = right_tx.send(TileCommand::Stop {
+                send_bye: stop_flags[1],
+            });
             let _ = left_handle.join();
             let _ = right_handle.join();
             remove_renderer_if_current(&instance, &control);

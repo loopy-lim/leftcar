@@ -5,15 +5,18 @@ pub(super) fn send_viewer_command(
     peer: std::net::SocketAddr,
     command: &[u8],
     token: &[u8],
-) {
+) -> bool {
     if token.is_empty() {
-        return;
+        return false;
     }
     let mut authenticated = Vec::with_capacity(command.len() + token.len());
     authenticated.extend_from_slice(command);
     authenticated.extend_from_slice(token);
     if let Err(error) = socket.send_to(&authenticated, peer) {
         log_info!("failed to send viewer command: {error}");
+        false
+    } else {
+        true
     }
 }
 

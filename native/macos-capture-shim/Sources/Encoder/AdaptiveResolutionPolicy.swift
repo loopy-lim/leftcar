@@ -15,6 +15,7 @@ struct AdaptiveResolutionObservation {
     let latencyBudgetUs: UInt64
     let recoveryActive: Bool
     let rebindInFlight: Bool
+    var floorCollapseDelta: Int = 0
 }
 
 enum AdaptiveResolutionDecision: Equatable {
@@ -46,18 +47,38 @@ enum AdaptiveBitrateFloorDecision: Equatable {
     case downshiftTo1440p
 }
 
+func adaptiveFallbackTarget(for source: AdaptiveResolutionTarget) -> AdaptiveResolutionTarget? {
+    let portrait = source.height > source.width
+    let orientedMaxWidth = portrait ? 1_440.0 : 2_560.0
+    let orientedMaxHeight = portrait ? 2_560.0 : 1_440.0
+    let scaleToFit = min(
+        min(orientedMaxWidth / Double(source.width), orientedMaxHeight / Double(source.height)),
+        1.0
+    )
+    guard scaleToFit < 1 else { return nil }
+    let shortSide = Double(min(source.width, source.height))
+    let scale = min(1.0, max(scaleToFit, 720.0 / shortSide))
+    let width = max(2, Int(Double(source.width) * scale) / 2 * 2)
+    let height = max(2, Int(Double(source.height) * scale) / 2 * 2)
+    guard Double(width) <= orientedMaxWidth, Double(height) <= orientedMaxHeight else { return nil }
+    guard width < source.width || height < source.height else { return nil }
+    return AdaptiveResolutionTarget(width: width, height: height, fps: source.fps)
+}
+
 func adaptiveBitrateFloorDecision(
     activeWidth: Int,
     activeHeight: Int,
     floorBitrate: Int,
     currentBitrate: Int
 ) -> AdaptiveBitrateFloorDecision {
-    let isExact4K = activeWidth == 3_840 && activeHeight == 2_160
+    let hasResolutionFallback = adaptiveFallbackTarget(
+        for: AdaptiveResolutionTarget(width: activeWidth, height: activeHeight, fps: 60)
+    ) != nil
     // Within 10% of the congestion floor the rate controller has no more
     // budget to trade; waiting longer only sinks transmitted FPS.
     let floorReached = Double(currentBitrate)
         <= Double(floorBitrate) * 1.10
-    guard isExact4K, floorReached else {
+    guard hasResolutionFallback, floorReached else {
         return .keepFloor
     }
     return .downshiftTo1440p
@@ -78,9 +99,7 @@ struct AdaptiveResolutionPolicy {
     init(sourceTarget: AdaptiveResolutionTarget) {
         self.sourceTarget = sourceTarget
         self.activeTarget = sourceTarget
-        self.fallbackTarget = sourceTarget.width == 3_840 && sourceTarget.height == 2_160
-            ? AdaptiveResolutionTarget(width: 2_560, height: 1_440, fps: sourceTarget.fps)
-            : nil
+        self.fallbackTarget = adaptiveFallbackTarget(for: sourceTarget)
     }
 
     mutating func observe(
@@ -94,10 +113,16 @@ struct AdaptiveResolutionPolicy {
         }
 
         if activeTarget == sourceTarget {
+            if nowMs < cooldownUntilMs {
+                congestionWindows = 0
+                stableWindows = 0
+                return .keep
+            }
             let fpsCollapsed = observation.encodedFps < observation.requestedFps * 0.9
                 || observation.transmittedFps < observation.requestedFps * 0.9
-            let congested = observation.receiverLossDelta > 0
-                && (fpsCollapsed || observation.queueAgeUs > observation.latencyBudgetUs)
+            let congested = observation.floorCollapseDelta > 0
+                || observation.queueAgeUs > observation.latencyBudgetUs
+                || (observation.receiverLossDelta > 0 && fpsCollapsed)
             congestionWindows = congested ? congestionWindows + 1 : 0
             stableWindows = 0
             if congestionWindows >= Self.downshiftWindows, let fallbackTarget {
@@ -108,7 +133,6 @@ struct AdaptiveResolutionPolicy {
 
         let healthy = observation.receiverLossDelta == 0
             && observation.encodedFps >= observation.requestedFps * 0.95
-            && observation.transmittedFps >= observation.requestedFps * 0.95
             && observation.queueAgeUs <= observation.latencyBudgetUs
             && !observation.recoveryActive
         stableWindows = healthy ? stableWindows + 1 : 0
@@ -122,7 +146,8 @@ struct AdaptiveResolutionPolicy {
     mutating func record(
         decision: AdaptiveResolutionDecision,
         success: Bool,
-        nowMs: UInt64
+        nowMs: UInt64,
+        acceptedTarget: AdaptiveResolutionTarget? = nil
     ) {
         let target: AdaptiveResolutionTarget
         switch decision {
@@ -132,7 +157,7 @@ struct AdaptiveResolutionPolicy {
             return
         }
         if success {
-            activeTarget = target
+            activeTarget = acceptedTarget ?? target
         }
         congestionWindows = 0
         stableWindows = 0

@@ -26,6 +26,18 @@ describe("stream termination presentation", () => {
     expect(notice.tone).toBe("neutral");
   });
 
+  it("presents an exact viewer close as a normal device-initiated stop", () => {
+    const notice = createTerminationNotice({
+      ...baseSession,
+      state: "stopped",
+      error: "viewer closed stream",
+    });
+
+    expect(notice.title).toBe("연결된 기기에서 화면 공유를 종료했습니다");
+    expect(notice.detail).toContain("뒤로 가기");
+    expect(notice.tone).toBe("neutral");
+  });
+
   it("explains the automatic feedback timeout and its threshold", () => {
     const notice = createTerminationNotice({
       ...baseSession,

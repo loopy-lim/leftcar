@@ -1,5 +1,6 @@
 use super::super::*;
 use super::SingleRendererLaunch;
+use crate::cursor_protocol::{cursor_stream_command, CursorStreamDelivery};
 
 pub(super) fn spawn(launch: SingleRendererLaunch) {
     std::thread::spawn(move || run(launch));
@@ -12,6 +13,30 @@ fn terminate_locally(control: &RendererControl, reason: i8, label: &str) {
     );
     control.send_bye.store(false, Ordering::SeqCst);
     control.stop.store(true, Ordering::SeqCst);
+}
+
+fn sync_cursor_stream(
+    control: &RendererControl,
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    delivery: &mut CursorStreamDelivery,
+) {
+    let requested = control.cursor_requested.load(Ordering::SeqCst);
+    let now_us = monotonic_us();
+    if !delivery.needs_send(requested, now_us) {
+        return;
+    }
+    if delivery.state_changed(requested) {
+        control
+            .cursor_active
+            .store(if requested { 0 } else { -1 }, Ordering::SeqCst);
+    }
+    // LCDON/LCDOFF are idempotent. Record every local attempt (including a
+    // socket error) to avoid a busy retry loop, then refresh periodically so
+    // a datagram lost after send_to succeeds is eventually healed.
+    let _ = send_viewer_command(socket, peer, cursor_stream_command(requested), token);
+    delivery.record_attempt(requested, now_us);
 }
 
 struct RenderHealthRuntime<'a> {
@@ -134,6 +159,7 @@ fn run(launch: SingleRendererLaunch) {
         port
     );
     let mut recovery_gate = RecoveryRequestGate::default();
+    let mut cursor_delivery = CursorStreamDelivery::default();
     if let Some(peer) = tcp_control_addr {
         // A longer TCP GOP must not introduce a startup deadlock: the
         // renderer may attach after the Host's first IDR was already
@@ -254,10 +280,13 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
-                if control_clone.cursor_requested.load(Ordering::SeqCst) {
-                    control_clone.cursor_active.store(0, Ordering::SeqCst);
-                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
-                }
+                sync_cursor_stream(
+                    &control_clone,
+                    &control_socket,
+                    peer,
+                    &viewer_control_token,
+                    &mut cursor_delivery,
+                );
             }
             continue;
         }
@@ -430,6 +459,35 @@ fn run(launch: SingleRendererLaunch) {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
+                    if let Some(peer) = host_peer {
+                        let mut expired_frames: [Option<(std::net::SocketAddr, FramePacket)>;
+                            MEDIA_BATCH_SIZE] = std::array::from_fn(|_| None);
+                        let mut expired_count = 0usize;
+                        queue_expired_frames(
+                            &mut frame_sequencer,
+                            &mut expired_frames,
+                            &mut expired_count,
+                            peer,
+                        );
+                        if expired_count > 0 {
+                            present_completed_frames(
+                                expired_frames,
+                                expired_count,
+                                &control_socket,
+                                &viewer_control_token,
+                                fps,
+                                &control_clone,
+                                &mut codec_config,
+                                &mut decoder,
+                                &mut aus,
+                                &mut completed_access_units,
+                                &mut renderer_stats,
+                                &mut last_frame_id,
+                                &mut awaiting_keyframe,
+                                &mut recovery_gate,
+                            );
+                        }
+                    }
                     RenderHealthRuntime {
                         control_socket: &control_socket,
                         host_peer,
@@ -545,10 +603,14 @@ fn run(launch: SingleRendererLaunch) {
                     &mut recovery_gate,
                     &control_clone,
                 );
-                if control_clone.cursor_requested.load(Ordering::SeqCst) {
-                    control_clone.cursor_active.store(0, Ordering::SeqCst);
-                    send_viewer_command(&control_socket, peer, b"LCDON", &viewer_control_token);
-                }
+                cursor_delivery.reset();
+                sync_cursor_stream(
+                    &control_clone,
+                    &control_socket,
+                    peer,
+                    &viewer_control_token,
+                    &mut cursor_delivery,
+                );
                 continue;
             }
             // Keep accepting responses on the legacy media socket during a
@@ -576,6 +638,9 @@ fn run(launch: SingleRendererLaunch) {
             ) {
                 continue;
             }
+            if let Some(next_config) = viewer_decoder::parse_codec_config(packet) {
+                frame_sequencer.set_codec(next_config.codec);
+            }
             if handle_codec_config_packet(
                 packet,
                 window_handle,
@@ -600,6 +665,16 @@ fn run(launch: SingleRendererLaunch) {
                 &mut completed_frames,
                 &mut completed_count,
                 &mut renderer_stats,
+            );
+        }
+
+        if let Some(peer) = host_peer {
+            sync_cursor_stream(
+                &control_clone,
+                &control_socket,
+                peer,
+                &viewer_control_token,
+                &mut cursor_delivery,
             );
         }
 

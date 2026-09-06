@@ -31,6 +31,30 @@ pub(super) fn queue_reassembled_frame(
     }
 }
 
+pub(super) fn queue_expired_frames(
+    frame_sequencer: &mut CompletedFrameSequencer,
+    completed_frames: &mut [Option<(std::net::SocketAddr, FramePacket)>],
+    completed_count: &mut usize,
+    peer: std::net::SocketAddr,
+) {
+    for completed in frame_sequencer.drain_expired() {
+        if *completed_count >= completed_frames.len() {
+            break;
+        }
+        completed_frames[*completed_count] = Some((
+            peer,
+            FramePacket {
+                id: completed.id,
+                au: completed.au,
+                capture_wall_ms: completed.capture_wall_ms,
+                encode_wall_ms: completed.encode_wall_ms,
+                send_wall_ms: Some(completed.send_wall_ms),
+            },
+        ));
+        *completed_count += 1;
+    }
+}
+
 pub(super) fn queue_restored_fragments(
     restored: Option<Vec<RestoredFragment>>,
     reassembler: &mut FrameReassembler,

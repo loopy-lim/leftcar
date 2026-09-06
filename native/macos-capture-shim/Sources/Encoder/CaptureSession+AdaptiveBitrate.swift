@@ -101,7 +101,7 @@ extension CaptureSession {
             // the frame rate fixed at 60 and spend the available capacity on
             // bits per frame instead of letting moving pictures collapse into
             // the old 8-28Mbps 1080p band.
-            let ultraHd = outWidth >= 3_840 && outHeight >= 2_160
+            let ultraHd = isUltraHdDimensions(width: outWidth, height: outHeight)
             if ultraHd {
                 minFloor = activeCount > 1 ? 18_000_000 : 24_000_000
                 maxFloor = activeCount > 1 ? 28_000_000 : 36_000_000
@@ -135,8 +135,11 @@ extension CaptureSession {
             target = max(floorBitrate, Int(Double(current) * 0.80))
             // The congestion floor has consumed the 4K bitrate budget: the
             // rate controller cannot restore the frame rate on its own.
-            // Record the hand-off so the Viewer's resolution policy sees a
-            // floor-collapse signal instead of an ordinary bitrate window.
+            // This monotonic counter records detected floor pressure, not a
+            // successfully applied bitrate transition. The Viewer deliberately
+            // requires pressure in two status windows before changing resolution,
+            // so target==current and encoder rejection remain valid evidence that
+            // bitrate control cannot relieve congestion at this resolution.
             if adaptiveBitrateFloorDecision(
                 activeWidth: Int(outWidth),
                 activeHeight: Int(outHeight),
@@ -145,10 +148,10 @@ extension CaptureSession {
             ) == .downshiftTo1440p {
                 stateLock.lock()
                 bitrateFloorCollapseCount &+= 1
-                bitrateFloorCollapseLastReason = "floor_reached_4k"
+                bitrateFloorCollapseLastReason = "resolution_fallback_floor_reached"
                 stateLock.unlock()
                 NSLog(
-                    "Leftcar %@ adaptive bitrate floor collapse: 4K fallback requested at %d bps",
+                    "Leftcar %@ adaptive bitrate floor collapse: resolution fallback requested at %d bps",
                     codecKind.rawValue.uppercased(),
                     target
                 )
@@ -157,7 +160,7 @@ extension CaptureSession {
             // Raise the budget as soon as a sustained high-change scene is
             // observed. This avoids waiting through eight stable windows,
             // which is too slow for the first seconds of a video.
-            let ultraHd = outWidth >= 3_840 && outHeight >= 2_160
+            let ultraHd = isUltraHdDimensions(width: outWidth, height: outHeight)
             let motionFloor = ultraHd
                 ? (activeCount > 1 ? 36_000_000 : 48_000_000)
                 : (activeCount > 1 ? 10_000_000 : 14_000_000)

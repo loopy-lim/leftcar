@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { diagnosticValueVariants } from "./diagnosticStyles";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
 import { cn } from "./lib/cn";
@@ -10,6 +11,26 @@ interface Props {
   qualityPercent: number;
   qualityBusy: boolean;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
+}
+
+function DiagnosticRow({ label, value, tone = "default" }: { label: string; value: ReactNode; tone?: "default" | "warning" | "active" }) {
+  return <div className="inspector-item"><span className="inspector-item-label">{label}</span><span className={cn(diagnosticValueVariants({ tone }))}>{value}</span></div>;
+}
+
+function QualityOverride({ session, diagnostics, qualitySupported, qualityPercent, qualityBusy, onSetQuality }: Props & { diagnostics: ReturnType<typeof encoderDiagnosticsView> }) {
+  return <div className="inspector-item quality-override-item">
+    <div className="quality-override-heading">
+      <span className="inspector-item-label">수동 화질 상한</span>
+      <span className="inspector-item-value">{session.qualityOverride != null ? `${qualityPercent}% 고정` : "자동"}{diagnostics.qualityBasis !== null ? ` · ${diagnostics.qualityBasis}` : null}</span>
+    </div>
+    <div className="quality-override-controls">
+      <span className="quality-override-endpoint">낮음</span>
+      <input key={`${session.session}-${session.qualityOverride ?? "auto"}-${Math.round((session.qualityHint ?? 0.5) * 100)}`} type="range" min="25" max="50" step="5" defaultValue={qualityPercent} disabled={!qualitySupported || session.state !== "running" || qualityBusy} aria-label="수동 화질 상한" onChange={(event) => void onSetQuality(session, Number(event.currentTarget.value) / 100)} />
+      <span className="quality-override-endpoint">기본</span>
+      <button className={cn("btn-ghost btn-sm quality-auto-button", inspectorButtonVariants())} disabled={!qualitySupported || session.qualityOverride == null || qualityBusy} onClick={() => void onSetQuality(session, null)}>자동 복귀</button>
+    </div>
+    <span className="quality-override-help">고변화 장면에서 프레임을 지키려면 낮추고, 여유가 생기면 자동 복귀하세요.</span>
+  </div>;
 }
 
 export default function SessionEncoderDiagnostics({
@@ -40,22 +61,9 @@ export default function SessionEncoderDiagnostics({
           {diagnostics.experiment} · {diagnostics.experimentDetail} · 실험 fallback {diagnostics.experimentFallback}
         </span>
       </div>
-      <div className="inspector-item">
-        <span className="inspector-item-label">인코더 압력</span>
-        <span className={cn(diagnosticValueVariants({
-          tone: diagnostics.hasEncoderPressure ? "warning" : "default",
-        }))}>{diagnostics.pressure}</span>
-      </div>
-      <div className="inspector-item">
-        <span className="inspector-item-label">인코더/패킷화 in-flight</span>
-        <span className={cn(diagnosticValueVariants({
-          tone: hasInFlightWork ? "active" : "default",
-        }))}>{diagnostics.inFlight}</span>
-      </div>
-      <div className="inspector-item">
-        <span className="inspector-item-label">유효 출력 FPS</span>
-        <span className={cn(diagnosticValueVariants())}>{diagnostics.validOutputFps}</span>
-      </div>
+      <DiagnosticRow label="인코더 압력" value={diagnostics.pressure} tone={diagnostics.hasEncoderPressure ? "warning" : "default"} />
+      <DiagnosticRow label="인코더/패킷화 in-flight" value={diagnostics.inFlight} tone={hasInFlightWork ? "active" : "default"} />
+      <DiagnosticRow label="유효 출력 FPS" value={diagnostics.validOutputFps} />
       <div className="inspector-item">
         <span className="inspector-item-label">미지원/거부 속성</span>
         <span className="inspector-item-value">{diagnostics.unavailable}</span>
@@ -74,40 +82,7 @@ export default function SessionEncoderDiagnostics({
             : "적용 안 됨"}
         </span>
       </div>
-      <div className="inspector-item quality-override-item">
-        <div className="quality-override-heading">
-          <span className="inspector-item-label">수동 화질 상한</span>
-          <span className="inspector-item-value">
-            {session.qualityOverride != null ? `${qualityPercent}% 고정` : "자동"}
-            {diagnostics.qualityBasis !== null ? ` · ${diagnostics.qualityBasis}` : null}
-          </span>
-        </div>
-        <div className="quality-override-controls">
-          <span className="quality-override-endpoint">낮음</span>
-          <input
-            key={`${session.session}-${session.qualityOverride ?? "auto"}-${Math.round((session.qualityHint ?? 0.5) * 100)}`}
-            type="range"
-            min="25"
-            max="50"
-            step="5"
-            defaultValue={qualityPercent}
-            disabled={!qualitySupported || session.state !== "running" || qualityBusy}
-            aria-label="수동 화질 상한"
-            onChange={(event) => void onSetQuality(session, Number(event.currentTarget.value) / 100)}
-          />
-          <span className="quality-override-endpoint">기본</span>
-          <button
-            className={cn("btn-ghost btn-sm quality-auto-button", inspectorButtonVariants())}
-            disabled={!qualitySupported || session.qualityOverride == null || qualityBusy}
-            onClick={() => void onSetQuality(session, null)}
-          >
-            자동 복귀
-          </button>
-        </div>
-        <span className="quality-override-help">
-          고변화 장면에서 프레임을 지키려면 낮추고, 여유가 생기면 자동 복귀하세요.
-        </span>
-      </div>
+      <QualityOverride {...{ session, diagnostics, qualitySupported, qualityPercent, qualityBusy, onSetQuality }} />
       <div className="inspector-item">
         <span className="inspector-item-label">화면 처리 방식</span>
         <span className={cn("inspector-item-value", "capitalize")}>

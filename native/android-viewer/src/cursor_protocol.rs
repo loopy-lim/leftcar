@@ -10,8 +10,48 @@ pub const CURSOR_MAGIC: &[u8; 4] = b"LCD1";
 pub const CURSOR_STREAM_ON: &[u8] = b"LCDON";
 /// Viewer→host command that stops the cursor position stream.
 pub const CURSOR_STREAM_OFF: &[u8] = b"LCDOFF";
+/// Refresh the idempotent subscription state once per second. This bounds
+/// control traffic while healing a dropped UDP command without an ACK plane.
+pub const CURSOR_STREAM_REFRESH_US: u64 = 1_000_000;
 /// Fixed payload width between the magic and the session token.
 pub const CURSOR_SAMPLE_LEN: usize = 14;
+
+pub fn cursor_stream_command(enabled: bool) -> &'static [u8] {
+    if enabled {
+        CURSOR_STREAM_ON
+    } else {
+        CURSOR_STREAM_OFF
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CursorStreamDelivery {
+    last_attempt: Option<(bool, u64)>,
+}
+
+impl CursorStreamDelivery {
+    pub fn state_changed(&self, requested: bool) -> bool {
+        self.last_attempt
+            .map(|(previous, _)| previous != requested)
+            .unwrap_or(true)
+    }
+
+    pub fn needs_send(&self, requested: bool, now_us: u64) -> bool {
+        match self.last_attempt {
+            None => true,
+            Some((previous, _)) if previous != requested => true,
+            Some((_, attempted_us)) => {
+                now_us.saturating_sub(attempted_us) >= CURSOR_STREAM_REFRESH_US
+            }
+        }
+    }
+    pub fn record_attempt(&mut self, requested: bool, now_us: u64) {
+        self.last_attempt = Some((requested, now_us));
+    }
+    pub fn reset(&mut self) {
+        self.last_attempt = None;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorSample {
@@ -96,5 +136,29 @@ mod tests {
     fn stream_commands_are_the_documented_bytes() {
         assert_eq!(CURSOR_STREAM_ON, b"LCDON");
         assert_eq!(CURSOR_STREAM_OFF, b"LCDOFF");
+    }
+
+    #[test]
+    fn delivery_retries_failures_and_tracks_on_off_transitions() {
+        let mut state = CursorStreamDelivery::default();
+        assert!(state.needs_send(false, 0));
+        state.record_attempt(false, 0);
+        assert!(!state.needs_send(false, CURSOR_STREAM_REFRESH_US - 1));
+        // The first UDP datagram may be lost after a locally successful send;
+        // refresh the idempotent state at a bounded interval regardless.
+        assert!(state.needs_send(false, CURSOR_STREAM_REFRESH_US));
+        assert!(!state.state_changed(false));
+        state.record_attempt(false, CURSOR_STREAM_REFRESH_US);
+        assert!(state.needs_send(true, CURSOR_STREAM_REFRESH_US));
+        assert!(state.state_changed(true));
+        assert_eq!(cursor_stream_command(true), b"LCDON");
+        state.record_attempt(true, CURSOR_STREAM_REFRESH_US);
+        assert!(!state.state_changed(true));
+        assert!(state.needs_send(true, CURSOR_STREAM_REFRESH_US * 2));
+        assert!(state.needs_send(false, CURSOR_STREAM_REFRESH_US));
+        assert!(state.state_changed(false));
+        assert_eq!(cursor_stream_command(false), b"LCDOFF");
+        state.reset();
+        assert!(state.needs_send(true, CURSOR_STREAM_REFRESH_US));
     }
 }

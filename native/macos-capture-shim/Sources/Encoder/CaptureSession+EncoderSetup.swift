@@ -22,14 +22,13 @@ extension CaptureSession {
         let minRate: Int
         let maxRate: Int
         if contentMode == .video {
-            let ultraHd = w >= 3_840 && h >= 2_160
-            if ultraHd {
-                minRate = activeCount > 1 ? 18_000_000 : 24_000_000
-                maxRate = activeCount > 1 ? 56_000_000 : 80_000_000
-            } else {
-                minRate = activeCount > 1 ? 7_000_000 : 8_000_000
-                maxRate = activeCount > 1 ? 20_000_000 : 28_000_000
-            }
+            let bounds = videoBitrateBounds(
+                width: UInt32(w),
+                height: UInt32(h),
+                activeCount: activeCount
+            )
+            minRate = bounds.minimum
+            maxRate = bounds.maximum
         } else {
             minRate = activeCount > 1 ? 4_000_000 : 6_000_000
             maxRate = activeCount > 1 ? 24_000_000 : 60_000_000
@@ -82,4 +81,3 @@ extension CaptureSession {
     }
 
 }
-
