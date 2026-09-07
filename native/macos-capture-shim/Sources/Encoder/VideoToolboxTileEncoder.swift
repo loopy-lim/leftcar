@@ -68,6 +68,39 @@ func splitTileHardwareEncoderVerified(
     )
 }
 
+/// Submission PTS for one `VTCompressionSessionEncodeFrame` call.
+///
+/// Apple's VideoToolbox contract (VTCompressionSessionEncodeFrame,
+/// developer.apple.com/documentation/videotoolbox) requires every
+/// presentation timestamp in a session to be strictly greater than the
+/// previous one. Split recovery replays the newest retained capture frame as
+/// the paired-IDR carrier, so its source PTS can repeat or undercut a PTS the
+/// same live session already encoded (recovery keeps the pipeline's encoder
+/// sessions). The submission clock must therefore stay strictly monotonic for
+/// the replay AND for every subsequent normal capture whose source PTS did
+/// not clear the replayed clock. The request keeps the original
+/// `captureNs`/`captureWallMs` so age accounting stays honest; only the PTS
+/// handed to VideoToolbox is adjusted. A fresh encoder instance owns a fresh
+/// VTCompressionSession, so its clock starts empty.
+func nextStrictlyMonotonicSubmissionPTS(
+    sourcePTS: CMTime,
+    lastSubmittedPTS: CMTime?
+) -> CMTime {
+    guard let last = lastSubmittedPTS, last.isValid else {
+        return sourcePTS
+    }
+    guard CMTimeCompare(sourcePTS, last) > 0 else {
+        // Replayed carrier (duplicate PTS) or a later frame whose source
+        // clock did not clear the replayed submission: step exactly one tick
+        // forward in the same timescale/epoch so the next real capture stays
+        // as close to its source PTS as possible.
+        var stepped = last
+        stepped.value &+= 1
+        return stepped
+    }
+    return sourcePTS
+}
+
 final class VideoToolboxTileEncoder {
     let side: TileSide
     let encoderID: String
@@ -77,6 +110,10 @@ final class VideoToolboxTileEncoder {
     private let session: VTCompressionSession
     private let lock = NSLock()
     private var invalidated = false
+    // Strictly increasing encode submission clock for this one
+    // VTCompressionSession. A recreated DualEncoderPipeline creates fresh
+    // encoder instances, which resets this clock per encoder session.
+    private var lastSubmittedPTS: CMTime?
 
     init(
         side: TileSide,
@@ -261,6 +298,16 @@ final class VideoToolboxTileEncoder {
     ) {
         lock.lock()
         let usable = !invalidated
+        // Enforce the VTCompressionSession strict-monotonic PTS contract here,
+        // at the single point every tile submission crosses (normal captures
+        // and replayed recovery carriers alike).
+        let submissionPTS = nextStrictlyMonotonicSubmissionPTS(
+            sourcePTS: request.pts,
+            lastSubmittedPTS: lastSubmittedPTS
+        )
+        if usable {
+            lastSubmittedPTS = submissionPTS
+        }
         lock.unlock()
         guard usable else {
             completion(.failure(.submit(kVTInvalidSessionErr)))
@@ -278,7 +325,7 @@ final class VideoToolboxTileEncoder {
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: request.pixelBuffer,
-            presentationTimeStamp: request.pts,
+            presentationTimeStamp: submissionPTS,
             duration: request.duration,
             frameProperties: frameProperties,
             infoFlagsOut: &infoFlags
@@ -309,7 +356,7 @@ final class VideoToolboxTileEncoder {
                     TileEncodedSample(
                         side: request.side,
                         frameSequence: request.frameSequence,
-                        pts: request.pts,
+                        pts: submissionPTS,
                         captureNs: request.captureNs,
                         captureWallMs: request.captureWallMs,
                         sampleBuffer: sampleBuffer,

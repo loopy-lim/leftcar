@@ -109,6 +109,9 @@ extension CaptureSession {
     func finishSplitFlowLease(_ lease: SplitFlowLease) -> Bool {
         captureLock.lock()
         let completed = splitFlowState.complete(lease)
+        if completed, !splitFlowState.recoveryBoundaryPending {
+            splitRecoveryGateStartedNs = 0
+        }
         let shouldSchedule = completed
             && hasPendingCaptureLocked()
             && !encodeScheduled
@@ -202,6 +205,11 @@ extension CaptureSession {
         case let .prepared(microseconds):
             stateLock.lock()
             appendRollingSample(microseconds, to: &splitPreparationSamplesUs)
+            // Populate the generic input-preparation gauges for split mode;
+            // Metal NV12 splitting is the split pipeline's input preparation.
+            lastInputPreparationUs = microseconds
+            maxInputPreparationUs = max(maxInputPreparationUs, microseconds)
+            appendRollingSample(microseconds, to: &inputPreparationSamplesUs)
             stateLock.unlock()
         case let .encodedPair(lease, left, right):
             recordSplitPair(left: left, right: right)
@@ -288,6 +296,16 @@ extension CaptureSession {
             fps: fps
         )
         appendRollingSample(pairLatencyUs, to: &splitPairCallbackSamplesUs)
+        // Populate the generic encode-output gauges for split mode: paired
+        // output callbacks are the split pipeline's encoder output stream.
+        if let previous = lastEncodeOutputCallbackNs, nowNs >= previous {
+            appendRollingSample(
+                (nowNs - previous) / 1_000,
+                to: &encodeOutputIntervalSamplesUs
+            )
+        }
+        lastEncodeOutputCallbackNs = nowNs
+        appendRollingSample(pairLatencyUs, to: &encodeOutputSamplesUs)
         if firstEncodeNs == nil {
             firstEncodeNs = nowNs
             lifecycleState = "waiting_first_send"

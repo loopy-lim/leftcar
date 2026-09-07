@@ -38,6 +38,7 @@ extension CaptureSession {
         _ = splitFlowState.cancelAll()
         recoveryEncodeInFlight = false
         recoveryEncodeGateStartedNs = 0
+        splitRecoveryGateStartedNs = 0
         captureLock.unlock()
         if let s = stream {
             s.stopCapture(completionHandler: nil)

@@ -14,17 +14,28 @@ extension CaptureSession {
     // MARK: Stats
 
     func statsJSON() -> String {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
         captureLock.lock()
         let currentEncodeInFlight = encodeInFlight
         let currentMaxEncodeInFlight = maxEncodeInFlight
         let reportedSplitFlowActiveLeases = splitFlowState.activeCount
         let reportedSplitFlowCapacity = splitFlowState.capacity
+        let splitCaptureQueueDepth = pendingSplitCaptures.count
+        let splitCaptureOldestCallbackNs = pendingSplitCaptures
+            .map(\.callbackNs).min()
+        let reportedSplitCaptureQueueOldestUs = splitCaptureOldestCallbackNs.map {
+            nowNs >= $0 ? (nowNs - $0) / 1_000 : 0
+        } ?? 0
+        let reportedSplitRecoveryBoundaryPending =
+            splitFlowState.recoveryBoundaryPending
+        let reportedSplitRecoveryGatePendingUs: UInt64 = splitRecoveryGateStartedNs != 0
+            && nowNs >= splitRecoveryGateStartedNs
+            ? (nowNs - splitRecoveryGateStartedNs) / 1_000 : 0
         captureLock.unlock()
 
         stateLock.lock()
         // roll the 1s rate window
         let now = Date()
-        let nowNs = DispatchTime.now().uptimeNanoseconds
         let elapsed = now.timeIntervalSince(rateWindowStart)
         if elapsed >= 1.0 {
             lastCaptureFps = UInt32((Double(rateWindowCaptureCallbacks) / elapsed).rounded())
@@ -298,7 +309,7 @@ extension CaptureSession {
             leftcarPerformanceLogger.notice("\(perfLogLine, privacy: .public)")
             if reportedEncoderMode == "splitVertical" {
                 leftcarPerformanceLogger.notice(
-                    "LeftcarSplit pairs=\(reportedSplitPairsEncoded) captureQueueDrops=\(captureQueueDropped) admissionDrops=\(reportedSplitPairAdmissionDrops) pairDrops=\(reportedSplitPairDrops) pairTimeouts=\(reportedSplitPairTimeouts) lastPairDropReason=\(reportedSplitLastPairDropReason, privacy: .public) inFlight=\(currentEncodeInFlight)/\(currentMaxEncodeInFlight) preparationP95Us=\(splitPreparationP95Us) callbackP95Us=\(splitPairCallbackP95Us)"
+                    "LeftcarSplit pairs=\(reportedSplitPairsEncoded) captureQueueDrops=\(captureQueueDropped) admissionDrops=\(reportedSplitPairAdmissionDrops) pairDrops=\(reportedSplitPairDrops) pairTimeouts=\(reportedSplitPairTimeouts) lastPairDropReason=\(reportedSplitLastPairDropReason, privacy: .public) inFlight=\(currentEncodeInFlight)/\(currentMaxEncodeInFlight) preparationP95Us=\(splitPreparationP95Us) callbackP95Us=\(splitPairCallbackP95Us) captureQueueDepth=\(splitCaptureQueueDepth) captureQueueOldestUs=\(reportedSplitCaptureQueueOldestUs) recoveryGatePending=\(reportedSplitRecoveryBoundaryPending) recoveryGatePendingUs=\(reportedSplitRecoveryGatePendingUs) preEncodeAdmissionDrops=\(reportedSplitPreEncodeAdmissionDrops)"
                 )
             }
         }
@@ -486,6 +497,10 @@ extension CaptureSession {
             "splitFlowActiveLeases": reportedSplitFlowActiveLeases,
             "splitFlowCapacity": reportedSplitFlowCapacity,
             "splitPreEncodeAdmissionDrops": reportedSplitPreEncodeAdmissionDrops,
+            "splitCaptureQueueDepth": splitCaptureQueueDepth,
+            "splitCaptureQueueOldestUs": reportedSplitCaptureQueueOldestUs,
+            "splitRecoveryBoundaryPending": reportedSplitRecoveryBoundaryPending,
+            "splitRecoveryGatePendingUs": reportedSplitRecoveryGatePendingUs,
             "splitEncodedQueueDepth": reportedSplitEncodedQueueDepth,
             "splitEncodedQueueOldestUs": reportedSplitEncodedQueueOldestUs,
             "splitRecoveryBoundaryDiscards": reportedSplitRecoveryBoundaryDiscards,
