@@ -22,7 +22,98 @@ pub fn decoder_candidate_plan(
     candidates
 }
 
-// -- Decoder session ------------------------------------------------------------
+// Qualcomm's decode-order extension is a candidate for streams without B-frames.
+// Restrict it to our H.264 QTI path; a rejected extension gets a fresh standard
+// configuration of the same codec before any permitted MIME fallback.
+fn decoder_configuration_plan(
+    codec: VideoCodec,
+    codec_name: Option<&str>,
+    allow_mime_fallback: bool,
+) -> Vec<(DecoderCandidate<'_>, bool)> {
+    decoder_candidate_plan(codec_name, allow_mime_fallback)
+        .into_iter()
+        .flat_map(|candidate| {
+            let qti = codec == VideoCodec::H264
+                && matches!(candidate, DecoderCandidate::Named(name)
+                    if name.starts_with("c2.qti.") || name.starts_with("OMX.qcom."));
+            if qti {
+                vec![(candidate, true), (candidate, false)]
+            } else {
+                vec![(candidate, false)]
+            }
+        })
+        .collect()
+}
+
+// Vendor key spelling follows Qualcomm's extensions, also used by upstream
+// Moonlight MediaCodecHelper. Standard low-latency alone was accepted on the
+// tablet, so effectiveness of these additional hints must be measured live.
+fn low_latency_format_entries(fps: u32, qti_extensions: bool) -> Vec<(&'static str, i32)> {
+    let fps_val = fps.clamp(1, 90) as i32;
+    let mut entries = vec![
+        ("frame-rate", fps_val),
+        ("operating-rate", fps_val),
+        ("priority", 0),
+        ("low-latency", 1),
+    ];
+    if qti_extensions {
+        entries.extend([
+            ("vendor.qti-ext-dec-low-latency.enable", 1),
+            ("vendor.qti-ext-dec-picture-order.enable", 1),
+        ]);
+    }
+    entries
+}
+
+#[cfg(test)]
+mod low_latency_tests {
+    use super::*;
+
+    #[test]
+    fn low_latency_setup_requests_standard_and_qti_vendor_mode() {
+        let entries = low_latency_format_entries(60, true);
+        assert!(entries.contains(&("low-latency", 1)));
+        assert!(entries.contains(&("vendor.qti-ext-dec-low-latency.enable", 1)));
+        assert!(entries.contains(&("vendor.qti-ext-dec-picture-order.enable", 1)));
+        assert!(entries.contains(&("priority", 0)));
+        assert!(entries.contains(&("operating-rate", 60)));
+    }
+
+    #[test]
+    fn strict_qti_selection_retries_same_codec_without_vendor_keys() {
+        let name = "c2.qti.avc.decoder.low_latency";
+        let candidate = DecoderCandidate::Named(name);
+        assert_eq!(
+            decoder_configuration_plan(VideoCodec::H264, Some(name), false),
+            vec![(candidate, true), (candidate, false)]
+        );
+        assert_eq!(
+            decoder_configuration_plan(VideoCodec::H264, Some(name), true),
+            vec![
+                (candidate, true),
+                (candidate, false),
+                (DecoderCandidate::MimeType, false)
+            ]
+        );
+        assert!(low_latency_format_entries(60, false)
+            .iter()
+            .all(|(key, _)| !key.starts_with("vendor.")));
+    }
+
+    #[test]
+    fn unrelated_codecs_keep_standard_configuration() {
+        for (codec, name) in [
+            (VideoCodec::H264, Some("c2.android.avc.decoder")),
+            (VideoCodec::Hevc, Some("c2.qti.hevc.decoder")),
+            (VideoCodec::H264, None),
+        ] {
+            assert!(decoder_configuration_plan(codec, name, true)
+                .iter()
+                .all(|(_, vendor)| !vendor));
+        }
+        assert!(low_latency_format_entries(240, false).contains(&("operating-rate", 90)));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecoderError {
@@ -164,10 +255,10 @@ impl AndroidDecoder {
                 mime: codec.mime().into(),
             });
         }
-        let candidates = decoder_candidate_plan(codec_name, allow_mime_fallback);
+        let candidates = decoder_configuration_plan(codec, codec_name, allow_mime_fallback);
 
         let mut last_error = None;
-        for candidate in candidates {
+        for (candidate, qti_extensions) in candidates {
             let codec_handle = if let DecoderCandidate::Named(name) = candidate {
                 if let Ok(c_name) = std::ffi::CString::new(name) {
                     unsafe { AMediaCodec_createCodecByName(c_name.as_ptr()) }
@@ -239,14 +330,10 @@ impl AndroidDecoder {
                 let max_input_size =
                     (u64::from(sw) * u64::from(sh) * 3 / 2).clamp(1 << 20, 16 << 20) as i32;
                 AMediaFormat_setInt32(format, c"max-input-size".as_ptr(), max_input_size);
-                // Tell platform decoders this is an interactive, real-time
-                // stream. These are optional MediaFormat keys, so older/vendor
-                // codecs can ignore them while modern codecs avoid extra queueing.
-                let fps_val = fps.clamp(1, 90) as i32;
-                AMediaFormat_setInt32(format, c"frame-rate".as_ptr(), fps_val);
-                AMediaFormat_setInt32(format, c"operating-rate".as_ptr(), fps_val);
-                AMediaFormat_setInt32(format, c"priority".as_ptr(), 0);
-                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
+                for (key, value) in low_latency_format_entries(fps, qti_extensions) {
+                    let c_key = std::ffi::CString::new(key).expect("format key has no NUL");
+                    AMediaFormat_setInt32(format, c_key.as_ptr(), value);
+                }
                 let surface = if window == 0 {
                     std::ptr::null_mut()
                 } else {

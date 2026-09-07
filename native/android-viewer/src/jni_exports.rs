@@ -423,11 +423,10 @@ pub extern "C" fn leftcar_jni_attach_split_port(
         stop_live_stream_renderer(&instance_str, false);
         reclaim_udp_port(left_port);
         reclaim_udp_port(right_port);
-        let Some(left_receiver) = take_prepared_receiver(left_port, &host) else {
-            return LEFTCAR_ERR_STATE;
-        };
-        let Some(right_receiver) = take_prepared_receiver(right_port, &host) else {
-            drop(left_receiver);
+        // Claim both preflight sockets atomically: either both come back or
+        // the store is left untouched, so a half-present pair can never
+        // strand the other side's UDP listener (P0-6).
+        let Some(receivers) = take_split_receivers(left_port, right_port, &host) else {
             return LEFTCAR_ERR_STATE;
         };
         if viewer_core::c_abi::stream_attach_surface(
@@ -437,6 +436,13 @@ pub extern "C" fn leftcar_jni_attach_split_port(
         )
         .is_err()
         {
+            // Return the claimed sockets (with any captured challenge token)
+            // so a retried attach can claim them again instead of always
+            // failing on an empty store. On Android the wrapper releases both
+            // ANativeWindow refs when this returns non-zero
+            // (attach_split_body), so no surface ownership is leaked here.
+            restore_prepared_receiver(left_port, receivers.left);
+            restore_prepared_receiver(right_port, receivers.right);
             return LEFTCAR_ERR_STATE;
         }
 
@@ -444,12 +450,12 @@ pub extern "C" fn leftcar_jni_attach_split_port(
         install_renderer(&instance_str, Arc::clone(&control));
         let launch = SplitRendererLaunch {
             instance: instance_str,
-            expected_host: host,
+            expected_host: host.clone(),
             fps,
             left_window: left_surface as usize,
             right_window: right_surface as usize,
-            left_receiver,
-            right_receiver,
+            left_receiver: receivers.left,
+            right_receiver: receivers.right,
             decoder_name,
             control: Arc::clone(&control),
         };
@@ -462,6 +468,11 @@ pub extern "C" fn leftcar_jni_attach_split_port(
             );
             control.mark_finished();
             let _ = viewer_core::c_abi::stream_detach_surface(state, &instance);
+            // `spawn` already consumed both receivers into the coordinator
+            // thread, so they cannot be put back. Best-effort fresh binds
+            // keep a retried attach from hitting an empty store forever.
+            let _ = prepare_udp_receiver(left_port, &host, "udp");
+            let _ = prepare_udp_receiver(right_port, &host, "udp");
             log_info!("failed to start split renderer: {error}");
             return LEFTCAR_ERR_STATE;
         }
