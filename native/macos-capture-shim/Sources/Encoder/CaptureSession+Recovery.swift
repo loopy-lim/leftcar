@@ -82,6 +82,19 @@ extension CaptureSession {
         let shouldBeginRecovery = invalidatePendingBoundary || !recoveryAlreadyPending
         if shouldBeginRecovery {
             _ = splitFlowState.beginRecovery()
+            // Seed the boundary submission from the newest retained frame when
+            // capture is idle; otherwise recovery waits for the next
+            // ScreenCaptureKit callback, whose arrival on a static screen has
+            // no guaranteed latency. One uncontrolled host log showed a
+            // multi-second pair-timeout-to-recovery stall, but its baseline
+            // stimulus and concurrent CPU load were not controlled, so only
+            // the unbounded-wait property is established here — not the
+            // observed duration or a single cause.
+            // The encoder submission clock (nextStrictlyMonotonicSubmissionPTS)
+            // keeps this replay legal for the live VTCompressionSession even
+            // though the carrier's source PTS was already encoded.
+            seedSplitRecoveryCarrierLocked()
+            splitRecoveryGateStartedNs = DispatchTime.now().uptimeNanoseconds
         }
         let shouldSchedule = shouldBeginRecovery
             && hasPendingCaptureLocked()

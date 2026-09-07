@@ -27,6 +27,8 @@ cd tools/cgvd-shim && swift build -c release
 | `create` | `READY <displayID> <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight>` | 0 — 등록·논리 모드·backing pixel까지 확인 후 출력하고 stop/EOF까지 상주 |
 | 상주 세션 stdin | `PLACE <requestID> <x> <y>` | `PLACED <requestID> <displayID> <x> <y> <width> <height> <primaryBefore> <primaryAfter>` — 요청 좌표와 실제 bounds가 일치하고 주 디스플레이가 유지된 경우에만 성공 |
 | 상주 세션 stdin | 잘못되거나 적용 실패한 `PLACE` | `FAILED <requestID> <detail>` — 요청별 한 줄 응답, 응답이 없거나 실패하면 Rust provider도 성공으로 처리하지 않음 |
+| 상주 세션 stdin | `RESIZE <width> <height> <scale>` | `RESIZED <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight>` — CGVirtualDisplaySettings를 새 모드(hiDPI=scale==2, 60Hz)로 재적용하고 도달한 관측 모드를 READY와 같은 형식으로 답한다. 뒤이은 `PLACE`는 새 논리 크기를 기대 bounds로 검증한다 |
+| 상주 세션 stdin | 잘못되거나 적용 실패한 `RESIZE` | `FAILED resize displayID=<id> <detail>` — PLACE와 같은 요청별 한 줄 실패다. **프로세스를 종료하지 않는다**: 세션이 곧 디스플레이 수명이므로 한 요청 실패로 세션 전체를 잃지 않고 계속 받는다. descriptor.maxPixels 생성 크기 초과 등은 apply가 거절할 수 있고 그 경우 mode/settings detail로 답한다 |
 | `create` | `FAILED registration timeout displayID=<id>` | 1 — 2초 내 활성 등록 미확인 |
 | `create` | `FAILED mode timeout displayID=<id>` | 1 — 2초 내 요청 크기 모드 미도달 |
 | `create` | `UNAVAILABLE session` | 1 — GUI 로그인 세션 밖 실행 (분류 A) |
@@ -56,7 +58,11 @@ cd tools/cgvd-shim && swift build -c release
 기다린다. 같은 세션에 `PLACE <requestID> <x> <y>`를 보내면 디스플레이를 만든
 소유 프로세스가 배치를 적용한다. Rust provider는 세션별 요청을 직렬화하고
 3초 안에 일치하는 requestID, displayID, 실제 bounds, 보존된 주 디스플레이를
-담은 `PLACED`를 받은 경우만 성공으로 처리한다. 호출자가 `stop` 한 줄을 보내거나
+담은 `PLACED`를 받은 경우만 성공으로 처리한다. 같은 세션의
+`RESIZE <width> <height> <scale>`는 생성과 같은 apply 경로를 재사용해 모드를
+바꾸고, 도달한 관측 모드를 `RESIZED <w> <h> <pw> <ph>`로 답한다 — 스트림
+재시작 없이 가상 화면 크기를 조정하는 호스트 resize(Task 3 provider.rs)가 이
+명령을 쓴다. RESIZE 실패는 세션을 끊지 않는다. 호출자가 `stop` 한 줄을 보내거나
 stdin을 닫으면 객체를 해제하고 종료하므로, displayID별 프로세스 수명과 제거
 대상이 일치한다.
 

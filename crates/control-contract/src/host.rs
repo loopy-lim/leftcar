@@ -229,6 +229,11 @@ pub struct CatalogView {
     pub displays: Vec<DisplayInfo>,
     #[serde(default)]
     pub encoder_experiments: Vec<EncoderExperimentInfo>,
+    /// Whether this host accepts an explicit `encoderExperiment` on
+    /// reconfigureStream. Newer hosts advertise `true`; older hosts omit the
+    /// field, so viewers only send the mode when the capability is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconfigure_encoder_experiment: Option<bool>,
     /// Host-supported UDP pacing/FEC choices. Older hosts omit this field, so
     /// viewers must preserve the legacy 8-datagram/2-parity behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,6 +549,11 @@ pub struct StatsInfo {
     pub split_encoded_queue_depth: u32,
     #[serde(default)]
     pub split_encoded_queue_oldest_us: u64,
+    /// Age of the oldest split capture-side queue entry in microseconds.
+    /// Optional: shims that do not track it omit the key entirely, and the
+    /// field must stay absent on the wire when unknown (`None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_capture_queue_oldest_us: Option<u64>,
     #[serde(default)]
     pub split_recovery_boundary_discards: i64,
     #[serde(default)]
@@ -668,6 +678,39 @@ mod split_flow_contract_tests {
         assert_eq!(status.split_wire_pair_send_failures, 2);
         assert_eq!(status.split_delta_gap_recoveries, 2);
     }
+
+    #[test]
+    fn split_capture_queue_oldest_us_is_optional_and_roundtrips() {
+        // 이전 캡처 stats 페이로드는 키 자체가 없다: 나이는 None으로 남는다.
+        let old_payload = serde_json::to_value(StatsInfo::default()).unwrap();
+        let old_stats: StatsInfo = serde_json::from_value(old_payload).unwrap();
+        assert_eq!(old_stats.split_capture_queue_oldest_us, None);
+
+        // 양수 큐 나이는 캡처 stats 파싱을 그대로 통과한다.
+        let mut payload = serde_json::to_value(StatsInfo::default()).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("splitCaptureQueueOldestUs".into(), 45_600.into());
+        let stats: StatsInfo = serde_json::from_value(payload).unwrap();
+        assert_eq!(stats.split_capture_queue_oldest_us, Some(45_600));
+
+        // status 계약도 그 값을 전달하며, None일 때는 와이어에서 생략된다.
+        let status = SessionView {
+            split_capture_queue_oldest_us: stats.split_capture_queue_oldest_us,
+            ..SessionView::default()
+        };
+        let encoded = serde_json::to_string(&status).unwrap();
+        assert!(
+            encoded.contains("\"splitCaptureQueueOldestUs\":45600"),
+            "{encoded}"
+        );
+        let default_encoded = serde_json::to_string(&SessionView::default()).unwrap();
+        assert!(!default_encoded.contains("splitCaptureQueueOldestUs"));
+        let legacy_status: SessionView =
+            serde_json::from_value(serde_json::to_value(SessionView::default()).unwrap()).unwrap();
+        assert_eq!(legacy_status.split_capture_queue_oldest_us, None);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -772,6 +815,41 @@ pub struct StartStreamInput {
     /// is intentionally the legacy wire policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<UdpStabilityRequest>,
+    /// Optional viewer display metrics (physical pixels + density) so the host
+    /// can auto-match a virtual display size. Older viewers omit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_display: Option<ViewerDisplayMetricsMsg>,
+    /// Optional id of an already-managed virtual display to reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_display_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerDisplayMetricsMsg {
+    pub physical_width: u32,
+    pub physical_height: u32,
+    pub density_dpi: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeVirtualDisplayInput {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub scale: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeVirtualDisplayOutput {
+    pub id: String,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub scale: u8,
+    pub backing_width: u32,
+    pub backing_height: u32,
 }
 
 fn default_capture_backend() -> String {
@@ -813,6 +891,11 @@ pub struct ReconfigureStreamInput {
     pub fps: u32,
     #[serde(default = "default_quality_state")]
     pub quality_state: String,
+    /// Requested encoder experiment. Absent on older viewers, which keeps the
+    /// legacy retention/demotion behavior; only sent when the catalog
+    /// advertises `reconfigureEncoderExperiment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_experiment: Option<EncoderExperiment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -823,6 +906,10 @@ pub struct ReconfigureStreamOutput {
     pub height: u32,
     pub fps: u32,
     pub quality_state: String,
+    /// Encoder experiment the replacement stream actually started with.
+    /// Older hosts omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_experiment: Option<EncoderExperiment>,
 }
 
 fn default_quality_state() -> String {
@@ -1137,6 +1224,9 @@ pub struct SessionView {
     pub split_encoded_queue_depth: u32,
     #[serde(default)]
     pub split_encoded_queue_oldest_us: u64,
+    /// Optional split capture-side queue age (see `StatsInfo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_capture_queue_oldest_us: Option<u64>,
     #[serde(default)]
     pub split_recovery_boundary_discards: i64,
     #[serde(default)]
@@ -1218,6 +1308,75 @@ mod stream_control_tests {
     }
 
     #[test]
+    fn start_stream_input_parses_legacy_json_without_viewer_display_fields() {
+        let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#;
+        let v: StartStreamInput = serde_json::from_str(json).unwrap();
+        assert_eq!(v.viewer_display, None);
+        assert_eq!(v.virtual_display_id, None);
+        // Legacy payloads must not gain the new keys on re-serialization.
+        let back = serde_json::to_string(&v).unwrap();
+        assert!(!back.contains("viewerDisplay"));
+        assert!(!back.contains("virtualDisplayId"));
+    }
+
+    #[test]
+    fn start_stream_input_roundtrips_viewer_display_metrics() {
+        let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1344,"height":836,"fps":90,
+            "viewerDisplay":{"physicalWidth":2800,"physicalHeight":1752,"densityDpi":420},
+            "virtualDisplayId":"cgvd-1"}"#;
+        let v: StartStreamInput = serde_json::from_str(json).unwrap();
+        let metrics = v.viewer_display.clone().expect("viewer display present");
+        assert_eq!(metrics.physical_width, 2800);
+        assert_eq!(metrics.physical_height, 1752);
+        assert_eq!(metrics.density_dpi, 420);
+        assert_eq!(v.virtual_display_id.as_deref(), Some("cgvd-1"));
+
+        let back = serde_json::to_string(&v).unwrap();
+        assert!(back.contains("\"viewerDisplay\""));
+        assert!(back.contains("\"physicalWidth\":2800"));
+        assert!(back.contains("\"physicalHeight\":1752"));
+        assert!(back.contains("\"densityDpi\":420"));
+        assert!(back.contains("\"virtualDisplayId\":\"cgvd-1\""));
+
+        let reparsed: StartStreamInput = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed.viewer_display, v.viewer_display);
+        assert_eq!(reparsed.virtual_display_id, v.virtual_display_id);
+    }
+
+    #[test]
+    fn resize_virtual_display_roundtrips_camel_case() {
+        let input = ResizeVirtualDisplayInput {
+            id: "cgvd-1".into(),
+            width: 1344,
+            height: 836,
+            scale: 2,
+        };
+        let back = serde_json::to_string(&input).unwrap();
+        assert!(back.contains("\"id\":\"cgvd-1\""));
+        assert!(back.contains("\"width\":1344"));
+        assert!(back.contains("\"height\":836"));
+        assert!(back.contains("\"scale\":2"));
+        let reparsed: ResizeVirtualDisplayInput = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, input);
+
+        let output = ResizeVirtualDisplayOutput {
+            id: "cgvd-1".into(),
+            logical_width: 1344,
+            logical_height: 836,
+            scale: 2,
+            backing_width: 2688,
+            backing_height: 1672,
+        };
+        let back = serde_json::to_string(&output).unwrap();
+        assert!(back.contains("\"logicalWidth\":1344"));
+        assert!(back.contains("\"logicalHeight\":836"));
+        assert!(back.contains("\"backingWidth\":2688"));
+        assert!(back.contains("\"backingHeight\":1672"));
+        let reparsed: ResizeVirtualDisplayOutput = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, output);
+    }
+
+    #[test]
     fn catalog_advertises_platform_capture_capabilities() {
         let catalog = CatalogView {
             platform: "windows".into(),
@@ -1229,6 +1388,7 @@ mod stream_control_tests {
             media_host: Some("192.168.0.134".into()),
             displays: Vec::new(),
             encoder_experiments: Vec::new(),
+            reconfigure_encoder_experiment: None,
             udp_stability_capabilities: None,
         };
         let json = serde_json::to_string(&catalog).unwrap();
@@ -1249,6 +1409,7 @@ mod stream_control_tests {
             media_host: None,
             displays: Vec::new(),
             encoder_experiments: phase_a_encoder_experiments(),
+            reconfigure_encoder_experiment: None,
             udp_stability_capabilities: None,
         };
         assert!(catalog

@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ControlClient } from "./control";
 import {
+  reconfigurePreparedStream,
   replaceRestartedStreamState,
   startPreparedStream,
   type StartStreamArgs,
   type StreamLauncher,
 } from "./launch-stream";
 import type { EncoderExperimentInfo } from "./encoder-experiment";
+import type { AdaptiveQualityState } from "./adaptive-resolution";
+import type { ActiveStream } from "./catalog-model-types";
 import { STREAM_PROFILES } from "./stream-profile";
 import { resolveStreamResolution } from "./stream-resolution";
 
@@ -375,6 +378,96 @@ describe("startPreparedStream", () => {
     expect(calls).toEqual(["usb", "prepare", "start", "cancel"]);
   });
 
+  it("forwards the viewer display metrics in the startStream payload", async () => {
+    const { control, launcher } = harness();
+    const displayArgs: StartStreamArgs = {
+      ...args,
+      viewerDisplay: {
+        physicalWidth: 2800,
+        physicalHeight: 1752,
+        densityDpi: 420,
+      },
+    };
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args: displayArgs,
+    });
+
+    expect(control.request).toHaveBeenCalledWith("startStream", {
+      ...displayArgs,
+      mediaTransport: "udp",
+      viewerIps: ["192.168.0.42"],
+      viewerDisplay: {
+        physicalWidth: 2800,
+        physicalHeight: 1752,
+        densityDpi: 420,
+      },
+    });
+  });
+
+  it("keeps the legacy startStream payload free of viewerDisplay when metrics are unavailable", async () => {
+    const { control, launcher } = harness();
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args,
+    });
+
+    const sent = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls.find(([command]) =>
+      command === "startStream"
+    )?.[1] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("viewerDisplay");
+  });
+
+  it("forwards the managed virtual display id in the startStream payload", async () => {
+    const { control, launcher } = harness();
+    // 자동 매칭이 관리 화면 ID를 시작 인자로 전달한다 — 누락 시 호스트의
+    // prepare_viewer_display가 어떤 화면을 재사용할지 알 수 없다 (회귀).
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args: { ...args, virtualDisplayId: "vd-1" },
+    });
+
+    const sent = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls.find(([command]) => command === "startStream")?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(sent["virtualDisplayId"]).toBe("vd-1");
+  });
+
+  it("keeps the startStream payload free of virtualDisplayId when the name carries none", async () => {
+    const { control, launcher } = harness();
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args,
+    });
+
+    const sent = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls.find(([command]) =>
+      command === "startStream"
+    )?.[1] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("virtualDisplayId");
+  });
+
   it("keeps older native launchers compatible when address discovery is absent", async () => {
     const { control, launcher } = harness();
     delete launcher.getLocalIpv4Addresses;
@@ -528,6 +621,38 @@ describe("startPreparedStream", () => {
     }));
   });
 
+  it("re-prepares the split receiver when a terminated split stream is restored", async () => {
+    // 이유 5(render stalled)로 소켓을 잃은 분할 스트림은 React/Host 재준비
+    // 경로로 복구된다. 복구 인자는 활성 스트림의 split 모드를 그대로 운반하며
+    // startStream 전에 수신기를 다시 준비해야 한다 — 다시 바인드한 수신기는
+    // 새 Host 세션의 LCH1 도전 토큰을 새로 캡처하기 때문이다.
+    const { calls, control, launcher } = harness();
+
+    await expect(
+      startPreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        advertisedEncoderExperiments,
+        args: {
+          ...args,
+          mediaTransport: "auto",
+          encoderExperiment: "splitVertical",
+        },
+      }),
+    ).resolves.toMatchObject({
+      mediaTransport: "udp",
+      encoderExperiment: "splitVertical",
+    });
+    expect(launcher.prepareStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      "udp",
+      "splitVertical",
+    );
+    expect(calls.indexOf("prepare")).toBeLessThan(calls.indexOf("start"));
+  });
+
   it("uses one replacement boundary for successful restore and transport results", () => {
     const endedUnownedSessions: number[] = [];
     const streams = [
@@ -621,5 +746,194 @@ describe("startPreparedStream", () => {
 
     expect(streams).toEqual([]);
     expect(endedUnownedSessions).toEqual([11]);
+  });
+});
+
+describe("reconfigurePreparedStream", () => {
+  const fourKTarget = { width: 3840, height: 2160, fps: 60 };
+  const sub4KTarget = { width: 2560, height: 1440, fps: 60 };
+  const nativeState: AdaptiveQualityState = "native";
+
+  function activeStream(overrides: Partial<ActiveStream> = {}): ActiveStream {
+    return {
+      port: 5003,
+      session: 31,
+      sourceIndex: 1,
+      sourceName: "LG UltraFine (1)",
+      width: 3840,
+      height: 2160,
+      fps: 60,
+      sourceTarget: fourKTarget,
+      activeTarget: fourKTarget,
+      fallbackTarget: null,
+      qualityState: "native",
+      captureBackend: "cgDisplayStream",
+      contentMode: "interactive",
+      encoderExperiment: "auto",
+      mediaTransport: "udp",
+      viewerIps: ["192.168.0.42"],
+      startedAt: 1,
+      ...overrides,
+    };
+  }
+
+  function reconfigureHarness(acceptedExperiments: string[]) {
+    const order: string[] = [];
+    let reconfigureCount = 0;
+    const launcher: StreamLauncher = {
+      prepareStream: vi.fn(async (_port, _host, _transport, experiment) => {
+        order.push(`prepare:${experiment}`);
+      }),
+      openStream: vi.fn(async () => {
+        order.push("open");
+        return "src-5003";
+      }),
+      cancelPreparedStream: vi.fn(async (_port, experiment) => {
+        order.push(`cancel:${experiment}`);
+      }),
+    };
+    const control: ControlClient = {
+      request: vi.fn(async (command: string) => {
+        if (command !== "reconfigureStream") throw new Error("unexpected");
+        const encoderExperiment = acceptedExperiments[
+          Math.min(reconfigureCount, acceptedExperiments.length - 1)
+        ];
+        reconfigureCount += 1;
+        order.push(`reconfigure:${encoderExperiment}`);
+        return {
+          session: 31,
+          width: 3840,
+          height: 2160,
+          fps: 60,
+          qualityState: "native",
+          ...(encoderExperiment ? { encoderExperiment } : {}),
+        };
+      }) as ControlClient["request"],
+      close: vi.fn(),
+    };
+    return { order, control, launcher };
+  }
+
+  it("keeps the existing preparation when the accepted mode matches the prepared mode", async () => {
+    const { order, control, launcher } = reconfigureHarness(["splitVertical"]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target: fourKTarget,
+      qualityState: nativeState,
+      reconfigureEncoderExperiment: true,
+      advertisedEncoderExperiments,
+    });
+    expect(started.encoderExperiment).toBe("splitVertical");
+    expect(order).toEqual(["prepare:splitVertical", "reconfigure:splitVertical", "open"]);
+    expect(launcher.cancelPreparedStream).not.toHaveBeenCalled();
+  });
+
+  it("re-prepares split and re-requests the reconfiguration when split is accepted against a single preparation", async () => {
+    // Promotion fallback: the split preflight failed locally so the viewer
+    // prepared auto and requested auto, but the Host still selected split.
+    // Binding split listeners AFTER that reconfiguration would hand the
+    // renderer an empty challenge token, so the viewer must reconfigure
+    // again and let the fresh listeners capture the new challenge.
+    const { order, control, launcher } = reconfigureHarness(["splitVertical", "splitVertical"]);
+    const prepareResults: Array<Record<string, Error>> = [];
+    launcher.prepareStream = vi.fn(async (_port, _host, _transport, experiment) => {
+      order.push(`prepare:${experiment}`);
+      if (experiment === "splitVertical" && prepareResults.length === 0) {
+        prepareResults.push({});
+        throw new Error("dual decoder unavailable");
+      }
+      prepareResults.push({});
+    });
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target: fourKTarget,
+      qualityState: nativeState,
+      reconfigureEncoderExperiment: true,
+      advertisedEncoderExperiments,
+    });
+    expect(started.encoderExperiment).toBe("splitVertical");
+    expect(order).toEqual([
+      "prepare:splitVertical",
+      "cancel:splitVertical",
+      "prepare:auto",
+      "reconfigure:splitVertical",
+      "cancel:auto",
+      "prepare:splitVertical",
+      "reconfigure:splitVertical",
+      "open",
+    ]);
+    const requests = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls.filter(([command]) => command === "reconfigureStream");
+    expect(requests[1][1]).toMatchObject({ encoderExperiment: "splitVertical" });
+  });
+
+  it("fails loudly when the second reconfiguration still does not land on split", async () => {
+    const { order, control, launcher } = reconfigureHarness(["splitVertical", "auto"]);
+    let splitAttempts = 0;
+    launcher.prepareStream = vi.fn(async (_port, _host, _transport, experiment) => {
+      order.push(`prepare:${experiment}`);
+      if (experiment === "splitVertical" && splitAttempts++ === 0) {
+        throw new Error("dual decoder unavailable");
+      }
+    });
+    await expect(
+      reconfigurePreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        active: activeStream(),
+        target: fourKTarget,
+        qualityState: nativeState,
+        reconfigureEncoderExperiment: true,
+        advertisedEncoderExperiments,
+      }),
+    ).rejects.toThrow("분할 인코딩 전환");
+    expect(order[order.length - 1]).toBe("cancel:splitVertical");
+    expect(launcher.openStream).not.toHaveBeenCalled();
+  });
+
+  it("never requests a mode transition without the host capability", async () => {
+    const { order, control, launcher } = reconfigureHarness([undefined as unknown as string]);
+    const sent = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target: fourKTarget,
+      qualityState: nativeState,
+      advertisedEncoderExperiments,
+    });
+    expect(sent.encoderExperiment).toBe("auto");
+    expect(order).toEqual(["prepare:auto", "reconfigure:undefined", "open"]);
+    const request = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls[0][1] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("encoderExperiment");
+  });
+
+  it("demotes a split stream to the single path for a sub-4K target", async () => {
+    const { order, control, launcher } = reconfigureHarness(["auto"]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream({
+        encoderExperiment: "splitVertical",
+        activeTarget: fourKTarget,
+      }),
+      target: sub4KTarget,
+      qualityState: nativeState,
+      reconfigureEncoderExperiment: true,
+      advertisedEncoderExperiments,
+    });
+    expect(started.encoderExperiment).toBe("auto");
+    expect(order).toEqual(["prepare:auto", "reconfigure:auto", "open"]);
   });
 });

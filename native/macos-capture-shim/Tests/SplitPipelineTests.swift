@@ -1,5 +1,8 @@
 import Foundation
 import VideoToolbox
+import CoreMedia
+import CoreVideo
+import Dispatch
 
 @main
 struct SplitPipelineTests {
@@ -269,6 +272,42 @@ struct SplitPipelineTests {
         )
         precondition(splitCaptureQueueLimit(fps: 60) == 2)
         precondition(splitCaptureQueueLimit(fps: 30) == 1)
+
+        // Recovery-boundary seeding: a recovery that begins while capture is
+        // idle (empty pending queue) must submit the newest retained frame
+        // immediately instead of waiting for the next ScreenCaptureKit
+        // callback, which is unbounded on a static screen.
+        precondition(
+            splitRecoverySeedDecision(pendingCaptureCount: 2, hasCarrier: true)
+                == .queueAlreadyPending
+        )
+        precondition(
+            splitRecoverySeedDecision(pendingCaptureCount: 1, hasCarrier: false)
+                == .queueAlreadyPending
+        )
+        precondition(
+            splitRecoverySeedDecision(pendingCaptureCount: 0, hasCarrier: true)
+                == .seedCarrier
+        )
+        precondition(
+            splitRecoverySeedDecision(pendingCaptureCount: 0, hasCarrier: false)
+                == .noCarrierAvailable
+        )
+
+        // The recovery boundary lease must remain the sole admission until the
+        // paired IDR is sent: no capture is admitted behind it.
+        do {
+            var gate = SplitFlowControlState(capacity: 5)
+            _ = gate.beginRecovery()
+            let boundary = gate.admit()!
+            precondition(boundary.isRecoveryBoundary)
+            precondition(gate.admit() == nil)
+            precondition(gate.admit() == nil)
+            precondition(gate.complete(boundary))
+            precondition(!gate.recoveryBoundaryPending)
+            let resumed = gate.admit()!
+            precondition(!resumed.isRecoveryBoundary)
+        }
         precondition(SplitEncoderStrategy.parse(environment: [:]) == .dualAve)
         precondition(
             SplitEncoderStrategy.parse(
@@ -515,5 +554,340 @@ struct SplitPipelineTests {
         )
         precondition(!invalidFault.shouldDropRightAu())
         precondition(invalidFault.injectedDrops == 0)
+
+        // Regression: strict monotonic encode submission PTS.
+        // Apple's VTCompressionSessionEncodeFrame requires every presentation
+        // timestamp in a session to be strictly greater than the previous
+        // one. The recovery carrier is a replayed frame whose source PTS was
+        // already encoded by the same live sessions, so the submission clock
+        // must absorb duplicates/regressions for the replay AND for the
+        // following real captures.
+        do {
+            let ptsA = CMTime(value: 1_000, timescale: 1_000)
+            let ptsB = CMTime(value: 2_000, timescale: 1_000)
+            // Fresh encoder session: the first submission keeps its source PTS.
+            let first = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: ptsA,
+                lastSubmittedPTS: nil
+            )
+            precondition(CMTimeCompare(first, ptsA) == 0)
+            // Normal advance: a source PTS strictly above last passes through.
+            let advanced = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: ptsB,
+                lastSubmittedPTS: first
+            )
+            precondition(CMTimeCompare(advanced, ptsB) == 0)
+            // Repeated same carrier: the replayed PTS duplicates the last
+            // submission, so the clock steps exactly one tick past it.
+            let replayed = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: ptsB,
+                lastSubmittedPTS: advanced
+            )
+            precondition(CMTimeCompare(replayed, advanced) > 0)
+            precondition(replayed.value == advanced.value + 1)
+            precondition(replayed.timescale == advanced.timescale)
+            // Another replay keeps stepping strictly upward.
+            let replayedAgain = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: ptsB,
+                lastSubmittedPTS: replayed
+            )
+            precondition(CMTimeCompare(replayedAgain, replayed) > 0)
+            // Next real frame whose source PTS is equal to the replayed clock
+            // (screen stayed idle across the recovery) still submits strictly
+            // above the last submission.
+            let equalRealFrame = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: replayedAgain,
+                lastSubmittedPTS: replayedAgain
+            )
+            precondition(CMTimeCompare(equalRealFrame, replayedAgain) > 0)
+            // And one whose source PTS is lower than the replayed clock is
+            // lifted past it instead of violating the session contract.
+            let lowerRealFrame = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: ptsA,
+                lastSubmittedPTS: equalRealFrame
+            )
+            precondition(CMTimeCompare(lowerRealFrame, equalRealFrame) > 0)
+        }
+
+        // Session reset: a recreated pipeline owns fresh VTCompressionSessions
+        // with an empty submission clock, so a source PTS below the previous
+        // session's last submission is accepted unchanged.
+        do {
+            let previousSessionLastPTS = CMTime(value: 99_999, timescale: 1_000)
+            _ = previousSessionLastPTS
+            let freshSessionSubmission = nextStrictlyMonotonicSubmissionPTS(
+                sourcePTS: CMTime(value: 10, timescale: 1_000),
+                lastSubmittedPTS: nil
+            )
+            precondition(
+                CMTimeCompare(freshSessionSubmission, CMTime(value: 10, timescale: 1_000)) == 0
+            )
+        }
+
+        // Live VideoToolbox probe (skipped when no hardware tile encoder is
+        // available): replayed carrier PTS and a following lower/equal source
+        // PTS must all encode successfully with strictly increasing submission
+        // PTS, and a fresh encoder session must restart the clock.
+        do {
+            if let encoder = try? VideoToolboxTileEncoder(
+                side: .left,
+                width: 320,
+                height: 240,
+                fps: 60,
+                bitrate: 1_000_000,
+                backend: .rtvc
+            ) {
+                func submitProbe(_ pts: CMTime, encoder: VideoToolboxTileEncoder) -> TileEncodedSample {
+                guard let pixelBuffer = makeProbePixelBuffer(width: 320, height: 240) else {
+                    preconditionFailure("split probe pixel buffer")
+                }
+                let semaphore = DispatchSemaphore(value: 0)
+                var outcome: Result<TileEncodedSample, TileEncoderError>?
+                encoder.submit(
+                    TileEncodeRequest(
+                        side: .left,
+                        frameSequence: 0,
+                        pts: pts,
+                        duration: .invalid,
+                        captureNs: 1_234,
+                        captureWallMs: 5_678,
+                        recoveryGeneration: 0,
+                        forceKeyframe: false,
+                        pixelBuffer: pixelBuffer
+                    )
+                ) { result in
+                    outcome = result
+                    semaphore.signal()
+                }
+                _ = semaphore.wait(timeout: .now() + 10)
+                guard let outcome, case let .success(sample) = outcome else {
+                    preconditionFailure(
+                        "split probe submit failed at pts \(pts.value): \(String(describing: outcome))"
+                    )
+                }
+                // Honest age: the sample keeps the original capture timestamps.
+                precondition(sample.captureNs == 1_234)
+                precondition(sample.captureWallMs == 5_678)
+                return sample
+            }
+            let carrierPTS = CMTime(value: 10_000, timescale: 1_000)
+            let firstSample = submitProbe(carrierPTS, encoder: encoder)
+            precondition(firstSample.pts.value == 10_000)
+            // Replayed carrier: same PTS must still encode, submitted one tick up.
+            let replaySample = submitProbe(carrierPTS, encoder: encoder)
+            precondition(replaySample.pts.value == 10_001)
+            // Lower/equal real frame after the replay still encodes.
+            let lowerSample = submitProbe(CMTime(value: 10_000, timescale: 1_000), encoder: encoder)
+            precondition(lowerSample.pts.value == 10_002)
+            let olderSample = submitProbe(CMTime(value: 9_000, timescale: 1_000), encoder: encoder)
+            precondition(olderSample.pts.value == 10_003)
+                encoder.invalidate()
+                // Session reset: a new encoder session accepts the same low PTS.
+                if let freshEncoder = try? VideoToolboxTileEncoder(
+                    side: .left,
+                    width: 320,
+                    height: 240,
+                    fps: 60,
+                    bitrate: 1_000_000,
+                    backend: .rtvc
+                ) {
+                    let freshSample = submitProbe(CMTime(value: 9_000, timescale: 1_000), encoder: freshEncoder)
+                    precondition(freshSample.pts.value == 9_000)
+                    freshEncoder.invalidate()
+                }
+            } else {
+                print("split probe: hardware tile encoder unavailable; skipping live PTS probe")
+            }
+        }
+
+        // Production carrier seeding wiring (not just the seed decision):
+        // beginRecovery() followed by seedSplitRecoveryCarrierLocked() must
+        // queue the newest retained carrier for the boundary drain with its
+        // original capture timestamps, and stop()'s clearPendingCapturesLocked()
+        // must clear the carrier so a stopped session cannot reseed it.
+        do {
+            let session = CaptureSession(
+                targetAddr: sockaddr_in(),
+                targetPort: 0,
+                targetLabel: "split-seed-test",
+                width: 3_840,
+                height: 2_160,
+                fps: 60,
+                backend: .screenCaptureKit,
+                mediaTransport: .udp,
+                requestedEncoderExperiment: .splitVertical
+            )
+            guard let carrierBuffer = makeProbePixelBuffer(width: 4, height: 4) else {
+                preconditionFailure("carrier pixel buffer")
+            }
+            let carrier = PendingCaptureFrame(
+                pixelBuffer: carrierBuffer,
+                pts: CMTime(value: 42_000, timescale: 1_000),
+                duration: .invalid,
+                callbackNs: 777,
+                captureWallMs: 123_456
+            )
+            session.captureLock.lock()
+            // Recovery with no carrier and no pending captures: seeding is a
+            // no-op and the boundary lease still gates the flow.
+            _ = session.splitFlowState.beginRecovery()
+            session.seedSplitRecoveryCarrierLocked()
+            precondition(session.pendingSplitCaptures.isEmpty)
+            let boundary = session.splitFlowState.admit()!
+            precondition(boundary.isRecoveryBoundary)
+            precondition(session.splitFlowState.admit() == nil)
+            precondition(session.splitFlowState.complete(boundary))
+
+            // Production wiring: handlePixelBuffer keeps the newest frame as
+            // the recovery carrier while the capture queue drains normally.
+            _ = session.enqueuePendingCaptureLocked(carrier)
+            session.splitRecoveryCarrier = carrier
+            precondition(session.pendingSplitCaptures.count == 1)
+
+            // Recovery while a capture is already pending: no duplicate seed.
+            _ = session.splitFlowState.beginRecovery()
+            session.seedSplitRecoveryCarrierLocked()
+            precondition(session.pendingSplitCaptures.count == 1)
+            _ = session.dequeuePendingCaptureLocked()
+
+            // Recovery on an idle screen: the seeded boundary is exactly the
+            // carrier, with its original honest age and identity.
+            session.seedSplitRecoveryCarrierLocked()
+            precondition(session.pendingSplitCaptures.count == 1)
+            let seeded = session.dequeuePendingCaptureLocked()!
+            precondition(CMTimeCompare(seeded.pts, carrier.pts) == 0)
+            precondition(seeded.callbackNs == carrier.callbackNs)
+            precondition(seeded.captureWallMs == carrier.captureWallMs)
+
+            // Repeated idle recoveries reseed the same carrier each time;
+            // this is the replay loop the encoder submission clock absorbs.
+            session.seedSplitRecoveryCarrierLocked()
+            let reseeded = session.dequeuePendingCaptureLocked()!
+            precondition(CMTimeCompare(reseeded.pts, carrier.pts) == 0)
+            precondition(reseeded.callbackNs == carrier.callbackNs)
+
+            // Lifecycle clear wiring: stop() clears the carrier together with
+            // the pending queue.
+            session.clearPendingCapturesLocked()
+            precondition(session.pendingSplitCaptures.isEmpty)
+            precondition(session.splitRecoveryCarrier == nil)
+            session.seedSplitRecoveryCarrierLocked()
+            precondition(session.pendingSplitCaptures.isEmpty)
+            session.captureLock.unlock()
+        }
+
+        // Regression: the wire cannot distinguish a
+        // genuinely new loss episode from a delayed duplicate of the PLI that
+        // produced the boundary just sent, so Host-side time-window gating is
+        // forbidden. A genuine PLI arriving immediately after a boundary send
+        // must trigger a fresh paired-IDR recovery, while the preexisting
+        // pending-boundary gate still coalesces requests for a boundary that
+        // has not completed yet.
+        do {
+            fputs("split genuine-PLI: block start\n", stderr)
+            let session = CaptureSession(
+                targetAddr: sockaddr_in(),
+                targetPort: 0,
+                targetLabel: "split-genuine-pli-test",
+                width: 3_840,
+                height: 2_160,
+                fps: 60,
+                backend: .screenCaptureKit,
+                mediaTransport: .udp,
+                requestedEncoderExperiment: .splitVertical
+            )
+            fputs("split genuine-PLI: session built\n", stderr)
+            // Complete the startup pair so the session is in steady state.
+            session.captureLock.lock()
+            let startupBoundary = session.splitFlowState.admit()!
+            precondition(startupBoundary.isRecoveryBoundary)
+            precondition(session.splitFlowState.complete(startupBoundary))
+            session.captureLock.unlock()
+
+            // First PLI of an episode: the full recovery runs exactly once.
+            session.beginSplitTransportRecovery(
+                reason: "viewer or transport requested IDR"
+            )
+            session.stateLock.lock()
+            let rebuildsAfterFirstPLI = session.recoveryKeyframes
+            session.stateLock.unlock()
+            precondition(rebuildsAfterFirstPLI == 1)
+            fputs("split genuine-PLI: first PLI rebuilt once ok\n", stderr)
+
+            // Recovery #1's boundary completes at send time: simulate the
+            // finished send so recoveryBoundaryPending is false.
+            session.captureLock.lock()
+            let sentBoundary = session.splitFlowState.admit()!
+            precondition(sentBoundary.isRecoveryBoundary)
+            precondition(session.splitFlowState.complete(sentBoundary))
+            session.captureLock.unlock()
+            session.stateLock.lock()
+            session.lastRecoverySendNs = DispatchTime.now().uptimeNanoseconds
+            session.stateLock.unlock()
+
+            // A genuine PLI arriving immediately after that send must start a
+            // fresh recovery: no time-window suppression may delay it.
+            session.beginSplitTransportRecovery(
+                reason: "viewer or transport requested IDR"
+            )
+            session.stateLock.lock()
+            let rebuildsAfterImmediatePLI = session.recoveryKeyframes
+            session.stateLock.unlock()
+            precondition(
+                rebuildsAfterImmediatePLI == 2,
+                "genuine PLI immediately after a boundary send was "
+                    + "suppressed (recoveryKeyframes="
+                    + "\(rebuildsAfterImmediatePLI))"
+            )
+            fputs("split genuine-PLI: immediate PLI rebuilt fresh ok\n", stderr)
+
+            // Recovery #2's boundary is still pending (never sent here): the
+            // preexisting pending-boundary gate coalesces the next request.
+            session.beginSplitTransportRecovery(
+                reason: "viewer or transport requested IDR"
+            )
+            session.stateLock.lock()
+            let rebuildsAfterPending = session.recoveryKeyframes
+            let suppressedByPending = session.recoveryRequestsSuppressed
+            session.stateLock.unlock()
+            precondition(rebuildsAfterPending == 2)
+            precondition(suppressedByPending == 1)
+            fputs("split genuine-PLI: pending boundary coalesced ok\n", stderr)
+
+            // Internal boundary-invalidating failures always rebuild.
+            session.beginSplitTransportRecovery(
+                reason: "split pair send failed",
+                invalidatePendingBoundary: true
+            )
+            session.stateLock.lock()
+            let rebuildsAfterInvalidate = session.recoveryKeyframes
+            session.stateLock.unlock()
+            precondition(rebuildsAfterInvalidate == 3)
+            fputs("split genuine-PLI: invalidate rebuilds ok\n", stderr)
+        }
     }
+}
+
+private func makeProbePixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+    var buffer: CVPixelBuffer?
+    guard CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        [kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary,
+        &buffer
+    ) == kCVReturnSuccess, let buffer else {
+        return nil
+    }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    for plane in 0..<2 {
+        if let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) {
+            let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
+            let planeHeight = CVPixelBufferGetHeightOfPlane(buffer, plane)
+            memset(base, plane == 0 ? 0x40 : 0x80, rowBytes * planeHeight)
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    return buffer
 }

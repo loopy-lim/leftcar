@@ -16,10 +16,33 @@ export interface AdaptiveObservation {
   encodedFps: number;
   /** Measured transmitted frame rate when a transport counter is available. */
   transmittedFps?: number;
+  /**
+   * Receiver-measured output frame rate from fresh receiver feedback.
+   * Deliberately named separately from `transmittedFps`/`encodedFps`: a
+   * receiver can be frozen while Host-side encoders still report 60. Callers
+   * must omit the field (not send 0) when feedback is unavailable or stale so
+   * older hosts and idle links stay idle-safe.
+   */
+  renderedFps?: number;
   requestedFps: number;
   queueAgeUs: number;
   latencyBudgetUs: number;
+  /**
+   * A recovery burst is actively in progress right now (frames are being
+   * regenerated/suppressed). Window measurements are invalid while true, so
+   * the policy pauses and resets its congestion/stability accumulators.
+   * Callers must pass cumulative-counter deltas here; episode observations
+   * belong in `recoveryObserved`.
+   */
   recoveryActive: boolean;
+  /**
+   * Completed recovery episodes were observed inside this window (counter
+   * delta). This is evidence of a struggling link, not a measurement
+   * invalidator: it never blocks downshift on its own, counts as congestion
+   * evidence when the frame rate also collapsed, and disqualifies the window
+   * from upshift stability.
+   */
+  recoveryObserved?: boolean;
   rebindInFlight: boolean;
   floorCollapseDelta?: number;
 }
@@ -83,15 +106,41 @@ export function fallbackTargetFor(sourceTarget: AdaptiveTarget): AdaptiveTarget 
 export function createAdaptiveResolutionState(
   sourceTarget: AdaptiveTarget,
 ): AdaptiveResolutionState {
-  return {
+  return seedAdaptiveResolutionState(sourceTarget, sourceTarget);
+}
+
+/**
+ * Seed adaptive state from what is actually running instead of assuming the
+ * stream sits at its source maximum. Used when a session appears (responsive
+ * starts open below the maximum) and after an explicit target change; never
+ * per sample, so hysteresis keeps accumulating between real changes.
+ */
+export function seedAdaptiveResolutionState(
+  sourceTarget: AdaptiveTarget,
+  activeTarget: AdaptiveTarget,
+  options: { nowMs?: number } = {},
+): AdaptiveResolutionState {
+  const state: AdaptiveResolutionState = {
     sourceTarget: { ...sourceTarget },
-    activeTarget: { ...sourceTarget },
+    activeTarget: { ...activeTarget },
     fallbackTarget: fallbackTargetFor(sourceTarget),
     qualityState: "native",
     congestionWindows: 0,
     stableWindows: 0,
     cooldownUntilMs: 0,
   };
+  if (
+    activeTarget.width !== sourceTarget.width ||
+    activeTarget.height !== sourceTarget.height
+  ) {
+    state.qualityState = "fallback";
+    if (options.nowMs !== undefined) {
+      // Keep the rebind cooldown alive across the seed so ownership-sensitive
+      // boundaries (start, explicit resize) never flip-flop immediately.
+      state.cooldownUntilMs = options.nowMs + REBIND_COOLDOWN_MS;
+    }
+  }
+  return state;
 }
 
 function isCongested(
@@ -100,22 +149,33 @@ function isCongested(
   const fpsCollapsed =
     observation.encodedFps < observation.requestedFps * CONGESTION_FPS_RATIO ||
     (observation.transmittedFps !== undefined &&
-      observation.transmittedFps < observation.requestedFps * CONGESTION_FPS_RATIO);
+      observation.transmittedFps < observation.requestedFps * CONGESTION_FPS_RATIO) ||
+    (observation.renderedFps !== undefined &&
+      observation.renderedFps < observation.requestedFps * CONGESTION_FPS_RATIO);
   // Receiver loss is useful evidence, but encoder/transport queue pressure is
   // independently actionable when it persists. A low FPS sample by itself is
-  // intentionally ignored so static screens remain idle-safe.
+  // intentionally ignored so static screens remain idle-safe — including a
+  // low receiver `renderedFps` with no loss/recovery/queue evidence. Completed
+  // recovery episodes plus a collapsed frame rate are the same kind of
+  // sustained-pressure evidence as loss; without this, a link that keeps
+  // recovering could suppress downshifting forever.
   return (observation.floorCollapseDelta ?? 0) > 0 ||
     observation.queueAgeUs > observation.latencyBudgetUs ||
-    (observation.receiverLossDelta > 0 && fpsCollapsed);
+    (observation.receiverLossDelta > 0 && fpsCollapsed) ||
+    ((observation.recoveryObserved ?? false) && fpsCollapsed);
 }
 
 function isHealthy(
   observation: AdaptiveObservation,
 ): boolean {
+  const receiverHealthy = observation.renderedFps === undefined ||
+    observation.renderedFps >= observation.requestedFps * HEALTHY_FPS_RATIO;
   return observation.receiverLossDelta === 0 &&
     observation.encodedFps >= observation.requestedFps * HEALTHY_FPS_RATIO &&
+    receiverHealthy &&
     observation.queueAgeUs <= observation.latencyBudgetUs &&
-    !observation.recoveryActive;
+    !observation.recoveryActive &&
+    !(observation.recoveryObserved ?? false);
 }
 
 /**
@@ -127,6 +187,9 @@ export function observeAdaptiveResolution(
   previous: AdaptiveResolutionState,
   observation: AdaptiveObservation,
 ): AdaptiveResolutionObservation {
+  // Only an actively in-flight recovery burst or rebind invalidates window
+  // measurements. Merely observing completed recovery episodes must not reset
+  // the accumulators, or chronic recovery would block downshift forever.
   if (observation.recoveryActive || observation.rebindInFlight) {
     return {
       state: {

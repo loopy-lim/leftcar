@@ -11,6 +11,9 @@
 //   PLACE <requestID> <x> <y>
 //           -> "PLACED <requestID> <displayID> <x> <y> <width> <height> <primaryBefore> <primaryAfter>" |
 //              "FAILED <requestID> <detail>"
+//   RESIZE <width> <height> <scale>
+//           -> "RESIZED <logicalWidth> <logicalHeight> <pixelWidth> <pixelHeight>" |
+//              "FAILED resize displayID=<id> <detail>" — 세션 유지, 프로세스는 종료하지 않는다
 //   remove  -> "FAILED remove requires a live create session"
 // argv 되돌림 금지: 개행 섞인 인자가 계약을 두 줄로 깨뜨린다.
 //
@@ -199,6 +202,52 @@ func runPlaceCommand(
     )
 }
 
+/// 상주 세션의 RESIZE — create와 같은 논리로 모드를 재적용한다. apply 실패나
+/// 모드 미도달은 fail()로 죽지 않는다: 한 요청의 실패가 프로세스(=디스플레이
+/// 수명)를 끝내면 Rust가 세션 전체를 잃으므로, PLACE와 같은 한 줄 FAILED로
+/// 답하고 루프는 계속한다. 반환값은 적용된 논리 크기 — 호출자가 PLACE의
+/// 기대 bounds를 갱신하는 데 쓴다.
+func runResizeCommand(
+    _ command: String,
+    virtualDisplay: CGVirtualDisplay,
+    displayID: CGDirectDisplayID
+) -> (width: Int, height: Int)? {
+    let fields = command.split(whereSeparator: { $0.isWhitespace })
+    // 크기 상한은 create의 --width/--height와 같다 — maxPixels 반영 오버플로
+    // 트랩을 파싱 단계에서 잘라낸다.
+    guard fields.count == 4,
+          fields[0] == "RESIZE",
+          let width = Int(fields[1]), width > 0, width <= Int(UInt32.max / 2),
+          let height = Int(fields[2]), height > 0, height <= Int(UInt32.max / 2),
+          let scale = Int(fields[3]), scale == 1 || scale == 2 else {
+        writeResponse("FAILED resize displayID=\(displayID) invalid RESIZE command")
+        return nil
+    }
+
+    // descriptor.maxPixels는 생성 시 크기 기준이므로 그보다 큰 RESIZE는 apply가
+    // 거절할 수 있다 — 거절 시 아래 FAILED가 정직한 답이다.
+    let settings = CGVirtualDisplaySettings()
+    settings.hiDPI = scale == 2 ? 1 : 0
+    settings.modes = [
+        CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: 60)
+    ]
+    guard virtualDisplay.apply(settings) else {
+        writeResponse("FAILED resize displayID=\(displayID) settings")
+        return nil
+    }
+    guard pollRequestedMode(displayID: displayID, width: width, height: height, scale: scale) else {
+        writeResponse("FAILED resize displayID=\(displayID) mode timeout")
+        return nil
+    }
+    guard let mode = CGDisplayCopyDisplayMode(displayID) else {
+        writeResponse("FAILED resize displayID=\(displayID) mode unavailable")
+        return nil
+    }
+    // READY와 같은 관측값 나열 — Rust 파서가 같은 형식 코드를 재사용한다.
+    writeResponse("RESIZED \(mode.width) \(mode.height) \(mode.pixelWidth) \(mode.pixelHeight)")
+    return (width: width, height: height)
+}
+
 func runCreate(_ arguments: [String]) -> Never {
     guard let options = parseCreateOptions(arguments) else {
         fail("FAILED usage: cgvd-shim create [--name=<n>] [--width=<w>] [--height=<h>]", code: 2)
@@ -280,15 +329,32 @@ func runCreate(_ arguments: [String]) -> Never {
 
     // CGVirtualDisplay의 수명은 이 객체가 살아 있는 동안 관리한다. Rust가
     // stop을 보내거나 stdin이 EOF가 되면 반환하면서 객체를 해제한다.
+    // RESIZE는 PLACE의 기대 bounds가 따라가야 할 현재 논리 크기를 바꾼다 —
+    // var로 추적해 리사이즈 뒤 PLACE 검증이 새 모드를 본다. PLACE 파서는
+    // fields[0] == "PLACE"로 정확히 일치를 보므로 RESIZE 줄을 잘못 먹지 않고,
+    // dispatch 순서만 RESIZE를 먼저 둔다.
+    var currentWidth = options.width
+    var currentHeight = options.height
     withExtendedLifetime(virtualDisplay) {
         while let command = readLine(strippingNewline: true) {
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed == "stop" { break }
+            if trimmed.hasPrefix("RESIZE") {
+                if let resized = runResizeCommand(
+                    trimmed,
+                    virtualDisplay: virtualDisplay,
+                    displayID: displayID
+                ) {
+                    currentWidth = resized.width
+                    currentHeight = resized.height
+                }
+                continue
+            }
             runPlaceCommand(
                 trimmed,
                 displayID: displayID,
-                expectedWidth: options.width,
-                expectedHeight: options.height
+                expectedWidth: currentWidth,
+                expectedHeight: currentHeight
             )
         }
     }

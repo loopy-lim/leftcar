@@ -1,8 +1,9 @@
 //! Contract tests (docs/04 §11, H02 acceptance).
 
 use control_contract::host::{
-    phase_a_encoder_experiments, AddNumbersInput, AddNumbersOutput, CatalogView, PairingOfferView,
-    ReconfigureStreamInput, StartStreamInput, StartStreamOutput,
+    phase_a_encoder_experiments, AddNumbersInput, AddNumbersOutput, CatalogView, EncoderExperiment,
+    PairingOfferView, ReconfigureStreamInput, ReconfigureStreamOutput, StartStreamInput,
+    StartStreamOutput,
 };
 
 #[test]
@@ -260,6 +261,7 @@ fn catalog_advertises_phase_a_encoder_experiments() {
         media_host: None,
         displays: Vec::new(),
         encoder_experiments: phase_a_encoder_experiments(),
+        reconfigure_encoder_experiment: None,
         udp_stability_capabilities: Some(udp_capabilities()),
     };
     let advertised: Vec<_> = catalog
@@ -276,6 +278,71 @@ fn catalog_advertises_phase_a_encoder_experiments() {
             ("encoderPool", true),
         ]
     );
+}
+
+#[test]
+fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
+    // New host advertises the capability as an optional boolean.
+    let new_catalog = CatalogView {
+        platform: "macos".into(),
+        capture_backends: Vec::new(),
+        media_host: None,
+        displays: Vec::new(),
+        encoder_experiments: Vec::new(),
+        udp_stability_capabilities: None,
+        reconfigure_encoder_experiment: Some(true),
+    };
+    let encoded = serde_json::to_string(&new_catalog).unwrap();
+    assert!(
+        encoded.contains("\"reconfigureEncoderExperiment\":true"),
+        "{encoded}"
+    );
+
+    // Old catalog JSON without the field deserializes with the capability off.
+    let old_catalog: CatalogView = serde_json::from_str(
+        r#"{"platform":"macos","captureBackends":[],"displays":[],"encoderExperiments":[]}"#,
+    )
+    .unwrap();
+    assert!(old_catalog.reconfigure_encoder_experiment.is_none());
+
+    // Old reconfigure request JSON without a mode keeps legacy semantics.
+    let legacy: ReconfigureStreamInput = serde_json::from_str(
+        r#"{"session":42,"width":2560,"height":1440,"fps":60,"qualityState":"native"}"#,
+    )
+    .unwrap();
+    assert!(legacy.encoder_experiment.is_none());
+
+    // A new viewer names the requested mode explicitly.
+    let explicit: ReconfigureStreamInput = serde_json::from_str(
+        r#"{"session":42,"width":3840,"height":2160,"fps":60,"qualityState":"native","encoderExperiment":"splitVertical"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        explicit.encoder_experiment,
+        Some(EncoderExperiment::SplitVertical)
+    );
+
+    // New host reports the actual accepted mode on the output.
+    let output = ReconfigureStreamOutput {
+        session: 42,
+        width: 3840,
+        height: 2160,
+        fps: 60,
+        quality_state: "native".into(),
+        encoder_experiment: Some(EncoderExperiment::SplitVertical),
+    };
+    let encoded = serde_json::to_string(&output).unwrap();
+    assert!(
+        encoded.contains("\"encoderExperiment\":\"splitVertical\""),
+        "{encoded}"
+    );
+
+    // Old host output JSON without the mode still deserializes.
+    let old_output: ReconfigureStreamOutput = serde_json::from_str(
+        r#"{"session":9,"width":2560,"height":1440,"fps":60,"qualityState":"native"}"#,
+    )
+    .unwrap();
+    assert!(old_output.encoder_experiment.is_none());
 }
 
 #[test]

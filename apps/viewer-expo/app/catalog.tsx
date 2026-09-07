@@ -32,15 +32,22 @@ import type {
   UdpStabilityOptions,
   UdpStabilitySelection,
 } from "../src/udp-stability";
-import { fitProfileToDisplay } from "../src/catalog-helpers";
+import {
+  isStreamingPriority,
+  resolveInitialStreamTarget,
+  STREAMING_PRIORITIES,
+  type StreamingPriority,
+} from "../src/streaming-policy";
 import {
   recommendedStreamProfileId,
+  resolveStreamMaximum,
   resolveViewerProfileId,
   type ViewerProfileSelection,
 } from "../src/viewer-preferences";
 import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
 import { transportBadgeLabel } from "../src/transport-label";
+import { DisplaySizeCard } from "../src/DisplaySizeCard";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -212,6 +219,88 @@ function ViewerOptionsCard({
   );
 }
 
+const PRIORITY_LABELS: Record<StreamingPriority, { label: string; detail: string }> = {
+  responsive: { label: "반응 속도 우선", detail: "빠른 입력" },
+  clarity: { label: "화질 우선", detail: "선명한 화면" },
+};
+
+function StreamingPriorityCard({
+  streamingPriority,
+  preview,
+  onSelect,
+  colors,
+}: {
+  streamingPriority: StreamingPriority;
+  preview: {
+    maximum: { width: number; height: number };
+    targets: Record<StreamingPriority, { width: number; height: number }>;
+  } | null;
+  onSelect: (priority: StreamingPriority) => void;
+  colors: ThemeTokens;
+}) {
+  return (
+    <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
+      <View style={{ gap: 2 }}>
+        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+          화면 우선순위
+        </Text>
+        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
+          {preview
+            ? `새로 여는 화면은 선택한 시작 크기로 열리고, 연결과 재생 상태에 따라 최대 ${preview.maximum.width} × ${preview.maximum.height}까지 자동으로 조절됩니다.`
+            : "시작 크기 선택은 새로 여는 화면에 적용됩니다. 화면 품질은 연결과 재생 상태에 따라 자동으로 조절됩니다."}
+        </Text>
+      </View>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {STREAMING_PRIORITIES.map((priority) => {
+          const chosen = priority === streamingPriority;
+          const target = preview?.targets[priority];
+          return (
+            <Pressable
+              key={priority}
+              accessibilityRole="button"
+              accessibilityState={{ selected: chosen }}
+              accessibilityLabel={`${PRIORITY_LABELS[priority].label}${target ? `: 시작 ${target.width} 곱하기 ${target.height}` : ""}`}
+              style={{
+                flexBasis: "31%",
+                flexGrow: 1,
+                gap: 2,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: chosen ? colors.btnPrimaryBg : colors.borderSubtle,
+                backgroundColor: chosen ? colors.btnPrimaryBg : colors.bgSubtle,
+                paddingHorizontal: 10,
+                paddingVertical: 10,
+              }}
+              onPress={() => onSelect(priority)}
+            >
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontWeight: "700",
+                  color: chosen ? colors.btnPrimaryText : colors.textPrimary,
+                }}
+              >
+                {PRIORITY_LABELS[priority].label}
+              </Text>
+              <Text
+                style={{
+                  fontSize: 11,
+                  lineHeight: 15,
+                  color: chosen ? colors.btnPrimaryText : colors.textSecondary,
+                  opacity: chosen ? 0.85 : 1,
+                }}
+              >
+                {PRIORITY_LABELS[priority].detail}
+                {target ? ` · 시작 ${target.width} × ${target.height}` : ""}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function EncoderExperimentChoices({ experiments, selected, requiresReconnect, colors, t, onSelect }: { experiments: EncoderExperimentInfo[]; selected: EncoderExperimentId; requiresReconnect: boolean; colors: ThemeTokens; t: ReturnType<typeof useAppLanguage>["t"]; onSelect: (id: EncoderExperimentId) => void }) {
   if (experiments.length <= 1) return null;
   return <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
@@ -242,6 +331,12 @@ interface CatalogHeaderProps {
   refreshing: boolean;
   onRefresh: () => void;
   onSelectProfile: (id: ViewerProfileSelection) => void;
+  streamingPriority: StreamingPriority;
+  priorityPreview: {
+    maximum: { width: number; height: number };
+    targets: Record<StreamingPriority, { width: number; height: number }>;
+  } | null;
+  onSelectStreamingPriority: (priority: StreamingPriority) => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
@@ -267,6 +362,9 @@ function CatalogHeader({
   refreshing,
   onRefresh,
   onSelectProfile,
+  streamingPriority,
+  priorityPreview,
+  onSelectStreamingPriority,
   showFps,
   onToggleFps,
   localCursor,
@@ -334,6 +432,13 @@ function CatalogHeader({
       ) : null}
 
       <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
+
+      <StreamingPriorityCard
+        streamingPriority={streamingPriority}
+        preview={priorityPreview}
+        onSelect={onSelectStreamingPriority}
+        colors={colors}
+      />
 
       {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
       {hasAdvancedOptions ? (
@@ -440,6 +545,7 @@ interface DisplayListItemProps {
   disabled: boolean;
   isLaunching: boolean;
   profileSelection: ViewerProfileSelection;
+  streamingPriority: StreamingPriority;
   onOpen: (display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
@@ -450,6 +556,7 @@ function DisplayListItem({
   disabled,
   isLaunching,
   profileSelection,
+  streamingPriority,
   onOpen,
   styles,
   colors,
@@ -459,7 +566,14 @@ function DisplayListItem({
   const effectiveProfileId = resolveViewerProfileId(profileSelection, display);
   const profile = STREAM_PROFILES.find((candidate) => candidate.id === effectiveProfileId)
     ?? STREAM_PROFILES[0];
-  const size = fitProfileToDisplay(display, profile);
+  // 목록에 실제로 열릴 시작 크기(우선순위 적용)를 표시한다 — 최대와 다르면
+  // 사용자가 시작 크기를 알 수 있어야 한다. 열기 경로와 같은 공유 헬퍼로
+  // 최대를 정한다.
+  const size = resolveInitialStreamTarget(
+    display,
+    streamingPriority,
+    resolveStreamMaximum(display, profileSelection),
+  );
   const recommendedProfile = STREAM_PROFILES.find((candidate) => candidate.id === recommendedId);
   const handlePress = useCallback(() => onOpen(display), [display, onOpen]);
   return (
@@ -570,14 +684,35 @@ function ActiveStreamItem({
 function CatalogFooter({
   streams,
   onStop,
+  resizingSession,
+  onResizeVirtualDisplay,
+  onResizeSession,
+  windowRatio,
+  onSelectWindowRatio,
   styles,
+  colors,
 }: {
   streams: ActiveStream[];
   onStop: (stream: ActiveStream) => void;
+  resizingSession: number | null;
+  onResizeVirtualDisplay: React.ComponentProps<typeof DisplaySizeCard>["onResizeVirtualDisplay"];
+  onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
+  windowRatio: React.ComponentProps<typeof DisplaySizeCard>["windowRatio"];
+  onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
   styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
 }) {
   const { t } = useAppLanguage();
   if (streams.length === 0) return null;
+  // The card drives the first active stream; multi-stream sizing needs the
+  // host-side managed display listing (Task 8 이후 연결).
+  const primaryStream = streams[0];
+  const tabletMatch = primaryStream.viewerDisplay
+    ? {
+        width: primaryStream.viewerDisplay.physicalWidth,
+        height: primaryStream.viewerDisplay.physicalHeight,
+      }
+    : null;
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
@@ -589,6 +724,17 @@ function CatalogFooter({
       {streams.map((stream) => (
         <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} styles={styles} />
       ))}
+      <DisplaySizeCard
+        stream={primaryStream}
+        tabletMatch={tabletMatch}
+        virtualDisplayId={primaryStream.virtualDisplayId}
+        resizing={resizingSession === primaryStream.session}
+        onResizeVirtualDisplay={onResizeVirtualDisplay}
+        onResizeSession={onResizeSession}
+        windowRatio={windowRatio}
+        onSelectWindowRatio={onSelectWindowRatio}
+        colors={colors}
+      />
     </View>
   );
 }
@@ -598,6 +744,20 @@ export default function Catalog() {
   const styles = useMemo(() => createCatalogStyles(colors, isDark), [colors, isDark]);
   const model = useCatalogModel();
 
+  // 실제 WxH 미리보기: 첫 번째 디스플레이 기준으로 우선순위별 시작 크기를
+  // 계산한다 (열 때와 동일한 공유 최대 헬퍼 사용 — AUTO는 실제 clarity
+  // 목표, 수동 프로필은 기존 상한).
+  const priorityPreview = useMemo(() => {
+    const display = model.displays[0];
+    if (!display) return null;
+    const maximum = resolveStreamMaximum(display, model.profileId);
+    const targets = {
+      responsive: resolveInitialStreamTarget(display, "responsive", maximum),
+      clarity: resolveInitialStreamTarget(display, "clarity", maximum),
+    };
+    return { maximum, targets };
+  }, [model.displays, model.profileId]);
+
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
       <DisplayListItem
@@ -605,12 +765,20 @@ export default function Catalog() {
         disabled={model.launchingIndex !== null}
         isLaunching={model.launchingIndex === item.index}
         profileSelection={model.profileId}
+        streamingPriority={model.streamingPriority}
         onOpen={model.openDisplay}
         styles={styles}
         colors={colors}
       />
     ),
-    [colors, model.launchingIndex, model.openDisplay, model.profileId, styles],
+    [
+      colors,
+      model.launchingIndex,
+      model.openDisplay,
+      model.profileId,
+      model.streamingPriority,
+      styles,
+    ],
   );
 
   return (
@@ -635,6 +803,9 @@ export default function Catalog() {
             refreshing={model.refreshing}
             onRefresh={model.handleRefresh}
             onSelectProfile={model.handleSelectProfile}
+            streamingPriority={model.streamingPriority}
+            priorityPreview={priorityPreview}
+            onSelectStreamingPriority={model.handleSelectStreamingPriority}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}
@@ -657,7 +828,17 @@ export default function Catalog() {
         renderItem={renderDisplay}
         ListEmptyComponent={<EmptyDisplayList loading={model.loading} styles={styles} colors={colors} />}
         ListFooterComponent={
-          <CatalogFooter streams={model.streams} onStop={model.stopStream} styles={styles} />
+          <CatalogFooter
+            streams={model.streams}
+            onStop={model.stopStream}
+            resizingSession={model.resizingSession}
+            onResizeVirtualDisplay={model.handleResizeVirtualDisplay}
+            onResizeSession={model.handleResizeSession}
+            windowRatio={model.windowRatio}
+            onSelectWindowRatio={model.handleSelectWindowAspectRatio}
+            styles={styles}
+            colors={colors}
+          />
         }
       />
     </SafeAreaView>

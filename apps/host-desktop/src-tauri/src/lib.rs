@@ -9,6 +9,7 @@ pub mod backend;
 pub mod clamshell_mode;
 pub mod control;
 pub mod display_management;
+pub mod display_matching;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
@@ -57,10 +58,16 @@ pub fn run() {
         "leftcar-host".into(),
         pairing::PairingServer::default_store_path(),
     ));
-    let server = Arc::new(control::ControlServer::new(
-        backend.clone(),
-        pairing.clone(),
+    // 제어 채널의 뷰어 메트릭 자동 매칭이 Tauri UI와 동일한 관리 화면
+    // 레지스트리를 공유하게 한다 (소유권 추적 일관성).
+    let display_manager = display_management::DisplayManager::new(Some(
+        display_management::DisplayManager::default_state_path(),
     ));
+    let server = Arc::new({
+        let mut server = control::ControlServer::new(backend.clone(), pairing.clone());
+        server.set_display_manager(display_manager.clone());
+        server
+    });
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -101,16 +108,15 @@ pub fn run() {
             list_managed_displays,
             add_managed_display,
             remove_managed_display,
-            set_managed_display_position
+            set_managed_display_position,
+            resize_managed_display
         ])
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
             app.manage(TabletSessionRegistry::new(None));
-            app.manage(display_management::DisplayManager::new(Some(
-                display_management::DisplayManager::default_state_path(),
-            )));
+            app.manage(display_manager);
             warm_display_catalog(warmup_backend);
 
             let show_item =
@@ -526,6 +532,23 @@ async fn set_managed_display_position(
         .ok_or_else(|| "활성 주 화면이 없어 배치할 수 없습니다.".to_string())?;
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || manager.set_position(&id, position, anchor))
+        .await
+        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
+}
+
+/// Async so a blocking engine round-trip (CGVD stdin RESIZE handshake,
+/// BetterDisplay CLI) runs off the main thread — same rationale as the other
+/// managed-display commands.
+#[tauri::command]
+async fn resize_managed_display(
+    state: tauri::State<'_, display_management::DisplayManager>,
+    id: String,
+    width: u32,
+    height: u32,
+    scale: u8,
+) -> Result<display_management::ManagedDisplayView, String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.resize(&id, width, height, scale))
         .await
         .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
 }

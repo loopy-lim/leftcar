@@ -24,6 +24,8 @@ fn fake_backend() -> SharedBackend {
             },
         ],
         encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+        advertise_split_vertical: false,
+        stops: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 

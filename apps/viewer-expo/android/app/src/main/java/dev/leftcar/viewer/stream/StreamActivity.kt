@@ -30,6 +30,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
         private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
+        private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
     }
 
     private var instanceId: String = ""
@@ -42,14 +43,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var splitVertical = false
     private var splitDecoderName = ""
     private var nativeState: Long = 0
-    private var surfaceAttached = false
     private var released = false
     private var streamSurfaces: StreamSurfaces? = null
-    private val createdSurfaceHolders = mutableSetOf<SurfaceHolder>()
+    private val surfaceLifecycle = StreamSurfaceLifecycleGate<SurfaceHolder>()
     private val surfaceHandler = Handler(Looper.getMainLooper())
     private val recoveryHandler = Handler(Looper.getMainLooper())
     private val recoveryRetryPolicy = StreamRecoveryRetryPolicy()
-    private var surfaceGeneration = 0
     private var surfaceChangeCount = 0
     private var pendingSurfaceAttach: Runnable? = null
     private val tabletCursorHandler = Handler(Looper.getMainLooper())
@@ -65,13 +64,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var recoveryFallbackEmitted = false
     private var xrSession: Session? = null
     private var xrPreferredRatio: Float? = null
+    /**
+     * 사용자가 선택한 창 비율 오버라이드(0 = 미지정 → 소스 비율 사용).
+     * 멤버 변수로 유지되어 config-change/rotation에서 그대로 살아남고,
+     * 프로세스 사망 시에는 onSaveInstanceState로 복원된다.
+     */
+    private var xrWindowRatio: Float = 0f
     private var ownershipGeneration: Long = 0L
     private var xrRatioGeneration = 0L
     private var xrCreationInFlight: Job? = null
 
-    private fun applyXrPreferredAspectRatio(force: Boolean = false) {
+    private fun applyXrPreferredAspectRatio(force: Boolean = false, ratioOverride: Float? = null) {
         if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
-        val ratio = sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
+        val sourceRatio =
+            sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
+        val ratio = ratioOverride ?: sourceRatio
         if (!force && xrPreferredRatio == ratio) return
         val generation = ++xrRatioGeneration
         val existing = xrSession
@@ -92,7 +99,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }.getOrNull() as? SessionCreateSuccess ?: return@launch
             xrSession = created.session
             if (generation != xrRatioGeneration) {
-                applyXrPreferredAspectRatio(force = true)
+                // 생성 도중 더 새 비율 요청이 들어왔으면 최신 상태로 다시 적용.
+                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
                 return@launch
             }
             runCatching { setXrRatio(created.session, ratio) }
@@ -105,6 +113,18 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Keep the XR path optional at runtime: the AndroidX API is present in
         // the APK, while non-XR devices simply never create a Session.
         SpatialWindowBridge.setPreferredAspectRatio(session, this, ratio)
+    }
+
+    /**
+     * 런타임 비율 프리셋 적용 진입점. 활성 Session이 있으면 즉시
+     * setPreferredAspectRatio를 다시 호출하고, 없으면 값을 저장해 다음 Session
+     * 생성 시 사용한다. applyXrPreferredAspectRatio가 아직 XR 기기 검사를
+     * 수행하므로 비 XR 기기에서는 no-op으로 끝난다.
+     */
+    fun applyWindowAspectRatio(ratio: Float) {
+        xrWindowRatio = normalizedAspectRatio(sourceWidth, sourceHeight, ratio)
+        if (xrWindowRatio == xrPreferredRatio) return
+        applyXrPreferredAspectRatio(ratioOverride = xrWindowRatio)
     }
 
     /**
@@ -153,6 +173,22 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun scheduleRenderRecovery() {
         if (released || isFinishing || isDestroyed) return
+        // A split renderer cannot rebind in place: its two UDP listeners are
+        // stopped by detach, and the single rebindSurfacePort path would
+        // rebuild a single renderer against a split-prepared Host. Split
+        // recovery delegates to the React/Host re-preparation path at once.
+        if (splitVertical) {
+            if (!recoveryFallbackEmitted) {
+                recoveryFallbackEmitted = true
+                android.util.Log.w(
+                    "LeftcarStream",
+                    "split render recovery requires React/Host re-preparation; " +
+                        "instanceId=$instanceId port=$port",
+                )
+                StreamLauncherModule.emitTermination(port, 5)
+            }
+            return
+        }
         val attempt = recoveryRetryPolicy.nextAttempt()
         if (attempt == null) {
             if (!recoveryFallbackEmitted) {
@@ -207,6 +243,17 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      * the two call sites cannot drift.
      */
     private fun rebindOnSameSurface(): Int {
+        if (splitVertical) {
+            // The split renderer binds two listeners; a single rebind would
+            // strand the right port and poison the next split attach. (Also
+            // unreachable: decideSurfaceTransition never rebinds in place on
+            // a split hierarchy, and split recovery delegates to React.)
+            android.util.Log.w(
+                "LeftcarStream",
+                "rebindOnSameSurface ignored in split mode; delegating to React",
+            )
+            return -1
+        }
         val surface = streamSurfaces?.left?.holder?.surface
         val result = if (nativeState != 0L && !released && surface != null && surface.isValid) {
             ViewerNative.rebindSurfacePort(
@@ -222,7 +269,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         } else {
             -1
         }
-        surfaceAttached = result == 0
+        surfaceLifecycle.confirmAttached(result == 0)
         if (result == 0) {
             terminationHandled = false
             recoveryFallbackEmitted = false
@@ -464,6 +511,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
         ownershipGeneration = intent?.getLongExtra("ownershipGeneration", 0L) ?: 0L
+        // Process-death 이후에도 사용자가 고른 창 비율을 복원한다.
+        xrWindowRatio =
+            savedInstanceState?.getFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio) ?: xrWindowRatio
 
         splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
         splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
@@ -476,6 +526,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             { view, event -> forwardPointer(event, view) },
         )
         streamSurfaces = surfaces
+        surfaceLifecycle.hierarchySwapped(surfaces.holders)
         android.util.Log.i("LeftcarStream", "onCreate: instanceId=$instanceId port=$port host=$host")
         if (host.isEmpty() || (splitVertical && splitDecoderName.isEmpty())) {
             // No paired host = no stream. Fail loudly instead of rendering a
@@ -511,7 +562,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
         lifecycleEvent(1) // ACTIVITY_CREATE
-        applyXrPreferredAspectRatio(force = true)
+        applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
+    }
+
+    /** The user-chosen window ratio, when one differs from the source ratio. */
+    private fun requestedRatioOverride(): Float? =
+        xrWindowRatio.takeIf { it > 0f }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio)
     }
 
     override fun onNewIntent(newIntent: Intent) {
@@ -526,6 +586,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
+        val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
         val cursorOnly = nextLocalCursor != localCursorEnabled &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
@@ -539,6 +600,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         setIntent(newIntent)
         if (newIntent.hasExtra("ownershipGeneration")) {
             ownershipGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
+        }
+        if (ratioChangeRequested) {
+            // 비율 프리셋만 바꾸는 호출: 소스 해상도는 그대로 둔다. 값은
+            // 다음 setIntent 이전 스트림 재구성에도 유지된다.
+            applyWindowAspectRatio(newIntent.getFloatExtra(KEY_XR_WINDOW_RATIO, xrWindowRatio))
         }
         if (cursorOnly) {
             localCursorEnabled = nextLocalCursor
@@ -558,24 +624,36 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             streamSurfaces?.updateVideoSize(sourceWidth, sourceHeight)
             if (sourceRatioChanged) {
                 xrPreferredRatio = null
-                applyXrPreferredAspectRatio(force = true)
+                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
             }
             if (!localCursorEnabled) disableCursorOverlay()
-            if (!splitVertical && streamSurfaces?.left?.holder?.surface?.isValid == true) {
-                val result = rebindOnSameSurface()
-                if (result != 0) {
-                    // Leave the Activity and Surface visible. The controller's
-                    // bounded retry can deliver another intent to this same
-                    // instance without opening a second window.
-                    android.util.Log.w(
-                        "LeftcarStream",
-                        "same-window rebind failed result=$result; retaining Activity",
-                    )
+            when (
+                decideSurfaceTransition(
+                    nextSplitVertical = splitVertical,
+                    hierarchyBuiltForSplit = streamSurfaces?.right != null,
+                    leftSurfaceValid = streamSurfaces?.left?.holder?.surface?.isValid == true,
+                )
+            ) {
+                StreamSurfaceTransition.REBIND_IN_PLACE -> {
+                    val result = rebindOnSameSurface()
+                    if (result != 0) {
+                        // Leave the Activity and Surface visible. The
+                        // controller's bounded retry can deliver another
+                        // intent to this same instance without opening a
+                        // second window.
+                        android.util.Log.w(
+                            "LeftcarStream",
+                            "same-window rebind failed result=$result; retaining Activity",
+                        )
+                    }
                 }
-            } else {
-                surfaceGeneration += 1
-                cancelPendingSurfaceAttach()
-                hud?.showRebindIndicator("화면을 다시 연결할 준비 중")
+                // A live-window mode change cannot swap the renderer in
+                // place: the hierarchy still only contains the previous
+                // mode's SurfaceView(s), so no SurfaceHolder callback could
+                // ever re-run the attach path. Rebuild it (4K splitVertical
+                // promotion, demotion, or a dead Surface) so fresh
+                // surfaceCreated callbacks drive attachStableSurfaces.
+                StreamSurfaceTransition.REBUILD_SURFACES -> rebuildStreamSurfaces()
             }
         } else {
             val nextDisplayName = newIntent.getStringExtra("displayName")?.takeIf { it.isNotBlank() }
@@ -613,18 +691,67 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Rebuild the Surface view hierarchy for the current mode on this same
+     * Activity window. onCreate builds exactly one hierarchy; a live-window
+     * mode change (4K splitVertical promotion, demotion, or a Surface that
+     * can no longer host a rebind) needs fresh SurfaceViews so the normal
+     * SurfaceHolder.Callback traffic re-runs attachStableSurfaces — including
+     * attachSplitSurfaces, which no other path can reach here.
+     */
+    private fun rebuildStreamSurfaces() {
+        if (released || isFinishing || isDestroyed) return
+        // Stop the renderer still bound to the replaced hierarchy BEFORE the
+        // swap: the old SurfaceViews' late destroys then own nothing, so their
+        // arrival order — interleaved with the new holders' creates or after
+        // the new attach — can never detach the fresh renderer (device
+        // session-3 failure mode). This split detach intentionally stops
+        // silently; it never suspends the receivers.
+        val oldRendererLive = surfaceLifecycle.isAttached
+        if (oldRendererLive) {
+            val res = ViewerNative.detachSurface(nativeState, instanceId)
+            android.util.Log.i(
+                "LeftcarStream",
+                "pre-swap detach of replaced renderer returned $res",
+            )
+        }
+        val next = createStreamSurfaces(
+            this,
+            sourceWidth,
+            sourceHeight,
+            splitVertical,
+            this,
+            { view, event -> forwardPointer(event, view) },
+        )
+        streamSurfaces = next
+        // Retired holders are forgotten here; their destroys are inert.
+        surfaceLifecycle.hierarchySwapped(next.holders)
+        cancelPendingSurfaceAttach()
+        hud?.showRebindIndicator("화면을 다시 연결할 준비 중")
+        setContentView(next.root)
+        next.requestFocus()
+        window.decorView.post { hideSystemBars() }
+        android.util.Log.i(
+            "LeftcarStream",
+            "rebuilt stream surfaces split=$splitVertical " +
+                "source=${sourceWidth}x$sourceHeight port=$port; " +
+                "awaiting SurfaceHolder callbacks",
+        )
+    }
+
     private fun cancelPendingSurfaceAttach() {
         pendingSurfaceAttach?.let(surfaceHandler::removeCallbacks)
         pendingSurfaceAttach = null
     }
 
-    private fun attachStableSurfaces(generation: Int) {
+    private fun attachStableSurfaces(scheduledGeneration: Int) {
         pendingSurfaceAttach = null
         val surfaces = streamSurfaces ?: return
         if (
-            released || isFinishing || isDestroyed || surfaceAttached ||
-            generation != surfaceGeneration || !surfaces.allValid() ||
-            createdSurfaceHolders.size != surfaces.holders.size
+            released || isFinishing || isDestroyed ||
+            !surfaceLifecycle.canAttachStableSurfaces(scheduledGeneration) ||
+            !surfaces.allValid() ||
+            surfaces.holders.size != surfaceLifecycle.trackedHolderCount
         ) {
             return
         }
@@ -663,8 +790,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 fps,
             )
         }
-        surfaceAttached = res == 0
-        if (surfaceAttached) {
+        surfaceLifecycle.confirmAttached(res == 0)
+        if (res == 0) {
             // Native attach clears a retained reason for this logical instance
             // before creating the new renderer. Only then may the HUD consume
             // a fresh termination reason.
@@ -681,18 +808,22 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        createdSurfaceHolders += holder
-        surfaceGeneration += 1
+        val tracked = surfaceLifecycle.tracks(holder)
+        val scheduled = surfaceLifecycle.onSurfaceCreated(holder)
+        if (!tracked) {
+            // A replaced hierarchy's late create must not disturb the live
+            // hierarchy's debounce attach or activity bookkeeping.
+            return
+        }
         surfaceChangeCount = 0
-        val generation = surfaceGeneration
         cancelPendingSurfaceAttach()
         android.util.Log.i(
             "LeftcarStream",
-            "surfaceCreated: debounce generation=$generation instanceId=$instanceId port=$port",
+            "surfaceCreated: debounce generation=${surfaceLifecycle.currentGeneration} " +
+                "instanceId=$instanceId port=$port",
         )
-        val surfaceCount = streamSurfaces?.holders?.size ?: 1
-        if (createdSurfaceHolders.size == surfaceCount) {
-            val attach = Runnable { attachStableSurfaces(generation) }
+        if (scheduled != null) {
+            val attach = Runnable { attachStableSurfaces(scheduled) }
             pendingSurfaceAttach = attach
             surfaceHandler.postDelayed(attach, SURFACE_ATTACH_DEBOUNCE_MS)
         }
@@ -700,8 +831,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (!surfaceLifecycle.tracks(holder)) return
         surfaceChangeCount += 1
-        if (surfaceAttached && width > 0 && height > 0) {
+        if (surfaceLifecycle.shouldUpdateGeometry(holder) && width > 0 && height > 0) {
             val surfaces = streamSurfaces
             val fullWidth = if (surfaces?.right != null) {
                 surfaces.left.width + surfaces.right.width
@@ -718,12 +850,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        createdSurfaceHolders -= holder
-        surfaceGeneration += 1
+        val tracked = surfaceLifecycle.tracks(holder)
+        val stop = surfaceLifecycle.onSurfaceDestroyed(holder, isFinishing)
+        if (stop == StreamSurfaceStop.NONE && !tracked) {
+            // A replaced hierarchy's late destroy owns nothing: no live
+            // renderer, no pending attach, no activity bookkeeping.
+            android.util.Log.i(
+                "LeftcarStream",
+                "surfaceDestroyed: retired holder ignored instanceId=$instanceId",
+            )
+            return
+        }
         cancelPendingSurfaceAttach()
         android.util.Log.i(
             "LeftcarStream",
-            "surfaceDestroyed: cancel pending attach generation=$surfaceGeneration " +
+            "surfaceDestroyed: stop=$stop generation=${surfaceLifecycle.currentGeneration} " +
                 "geometryChanges=$surfaceChangeCount instanceId=$instanceId",
         )
         lifecycleEvent(8) // SURFACE_DESTROY
@@ -733,25 +874,24 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // detach intentionally stops silently for resize/rebind, so on a
         // final Activity finish release the renderer here while its peer and
         // authentication token are still available; otherwise the later
-        // onDestroy release has no active renderer left to send BYE.
-        val finalActivity = isFinishing
-        val res = if (surfaceAttached) {
-            surfaceAttached = false
-            if (finalActivity && !released) {
+        // onDestroy release has no active renderer left to send BYE. A holder
+        // from a replaced (rebuilt) hierarchy consumes the retired stop flag
+        // once — it can never detach a renderer the new hierarchy attached.
+        when (stop) {
+            StreamSurfaceStop.NONE -> {}
+            StreamSurfaceStop.DETACH_RENDERER -> {
+                val res = ViewerNative.detachSurface(nativeState, instanceId)
+                android.util.Log.i(
+                    "LeftcarStream",
+                    "detachSurface returned $res; waiting for Surface recreation",
+                )
+            }
+            StreamSurfaceStop.FINAL_RELEASE -> {
                 released = true
                 ViewerNative.release(nativeState, instanceId)
-                0
-            } else {
-                ViewerNative.detachSurface(nativeState, instanceId)
+                android.util.Log.i("LeftcarStream", "final release completed before onDestroy")
             }
-        } else {
-            0
         }
-        android.util.Log.i(
-            "LeftcarStream",
-            "${if (finalActivity) "final release" else "detachSurface"} returned $res; " +
-                "waiting for Surface recreation",
-        )
     }
 
     override fun onPause() {
@@ -775,13 +915,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         android.util.Log.i(
             "LeftcarStream",
-            "onDestroy: final release instanceId=$instanceId attached=$surfaceAttached",
+            "onDestroy: final release instanceId=$instanceId attached=${surfaceLifecycle.isAttached}",
         )
         if (!released) {
             lifecycleEvent(12) // TASK_REMOVE / final Activity destruction
             released = true
         }
-        surfaceGeneration += 1
+        surfaceLifecycle.invalidate()
         cancelPendingSurfaceAttach()
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
@@ -795,5 +935,140 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ViewerNative.release(nativeState, instanceId)
         StreamLauncherModule.forgetStream(instanceId, ownershipGeneration)
         super.onDestroy()
+    }
+}
+
+/** Live-window stream intent transition decision (U3 single↔split fix). */
+internal enum class StreamSurfaceTransition {
+    /** Swap the renderer onto the existing single Surface. */
+    REBIND_IN_PLACE,
+
+    /** Rebuild the view hierarchy so fresh Surface callbacks re-run attach. */
+    REBUILD_SURFACES,
+}
+
+/**
+ * A same-mode single stream with a still-valid Surface swaps its renderer in
+ * place; every other transition changes what the hierarchy must contain —
+ * most importantly a 4K splitVertical promotion on a window created with a
+ * single SurfaceView — so the hierarchy itself is rebuilt and the normal
+ * SurfaceHolder.Callback attach path runs again.
+ */
+internal fun decideSurfaceTransition(
+    nextSplitVertical: Boolean,
+    hierarchyBuiltForSplit: Boolean,
+    leftSurfaceValid: Boolean,
+): StreamSurfaceTransition =
+    if (!nextSplitVertical && !hierarchyBuiltForSplit && leftSurfaceValid) {
+        StreamSurfaceTransition.REBIND_IN_PLACE
+    } else {
+        StreamSurfaceTransition.REBUILD_SURFACES
+    }
+
+/** Renderer stop policy produced by [StreamSurfaceLifecycleGate.onSurfaceDestroyed]. */
+internal enum class StreamSurfaceStop {
+    /** Nothing to stop; the holder never hosted a renderer. */
+    NONE,
+
+    /** Stop the renderer bound to the Surface, keep the Activity window alive. */
+    DETACH_RENDERER,
+
+    /** The Activity is finishing: release the renderer so the final BYE goes out. */
+    FINAL_RELEASE,
+}
+
+/**
+ * JVM-pure owner of the SurfaceHolder.Callback bookkeeping StreamActivity
+ * mirrors 1:1: which holders belong to the live hierarchy, when the debounced
+ * attach may run, and how a destroy stops its renderer.
+ *
+ * A live-window single↔split promotion replaces the view hierarchy. The
+ * Activity stops the replaced hierarchy's renderer eagerly (detach before the
+ * swap), so retired holders carry no stop duty at all: their late destroys —
+ * in any arrival order, before or after the new attach — are fully inert and
+ * can never detach a renderer the new hierarchy attached (device session-3
+ * failure).
+ */
+internal class StreamSurfaceLifecycleGate<T : Any> {
+    private var tracked: Set<T> = emptySet()
+    private val created = LinkedHashSet<T>()
+    private val stopped = mutableSetOf<T>()
+    private var generation: Int = 0
+    private var attached: Boolean = false
+
+    val isAttached: Boolean get() = attached
+    val currentGeneration: Int get() = generation
+    val trackedHolderCount: Int get() = tracked.size
+
+    fun tracks(holder: T): Boolean = holder in tracked
+
+    /**
+     * onCreate and onNewIntent rebuilds: [holders] now form the live
+     * hierarchy. The caller detached any renderer bound to the replaced
+     * hierarchy before the swap, so the attached state ends here and retired
+     * holders are forgotten outright — also keeping [stopped] bounded on
+     * long-lived Activities.
+     */
+    fun hierarchySwapped(holders: List<T>) {
+        tracked = holders.toSet()
+        created.clear()
+        stopped.clear()
+        attached = false
+        generation += 1
+    }
+
+    /**
+     * SURFACE_CREATE for a live holder. Returns the generation to
+     * debounce-schedule once every holder of the hierarchy has a Surface.
+     */
+    fun onSurfaceCreated(holder: T): Int? {
+        if (holder !in tracked) return null
+        created += holder
+        stopped -= holder
+        generation += 1
+        if (tracked.isNotEmpty() && created.size == tracked.size) {
+            return generation
+        }
+        return null
+    }
+
+    /** SURFACE_CHANGED feeds geometry only for the live, attached hierarchy. */
+    fun shouldUpdateGeometry(holder: T): Boolean = attached && holder in tracked
+
+    /** SURFACE_DESTROY: how the renderer bound to [holder] must be stopped. */
+    fun onSurfaceDestroyed(holder: T, finishing: Boolean): StreamSurfaceStop {
+        if (holder !in tracked) {
+            // Retired hierarchy: its renderer was detached at swap time, so
+            // this destroy owns nothing — never a stop, never a generation
+            // bump, never a pending-attach cancellation.
+            return StreamSurfaceStop.NONE
+        }
+        // The framework destroys a tracked holder's Surface at most once per
+        // creation; treat any repeat as inert.
+        if (holder in stopped) return StreamSurfaceStop.NONE
+        stopped += holder
+        val wasAttached = attached
+        created -= holder
+        generation += 1
+        if (!wasAttached) return StreamSurfaceStop.NONE
+        attached = false
+        return if (finishing) StreamSurfaceStop.FINAL_RELEASE else StreamSurfaceStop.DETACH_RENDERER
+    }
+
+    /**
+     * The debounced attach runnable: run only when the captured generation is
+     * still current, every live holder has (re)created its Surface, and no
+     * renderer is attached yet.
+     */
+    fun canAttachStableSurfaces(scheduledGeneration: Int): Boolean =
+        !attached && scheduledGeneration == generation && created.size == tracked.size
+
+    fun confirmAttached(success: Boolean) {
+        attached = success
+    }
+
+    /** Final teardown: no further attach may run. */
+    fun invalidate() {
+        generation += 1
     }
 }

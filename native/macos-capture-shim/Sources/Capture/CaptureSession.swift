@@ -21,6 +21,13 @@ final class CaptureSession {
      let captureLock = NSLock()
      var pendingCapture: PendingCaptureFrame?
      var pendingSplitCaptures: [PendingCaptureFrame] = []
+    // Newest retained capture frame. When a split recovery begins while the
+    // pending capture queue is empty (idle screen), this frame is submitted as
+    // the paired-IDR carrier so recovery latency is bounded by encode + send
+    // instead of waiting unbounded for the next ScreenCaptureKit callback.
+     var splitRecoveryCarrier: PendingCaptureFrame?
+    // Age of the currently pending split recovery boundary (0 when idle).
+     var splitRecoveryGateStartedNs: UInt64 = 0
      var encodeScheduled = false
     // VideoToolbox accepts frames asynchronously. A latest-frame slot alone
     // does not prevent its internal queue from growing, so keep a small

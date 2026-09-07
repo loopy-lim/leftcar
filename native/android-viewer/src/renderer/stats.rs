@@ -103,6 +103,12 @@ mod tests {
             fec_decode_failures: 19,
         });
         assert_eq!(&body[..4], b"LCF1");
+        // Bytes 16..20 are the stale-frame field the Host reads into its ABR
+        // loss signal. The split worker intentionally keeps sending 0 there
+        // (it has no capture-age metric; populating it would change Host
+        // bitrate policy), but the wire position itself must stay pinned so
+        // that a future intentional change is a visible, deliberate act.
+        assert_eq!(u32::from_be_bytes(body[16..20].try_into().unwrap()), 4);
         assert_eq!(u16::from_be_bytes([body[32], body[33]]), 55);
         assert_eq!(u16::from_be_bytes([body[34], body[35]]), 54);
         assert_eq!(u32::from_be_bytes(body[36..40].try_into().unwrap()), 700);

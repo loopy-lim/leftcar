@@ -87,6 +87,15 @@ impl ProviderError {
     }
 }
 
+/// Observed result of an in-place mode switch, mirroring the shim's RESIZED
+/// line: logical dimensions and the backing pixel dimensions actually reached.
+pub struct ResizedDisplayMode {
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
 /// The tablet-display pipeline depends only on this trait.
 pub trait VirtualDisplayProvider: Send + Sync {
     fn name(&self) -> &'static str;
@@ -107,6 +116,22 @@ pub trait VirtualDisplayProvider: Send + Sync {
         }
     }
     fn remove(&self, display: &VirtualDisplay) -> Result<(), ProviderError>;
+    /// Switch the live display's mode to (width, height, scale) without
+    /// destroying it. Default: unsupported — engines with create-only CLIs
+    /// (BetterDisplay) answer this way, and callers fall back to
+    /// remove-and-recreate at the DisplayManager layer.
+    fn resize(
+        &self,
+        display: &VirtualDisplay,
+        width: u32,
+        height: u32,
+        scale: u8,
+    ) -> Result<ResizedDisplayMode, ProviderError> {
+        let _ = (display, width, height, scale);
+        Err(ProviderError::EngineUnavailable(
+            "이 엔진은 화면 제거 없이 리사이즈를 지원하지 않습니다. 화면을 제거한 뒤 새 크기로 다시 만들어야 합니다.".into(),
+        ))
+    }
 }
 
 /// Premise check shared by every provider: creation is impossible with zero
@@ -537,6 +562,134 @@ impl CgvdProvider {
         let _ = session.child.kill();
         let _ = session.child.wait();
     }
+
+    /// Sends `RESIZE <w> <h> <scale>` to the retained shim and waits for its
+    /// `RESIZED` line (see tools/cgvd-shim). The sessions lock is held for the
+    /// whole handshake, serializing this against PLACE — the shim's tracked
+    /// current logical size is never racing a concurrent place request, and
+    /// the next reply line on the channel is guaranteed to be this resize's.
+    #[cfg(target_os = "macos")]
+    fn resize_session(
+        &self,
+        display_id: u32,
+        width: u32,
+        height: u32,
+        scale: u8,
+    ) -> Result<ResizedCgvdMode, ProviderError> {
+        use std::io::Write;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        if let Err(error) = super::virtual_display::validate_dimensions(width, height) {
+            return Err(ProviderError::EngineFailed(error));
+        }
+        if let Err(error) = super::virtual_display::validate_scale(scale) {
+            return Err(ProviderError::EngineFailed(error));
+        }
+        let expected_pixel_width = width.checked_mul(u32::from(scale)).ok_or_else(|| {
+            ProviderError::EngineFailed("검증할 backing 폭이 너무 큽니다.".into())
+        })?;
+        let expected_pixel_height = height.checked_mul(u32::from(scale)).ok_or_else(|| {
+            ProviderError::EngineFailed("검증할 backing 높이가 너무 큽니다.".into())
+        })?;
+
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ProviderError::EngineFailed("CGVD 세션 잠금 실패".into()))?;
+        let session = sessions.get_mut(&display_id).ok_or_else(|| {
+            ProviderError::EngineFailed(format!("관리 중인 displayID가 아닙니다: {display_id}"))
+        })?;
+        writeln!(session.stdin, "RESIZE {width} {height} {scale}")
+            .and_then(|_| session.stdin.flush())
+            .map_err(|error| {
+                ProviderError::EngineFailed(format!("shim 리사이즈 요청 실패: {error}"))
+            })?;
+
+        // RESIZED 응답에는 PLACE처럼 식별 가능한 requestID가 없다. 대신 이
+        // sessions 잠금을 든 채로 응답을 기다린다 — PLACE·RESIZE·stop이 모두
+        // 같은 잠금을 쓰므로 요청 자체가 직렬화되고, 다음 도착 줄이 곧 이
+        // RESIZE의 응답임이 보장된다. 잠금이 최대 5초 묶이는 건 그 직렬화의
+        // 대가다.
+        const RESIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+        let line = match session.responses.recv_timeout(RESIZE_RESPONSE_TIMEOUT) {
+            Ok(Ok(line)) if !line.is_empty() => line,
+            Ok(Ok(_)) | Err(RecvTimeoutError::Disconnected) => {
+                return Err(ProviderError::EngineFailed("shim 응답 스트림 종료".into()))
+            }
+            Ok(Err(error)) => {
+                return Err(ProviderError::EngineFailed(format!(
+                    "shim RESIZED 읽기 실패: {error}"
+                )))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(ProviderError::EngineFailed(
+                    "shim RESIZED 응답 시간 초과".into(),
+                ))
+            }
+        };
+        // READY와 동일하게 관측값이 요청과 일치하는지 확인한다 — shim이 다른
+        // 모드로 떨어졌는데 성공처럼 기록되는 것을 막는다.
+        let mode = parse_cgvd_resized(line.trim())?;
+        if (mode.logical_width, mode.logical_height) != (width, height)
+            || (mode.pixel_width, mode.pixel_height)
+                != (expected_pixel_width, expected_pixel_height)
+        {
+            return Err(ProviderError::EngineFailed(format!(
+                "shim 모드 불일치: logical={}x{}, pixel={}x{}",
+                mode.logical_width, mode.logical_height, mode.pixel_width, mode.pixel_height
+            )));
+        }
+        Ok(mode)
+    }
+}
+
+/// One-line RESIZED contract of the retained shim: the logical and pixel
+/// dimensions actually reached after the mode switch. Kept compiled on every
+/// platform for contract tests (same rationale as parse_cgvd_line).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_cgvd_resized(line: &str) -> Result<ResizedCgvdMode, ProviderError> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.first().copied() == Some("FAILED") {
+        return Err(ProviderError::EngineFailed(
+            fields[1..].join(" ").trim_end().to_string(),
+        ));
+    }
+    if fields.len() != 5 || fields[0] != "RESIZED" {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim RESIZED 응답 파싱 실패: {line}"
+        )));
+    }
+    let values: Vec<u32> = fields[1..]
+        .iter()
+        .map(|value| value.parse().ok())
+        .collect::<Option<_>>()
+        .ok_or_else(|| {
+            ProviderError::EngineFailed(format!("shim RESIZED 응답 파싱 실패: {line}"))
+        })?;
+    if values[0] == 0 || values[1] == 0 || values[2] == 0 || values[3] == 0 {
+        return Err(ProviderError::EngineFailed(format!(
+            "shim 리사이즈 모드 불일치: logical={}x{}, pixel={}x{}",
+            values[0], values[1], values[2], values[3]
+        )));
+    }
+    Ok(ResizedCgvdMode {
+        logical_width: values[0],
+        logical_height: values[1],
+        pixel_width: values[2],
+        pixel_height: values[3],
+    })
+}
+
+/// RESIZE가 실제로 도달한 모드. PLACE와 달리 requestID가 없는 계약이라 늦은
+/// 응답 구분은 세션 직렬화(sessions 잠금)에 의존한다.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct ResizedCgvdMode {
+    logical_width: u32,
+    logical_height: u32,
+    pixel_width: u32,
+    pixel_height: u32,
 }
 
 impl Default for CgvdProvider {
@@ -860,6 +1013,61 @@ impl VirtualDisplayProvider for CgvdProvider {
             Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
         }
     }
+
+    fn resize(
+        &self,
+        display: &VirtualDisplay,
+        width: u32,
+        height: u32,
+        scale: u8,
+    ) -> Result<ResizedDisplayMode, ProviderError> {
+        #[cfg(target_os = "macos")]
+        {
+            let id = display
+                .cgvd_display_id
+                .ok_or_else(|| ProviderError::EngineFailed("CGVD displayID가 없습니다.".into()))?;
+            let generation = {
+                let sessions = self
+                    .sessions
+                    .lock()
+                    .map_err(|_| ProviderError::EngineFailed("CGVD 세션 잠금 실패".into()))?;
+                sessions
+                    .get(&id)
+                    .ok_or_else(|| {
+                        ProviderError::EngineFailed(format!("관리 중인 displayID가 아닙니다: {id}"))
+                    })?
+                    .generation
+            };
+            let mode = self.resize_session(id, width, height, scale)?;
+            // Same (displayID, serial) key the capture side registered at
+            // create time — the mode table is updated in place, keeping the
+            // session and its display alive even if re-registration fails so
+            // a retry remains possible.
+            if let Err(error) = crate::ffi::register_managed_display_mode(
+                id,
+                generation,
+                mode.logical_width,
+                mode.logical_height,
+                mode.pixel_width,
+                mode.pixel_height,
+            ) {
+                return Err(ProviderError::EngineFailed(format!(
+                    "capture HiDPI mode 재등록 실패: {error}"
+                )));
+            }
+            Ok(ResizedDisplayMode {
+                logical_width: mode.logical_width,
+                logical_height: mode.logical_height,
+                pixel_width: mode.pixel_width,
+                pixel_height: mode.pixel_height,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (display, width, height, scale);
+            Err(ProviderError::EngineUnavailable(MACOS_ONLY_MESSAGE.into()))
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1012,6 +1220,38 @@ mod tests {
         );
         assert!(parse_cgvd_ready("READY 42 3200 2000 6400 4000", 1600, 1000, 2).is_err());
         assert!(parse_cgvd_ready("READY 0 1600 1000 3200 2000", 1600, 1000, 2).is_err());
+    }
+
+    #[test]
+    fn cgvd_resized_parser_pins_contract_and_late_place_replies() {
+        assert_eq!(
+            parse_cgvd_resized("RESIZED 1280 800 1280 800"),
+            Ok(ResizedCgvdMode {
+                logical_width: 1280,
+                logical_height: 800,
+                pixel_width: 1280,
+                pixel_height: 800,
+            })
+        );
+        // The shim keeps the session alive on failure — FAILED detail only.
+        assert_eq!(
+            parse_cgvd_resized("FAILED resize displayID=42 mode timeout"),
+            Err(ProviderError::EngineFailed(
+                "resize displayID=42 mode timeout".into()
+            ))
+        );
+        // Malformed, wrong shape, and zero dimensions are contract violations.
+        assert!(parse_cgvd_resized("").is_err());
+        assert!(parse_cgvd_resized("RESIZED 1280 800").is_err());
+        assert!(parse_cgvd_resized("RESIZED 0 800 0 800").is_err());
+        assert!(parse_cgvd_resized("RESIZED a b c d").is_err());
+        // Late PLACE replies (multi-word FAILED <requestID> detail included)
+        // are recognized so the resize wait can skip them.
+        assert!(parse_cgvd_resized("PLACED 9 42 -1600 0 1600 1000 1 1").is_err());
+        assert_eq!(
+            parse_cgvd_resized("FAILED 9 configure code=1001"),
+            Err(ProviderError::EngineFailed("9 configure code=1001".into()))
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! - exceptions checked/cleared, never leaked across the boundary
 //! - panics never cross JNI (catch_unwind everywhere)
 
+#[cfg(target_os = "android")]
 use std::ffi::c_char;
 
 use crate::input_protocol::InputScheduler;
@@ -23,6 +24,7 @@ pub(crate) const LATENCY_UNKNOWN: u64 = u64::MAX;
 
 pub(crate) type StatePtr = *mut viewer_core::ProcessState;
 
+#[cfg(target_os = "android")]
 extern "C" {
     fn __android_log_print(prio: i32, tag: *const c_char, fmt: *const c_char, ...) -> i32;
 }
@@ -34,6 +36,10 @@ macro_rules! log_info {
     };
 }
 
+// Host test builds compile the receiver handoff helpers below, so their log
+// paths must not reference the Android log symbol. Same split as
+// prepared_tcp::bridge_log.
+#[cfg(target_os = "android")]
 #[doc(hidden)]
 pub fn android_log_info(msg: String) {
     if let Ok(c_msg) = std::ffi::CString::new(msg) {
@@ -49,6 +55,10 @@ pub fn android_log_info(msg: String) {
         }
     }
 }
+
+#[cfg(not(target_os = "android"))]
+#[doc(hidden)]
+pub fn android_log_info(_msg: String) {}
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -587,6 +597,48 @@ pub(crate) fn take_prepared_receiver(
     }
 }
 
+/// Both split-stream preflight receivers claimed atomically.
+pub(crate) struct SplitPreparedReceivers {
+    pub(crate) left: PreparedUdpReceiver,
+    pub(crate) right: PreparedUdpReceiver,
+}
+
+/// All-or-nothing claim of the two split-stream preflight sockets.
+///
+/// Splitting the claim across two bare `take_prepared_receiver` calls lost a
+/// socket forever when only one half was present: the caller dropped the
+/// taken half on the error return, closing the UDP listener, and every retry
+/// then failed with LEFTCAR_ERR_STATE. Here either both sockets come back,
+/// or the store is left exactly as it was.
+pub(crate) fn take_split_receivers(
+    left_port: u16,
+    right_port: u16,
+    expected_host: &str,
+) -> Option<SplitPreparedReceivers> {
+    let left = take_prepared_receiver(left_port, expected_host)?;
+    match take_prepared_receiver(right_port, expected_host) {
+        Some(right) => Some(SplitPreparedReceivers { left, right }),
+        None => {
+            restore_prepared_receiver(left_port, left);
+            None
+        }
+    }
+}
+
+/// Return a claimed receiver so a later attach can retry. Never overwrites a
+/// receiver another thread prepared in the meantime: the stale one is dropped
+/// instead of clobbering the fresher socket.
+pub(crate) fn restore_prepared_receiver(port: u16, receiver: PreparedUdpReceiver) -> bool {
+    let mut receivers = PREPARED_RECEIVERS.lock().unwrap();
+    match receivers.get_or_insert_with(HashMap::new).entry(port) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(receiver);
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod renderer_lifecycle_tests {
     use super::*;
@@ -712,5 +764,119 @@ mod renderer_lifecycle_tests {
 
         remove_renderer_if_current(instance, &new);
         clear_cached_termination(instance);
+    }
+}
+
+#[cfg(test)]
+mod split_receiver_tests {
+    use super::*;
+    use crate::prepared_udp::PreparedUdpReceiver;
+
+    const HOST: &str = "127.0.0.1";
+
+    // PREPARED_RECEIVERS is process-global; these tests assert absolute store
+    // counts, so they serialize on this lock instead of racing each other.
+    static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn bind_prepared() -> PreparedUdpReceiver {
+        PreparedUdpReceiver::bind(0, HOST.to_owned()).unwrap()
+    }
+
+    fn insert_prepared(port: u16, receiver: PreparedUdpReceiver) {
+        PREPARED_RECEIVERS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(port, receiver);
+    }
+
+    fn store_len() -> usize {
+        PREPARED_RECEIVERS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|receivers| receivers.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn split_claim_returns_both_receivers_and_empties_the_store() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let left = bind_prepared();
+        let right = bind_prepared();
+        let (left_port, right_port) = (left.port().unwrap(), right.port().unwrap());
+        insert_prepared(left_port, left);
+        insert_prepared(right_port, right);
+
+        let claimed =
+            take_split_receivers(left_port, right_port, HOST).expect("both halves prepared");
+        assert_eq!(claimed.left.port().unwrap(), left_port);
+        assert_eq!(claimed.right.port().unwrap(), right_port);
+        assert_eq!(store_len(), 0, "claim must drain both preflight sockets");
+    }
+
+    #[test]
+    fn split_claim_with_missing_right_restores_the_left_socket() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let left = bind_prepared();
+        let left_port = left.port().unwrap();
+        insert_prepared(left_port, left);
+
+        assert!(
+            take_split_receivers(left_port, left_port.wrapping_add(1), HOST).is_none(),
+            "missing right half must fail the whole claim"
+        );
+        // The left socket must be back in the store, still bound and still
+        // match the host — a retried attach can claim it again.
+        assert_eq!(store_len(), 1);
+        let restored = take_prepared_receiver(left_port, HOST).expect("left socket restored");
+        assert_eq!(restored.port().unwrap(), left_port);
+    }
+
+    #[test]
+    fn split_claim_failure_then_retry_succeeds_after_right_is_prepared() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let left = bind_prepared();
+        let left_port = left.port().unwrap();
+        insert_prepared(left_port, left);
+
+        // First attempt: right half missing, nothing may be lost.
+        assert!(take_split_receivers(left_port, left_port.wrapping_add(1), HOST).is_none());
+        assert_eq!(store_len(), 1);
+
+        // Retry after the right listener has been prepared.
+        let right = bind_prepared();
+        let right_port = right.port().unwrap();
+        insert_prepared(right_port, right);
+        let claimed =
+            take_split_receivers(left_port, right_port, HOST).expect("retry claims both halves");
+        drop(claimed);
+        assert_eq!(store_len(), 0);
+    }
+
+    #[test]
+    fn restore_never_clobbers_a_fresher_prepared_receiver() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let stale = bind_prepared();
+        let fresh = bind_prepared();
+        let port = fresh.port().unwrap();
+        insert_prepared(port, fresh);
+
+        assert!(
+            !restore_prepared_receiver(port, stale),
+            "restoring over a live receiver must be refused"
+        );
+        let stored = take_prepared_receiver(port, HOST).expect("fresh receiver retained");
+        assert_eq!(stored.port().unwrap(), port);
+    }
+
+    #[test]
+    fn split_claim_with_no_prepared_sockets_leaves_store_untouched() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let before = store_len();
+        let left = bind_prepared();
+        let right = bind_prepared();
+        assert!(take_split_receivers(left.port().unwrap(), right.port().unwrap(), HOST).is_none());
+        assert_eq!(store_len(), before);
     }
 }

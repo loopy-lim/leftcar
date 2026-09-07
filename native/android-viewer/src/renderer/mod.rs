@@ -9,8 +9,20 @@ pub(crate) mod single_session {
         include!("single_session/health.rs");
     }
 }
+/// V2 paired-IDR dispatch semantics (single selected path per action,
+/// bounded alternate retry, episode-owned cancellation, truthful
+/// attempt-not-delivery reporting). Kept out of the android gate so host
+/// `cargo test` exercises the pure routing logic; the android-gated split
+/// coordinator and tile workers only wire it up.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) mod dispatch;
 #[path = "split_session/gap_policy.rs"]
 pub(crate) mod split_gap_policy;
+/// Bounded local-monotonic latency telemetry for the split path. Kept out of
+/// the android gate so host `cargo test` exercises the pure tracking logic;
+/// the android-gated split worker only wires it up.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) mod split_latency;
 #[cfg(target_os = "android")]
 pub(crate) mod split_session;
 pub mod stats;

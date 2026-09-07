@@ -1,4 +1,5 @@
 use super::*;
+use crate::renderer::split_latency::TileLatencyTelemetry;
 use std::os::fd::AsRawFd;
 
 // Qualcomm's low-latency decoder can briefly withhold the next compressed
@@ -65,6 +66,7 @@ pub(super) fn process_restored(
     events: &mpsc::Sender<CoordinatorEvent>,
     stats: &RuntimeStats,
     control: &RendererControl,
+    telemetry: &mut TileLatencyTelemetry,
 ) {
     for recovered in restored.into_iter().flatten() {
         let fragment = FrameFragment {
@@ -98,6 +100,7 @@ pub(super) fn process_restored(
                 events,
                 stats,
                 control,
+                telemetry,
             );
         }
     }
@@ -147,6 +150,7 @@ pub(super) fn process_frame(
     events: &mpsc::Sender<CoordinatorEvent>,
     stats: &RuntimeStats,
     control: &RendererControl,
+    telemetry: &mut TileLatencyTelemetry,
 ) {
     let keyframe = is_keyframe(&frame.au);
     let gap = decide_split_frame_gap(*last_id, frame.id, keyframe, *awaiting_keyframe);
@@ -161,6 +165,7 @@ pub(super) fn process_frame(
     *awaiting_keyframe = gap.awaiting_keyframe_after;
     if gap.signal == SplitGapSignal::Loss {
         stats.delta_gap_recoveries.fetch_add(1, Ordering::Relaxed);
+        telemetry.note_gap_started(monotonic_ns());
         let _ = events.send(CoordinatorEvent::NetworkGap(side));
     } else if gap.signal == SplitGapSignal::Idr && gap.missing > 0 {
         stats
@@ -168,6 +173,13 @@ pub(super) fn process_frame(
             .fetch_add(1, Ordering::Relaxed);
     }
     if !gap.feed {
+        // The tile holds its last good Surface image and withholds this AU.
+        // With a decoder present the freeze is user-visible, so count it in
+        // the local frozen-input metric (the wire stale-frames field stays 0
+        // because the Host reads it into its ABR loss signal).
+        if decoder.is_some() {
+            telemetry.note_frozen_input();
+        }
         return;
     }
     let Some(config) = config.as_ref() else {
@@ -238,6 +250,17 @@ pub(super) fn process_frame(
     match decoder.queue_access_unit(&frame.au, pts_us, SPLIT_DECODER_INPUT_TIMEOUT_US) {
         Ok(viewer_decoder::FeedStatus::Queued { .. }) => {
             *input_pressure_started_ns = None;
+            let queued_ns = monotonic_ns();
+            telemetry.note_queued(frame.id, pts_us, queued_ns);
+            if gap.signal == SplitGapSignal::Idr {
+                if let Some(gap_to_idr_us) = telemetry.note_idr(pts_us, queued_ns) {
+                    log_info!(
+                        "split {:?} gap freeze IDR queued after {}us",
+                        side,
+                        gap_to_idr_us
+                    );
+                }
+            }
         }
         Ok(viewer_decoder::FeedStatus::InputUnavailable) => {
             *input_drops = input_drops.saturating_add(1);
@@ -319,6 +342,27 @@ pub(super) fn send_authenticated(socket: &UdpSocket, peer: SocketAddr, body: &[u
     packet.extend_from_slice(body);
     packet.extend_from_slice(token);
     let _ = socket.send_to(&packet, peer);
+}
+
+/// One authenticated send_to whose kernel result is reported. Acceptance by
+/// the kernel is a transmit attempt only — actual delivery is never known
+/// from UDP — so callers must treat `Ok(())` as `Transmitted`, not delivered.
+pub(super) fn send_authenticated_checked(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    body: &[u8],
+    token: &[u8],
+) -> std::io::Result<()> {
+    if token.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no session token",
+        ));
+    }
+    let mut packet = Vec::with_capacity(body.len() + token.len());
+    packet.extend_from_slice(body);
+    packet.extend_from_slice(token);
+    socket.send_to(&packet, peer).map(|_| ())
 }
 
 pub(super) fn rate(current: u64, previous: u64, elapsed_ms: u64) -> u16 {
