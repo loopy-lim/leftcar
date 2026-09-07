@@ -6,6 +6,7 @@ use control_contract::host::{
     EncoderExperimentInfo, StatsInfo,
 };
 use control_contract::udp_stability::AppliedUdpStability;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -74,6 +75,10 @@ pub trait CaptureBackend: Send + Sync {
 pub struct FakeBackend {
     pub displays: Vec<DisplayInfo>,
     pub encoder_experiment: Mutex<EncoderExperiment>,
+    /// Whether the catalog should advertise splitVertical as startable.
+    pub advertise_split_vertical: bool,
+    /// Number of successful stop() calls, for reconfigure rollback tests.
+    pub stops: AtomicUsize,
 }
 
 impl CaptureBackend for FakeBackend {
@@ -90,7 +95,18 @@ impl CaptureBackend for FakeBackend {
     }
 
     fn encoder_experiments(&self) -> Result<Vec<EncoderExperimentInfo>, String> {
-        Ok(phase_a_encoder_experiments())
+        let mut experiments = phase_a_encoder_experiments();
+        if self.advertise_split_vertical {
+            // control.rs re-canonicalizes advertised entries, so a raw entry
+            // is enough here.
+            experiments.push(EncoderExperimentInfo {
+                id: EncoderExperiment::SplitVertical,
+                label: String::new(),
+                hint: String::new(),
+                requires_reconnect: true,
+            });
+        }
+        Ok(experiments)
     }
 
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
@@ -117,6 +133,7 @@ impl CaptureBackend for FakeBackend {
 
     fn stop(&self, handle: u32) -> Result<(), String> {
         if handle == 7 {
+            self.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
         } else {
             Err("no such handle".into())

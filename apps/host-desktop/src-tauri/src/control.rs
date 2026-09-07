@@ -94,13 +94,20 @@ fn validate_stream_shape(width: u32, height: u32, fps: u32) -> Result<(), String
     Ok(())
 }
 
-fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> Result<(), String> {
-    if input.encoder_experiment != EncoderExperiment::SplitVertical {
+fn validate_split_request(
+    encoder_experiment: EncoderExperiment,
+    width: u32,
+    height: u32,
+    fps: u32,
+    concrete_transport: &str,
+    viewer_port: u16,
+) -> Result<(), String> {
+    if encoder_experiment != EncoderExperiment::SplitVertical {
         return Ok(());
     }
-    if (input.width, input.height, input.fps) != (3840, 2160, 60)
+    if (width, height, fps) != (3840, 2160, 60)
         || concrete_transport != "udp"
-        || input.viewer_port == u16::MAX
+        || viewer_port == u16::MAX
     {
         return Err(
             "splitVertical requires 3840x2160 at 60fps over direct UDP and two consecutive viewer ports"
@@ -108,6 +115,17 @@ fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> R
         );
     }
     Ok(())
+}
+
+fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> Result<(), String> {
+    validate_split_request(
+        input.encoder_experiment,
+        input.width,
+        input.height,
+        input.fps,
+        concrete_transport,
+        input.viewer_port,
+    )
 }
 
 fn canonical_encoder_experiment(id: EncoderExperiment) -> EncoderExperimentInfo {
@@ -322,6 +340,7 @@ impl ControlServer {
     ) -> Result<u32, String> {
         let recovered = self.start_replacement_from_snapshot(
             previous,
+            previous.encoder_experiment,
             previous.width,
             previous.height,
             previous.fps_target,
@@ -350,6 +369,7 @@ impl ControlServer {
     fn start_replacement_from_snapshot(
         &self,
         previous: &ReconfigureSnapshot,
+        encoder_experiment: EncoderExperiment,
         width: u32,
         height: u32,
         fps: u32,
@@ -376,7 +396,7 @@ impl ControlServer {
             &previous.capture_backend,
             &previous.media_transport,
             &previous.content_mode,
-            previous.encoder_experiment,
+            encoder_experiment,
             udp_stability,
         )
     }
@@ -425,20 +445,66 @@ impl ControlServer {
             }
         };
 
+        let requested_transport = normalize_media_transport(&previous.media_transport)
+            .ok_or_else(|| format!("unsupported media transport: {}", previous.media_transport))?;
+        // Resolve the replacement experiment and validate it BEFORE stopping
+        // the previous backend: explicit unsupported or malformed input must
+        // leave the live stream unchanged.
+        let replacement_encoder_experiment = match input.encoder_experiment {
+            Some(requested) => {
+                let advertised = match self.backend.encoder_experiments() {
+                    Ok(experiments) => advertised_encoder_experiments(experiments),
+                    Err(error) => return Err(error),
+                };
+                let split_diagnostic_enabled = std::env::var("LEFTCAR_ENABLE_SPLIT_DIAGNOSTIC")
+                    .is_ok_and(|value| value == "1");
+                if !encoder_experiment_is_startable(
+                    &advertised,
+                    requested,
+                    split_diagnostic_enabled,
+                ) {
+                    return Err(format!(
+                        "unsupported encoder experiment: {}",
+                        requested.as_str()
+                    ));
+                }
+                requested
+            }
+            None => {
+                // Older request without a mode: retain the previous
+                // experiment, demoting split to the single path when
+                // leaving exact 4K (legacy behavior).
+                let replacement = if previous.encoder_experiment == EncoderExperiment::SplitVertical
+                    && (input.width != 3_840 || input.height != 2_160)
+                {
+                    EncoderExperiment::Auto
+                } else {
+                    previous.encoder_experiment
+                };
+                replacement
+            }
+        };
+
+        // Split keeps the exact 4K60 direct-UDP consecutive-port
+        // restriction; other modes use the supported single path. Both
+        // branches resolve the replacement experiment FIRST and share this
+        // validation, so legacy mode-omitted requests cannot retain an
+        // invalid split shape (e.g. exact 4K at 90/30fps) either.
+        validate_split_request(
+            replacement_encoder_experiment,
+            input.width,
+            input.height,
+            input.fps,
+            requested_transport,
+            previous.viewer_port,
+        )?;
+
         self.backend.stop(previous.handle)?;
         cleanup_media_transport(&previous.media_transport, previous.viewer_port);
 
-        let replacement_encoder_experiment = if previous.encoder_experiment
-            == EncoderExperiment::SplitVertical
-            && (input.width != 3_840 || input.height != 2_160)
-        {
-            EncoderExperiment::Auto
-        } else {
-            previous.encoder_experiment
-        };
-
         let replacement_handle = match self.start_replacement_from_snapshot(
             &previous,
+            replacement_encoder_experiment,
             input.width,
             input.height,
             input.fps,
@@ -483,6 +549,7 @@ impl ControlServer {
             height: input.height,
             fps: input.fps,
             quality_state: settled_quality_state.into(),
+            encoder_experiment: Some(replacement_encoder_experiment),
         })
     }
 
@@ -845,6 +912,7 @@ impl ControlServer {
                     split_pre_encode_admission_drops: metrics.split_pre_encode_admission_drops,
                     split_encoded_queue_depth: metrics.split_encoded_queue_depth,
                     split_encoded_queue_oldest_us: metrics.split_encoded_queue_oldest_us,
+                    split_capture_queue_oldest_us: metrics.split_capture_queue_oldest_us,
                     split_recovery_boundary_discards: metrics.split_recovery_boundary_discards,
                     split_post_encode_delta_drops: metrics.split_post_encode_delta_drops,
                     split_wire_pairs_attempted: metrics.split_wire_pairs_attempted,
@@ -1063,6 +1131,7 @@ impl ControlServer {
                     }),
                     displays,
                     encoder_experiments,
+                    reconfigure_encoder_experiment: Some(true),
                     udp_stability_capabilities: Some(host_udp_stability_capabilities()),
                 })
             }
@@ -1329,6 +1398,30 @@ impl ControlServer {
                 }
             }
             "getStatus" => ok(self.snapshot()),
+            "resizeVirtualDisplay" => {
+                // Viewer-initiated managed display resize. The registry is
+                // attached by the host UI; without it the viewer has no
+                // business resizing anything.
+                let input: control_contract::host::ResizeVirtualDisplayInput =
+                    match serde_json::from_value(args) {
+                        Ok(v) => v,
+                        Err(e) => return err(&format!("bad args: {e}")),
+                    };
+                let Some(displays) = self.displays.clone() else {
+                    return err("관리 화면 레지스트리가 연결되지 않았습니다.");
+                };
+                match displays.resize(&input.id, input.width, input.height, input.scale) {
+                    Ok(view) => ok(control_contract::host::ResizeVirtualDisplayOutput {
+                        id: view.id,
+                        logical_width: view.logical_width,
+                        logical_height: view.logical_height,
+                        scale: view.scale,
+                        backing_width: view.backing_width,
+                        backing_height: view.backing_height,
+                    }),
+                    Err(error) => err(&error),
+                }
+            }
             _ => {
                 // delegate stateless commands to the real rustra package (H02 path)
                 match control_contract::host::host_package().invoke_json(command, args) {
@@ -1584,6 +1677,8 @@ mod tests {
                 height: 1080,
             }],
             encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: AtomicUsize::new(0),
         })
     }
 
@@ -2215,6 +2310,390 @@ mod tests {
         assert_eq!(session.input_rate_hz, 120);
     }
 
+    /// Seed one live UDP session directly (the dispatcher's split start
+    /// validation requires the diagnostic flag; these tests target the
+    /// reconfigure path with a session already established).
+    fn seed_live_session(
+        server: &ControlServer,
+        encoder_experiment: EncoderExperiment,
+        width: u32,
+        height: u32,
+    ) {
+        server.sessions.lock().unwrap().live.insert(
+            1,
+            Session {
+                handle: 7,
+                source_index: 0,
+                source_name: "Main".into(),
+                width,
+                height,
+                fps_target: 60,
+                quality_state: "native".into(),
+                capture_backend: "screenCaptureKit".into(),
+                content_mode: "video".into(),
+                encoder_experiment,
+                viewer_addr: "192.168.0.9:5002".into(),
+                viewer_port: 5002,
+                media_transport: "udp".into(),
+                udp_stability: None,
+                input_enabled: false,
+                input_rate_hz: 180,
+                terminal_since: None,
+                terminal_error: None,
+                backend_released: false,
+            },
+        );
+    }
+
+    /// Backend whose capture stats report a positive split capture queue age.
+    struct CaptureQueueAgeBackend;
+
+    impl CaptureBackend for CaptureQueueAgeBackend {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            Ok(Vec::new())
+        }
+
+        fn start(
+            &self,
+            _source_index: u32,
+            _ip: &str,
+            _port: u16,
+            _w: u32,
+            _h: u32,
+            _fps: u32,
+            _capture_backend: &str,
+            _media_transport: &str,
+            _content_mode: &str,
+            _encoder_experiment: EncoderExperiment,
+            _udp_stability: &AppliedUdpStability,
+        ) -> Result<u32, String> {
+            Ok(9)
+        }
+
+        fn stop(&self, _handle: u32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn stats(&self, _handle: u32) -> Result<StatsInfo, String> {
+            Ok(StatsInfo {
+                state: "running".into(),
+                split_capture_queue_oldest_us: Some(45_600),
+                ..StatsInfo::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn status_response_forwards_split_capture_queue_oldest_us() {
+        // 네이티브 캡처 stats의 splitCaptureQueueOldestUs가 status 응답까지
+        // 생존해야 한다 (파싱 → SessionView 전달 → Host JSON).
+        let server = Arc::new(ControlServer::new(
+            Arc::new(CaptureQueueAgeBackend),
+            test_pairing(),
+        ));
+        seed_live_session(&server, EncoderExperiment::Auto, 3840, 2160);
+
+        let resp = server
+            .dispatch("getStatus", serde_json::json!({}), "192.168.0.9")
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(
+            resp["result"]["sessions"][0]["splitCaptureQueueOldestUs"], 45_600,
+            "{resp}"
+        );
+    }
+
+    /// Backend that records every start attempt and can fail specific
+    /// experiments, to exercise the reconfigure rollback path.
+    struct ReplacingBackend {
+        starts: Mutex<Vec<(EncoderExperiment, u32, u32)>>,
+        fail_experiments: Vec<EncoderExperiment>,
+        stops: AtomicUsize,
+    }
+
+    impl CaptureBackend for ReplacingBackend {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            Ok(vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 3840,
+                height: 2160,
+            }])
+        }
+
+        fn encoder_experiments(
+            &self,
+        ) -> Result<Vec<control_contract::host::EncoderExperimentInfo>, String> {
+            let mut experiments = control_contract::host::phase_a_encoder_experiments();
+            experiments.push(control_contract::host::EncoderExperimentInfo {
+                id: EncoderExperiment::SplitVertical,
+                label: String::new(),
+                hint: String::new(),
+                requires_reconnect: true,
+            });
+            Ok(experiments)
+        }
+
+        fn start(
+            &self,
+            _source_index: u32,
+            _ip: &str,
+            _port: u16,
+            width: u32,
+            height: u32,
+            _fps: u32,
+            _capture_backend: &str,
+            _media_transport: &str,
+            _content_mode: &str,
+            encoder_experiment: EncoderExperiment,
+            _udp_stability: &AppliedUdpStability,
+        ) -> Result<u32, String> {
+            self.starts
+                .lock()
+                .unwrap()
+                .push((encoder_experiment, width, height));
+            if self.fail_experiments.contains(&encoder_experiment) {
+                return Err("simulated replacement failure".into());
+            }
+            Ok(7)
+        }
+
+        fn stop(&self, _handle: u32) -> Result<(), String> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stats(&self, _handle: u32) -> Result<StatsInfo, String> {
+            Ok(StatsInfo {
+                state: "running".into(),
+                first_send_ms: 26,
+                ..StatsInfo::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_explicit_split_targets_exact_4k_and_reports_actual_mode() {
+        let fake = Arc::new(FakeBackend {
+            displays: vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 3840,
+                height: 2160,
+            }],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: true,
+            stops: AtomicUsize::new(0),
+        });
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": 60,
+                    "qualityState": "native",
+                    "encoderExperiment": "splitVertical"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        // 교체 백엔드는 요청된 split 모드로 시작한다.
+        assert_eq!(
+            *fake.encoder_experiment.lock().unwrap(),
+            EncoderExperiment::SplitVertical,
+            "{resp}"
+        );
+        // 라이브 기록과 수락 응답이 실제 모드로 일치한다.
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert_eq!(session.encoder_experiment, EncoderExperiment::SplitVertical);
+        assert_eq!((session.width, session.height), (3840, 2160));
+        drop(state);
+        assert_eq!(
+            resp["result"]["encoderExperiment"], "splitVertical",
+            "{resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_explicit_auto_leaves_split_for_single_path() {
+        let fake = Arc::new(FakeBackend {
+            displays: vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 3840,
+                height: 2160,
+            }],
+            encoder_experiment: Mutex::new(EncoderExperiment::SplitVertical),
+            advertise_split_vertical: false,
+            stops: AtomicUsize::new(0),
+        });
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 2560,
+                    "height": 1440,
+                    "fps": 60,
+                    "qualityState": "native",
+                    "encoderExperiment": "auto"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(
+            *fake.encoder_experiment.lock().unwrap(),
+            EncoderExperiment::Auto,
+            "{resp}"
+        );
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert_eq!(session.encoder_experiment, EncoderExperiment::Auto);
+        assert_eq!((session.width, session.height), (2560, 1440));
+        drop(state);
+        assert_eq!(resp["result"]["encoderExperiment"], "auto", "{resp}");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_rejects_unsupported_split_shape_before_stopping() {
+        let fake = Arc::new(FakeBackend {
+            displays: vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 3840,
+                height: 2160,
+            }],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: true,
+            stops: AtomicUsize::new(0),
+        });
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 2560,
+                    "height": 1440,
+                    "fps": 60,
+                    "qualityState": "native",
+                    "encoderExperiment": "splitVertical"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        let message = resp["error"].as_str().unwrap_or_default();
+        assert!(message.contains("splitVertical"), "{resp}");
+        // 검증은 이전 백엔드 stop 전에 수행된다: 라이브 스트림은 그대로다.
+        assert_eq!(fake.stops.load(Ordering::SeqCst), 0, "{resp}");
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert_eq!(session.encoder_experiment, EncoderExperiment::Auto);
+        assert_eq!((session.width, session.height), (2560, 1440));
+        assert_eq!(session.handle, 7);
+        assert!(!session.backend_released);
+        assert!(session.terminal_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_rejects_unsupported_requested_mode_before_stopping() {
+        let fake = Arc::new(FakeBackend {
+            displays: vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 3840,
+                height: 2160,
+            }],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: AtomicUsize::new(0),
+        });
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": 60,
+                    "qualityState": "native",
+                    "encoderExperiment": "splitHorizontal"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        let message = resp["error"].as_str().unwrap_or_default();
+        assert!(message.contains("unsupported encoder experiment"), "{resp}");
+        assert_eq!(fake.stops.load(Ordering::SeqCst), 0, "{resp}");
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert_eq!(session.encoder_experiment, EncoderExperiment::Auto);
+        assert_eq!(session.handle, 7);
+        assert!(!session.backend_released);
+        assert!(session.terminal_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_failure_restores_previous_actual_mode() {
+        let backend = Arc::new(ReplacingBackend {
+            starts: Mutex::new(Vec::new()),
+            fail_experiments: vec![EncoderExperiment::SplitVertical],
+            stops: AtomicUsize::new(0),
+        });
+        let server = Arc::new(ControlServer::new(backend.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": 60,
+                    "qualityState": "native",
+                    "encoderExperiment": "splitVertical"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        // 교체 실패 시 정확히 이전 실제 모드/형태로 복구된다.
+        assert_eq!(
+            *backend.starts.lock().unwrap(),
+            vec![
+                (EncoderExperiment::SplitVertical, 3840, 2160),
+                (EncoderExperiment::Auto, 2560, 1440),
+            ]
+        );
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert_eq!(session.encoder_experiment, EncoderExperiment::Auto);
+        assert_eq!((session.width, session.height), (2560, 1440));
+        assert_eq!(session.handle, 7);
+        assert!(!session.backend_released);
+        assert!(session.terminal_error.is_none());
+    }
+
     mod viewer_display_matching {
         use super::*;
 
@@ -2304,6 +2783,297 @@ mod tests {
             let mut server = ControlServer::new(backend(), test_pairing());
             server.set_display_manager(crate::display_management::DisplayManager::default());
             server
+        }
+
+        /// resizeVirtualDisplay 제어 채널 dispatch 테스트용 ResizeOk 픽스처
+        /// (preparation_resize_keeps_managed_record_and_id와 동일한 자원).
+        #[cfg(target_os = "macos")]
+        struct DispatchResizeOk;
+        #[cfg(target_os = "macos")]
+        impl crate::provider::VirtualDisplayProvider for DispatchResizeOk {
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn create(
+                &self,
+                _: &crate::provider::DisplaySpec,
+            ) -> Result<crate::provider::VirtualDisplay, crate::provider::ProviderError>
+            {
+                unreachable!()
+            }
+            fn place(
+                &self,
+                _: &crate::provider::VirtualDisplay,
+                _: i32,
+                _: i32,
+            ) -> Result<(), crate::provider::ProviderError> {
+                Ok(())
+            }
+            fn remove(
+                &self,
+                _: &crate::provider::VirtualDisplay,
+            ) -> Result<(), crate::provider::ProviderError> {
+                unreachable!()
+            }
+            fn resize(
+                &self,
+                _: &crate::provider::VirtualDisplay,
+                width: u32,
+                height: u32,
+                scale: u8,
+            ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError>
+            {
+                Ok(crate::provider::ResizedDisplayMode {
+                    logical_width: width,
+                    logical_height: height,
+                    pixel_width: width * u32::from(scale),
+                    pixel_height: height * u32::from(scale),
+                })
+            }
+        }
+
+        #[tokio::test]
+        #[cfg(target_os = "macos")]
+        async fn resize_virtual_display_dispatch_keeps_managed_id_and_reports_scale() {
+            let server = Arc::new(server_with_registry());
+            crate::display_management::DisplayManager::seed_test_display(
+                &server.displays.as_ref().unwrap(),
+                "vd-1",
+                "Tablet [leftcar:vd-1]",
+                1600,
+                1000,
+                2,
+                Arc::new(DispatchResizeOk),
+            );
+            let resp = server
+                .dispatch(
+                    "resizeVirtualDisplay",
+                    serde_json::json!({ "id": "vd-1", "width": 1400, "height": 876, "scale": 2 }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["id"], "vd-1", "{resp}");
+            assert_eq!(resp["result"]["logicalWidth"], 1400, "{resp}");
+            assert_eq!(resp["result"]["logicalHeight"], 876, "{resp}");
+            assert_eq!(resp["result"]["scale"], 2, "{resp}");
+            assert_eq!(resp["result"]["backingWidth"], 2800, "{resp}");
+            assert_eq!(resp["result"]["backingHeight"], 1752, "{resp}");
+            // 세션 종료 정리 정책과 동일: dispatch 성공 후에도 관리 ID로 유지된다.
+            assert_eq!(
+                server.displays.as_ref().unwrap().list().len(),
+                1,
+                "managed display must survive the viewer resize"
+            );
+        }
+
+        #[tokio::test]
+        async fn resize_virtual_display_dispatch_rejects_unknown_id() {
+            let server = Arc::new(server_with_registry());
+            let resp = server
+                .dispatch(
+                    "resizeVirtualDisplay",
+                    serde_json::json!({ "id": "missing", "width": 1400, "height": 876, "scale": 2 }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], false, "{resp}");
+            let message = resp["error"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("관리 중인 디스플레이"),
+                "unexpected error: {message}"
+            );
+        }
+
+        #[tokio::test]
+        async fn resize_virtual_display_dispatch_requires_registry() {
+            let server = Arc::new(ControlServer::new(backend(), test_pairing()));
+            let resp = server
+                .dispatch(
+                    "resizeVirtualDisplay",
+                    serde_json::json!({ "id": "vd-1", "width": 1400, "height": 876, "scale": 2 }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], false, "{resp}");
+            let message = resp["error"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("레지스트리"),
+                "unexpected error: {message}"
+            );
+        }
+
+        #[tokio::test]
+        async fn reconfigure_stream_demotes_split_replacement_for_non_4k_target() {
+            // 4K split 세션을 1080p로 재구성하면 교체 캡처가 Auto 단일 인코더로
+            // 시작해야 한다 — 뷰어는 이미 demote된 단일 prepare/rebind 경로로
+            // 전환했으므로, 교체 세션이 splitVertical로 시작되면 (엔진 검증
+            // 실패 또는 포트 기하 불일치로) 복구된 이전 세션은 뷰어 피드백을
+            // 영원히 받지 못하고 feedback timeout으로 죽는다 (실기 2026-09-07
+            // 4K split → 1080p 프리셋 실패 재현).
+            let fake = Arc::new(FakeBackend {
+                displays: vec![DisplayInfo {
+                    index: 0,
+                    name: "Main".into(),
+                    width: 1920,
+                    height: 1080,
+                }],
+                encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+                advertise_split_vertical: false,
+                stops: AtomicUsize::new(0),
+            });
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            // dispatcher의 split 시작 검증은 진단 플래그를 요구하므로 라이브
+            // split 세션을 직접 시드한다 — 이 테스트의 대상은 reconfigure의
+            // 교체 세션 실험 선택이다.
+            server.sessions.lock().unwrap().live.insert(
+                1,
+                Session {
+                    handle: 7,
+                    source_index: 0,
+                    source_name: "Main".into(),
+                    width: 3840,
+                    height: 2160,
+                    fps_target: 60,
+                    quality_state: "native".into(),
+                    capture_backend: "screenCaptureKit".into(),
+                    content_mode: "video".into(),
+                    encoder_experiment: EncoderExperiment::SplitVertical,
+                    viewer_addr: "192.168.0.9:5002".into(),
+                    viewer_port: 5002,
+                    media_transport: "udp".into(),
+                    udp_stability: None,
+                    input_enabled: false,
+                    input_rate_hz: 180,
+                    terminal_since: None,
+                    terminal_error: None,
+                    backend_released: false,
+                },
+            );
+
+            let resp = server
+                .dispatch(
+                    "reconfigureStream",
+                    serde_json::json!({
+                        "session": 1,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 60,
+                        "qualityState": "native"
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            assert_eq!(resp["result"]["width"], 1920, "{resp}");
+            // 구 요청(mode 생략)도 실제 수락 모드를 응답에 보고한다.
+            assert_eq!(resp["result"]["encoderExperiment"], "auto", "{resp}");
+            // 교체 캡처 백엔드는 demote된 Auto로 시작해야 한다.
+            assert_eq!(
+                *fake.encoder_experiment.lock().unwrap(),
+                EncoderExperiment::Auto,
+                "replacement capture must start with the demoted encoder experiment",
+            );
+            // 세션 기록도 교체 결과와 일치한다.
+            let state = server.sessions.lock().unwrap();
+            let session = state.live.get(&1).unwrap();
+            assert_eq!(session.width, 1920);
+            assert_eq!(session.height, 1080);
+            assert_eq!(session.encoder_experiment, EncoderExperiment::Auto);
+            assert_eq!(session.handle, 7);
+        }
+
+        #[tokio::test]
+        async fn reconfigure_stream_omitted_mode_rejects_split_4k_90fps_before_stopping() {
+            // mode 생략(구 뷰어) 요청이 정확한 4K를 유지하면 이전 split 실험이
+            // 유지되지만, fps가 60이 아니면 split 제약 위반이다. 교체 실험을
+            // 검증하기 전에는 이전 백엔드를 멈추지 않는다: 거부 시 라이브
+            // 스트림과 기록은 그대로여야 한다.
+            let fake = Arc::new(FakeBackend {
+                displays: vec![DisplayInfo {
+                    index: 0,
+                    name: "Main".into(),
+                    width: 3840,
+                    height: 2160,
+                }],
+                encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+                advertise_split_vertical: false,
+                stops: AtomicUsize::new(0),
+            });
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
+
+            let resp = server
+                .dispatch(
+                    "reconfigureStream",
+                    serde_json::json!({
+                        "session": 1,
+                        "width": 3840,
+                        "height": 2160,
+                        "fps": 90,
+                        "qualityState": "native"
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], false, "{resp}");
+            let message = resp["error"].as_str().unwrap_or_default();
+            assert!(message.contains("splitVertical"), "{resp}");
+            assert_eq!(fake.stops.load(Ordering::SeqCst), 0, "{resp}");
+            let state = server.sessions.lock().unwrap();
+            let session = state.live.get(&1).unwrap();
+            assert_eq!(session.encoder_experiment, EncoderExperiment::SplitVertical);
+            assert_eq!((session.width, session.height), (3840, 2160));
+            assert_eq!(session.fps_target, 60);
+            assert_eq!(session.handle, 7);
+            assert!(!session.backend_released);
+            assert!(session.terminal_error.is_none());
+        }
+
+        #[tokio::test]
+        async fn reconfigure_stream_omitted_mode_rejects_split_4k_30fps_before_stopping() {
+            let fake = Arc::new(FakeBackend {
+                displays: vec![DisplayInfo {
+                    index: 0,
+                    name: "Main".into(),
+                    width: 3840,
+                    height: 2160,
+                }],
+                encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+                advertise_split_vertical: false,
+                stops: AtomicUsize::new(0),
+            });
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
+
+            let resp = server
+                .dispatch(
+                    "reconfigureStream",
+                    serde_json::json!({
+                        "session": 1,
+                        "width": 3840,
+                        "height": 2160,
+                        "fps": 30,
+                        "qualityState": "native"
+                    }),
+                    "192.168.0.9",
+                )
+                .await;
+            assert_eq!(resp["ok"], false, "{resp}");
+            let message = resp["error"].as_str().unwrap_or_default();
+            assert!(message.contains("splitVertical"), "{resp}");
+            assert_eq!(fake.stops.load(Ordering::SeqCst), 0, "{resp}");
+            let state = server.sessions.lock().unwrap();
+            let session = state.live.get(&1).unwrap();
+            assert_eq!(session.encoder_experiment, EncoderExperiment::SplitVertical);
+            assert_eq!((session.width, session.height), (3840, 2160));
+            assert_eq!(session.fps_target, 60);
+            assert_eq!(session.handle, 7);
+            assert!(!session.backend_released);
+            assert!(session.terminal_error.is_none());
         }
 
         #[tokio::test]

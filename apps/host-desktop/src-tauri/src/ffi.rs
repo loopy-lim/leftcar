@@ -493,6 +493,7 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         split_pre_encode_admission_drops: v["splitPreEncodeAdmissionDrops"].as_i64().unwrap_or(0),
         split_encoded_queue_depth: bounded_u32(&v, "splitEncodedQueueDepth"),
         split_encoded_queue_oldest_us: v["splitEncodedQueueOldestUs"].as_u64().unwrap_or(0),
+        split_capture_queue_oldest_us: v["splitCaptureQueueOldestUs"].as_u64(),
         split_recovery_boundary_discards: v["splitRecoveryBoundaryDiscards"].as_i64().unwrap_or(0),
         split_post_encode_delta_drops: v["splitPostEncodeDeltaDrops"].as_i64().unwrap_or(0),
         split_wire_pairs_attempted: v["splitWirePairsAttempted"].as_i64().unwrap_or(0),
@@ -927,6 +928,20 @@ pub fn dylib_report() -> String {
 mod tests {
     use super::*;
     use control_contract::host::EncoderExperiment;
+
+    #[test]
+    fn parse_stats_json_preserves_known_capture_queue_age_and_unknown_legacy_age() {
+        for (payload, expected) in [
+            (r#"{"splitCaptureQueueOldestUs":45600}"#, Some(45_600)),
+            (r#"{"splitCaptureQueueOldestUs":0}"#, Some(0)),
+            (r#"{"state":"running"}"#, None),
+            (r#"{"splitCaptureQueueOldestUs":null}"#, None),
+            (r#"{"splitCaptureQueueOldestUs":-1}"#, None),
+        ] {
+            let stats = parse_stats_json(payload).unwrap();
+            assert_eq!(stats.split_capture_queue_oldest_us, expected, "{payload}");
+        }
+    }
 
     #[test]
     fn parse_stats_json_preserves_encoder_diagnostics() {
