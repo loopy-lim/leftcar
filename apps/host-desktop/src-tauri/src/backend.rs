@@ -79,6 +79,11 @@ pub struct FakeBackend {
     pub advertise_split_vertical: bool,
     /// Number of successful stop() calls, for reconfigure rollback tests.
     pub stops: AtomicUsize,
+    /// What input_permission() reports: the OS-granted state the start path
+    /// auto-enables remote input under.
+    pub input_permission: bool,
+    /// Every set_input_enabled call, for auto-enable/carry-over assertions.
+    pub input_calls: Mutex<Vec<(u32, bool)>>,
 }
 
 impl CaptureBackend for FakeBackend {
@@ -267,15 +272,16 @@ impl CaptureBackend for FakeBackend {
     }
 
     fn input_permission(&self) -> Result<bool, String> {
-        Ok(true)
+        Ok(self.input_permission)
     }
 
     fn request_input_permission(&self) -> Result<bool, String> {
-        Ok(true)
+        Ok(self.input_permission)
     }
 
-    fn set_input_enabled(&self, handle: u32, _enabled: bool) -> Result<(), String> {
+    fn set_input_enabled(&self, handle: u32, enabled: bool) -> Result<(), String> {
         if handle == 7 {
+            self.input_calls.lock().unwrap().push((handle, enabled));
             Ok(())
         } else {
             Err("no such handle".into())

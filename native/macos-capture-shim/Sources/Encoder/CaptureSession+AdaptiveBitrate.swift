@@ -45,14 +45,44 @@ extension CaptureSession {
         } else {
             newReceiverLoss = 0
         }
-        let receiverLatencyHigh = feedbackFresh
-            && !recoveryBurstGrace
-            && ((receiverRttMs != .max && receiverRttMs >= 50)
-                || (receiverWireMs != .max && receiverWireMs >= 40))
-        let congested = newDrops > 0
-            || (!recoveryBurstGrace && lastSendBlockUs > 8_000)
-            || (!recoveryBurstGrace && newReceiverLoss > 0)
-            || receiverLatencyHigh
+        // Latency only counts as congestion while it is WORSENING. A steady
+        // high RTT/wire baseline (Wi-Fi power-save viewers sit there for the
+        // whole session) previously voted congested in every window, so
+        // `stableBitrateWindows` never reached eight and the bitrate could
+        // never rise again after one cut — the stream degraded monotonically
+        // over a long session while every cut made latency no better.
+        let latencyWorsening: Bool
+        if feedbackFresh, !recoveryBurstGrace {
+            let rttKnown = receiverRttMs != .max
+            let wireKnown = receiverWireMs != .max
+            let rttWorse = rttKnown
+                && lastAdaptedRttMs != .max
+                && receiverRttMs >= 50
+                && Int(receiverRttMs) - Int(lastAdaptedRttMs) >= 30
+            let wireWorse = wireKnown
+                && lastAdaptedWireMs != .max
+                && receiverWireMs >= 40
+                && Int(receiverWireMs) - Int(lastAdaptedWireMs) >= 30
+            latencyWorsening = rttWorse || wireWorse
+        } else {
+            latencyWorsening = false
+        }
+        if feedbackFresh {
+            lastAdaptedRttMs = receiverRttMs
+            lastAdaptedWireMs = receiverWireMs
+        }
+        // A viewer that keeps its control feedback flowing but reports ZERO
+        // rendered frames is stalled on its own side (app foregrounding,
+        // surface recreation — observed 3-8s on a headset). Frames dropped
+        // while nothing is being rendered are the stall's consequence, not
+        // link congestion; letting them vote cut the bitrate after every app
+        // access even though RTT and loss were clean.
+        let viewerRenderStalled = feedbackFresh && receiverRenderedFps == nil
+        let congested = !viewerRenderStalled
+            && (newDrops > 0
+                || (!recoveryBurstGrace && lastSendBlockUs > 8_000)
+                || (!recoveryBurstGrace && newReceiverLoss > 0)
+                || latencyWorsening)
         let current = currentAverageBitrate
         let qualityHintForBitrate = manualQualityHint ?? currentQualityHint
         let highMotion = adaptiveMotionState.mode(at: nowNs) == .video
@@ -60,12 +90,16 @@ extension CaptureSession {
             stableBitrateWindows = 0
             consecutiveCongestedWindows += 1
             consecutiveRaiseSteps = 0
+            adaptiveCeilingCleanStreak = 0
         } else {
             stableBitrateWindows += 1
+            adaptiveCeilingCleanStreak += 1
             if stableBitrateWindows >= 8 {
                 consecutiveCongestedWindows = 0
             }
         }
+        let raiseCeilingSnapshot = adaptiveRaiseCeilingBitrate
+        let ceilingCleanStreakSnapshot = adaptiveCeilingCleanStreak
         // Only treat sustained congestion (two consecutive windows) as real.
         // A single lost datagram or one RTT spike is normal Wi-Fi behavior
         // and must not cut the bitrate.
@@ -130,9 +164,34 @@ extension CaptureSession {
             max(pixelsPerSecond * 0.14 * qualityScale, Double(minCeiling) * qualityScale),
             Double(maxCeiling) * qualityScale
         ))
+        // Relax the congestion-cut ceiling only after sustained health so a
+        // marginal link stops sawtoothing raise→collapse (see
+        // adaptiveRaiseCeilingAfterCongestion).
+        var raiseCeiling = raiseCeilingSnapshot
+        if raiseCeiling > 0 {
+            let relaxed = nextAdaptiveRaiseCeiling(
+                currentCeiling: raiseCeiling,
+                cleanStreak: ceilingCleanStreakSnapshot,
+                globalCeiling: ceilingBitrate
+            )
+            if relaxed != raiseCeiling {
+                raiseCeiling = relaxed
+                stateLock.lock()
+                adaptiveRaiseCeilingBitrate = relaxed
+                adaptiveCeilingCleanStreak = 0
+                stateLock.unlock()
+            }
+        }
+        let effectiveCeiling = raiseCeiling > 0 ? min(raiseCeiling, ceilingBitrate) : ceilingBitrate
         let target: Int
         if congestionConfirmed {
             target = max(floorBitrate, Int(Double(current) * 0.80))
+            stateLock.lock()
+            adaptiveRaiseCeilingBitrate = adaptiveRaiseCeilingAfterCongestion(
+                failingBitrate: current
+            )
+            adaptiveCeilingCleanStreak = 0
+            stateLock.unlock()
             // The congestion floor has consumed the 4K bitrate budget: the
             // rate controller cannot restore the frame rate on its own.
             // This monotonic counter records detected floor pressure, not a
@@ -159,7 +218,9 @@ extension CaptureSession {
         } else if highMotion {
             // Raise the budget as soon as a sustained high-change scene is
             // observed. This avoids waiting through eight stable windows,
-            // which is too slow for the first seconds of a video.
+            // which is too slow for the first seconds of a video. The
+            // congestion-cut ceiling still applies: high motion must not push
+            // the stream back into a level that just collapsed the link.
             let ultraHd = isUltraHdDimensions(width: outWidth, height: outHeight)
             let motionFloor = ultraHd
                 ? (activeCount > 1 ? 36_000_000 : 48_000_000)
@@ -167,15 +228,17 @@ extension CaptureSession {
             target = highMotionBitrateTarget(
                 current: current,
                 floor: floorBitrate,
-                ceiling: ceilingBitrate,
-                motionFloor: motionFloor
+                ceiling: effectiveCeiling,
+                motionFloor: min(motionFloor, effectiveCeiling)
             )
         } else if canRaise {
             // Accelerating recovery: 4% → 8% → 16% per stable window so a
             // ratchet-down to the floor recovers in a few seconds while an
             // early overshoot is still corrected by the next cut.
             let raiseFactor = min(0.04 * pow(2.0, Double(min(consecutiveRaiseSteps - 1, 5))), 0.30)
-            target = min(ceilingBitrate, Int(Double(current) * (1.0 + raiseFactor)))
+            let capped = min(effectiveCeiling, Int(Double(current) * (1.0 + raiseFactor)))
+            guard capped > current else { return }
+            target = capped
         } else {
             return
         }

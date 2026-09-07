@@ -408,14 +408,23 @@ func adaptiveEncoderQualityHint(
         || receiverLoss > 0
         || renderBelowTarget
     if overloaded {
-        return max(floor, current - 0.25)
+        // Drop gradually. The old one-shot -0.25 cut floored quality on a
+        // single bad second (one receiver gap), and recovery needed a
+        // PERFECT window to start — a 55-of-60fps viewer never qualified,
+        // so long sessions spent the rest of their lifetime at 0.55x bitrate.
+        return max(floor, current - 0.10)
     }
 
+    // Recovery uses the same 90% render band as the overload detector so a
+    // slightly-under-target viewer can still climb back after a cut.
+    let renderAtOrAboveBand = renderedFps.map {
+        $0 > 0 && $0 * 10 >= max(1, targetFps) * 9
+    } ?? false
     let hasHeadroom = encodeOutputP95Us > 0
         && encodeOutputP95Us <= 13_000
         && captureQueueWaitP95Us <= 2_000
         && receiverLoss == 0
-        && renderedFps.map { $0 >= targetFps } == true
+        && renderAtOrAboveBand
     guard hasHeadroom else { return current }
     let rounded = (Double(current) + 0.05) * 100.0
     return min(ceiling, Float(rounded.rounded() / 100.0))
@@ -430,6 +439,28 @@ func adaptiveEncoderQualityHint(
 func adaptiveQualityBitrateScale(qualityHint: Float) -> Double {
     let normalized = max(0.0, min(1.0, (Double(qualityHint) - 0.25) / 0.25))
     return 0.55 + (normalized * 0.45)
+}
+
+/// Bitrate level below the one that just collapsed the link. After a confirmed
+/// congestion cut the controller may raise back toward this level but not
+/// beyond it — without the memory it accelerated straight back into the same
+/// wall and the link sawtoothed raise→collapse every few seconds while the
+/// content kept demanding more (observed on a marginal Wi-Fi link 2026-09-08).
+func adaptiveRaiseCeilingAfterCongestion(failingBitrate: Int) -> Int {
+    max(1, Int(Double(max(1, failingBitrate)) * 0.90))
+}
+
+/// Relax the congestion-cut ceiling by 10% per 30 consecutive clean windows,
+/// never above the policy's global ceiling. An inactive ceiling (0) stays
+/// inactive; the streak accounting belongs to the caller.
+func nextAdaptiveRaiseCeiling(
+    currentCeiling: Int,
+    cleanStreak: Int,
+    globalCeiling: Int
+) -> Int {
+    guard currentCeiling > 0 else { return 0 }
+    guard cleanStreak >= 30 else { return currentCeiling }
+    return min(globalCeiling, Int(Double(currentCeiling) * 1.10))
 }
 
 enum EncoderBitrateApplicationRoute: Equatable {

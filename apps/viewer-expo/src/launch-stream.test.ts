@@ -378,38 +378,7 @@ describe("startPreparedStream", () => {
     expect(calls).toEqual(["usb", "prepare", "start", "cancel"]);
   });
 
-  it("forwards the viewer display metrics in the startStream payload", async () => {
-    const { control, launcher } = harness();
-    const displayArgs: StartStreamArgs = {
-      ...args,
-      viewerDisplay: {
-        physicalWidth: 2800,
-        physicalHeight: 1752,
-        densityDpi: 420,
-      },
-    };
-
-    await startPreparedStream({
-      control,
-      launcher,
-      host: "192.168.0.134",
-      advertisedEncoderExperiments,
-      args: displayArgs,
-    });
-
-    expect(control.request).toHaveBeenCalledWith("startStream", {
-      ...displayArgs,
-      mediaTransport: "udp",
-      viewerIps: ["192.168.0.42"],
-      viewerDisplay: {
-        physicalWidth: 2800,
-        physicalHeight: 1752,
-        densityDpi: 420,
-      },
-    });
-  });
-
-  it("keeps the legacy startStream payload free of viewerDisplay when metrics are unavailable", async () => {
+  it("keeps the legacy startStream payload free of removed virtual display fields", async () => {
     const { control, launcher } = harness();
 
     await startPreparedStream({
@@ -426,45 +395,6 @@ describe("startPreparedStream", () => {
       command === "startStream"
     )?.[1] as Record<string, unknown>;
     expect(sent).not.toHaveProperty("viewerDisplay");
-  });
-
-  it("forwards the managed virtual display id in the startStream payload", async () => {
-    const { control, launcher } = harness();
-    // 자동 매칭이 관리 화면 ID를 시작 인자로 전달한다 — 누락 시 호스트의
-    // prepare_viewer_display가 어떤 화면을 재사용할지 알 수 없다 (회귀).
-    await startPreparedStream({
-      control,
-      launcher,
-      host: "192.168.0.134",
-      advertisedEncoderExperiments,
-      args: { ...args, virtualDisplayId: "vd-1" },
-    });
-
-    const sent = (control.request as unknown as {
-      mock: { calls: Array<[string, unknown?]> };
-    }).mock.calls.find(([command]) => command === "startStream")?.[1] as Record<
-      string,
-      unknown
-    >;
-    expect(sent["virtualDisplayId"]).toBe("vd-1");
-  });
-
-  it("keeps the startStream payload free of virtualDisplayId when the name carries none", async () => {
-    const { control, launcher } = harness();
-
-    await startPreparedStream({
-      control,
-      launcher,
-      host: "192.168.0.134",
-      advertisedEncoderExperiments,
-      args,
-    });
-
-    const sent = (control.request as unknown as {
-      mock: { calls: Array<[string, unknown?]> };
-    }).mock.calls.find(([command]) =>
-      command === "startStream"
-    )?.[1] as Record<string, unknown>;
     expect(sent).not.toHaveProperty("virtualDisplayId");
   });
 

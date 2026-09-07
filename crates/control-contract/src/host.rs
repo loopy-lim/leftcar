@@ -815,41 +815,6 @@ pub struct StartStreamInput {
     /// is intentionally the legacy wire policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<UdpStabilityRequest>,
-    /// Optional viewer display metrics (physical pixels + density) so the host
-    /// can auto-match a virtual display size. Older viewers omit the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewer_display: Option<ViewerDisplayMetricsMsg>,
-    /// Optional id of an already-managed virtual display to reuse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub virtual_display_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ViewerDisplayMetricsMsg {
-    pub physical_width: u32,
-    pub physical_height: u32,
-    pub density_dpi: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ResizeVirtualDisplayInput {
-    pub id: String,
-    pub width: u32,
-    pub height: u32,
-    pub scale: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ResizeVirtualDisplayOutput {
-    pub id: String,
-    pub logical_width: u32,
-    pub logical_height: u32,
-    pub scale: u8,
-    pub backing_width: u32,
-    pub backing_height: u32,
 }
 
 fn default_capture_backend() -> String {
@@ -1308,72 +1273,13 @@ mod stream_control_tests {
     }
 
     #[test]
-    fn start_stream_input_parses_legacy_json_without_viewer_display_fields() {
+    fn start_stream_input_parses_legacy_json_without_optional_fields() {
         let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#;
         let v: StartStreamInput = serde_json::from_str(json).unwrap();
-        assert_eq!(v.viewer_display, None);
-        assert_eq!(v.virtual_display_id, None);
-        // Legacy payloads must not gain the new keys on re-serialization.
+        assert_eq!(v.udp_stability, None);
+        // Legacy payloads must not gain the optional keys on re-serialization.
         let back = serde_json::to_string(&v).unwrap();
-        assert!(!back.contains("viewerDisplay"));
-        assert!(!back.contains("virtualDisplayId"));
-    }
-
-    #[test]
-    fn start_stream_input_roundtrips_viewer_display_metrics() {
-        let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1344,"height":836,"fps":90,
-            "viewerDisplay":{"physicalWidth":2800,"physicalHeight":1752,"densityDpi":420},
-            "virtualDisplayId":"cgvd-1"}"#;
-        let v: StartStreamInput = serde_json::from_str(json).unwrap();
-        let metrics = v.viewer_display.clone().expect("viewer display present");
-        assert_eq!(metrics.physical_width, 2800);
-        assert_eq!(metrics.physical_height, 1752);
-        assert_eq!(metrics.density_dpi, 420);
-        assert_eq!(v.virtual_display_id.as_deref(), Some("cgvd-1"));
-
-        let back = serde_json::to_string(&v).unwrap();
-        assert!(back.contains("\"viewerDisplay\""));
-        assert!(back.contains("\"physicalWidth\":2800"));
-        assert!(back.contains("\"physicalHeight\":1752"));
-        assert!(back.contains("\"densityDpi\":420"));
-        assert!(back.contains("\"virtualDisplayId\":\"cgvd-1\""));
-
-        let reparsed: StartStreamInput = serde_json::from_str(&back).unwrap();
-        assert_eq!(reparsed.viewer_display, v.viewer_display);
-        assert_eq!(reparsed.virtual_display_id, v.virtual_display_id);
-    }
-
-    #[test]
-    fn resize_virtual_display_roundtrips_camel_case() {
-        let input = ResizeVirtualDisplayInput {
-            id: "cgvd-1".into(),
-            width: 1344,
-            height: 836,
-            scale: 2,
-        };
-        let back = serde_json::to_string(&input).unwrap();
-        assert!(back.contains("\"id\":\"cgvd-1\""));
-        assert!(back.contains("\"width\":1344"));
-        assert!(back.contains("\"height\":836"));
-        assert!(back.contains("\"scale\":2"));
-        let reparsed: ResizeVirtualDisplayInput = serde_json::from_str(&back).unwrap();
-        assert_eq!(reparsed, input);
-
-        let output = ResizeVirtualDisplayOutput {
-            id: "cgvd-1".into(),
-            logical_width: 1344,
-            logical_height: 836,
-            scale: 2,
-            backing_width: 2688,
-            backing_height: 1672,
-        };
-        let back = serde_json::to_string(&output).unwrap();
-        assert!(back.contains("\"logicalWidth\":1344"));
-        assert!(back.contains("\"logicalHeight\":836"));
-        assert!(back.contains("\"backingWidth\":2688"));
-        assert!(back.contains("\"backingHeight\":1672"));
-        let reparsed: ResizeVirtualDisplayOutput = serde_json::from_str(&back).unwrap();
-        assert_eq!(reparsed, output);
+        assert!(!back.contains("udpStability"));
     }
 
     #[test]

@@ -685,7 +685,6 @@ function CatalogFooter({
   streams,
   onStop,
   resizingSession,
-  onResizeVirtualDisplay,
   onResizeSession,
   windowRatio,
   onSelectWindowRatio,
@@ -695,7 +694,6 @@ function CatalogFooter({
   streams: ActiveStream[];
   onStop: (stream: ActiveStream) => void;
   resizingSession: number | null;
-  onResizeVirtualDisplay: React.ComponentProps<typeof DisplaySizeCard>["onResizeVirtualDisplay"];
   onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
   windowRatio: React.ComponentProps<typeof DisplaySizeCard>["windowRatio"];
   onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
@@ -704,15 +702,8 @@ function CatalogFooter({
 }) {
   const { t } = useAppLanguage();
   if (streams.length === 0) return null;
-  // The card drives the first active stream; multi-stream sizing needs the
-  // host-side managed display listing (Task 8 이후 연결).
+  // The card drives the first active stream.
   const primaryStream = streams[0];
-  const tabletMatch = primaryStream.viewerDisplay
-    ? {
-        width: primaryStream.viewerDisplay.physicalWidth,
-        height: primaryStream.viewerDisplay.physicalHeight,
-      }
-    : null;
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
@@ -726,10 +717,7 @@ function CatalogFooter({
       ))}
       <DisplaySizeCard
         stream={primaryStream}
-        tabletMatch={tabletMatch}
-        virtualDisplayId={primaryStream.virtualDisplayId}
         resizing={resizingSession === primaryStream.session}
-        onResizeVirtualDisplay={onResizeVirtualDisplay}
         onResizeSession={onResizeSession}
         windowRatio={windowRatio}
         onSelectWindowRatio={onSelectWindowRatio}
@@ -832,7 +820,6 @@ export default function Catalog() {
             streams={model.streams}
             onStop={model.stopStream}
             resizingSession={model.resizingSession}
-            onResizeVirtualDisplay={model.handleResizeVirtualDisplay}
             onResizeSession={model.handleResizeSession}
             windowRatio={model.windowRatio}
             onSelectWindowRatio={model.handleSelectWindowAspectRatio}

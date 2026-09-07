@@ -21,30 +21,6 @@ import Security
 import Darwin
 import OSLog
 
-@_cdecl("leftcar_capture_register_managed_display_mode_v1")
-public func leftcarCaptureRegisterManagedDisplayModeV1(
-    displayID: UInt32,
-    generation: UInt64,
-    logicalWidth: UInt32,
-    logicalHeight: UInt32,
-    pixelWidth: UInt32,
-    pixelHeight: UInt32
-) -> Int32 {
-    registerManagedDisplayMode(
-        displayID: displayID,
-        generation: generation,
-        logicalWidth: Int(logicalWidth),
-        logicalHeight: Int(logicalHeight),
-        pixelWidth: Int(pixelWidth),
-        pixelHeight: Int(pixelHeight)
-    ) ? 0 : -1
-}
-
-@_cdecl("leftcar_capture_clear_managed_display_mode_v1")
-public func leftcarCaptureClearManagedDisplayModeV1(displayID: UInt32, generation: UInt64) {
-    clearManagedDisplayMode(displayID: displayID, generation: generation)
-}
-
 @_cdecl("leftcar_capture_has_persistent_access_v1")
 public func leftcarCaptureHasPersistentAccessV1() -> Int32 {
     hasPersistentContentCaptureEntitlement() ? 1 : 0
@@ -299,9 +275,13 @@ public func leftcarCaptureStartV6(
     let started: Bool
     switch backend {
     case .screenCaptureKit:
-        guard hasPersistentContentCaptureEntitlement() else {
+        // The persistent-content-capture entitlement grants VNC-style
+        // no-reconsent capture; ordinary Screen Recording consent supports
+        // the same SCK path — including its system-audio plane. Only a Mac
+        // with neither consent falls through to the error below.
+        guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
             setLastError(
-                "persistent ScreenCaptureKit access is not approved; use the automatic cgDisplayStream backend"
+                "screen-recording permission is not granted to Leftcar Host"
             )
             session.stop()
             return 0

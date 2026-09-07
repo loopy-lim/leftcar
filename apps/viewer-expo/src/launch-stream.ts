@@ -26,19 +26,8 @@ import {
   type UdpStabilitySelection,
 } from "./udp-stability";
 
-/**
- * Physical metrics of the viewer's own screen, reported at stream start so
- * the Host can size a virtual display to match the tablet.
- */
-export interface ViewerDisplayMetrics {
-  physicalWidth: number;
-  physicalHeight: number;
-  densityDpi: number;
-}
-
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
-  getDisplayMetrics?(): Promise<ViewerDisplayMetrics>;
   prepareStream(
     port: number,
     host: string,
@@ -62,7 +51,7 @@ export interface StreamLauncher {
   ): Promise<void>;
   setCursorStream?(instanceId: string, enabled: boolean): Promise<void>;
   /**
-   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. Mac 가상 화면 해상도는
+   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
    * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
    * 호출부는 best-effort로 이를 무시한다.
    */
@@ -84,8 +73,6 @@ export interface StartStreamArgs {
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
-  viewerDisplay?: ViewerDisplayMetrics;
-  virtualDisplayId?: string;
 }
 
 export interface StartedStream {
@@ -253,9 +240,6 @@ export async function startPreparedStream({
     const startArgs = {
       ...baseArgs,
       ...(viewerIps.length > 0 ? { viewerIps } : {}),
-      // Omitted entirely for legacy Hosts — the contract treats a missing
-      // field as the historical wire shape.
-      ...(args.viewerDisplay ? { viewerDisplay: args.viewerDisplay } : {}),
       mediaTransport,
       encoderExperiment,
       ...(mediaTransport === "udp" && udpStability

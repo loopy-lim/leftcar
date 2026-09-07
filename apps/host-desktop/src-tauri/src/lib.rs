@@ -6,17 +6,11 @@ pub mod aoap;
 pub mod aoap_control;
 pub mod aoap_proxy;
 pub mod backend;
-pub mod clamshell_mode;
 pub mod control;
-pub mod display_management;
-pub mod display_matching;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod pairing;
-pub mod power_assertion;
-pub mod provider;
-pub mod virtual_display;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -58,16 +52,7 @@ pub fn run() {
         "leftcar-host".into(),
         pairing::PairingServer::default_store_path(),
     ));
-    // 제어 채널의 뷰어 메트릭 자동 매칭이 Tauri UI와 동일한 관리 화면
-    // 레지스트리를 공유하게 한다 (소유권 추적 일관성).
-    let display_manager = display_management::DisplayManager::new(Some(
-        display_management::DisplayManager::default_state_path(),
-    ));
-    let server = Arc::new({
-        let mut server = control::ControlServer::new(backend.clone(), pairing.clone());
-        server.set_display_manager(display_manager.clone());
-        server
-    });
+    let server = Arc::new(control::ControlServer::new(backend.clone(), pairing.clone()));
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -99,24 +84,12 @@ pub fn run() {
             list_paired_devices,
             revoke_device,
             revoke_paired_device,
-            revoke_all_devices,
-            create_virtual_display,
-            remove_virtual_display,
-            tablet_display_start,
-            tablet_display_stop,
-            tablet_display_status,
-            list_managed_displays,
-            add_managed_display,
-            remove_managed_display,
-            set_managed_display_position,
-            resize_managed_display
+            revoke_all_devices
         ])
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
-            app.manage(TabletSessionRegistry::new(None));
-            app.manage(display_manager);
             warm_display_catalog(warmup_backend);
 
             let show_item =
@@ -182,16 +155,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("tauri build")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                for error in app
-                    .state::<display_management::DisplayManager>()
-                    .cleanup_all()
-                {
-                    eprintln!("managed display cleanup failed: {error}");
-                }
-            }
-        });
+        .run(|_app, _event| {});
 }
 
 #[cfg(target_os = "macos")]
@@ -437,249 +401,6 @@ fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingSer
     state.revoke_all()
 }
 
-/// Async so the blocking `betterdisplaycli` spawn runs off the main thread
-/// (Tauri 2 executes async commands on a separate thread pool).
-#[tauri::command]
-async fn create_virtual_display(name: String, width: u32, height: u32) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        virtual_display::create_virtual_display(&name, width, height)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (name, width, height);
-        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
-    }
-}
-
-/// Async so the blocking `betterdisplaycli` spawn runs off the main thread.
-#[tauri::command]
-async fn remove_virtual_display(name: String) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        virtual_display::remove_virtual_display(&name)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = name;
-        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
-    }
-}
-
-#[tauri::command]
-fn list_managed_displays(
-    state: tauri::State<'_, display_management::DisplayManager>,
-) -> Vec<display_management::ManagedDisplayView> {
-    state.list()
-}
-
-#[tauri::command]
-async fn add_managed_display(
-    state: tauri::State<'_, display_management::DisplayManager>,
-    provider_kind: String,
-    name: String,
-    width: u32,
-    height: u32,
-    scale: u8,
-    position: String,
-) -> Result<display_management::ManagedDisplayView, String> {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(error) = provider_kind_error(&provider_kind) {
-            return Err(error);
-        }
-        let position = display_management::DisplayPosition::parse(&position)?;
-        let manager = state.inner().clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            manager.add(
-                provider_for_kind(&provider_kind),
-                name,
-                width,
-                height,
-                scale,
-                position,
-            )
-        })
-        .await
-        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (state, provider_kind, name, width, height, scale, position);
-        Err("가상 디스플레이는 macOS에서만 지원됩니다.".into())
-    }
-}
-
-#[tauri::command]
-async fn remove_managed_display(
-    state: tauri::State<'_, display_management::DisplayManager>,
-    id: String,
-) -> Result<(), String> {
-    let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.remove(&id))
-        .await
-        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
-}
-
-#[tauri::command]
-async fn set_managed_display_position(
-    state: tauri::State<'_, display_management::DisplayManager>,
-    id: String,
-    position: String,
-) -> Result<display_management::ManagedDisplayView, String> {
-    let position = display_management::DisplayPosition::parse(&position)?;
-    let anchor = display_management::active_anchor_rect()
-        .ok_or_else(|| "활성 주 화면이 없어 배치할 수 없습니다.".to_string())?;
-    let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.set_position(&id, position, anchor))
-        .await
-        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
-}
-
-/// Async so a blocking engine round-trip (CGVD stdin RESIZE handshake,
-/// BetterDisplay CLI) runs off the main thread — same rationale as the other
-/// managed-display commands.
-#[tauri::command]
-async fn resize_managed_display(
-    state: tauri::State<'_, display_management::DisplayManager>,
-    id: String,
-    width: u32,
-    height: u32,
-    scale: u8,
-) -> Result<display_management::ManagedDisplayView, String> {
-    let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.resize(&id, width, height, scale))
-        .await
-        .map_err(|error| format!("디스플레이 작업 실행 실패: {error}"))?
-}
-
-/// Validates the provider kind sent from the UI. CGVD stays opt-in behind the
-/// `cgvirtualdisplay` kind; R-015 forbids promoting it to the default.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn provider_kind_error(kind: &str) -> Option<String> {
-    match kind {
-        "betterdisplay" | "cgvirtualdisplay" => None,
-        other => Some(format!("지원하지 않는 엔진입니다: {other}")),
-    }
-}
-
-/// Shared per-app session slot: one tablet display session at a time.
-type TabletSessionRegistry = std::sync::Mutex<Option<clamshell_mode::TabletDisplaySession>>;
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn provider_for_kind(kind: &str) -> std::sync::Arc<dyn provider::VirtualDisplayProvider> {
-    match kind {
-        "cgvirtualdisplay" => std::sync::Arc::new(provider::CgvdProvider::new()),
-        _ => std::sync::Arc::new(provider::BetterDisplayProvider::new()),
-    }
-}
-
-/// Async so blocking engine spawns run off the main thread (same rationale as
-/// create_virtual_display above).
-#[tauri::command]
-async fn tablet_display_start(
-    state: tauri::State<'_, TabletSessionRegistry>,
-    provider_kind: String,
-    name: String,
-    width: u32,
-    height: u32,
-) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(error) = provider_kind_error(&provider_kind) {
-            return Err(error);
-        }
-        let mut guard = state.lock().map_err(|error| error.to_string())?;
-        if guard.is_some() {
-            return Err("태블릿 화면 세션이 이미 실행 중입니다.".into());
-        }
-        let session = clamshell_mode::TabletDisplaySession::start(
-            provider_for_kind(&provider_kind),
-            &provider::DisplaySpec {
-                name,
-                width,
-                height,
-                scale: 1,
-            },
-        )
-        .map_err(|error| error.message())?;
-        *guard = Some(session);
-        Ok("태블릿 화면 세션 시작됨".into())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (state, provider_kind, name, width, height);
-        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
-    }
-}
-
-/// Async so the blocking engine teardown spawn runs off the main thread.
-#[tauri::command]
-async fn tablet_display_stop(
-    state: tauri::State<'_, TabletSessionRegistry>,
-) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut guard = state.lock().map_err(|error| error.to_string())?;
-        match guard.take() {
-            Some(session) => {
-                drop(session); // Drop removes the VD and kills caffeinate.
-                Ok("태블릿 화면 세션을 정리했습니다.".into())
-            }
-            None => Ok("실행 중인 세션이 없습니다.".into()),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = state;
-        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
-    }
-}
-
-/// Async (matching tablet_display_start/stop): while streaming, the reported
-/// string is derived by probing `ioreg` for the lid state, which is a real
-/// process spawn that must not run on the main thread. The lid read is UI
-/// display only — the stored ModeState is never mutated and no control path
-/// branches on it. The reported decision lives in the pure
-/// `clamshell_mode::reported_status` (tested without any spawn); an
-/// indeterminate lid reading degrades to "streaming", never "clamshell".
-/// The battery flag recorded at start rides the same string as a
-/// ";battery" suffix (design: 배터리 `-i` 강등 + UI 경고).
-#[tauri::command]
-async fn tablet_display_status(
-    state: tauri::State<'_, TabletSessionRegistry>,
-) -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        // Block scope (not drop()) so the MutexGuard's borrow provably ends
-        // before the await below — the tauri command future must be Send.
-        let (session_state, on_battery) = {
-            let guard = state.lock().map_err(|error| error.to_string())?;
-            match guard.as_ref() {
-                Some(session) => (session.state.clone(), session.on_battery),
-                None => (clamshell_mode::ModeState::Idle, false),
-            }
-        };
-        // Probe outside the registry lock so a (capped) ioreg hang cannot
-        // block start/stop on the same mutex.
-        let lid_closed = if session_state == clamshell_mode::ModeState::Streaming {
-            clamshell_mode::read_lid_closed().await
-        } else {
-            None
-        };
-        Ok(clamshell_mode::reported_status(
-            &session_state,
-            lid_closed,
-            on_battery,
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = state;
-        Err("태블릿 화면 확장은 macOS에서만 지원됩니다.".into())
-    }
-}
-
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.
 /// The ServiceDaemon is leaked on purpose — it must outlive the app setup.
 fn advertise_mdns(port: u16) -> Result<(), String> {
@@ -724,13 +445,5 @@ mod tests {
 
         assert_ne!(actual_port, occupied_port);
         assert_ne!(actual_port, 0);
-    }
-
-    #[test]
-    fn provider_kind_selects_the_registered_engines() {
-        assert!(super::provider_kind_error("betterdisplay").is_none());
-        assert!(super::provider_kind_error("cgvirtualdisplay").is_none());
-        let unknown = super::provider_kind_error("duet").unwrap();
-        assert!(unknown.contains("지원하지 않는"));
     }
 }

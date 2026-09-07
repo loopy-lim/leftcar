@@ -40,6 +40,7 @@ struct ReconfigureSnapshot {
     width: u32,
     height: u32,
     fps_target: u32,
+    input_enabled: bool,
 }
 
 struct Session {
@@ -289,10 +290,6 @@ const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ControlServer {
     backend: SharedBackend,
     pairing: std::sync::Arc<crate::pairing::PairingServer>,
-    /// Leftcar 관리 가상 화면 소유권 레지스트리. 제어 채널의 자동 매칭
-    /// (start_stream 준비, resize)이 이 레지스트리를 공유한다 — Tauri UI
-    /// 명령과 동일한 인스턴스여야 소유권 추적이 일관된다.
-    displays: Option<crate::display_management::DisplayManager>,
     control_port: AtomicU16,
     sessions: Mutex<State>,
 }
@@ -310,19 +307,12 @@ impl ControlServer {
         Self {
             backend,
             pairing,
-            displays: None,
             control_port: AtomicU16::new(crate::PREFERRED_CONTROL_PORT),
             sessions: Mutex::new(State {
                 next: 1,
                 live: HashMap::new(),
             }),
         }
-    }
-
-    /// 가상 화면 자동 매칭에 쓸 관리 화면 레지스트리를 붙인다. 없으면(None)
-    /// 자동 매칭이 비활성화되지만 스트림 시작은 정상적으로 계속된다.
-    pub fn set_display_manager(&mut self, displays: crate::display_management::DisplayManager) {
-        self.displays = Some(displays);
     }
 
     pub fn set_control_port(&self, port: u16) {
@@ -349,11 +339,20 @@ impl ControlServer {
             Ok(handle) => self.wait_for_first_frame(handle).await.map(|_| handle),
             Err(recovery_error) => Err(recovery_error),
         };
+        // Same carry-over as reconfigure: a restored backend handle restarts
+        // with input off, so the session's enablement must be re-applied.
+        let input_enabled = match &recovered {
+            Ok(handle) if previous.input_enabled => {
+                self.backend.set_input_enabled(*handle, true).is_ok()
+            }
+            _ => false,
+        };
         let mut state = self.sessions.lock().unwrap();
         if let Some(session) = state.live.get_mut(&session_id) {
             match recovered {
                 Ok(recovered) => {
                     session.handle = recovered;
+                    session.input_enabled = input_enabled;
                     session.backend_released = false;
                 }
                 Err(_) => {
@@ -442,6 +441,7 @@ impl ControlServer {
                 width: session.width,
                 height: session.height,
                 fps_target: session.fps_target,
+                input_enabled: session.input_enabled,
             }
         };
 
@@ -474,14 +474,13 @@ impl ControlServer {
                 // Older request without a mode: retain the previous
                 // experiment, demoting split to the single path when
                 // leaving exact 4K (legacy behavior).
-                let replacement = if previous.encoder_experiment == EncoderExperiment::SplitVertical
+                if previous.encoder_experiment == EncoderExperiment::SplitVertical
                     && (input.width != 3_840 || input.height != 2_160)
                 {
                     EncoderExperiment::Auto
                 } else {
                     previous.encoder_experiment
-                };
-                replacement
+                }
             }
         };
 
@@ -529,12 +528,22 @@ impl ControlServer {
             }
         };
 
+        // The replacement backend handle starts with remote input disabled;
+        // re-apply the session's enablement so a resolution switch never
+        // silently strips the viewer of control.
+        let input_enabled = previous.input_enabled
+            && self
+                .backend
+                .set_input_enabled(replacement_handle, true)
+                .is_ok();
+
         let mut state = self.sessions.lock().unwrap();
         let session = state
             .live
             .get_mut(&input.session)
             .ok_or_else(|| format!("session {} ended during reconfigure", input.session))?;
         session.handle = replacement_handle;
+        session.input_enabled = input_enabled;
         session.width = input.width;
         session.height = input.height;
         session.fps_target = input.fps;
@@ -1172,9 +1181,6 @@ impl ControlServer {
                     .and_then(|d| d.get(input.source_index as usize).cloned())
                     .map(|d| d.name)
                     .unwrap_or_else(|| format!("display {}", input.source_index));
-                // 뷰어 메트릭 자동 매칭: 관리 가상 화면 준비는 best-effort이며
-                // 실패가 스트림 시작을 막지 않는다 (prepare_viewer_display 참고).
-                self.prepare_viewer_display(&input, Some(&name));
                 let requested_transport = normalize_media_transport(&input.media_transport)
                     .ok_or_else(|| {
                         format!("unsupported media transport: {}", input.media_transport)
@@ -1301,6 +1307,14 @@ impl ControlServer {
                 match started {
                     Some((handle, candidate, transport)) => {
                         let viewer_addr = format!("{candidate}:{}", input.viewer_port);
+                        // Remote input turns itself on with the session when
+                        // the OS input permission is already granted, so the
+                        // viewer never has to ask; without it the host banner
+                        // and manual toggle remain the path in. A failure to
+                        // apply degrades to disabled rather than failing the
+                        // stream.
+                        let input_enabled = self.backend.input_permission().unwrap_or(false)
+                            && self.backend.set_input_enabled(handle, true).is_ok();
                         let session_id = {
                             let mut st = self.sessions.lock().unwrap();
                             let id = st.next;
@@ -1323,7 +1337,7 @@ impl ControlServer {
                                     media_transport: transport.into(),
                                     udp_stability: (transport == "udp")
                                         .then(|| udp_stability.clone()),
-                                    input_enabled: false,
+                                    input_enabled,
                                     input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
                                     terminal_error: None,
@@ -1398,30 +1412,6 @@ impl ControlServer {
                 }
             }
             "getStatus" => ok(self.snapshot()),
-            "resizeVirtualDisplay" => {
-                // Viewer-initiated managed display resize. The registry is
-                // attached by the host UI; without it the viewer has no
-                // business resizing anything.
-                let input: control_contract::host::ResizeVirtualDisplayInput =
-                    match serde_json::from_value(args) {
-                        Ok(v) => v,
-                        Err(e) => return err(&format!("bad args: {e}")),
-                    };
-                let Some(displays) = self.displays.clone() else {
-                    return err("관리 화면 레지스트리가 연결되지 않았습니다.");
-                };
-                match displays.resize(&input.id, input.width, input.height, input.scale) {
-                    Ok(view) => ok(control_contract::host::ResizeVirtualDisplayOutput {
-                        id: view.id,
-                        logical_width: view.logical_width,
-                        logical_height: view.logical_height,
-                        scale: view.scale,
-                        backing_width: view.backing_width,
-                        backing_height: view.backing_height,
-                    }),
-                    Err(error) => err(&error),
-                }
-            }
             _ => {
                 // delegate stateless commands to the real rustra package (H02 path)
                 match control_contract::host::host_package().invoke_json(command, args) {
@@ -1434,82 +1424,6 @@ impl ControlServer {
 
     pub(crate) fn authorize_token(&self, token: &str) -> bool {
         self.pairing.authorize(token)
-    }
-
-    /// 스트림 시작 전 뷰어 메트릭 자동 매칭으로 관리 가상 화면을 준비한다.
-    ///
-    /// 정책 (docs/plans/2026-09-06-viewer-display-sizing-design.md §1·§4):
-    /// - 매칭은 best-effort다. 준비에 실패해도(관리 화면 없음, 리사이즈 실패,
-    ///   레지스트리 부재) 절대 오류를 반환하지 않고 로그만 남긴다 — 가상 화면
-    ///   크기 매칭이 스트림 시작을 막지 않는다.
-    /// - 요청된 관리 화면(`virtual_display_id`)이 없어도 생성하지 않는다.
-    ///   생성은 호스트 UI(DisplayManagerCard)의 명시적 사용자 동작으로 남긴다.
-    /// - 자동 생성 경로는 없으므로 별도의 세션 종료 정리도 생기지 않는다:
-    ///   관리 화면은 기존 소유 ID로 추적되며 세션 종료 시 즉시 제거하지
-    ///   않는 기존 정책을 유지한다.
-    fn prepare_viewer_display(&self, input: &StartStreamInput, source_name: Option<&str>) {
-        let Some(displays) = self.displays.clone() else {
-            if input.viewer_display.is_some() {
-                eprintln!("viewer display matching skipped: no managed-display registry attached");
-            }
-            return;
-        };
-        let managed = displays.list();
-        let decisions: Vec<_> = managed
-            .iter()
-            .map(|view| crate::display_matching::ManagedDisplayMode {
-                id: &view.id,
-                logical_width: view.logical_width,
-                logical_height: view.logical_height,
-                scale: view.scale,
-            })
-            .collect();
-        let metrics = input.viewer_display.as_ref().map(|msg| {
-            crate::display_matching::ViewerDisplayMetrics {
-                physical_width: msg.physical_width,
-                physical_height: msg.physical_height,
-                density_dpi: msg.density_dpi,
-            }
-        });
-        let preparation = crate::display_matching::prepare_virtual_display(
-            metrics.as_ref(),
-            input.virtual_display_id.as_deref(),
-            source_name,
-            &decisions,
-        );
-        match preparation {
-            crate::display_matching::VirtualDisplayPreparation::NotNeeded => {}
-            crate::display_matching::VirtualDisplayPreparation::Resize {
-                id,
-                width,
-                height,
-                scale,
-            } => {
-                println!(
-                    "viewer display match: resizing managed display {id} to {width}x{height}@{scale}x"
-                );
-                if let Err(error) = displays.resize(&id, width, height, u8::from(scale)) {
-                    // best-effort: 스트림은 기존 소스 크기로 계속된다.
-                    eprintln!(
-                        "viewer display resize of {id} to {width}x{height}@{scale}x failed; \
-                         continuing with the existing source: {error}"
-                    );
-                }
-            }
-            crate::display_matching::VirtualDisplayPreparation::Reuse { id } => {
-                println!("viewer display match: reusing managed display {id}");
-            }
-            crate::display_matching::VirtualDisplayPreparation::LogOnly {
-                width,
-                height,
-                scale,
-            } => {
-                println!(
-                    "viewer display match: no managed display to prepare (creation stays a \
-                     host-UI action); matched size {width}x{height}@{scale}x logged only"
-                );
-            }
-        }
     }
 }
 
@@ -1679,6 +1593,8 @@ mod tests {
             encoder_experiment: Mutex::new(EncoderExperiment::Auto),
             advertise_split_vertical: false,
             stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
         })
     }
 
@@ -1938,7 +1854,7 @@ mod tests {
         assert!(line.contains("\"state\":\"running\""), "{line}");
         assert!(line.contains("\"width\":2560"), "{line}");
         assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
-        assert!(line.contains("\"inputEnabled\":false"), "{line}");
+        assert!(line.contains("\"inputEnabled\":true"), "{line}");
         assert!(line.contains("\"bitrateFloorCollapseCount\":7"), "{line}");
         assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
@@ -2275,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_input_is_host_opt_in_per_session() {
+    fn set_session_input_toggles_a_live_session() {
         let server = ControlServer::new(backend(), test_pairing());
         server.sessions.lock().unwrap().live.insert(
             1,
@@ -2308,6 +2224,111 @@ mod tests {
         let session = server.snapshot().sessions.remove(0);
         assert!(session.input_enabled);
         assert_eq!(session.input_rate_hz, 120);
+    }
+
+    fn input_test_backend(permission: bool) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            displays: vec![DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 1920,
+                height: 1080,
+            }],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: AtomicUsize::new(0),
+            input_permission: permission,
+            input_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn start_stream_auto_enables_input_when_permission_is_granted() {
+        let fake = input_test_backend(true);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.values().next().unwrap();
+        assert!(session.input_enabled, "{resp}");
+        assert_eq!(*fake.input_calls.lock().unwrap(), vec![(7, true)], "{resp}");
+    }
+
+    #[tokio::test]
+    async fn start_stream_leaves_input_off_without_permission() {
+        let fake = input_test_backend(false);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.values().next().unwrap();
+        assert!(!session.input_enabled, "{resp}");
+        assert!(fake.input_calls.lock().unwrap().is_empty(), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_stream_carries_input_enablement_to_replacement() {
+        let fake = input_test_backend(true);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
+        server.set_session_input(1, true).unwrap();
+        assert_eq!(*fake.input_calls.lock().unwrap(), vec![(7, true)]);
+
+        let resp = server
+            .dispatch(
+                "reconfigureStream",
+                serde_json::json!({
+                    "session": 1,
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": 60,
+                    "qualityState": "native"
+                }),
+                "192.168.0.9",
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        // The replacement backend handle must re-receive the enablement the
+        // viewer already had; a resolution switch cannot silently strip
+        // control.
+        assert_eq!(
+            *fake.input_calls.lock().unwrap(),
+            vec![(7, true), (7, true)],
+            "{resp}"
+        );
+        let state = server.sessions.lock().unwrap();
+        assert!(state.live.get(&1).unwrap().input_enabled, "{resp}");
     }
 
     /// Seed one live UDP session directly (the dispatcher's split start
@@ -2484,6 +2505,8 @@ mod tests {
             encoder_experiment: Mutex::new(EncoderExperiment::Auto),
             advertise_split_vertical: true,
             stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
         });
         let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
@@ -2533,6 +2556,8 @@ mod tests {
             encoder_experiment: Mutex::new(EncoderExperiment::SplitVertical),
             advertise_split_vertical: false,
             stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
         });
         let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
         seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
@@ -2577,6 +2602,8 @@ mod tests {
             encoder_experiment: Mutex::new(EncoderExperiment::Auto),
             advertise_split_vertical: true,
             stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
         });
         let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
@@ -2621,6 +2648,8 @@ mod tests {
             encoder_experiment: Mutex::new(EncoderExperiment::Auto),
             advertise_split_vertical: false,
             stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
         });
         let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
@@ -2694,219 +2723,8 @@ mod tests {
         assert!(session.terminal_error.is_none());
     }
 
-    mod viewer_display_matching {
-        use super::*;
-
-        fn metrics_msg(
-            w: u32,
-            h: u32,
-            dpi: u32,
-        ) -> control_contract::host::ViewerDisplayMetricsMsg {
-            control_contract::host::ViewerDisplayMetricsMsg {
-                physical_width: w,
-                physical_height: h,
-                density_dpi: dpi,
-            }
-        }
-
-        /// 자동 매칭은 기존 소유 정책을 건드리지 않는다: 준비 동작은
-        /// 기존 관리 화면의 재사용·리사이즈까지만이고 세션 종료 시 별도의
-        /// 즉시 제거도 없다. 이 테스트는 resize가 record를 유지하는
-        /// DisplayManager 불변식(Task 3, display_management 테스트 자원 재사용)
-        /// 위에 세워진다.
-        #[cfg(target_os = "macos")]
-        #[test]
-        fn preparation_resize_keeps_managed_record_and_id() {
-            // macOS DisplayManager는 관찰 경로가 필요해 빈 레지스트리에서
-            // resize 불변식만 직접 검증한다(ResizeOk 픽스처는
-            // display_management::tests::resize_fixture와 동일한 자원).
-            use crate::provider::{DisplaySpec, VirtualDisplay, VirtualDisplayProvider};
-            struct ResizeOk;
-            impl VirtualDisplayProvider for ResizeOk {
-                fn name(&self) -> &'static str {
-                    "fake"
-                }
-                fn available(&self) -> bool {
-                    true
-                }
-                fn create(
-                    &self,
-                    _: &DisplaySpec,
-                ) -> Result<VirtualDisplay, crate::provider::ProviderError> {
-                    unreachable!()
-                }
-                fn place(
-                    &self,
-                    _: &VirtualDisplay,
-                    _: i32,
-                    _: i32,
-                ) -> Result<(), crate::provider::ProviderError> {
-                    Ok(())
-                }
-                fn remove(&self, _: &VirtualDisplay) -> Result<(), crate::provider::ProviderError> {
-                    unreachable!()
-                }
-                fn resize(
-                    &self,
-                    _: &VirtualDisplay,
-                    width: u32,
-                    height: u32,
-                    scale: u8,
-                ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError>
-                {
-                    Ok(crate::provider::ResizedDisplayMode {
-                        logical_width: width,
-                        logical_height: height,
-                        pixel_width: width * u32::from(scale),
-                        pixel_height: height * u32::from(scale),
-                    })
-                }
-            }
-            let manager = crate::display_management::DisplayManager::default();
-            crate::display_management::DisplayManager::seed_test_display(
-                &manager,
-                "vd-1",
-                "Tablet [leftcar:vd-1]",
-                1600,
-                1000,
-                2,
-                Arc::new(ResizeOk),
-            );
-            let view = manager.resize("vd-1", 1400, 876, 2).unwrap();
-            assert_eq!((view.logical_width, view.logical_height), (1400, 876));
-            assert_eq!(view.id, "vd-1");
-            // 세션 종료 정리 정책: 준비가 끝나도 화면은 관리 ID로 유지된다.
-            assert_eq!(manager.list().len(), 1);
-        }
-
-        fn server_with_registry() -> ControlServer {
-            let mut server = ControlServer::new(backend(), test_pairing());
-            server.set_display_manager(crate::display_management::DisplayManager::default());
-            server
-        }
-
-        /// resizeVirtualDisplay 제어 채널 dispatch 테스트용 ResizeOk 픽스처
-        /// (preparation_resize_keeps_managed_record_and_id와 동일한 자원).
-        #[cfg(target_os = "macos")]
-        struct DispatchResizeOk;
-        #[cfg(target_os = "macos")]
-        impl crate::provider::VirtualDisplayProvider for DispatchResizeOk {
-            fn name(&self) -> &'static str {
-                "fake"
-            }
-            fn available(&self) -> bool {
-                true
-            }
-            fn create(
-                &self,
-                _: &crate::provider::DisplaySpec,
-            ) -> Result<crate::provider::VirtualDisplay, crate::provider::ProviderError>
-            {
-                unreachable!()
-            }
-            fn place(
-                &self,
-                _: &crate::provider::VirtualDisplay,
-                _: i32,
-                _: i32,
-            ) -> Result<(), crate::provider::ProviderError> {
-                Ok(())
-            }
-            fn remove(
-                &self,
-                _: &crate::provider::VirtualDisplay,
-            ) -> Result<(), crate::provider::ProviderError> {
-                unreachable!()
-            }
-            fn resize(
-                &self,
-                _: &crate::provider::VirtualDisplay,
-                width: u32,
-                height: u32,
-                scale: u8,
-            ) -> Result<crate::provider::ResizedDisplayMode, crate::provider::ProviderError>
-            {
-                Ok(crate::provider::ResizedDisplayMode {
-                    logical_width: width,
-                    logical_height: height,
-                    pixel_width: width * u32::from(scale),
-                    pixel_height: height * u32::from(scale),
-                })
-            }
-        }
-
-        #[tokio::test]
-        #[cfg(target_os = "macos")]
-        async fn resize_virtual_display_dispatch_keeps_managed_id_and_reports_scale() {
-            let server = Arc::new(server_with_registry());
-            crate::display_management::DisplayManager::seed_test_display(
-                &server.displays.as_ref().unwrap(),
-                "vd-1",
-                "Tablet [leftcar:vd-1]",
-                1600,
-                1000,
-                2,
-                Arc::new(DispatchResizeOk),
-            );
-            let resp = server
-                .dispatch(
-                    "resizeVirtualDisplay",
-                    serde_json::json!({ "id": "vd-1", "width": 1400, "height": 876, "scale": 2 }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            assert_eq!(resp["result"]["id"], "vd-1", "{resp}");
-            assert_eq!(resp["result"]["logicalWidth"], 1400, "{resp}");
-            assert_eq!(resp["result"]["logicalHeight"], 876, "{resp}");
-            assert_eq!(resp["result"]["scale"], 2, "{resp}");
-            assert_eq!(resp["result"]["backingWidth"], 2800, "{resp}");
-            assert_eq!(resp["result"]["backingHeight"], 1752, "{resp}");
-            // 세션 종료 정리 정책과 동일: dispatch 성공 후에도 관리 ID로 유지된다.
-            assert_eq!(
-                server.displays.as_ref().unwrap().list().len(),
-                1,
-                "managed display must survive the viewer resize"
-            );
-        }
-
-        #[tokio::test]
-        async fn resize_virtual_display_dispatch_rejects_unknown_id() {
-            let server = Arc::new(server_with_registry());
-            let resp = server
-                .dispatch(
-                    "resizeVirtualDisplay",
-                    serde_json::json!({ "id": "missing", "width": 1400, "height": 876, "scale": 2 }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], false, "{resp}");
-            let message = resp["error"].as_str().unwrap_or_default();
-            assert!(
-                message.contains("관리 중인 디스플레이"),
-                "unexpected error: {message}"
-            );
-        }
-
-        #[tokio::test]
-        async fn resize_virtual_display_dispatch_requires_registry() {
-            let server = Arc::new(ControlServer::new(backend(), test_pairing()));
-            let resp = server
-                .dispatch(
-                    "resizeVirtualDisplay",
-                    serde_json::json!({ "id": "vd-1", "width": 1400, "height": 876, "scale": 2 }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], false, "{resp}");
-            let message = resp["error"].as_str().unwrap_or_default();
-            assert!(
-                message.contains("레지스트리"),
-                "unexpected error: {message}"
-            );
-        }
-
-        #[tokio::test]
+    // split 재구성 회귀 테스트(구 viewer_display_matching 모듌에서 이전)
+    #[tokio::test]
         async fn reconfigure_stream_demotes_split_replacement_for_non_4k_target() {
             // 4K split 세션을 1080p로 재구성하면 교체 캡처가 Auto 단일 인코더로
             // 시작해야 한다 — 뷰어는 이미 demote된 단일 prepare/rebind 경로로
@@ -2924,6 +2742,8 @@ mod tests {
                 encoder_experiment: Mutex::new(EncoderExperiment::Auto),
                 advertise_split_vertical: false,
                 stops: AtomicUsize::new(0),
+                input_permission: true,
+                input_calls: Mutex::new(Vec::new()),
             });
             let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
             // dispatcher의 split 시작 검증은 진단 플래그를 요구하므로 라이브
@@ -2986,7 +2806,7 @@ mod tests {
             assert_eq!(session.handle, 7);
         }
 
-        #[tokio::test]
+    #[tokio::test]
         async fn reconfigure_stream_omitted_mode_rejects_split_4k_90fps_before_stopping() {
             // mode 생략(구 뷰어) 요청이 정확한 4K를 유지하면 이전 split 실험이
             // 유지되지만, fps가 60이 아니면 split 제약 위반이다. 교체 실험을
@@ -3002,6 +2822,8 @@ mod tests {
                 encoder_experiment: Mutex::new(EncoderExperiment::Auto),
                 advertise_split_vertical: false,
                 stops: AtomicUsize::new(0),
+                input_permission: true,
+                input_calls: Mutex::new(Vec::new()),
             });
             let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
             seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
@@ -3033,7 +2855,7 @@ mod tests {
             assert!(session.terminal_error.is_none());
         }
 
-        #[tokio::test]
+    #[tokio::test]
         async fn reconfigure_stream_omitted_mode_rejects_split_4k_30fps_before_stopping() {
             let fake = Arc::new(FakeBackend {
                 displays: vec![DisplayInfo {
@@ -3045,6 +2867,8 @@ mod tests {
                 encoder_experiment: Mutex::new(EncoderExperiment::Auto),
                 advertise_split_vertical: false,
                 stops: AtomicUsize::new(0),
+                input_permission: true,
+                input_calls: Mutex::new(Vec::new()),
             });
             let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
             seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
@@ -3076,121 +2900,4 @@ mod tests {
             assert!(session.terminal_error.is_none());
         }
 
-        #[tokio::test]
-        async fn start_stream_with_viewer_metrics_proceeds_without_any_managed_display() {
-            // 매칭 대상이 하나도 없어도(레지스트리가 비어 있어도) 스트림은
-            // 기존 소스로 정상 시작된다 — best-effort 정책.
-            let server = Arc::new(server_with_registry());
-            let resp = server
-                .dispatch(
-                    "startStream",
-                    serde_json::json!({
-                        "sourceIndex": 0,
-                        "viewerPort": 5001,
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 90,
-                        "viewerDisplay": {
-                            "physicalWidth": 2800,
-                            "physicalHeight": 1752,
-                            "densityDpi": 420
-                        },
-                        "virtualDisplayId": "missing-registry-entry"
-                    }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            assert_eq!(resp["result"]["session"], 1, "{resp}");
-            assert_eq!(resp["result"]["width"], 1920, "{resp}");
-        }
-
-        #[tokio::test]
-        async fn unmatchable_viewer_metrics_still_start_the_stream() {
-            let server = Arc::new(server_with_registry());
-            // 1999×719는 scale 2·scale 1 모두 최소 논리 크기 미달 → 매칭 실패.
-            let resp = server
-                .dispatch(
-                    "startStream",
-                    serde_json::json!({
-                        "sourceIndex": 0,
-                        "viewerPort": 5001,
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 90,
-                        "viewerDisplay": metrics_msg(1999, 719, 160)
-                    }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            assert_eq!(resp["result"]["session"], 1, "{resp}");
-        }
-
-        #[tokio::test]
-        async fn start_stream_without_viewer_metrics_still_works_on_legacy_path() {
-            let server = Arc::new(server_with_registry());
-            let resp = server
-                .dispatch(
-                    "startStream",
-                    serde_json::json!({
-                        "sourceIndex": 0,
-                        "viewerPort": 5001,
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 90
-                    }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            assert_eq!(resp["result"]["session"], 1, "{resp}");
-        }
-
-        #[tokio::test]
-        async fn start_stream_without_registry_attached_still_works() {
-            // 레지스트리가 없어도(None) 자동 매칭은 건너뛰고 스트림은 시작된다.
-            let server = Arc::new(ControlServer::new(backend(), test_pairing()));
-            let resp = server
-                .dispatch(
-                    "startStream",
-                    serde_json::json!({
-                        "sourceIndex": 0,
-                        "viewerPort": 5001,
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 90,
-                        "viewerDisplay": metrics_msg(2800, 1752, 420)
-                    }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            assert_eq!(resp["result"]["session"], 1, "{resp}");
-        }
-
-        #[tokio::test]
-        async fn extension_mode_source_marker_log_only_policy_is_wired() {
-            // 소스가 관리 화면 마커를 가져도 매칭 크기의 관리 화면이 없으면
-            // 생성하지 않는다 — dispatch는 여전히 ok를 반환해야 한다.
-            let server = Arc::new(server_with_registry());
-            let resp = server
-                .dispatch(
-                    "startStream",
-                    serde_json::json!({
-                        "sourceIndex": 0,
-                        "viewerPort": 5001,
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 90,
-                        "viewerDisplay": metrics_msg(2800, 1752, 420)
-                    }),
-                    "192.168.0.9",
-                )
-                .await;
-            assert_eq!(resp["ok"], true, "{resp}");
-            // 아무것도 생성/리사이즈되지 않았다.
-            assert!(server.displays.as_ref().unwrap().list().is_empty());
-        }
-    }
 }

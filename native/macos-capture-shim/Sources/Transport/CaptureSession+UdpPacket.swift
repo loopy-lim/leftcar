@@ -145,6 +145,11 @@ extension CaptureSession {
         var auFragmentCount: UInt32 = 0
         var auParityCount: UInt32 = 0
         var sendSyscallUs: UInt64 = 0
+        // Worst SINGLE sendto duration in this AU. The AU total grows with
+        // fragment count (a clean 165-fragment 4K frame easily sums past
+        // 8ms of fast syscalls), so only the per-datagram worst says whether
+        // the socket buffer actually blocked the sender.
+        var worstDatagramSyscallUs: UInt64 = 0
         var ok = true
         if isFrame {
             // Logical L2 header: marker + AU id LE + capture/encode clocks.
@@ -257,10 +262,34 @@ extension CaptureSession {
                     transmissions.count
                 )
             }
+            // Slow-but-successful sends during link collapse must not hold
+            // newer frames hostage: abort the access unit once it overran its
+            // size-aware budget (see udpAccessUnitSendDeadlineUs). Checked per
+            // pacing range so the deadline covers pacing sleeps and sendto
+            // time together.
+            let sendDeadlineBudgetUs = udpAccessUnitSendDeadlineUs(
+                isKeyframe: isKeyframe,
+                fps: fps,
+                dataFragmentCount: fragmentCount,
+                burstDatagrams: currentUdpBurstLimit()
+            )
             primary: for range in udpPacingBurstRanges(
                 datagramCount: transmissions.count,
                 maxDatagrams: currentUdpBurstLimit()
             ) {
+                let elapsedUs = (DispatchTime.now().uptimeNanoseconds &- sendStart) / 1_000
+                if elapsedUs > sendDeadlineBudgetUs {
+                    NSLog(
+                        "Leftcar %@ AU send deadline exceeded %@: elapsed=%lluus fragments=%d isKeyframe=%@",
+                        codecKind.rawValue.uppercased(),
+                        targetLabel,
+                        elapsedUs,
+                        fragmentCount,
+                        isKeyframe ? "true" : "false"
+                    )
+                    ok = false
+                    break primary
+                }
                 let burstBytes = range.reduce(into: 0) { total, index in
                     total += transmissions[index].count
                 }
@@ -280,9 +309,11 @@ extension CaptureSession {
                     let datagram = transmissions[index]
                     let syscallStart = DispatchTime.now().uptimeNanoseconds
                     let sent = sendMediaDatagram(datagram, fd: fd, tileSide: tileSide)
-                    sendSyscallUs &+= (
+                    let datagramSyscallUs = (
                         DispatchTime.now().uptimeNanoseconds &- syscallStart
                     ) / 1_000
+                    sendSyscallUs &+= datagramSyscallUs
+                    worstDatagramSyscallUs = max(worstDatagramSyscallUs, datagramSyscallUs)
                     if sent != datagram.count {
                         ok = false
                         break primary
@@ -298,6 +329,7 @@ extension CaptureSession {
             let syscallStart = DispatchTime.now().uptimeNanoseconds
             let sent = sendMediaDatagram(data, fd: fd, tileSide: tileSide)
             sendSyscallUs = (DispatchTime.now().uptimeNanoseconds &- syscallStart) / 1_000
+            worstDatagramSyscallUs = sendSyscallUs
             ok = sent == data.count
             if ok {
                 sentBytes = sent
@@ -349,8 +381,11 @@ extension CaptureSession {
         }
         bytesSent &+= Int64(sentBytes)
         rateWindowBytes &+= Int64(sentBytes)
-        lastSendBlockUs = sendSyscallUs
-        maxSendBlockUs = max(maxSendBlockUs, sendSyscallUs)
+        // Congestion votes read the per-datagram worst, not the AU total
+        // (see worstDatagramSyscallUs above). The AU total keeps feeding the
+        // rolling p95 diagnostics.
+        lastSendBlockUs = worstDatagramSyscallUs
+        maxSendBlockUs = max(maxSendBlockUs, worstDatagramSyscallUs)
         appendRollingSample(sendSyscallUs, to: &sendBlockSamplesUs)
         lastSendPaceUs = sendPaceUs
         maxSendPaceUs = max(maxSendPaceUs, sendPaceUs)

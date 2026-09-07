@@ -6,8 +6,7 @@
       "signingIdentity": "3D28D0786675B5D4AF9747098D7042816506BE50"
     },
     "resources": {
-      "../../../native/macos-capture-shim/libleftcar_capture.dylib": "libleftcar_capture.dylib",
-      "../../../tools/cgvd-shim/.build/release/cgvd-shim": "cgvd-shim"
+      "../../../native/macos-capture-shim/libleftcar_capture.dylib": "libleftcar_capture.dylib"
     }
   }
 }

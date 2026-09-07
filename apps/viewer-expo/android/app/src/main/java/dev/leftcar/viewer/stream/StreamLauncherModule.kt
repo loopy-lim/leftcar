@@ -112,39 +112,6 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         super.invalidate()
     }
 
-    /**
-     * Reports this tablet's physical screen so the Host can size a virtual
-     * display to match. API 30+ reads the true panel resolution from
-     * `maximumWindowMetrics`; older releases fall back to DisplayMetrics.
-     */
-    @ReactMethod
-    fun getDisplayMetrics(promise: Promise) {
-        try {
-            val context: Context = getReactApplicationContext()
-                .getCurrentActivity()
-                ?: getReactApplicationContext()
-            val metrics = context.resources.displayMetrics
-            val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                context.getSystemService(android.view.WindowManager::class.java)
-                    ?.maximumWindowMetrics
-                    ?.bounds
-            } else {
-                null
-            }
-            val width = bounds?.width() ?: metrics.widthPixels
-            val height = bounds?.height() ?: metrics.heightPixels
-            promise.resolve(
-                Arguments.createMap().apply {
-                    putInt("physicalWidth", width)
-                    putInt("physicalHeight", height)
-                    putInt("densityDpi", metrics.densityDpi)
-                },
-            )
-        } catch (t: Throwable) {
-            promise.reject("ERR_DISPLAY_METRICS", t.message, t)
-        }
-    }
-
     @ReactMethod
     fun addListener(eventName: String) {}
 
@@ -327,7 +294,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * 활성 StreamActivity 창에 XR 비율 프리셋을 전달한다. Mac 가상 화면
+     * 활성 StreamActivity 창에 XR 비율 프리셋을 전달한다. 컴퓨터 화면
      * 해상도는 변경하지 않는다 — 이 값은 SpatialWindow 비율에만 쓰인다.
      * XR이 아닌 기기에서는 Activity의 XR 검사가 no-op으로 처리한다.
      */

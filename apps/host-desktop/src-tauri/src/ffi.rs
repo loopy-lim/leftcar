@@ -59,66 +59,6 @@ fn dylib_candidates() -> Vec<PathBuf> {
     v
 }
 
-#[cfg(target_os = "macos")]
-fn managed_mode_library() -> Result<&'static Library, String> {
-    static LIBRARY: std::sync::OnceLock<Result<Library, String>> = std::sync::OnceLock::new();
-    LIBRARY
-        .get_or_init(|| {
-            let mut last_error = "capture dylib not found".to_string();
-            for path in dylib_candidates() {
-                if !path.exists() {
-                    continue;
-                }
-                match unsafe { Library::new(&path) } {
-                    Ok(library) => return Ok(library),
-                    Err(error) => last_error = format!("dlopen {}: {error}", path.display()),
-                }
-            }
-            Err(last_error)
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn register_managed_display_mode(
-    display_id: u32,
-    generation: u64,
-    logical_width: u32,
-    logical_height: u32,
-    pixel_width: u32,
-    pixel_height: u32,
-) -> Result<(), String> {
-    unsafe {
-        let function: Symbol<unsafe extern "C" fn(u32, u64, u32, u32, u32, u32) -> i32> =
-            managed_mode_library()?
-                .get(b"leftcar_capture_register_managed_display_mode_v1")
-                .map_err(|error| error.to_string())?;
-        let result = function(
-            display_id,
-            generation,
-            logical_width,
-            logical_height,
-            pixel_width,
-            pixel_height,
-        );
-        (result == 0)
-            .then_some(())
-            .ok_or_else(|| format!("managed display mode registration rc={result}"))
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn clear_managed_display_mode(display_id: u32, generation: u64) -> Result<(), String> {
-    unsafe {
-        let function: Symbol<unsafe extern "C" fn(u32, u64)> = managed_mode_library()?
-            .get(b"leftcar_capture_clear_managed_display_mode_v1")
-            .map_err(|error| error.to_string())?;
-        function(display_id, generation);
-    }
-    Ok(())
-}
-
 impl FfiBackend {
     pub fn new() -> Result<Self, String> {
         let mut last_err = "no dylib candidates".to_string();
@@ -232,21 +172,21 @@ impl FfiBackend {
 }
 
 fn macos_capture_backends(persistent_access: bool) -> Vec<CaptureBackendInfo> {
-    let automatic = CaptureBackendInfo {
-        id: "cgDisplayStream".into(),
-        label: "자동 화면 공유".into(),
-        hint: "화면 선택기 없이 바로 연결".into(),
-    };
-    if !persistent_access {
-        return vec![automatic];
-    }
     vec![
         CaptureBackendInfo {
             id: "screenCaptureKit".into(),
-            label: "지속 화면 공유".into(),
-            hint: "Apple 지속 캡처 승인됨 · 선택기 없이 연결".into(),
+            label: "화면 공유".into(),
+            hint: if persistent_access {
+                "Apple 지속 캡처 승인됨 · 화면과 소리".into()
+            } else {
+                "화면 녹화 권한으로 연결 · 화면과 소리".into()
+            },
         },
-        automatic,
+        CaptureBackendInfo {
+            id: "cgDisplayStream".into(),
+            label: "화면 공유(호환)".into(),
+            hint: "화면만 · 구형 경로".into(),
+        },
     ]
 }
 
@@ -1140,10 +1080,11 @@ mod tests {
     }
 
     #[test]
-    fn unapproved_build_advertises_only_the_automatic_pickerless_backend() {
+    fn unapproved_build_still_leads_with_screen_capture_kit_for_audio() {
         let backends = macos_capture_backends(false);
-        assert_eq!(backends.len(), 1);
-        assert_eq!(backends[0].id, "cgDisplayStream");
+        assert_eq!(backends.len(), 2);
+        assert_eq!(backends[0].id, "screenCaptureKit");
+        assert_eq!(backends[1].id, "cgDisplayStream");
     }
 
     #[test]

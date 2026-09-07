@@ -8,7 +8,6 @@ import {
   View,
 } from "react-native";
 import {
-  customSizeScale,
   displaySizePresets,
   normalizeCustomSize,
 } from "./display-size";
@@ -20,28 +19,15 @@ import type { ActiveStream } from "./catalog-model-types";
 import type { ThemeTokens } from "./theme";
 
 /**
- * "가상 화면 크기" card: shows the current session size, offers preset
- * candidates (tablet match when metrics are known, 1080p/1440p/4K), and a
- * manual pixel input. Applies through the model's resize handlers, falling
- * back to a session-only resolution change while the host-side managed
- * display listing is unavailable.
+ * "화면 해상도" card: shows the current session resolution, offers preset
+ * candidates (1080p/1440p/4K), and a manual pixel input. Applies through the
+ * model's session reconfigure path.
  */
 
 export interface DisplaySizeCardProps {
   stream: ActiveStream | null;
-  tabletMatch: { width: number; height: number } | null;
   resizing: boolean;
-  /** Managed virtual display id, when the viewer knows one. Task 8 wiring. */
-  virtualDisplayId?: string | null;
   colors: ThemeTokens;
-  onResizeVirtualDisplay: (
-    stream: ActiveStream,
-    virtualDisplayId: string,
-    width: number,
-    height: number,
-    scale: 1 | 2,
-    fps: number,
-  ) => Promise<boolean>;
   onResizeSession: (
     stream: ActiveStream,
     width: number,
@@ -123,11 +109,8 @@ function PresetButton({
 
 export function DisplaySizeCard({
   stream,
-  tabletMatch,
   resizing,
-  virtualDisplayId,
   colors,
-  onResizeVirtualDisplay,
   onResizeSession,
   windowRatio = null,
   onSelectWindowRatio,
@@ -138,27 +121,20 @@ export function DisplaySizeCard({
 
   const currentWidth = stream?.activeTarget.width ?? null;
   const currentHeight = stream?.activeTarget.height ?? null;
-  const currentScale: 1 | 2 = stream?.scale ?? 1;
   const presets = useMemo(
     () =>
       displaySizePresets(
-        tabletMatch,
         currentWidth !== null && currentHeight !== null
-          ? { width: currentWidth, height: currentHeight, scale: currentScale }
+          ? { width: currentWidth, height: currentHeight }
           : null,
       ),
-    [tabletMatch, currentWidth, currentHeight, currentScale],
+    [currentWidth, currentHeight],
   );
 
   if (!stream) return null;
 
-  const applyPreset = (width: number, height: number, scale: 1 | 2) => {
+  const applyPreset = (width: number, height: number) => {
     if (resizing || !stream) return;
-    if (virtualDisplayId) {
-      void onResizeVirtualDisplay(stream, virtualDisplayId, width, height, scale, stream.fps);
-      return;
-    }
-    // No managed-display id yet: change the session resolution only.
     void onResizeSession(stream, width, height, stream.fps);
   };
 
@@ -174,17 +150,6 @@ export function DisplaySizeCard({
       return;
     }
     setCustomError(null);
-    if (virtualDisplayId) {
-      void onResizeVirtualDisplay(
-        stream,
-        virtualDisplayId,
-        normalized.width,
-        normalized.height,
-        customSizeScale(normalized.width, normalized.height),
-        stream.fps,
-      );
-      return;
-    }
     void onResizeSession(stream, normalized.width, normalized.height, stream.fps);
   };
 
@@ -234,12 +199,10 @@ export function DisplaySizeCard({
     <View style={styles.card}>
       <View style={{ gap: 2 }}>
         <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          가상 화면 크기
+          화면 해상도
         </Text>
         <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          {virtualDisplayId
-            ? "컴퓨터의 가상 화면 크기를 바꾸고 열린 창에 바로 적용합니다."
-            : "열린 화면 창의 해상도를 바로 바꿉니다. 가상 화면까지 바꾸려면 호스트 목록 조회가 필요합니다."}
+          열린 화면 창의 해상도를 바로 바꿉니다.
         </Text>
       </View>
 
@@ -251,25 +214,20 @@ export function DisplaySizeCard({
       </Text>
 
       <View style={styles.presetRow}>
-        {presets.map((preset) => {
-          // Scale matters only once the stream's scale is known; an unknown
-          // scale keeps the legacy width/height-only comparison.
-          const active =
-            stream.activeTarget.width === preset.width &&
-            stream.activeTarget.height === preset.height &&
-            (stream.scale === undefined || stream.scale === preset.scale);
-          return (
-            <PresetButton
-              key={`${preset.label}-${preset.width}x${preset.height}`}
-              label={preset.label}
-              detail={`${preset.width} × ${preset.height}${preset.scale === 2 ? " · 2x" : ""}`}
-              active={active}
-              disabled={resizing}
-              colors={colors}
-              onPress={() => applyPreset(preset.width, preset.height, preset.scale)}
-            />
-          );
-        })}
+        {presets.map((preset) => (
+          <PresetButton
+            key={`${preset.label}-${preset.width}x${preset.height}`}
+            label={preset.label}
+            detail={`${preset.width} × ${preset.height}`}
+            active={
+              stream.activeTarget.width === preset.width &&
+              stream.activeTarget.height === preset.height
+            }
+            disabled={resizing}
+            colors={colors}
+            onPress={() => applyPreset(preset.width, preset.height)}
+          />
+        ))}
       </View>
 
       <View style={{ gap: 4 }}>

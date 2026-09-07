@@ -58,6 +58,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
     private var hud: StreamHudController? = null
     private var cursorOverlay: CursorOverlayView? = null
+    private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
@@ -561,6 +562,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         hideSystemBars()
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
+        // Host audio is a passive plane: start draining with the renderer and
+        // keep running across surface transitions. Rebinds clear the native
+        // ring via the LCH1 challenge, so a replacement session never plays
+        // stale chunks.
+        audioPlayer = StreamAudioPlayer(instanceId).also { it.start() }
         lifecycleEvent(1) // ACTIVITY_CREATE
         applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
     }
@@ -928,6 +934,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         cursorOverlay?.stop()
         cursorOverlay = null
+        audioPlayer?.stop()
+        audioPlayer = null
         hud?.stop()
         hud = null
         releaseNetworkLocks()

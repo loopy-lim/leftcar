@@ -240,3 +240,42 @@ func udpDatagramIntervalUs(
     let minimum: UInt64 = isKeyframe ? 50 : 100
     return max(minimum, min(4_000, interval))
 }
+
+/// Wall-clock budget for sending one access unit over UDP.
+///
+/// During Wi-Fi airtime collapse a non-blocking `sendto` does not fail — it
+/// SUCCEEDS slowly (observed 13-80ms per datagram, one 2.24s outlier), so the
+/// serial network queue crawls behind a degraded link for hundreds of
+/// milliseconds per frame with zero send failures. Every newer frame then
+/// piles up behind the stale one and the whole capture→encode pipeline stalls
+/// ("sudden 4fps"). Aborting an access unit that overran its budget turns
+/// that crawl into an ordinary loss event: the existing failure path drops
+/// the stale chain and requests a recovery keyframe, so the encoder and
+/// capture keep running and the stream recovers the moment the link does.
+///
+/// The budget must be AU-SIZE AWARE: a legitimate high-motion delta (40+ KB)
+/// spends its entire send window in pacing sleeps — 4ms per burst range,
+/// ~44ms for a 43-fragment AU — and a flat two-frame budget (33ms at 60fps)
+/// aborted every large frame even on a healthy link, flooding the stream
+/// with recovery IDRs (observed 300 keyframes/10min at RTT 9ms). Scale the
+/// budget with the AU's own paced duration: twice the pacing floor plus a
+/// fixed 20ms slack, never below two frame budgets. Recovery keyframes keep
+/// the IDR retry cadence instead.
+func udpAccessUnitSendDeadlineUs(
+    isKeyframe: Bool,
+    fps: UInt32,
+    dataFragmentCount: Int,
+    burstDatagrams: Int
+) -> UInt64 {
+    if isKeyframe {
+        return 750_000
+    }
+    let boundedBurst = max(1, burstDatagrams)
+    let fragmentCount = max(1, dataFragmentCount)
+    let pacingRanges = udpPacingBurstRanges(
+        datagramCount: fragmentCount,
+        maxDatagrams: boundedBurst
+    ).count
+    let pacedUs = UInt64(pacingRanges) * 4_000
+    return max(frameBudgetUs(fps: fps) * 2, pacedUs * 2 + 20_000)
+}

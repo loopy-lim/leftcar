@@ -7,7 +7,6 @@ import type { ResolvedTransport } from "./usb";
 import type { EncoderExperimentId } from "./encoder-experiment";
 import type { StreamProfile } from "./stream-profile";
 import type { UdpStabilitySelection } from "./udp-stability";
-import type { ViewerDisplayMetrics } from "./launch-stream";
 
 export interface ActiveStream {
   port: number;
@@ -29,12 +28,6 @@ export interface ActiveStream {
   localCursor?: boolean;
   mediaTransport: ResolvedTransport;
   viewerIps: string[];
-  /** Metrics captured at launch, used by the display-size card. */
-  viewerDisplay?: ViewerDisplayMetrics;
-  /** Managed host display id encoded in the catalog display name, when present. */
-  virtualDisplayId?: string;
-  /** HiDPI scale of the active target, when the host confirmed one. */
-  scale?: 1 | 2;
   startedAt: number;
 }
 

@@ -587,6 +587,9 @@ fn run(launch: SingleRendererLaunch) {
                 control_health = ControlHealthState::default();
                 *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
                 control_clone.input.lock().unwrap().reset_session();
+                // Audio chunks from the replaced session must never play
+                // into the new one.
+                control_clone.audio.lock().unwrap().clear();
                 // Drop any cursor state from a previous session so a
                 // rebind cannot keep showing stale coordinates forever.
                 control_clone.cursor_active.store(-1, Ordering::SeqCst);
@@ -621,6 +624,12 @@ fn run(launch: SingleRendererLaunch) {
                 &mut control_health,
                 &control_clone,
                 &mut renderer_stats,
+            ) {
+                continue;
+            }
+            if crate::audio_protocol::accept_audio_packet(
+                packet,
+                &mut control_clone.audio.lock().unwrap(),
             ) {
                 continue;
             }

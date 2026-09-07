@@ -42,8 +42,30 @@ pub fn find_accessory(device: &DeviceInfo) -> bool {
     is_accessory_id(device.vendor_id(), device.product_id())
 }
 
+/// Interface classes that plausibly belong to an Android device capable of
+/// AOAP: vendor-specific (ADB/accessory), MTP, or wireless/RNDIS. Claiming an
+/// interface on macOS detaches the active driver — HID for keyboards and
+/// mice, mass storage for bridges — and visibly power-cycles the device, so
+/// the AOAP probe must never reach purely HID/hub/storage devices (a real
+/// incident repeatedly disconnected a USB keyboard on every `auto`-transport
+/// stream start; see docs/virtual-display-removal-validation.md).
+pub fn interface_class_suggests_android(interface_class: u8) -> bool {
+    matches!(interface_class, 0xFF | 0x06 | 0xE0)
+}
+
 pub fn handshake_candidate(device: &DeviceInfo) -> bool {
-    !find_accessory(device) && device.interfaces().next().is_some()
+    if find_accessory(device) {
+        return false;
+    }
+    let mut has_interface = false;
+    let mut android_shaped = false;
+    for interface in device.interfaces() {
+        has_interface = true;
+        if interface_class_suggests_android(interface.class()) {
+            android_shaped = true;
+        }
+    }
+    has_interface && android_shaped
 }
 
 /// Negotiate AOAP on a connected, non-accessory device. The device will
@@ -399,6 +421,27 @@ mod tests {
         assert!(is_accessory_id(ACCESSORY_VID, ACCESSORY_PID_ADB));
         assert!(!is_accessory_id(ACCESSORY_VID, 0x4EE7));
         assert!(!is_accessory_id(0x05AC, ACCESSORY_PID_PURE));
+    }
+
+    #[test]
+    fn aoap_probe_never_targets_hid_hub_or_storage_devices() {
+        // Android-shaped interfaces: vendor-specific (ADB/accessory), MTP,
+        // wireless/RNDIS.
+        assert!(interface_class_suggests_android(0xFF));
+        assert!(interface_class_suggests_android(0x06));
+        assert!(interface_class_suggests_android(0xE0));
+        // A USB keyboard/mouse (HID 0x03), hub (0x09), NVMe bridge (mass
+        // storage 0x08), printer, audio, or CDC device must never receive the
+        // probe — claiming their interface detaches the active driver and
+        // power-cycles the device behind hubs.
+        assert!(!interface_class_suggests_android(0x03));
+        assert!(!interface_class_suggests_android(0x09));
+        assert!(!interface_class_suggests_android(0x08));
+        assert!(!interface_class_suggests_android(0x02));
+        assert!(!interface_class_suggests_android(0x0A));
+        assert!(!interface_class_suggests_android(0x01));
+        assert!(!interface_class_suggests_android(0x07));
+        assert!(!interface_class_suggests_android(0x0B));
     }
 
     #[test]

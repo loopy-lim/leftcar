@@ -114,6 +114,11 @@ extension CaptureSession {
             experiment: requestedEncoderExperiment
         )
         config.backgroundColor = CGColor.black
+        if #available(macOS 13.3, *) {
+            // System audio rides the same stream as the video plane; the
+            // receiver demuxes the LCAU datagrams on the media socket.
+            config.capturesAudio = true
+        }
         if #available(macOS 14.0, *) {
             config.shouldBeOpaque = true
         }

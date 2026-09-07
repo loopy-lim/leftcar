@@ -90,6 +90,12 @@ object ViewerNative {
     /** -1 waiting/unknown, 0 Host-locked, 1 remote input enabled. */
     external fun inputStatus(instanceId: String): Int
     /**
+     * Drain pending host audio PCM into [out]. Blob layout:
+     * rate u16 BE | channels u8 | rsv | frames u16 BE | PCM int16 LE.
+     * Returns the written byte length; 0 when nothing is buffered.
+     */
+    external fun pollAudio(instanceId: String, out: ByteArray): Int
+    /**
      * Newest LCD1 cursor sample packed into a Long: bits 0..15 x, 16..31 y,
      * 32..61 sequence (low 30 bits), 63 visible. -1 while the Host has not
      * opted in or no sample has arrived yet.

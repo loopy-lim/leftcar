@@ -111,6 +111,20 @@ extension CaptureSession {
                     type: .screen,
                     sampleHandlerQueue: queue
                 )
+                if #available(macOS 13.3, *) {
+                    // System audio joins the same stream; failures degrade to
+                    // a silent plane rather than blocking video capture.
+                    do {
+                        try candidate.addStreamOutput(
+                            handler,
+                            type: .audio,
+                            sampleHandlerQueue: queue
+                        )
+                        NSLog("Leftcar audio output registered capturesAudio=%d", config.capturesAudio ? 1 : 0)
+                    } catch {
+                        NSLog("Leftcar audio output registration failed: %@", "\(error)")
+                    }
+                }
                 streamHandler = handler
                 stream = candidate
                 candidate.startCapture { error in

@@ -113,6 +113,32 @@ pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
     guard.unwrap_or(-1)
 }
 
+/// Drain pending host audio (LCAU plane) into the caller's buffer.
+/// Blob layout: `rate u16 BE | channels u8 | rsv u8 | frames u16 BE
+/// | PCM int16 LE`. Returns the written byte length; 0 when nothing is
+/// buffered, the renderer is gone, or the buffer cannot hold a chunk.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn leftcar_jni_poll_audio(
+    instance_c: *const c_char,
+    out: *mut u8,
+    capacity: usize,
+) -> i32 {
+    let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(_) => return 0,
+        };
+        if out.is_null() || capacity < crate::audio_protocol::AUDIO_BLOB_HEADER_LEN {
+            return 0;
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+        let mut audio = control.audio.lock().unwrap();
+        audio.drain_into(buffer) as i32
+    }));
+    guard.unwrap_or(0)
+}
+
 /// Host or local termination reason for this stream, or -1 while active.
 /// 1 = feedback health check, 2 = host operator forced stop, 3 = ordinary
 /// host stop, 4 = authenticated control peer unreachable, 5 = Surface render
