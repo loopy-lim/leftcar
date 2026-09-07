@@ -102,3 +102,7 @@ BetterDisplay:
    …/bundle/dmg/bundle_dmg.sh\``
 3. AOAP `claim USB control interface failed: could not be opened for exclusive access`
    노이즈 — 기존 존재, 본 검증과 무관.
+
+## 다음 단계
+
+플랫폼별 권한 현황과 후속 작업 우선순위는 docs/platform-permissions-audit.md(2026-09-07)로 정리했다.
