@@ -1,5 +1,6 @@
 import TcpSocket from "react-native-tcp-socket";
 import type { AdaptiveQualityState } from "./adaptive-resolution";
+import type { EncoderExperimentId } from "./encoder-experiment";
 
 /**
  * Control-plane client (design §제어평면): viewer pulls from the host's
@@ -20,6 +21,12 @@ export interface CatalogView {
   displays: DisplayInfo[];
   encoderExperiments?: unknown;
   udpStabilityCapabilities?: unknown;
+  /**
+   * Host accepts an optional `encoderExperiment` on reconfigureStream and
+   * reports the actually accepted mode in the response. Older hosts omit this
+   * flag; viewers must never send a mode transition without it.
+   */
+  reconfigureEncoderExperiment?: boolean;
 }
 
 export interface CaptureBackendInfo {
@@ -54,6 +61,12 @@ export interface SessionView {
   encodeSubmitFps?: number;
   encodeOutputFps?: number;
   renderedFps?: number | null;
+  /** Non-null only while the accepted encoder experiment is splitVertical. */
+  splitDirection?: string | null;
+  /** Raw split-decoder receiver output fps (0 while frozen; Host maps the aggregate 0 to null). */
+  leftRenderedFps?: number;
+  rightRenderedFps?: number;
+  joinedRenderedFps?: number;
   captureCallbacks?: number;
   encodeOutputCallbacks?: number;
   encodeSubmitFailures?: number;
@@ -79,6 +92,10 @@ export interface SessionView {
   pendingFrame: number;
   pendingFrameBytes?: number;
   pendingFrameOldestAgeUs?: number;
+  /** Oldest age in the split encoded queue (macOS split pipeline). */
+  splitEncodedQueueOldestUs?: number;
+  /** Oldest age in the split capture queue (pending capture age). */
+  splitCaptureQueueOldestUs?: number;
   frames: number;
   bytes: number;
   captureBackend: "screenCaptureKit" | "cgDisplayStream" | "windowsGraphicsCapture" | string;
@@ -135,6 +152,13 @@ export interface ReconfigureStreamInput {
   height: number;
   fps: number;
   qualityState: AdaptiveQualityState;
+  /**
+   * Requested encoder mode transition (e.g. auto→splitVertical on a 4K
+   * upshift). Only sent when the catalog advertises
+   * `reconfigureEncoderExperiment`; omission preserves legacy retention and
+   * dimension-based demotion on older hosts.
+   */
+  encoderExperiment?: EncoderExperimentId;
 }
 
 export interface ReconfigureStreamOutput {
@@ -143,6 +167,8 @@ export interface ReconfigureStreamOutput {
   height: number;
   fps: number;
   qualityState: AdaptiveQualityState;
+  /** The mode actually accepted by the Host (capability-backed hosts). */
+  encoderExperiment?: EncoderExperimentId;
 }
 
 /** Viewer → Host: resize a managed virtual display (control-contract host.rs). */

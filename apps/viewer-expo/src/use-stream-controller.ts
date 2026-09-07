@@ -10,14 +10,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert } from "react-native";
 import { replaceRestartedStreamState } from "./launch-stream";
 import {
-  createAdaptiveResolutionState,
   observeAdaptiveResolution,
   recordAdaptiveResolutionResult,
+  seedAdaptiveResolutionState,
   type AdaptiveQualityState,
   type AdaptiveResolutionAction,
   type AdaptiveResolutionState,
   type AdaptiveTarget,
 } from "./adaptive-resolution";
+import {
+  hostQueuePressureUs,
+  receiverRenderedFps,
+} from "./receiver-telemetry";
 import { requestWithReconnect } from "./catalog-helpers";
 import { controlHost } from "./session";
 import { shouldSwitchTransport } from "./transport-switch";
@@ -132,9 +136,17 @@ export function useStreamController(
     const activeIds = new Set(streams.map((stream) => stream.session));
     for (const active of streams) {
       if (!adaptiveStates.current.has(active.session)) {
+        // Seed from what is actually running (responsive starts sit below the
+        // source maximum), not from the maximum itself. Seeding only happens
+        // when a session appears — never per sample, so hysteresis keeps
+        // accumulating between real changes.
         adaptiveStates.current.set(
           active.session,
-          createAdaptiveResolutionState(active.sourceTarget),
+          seedAdaptiveResolutionState(
+            active.sourceTarget,
+            active.activeTarget,
+            { nowMs: Date.now() },
+          ),
         );
       }
     }
@@ -251,11 +263,19 @@ export function useStreamController(
     ) => {
       const reconfigure = reconfigureStreamRef.current;
       if (!reconfigure || adaptiveRebinds.current.has(active.session)) return;
+      // A pending restart/transport switch owns the session; an adaptive
+      // reconfigure issued underneath it would race the replacement.
+      if (heartbeatInFlight.current.has(active.session)) return;
       adaptiveRebinds.current.add(active.session);
       const pendingQualityState: AdaptiveQualityState =
         action.kind === "downshift" ? "fallback" : "native";
       try {
-        const restarted = await reconfigure(active, action.target, pendingQualityState);
+          const restarted = await reconfigure(active, action.target, pendingQualityState);
+        // The session may have been replaced/removed while the reconfigure
+        // was in flight; only apply results to the stream that still exists.
+        if (!streamsRef.current.some((item) => item.session === active.session)) {
+          return;
+        }
         const acceptedTarget = {
           width: restarted.width ?? action.target.width,
           height: restarted.height ?? action.target.height,
@@ -326,15 +346,26 @@ export function useStreamController(
       adaptiveFloorCollapse.current.set(active.session, floorCollapse);
       if (previousLoss === undefined || previousRecovery === undefined || previousFloorCollapse === undefined) continue;
       const state = adaptiveStates.current.get(active.session) ??
-        createAdaptiveResolutionState(active.sourceTarget);
+        seedAdaptiveResolutionState(active.sourceTarget, active.activeTarget);
+      // 수신기 renderedFps는 신선한 피드백에서만 관측값으로 전달한다 —
+      // 없거나 오래된 값은 0으로 만들지 않고 생략한다 (구 Host 호환).
+      const renderedFps = receiverRenderedFps(session);
       const observed = observeAdaptiveResolution(state, {
         nowMs: Date.now(),
         receiverLossDelta: Math.max(0, loss - previousLoss),
         encodedFps: session.encodeOutputFps ?? session.fps,
+        renderedFps,
         requestedFps: active.activeTarget.fps,
-        queueAgeUs: session.pendingFrameOldestAgeUs ?? 0,
+        // Host 큐 압력은 인코딩 대기열, 분할 인코딩 큐, 분할 캡처 큐 중
+        // 가장 오래된 값으로 본다.
+        queueAgeUs: hostQueuePressureUs(session),
         latencyBudgetUs: 100_000,
-        recoveryActive: recovery > previousRecovery,
+        // 실시간 active-burst 필드는 아직 존재하지 않는다. 누적 카운터
+        // 델타는 관측 증거(recoveryObserved)로만 전달하고, 진행 중
+        // 폭발(recoveryActive)로 거짓 표기해 측정을 계속 무효화하지
+        // 않는다.
+        recoveryActive: false,
+        recoveryObserved: recovery > previousRecovery,
         floorCollapseDelta: Math.max(0, floorCollapse - previousFloorCollapse),
         rebindInFlight: adaptiveRebinds.current.has(active.session),
       });
@@ -398,6 +429,20 @@ export function useStreamController(
   const patchStream = useCallback((session: number, patch: (active: ActiveStream) => ActiveStream) => {
     updateStreams((previous) => previous.map((stream) => (stream.session === session ? patch(stream) : stream)));
   }, [updateStreams]);
+  /**
+   * Re-seed adaptive state after an explicit target change (manual resize or
+   * restore). Called only on real changes — never per sample — so window
+   * hysteresis is not silently reset while the user is not touching anything.
+   */
+  const syncAdaptiveTarget = useCallback(
+    (session: number, sourceTarget: AdaptiveTarget, activeTarget: AdaptiveTarget) => {
+      adaptiveStates.current.set(
+        session,
+        seedAdaptiveResolutionState(sourceTarget, activeTarget, { nowMs: Date.now() }),
+      );
+    },
+    [],
+  );
   const applyUdpStability = useCallback(
     async (udpStability: UdpStabilitySelection) => {
       const activeStreams = [...streamsRef.current];
@@ -434,5 +479,13 @@ export function useStreamController(
     [endUnownedRestart, host, queryClient, restoreStream, setError, updateStreams],
   );
 
-  return { addStream, applyUdpStability, patchStream, removeStream, streams, updateLocalCursor };
+  return {
+    addStream,
+    applyUdpStability,
+    patchStream,
+    removeStream,
+    streams,
+    syncAdaptiveTarget,
+    updateLocalCursor,
+  };
 }

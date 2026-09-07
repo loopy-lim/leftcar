@@ -13,10 +13,12 @@ import {
   type AdaptiveTarget,
 } from "./adaptive-resolution";
 import {
+  availableEncoderExperiments,
   resolveEncoderExperimentForStream,
   selectAutomaticEncoderExperiment,
   type EncoderExperimentId,
 } from "./encoder-experiment";
+import { STREAM_TARGET_FPS } from "./streaming-policy";
 import {
   VIEWER_UDP_CAPABILITIES,
   availableUdpStabilityOptions,
@@ -83,6 +85,7 @@ export interface StartStreamArgs {
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
   viewerDisplay?: ViewerDisplayMetrics;
+  virtualDisplayId?: string;
 }
 
 export interface StartedStream {
@@ -318,6 +321,45 @@ interface ReconfigurePreparedStreamInput {
   active: ActiveStream;
   target: AdaptiveTarget;
   qualityState: AdaptiveQualityState;
+  /**
+   * Catalog capability `reconfigureEncoderExperiment`. When true the Host
+   * accepts an optional `encoderExperiment` request and reports the actually
+   * accepted mode. Without it the viewer must never request a mode transition:
+   * older hosts cannot honor one mid-session.
+   */
+  reconfigureEncoderExperiment?: boolean;
+  /** Catalog `encoderExperiments` advertisement, for availability checks. */
+  advertisedEncoderExperiments?: unknown;
+}
+
+/**
+ * Encoder mode the reconfigure should run under. Demotion (split at a
+ * non-4K target) falls back to the automatic single path and stays on the
+ * legacy omission wire shape. A promotion (auto → splitVertical at exact 4K
+ * 60fps) requires the capability, an advertised split experiment, the UDP
+ * transport, and an automatic (not user-pinned) current mode. 90/30fps 4K
+ * targets stay on the single path: the split pair is sized for the 4K60
+ * contract only.
+ */
+function resolveReconfigureExperiment(
+  active: ActiveStream,
+  target: AdaptiveTarget,
+  input: Pick<
+    ReconfigurePreparedStreamInput,
+    "reconfigureEncoderExperiment" | "advertisedEncoderExperiments"
+  >,
+): EncoderExperimentId {
+  if (active.encoderExperiment === "splitVertical" && !isExact4K(target)) {
+    return "auto";
+  }
+  const promote = input.reconfigureEncoderExperiment === true &&
+    active.encoderExperiment === "auto" &&
+    active.mediaTransport === "udp" &&
+    isExact4K(target) &&
+    target.fps === STREAM_TARGET_FPS &&
+    availableEncoderExperiments(input.advertisedEncoderExperiments, 3840, 2160)
+      .some((experiment) => experiment.id === "splitVertical");
+  return promote ? "splitVertical" : active.encoderExperiment;
 }
 
 export async function reconfigurePreparedStream({
@@ -327,21 +369,47 @@ export async function reconfigurePreparedStream({
   active,
   target,
   qualityState,
+  reconfigureEncoderExperiment,
+  advertisedEncoderExperiments,
 }: ReconfigurePreparedStreamInput): Promise<StartedStream> {
-  // splitVertical requires an exact-4K source; a demoted target falls back
-  // to the automatic single-encoder path.
-  const encoderExperiment = active.encoderExperiment === "splitVertical" &&
-    !isExact4K(target)
-    ? "auto"
-    : active.encoderExperiment;
-  await launcher.prepareStream(
-    active.port,
-    host,
-    active.mediaTransport,
-    encoderExperiment,
-  );
+  const desiredExperiment = resolveReconfigureExperiment(active, target, {
+    reconfigureEncoderExperiment,
+    advertisedEncoderExperiments,
+  });
+  // Only a capability-backed split promotion is requested explicitly; demotion
+  // and same-mode retention keep the legacy omission wire shape so older
+  // hosts never receive a field they do not know.
+  const promotion = desiredExperiment === "splitVertical" &&
+    desiredExperiment !== active.encoderExperiment;
+  let preparedExperiment = desiredExperiment;
+  let requestedExperiment: EncoderExperimentId | undefined = promotion
+    ? desiredExperiment
+    : undefined;
   try {
-    const accepted = await control.request<ReconfigureStreamOutput>(
+    await launcher.prepareStream(
+      active.port,
+      host,
+      active.mediaTransport,
+      desiredExperiment,
+    );
+  } catch (error) {
+    if (!promotion) {
+      throw error;
+    }
+    await launcher
+      .cancelPreparedStream(active.port, desiredExperiment)
+      .catch(() => undefined);
+    preparedExperiment = "auto";
+    requestedExperiment = "auto";
+    await launcher.prepareStream(
+      active.port,
+      host,
+      active.mediaTransport,
+      preparedExperiment,
+    );
+  }
+  try {
+    const acceptedOnce = await control.request<ReconfigureStreamOutput>(
       "reconfigureStream",
       {
         session: active.session,
@@ -349,8 +417,70 @@ export async function reconfigurePreparedStream({
         height: target.height,
         fps: target.fps,
         qualityState,
+        ...(requestedExperiment ? { encoderExperiment: requestedExperiment } : {}),
       },
     );
+    // Open (and report) the mode the Host actually accepted — it may differ
+    // from the request; capability-less hosts omit the field entirely.
+    let accepted: ReconfigureStreamOutput = acceptedOnce;
+    if (
+      accepted.encoderExperiment === "splitVertical" &&
+      accepted.encoderExperiment !== preparedExperiment
+    ) {
+      // The Host accepted split while the receiver was prepared for a single
+      // mode. A split attach claims two fresh prepared listeners — openStream
+      // assumes a matching preparation and never prepares itself. But the
+      // reconfiguration above already issued its LCH1 challenge, and a
+      // streaming replacement never issues a second one on its own: a split
+      // preflight bound now would hand the renderer an empty token (device
+      // session-3 feedback-timeout failure). So cancel the single
+      // preparation, re-prepare split, and RECONFIGURE AGAIN with an explicit
+      // split request — the fresh listeners capture the replacement
+      // session's new challenge. Any failure lands in the catch below, which
+      // cancels whatever is still prepared and propagates the error.
+      await launcher
+        .cancelPreparedStream(active.port, preparedExperiment)
+        .catch(() => undefined);
+      // A failed prepare can already own resources in the accepted mode.
+      preparedExperiment = "splitVertical";
+      await launcher.prepareStream(
+        active.port,
+        host,
+        active.mediaTransport,
+        preparedExperiment,
+      );
+      accepted = await control.request<ReconfigureStreamOutput>(
+        "reconfigureStream",
+        {
+          session: active.session,
+          width: target.width,
+          height: target.height,
+          fps: target.fps,
+          qualityState,
+          encoderExperiment: "splitVertical",
+        },
+      );
+      if (
+        accepted.encoderExperiment !== undefined &&
+        accepted.encoderExperiment !== "splitVertical"
+      ) {
+        // The second request still did not land on split (e.g. the Host lost
+        // the split encoder mid-transition). The freshly prepared split
+        // listeners cannot serve a single stream; report the mismatch
+        // instead of attaching with an empty token.
+        throw new Error(
+          "컴퓨터가 분할 인코딩 전환을 수락하지 않아 해상도 전환을 마치지 못했습니다.",
+        );
+      }
+    }
+    // An accepted single mode keeps the existing preparation: it was bound
+    // before the Host reconfigured, so its worker already captured the
+    // replacement session's challenge token. Re-creating the receiver now —
+    // after the Host change — would hand the renderer an empty token, and a
+    // streaming replacement never issues a second challenge. The single
+    // attach/rebind claims this exact prepared socket. In both cases the mode
+    // opened is the one the prepared listeners can actually authenticate.
+    const encoderExperiment = accepted.encoderExperiment ?? preparedExperiment;
     await launcher.openStream(
       active.port,
       host,
@@ -375,7 +505,7 @@ export async function reconfigurePreparedStream({
     };
   } catch (error) {
     await launcher
-      .cancelPreparedStream(active.port, encoderExperiment)
+      .cancelPreparedStream(active.port, preparedExperiment)
       .catch(() => undefined);
     throw error;
   }

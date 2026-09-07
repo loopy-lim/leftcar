@@ -33,6 +33,10 @@ import {
   is4KResolution,
 } from "./stream-profile";
 import {
+  resolveInitialStreamTarget,
+  type StreamingPriority,
+} from "./streaming-policy";
+import {
   availableEncoderExperimentsForStreams,
   resolveEncoderExperimentForStream,
   type EncoderExperimentId,
@@ -49,7 +53,10 @@ import {
   isHubDisplay,
   requestWithReconnect,
 } from "./catalog-helpers";
-import { streamTargetAfterVirtualResize } from "./display-resize";
+import {
+  streamTargetAfterVirtualResize,
+  type VirtualResizeTarget,
+} from "./display-resize";
 import type {
   ResizeVirtualDisplayOutput,
 } from "./control";
@@ -63,6 +70,7 @@ import { useStreamController } from "./use-stream-controller";
 import {
   DEFAULT_VIEWER_PREFERENCES,
   readViewerPreferences,
+  resolveStreamMaximum,
   resolveViewerProfileId,
   writeViewerPreferences,
   type ViewerProfileSelection,
@@ -72,6 +80,11 @@ import {
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
 /** Best-effort tablet screen probe; older native modules simply omit it. */
+function managedDisplayId(displayName: string): string | undefined {
+  const match = displayName.match(/\[leftcar:([^\]]+)\]/);
+  return match?.[1] || undefined;
+}
+
 async function readViewerDisplayMetrics(
   launcherInstance: StreamLauncher | undefined,
 ): Promise<ViewerDisplayMetrics | undefined> {
@@ -246,6 +259,8 @@ export function useCatalogModel() {
           udpStability: active.udpStability,
           showFps: active.showFps ?? preferences.showFps,
           localCursor: active.localCursor ?? preferences.localCursor,
+          ...(active.viewerDisplay ? { viewerDisplay: active.viewerDisplay } : {}),
+          ...(active.virtualDisplayId ? { virtualDisplayId: active.virtualDisplayId } : {}),
         },
       });
       return {
@@ -277,16 +292,20 @@ export function useCatalogModel() {
         active,
         target,
         qualityState,
+        // capability가 있을 때만 인코더 모드 전환(Auto↔Split)을 요청한다.
+        reconfigureEncoderExperiment:
+          catalogQuery.data?.reconfigureEncoderExperiment === true,
+        advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
       });
       return {
         ...reconfigured,
         captureBackend: active.captureBackend,
       };
     },
-    [mediaHost],
+    [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streams, updateLocalCursor } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streams, syncAdaptiveTarget, updateLocalCursor } =
     useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
@@ -317,6 +336,13 @@ export function useCatalogModel() {
       ).catch(() => setError("열린 화면의 커서 설정을 바꾸지 못했습니다."));
     }
   }, [setError, streams, updateLocalCursor]);
+
+  const handleSelectStreamingPriority = useCallback(
+    (priority: StreamingPriority) => {
+      setPreferences((current) => ({ ...current, streamingPriority: priority }));
+    },
+    [],
+  );
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
@@ -383,11 +409,23 @@ export function useCatalogModel() {
         const displayProfile =
           STREAM_PROFILES.find((profile) => profile.id === profileId) ??
           selectedProfile;
-        const { width, height, fps } = fitProfileToDisplay(
+        // 소스/사용자 최대(적응 정책의 업시프트 목표)와 새 스트림의 시작
+        // 목표(responsive 1440 / clarity 최대)를 분리한다. AUTO는 실제
+        // clarity 스트리밍 목표(resolveStreamingTarget)를 최대로 쓰고,
+        // 수동 프로필은 기존 프로필 상한을 그대로 유지한다. 논리 데스크톱
+        // 크기는 자동 품질 전환으로 바꾸지 않는다.
+        const maximumTarget = resolveStreamMaximum(display, preferences.profileId);
+        const initialTarget = resolveInitialStreamTarget(
           display,
-          displayProfile,
+          preferences.streamingPriority,
+          maximumTarget,
         );
-        const sourceTarget = { width, height, fps };
+        const { width, height, fps } = initialTarget;
+        const sourceTarget = {
+          width: maximumTarget.width,
+          height: maximumTarget.height,
+          fps: maximumTarget.fps,
+        };
         const viewerDisplay = await readViewerDisplayMetrics(launcher);
         const started = await startPreparedStream({
           control: client,
@@ -412,6 +450,9 @@ export function useCatalogModel() {
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
             ...(viewerDisplay ? { viewerDisplay } : {}),
+            ...(managedDisplayId(display.name)
+              ? { virtualDisplayId: managedDisplayId(display.name) }
+              : {}),
           },
         });
         const acceptedTarget = {
@@ -430,7 +471,12 @@ export function useCatalogModel() {
           sourceTarget,
           activeTarget: acceptedTarget,
           fallbackTarget: fallbackTargetFor(sourceTarget),
-          qualityState: started.qualityState ?? "native",
+          qualityState:
+            started.qualityState ??
+            (acceptedTarget.width === sourceTarget.width &&
+              acceptedTarget.height === sourceTarget.height)
+              ? "native"
+              : "fallback",
           captureBackend: effectiveCaptureBackend,
           contentMode: displayProfile.contentMode,
           encoderExperiment: started.encoderExperiment,
@@ -439,6 +485,11 @@ export function useCatalogModel() {
           localCursor: preferences.localCursor,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
+          // Display scale remains unknown until confirmed by the Host.
+          ...(viewerDisplay ? { viewerDisplay } : {}),
+          ...(managedDisplayId(display.name)
+            ? { virtualDisplayId: managedDisplayId(display.name) }
+            : {}),
           startedAt: Date.now(),
         });
       } catch (cause) {
@@ -458,6 +509,7 @@ export function useCatalogModel() {
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
+      preferences.streamingPriority,
       selectedProfile,
     ],
   );
@@ -500,13 +552,18 @@ export function useCatalogModel() {
           "resizeVirtualDisplay",
           { id: virtualDisplayId, width, height, scale },
         );
-        const target = {
+        const target: VirtualResizeTarget = {
           width: output.logicalWidth,
           height: output.logicalHeight,
           fps,
+          scale: output.scale === 2 ? 2 : 1,
         };
-        await reconfigureActiveStream(active, target, "native");
-        replaceStreamState(streamTargetAfterVirtualResize(active, target));
+        const accepted = await reconfigureActiveStream(active, target, "native");
+        const next = streamTargetAfterVirtualResize(active, target, accepted);
+        // 명시적 크기 변경 후 적응 상태를 새 목표로 다시 심는다 — 매 샘플마다가
+        // 아니라 실제 변경 때만 호출되므로 히스테리시스가 보존된다.
+        syncAdaptiveTarget(active.session, next.sourceTarget, next.activeTarget);
+        replaceStreamState(next);
         return true;
       } catch (cause) {
         // Keep the previous size on failure — the session stays untouched.
@@ -516,7 +573,7 @@ export function useCatalogModel() {
         setResizingSession(null);
       }
     },
-    [reconfigureActiveStream, replaceStreamState],
+    [reconfigureActiveStream, replaceStreamState, syncAdaptiveTarget],
   );
 
   /**
@@ -533,8 +590,10 @@ export function useCatalogModel() {
       setResizingSession(active.session);
       try {
         const target = { width, height, fps };
-        await reconfigureActiveStream(active, target, "native");
-        replaceStreamState(streamTargetAfterVirtualResize(active, target));
+        const accepted = await reconfigureActiveStream(active, target, "native");
+        const next = streamTargetAfterVirtualResize(active, target, accepted);
+        syncAdaptiveTarget(active.session, next.sourceTarget, next.activeTarget);
+        replaceStreamState(next);
         return true;
       } catch (cause) {
         setError(`화면 해상도 전환에 실패했습니다: ${formatErrorMessage(cause)}`);
@@ -543,7 +602,7 @@ export function useCatalogModel() {
         setResizingSession(null);
       }
     },
-    [reconfigureActiveStream, replaceStreamState],
+    [reconfigureActiveStream, replaceStreamState, syncAdaptiveTarget],
   );
 
   const visibleError = error
@@ -562,6 +621,7 @@ export function useCatalogModel() {
     handleResizeVirtualDisplay,
     handleSelectEncoderExperiment,
     handleSelectProfile,
+    handleSelectStreamingPriority,
     handleSelectUdpStability,
     handleSelectWindowAspectRatio,
     windowRatio,
@@ -581,6 +641,7 @@ export function useCatalogModel() {
     handleToggleFps,
     handleToggleCursor,
     profileId: preferences.profileId,
+    streamingPriority: preferences.streamingPriority,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
     resizingSession,

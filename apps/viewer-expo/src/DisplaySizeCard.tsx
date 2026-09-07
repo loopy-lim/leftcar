@@ -7,7 +7,11 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { displaySizePresets, normalizeCustomSize } from "./display-size";
+import {
+  customSizeScale,
+  displaySizePresets,
+  normalizeCustomSize,
+} from "./display-size";
 import {
   WINDOW_ASPECT_RATIO_PRESETS,
   type WindowAspectRatioPresetId,
@@ -134,15 +138,16 @@ export function DisplaySizeCard({
 
   const currentWidth = stream?.activeTarget.width ?? null;
   const currentHeight = stream?.activeTarget.height ?? null;
+  const currentScale: 1 | 2 = stream?.scale ?? 1;
   const presets = useMemo(
     () =>
       displaySizePresets(
         tabletMatch,
         currentWidth !== null && currentHeight !== null
-          ? { width: currentWidth, height: currentHeight, scale: 1 as const }
+          ? { width: currentWidth, height: currentHeight, scale: currentScale }
           : null,
       ),
-    [tabletMatch, currentWidth, currentHeight],
+    [tabletMatch, currentWidth, currentHeight, currentScale],
   );
 
   if (!stream) return null;
@@ -175,7 +180,7 @@ export function DisplaySizeCard({
         virtualDisplayId,
         normalized.width,
         normalized.height,
-        1,
+        customSizeScale(normalized.width, normalized.height),
         stream.fps,
       );
       return;
@@ -247,9 +252,12 @@ export function DisplaySizeCard({
 
       <View style={styles.presetRow}>
         {presets.map((preset) => {
+          // Scale matters only once the stream's scale is known; an unknown
+          // scale keeps the legacy width/height-only comparison.
           const active =
             stream.activeTarget.width === preset.width &&
-            stream.activeTarget.height === preset.height;
+            stream.activeTarget.height === preset.height &&
+            (stream.scale === undefined || stream.scale === preset.scale);
           return (
             <PresetButton
               key={`${preset.label}-${preset.width}x${preset.height}`}

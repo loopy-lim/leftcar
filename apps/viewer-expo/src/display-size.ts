@@ -39,6 +39,15 @@ export function isHiDpiEligible(width: number, height: number): boolean {
   return width >= HIDPI_MIN_WIDTH && height >= HIDPI_MIN_HEIGHT;
 }
 
+/**
+ * HiDPI scale for a manually entered logical size — the same rule the preset
+ * candidates and the host-side matching use: large enough logical sizes map
+ * scale 2, anything smaller falls back to 1:1 physical pixels.
+ */
+export function customSizeScale(width: number, height: number): 1 | 2 {
+  return isHiDpiEligible(width, height) ? 2 : 1;
+}
+
 function even(value: number): number {
   return Math.floor(value / 2) * 2;
 }
@@ -70,8 +79,12 @@ function tabletCandidate(
   // Tablet metrics arrive as physical pixels. The matched logical size is
   // physical ÷ 2 (the HiDPI convention used by the rest of the pipeline),
   // even aligned so encoders and the CGVD shim accept the mode.
-  const width = even(tabletMatch.width / 2);
-  const height = even(tabletMatch.height / 2);
+  const halfWidth = even(tabletMatch.width / 2);
+  const halfHeight = even(tabletMatch.height / 2);
+  // Host matching uses a landscape-normalized pixel pair so portrait and
+  // landscape reports select the same virtual-display mode.
+  const width = Math.max(halfWidth, halfHeight);
+  const height = Math.min(halfWidth, halfHeight);
   if (!clampCandidate(width, height)) return null;
   const scale: 1 | 2 = isHiDpiEligible(width, height) ? 2 : 1;
   if (current && current.width === width && current.height === height) {

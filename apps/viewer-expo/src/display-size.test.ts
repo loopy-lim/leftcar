@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { displaySizePresets, normalizeCustomSize } from "./display-size";
+import {
+  customSizeScale,
+  displaySizePresets,
+  normalizeCustomSize,
+} from "./display-size";
+
+describe("customSizeScale", () => {
+  it("maps HiDPI-eligible custom sizes to scale 2", () => {
+    // 커스텀 1920×1080은 프리셋 1080p와 동일한 규칙을 적용받는다 —
+    // 과거에는 카드가 항상 scale 1을 하드코딩했다 (회귀).
+    expect(customSizeScale(1920, 1080)).toBe(2);
+    expect(customSizeScale(2560, 1440)).toBe(2);
+    expect(customSizeScale(3840, 2160)).toBe(2);
+  });
+
+  it("falls back to scale 1 below the 1280×720 HiDPI minimum", () => {
+    expect(customSizeScale(1280, 718)).toBe(1);
+    expect(customSizeScale(1278, 720)).toBe(1);
+    expect(customSizeScale(640, 480)).toBe(1);
+  });
+});
 
 describe("displaySizePresets", () => {
   it("offers the tablet-matched candidate computed from physical pixels", () => {
