@@ -1122,6 +1122,12 @@ impl ControlServer {
                 };
                 match res {
                     Ok(token) => ok(json!({ "token": token })),
+                    // 승인 기반 페어링: 시크릿은 맞지만 Mac 사용자의 허용이
+                    // 아직 없다. 뷰어는 이 상태를 보고 폴링을 계속한다.
+                    Err(crate::pairing::PairingServerError::Pending) => {
+                        ok(json!({ "status": "pending" }))
+                    }
+                    Err(crate::pairing::PairingServerError::Rejected) => err("pairing rejected"),
                     Err(_) => err("pairing failed"),
                 }
             }
@@ -1953,6 +1959,39 @@ mod tests {
             "deviceName": "Code Only Viewer",
         });
 
+        let line = request(&mut sock, "pair", &args.to_string(), "").await;
+        assert!(line.contains("\"ok\":true"), "{line}");
+        assert!(line.contains("\"token\":"), "{line}");
+        assert_eq!(pairing.list_devices().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_pairing_returns_pending_then_token_after_approval() {
+        let pairing = test_pairing();
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let payload: serde_json::Value =
+            serde_json::from_str(&view.qr_payload).unwrap();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let args = json!({
+            "offerId": payload["id"],
+            "secret": payload["s"],
+            "code": "",
+            "deviceId": "approval-viewer",
+            "deviceName": "Approval Viewer",
+        });
+
+        // Mac 승인 전: 오류가 아니라 pending 상태로 답한다.
+        let line = request(&mut sock, "pair", &args.to_string(), "").await;
+        assert!(line.contains("\"ok\":true"), "{line}");
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["result"]["status"], "pending", "{line}");
+        assert_eq!(pairing.list_devices().len(), 0);
+
+        // Mac 사용자가 [허용]을 누른 뒤 같은 요청은 토큰으로 답한다.
+        pairing
+            .approve_pending(payload["id"].as_str().unwrap())
+            .unwrap();
         let line = request(&mut sock, "pair", &args.to_string(), "").await;
         assert!(line.contains("\"ok\":true"), "{line}");
         assert!(line.contains("\"token\":"), "{line}");

@@ -238,6 +238,12 @@ describe("formatErrorMessage and socket error handling", () => {
     );
   });
 
+  it("maps an explicit pairing denial to the declined guide", () => {
+    expect(formatErrorMessage(new Error("pairing rejected"))).toBe(
+      "컴퓨터에서 연결 요청을 거절했습니다. 다시 시도하려면 QR을 다시 스캔해 주세요.",
+    );
+  });
+
   it("handles non-Error socket errors without producing 'control connection error: undefined'", async () => {
     const connectPromise = connect("1.2.3.4", 7777, 1000);
     const socket = lastSocket();

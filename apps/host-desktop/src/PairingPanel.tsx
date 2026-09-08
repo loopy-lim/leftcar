@@ -25,6 +25,11 @@ interface PairingSessionView {
   code: string;
   expires_in_secs: number;
 }
+interface PendingPairingView {
+  offer_id: string;
+  device_name: string;
+  requested_at: string;
+}
 interface PairedDevice {
   device_id: string;
   name: string;
@@ -197,6 +202,7 @@ function PairingQrCard({
             )}
           </button>
         </div>
+        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>{t.host.pairingQrScanHint}</p>
         <div className="countdown-container">
           <div className="countdown-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
             <Clock size={12} /> {t.host.remainingTime} {formatCountdown(remainingMs)}
@@ -213,6 +219,64 @@ function PairingQrCard({
             {t.host.pairingCancel}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PendingApprovalCard({
+  requests,
+  busyId,
+  onApprove,
+  onDeny,
+  t,
+}: {
+  requests: PendingPairingView[];
+  busyId: string | null;
+  onApprove: (offerId: string) => void;
+  onDeny: (offerId: string) => void;
+  t: TranslationSchema;
+}) {
+  if (requests.length === 0) return null;
+  return (
+    <div className="paired-devices-section" role="alert">
+      <div className="section-title-row">
+        <div className="section-title-left">
+          <Smartphone size={15} />
+          <h4>{t.host.pairApprovalCardTitle}</h4>
+          <span className="count-pill">{requests.length}</span>
+        </div>
+      </div>
+      <p style={{ margin: "4px 0 8px", fontSize: 12, opacity: 0.75 }}>
+        {t.host.pairApprovalCardHint}
+      </p>
+      <div className="device-rows-container">
+        {requests.map((request) => (
+          <div key={request.offer_id} className="device-row-item">
+            <div className="device-row-main">
+              <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                <Smartphone size={15} strokeWidth={2} />
+                {request.device_name}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={() => onApprove(request.offer_id)}
+                className={buttonVariants({ variant: "primary", size: "sm" })}
+                disabled={busyId !== null}
+              >
+                <Check size={13} /> {t.host.pairApprovalAllow}
+              </button>
+              <button
+                onClick={() => onDeny(request.offer_id)}
+                className="btn-danger-outline btn-sm"
+                disabled={busyId !== null}
+              >
+                {t.host.pairApprovalDeny}
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -294,6 +358,8 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [starting, setStarting] = useState(false);
   const [devices, setDevices] = useState<PairedDevice[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingPairingView[]>([]);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -402,11 +468,49 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     }
   }, [refreshDevices, t]);
 
+  const refreshPending = useCallback(async () => {
+    try {
+      setPendingRequests(await invoke<PendingPairingView[]>("list_pending_pairings"));
+    } catch {
+      // best effort
+    }
+  }, []);
+
+  const approveRequest = useCallback(async (offerId: string) => {
+    setDecidingId(offerId);
+    try {
+      await invoke("approve_pending_pairing", { offerId });
+      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
+    } catch {
+      // 다음 폴링이 목록을 정리한다
+    } finally {
+      setDecidingId(null);
+    }
+  }, []);
+
+  const denyRequest = useCallback(async (offerId: string) => {
+    setDecidingId(offerId);
+    try {
+      await invoke("reject_pending_pairing", { offerId });
+      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
+    } catch {
+      // 다음 폴링이 목록을 정리한다
+    } finally {
+      setDecidingId(null);
+    }
+  }, []);
+
   useEffect(() => {
     refreshDevices();
     const interval = setInterval(refreshDevices, 2000);
     return () => clearInterval(interval);
   }, [refreshDevices]);
+
+  useEffect(() => {
+    refreshPending();
+    const interval = setInterval(refreshPending, 1500);
+    return () => clearInterval(interval);
+  }, [refreshPending]);
 
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 1000);
@@ -458,6 +562,14 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
           </span>
         </div>
       )}
+
+      <PendingApprovalCard
+        requests={pendingRequests}
+        busyId={decidingId}
+        onApprove={(offerId) => void approveRequest(offerId)}
+        onDeny={(offerId) => void denyRequest(offerId)}
+        t={t}
+      />
 
       <PairingQrCard
         session={session}

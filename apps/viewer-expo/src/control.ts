@@ -213,6 +213,9 @@ export function formatErrorMessage(err: unknown): string {
   if (normalized.includes("pairing failed")) {
     return t.errPairingRejected;
   }
+  if (normalized.includes("pairing rejected")) {
+    return t.errPairingDeclined;
+  }
   if (normalized.includes("offer not found")) {
     return t.errCodeExpired;
   }

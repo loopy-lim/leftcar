@@ -16,7 +16,9 @@ import { connectHost, controlHost } from "../src/session";
 import {
   formatHostEndpoint,
   canSubmitPairingCode,
+  isPairingUnsupportedError,
   pairWithHost,
+  pairWithHostApproval,
   pairWithHostByCode,
   parseHostEndpoint,
   parseQrPayload,
@@ -257,6 +259,7 @@ export default function Pairing() {
     async (scannedData: string) => {
       if (busy || scanningLockRef.current) return;
       scanningLockRef.current = true;
+      dispatch({ type: "update", patch: { busy: true, error: null, statusMessage: null } });
       try {
         const payload = parseQrPayload(scannedData);
         if (!payload) {
@@ -266,19 +269,48 @@ export default function Pairing() {
           });
           return;
         }
+        // QR 스캔으로 페어링이 완결된다: 시크릿을 제시하고 Mac 화면의
+        // [허용]을 기다린다. 카메라는 계속 켜져 있어 다른 QR로 재시도도
+        // 바로 가능하다.
         dispatch({
           type: "update",
           patch: {
-            busy: true,
-            error: null,
             scannedPayload: payload,
             scannedHost: formatHostEndpoint(payload.host, payload.port),
-            mode: "code",
-            statusMessage: null,
+            statusMessage: t.viewer.qrApprovalWaitDesc,
+          },
+        });
+        const result = await pairWithHostApproval(payload, {
+          onPending: () =>
+            dispatch({
+              type: "update",
+              patch: { statusMessage: t.viewer.qrApprovalWaitDesc },
+            }),
+        });
+        if (result.kind === "approved") {
+          await connectHost(payload.host, payload.port);
+          router.replace("/catalog");
+          return;
+        }
+        dispatch({
+          type: "update",
+          patch: {
+            error: t.viewer.errPairingDeclined,
+            scannedPayload: null,
+            scannedHost: "",
           },
         });
       } catch (e) {
-        dispatch({ type: "update", patch: { error: formatErrorMessage(e) } });
+        if (isPairingUnsupportedError(e)) {
+          // 구버전 호스트는 시크릿만으로 pair을 받지 않는다 — 6자리 입력으로
+          // 전환한다(스캔한 대상은 그대로 유지).
+          dispatch({ type: "update", patch: { mode: "code" } });
+        } else {
+          dispatch({
+            type: "update",
+            patch: { error: formatErrorMessage(e), scannedPayload: null, scannedHost: "" },
+          });
+        }
       } finally {
         dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
         setTimeout(() => {
