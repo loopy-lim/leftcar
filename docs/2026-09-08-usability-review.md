@@ -85,3 +85,30 @@
 얹혀 있고 커밋하지 않았다. 커밋 시 WIP의 `LeftcarGesture` 디버그 로그
 (`StreamActivity.kt` `forwardTouchGesture`/`syncLongPressTimer`)를 먼저 정리할 것 —
 기존 합의된 사전 작업이다.
+
+### 후속 (같은 날 오후)
+
+- 위 알림대로 `LeftcarGesture` 로그를 정리하고 제스처 WIP와 사용성 작업을 분리 커밋했다.
+- 제스처 WIP의 shim 코드(`usesNaturalScrolling`)는 `NSGlobalDomain` 참조 때문에 **컴파일되지
+  않던 상태**였다(`UserDefaults.globalDomain`으로 수정해 같은 커밋에 흡수). 따라서 이전 세션의
+  "자연 스크롤 방향 존중"은 실기 미검증으로 봐야 한다 — §6 체크리스트 5번.
+- 백로그 1순위였던 **화면 녹화 권한 대시보드 표시**를 구현했다: shim preflight export →
+  Rust `get_screen_permission` → `SystemAlertBanners` 경고 배너(i18n `screenPermBannerTitle/Desc`).
+  BetterDisplay 항목은 코드가 이미 f1a846e에서 제거돼 있어 문서만 정리했다.
+
+## 6. 기기 검증 체크리스트 (사용자 수행)
+
+사전 준비: 호스트는 `tools/dev-host-macos.zsh`로 shim과 앱을 재빌드해 `/Applications/Leftcar Host.app`에
+설치한 뒤 실행한다 — 설치돼 있던 앱은 이전 dylib/바이너리라 배너와 자연 스크롤 변경이 반영되지 않는다.
+뷰어는 `:app:assembleRelease` APK를 태블릿에 `adb install -r`.
+
+| # | 항목 | 절차 | 기대 결과 |
+|---|------|------|-----------|
+| 1 | 허브 원탭 재연결 (V1) | 허브의 "최근 연결한 컴퓨터" 띠 탭 | 곧장 카탈로그 진입. 호스트에서 기기를 해제한 뒤 탭하면 승인 요청 알림 → 페어링 화면에 대상 주소가 보임 |
+| 2 | 첫 실행 제스처 안내 (V7) | 앱 데이터 초기화 후 첫 스트림 창 | 안내 오버레이 1회 표시, 확인/바깥 탭으로 닫힘, 창을 다시 열어도 미노출 |
+| 3 | 저장 설정 유지 (V6) | 업데이트 전 FPS 배지를 켜둔 기기에서 업데이트 | 배지 여전히 켜짐. 신규 설치 기기에서는 배지·통계 HUD 모두 꺼짐 |
+| 4 | 화면 기록 권한 배너 (신규) | 시스템 설정 → 개인정보 보호 및 보안 → 화면 기록에서 Leftcar Host 끄기 → 호스트 재실행 | 대시보드에 "화면 기록 권한 필요" 경고 배너와 "화면 기록 설정 열기" 버튼(클릭 시 해당 설정 창). 허용 → 재실행 → 배너 사라짐. 미허용 상태로 태블릿에서 스트림을 시작하면 뷰어에 화면 공유 권한 안내가 뜨고 호스트 배너는 하나만 유지 |
+| 5 | 자연 스크롤 방향 (WIP 미검증분) | Mac 설정의 자연 스크롤 on/off 각각에서 태블릿 두 손가락 스크롤 | 두 경우 모두 Mac 트랙패드와 같은 방향으로 콘텐츠가 움직임 |
+
+권한 미허용 상태 재현 대안: `tccutil reset ScreenCapture leftcar.ll3.kr` 후 호스트 재실행. 앱은 권한
+프롬프트를 띄우지 않으므로(preflight 전용 설계) 배너의 버튼으로 시스템 설정에서 직접 허용한다.
