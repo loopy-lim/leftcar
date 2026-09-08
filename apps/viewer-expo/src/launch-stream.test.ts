@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setCurrentLanguage } from "./language-store";
 import type { ControlClient } from "./control";
 import {
   reconfigurePreparedStream,
@@ -11,6 +12,9 @@ import type { EncoderExperimentInfo } from "./encoder-experiment";
 import type { AdaptiveQualityState } from "./adaptive-resolution";
 import type { ActiveStream } from "./catalog-model-types";
 import { STREAM_PROFILES } from "./stream-profile";
+
+// 런처 인자에 현재 언어가 포함되므로 테스트에서는 한국어로 고정한다.
+setCurrentLanguage("ko");
 import { resolveStreamResolution } from "./stream-resolution";
 
 const advertisedUdpStability = {
@@ -239,6 +243,7 @@ describe("startPreparedStream", () => {
       "192.168.0.134",
       "udp",
       "splitVertical",
+      "ko",
     );
     expect(launcher.openStream).toHaveBeenCalledWith(
       5003,
@@ -250,6 +255,7 @@ describe("startPreparedStream", () => {
       undefined,
       false,
       false,
+      "ko",
     );
   });
 
@@ -304,6 +310,7 @@ describe("startPreparedStream", () => {
       "LG UltraFine (1)",
       false,
       false,
+      "ko",
     );
   });
 
@@ -328,6 +335,7 @@ describe("startPreparedStream", () => {
       undefined,
       false,
       false,
+      "ko",
     );
   });
 
@@ -352,6 +360,7 @@ describe("startPreparedStream", () => {
       undefined,
       false,
       true,
+      "ko",
     );
   });
 
@@ -500,6 +509,7 @@ describe("startPreparedStream", () => {
       "192.168.0.134",
       "udp",
       "splitVertical",
+      "ko",
     );
   });
 
@@ -533,6 +543,7 @@ describe("startPreparedStream", () => {
       "192.168.0.134",
       "udp",
       "splitVertical",
+      "ko",
     );
     expect(launcher.cancelPreparedStream).toHaveBeenCalledWith(
       5003,
@@ -544,6 +555,7 @@ describe("startPreparedStream", () => {
       "192.168.0.134",
       "udp",
       "auto",
+      "ko",
     );
     expect(control.request).toHaveBeenCalledWith("startStream", expect.objectContaining({
       mediaTransport: "udp",
@@ -579,6 +591,7 @@ describe("startPreparedStream", () => {
       "192.168.0.134",
       "udp",
       "splitVertical",
+      "ko",
     );
     expect(calls.indexOf("prepare")).toBeLessThan(calls.indexOf("start"));
   });
@@ -824,7 +837,7 @@ describe("reconfigurePreparedStream", () => {
         reconfigureEncoderExperiment: true,
         advertisedEncoderExperiments,
       }),
-    ).rejects.toThrow("분할 인코딩 전환");
+    ).rejects.toThrow("leftcar:errSplitEncodeRejected");
     expect(order[order.length - 1]).toBe("cancel:splitVertical");
     expect(launcher.openStream).not.toHaveBeenCalled();
   });

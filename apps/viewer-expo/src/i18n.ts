@@ -6,6 +6,7 @@ import {
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
+import { setCurrentLanguage } from "./language-store";
 
 const LANGUAGE_KEY = "leftcar.language";
 
@@ -82,6 +83,11 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   }, [persistLanguage]);
 
   const t = useMemo(() => getTranslation(language), [language]);
+
+  // React 바깥 모듈(세션/런처/오류 포맷터)이 같은 언어를 보게 한다.
+  useEffect(() => {
+    setCurrentLanguage(language);
+  }, [language]);
 
   const format = useCallback((template: string, params?: Record<string, string | number>) => {
     return interpolate(template, params);

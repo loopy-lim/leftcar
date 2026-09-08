@@ -184,7 +184,7 @@ describe("pairWithHost", () => {
 
   it("requires the separately displayed code", async () => {
     await expect(pairWithHost(makePayload(), "")).rejects.toThrow(
-      "6자리 인증 코드를 정확히 입력해 주세요",
+      "leftcar:errPairingCodeInvalid",
     );
     expect(connect).not.toHaveBeenCalled();
   });
@@ -222,7 +222,7 @@ describe("pairWithHost", () => {
   it("rejects a malformed issued token instead of storing it", async () => {
     requestMock.mockResolvedValueOnce({ token: "not-a-valid-token" });
     await expect(pairWithHost(makePayload(), "123456")).rejects.toThrow(
-      "연결 승인 응답을 확인할 수 없습니다",
+      "leftcar:errPairingResponseInvalid",
     );
     expect(store.get("leftcar.token")).toBeUndefined();
     expect(closeMock).toHaveBeenCalledTimes(1);

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setCurrentLanguage } from "./language-store";
 import type { ControlClient } from "./control";
 import {
   reconfigurePreparedStream,
@@ -7,6 +8,9 @@ import {
   type StreamLauncher,
 } from "./launch-stream";
 import type { ActiveStream } from "./catalog-model-types";
+
+// 런처 인자에 현재 언어가 포함되므로 테스트에서는 한국어로 고정한다.
+setCurrentLanguage("ko");
 
 const splitAdvertised = [{
   id: "auto",
@@ -81,6 +85,7 @@ describe("adaptive stream receipts", () => {
       "Main",
       false,
       false,
+      "ko",
     );
   });
 
@@ -136,6 +141,7 @@ describe("adaptive stream receipts", () => {
       "Main",
       false,
       false,
+      "ko",
     );
   });
 });
@@ -194,9 +200,9 @@ describe("reconfigure encoder mode transitions", () => {
       fps: 60,
       qualityState: "native",
     });
-    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "udp", "auto");
+    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "udp", "auto", "ko");
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false, "ko",
     );
   });
 
@@ -229,11 +235,11 @@ describe("reconfigure encoder mode transitions", () => {
       encoderExperiment: "splitVertical",
     });
     expect(native.prepareStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", "udp", "splitVertical",
+      5010, "192.168.0.134", "udp", "splitVertical", "ko",
     );
     // 수신기는 Host가 실제 수락한 모드로 열어야 한다.
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false, "ko",
     );
     expect(result.encoderExperiment).toBe("splitVertical");
   });
@@ -260,7 +266,7 @@ describe("reconfigure encoder mode transitions", () => {
       fps: 60,
       qualityState: "native",
     });
-    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "udp", "auto");
+    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "udp", "auto", "ko");
   });
 
   it("does not prepare a split receiver for a non-UDP transport", async () => {
@@ -278,7 +284,7 @@ describe("reconfigure encoder mode transitions", () => {
       reconfigureEncoderExperiment: true,
       advertisedEncoderExperiments: splitAdvertised,
     });
-    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "usb", "auto");
+    expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "usb", "auto", "ko");
     expect(control.request).toHaveBeenCalledWith("reconfigureStream", {
       session: 42,
       width: 3840,
@@ -304,7 +310,7 @@ describe("reconfigure encoder mode transitions", () => {
       advertisedEncoderExperiments: splitAdvertised,
     });
     expect(native.prepareStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", "udp", "adaptiveQp",
+      5010, "192.168.0.134", "udp", "adaptiveQp", "ko",
     );
     expect(control.request).toHaveBeenCalledWith("reconfigureStream", {
       session: 42,
@@ -342,7 +348,7 @@ describe("reconfigure encoder mode transitions", () => {
     });
     expect(native.cancelPreparedStream).toHaveBeenCalledWith(5010, "splitVertical");
     expect(native.prepareStream).toHaveBeenNthCalledWith(
-      2, 5010, "192.168.0.134", "udp", "auto",
+      2, 5010, "192.168.0.134", "udp", "auto", "ko",
     );
     expect(control.request).toHaveBeenCalledWith("reconfigureStream", {
       session: 42,
@@ -429,7 +435,7 @@ describe("reconfigure encoder mode transitions", () => {
       qualityState: "native",
     });
     expect(native.prepareStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", "udp", "auto",
+      5010, "192.168.0.134", "udp", "auto", "ko",
     );
     expect(result.encoderExperiment).toBe("auto");
   });
@@ -457,7 +463,7 @@ describe("reconfigure encoder mode transitions", () => {
       qualityState: "native",
     });
     expect(native.prepareStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", "udp", "auto",
+      5010, "192.168.0.134", "udp", "auto", "ko",
     );
     expect(result.encoderExperiment).toBe("auto");
   });
@@ -489,11 +495,11 @@ describe("reconfigure encoder mode transitions", () => {
     });
     expect(native.prepareStream).toHaveBeenCalledTimes(1);
     expect(native.prepareStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", "udp", "splitVertical",
+      5010, "192.168.0.134", "udp", "splitVertical", "ko",
     );
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false, "ko",
     );
     expect(result.encoderExperiment).toBe("auto");
   });
@@ -523,7 +529,7 @@ describe("reconfigure encoder mode transitions", () => {
     expect(native.prepareStream).toHaveBeenCalledTimes(1);
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false, "ko",
     );
   });
 
@@ -547,7 +553,7 @@ describe("reconfigure encoder mode transitions", () => {
     expect(native.prepareStream).toHaveBeenCalledTimes(1);
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false, "ko",
     );
   });
 

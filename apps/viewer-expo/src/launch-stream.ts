@@ -1,4 +1,6 @@
 import type { ControlClient, ReconfigureStreamOutput } from "./control";
+import { currentLanguage } from "./language-store";
+import { LocalizedError } from "./localized-error";
 import {
   getUsbState,
   resolveTransport,
@@ -33,6 +35,7 @@ export interface StreamLauncher {
     host: string,
     mediaTransport: string,
     encoderExperiment: EncoderExperimentId,
+    language?: string,
   ): Promise<void>;
   openStream(
     port: number,
@@ -44,6 +47,7 @@ export interface StreamLauncher {
     displayName?: string,
     showFps?: boolean,
     localCursor?: boolean,
+    language?: string,
   ): Promise<string>;
   cancelPreparedStream(
     port: number,
@@ -209,7 +213,7 @@ export async function startPreparedStream({
         )
       : null;
     if (args.udpStability && udpOptions && !udpStability) {
-      throw new Error("선택한 UDP 안정성 설정을 이 컴퓨터에서 지원하지 않습니다.");
+      throw new LocalizedError("errUdpUnsupported");
     }
     try {
       await launcher.prepareStream(
@@ -217,6 +221,7 @@ export async function startPreparedStream({
         host,
         mediaTransport,
         encoderExperiment,
+        currentLanguage(),
       );
     } catch (error) {
       const canFallBackToSingleEncoder = selectedEncoderExperiment === "auto" &&
@@ -234,6 +239,7 @@ export async function startPreparedStream({
         host,
         mediaTransport,
         encoderExperiment,
+        currentLanguage(),
       );
     }
     const { udpStability: _requestedUdpStability, ...baseArgs } = args;
@@ -273,6 +279,7 @@ export async function startPreparedStream({
       args.showFps ?? false,
       // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
       args.localCursor ?? false,
+      currentLanguage(),
     );
     return {
       session,
@@ -375,6 +382,7 @@ export async function reconfigurePreparedStream({
       host,
       active.mediaTransport,
       desiredExperiment,
+      currentLanguage(),
     );
   } catch (error) {
     if (!promotion) {
@@ -390,6 +398,7 @@ export async function reconfigurePreparedStream({
       host,
       active.mediaTransport,
       preparedExperiment,
+      currentLanguage(),
     );
   }
   try {
@@ -432,6 +441,7 @@ export async function reconfigurePreparedStream({
         host,
         active.mediaTransport,
         preparedExperiment,
+        currentLanguage(),
       );
       accepted = await control.request<ReconfigureStreamOutput>(
         "reconfigureStream",
@@ -452,9 +462,7 @@ export async function reconfigurePreparedStream({
         // the split encoder mid-transition). The freshly prepared split
         // listeners cannot serve a single stream; report the mismatch
         // instead of attaching with an empty token.
-        throw new Error(
-          "컴퓨터가 분할 인코딩 전환을 수락하지 않아 해상도 전환을 마치지 못했습니다.",
-        );
+        throw new LocalizedError("errSplitEncodeRejected");
       }
     }
     // An accepted single mode keeps the existing preparation: it was bound
@@ -475,6 +483,7 @@ export async function reconfigurePreparedStream({
       active.sourceName,
       active.showFps ?? false,
       active.localCursor ?? false,
+      currentLanguage(),
     );
     return {
       session: accepted.session,

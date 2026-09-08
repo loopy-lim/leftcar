@@ -4,6 +4,9 @@ import { Alert, NativeModules } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { clearToken } from "./pairing";
+import { LocalizedError } from "./localized-error";
+import { currentTranslation } from "./language-store";
+import { interpolate } from "@leftcar/ui-tokens";
 import {
   reconfigurePreparedStream,
   startPreparedStream,
@@ -75,6 +78,8 @@ import {
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
 export function useCatalogModel() {
+  // 오류 문구는 발생 시점 언어를 따른다 — 훅 t를 넣으면 언어 전환마다
+  // 장기 콜백 신원이 흔들리므로 모듈 저장소에서 직접 읽는다.
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [resizingSession, setResizingSession] = useState<number | null>(null);
@@ -130,8 +135,8 @@ export function useCatalogModel() {
         await clearToken();
         disconnectHost();
         Alert.alert(
-          "연결 승인이 필요해요",
-          "컴퓨터의 연결 승인이 만료되었거나 삭제되었습니다. 다시 승인해 주세요.",
+          currentTranslation().viewer.pairingRequiredTitle,
+          currentTranslation().viewer.pairingRequiredDesc,
         );
         router.replace({
           pathname: "/pairing",
@@ -205,12 +210,12 @@ export function useCatalogModel() {
   const restoreActiveStream = useCallback(
     async (active: ActiveStream): Promise<RestoredStream> => {
       if (!launcher) {
-        throw new Error("화면을 다시 연결할 기능을 시작할 수 없습니다");
+        throw new LocalizedError("errRestartLauncher");
       }
       const refreshed = await refetchCatalog();
       const currentCatalog = refreshed.data ?? catalogQuery.data;
       if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
-        throw new Error("현재 컴퓨터의 화면 공유 backend를 조회하지 못했습니다");
+        throw new LocalizedError("errBackendQuery");
       }
       const captureBackend = preferredCaptureBackend(
         currentCatalog,
@@ -267,7 +272,7 @@ export function useCatalogModel() {
       qualityState: AdaptiveQualityState,
     ): Promise<RestoredStream> => {
       if (!launcher) {
-        throw new Error("화면 해상도를 다시 연결할 기능을 시작할 수 없습니다");
+        throw new LocalizedError("errResizeLauncher");
       }
       const control = controlClient() ?? (await reconnectHost());
       const reconfigured = await reconfigurePreparedStream({
@@ -290,8 +295,8 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streams, syncAdaptiveTarget, updateLocalCursor } =
-    useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
+    useStreamController(restoreActiveStream, reconfigureActiveStream);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
       patchStream(next.session, () => next);
@@ -318,7 +323,7 @@ export function useCatalogModel() {
     if (launcher?.setCursorStream) {
       void Promise.all(
         streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
-      ).catch(() => setError("열린 화면의 커서 설정을 바꾸지 못했습니다."));
+      ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
     }
   }, [setError, streams, updateLocalCursor]);
 
@@ -372,11 +377,11 @@ export function useCatalogModel() {
     async (display: DisplayInfo) => {
       const client = controlClient();
       if (!client) {
-        setError("컴퓨터와의 연결이 끊어졌습니다. 다시 연결해 주세요.");
+        setError(currentTranslation().viewer.connectionLostError);
         return;
       }
       if (!launcher) {
-        setError("화면을 여는 기능을 시작할 수 없습니다. 앱을 다시 실행해 주세요.");
+        setError(currentTranslation().viewer.launchFeatureError);
         return;
       }
       setLaunchingIndex(display.index);
@@ -516,7 +521,7 @@ export function useCatalogModel() {
         replaceStreamState(next);
         return true;
       } catch (cause) {
-        setError(`화면 해상도 전환에 실패했습니다: ${formatErrorMessage(cause)}`);
+        setError(interpolate(currentTranslation().viewer.errResizeFailed, { detail: formatErrorMessage(cause) }));
         return false;
       } finally {
         setResizingSession(null);
@@ -527,9 +532,11 @@ export function useCatalogModel() {
 
   const visibleError = error
     ? error
-    : catalogQuery.error
-      ? catalogErrorMessage(catalogQuery.error)
-      : null;
+    : streamError
+      ? streamError
+      : catalogQuery.error
+        ? catalogErrorMessage(catalogQuery.error)
+        : null;
 
   return {
     displays,

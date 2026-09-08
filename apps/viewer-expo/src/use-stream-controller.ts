@@ -1,11 +1,4 @@
-import {
-  type Dispatch,
-  type SetStateAction,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert } from "react-native";
 import { replaceRestartedStreamState } from "./launch-stream";
@@ -40,11 +33,12 @@ import {
   type UsbAccessoryState,
 } from "./usb";
 import { formatErrorMessage, type StatusView } from "./control";
+import { currentTranslation } from "./language-store";
+import { interpolate } from "@leftcar/ui-tokens";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import type { UdpStabilitySelection } from "./udp-stability";
 
 export function useStreamController(
-  setError: Dispatch<SetStateAction<string | null>>,
   restoreStream: (active: ActiveStream) => Promise<RestoredStream>,
   reconfigureStream?: (
     active: ActiveStream,
@@ -52,7 +46,12 @@ export function useStreamController(
     qualityState: AdaptiveQualityState,
   ) => Promise<RestoredStream>,
 ) {
+  // 오류 문구는 발생 시점 언어를 따른다 — 훅 t를 넣으면 언어 전환마다
+  // 장기 콜백 신원이 흔들리므로 모듈 저장소에서 직접 읽는다.
   const [streams, setStreams] = useState<ActiveStream[]>([]);
+  // 스트림 오류는 이 훅이 소유하고 반환한다 — 부모 setter를 effect에서
+  // 호출해 상태를 끌어올리는 대신, 표시 주체(카탈로그)가 반환값을 합성한다.
+  const [streamError, setStreamError] = useState<string | null>(null);
   const heartbeatInFlight = useRef(new Set<number>());
   const lastRestartAt = useRef(new Map<number, number>());
   const notifiedTerminations = useRef(new Set<number>());
@@ -74,12 +73,10 @@ export function useStreamController(
   const endUnownedRestart = useCallback(
     (session: number) => {
       void requestWithReconnect("stopStream", { session }).catch((cause) => {
-        setError(
-          `소유권이 사라진 화면 공유를 종료하지 못했습니다: ${formatErrorMessage(cause)}`,
-        );
+        setStreamError(interpolate(currentTranslation().viewer.errStopOrphaned, { detail: formatErrorMessage(cause) }));
       });
     },
-    [setError],
+    [],
   );
   const host = controlHost();
   const queryClient = useQueryClient();
@@ -108,7 +105,7 @@ export function useStreamController(
           endUnownedRestart,
         ),
       );
-      setError(null);
+      setStreamError(null);
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
     onError: (error, _request) => {
@@ -116,7 +113,7 @@ export function useStreamController(
       // the same Activity can retry on its current Surface; the caller owns
       // the explicit retry action and no automatic loop is created.
       updateStreams((previous) => previous);
-      setError(`화면을 다시 연결하지 못했습니다: ${formatErrorMessage(error)}`);
+      setStreamError(interpolate(currentTranslation().viewer.errRestoreFailed, { detail: formatErrorMessage(error) }));
     },
     onSettled: (_data, _error, request) => {
       releaseStreamRestore(heartbeatInFlight.current, request.active.session);
@@ -191,11 +188,11 @@ export function useStreamController(
           endUnownedRestart,
         ),
       );
-      setError(null);
+      setStreamError(null);
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
     onError: (error, active) => {
-      setError(`전송 경로를 바꾸지 못했습니다: ${formatErrorMessage(error)}`);
+      setStreamError(interpolate(currentTranslation().viewer.errTransportSwitchFailed, { detail: formatErrorMessage(error) }));
     },
     onSettled: (_data, _error, active) => {
       releaseStreamRestore(heartbeatInFlight.current, active.session);
@@ -229,11 +226,12 @@ export function useStreamController(
           !notifiedTerminations.current.has(active.session)
         ) {
           notifiedTerminations.current.add(active.session);
+          const copy = currentTranslation().viewer;
           Alert.alert(
-            "화면 공유가 종료되었어요",
+            copy.streamEndedTitle,
             hostTermination === "feedbackTimeout"
-              ? "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
-              : "컴퓨터에서 이 화면 공유를 종료했습니다.",
+              ? copy.streamEndedByDisconnect
+              : copy.streamEndedByHost,
           );
         }
         continue;
@@ -301,7 +299,7 @@ export function useStreamController(
             qualityState: result.state.qualityState,
           };
         }));
-        setError(null);
+        setStreamError(null);
       } catch (error) {
         const result = recordAdaptiveResolutionResult(
           state,
@@ -310,14 +308,12 @@ export function useStreamController(
           Date.now(),
         );
         adaptiveStates.current.set(active.session, result.state);
-        setError(
-          `해상도 전환에 실패했습니다. 현재 화면에서 다시 시도할 수 있습니다: ${formatErrorMessage(error)}`,
-        );
+        setStreamError(interpolate(currentTranslation().viewer.errAdaptiveResize, { detail: formatErrorMessage(error) }));
       } finally {
         adaptiveRebinds.current.delete(active.session);
       }
     },
-    [setError, updateStreams],
+    [updateStreams],
   );
 
   useEffect(() => {
@@ -466,7 +462,7 @@ export function useStreamController(
           );
           void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
         } catch (cause) {
-          setError(`UDP 설정을 적용하지 못했습니다: ${formatErrorMessage(cause)}`);
+          setStreamError(interpolate(currentTranslation().viewer.errUdpApply, { detail: formatErrorMessage(cause) }));
           throw cause;
         } finally {
           releaseStreamRestore(heartbeatInFlight.current, active.session);
@@ -474,12 +470,13 @@ export function useStreamController(
         return reconnectAt(index + 1);
       };
       await reconnectAt(0);
-      setError(null);
+      setStreamError(null);
     },
-    [endUnownedRestart, host, queryClient, restoreStream, setError, updateStreams],
+    [endUnownedRestart, host, queryClient, restoreStream, updateStreams],
   );
 
   return {
+    streamError,
     addStream,
     applyUdpStability,
     patchStream,

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setCurrentLanguage } from "./language-store";
 
 // control.ts talks to react-native-tcp-socket; the socket is faked at the
 // module boundary with an EventEmitter-style mock. No real sockets.
@@ -75,6 +76,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+// 포맷 문구는 테스트에서 한국어로 고정한다.
+setCurrentLanguage("ko");
 
 describe("connect token injection", () => {
   it("adds the provider token to every request envelope", async () => {

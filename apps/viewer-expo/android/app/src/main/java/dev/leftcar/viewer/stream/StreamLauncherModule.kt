@@ -151,8 +151,10 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         host: String,
         mediaTransport: String,
         encoderExperiment: String,
+        language: String?,
         promise: Promise,
     ) {
+        ViewerStrings.applyLanguage(language)
         val splitVertical = encoderExperiment == "splitVertical"
         val decoderName = if (splitVertical) {
             SplitDecoderCapability.findQualifiedCodecName()
@@ -162,7 +164,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         if (splitVertical && decoderName == null) {
             promise.reject(
                 "ERR_SPLIT_DECODER_CAPABILITY",
-                "4K 분할 스트림에 필요한 동시 2개 하드웨어 H.264 디코더를 사용할 수 없습니다.",
+                ViewerStrings.splitDecoderUnavailable,
             )
             return
         }
@@ -177,7 +179,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         } else {
             promise.reject(
                 "ERR_STREAM_PREPARE",
-                "미디어 수신 포트를 준비하지 못했습니다. (code=$result)",
+                "${ViewerStrings.prepareFailed} (code=$result)",
             )
         }
     }
@@ -195,7 +197,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         } else {
             promise.reject(
                 "ERR_STREAM_PREPARE_CANCEL",
-                "미디어 수신 포트 정리에 실패했습니다. (code=$result)",
+                "${ViewerStrings.prepareCancelFailed} (code=$result)",
             )
         }
     }
@@ -211,8 +213,10 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         displayName: String?,
         showFps: Boolean?,
         localCursor: Boolean?,
+        language: String?,
         promise: Promise,
     ) {
+        ViewerStrings.applyLanguage(language)
         try {
             val splitVertical = encoderExperiment == "splitVertical"
             val decoderName = if (splitVertical) {
@@ -223,12 +227,12 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             if (splitVertical && decoderName == null) {
                 promise.reject(
                     "ERR_SPLIT_DECODER_CAPABILITY",
-                    "검증된 동시 하드웨어 H.264 디코더가 없어 4K 분할 스트림을 열 수 없습니다.",
+                    ViewerStrings.splitDecoderMissing,
                 )
                 return
             }
             val instanceId = "src-$port"
-            val titleName = displayName?.takeIf { it.isNotBlank() } ?: "디스플레이"
+            val titleName = displayName?.takeIf { it.isNotBlank() } ?: ViewerStrings.displayFallback
             val intent = Intent(reactApplicationContext, StreamActivity::class.java).apply {
                 data = Uri.Builder()
                     .scheme("leftcar-stream")
@@ -247,6 +251,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: false)
                 putExtra("localCursor", localCursor ?: false)
+                putExtra("language", language ?: "ko")
                 // A recovery reuses the existing document task and port. The
                 // Activity keeps its Surface and swaps only the native
                 // renderer when this intent is delivered via onNewIntent.
@@ -280,7 +285,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     fun setCursorStream(instanceId: String, enabled: Boolean, promise: Promise) {
         val target = liveStreams[instanceId]
         if (target == null) {
-            promise.reject("ERR_STREAM_NOT_ACTIVE", "화면 공유 창을 찾을 수 없습니다.")
+            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
             return
         }
         launchStreamIntent(instanceId, target) { intent ->
@@ -302,11 +307,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     fun setWindowAspectRatio(instanceId: String, ratio: Double, promise: Promise) {
         val target = liveStreams[instanceId]
         if (target == null) {
-            promise.reject("ERR_STREAM_NOT_ACTIVE", "화면 공유 창을 찾을 수 없습니다.")
+            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
             return
         }
         if (!ratio.isFinite()) {
-            promise.reject("ERR_WINDOW_ASPECT_RATIO", "비율 값이 올바르지 않습니다.")
+            promise.reject("ERR_WINDOW_ASPECT_RATIO", ViewerStrings.invalidRatio)
             return
         }
         try {

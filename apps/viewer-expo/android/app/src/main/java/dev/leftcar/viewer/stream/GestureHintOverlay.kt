@@ -12,23 +12,10 @@ import android.widget.PopupWindow
 import android.widget.TextView
 
 /**
- * 스트림 창 터치 제스처 안내 행. 순수 데이터로만 구성해 JVM 단위 테스트가
- * Android 프레임워크 없이 내용을 검증할 수 있게 한다.
- */
-internal object GestureHintRows {
-    val rows: List<Pair<String, String>> = listOf(
-        "탭" to "클릭",
-        "끌기" to "드래그",
-        "두 손가락으로 밀기" to "스크롤",
-        "길게 누르기" to "오른쪽 클릭",
-    )
-}
-
-/**
  * 첫 스트림 창에서 한 번만 보여 주는 제스처 안내. 영상 SurfaceView가
  * setZOrderOnTop이라 Activity 뷰 계층 위로 그릴 수 없어 HUD 배지와 같은
  * PopupWindow로 띄운다. 닫힐 때 [onDismissed]가 호출되므로 호출자가
- * "다시 보지 않기" 플래그를 저장하면 된다.
+ * "다시 보지 않기" 플래그를 저장하면 된다. 문구는 [ViewerStrings] 언어를 따른다.
  */
 internal class GestureHintOverlay(
     private val activity: Activity,
@@ -43,7 +30,7 @@ internal class GestureHintOverlay(
     fun show() {
         if (popup != null || activity.isFinishing || activity.isDestroyed) return
         val confirmButton = TextView(activity).apply {
-            text = "확인"
+            text = ViewerStrings.gestureHintConfirm
             setTextColor(Color.argb(255, 140, 188, 255))
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
@@ -55,13 +42,13 @@ internal class GestureHintOverlay(
             background = cardBackground()
         }
         TextView(activity).apply {
-            text = "터치 제스처"
+            text = ViewerStrings.gestureHintTitle
             setTextColor(Color.WHITE)
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, dp(6))
         }.also(content::addView)
-        GestureHintRows.rows.forEach { (gesture, action) ->
+        GestureHintRows.rows(ViewerStrings.language).forEach { (gesture, action) ->
             TextView(activity).apply {
                 text = "$gesture — $action"
                 setTextColor(Color.argb(224, 255, 255, 255))

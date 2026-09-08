@@ -60,8 +60,14 @@ internal val persistentFpsOverlayPolicy = PersistentFpsOverlayPolicy()
 internal fun persistentFpsText(displayedFps: Double?): String =
     displayedFps?.takeIf { it.isFinite() && it >= 0.0 }?.let { "${it.roundToInt()} FPS" } ?: "-- FPS"
 
-internal fun persistentFpsContentDescription(displayedFps: Double?): String =
+internal fun persistentFpsContentDescription(
+    displayedFps: Double?,
+    language: String = ViewerStrings.language,
+): String = if (language == "en") {
+    "Actual render rate ${persistentFpsText(displayedFps)}"
+} else {
     "실제 렌더링 속도 ${persistentFpsText(displayedFps)}"
+}
 
 internal class PersistentFpsOverlay(private val activity: Activity) {
     private var popup: PopupWindow? = null

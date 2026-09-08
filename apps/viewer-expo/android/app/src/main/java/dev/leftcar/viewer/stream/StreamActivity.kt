@@ -154,7 +154,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 // Keep the visible Activity and Surface alive. First retry the
                 // renderer directly on the same port; only exhaust the short
                 // native budget before asking React/Host to recreate the session.
-                hud?.showRebindIndicator("화면을 같은 창에서 다시 연결하는 중")
+                hud?.showRebindIndicator(ViewerStrings.rebindReconnecting)
                 scheduleRenderRecovery()
             } else {
                 // A complete Wi-Fi outage tears down the Host session, so the
@@ -164,7 +164,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 recoveryRetryRunnable = null
                 recoveryRetryPolicy.reset()
                 recoveryFallbackEmitted = false
-                hud?.showRebindIndicator("컴퓨터 연결을 같은 창에서 다시 연결하는 중")
+                hud?.showRebindIndicator(ViewerStrings.rebindReconnectingControl)
             }
             return
         }
@@ -684,7 +684,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         setContentView(surfaces.root)
         localCursorEnabled = intent?.getBooleanExtra("localCursor", false) ?: false
-        val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: "디스플레이"
+        // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
+        intent?.getStringExtra("language")?.let { stored ->
+            ViewerStrings.applyLanguage(stored)
+            getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+                .edit().putString(ViewerStrings.PREF_LANGUAGE, stored).apply()
+        } ?: ViewerStrings.applyLanguage(
+            getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+                .getString(ViewerStrings.PREF_LANGUAGE, null),
+        )
+        val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: ViewerStrings.displayFallback
         title = displayName
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             setTaskDescription(android.app.ActivityManager.TaskDescription(displayName))
@@ -875,7 +884,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
         cancelPendingSurfaceAttach()
-        hud?.showRebindIndicator("화면을 다시 연결할 준비 중")
+        hud?.showRebindIndicator(ViewerStrings.rebindPreparing)
         setContentView(next.root)
         next.requestFocus()
         window.decorView.post { hideSystemBars() }
