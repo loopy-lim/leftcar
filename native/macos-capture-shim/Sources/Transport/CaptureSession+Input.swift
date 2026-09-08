@@ -2,6 +2,10 @@ import Foundation
 import AppKit
 import CoreGraphics
 
+// Mouse events post at the session tap: macOS 26 drops synthesized button
+// and scroll state injected at the HID tap (moves still warp the cursor
+// there, which made the regression look like dead clicks). Keyboard events
+// keep the HID tap, which continues to deliver.
 extension CaptureSession {
     /// Authenticated state packet for the viewer's lock indicator. It is sent
     /// after the UDP proof and whenever the per-session opt-in changes. ACKs
@@ -138,7 +142,7 @@ extension CaptureSession {
             mouseType: type,
             mouseCursorPosition: point,
             mouseButton: button
-        )?.post(tap: .cghidEventTap)
+        )?.post(tap: .cgSessionEventTap)
     }
 
      func mouseButton(mask: UInt8) -> CGMouseButton? {
@@ -177,7 +181,7 @@ extension CaptureSession {
             mouseType: type,
             mouseCursorPosition: point,
             mouseButton: button
-        )?.post(tap: .cghidEventTap)
+        )?.post(tap: .cgSessionEventTap)
     }
 
      func injectScroll(_ message: Data) {
@@ -188,14 +192,29 @@ extension CaptureSession {
         horizontalScrollRemainder %= 1_000
         verticalScrollRemainder %= 1_000
         guard horizontal != 0 || vertical != 0 else { return }
+        // The viewer speaks content-tracks-fingers (natural scrolling). macOS
+        // applies the system's natural-scroll flip to synthesized wheel
+        // events too, so honor the user's direction preference here instead
+        // of on every viewer.
+        let direction: Int32 = usesNaturalScrolling ? -1 : 1
         CGEvent(
             scrollWheelEvent2Source: nil,
             units: .line,
             wheelCount: 2,
-            wheel1: vertical,
-            wheel2: horizontal,
+            wheel1: direction * vertical,
+            wheel2: direction * horizontal,
             wheel3: 0
-        )?.post(tap: .cghidEventTap)
+        )?.post(tap: .cgSessionEventTap)
+    }
+
+    /// Global scroll direction preference. Missing key means the macOS
+    /// default: natural scrolling on.
+    var usesNaturalScrolling: Bool {
+        let domain = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
+        if let value = domain?["com.apple.swipescrolldirection"] as? Bool {
+            return value
+        }
+        return true
     }
 
      func keyboardFlags(metaState: UInt32) -> CGEventFlags {
@@ -274,7 +293,7 @@ extension CaptureSession {
                 mouseType: type,
                 mouseCursorPosition: lastPointerPosition,
                 mouseButton: button
-            )?.post(tap: .cghidEventTap)
+            )?.post(tap: .cgSessionEventTap)
         }
         pressedButtons.removeAll(keepingCapacity: true)
         horizontalScrollRemainder = 0
