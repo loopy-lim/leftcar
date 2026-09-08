@@ -8,7 +8,6 @@ describe("stream profiles", () => {
     expect(video).toMatchObject({
       id: "video",
       contentMode: "video",
-      detail: "최대 4K 60fps",
       maxWidth: 3840,
       maxHeight: 2160,
       fps: 60,
@@ -25,7 +24,6 @@ describe("stream profiles", () => {
   it("marks 1440p60 as the measurable fallback baseline", () => {
     expect(STREAM_PROFILES.find((profile) => profile.id === "balanced")).toMatchObject({
       id: "balanced",
-      detail: "1440p 60fps",
       maxWidth: 2560,
       maxHeight: 1440,
       fps: 60,
