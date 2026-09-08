@@ -1,5 +1,5 @@
 /**
- * Rustra 0.4 generated entry point.
+ * Rustra 0.8 generated entry point.
  *
  * Importing this module installs the lazy zero-config bootstrap. The native
  * JSI module is still installed only when a generated command is invoked, so

@@ -27,6 +27,18 @@ bun run test:architecture
 - 빌드 산출이 필요할 때: `cargo check --workspace`, `cargo run -p control-contract --bin generate`
 - `docs/` 변경 시: `docs/README.md`의 상태 표/근거 수준과 동기화
 
+## Rustra 코드젠
+
+계약(Rust `control-contract`)을 고치면 두 단계로 재생성한다:
+
+```bash
+bun run rustra:generate                                   # packages/control-generated (+ 스키마)
+cd apps/viewer-expo && bunx --package @rustra/cli@0.8.0 rustra codegen --config rustra.json
+```
+
+- CLI 버전은 Rust crate 핀(docs/10-references.md)과 같은 라인으로 맞춘다.
+- CLI 실행 직후 `apps/viewer-expo/package.json`에 `workspaces: ["modules/rustra-bridge"]`가 다시 생기면 제거한다 — 루트 workspace가 `apps/*/modules/*`를 이미 커버하며, 이 키가 남으면 react-doctor가 viewer-expo를 모노레포 루트로 오판한다.
+
 ## PR 규칙
 
 - 최소 변경 단위로 구현하고, 각 변경은 plan task와 연동해 요약

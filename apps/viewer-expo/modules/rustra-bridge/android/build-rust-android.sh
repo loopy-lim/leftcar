@@ -1,4 +1,12 @@
 #!/bin/sh
+# ── rustra generated ────────────────────────────────────────
+# File:   android/build-rust-android.sh
+# Source: schema.json (single source of truth for this file)
+# Regen:  rustra codegen --config rustra.json
+# Stage:  rust-probe schema → ts renderer
+# DO NOT EDIT — changes will be overwritten and fail codegen --check.
+# ────────────────────────────────────────────────────────────
+
 set -eu
 
 MODULE_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,8 +20,6 @@ REL_FLAG=""
 if [ "$PROFILE" = "release" ]; then REL_FLAG="--release"; fi
 ABIS=${ANDROID_ABIS:-"x86_64-linux-android aarch64-linux-android"}
 
-# cargo-ndk gives ANDROID_NDK_HOME precedence over the SDK. Repair a common
-# shell setup where that variable accidentally points at the SDK root.
 if [ ! -f "${ANDROID_NDK_HOME:-}/source.properties" ]; then
   for SDK_ROOT in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}"; do
     [ -d "$SDK_ROOT/ndk" ] || continue

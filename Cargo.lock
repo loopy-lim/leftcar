@@ -568,12 +568,13 @@ dependencies = [
 
 [[package]]
 name = "rustra"
-version = "0.4.0"
-source = "git+https://github.com/loopy-lim/rustra?rev=f8bab2996010781135fe6bf2c439fef9d470ceb8#f8bab2996010781135fe6bf2c439fef9d470ceb8"
+version = "0.8.0"
+source = "git+https://github.com/loopy-lim/rustra?rev=a9e3ee6b12c031f328e2b6ed93bd667f0085119c#a9e3ee6b12c031f328e2b6ed93bd667f0085119c"
 dependencies = [
  "hex",
  "postcard",
  "rustra-macros",
+ "rustra-naming",
  "schemars",
  "serde",
  "serde_json",
@@ -582,13 +583,19 @@ dependencies = [
 
 [[package]]
 name = "rustra-macros"
-version = "0.4.0"
-source = "git+https://github.com/loopy-lim/rustra?rev=f8bab2996010781135fe6bf2c439fef9d470ceb8#f8bab2996010781135fe6bf2c439fef9d470ceb8"
+version = "0.8.0"
+source = "git+https://github.com/loopy-lim/rustra?rev=a9e3ee6b12c031f328e2b6ed93bd667f0085119c#a9e3ee6b12c031f328e2b6ed93bd667f0085119c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "rustra-naming",
+ "syn 3.0.3",
 ]
+
+[[package]]
+name = "rustra-naming"
+version = "0.8.0"
+source = "git+https://github.com/loopy-lim/rustra?rev=a9e3ee6b12c031f328e2b6ed93bd667f0085119c#a9e3ee6b12c031f328e2b6ed93bd667f0085119c"
 
 [[package]]
 name = "rustversion"

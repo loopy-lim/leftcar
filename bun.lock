@@ -18,13 +18,10 @@
       "dependencies": {
         "@leftcar/ui-tokens": "workspace:*",
         "@tauri-apps/api": "^2",
-        "class-variance-authority": "^0.7.1",
-        "clsx": "^2.1.1",
         "lucide-react": "^1.33.0",
         "qrcode": "^1.5.4",
         "react": "19.2.3",
         "react-dom": "19.2.3",
-        "tailwind-merge": "^3.6.0",
       },
       "devDependencies": {
         "@tailwindcss/vite": "^4.3.3",
@@ -58,7 +55,7 @@
         "@expo/vector-icons": "^15.1.1",
         "@leftcar/ui-tokens": "workspace:*",
         "@rustra/generated-react-native": "workspace:*",
-        "@rustra/react-native": "^0.4.0",
+        "@rustra/react-native": "^0.7.0",
         "@tanstack/react-query": "^5.101.4",
         "expo": "~57.0.15",
         "expo-camera": "~57.0.4",
@@ -87,7 +84,7 @@
       "name": "@rustra/generated-react-native",
       "version": "0.0.0",
       "peerDependencies": {
-        "@rustra/react-native": "^0.4.0",
+        "@rustra/react-native": "^0.7.0",
         "react-native": ">=0.76",
       },
     },
@@ -522,9 +519,9 @@
 
     "@rustra/generated-react-native": ["@rustra/generated-react-native@workspace:apps/viewer-expo/modules/rustra-bridge"],
 
-    "@rustra/react-native": ["@rustra/react-native@0.4.0", "", { "dependencies": { "@rustra/types": "^0.4.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-FM8RQEoAvddEXg/nbRBtzRugdDH/thTm8hFBJv3pjzLIelimhLzwRUGZb5CBFdU8OIxSBNNammNlSG+EzWsD7w=="],
+    "@rustra/react-native": ["@rustra/react-native@0.7.0", "", { "dependencies": { "@rustra/types": "^0.8.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-JdFMJbscOuuX5fSlXHwLTFT5bb5/YH5+QYHTMoaugrpfu0BKm3DCAvaebzkwuZdM7lr+a0VUuGFS4RamE9uKqA=="],
 
-    "@rustra/types": ["@rustra/types@0.4.0", "", {}, "sha512-7rE7bCsgTHhl+tuGoZzZoK/MVDXfvFA7FK9dKiuP+HpAcM7OmnMVuLS8ASAWYi4o9+INYbO88+R1fw7tjx7i1Q=="],
+    "@rustra/types": ["@rustra/types@0.8.0", "", {}, "sha512-PPz0e/wvcxi4mXup3yFlGK1zZVF3xdZwnbVyYuxU79kZj7Iqw6QBqa0peq8fUvbzJ/BO0+qYZvCjbcdU3F14yw=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.27.12", "", {}, "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g=="],
 

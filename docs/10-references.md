@@ -9,8 +9,8 @@
   - Rust command에서 TypeScript client 생성
   - Node, Bun, Tauri, React Native, Lynx adapter
   - local control contract의 근거
-- 현재 검증·고정한 `0.4.0` public commit: [`f8bab2996010781135fe6bf2c439fef9d470ceb8`](https://github.com/loopy-lim/rustra/commit/f8bab2996010781135fe6bf2c439fef9d470ceb8)
-  - Rust crate, 생성 TypeScript 계약, vendored `@rustra/types`와 React Native adapter를 같은 릴리스로 맞춘다.
+- 현재 검증·고정한 `0.8.0` public commit: [`a9e3ee6b12c031f328e2b6ed93bd667f0085119c`](https://github.com/loopy-lim/rustra/commit/a9e3ee6b12c031f328e2b6ed93bd667f0085119c)
+  - Rust crate, 생성 TypeScript 계약, npm 의존성(`@rustra/react-native` 0.7.x / `@rustra/types` 0.8.x)을 같은 릴리스로 맞춘다. `vendor/`의 두 패키지는 참조용 사본으로 함께 갱신한다.
   - 이후 업그레이드도 branch가 아니라 검증한 commit/tag를 pin하고 코드젠 diff와 런타임을 함께 확인한다.
 
 ## 2. Android XR와 Home Space

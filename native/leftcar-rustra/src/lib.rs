@@ -1,4 +1,4 @@
-//! Rustra 0.4 control-package boundary for Leftcar.
+//! Rustra 0.8 control-package boundary for Leftcar.
 //!
 //! The generated React Native entry point is `native_entry!`; the JNI exports
 //! below are retained only as the legacy H09 device-proof shim until the app
@@ -20,7 +20,7 @@ static PACKAGE: OnceLock<Package> = OnceLock::new();
 
 fn package() -> &'static Package {
     let package = PACKAGE.get_or_init(host_package);
-    // Rustra 0.4 generated JSI calls the generic rkyv-v2 FFI surface. The
+    // Rustra 0.8 generated JSI calls the generic rkyv-v2 FFI surface. The
     // legacy JNI shim invokes Package directly, so without this registration
     // the old proof passes while the generated bridge returns
     // `ffi.not_registered`.
@@ -28,7 +28,7 @@ fn package() -> &'static Package {
     package
 }
 
-// Rustra 0.4's generated React Native package loads the stable native entry
+// Rustra 0.8's generated React Native package loads the stable native entry
 // point. Keep the legacy JNI shim below during the app cutover; both paths
 // resolve to the same OnceLock-backed package and therefore cannot diverge in
 // command registration or contract hash.

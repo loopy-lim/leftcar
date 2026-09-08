@@ -5,11 +5,11 @@ export { RustraCommandError } from '@rustra/types';
  * H02/H09 proof command on the viewer path too.
  */
 export type ViewerAddNumbersInput = {
-  a: number;
-  b: number;
+  a: number | bigint;
+  b: number | bigint;
 };
 
 export type ViewerAddNumbersOutput = {
-  value: number;
+  value: number | bigint;
 };
 
