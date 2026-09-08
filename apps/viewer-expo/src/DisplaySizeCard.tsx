@@ -35,10 +35,15 @@ export interface DisplaySizeCardProps {
     height: number,
     fps: number,
   ) => Promise<boolean>;
-  /** Currently applied XR window ratio preset id, when known. */
+  /** Currently applied XR window ratio preset id for this stream, when known. */
   windowRatio?: WindowAspectRatioPresetId | null;
-  /** Selects an XR window ratio preset; failures are ignored upstream. */
-  onSelectWindowRatio?: (presetId: WindowAspectRatioPresetId) => void;
+  /**
+   * Selects an XR window ratio preset for this stream; failures are ignored
+   * upstream. 비-XR 기기는 aspectSupported=false로 비율 행 자체를 숨긴다.
+   */
+  onSelectWindowRatio?: (presetId: WindowAspectRatioPresetId, stream: ActiveStream) => void;
+  /** XR 창 비율 프리셋 지원 여부. false면 비율 행을 숨긴다(기본 true). */
+  aspectSupported?: boolean;
 }
 
 const MIN_WIDTH = 640;
@@ -115,6 +120,7 @@ export function DisplaySizeCard({
   onResizeSession,
   windowRatio = null,
   onSelectWindowRatio,
+  aspectSupported = true,
 }: DisplaySizeCardProps) {
   const [customWidth, setCustomWidth] = useState("");
   const [customHeight, setCustomHeight] = useState("");
@@ -233,29 +239,31 @@ export function DisplaySizeCard({
         ))}
       </View>
 
-      <View style={{ gap: 4 }}>
-        <Text
-          style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
-        >
-          {t.viewer.aspectTitle}
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          {t.viewer.aspectHint}
-        </Text>
-        <View style={styles.presetRow}>
-          {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (
-            <PresetButton
-              key={preset.id}
-              label={preset.label}
-              detail={preset.ratio < 1 ? t.viewer.aspectPortrait : t.viewer.aspectLandscape}
-              active={windowRatio === preset.id}
-              disabled={resizing || !onSelectWindowRatio}
-              colors={colors}
-              onPress={() => onSelectWindowRatio?.(preset.id)}
-            />
-          ))}
+      {aspectSupported ? (
+        <View style={{ gap: 4 }}>
+          <Text
+            style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
+          >
+            {t.viewer.aspectTitle}
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
+            {t.viewer.aspectHint}
+          </Text>
+          <View style={styles.presetRow}>
+            {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (
+              <PresetButton
+                key={preset.id}
+                label={preset.label}
+                detail={preset.ratio < 1 ? t.viewer.aspectPortrait : t.viewer.aspectLandscape}
+                active={windowRatio === preset.id}
+                disabled={resizing || !onSelectWindowRatio}
+                colors={colors}
+                onPress={() => onSelectWindowRatio?.(preset.id, stream)}
+              />
+            ))}
+          </View>
         </View>
-      </View>
+      ) : null}
 
       <View style={styles.inputRow}>
         <TextInput

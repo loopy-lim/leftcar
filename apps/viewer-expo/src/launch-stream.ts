@@ -67,6 +67,12 @@ export interface StreamLauncher {
    * 호출부는 best-effort로 이를 무시한다.
    */
   setWindowAspectRatio?(instanceId: string, ratio: number): Promise<void>;
+  /**
+   * XR 창 비율 프리셋 지원 여부. StreamActivity의 XR 검사와 같은 시스템
+   * 피처를 본다. 구버전 네이티브 모듈엔 없을 수 있고, 호출부는 그 경우
+   * 기존처럼 비율 행을 보여 준다.
+   */
+  isXrWindowRatioSupported?(): Promise<boolean>;
 }
 
 export interface StartStreamArgs {

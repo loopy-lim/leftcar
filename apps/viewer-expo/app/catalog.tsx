@@ -641,7 +641,8 @@ function CatalogFooter({
   onStop,
   resizingSession,
   onResizeSession,
-  windowRatio,
+  windowRatios,
+  aspectSupported,
   onSelectWindowRatio,
   styles,
   colors,
@@ -650,15 +651,19 @@ function CatalogFooter({
   onStop: (stream: ActiveStream) => void;
   resizingSession: number | null;
   onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
-  windowRatio: React.ComponentProps<typeof DisplaySizeCard>["windowRatio"];
+  windowRatios: Record<
+    number,
+    NonNullable<React.ComponentProps<typeof DisplaySizeCard>["windowRatio"]>
+  >;
+  aspectSupported: boolean | null;
   onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
 }) {
   const { t } = useAppLanguage();
   if (streams.length === 0) return null;
-  // The card drives the first active stream.
-  const primaryStream = streams[0];
+  // 스트림마다 자신의 크기 카드를 가진다 — 멀티 스트림에서 첫 창만 크기를
+  // 바꿀 수 있던 비대칭을 없앤다.
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
@@ -670,14 +675,18 @@ function CatalogFooter({
       {streams.map((stream) => (
         <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} styles={styles} />
       ))}
-      <DisplaySizeCard
-        stream={primaryStream}
-        resizing={resizingSession === primaryStream.session}
-        onResizeSession={onResizeSession}
-        windowRatio={windowRatio}
-        onSelectWindowRatio={onSelectWindowRatio}
-        colors={colors}
-      />
+      {streams.map((stream) => (
+        <DisplaySizeCard
+          key={`size-${stream.session}`}
+          stream={stream}
+          resizing={resizingSession === stream.session}
+          onResizeSession={onResizeSession}
+          windowRatio={windowRatios[stream.session] ?? null}
+          onSelectWindowRatio={onSelectWindowRatio}
+          aspectSupported={aspectSupported !== false}
+          colors={colors}
+        />
+      ))}
     </View>
   );
 }
@@ -761,7 +770,8 @@ export default function Catalog() {
             onStop={model.stopStream}
             resizingSession={model.resizingSession}
             onResizeSession={model.handleResizeSession}
-            windowRatio={model.windowRatio}
+            windowRatios={model.windowRatios}
+            aspectSupported={model.aspectSupported}
             onSelectWindowRatio={model.handleSelectWindowAspectRatio}
             styles={styles}
             colors={colors}

@@ -343,6 +343,23 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * 이 기기가 XR 창 비율 프리셋을 지원하는지 — StreamActivity가 쓰는 것과
+     * 같은 시스템 피처를 본다. 비-XR 기기 카탈로그에서 비율 프리셋 행을
+     * 숨기기 위한 정적 프로브다.
+     */
+    @ReactMethod
+    fun isXrWindowRatioSupported(promise: Promise) {
+        promise.resolve(
+            try {
+                reactApplicationContext.packageManager
+                    .hasSystemFeature("android.software.xr.api.spatial")
+            } catch (t: Throwable) {
+                false
+            },
+        )
+    }
+
     private fun launchStreamIntent(
         instanceId: String,
         target: StreamOwnership,
