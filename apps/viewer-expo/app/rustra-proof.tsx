@@ -4,9 +4,10 @@ import { initializeRustra } from "../src/rustra";
 import { GENERATED_CONTRACT_HASH } from "../generated/contract";
 
 /**
- * Temporary device-proof route for the Rustra 0.8 migration (E9).
+ * Device-proof route for the Rustra bridge (E9).
  * Invokes the generated JSI bridge end to end and renders the result.
- * Not linked from app navigation; reached via deep link only.
+ * Not linked from app navigation; reached via deep link only
+ * (`leftcar://rustra-proof`) — see CONTRIBUTING.md "Rustra 코드젠".
  */
 export default function RustraProofScreen() {
   const [result, setResult] = useState<string>("pending");

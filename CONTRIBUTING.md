@@ -38,6 +38,7 @@ cd apps/viewer-expo && bunx --package @rustra/cli@0.8.0 rustra codegen --config 
 
 - CLI 버전은 Rust crate 핀(docs/10-references.md)과 같은 라인으로 맞춘다.
 - CLI 실행 직후 `apps/viewer-expo/package.json`에 `workspaces: ["modules/rustra-bridge"]`가 다시 생기면 제거한다 — 루트 workspace가 `apps/*/modules/*`를 이미 커버하며, 이 키가 남으면 react-doctor가 viewer-expo를 모노레포 루트로 오판한다.
+- 브리지 실기기 증명(E9): metro 띄우고(`bunx expo start --dev-client --port 8082` + `adb reverse tcp:8081 tcp:8082`) 앱 설치·실행 뒤 딥링크 `leftcar://rustra-proof`로 진입하면 `addNumbers(20,22)=42`와 계약 해시가 화면에 렌더링된다.
 
 ## PR 규칙
 
