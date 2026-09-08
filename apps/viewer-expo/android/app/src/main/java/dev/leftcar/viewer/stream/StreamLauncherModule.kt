@@ -214,6 +214,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         showFps: Boolean?,
         localCursor: Boolean?,
         language: String?,
+        localAudio: Boolean?,
         promise: Promise,
     ) {
         ViewerStrings.applyLanguage(language)
@@ -250,7 +251,8 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("splitDecoderName", decoderName)
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: false)
-                putExtra("localCursor", localCursor ?: false)
+                putExtra("localCursor", localCursor ?: true)
+                putExtra("localAudio", localAudio ?: true)
                 putExtra("language", language ?: "ko")
                 // A recovery reuses the existing document task and port. The
                 // Activity keeps its Surface and swaps only the native
@@ -298,6 +300,23 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun setAudioStream(instanceId: String, enabled: Boolean, promise: Promise) {
+        val target = liveStreams[instanceId]
+        if (target == null) {
+            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
+            return
+        }
+        launchStreamIntent(instanceId, target) { intent ->
+            intent.putExtra("localAudio", enabled)
+        }
+        try {
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("ERR_AUDIO_TOGGLE", t.message, t)
+        }
+    }
+
     /**
      * 활성 StreamActivity 창에 XR 비율 프리셋을 전달한다. 컴퓨터 화면
      * 해상도는 변경하지 않는다 — 이 값은 SpatialWindow 비율에만 쓰인다.
@@ -322,6 +341,23 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         } catch (t: Throwable) {
             promise.reject("ERR_WINDOW_ASPECT_RATIO", t.message, t)
         }
+    }
+
+    /**
+     * 이 기기가 XR 창 비율 프리셋을 지원하는지 — StreamActivity가 쓰는 것과
+     * 같은 시스템 피처를 본다. 비-XR 기기 카탈로그에서 비율 프리셋 행을
+     * 숨기기 위한 정적 프로브다.
+     */
+    @ReactMethod
+    fun isXrWindowRatioSupported(promise: Promise) {
+        promise.resolve(
+            try {
+                reactApplicationContext.packageManager
+                    .hasSystemFeature("android.software.xr.api.spatial")
+            } catch (t: Throwable) {
+                false
+            },
+        )
     }
 
     private fun launchStreamIntent(

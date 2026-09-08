@@ -8,7 +8,7 @@
 
 use base64::Engine as _;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -38,6 +38,14 @@ struct Inner {
     /// PairingService — its copy is the only one, zeroized on approve/cancel;
     /// the QR payload already carries the base64url form for the viewer).
     live_offers: std::collections::HashSet<String>,
+    /// QR 시크릿을 제시했지만 Mac 사용자의 허용을 기다리는 요청.
+    pending: HashMap<String, PendingPairing>,
+    /// 승인이 끝나고 뷰어 폴링이 픽업할 토큰. 픽업 요청이 같은 시크릿의
+    /// 소지자임을 다시 증명하도록 사본을 함께 보관한다.
+    completed: HashMap<String, CompletedPairing>,
+    /// Mac 사용자가 명시적으로 거절한 offer. 폴링에 "거절됨"을 알리기 위해
+    /// 다음 offer 생성까지 보관한다.
+    rejected: HashSet<String>,
 }
 
 pub struct PairingServer {
@@ -69,7 +77,31 @@ pub struct PairingSessionView {
     pub expires_in_secs: u64,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// QR 시크릿을 제시했지만 아직 Mac 사용자의 허용을 기다리는 요청.
+#[derive(Clone)]
+pub struct PendingPairing {
+    pub device_id: String,
+    pub device_name: String,
+    pub requested_at: String,
+    requested_at_instant: Instant,
+}
+
+/// 웹뷰 승인 카드에 필요한 최소 정보.
+#[derive(serde::Serialize, Clone)]
+pub struct PendingPairingView {
+    pub offer_id: String,
+    pub device_name: String,
+    pub requested_at: String,
+}
+
+/// 승인 완료 후 뷰어 폴링이 픽업하는 레코드. 메모리에만 살고 다음 offer가
+/// 만들어지면 지워진다.
+struct CompletedPairing {
+    token: String,
+    secret: session::OfferSecret,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PairingServerError {
     #[error("pairing failed")]
     PairingFailed,
@@ -77,6 +109,13 @@ pub enum PairingServerError {
     OfferNotFound,
     #[error("persistence failed")]
     PersistenceFailed,
+    /// 시크릿은 맞지만 Mac 사용자의 허용이 아직 없다. 오류가 아니라 폴링
+    /// 축이 해석하는 상태 신호다.
+    #[error("pairing pending approval")]
+    Pending,
+    /// Mac 사용자가 명시적으로 거절했다.
+    #[error("pairing rejected")]
+    Rejected,
 }
 
 // -- Implementation -----------------------------------------------------------
@@ -99,6 +138,9 @@ impl PairingServer {
                 fail_counts: HashMap::new(),
                 paired,
                 live_offers: std::collections::HashSet::new(),
+                pending: HashMap::new(),
+                completed: HashMap::new(),
+                rejected: HashSet::new(),
             }),
             store_path,
         }
@@ -121,6 +163,10 @@ impl PairingServer {
             inner.service.cancel(&offer_id);
         }
         inner.fail_counts.clear();
+        // 새 QR은 이전 offer의 승인 대기·완료·거절 기록도 모두 무효화한다.
+        inner.pending.clear();
+        inner.completed.clear();
+        inner.rejected.clear();
 
         let fingerprint = inner.fingerprint.clone();
         let offer = inner.service.begin_offer(fingerprint);
@@ -154,6 +200,9 @@ impl PairingServer {
     /// 32-byte hex token, persist the device. Failures deliberately report a
     /// single generic message — an attacker must not learn which factor was
     /// wrong. Three failed attempts burn the offer.
+    ///
+    /// `code`가 비어 있으면 승인 기반 경로다: 시크릿 소지만 증명하고 Mac
+    /// 사용자의 [허용]을 기다린다([PairingServer::approve_pending]).
     pub fn pair(
         &self,
         offer_id: &str,
@@ -163,6 +212,10 @@ impl PairingServer {
         name: &str,
     ) -> Result<String, PairingServerError> {
         let mut inner = self.inner.lock().unwrap();
+
+        if code.is_empty() {
+            return Self::pair_awaiting_approval(&mut inner, offer_id, secret_b64url, device_id, name);
+        }
 
         if !inner.live_offers.contains(offer_id) {
             return Err(PairingServerError::OfferNotFound);
@@ -281,6 +334,141 @@ impl PairingServer {
         }
     }
 
+    /// 승인 기반 페어링의 뷰어 측 폴링. 시크릿 소지를 증명하면 대기 요청을
+    /// 등록하고 `Pending`을 돌려준다. Mac 사용자가 허용하면 완료 레코드의
+    /// 토큰을, 거절하면 `Rejected`를 돌려준다.
+    ///
+    /// docs §7.3의 "QR 스캔만으로 승인하지 않는다"는 규칙을 지킨다 — 시크릿
+    /// 제시는 요청 등록일 뿐이고 승인은 Host 화면의 허용 행동이다.
+    fn pair_awaiting_approval(
+        inner: &mut Inner,
+        offer_id: &str,
+        secret_b64url: &str,
+        device_id: &str,
+        name: &str,
+    ) -> Result<String, PairingServerError> {
+        if inner.rejected.contains(offer_id) {
+            return Err(PairingServerError::Rejected);
+        }
+        let decoded: Vec<u8> = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(secret_b64url)
+            .map_err(|_| PairingServerError::PairingFailed)?;
+        let Ok(proof) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+            return Err(PairingServerError::PairingFailed);
+        };
+        if let Some(record) = inner.completed.get(offer_id) {
+            if session::constant_time_eq(&record.secret.0, &proof) {
+                return Ok(record.token.clone());
+            }
+            return Err(PairingServerError::PairingFailed);
+        }
+        if !inner.live_offers.contains(offer_id) {
+            return Err(PairingServerError::OfferNotFound);
+        }
+        let expected = inner
+            .service
+            .take_secret_for_qr(offer_id)
+            .ok_or(PairingServerError::PairingFailed)?;
+        if !session::constant_time_eq(&expected.0, &proof) {
+            let count = inner.fail_counts.entry(offer_id.to_owned()).or_insert(0);
+            *count += 1;
+            if *count >= 3 {
+                inner.service.cancel(offer_id);
+                inner.live_offers.remove(offer_id);
+                inner.fail_counts.remove(offer_id);
+            }
+            return Err(PairingServerError::PairingFailed);
+        }
+        inner.pending.insert(
+            offer_id.to_owned(),
+            PendingPairing {
+                device_id: device_id.to_owned(),
+                device_name: truncate_label(name),
+                requested_at: unix_timestamp_utc(),
+                requested_at_instant: Instant::now(),
+            },
+        );
+        Err(PairingServerError::Pending)
+    }
+
+    /// Mac 사용자가 승인 카드에서 [허용]을 눌렀다. 대기 요청을 실제 페어링으로
+    /// 바꾸고 토큰을 완료 레코드에 올려 뷰어 폴링이 픽업하게 한다.
+    pub fn approve_pending(&self, offer_id: &str) -> Result<(), PairingServerError> {
+        let mut inner = self.inner.lock().unwrap();
+        prune_stale_requests(&mut inner);
+        let request = inner
+            .pending
+            .remove(offer_id)
+            .ok_or(PairingServerError::OfferNotFound)?;
+        let Some(secret) = inner.service.take_secret_for_qr(offer_id) else {
+            return Err(PairingServerError::PairingFailed);
+        };
+        let Some(code) = inner.service.offer_code(offer_id) else {
+            return Err(PairingServerError::PairingFailed);
+        };
+        let device = domain::ids::DeviceId::from_raw(&request.device_id)
+            .map_err(|_| PairingServerError::PairingFailed)?;
+        // 승인은 6자리 코드 대신 Host 사용자의 행동이므로, 코드 인자에는
+        // offer 자신의 코드를 되돌려 준다(항상 일치).
+        match inner.service.approve(offer_id, device, &secret.0, &code) {
+            Ok(_device) => {
+                let token = session::OfferSecret::from_random();
+                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+                let paired = PairedDevice {
+                    device_id: request.device_id,
+                    name: request.device_name,
+                    token_hex: token_hex.clone(),
+                    paired_at: unix_timestamp_utc(),
+                };
+                inner.paired.retain(|d| {
+                    d.device_id != paired.device_id
+                        && (paired.name.is_empty() || d.name != paired.name)
+                });
+                inner.paired.push(paired);
+                if self.persist(inner.paired.clone()).is_err() {
+                    eprintln!("leftcar: paired-device persistence failed");
+                }
+                inner.completed.insert(
+                    offer_id.to_owned(),
+                    CompletedPairing {
+                        token: token_hex,
+                        secret,
+                    },
+                );
+                Ok(())
+            }
+            Err(_) => Err(PairingServerError::PairingFailed),
+        }
+    }
+
+    /// Mac 사용자가 [거절]을 눌렀다. offer를 소각하고 폴링에 거절을 알린다.
+    pub fn reject_pending(&self, offer_id: &str) -> Result<(), PairingServerError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .pending
+            .remove(offer_id)
+            .ok_or(PairingServerError::OfferNotFound)?;
+        inner.service.cancel(offer_id);
+        inner.live_offers.remove(offer_id);
+        inner.rejected.insert(offer_id.to_owned());
+        Ok(())
+    }
+
+    /// 승인 카드 목록(웹뷰 폴링용). 만료된 대기 요청은 잘라낸다.
+    pub fn list_pending_views(&self) -> Vec<PendingPairingView> {
+        let mut inner = self.inner.lock().unwrap();
+        prune_stale_requests(&mut inner);
+        inner
+            .pending
+            .iter()
+            .map(|(offer_id, request)| PendingPairingView {
+                offer_id: offer_id.clone(),
+                device_name: request.device_name.clone(),
+                requested_at: request.requested_at.clone(),
+            })
+            .collect()
+    }
+
     /// Constant-time token check against every stored token. False when no
     /// devices are paired.
     pub fn authorize(&self, token_hex: &str) -> bool {
@@ -306,12 +494,18 @@ impl PairingServer {
             inner.service.cancel(&offer_id);
         }
         inner.fail_counts.clear();
+        inner.pending.clear();
+        inner.completed.clear();
+        inner.rejected.clear();
     }
 
     /// Remove a device and its token; persists the change. False when the
     /// device was not paired.
     pub fn revoke(&self, device_id: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
+        // 철회된 기기가 미픽업 승인 토큰으로 되짚어 들어오지 않게 한다.
+        inner.completed.clear();
+        inner.pending.clear();
         let before = inner.paired.len();
         inner.paired.retain(|d| d.device_id != device_id);
         let removed = inner.paired.len() != before;
@@ -328,6 +522,8 @@ impl PairingServer {
         let mut inner = self.inner.lock().unwrap();
         let count = inner.paired.len();
         inner.paired.clear();
+        inner.completed.clear();
+        inner.pending.clear();
         if let Err(e) = self.persist(Vec::new()) {
             eprintln!("leftcar: persist after revoke_all failed: {e}");
         }
@@ -421,6 +617,21 @@ fn unix_timestamp_utc() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("unix:{secs}")
+}
+
+/// 승인 카드에 표시할 기기 이름은 뷰어가 보낸 임의 문자열이므로 길이를
+/// 제한한다(문자 단위 절단, UI 폭 붕괴 방지).
+fn truncate_label(name: &str) -> String {
+    name.chars().take(40).collect()
+}
+
+/// offer TTL + 픽업 여유를 넘긴 대기 요청은 승인 카드에서도, 승인 시에도
+/// 유효하지 않다.
+fn prune_stale_requests(inner: &mut Inner) {
+    let ttl = session::PAIRING_TTL + Duration::from_secs(60);
+    inner
+        .pending
+        .retain(|_, request| request.requested_at_instant.elapsed() < ttl);
 }
 
 fn load_devices(path: &std::path::Path) -> Option<Vec<PairedDevice>> {
@@ -731,5 +942,140 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600, "store must be 0600, got {:o}", mode);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -- 승인 기반 QR 페어링 (시크릿 제시 → Mac 허용 → 폴링 픽업) --------
+
+    fn begin_offer_parts(server: &PairingServer) -> (String, String, String) {
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+        (
+            payload["id"].as_str().unwrap().to_owned(),
+            payload["s"].as_str().unwrap().to_owned(),
+            view.code,
+        )
+    }
+
+    #[test]
+    fn approval_pairing_waits_pending_then_approves_and_pickup_issues_token() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+
+        // 첫 제시: 아직 Mac 승인 전 — Pending 상태 신호.
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+        // 아직 기기가 생기지 않는다.
+        assert!(server.list_devices().is_empty());
+        // 승인 카드에 대기 요청이 보인다.
+        let pending = server.list_pending_views();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].device_name, "Galaxy XR");
+        assert_eq!(pending[0].offer_id, offer_id);
+        assert!(pending[0].device_name.len() <= 40);
+
+        // Mac 사용자가 허용.
+        server.approve_pending(&offer_id).unwrap();
+        // 기기는 즉시 등록되지만 토큰 픽업은 뷰어 폴링이 한다.
+        let devices = server.list_devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "viewer-1");
+
+        // 같은 시크릿으로 폴링하면 토큰을 픽업한다.
+        let token = server
+            .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        assert_eq!(token, server.list_devices()[0].token_hex);
+        // 다른 시크릿으로는 픽업할 수 없다.
+        let wrong = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
+        assert!(server.pair(&offer_id, &wrong, "", "viewer-1", "x").is_err());
+    }
+
+    #[test]
+    fn approval_pairing_rejection_tells_the_poller() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+        server.reject_pending(&offer_id).unwrap();
+        assert!(server.list_pending_views().is_empty());
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Rejected)
+        ));
+        assert!(server.list_devices().is_empty());
+    }
+
+    #[test]
+    fn approval_pairing_rejects_without_a_pending_request() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
+        assert_eq!(
+            server.approve_pending(&offer_id).unwrap_err(),
+            PairingServerError::OfferNotFound
+        );
+        assert_eq!(
+            server.reject_pending(&offer_id).unwrap_err(),
+            PairingServerError::OfferNotFound
+        );
+    }
+
+    #[test]
+    fn approval_pending_polls_do_not_burn_the_offer() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+
+        // 승인 대기 폴링은 실패 횟수를 올리지 않는다 — 5번 넘게 반복해도.
+        for _ in 0..5 {
+            assert!(matches!(
+                server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+                Err(PairingServerError::Pending)
+            ));
+        }
+        server.approve_pending(&offer_id).unwrap();
+        assert!(server
+            .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
+            .is_ok());
+    }
+
+    #[test]
+    fn wrong_secret_polls_still_burn_the_offer_after_three_tries() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
+        let wrong = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
+
+        for _ in 0..3 {
+            assert!(matches!(
+                server.pair(&offer_id, &wrong, "", "viewer-1", "Galaxy XR"),
+                Err(PairingServerError::PairingFailed)
+            ));
+        }
+        // 정확한 시크릿으로도 소각된 offer에는 승인 대기를 등록할 수 없다.
+        let (_id2, secret_b64, code) = begin_offer_parts(&server); // 새 QR로 갱신됨
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::OfferNotFound)
+        ));
+        let _ = code;
+    }
+
+    #[test]
+    fn new_begin_pairing_invalidates_outstanding_approvals() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+
+        begin_offer_parts(&server); // Mac에서 QR 재생성
+
+        assert!(server.list_pending_views().is_empty());
+        assert!(server.approve_pending(&offer_id).is_err());
     }
 }

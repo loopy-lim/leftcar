@@ -27,16 +27,28 @@ vi.mock("expo-secure-store", () => {
 const requestMock = vi.fn();
 const closeMock = vi.fn();
 
-vi.mock("./control", () => ({
-  connect: vi.fn(async () => ({
-    request: requestMock,
-    close: closeMock,
-  })),
-  isUnauthorizedError: vi.fn(
-    (e: unknown) =>
-      e instanceof Error && e.name === "ControlRequestError" && e.message.includes("unauthorized"),
-  ),
-}));
+vi.mock("./control", () => {
+  class ControlRequestError extends Error {
+    constructor(
+      message: string,
+      readonly kind: "remote" | "timeout" | "transport" | "unauthorized",
+    ) {
+      super(message);
+      this.name = "ControlRequestError";
+    }
+  }
+  return {
+    ControlRequestError,
+    connect: vi.fn(async () => ({
+      request: requestMock,
+      close: closeMock,
+    })),
+    isUnauthorizedError: vi.fn(
+      (e: unknown) =>
+        e instanceof Error && e.name === "ControlRequestError" && e.message.includes("unauthorized"),
+    ),
+  };
+});
 
 import * as SecureStore from "expo-secure-store";
 import { connect } from "./control";
@@ -47,7 +59,10 @@ import {
   getDeviceId,
   getStoredToken,
   isTrustedHost,
+  isPairingRejectedError,
+  isPairingUnsupportedError,
   pairWithHost,
+  pairWithHostApproval,
   pairWithHostByCode,
   formatHostEndpoint,
   parseHostEndpoint,
@@ -265,5 +280,83 @@ describe("deviceName", () => {
     const name = deviceName();
     expect(typeof name).toBe("string");
     expect(name.length).toBeGreaterThan(0);
+  });
+});
+
+describe("approval-based QR pairing", () => {
+  it("polls pending until the host completes approval, then stores the token", async () => {
+    requestMock
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ token: TOKEN_64HEX });
+
+    const onPending = vi.fn();
+    const result = await pairWithHostApproval(makePayload(), { pollMs: 1, onPending });
+
+    expect(result).toEqual({ kind: "approved", token: TOKEN_64HEX });
+    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(requestMock).toHaveBeenCalledTimes(3);
+    expect(onPending).toHaveBeenCalledTimes(2);
+    // 코드는 비워 보낸다 — 승인은 Mac 사용자의 몫이다.
+    expect(requestMock).toHaveBeenLastCalledWith("pair", {
+      offerId: OFFER_ID,
+      secret: OFFER_SECRET,
+      code: "",
+      deviceId: expect.any(String),
+      deviceName: "Android 뷰어 테스트",
+    });
+  });
+
+  it("returns rejected when the host reports an explicit denial", async () => {
+    const { ControlRequestError } = (await import("./control")) as {
+      ControlRequestError: new (message: string, kind: string) => Error;
+    };
+    requestMock.mockRejectedValue(new ControlRequestError("pairing rejected", "remote"));
+
+    const result = await pairWithHostApproval(makePayload(), { pollMs: 1 });
+
+    expect(result).toEqual({ kind: "rejected" });
+    expect(store.get("leftcar.token")).toBeUndefined();
+  });
+
+  it("keeps polling through an individual request timeout", async () => {
+    const { ControlRequestError } = (await import("./control")) as {
+      ControlRequestError: new (message: string, kind: string) => Error;
+    };
+    requestMock
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockRejectedValueOnce(new ControlRequestError("control request timeout: pair", "timeout"))
+      .mockResolvedValueOnce({ token: TOKEN_64HEX });
+
+    const result = await pairWithHostApproval(makePayload(), { pollMs: 1 });
+
+    expect(result).toEqual({ kind: "approved", token: TOKEN_64HEX });
+    expect(requestMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("surfaces old-host pairing failures so the caller can fall back to the PIN entry", async () => {
+    const { ControlRequestError } = (await import("./control")) as {
+      ControlRequestError: new (message: string, kind: string) => Error;
+    };
+    requestMock.mockRejectedValue(new ControlRequestError("pairing failed", "remote"));
+
+    await expect(
+      pairWithHostApproval(makePayload(), { pollMs: 1 }),
+    ).rejects.toMatchObject({ message: "pairing failed" });
+    expect(isPairingUnsupportedError(new Error("pairing failed"))).toBe(true);
+    expect(isPairingUnsupportedError(new Error("pairing rejected"))).toBe(false);
+  });
+
+  it("times out when approval never arrives", async () => {
+    requestMock.mockResolvedValue({ status: "pending" });
+
+    await expect(
+      pairWithHostApproval(makePayload(), { pollMs: 1, timeoutMs: 30 }),
+    ).rejects.toMatchObject({ message: "leftcar:errPairingApprovalTimeout" });
+  });
+
+  it("classifies rejection errors for the caller", () => {
+    expect(isPairingRejectedError(new Error("pairing rejected"))).toBe(true);
+    expect(isPairingRejectedError(new Error("pairing failed"))).toBe(false);
   });
 });

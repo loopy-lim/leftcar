@@ -1,6 +1,6 @@
 import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
-import { connect } from "./control";
+import { connect, ControlRequestError } from "./control";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
 
@@ -228,4 +228,95 @@ export async function pairWithHostByCode(
   } finally {
     client.close();
   }
+}
+
+// -- 승인 기반 QR 페어링 ------------------------------------------------------
+//
+// QR 시크릿만 제시하고 Mac 사용자가 [허용]을 누를 때까지 폴링한다. Host는
+// 시크릿이 맞으면 {status:"pending"}으로 답하고, 승인 후 같은 시크릿으로
+// 폴링하면 토큰을 돌려준다. 거절은 "pairing rejected" 오류로 온다.
+
+export type PairingApprovalResult =
+  | { kind: "approved"; token: string }
+  | { kind: "rejected" };
+
+export const PAIRING_APPROVAL_TIMEOUT_MS = 150_000;
+
+/** 구버전 호스트는 코드 없는 pair을 "pairing failed"로 거절한다 — PIN 폴백 신호. */
+export function isPairingUnsupportedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /pairing failed/i.test(message);
+}
+
+export function isPairingRejectedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /pairing rejected/i.test(message);
+}
+
+/**
+ * QR 스캔 한 번으로 페어링을 완결하는 승인 폴링. pending 동안 2.5초 간격으로
+ * 같은 요청을 재전송한다(멱등 — 호스트는 매번 시크릿을 상수 시간 비교로
+ * 검증하고, 대기 폴링은 offer를 소각하지 않는다).
+ */
+export async function pairWithHostApproval(
+  p: QrPayload,
+  options: {
+    pollMs?: number;
+    timeoutMs?: number;
+    onPending?: () => void;
+  } = {},
+): Promise<PairingApprovalResult> {
+  if (!isTrustedHost(p.host)) {
+    throw new LocalizedError("trustedHostError");
+  }
+  const pollMs = options.pollMs ?? 2_500;
+  const deadline = Date.now() + (options.timeoutMs ?? PAIRING_APPROVAL_TIMEOUT_MS);
+  const args = {
+    offerId: p.id,
+    secret: p.secret,
+    code: "",
+    deviceId: await getDeviceId(),
+    deviceName: deviceName(),
+  };
+
+  while (Date.now() < deadline) {
+    const client = await connect(p.host, p.port);
+    try {
+      const response = await client.request<{ token?: string; status?: string }>(
+        "pair",
+        args,
+      );
+      if (typeof response.token === "string") {
+        if (!/^[0-9a-f]{64}$/.test(response.token)) {
+          throw new LocalizedError("errPairingResponseInvalid");
+        }
+        await SecureStore.setItemAsync(TOKEN_KEY, response.token);
+        return { kind: "approved", token: response.token };
+      }
+      if (response.status === "pending") {
+        options.onPending?.();
+        await delay(pollMs);
+        continue;
+      }
+      throw new LocalizedError("errPairingResponseInvalid");
+    } catch (e) {
+      if (isPairingRejectedError(e)) {
+        return { kind: "rejected" };
+      }
+      // 개별 요청 타임아웃은 흐름을 죽이지 않는다 — 호스트가 한 순간
+      // 바빠도 다음 폴링이 상태를 회수한다.
+      if (e instanceof ControlRequestError && e.kind === "timeout") {
+        await delay(pollMs);
+        continue;
+      }
+      throw e;
+    } finally {
+      client.close();
+    }
+  }
+  throw new LocalizedError("errPairingApprovalTimeout");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

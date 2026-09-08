@@ -83,8 +83,32 @@ export function useCatalogModel() {
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [resizingSession, setResizingSession] = useState<number | null>(null);
-  const [windowRatio, setWindowRatio] =
-    useState<WindowAspectRatioPresetId | null>(null);
+  // 스트림 세션별 XR 창 비율 선택 — 멀티 스트림에서 카드가 각자 활성
+  // 상태를 표시할 수 있게 한다.
+  const [windowRatios, setWindowRatios] = useState<
+    Record<number, WindowAspectRatioPresetId>
+  >({});
+  // null = 프로브 불가(구버전 네이티브) — 기존처럼 비율 행을 보여 준다.
+  const [aspectSupported, setAspectSupported] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!launcher?.isXrWindowRatioSupported) {
+      setAspectSupported(null);
+      return;
+    }
+    let active = true;
+    launcher
+      .isXrWindowRatioSupported()
+      .then((supported) => {
+        if (active) setAspectSupported(Boolean(supported));
+      })
+      .catch(() => {
+        if (active) setAspectSupported(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const [preferences, setPreferences] = useState<ViewerPreferences>(
     DEFAULT_VIEWER_PREFERENCES,
   );
@@ -251,6 +275,7 @@ export function useCatalogModel() {
           udpStability: active.udpStability,
           showFps: active.showFps ?? preferences.showFps,
           localCursor: active.localCursor ?? preferences.localCursor,
+          localAudio: active.localAudio ?? preferences.localAudio,
         },
       });
       return {
@@ -262,7 +287,14 @@ export function useCatalogModel() {
         qualityState: active.qualityState,
       };
     },
-    [catalogQuery.data, host, preferences.showFps, preferences.localCursor, refetchCatalog],
+    [
+      catalogQuery.data,
+      host,
+      preferences.showFps,
+      preferences.localCursor,
+      preferences.localAudio,
+      refetchCatalog,
+    ],
   );
 
   const reconfigureActiveStream = useCallback(
@@ -295,7 +327,7 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor, updateLocalAudio } =
     useStreamController(restoreActiveStream, reconfigureActiveStream);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
@@ -327,6 +359,16 @@ export function useCatalogModel() {
     }
   }, [setError, streams, updateLocalCursor]);
 
+  const handleToggleAudio = useCallback((localAudio: boolean) => {
+    setPreferences((current) => ({ ...current, localAudio }));
+    updateLocalAudio(localAudio);
+    if (launcher?.setAudioStream) {
+      void Promise.all(
+        streams.map((stream) => launcher.setAudioStream?.(`src-${stream.port}`, localAudio)),
+      ).catch(() => setError(currentTranslation().viewer.errAudioUpdate));
+    }
+  }, [setError, streams, updateLocalAudio]);
+
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
       setEncoderExperiment(id);
@@ -337,25 +379,32 @@ export function useCatalogModel() {
   /**
    * XR 창 비율 프리셋 선택. 네이티브 setWindowAspectRatio가 활성
    * StreamActivity에 비율을 전달하고, 컴퓨터 화면 해상도는 그대로 둔다.
-   * XR이 아닌 기기에서는 네이티브 호출이 실패하므로 조용히 무시하고 선택을
-   * 되돌린다 — 카드는 어떤 기기에서도 비율 행을 노출한다.
+   * 선택은 세션별로 기록한다. 비-XR 기기에서 네이티브 호출이 실패하면
+   * 조용히 이전 선택으로 되돌리고, 프로브가 지원 불가를 알리면 카드가
+   * 비율 행 자체를 숨긴다 — 눌렸다가 튕기는 버튼을 남기지 않는다.
    */
   const handleSelectWindowAspectRatio = useCallback(
-    (presetId: WindowAspectRatioPresetId) => {
+    (presetId: WindowAspectRatioPresetId, stream: ActiveStream) => {
       const preset = WINDOW_ASPECT_RATIO_PRESETS.find((c) => c.id === presetId);
       if (!preset) return;
-      const active = streams[0];
-      if (!launcher?.setWindowAspectRatio || !active) {
-        setWindowRatio(presetId);
+      if (!launcher?.setWindowAspectRatio) {
+        setWindowRatios((current) => ({ ...current, [stream.session]: presetId }));
         return;
       }
-      const previous = windowRatio;
-      setWindowRatio(presetId);
+      const previous = windowRatios[stream.session] ?? null;
+      setWindowRatios((current) => ({ ...current, [stream.session]: presetId }));
       launcher
-        .setWindowAspectRatio(`src-${active.port}`, preset.ratio)
-        .catch(() => setWindowRatio(previous));
+        .setWindowAspectRatio(`src-${stream.port}`, preset.ratio)
+        .catch(() =>
+          setWindowRatios((current) => {
+            const next = { ...current };
+            if (previous === null) delete next[stream.session];
+            else next[stream.session] = previous;
+            return next;
+          }),
+        );
     },
-    [streams, windowRatio],
+    [windowRatios],
   );
 
   const handleSelectUdpStability = useCallback(
@@ -431,6 +480,7 @@ export function useCatalogModel() {
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
+            localAudio: preferences.localAudio,
           },
         });
         const acceptedTarget = {
@@ -461,6 +511,7 @@ export function useCatalogModel() {
           udpStability: started.udpStability,
           showFps: preferences.showFps,
           localCursor: preferences.localCursor,
+          localAudio: preferences.localAudio,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
           startedAt: Date.now(),
@@ -482,6 +533,7 @@ export function useCatalogModel() {
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
+      preferences.localAudio,
       selectedProfile,
       streamingPriority,
     ],
@@ -549,7 +601,8 @@ export function useCatalogModel() {
     handleSelectProfile,
     handleSelectUdpStability,
     handleSelectWindowAspectRatio,
-    windowRatio,
+    windowRatios,
+    aspectSupported,
     host,
     launchingIndex,
     loading,
@@ -565,10 +618,12 @@ export function useCatalogModel() {
     visibleError,
     handleToggleFps,
     handleToggleCursor,
+    handleToggleAudio,
     profileId: preferences.profileId,
     streamingPriority,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
+    localAudio: preferences.localAudio,
     resizingSession,
   };
 }

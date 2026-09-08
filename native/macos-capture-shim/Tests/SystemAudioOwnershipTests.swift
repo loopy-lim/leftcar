@@ -74,6 +74,27 @@ struct SystemAudioOwnershipTests {
             systemAudioOwnerHandle(candidates: [], viewerKey: headset) == nil
         )
 
+        // SNDON is the default state: an unmuted viewer's owner captures.
+        precondition(shouldCaptureSystemAudio(owner: true, viewerKey: headset))
+
+        // SNDOFF gates the plane even while the session still owns it.
+        setSystemAudioDeliveryEnabled(false, viewerKey: headset)
+        precondition(!systemAudioDeliveryEnabled(forKey: headset))
+        precondition(!shouldCaptureSystemAudio(owner: true, viewerKey: headset))
+        // The gate is per viewer: another device keeps its audio.
+        precondition(systemAudioDeliveryEnabled(forKey: tablet))
+        precondition(shouldCaptureSystemAudio(owner: true, viewerKey: tablet))
+
+        // Repeating SNDOFF stays muted (idempotent), and SNDON restores.
+        setSystemAudioDeliveryEnabled(false, viewerKey: headset)
+        precondition(!systemAudioDeliveryEnabled(forKey: headset))
+        setSystemAudioDeliveryEnabled(true, viewerKey: headset)
+        precondition(systemAudioDeliveryEnabled(forKey: headset))
+        precondition(shouldCaptureSystemAudio(owner: true, viewerKey: headset))
+        // Repeating SNDON stays enabled.
+        setSystemAudioDeliveryEnabled(true, viewerKey: headset)
+        precondition(systemAudioDeliveryEnabled(forKey: headset))
+
         print("SystemAudioOwnershipTests passed")
     }
 }

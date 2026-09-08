@@ -34,6 +34,47 @@ private func projectedCandidates(_ registry: [UInt32: CaptureSession]) -> [Syste
     }
 }
 
+/// Viewer keys whose audio plane is muted by an SNDOFF command. State is
+/// keyed by viewer (not session) because every session aimed at one device
+/// shares a single audio plane. The viewer re-asserts its request once per
+/// second, so a datagram lost after a toggle or a host restart heals without
+/// an ACK plane, and the set needs no expiry: a stale key is harmless while
+/// no live session carries it.
+private var systemAudioMutedKeys: Set<UInt32> = []
+private let systemAudioMuteLock = NSLock()
+
+/// Whether the viewer behind `key` still wants the system-audio plane.
+func systemAudioDeliveryEnabled(forKey key: UInt32) -> Bool {
+    systemAudioMuteLock.lock()
+    defer { systemAudioMuteLock.unlock() }
+    return !systemAudioMutedKeys.contains(key)
+}
+
+/// Viewer opt-in (SNDON) or opt-out (SNDOFF) of the system-audio plane,
+/// token-authenticated like IDR/BYE before dispatch. Every live session for
+/// that viewer re-applies its stream configuration: only the owner's
+/// `capturesAudio` matters, and updateConfiguration applies it live without
+/// a session restart.
+func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: UInt32) {
+    systemAudioMuteLock.lock()
+    let changed = enabled
+        ? systemAudioMutedKeys.remove(viewerKey) != nil
+        : systemAudioMutedKeys.insert(viewerKey).inserted
+    systemAudioMuteLock.unlock()
+    guard changed else { return }
+    NSLog("Leftcar system audio muted=%d viewerKey=%u", enabled ? 0 : 1, viewerKey)
+    let sessions = withRegistry { registry in
+        registry.values.filter { $0.viewerAddressKey == viewerKey }
+    }
+    sessions.forEach { $0.refreshSystemAudioCapture() }
+}
+
+/// True only while a session may capture: it must hold the viewer's audio
+/// plane and the viewer must not have muted it.
+func shouldCaptureSystemAudio(owner: Bool, viewerKey: UInt32) -> Bool {
+    owner && systemAudioDeliveryEnabled(forKey: viewerKey)
+}
+
 extension CaptureSession {
     /// Viewer identity for shared-resource arbitration. Sessions streaming
     /// different displays to the same device share one audio plane; sessions
@@ -66,12 +107,28 @@ extension CaptureSession {
         NSLog(
             "Leftcar system audio owner %@ capturesAudio=%d",
             targetLabel,
-            isSystemAudioOwner() ? 1 : 0
+            shouldCaptureSystemAudio(
+                owner: isSystemAudioOwner(),
+                viewerKey: viewerAddressKey
+            ) ? 1 : 0
         )
         stream?.updateConfiguration(
             streamConfiguration(showsCursor: captureEmbedsCursor()),
             completionHandler: nil
         )
+    }
+
+    /// SNDOFF mutes the audio plane; SNDON restores it. Any session aimed at
+    /// the viewer may carry the command — the toggle is per viewer, so the
+    /// session that owns the plane obeys even when a sibling display's
+    /// session received the datagram.
+    func handleSystemAudioCommand(_ command: Data) {
+        guard backend == .screenCaptureKit else { return }
+        if command == Data("SNDON".utf8) {
+            setSystemAudioDeliveryEnabled(true, viewerKey: viewerAddressKey)
+        } else if command == Data("SNDOFF".utf8) {
+            setSystemAudioDeliveryEnabled(false, viewerKey: viewerAddressKey)
+        }
     }
 }
 

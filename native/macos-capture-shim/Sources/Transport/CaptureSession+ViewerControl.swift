@@ -98,6 +98,12 @@ extension CaptureSession {
                 handleCursorStreamCommand(message, fd: fd, destination: source)
                 continue
             }
+            if message == Data("SNDON".utf8) || message == Data("SNDOFF".utf8) {
+                // Same token-authenticated command class; audio needs no
+                // reply address because it rides the existing media socket.
+                handleSystemAudioCommand(message)
+                continue
+            }
             if message.count == 16,
                message.prefix(4) == Data("LCP1".utf8) {
                 sendLatencyProbeResponse(message, fd: fd, destination: source)
@@ -176,6 +182,11 @@ extension CaptureSession {
                     || messageBytes == Array("LCDOFF".utf8) {
                     let message = Data(messageBytes)
                     handleCursorStreamCommand(message, fd: fd, destination: nil)
+                    continue
+                }
+                if messageBytes == Array("SNDON".utf8)
+                    || messageBytes == Array("SNDOFF".utf8) {
+                    handleSystemAudioCommand(Data(messageBytes))
                     continue
                 }
                 if messageBytes.count == 16,

@@ -421,6 +421,9 @@ export function useStreamController(
   const updateLocalCursor = useCallback((localCursor: boolean) => {
     updateStreams((previous) => previous.map((stream) => ({ ...stream, localCursor })));
   }, [updateStreams]);
+  const updateLocalAudio = useCallback((localAudio: boolean) => {
+    updateStreams((previous) => previous.map((stream) => ({ ...stream, localAudio })));
+  }, [updateStreams]);
   /** In-place state patch for one session (e.g. a user-driven resolution change). */
   const patchStream = useCallback((session: number, patch: (active: ActiveStream) => ActiveStream) => {
     updateStreams((previous) => previous.map((stream) => (stream.session === session ? patch(stream) : stream)));
@@ -484,5 +487,6 @@ export function useStreamController(
     streams,
     syncAdaptiveTarget,
     updateLocalCursor,
+    updateLocalAudio,
   };
 }

@@ -82,6 +82,9 @@ pub fn run() {
             force_stop_session,
             begin_pairing,
             cancel_pairing,
+            list_pending_pairings,
+            approve_pending_pairing,
+            reject_pending_pairing,
             list_paired_devices,
             revoke_device,
             revoke_paired_device,
@@ -379,6 +382,31 @@ fn begin_pairing(
 #[tauri::command]
 fn cancel_pairing(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) {
     state.cancel_active();
+}
+
+#[tauri::command]
+fn list_pending_pairings(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+) -> Vec<pairing::PendingPairingView> {
+    state.list_pending_views()
+}
+
+#[tauri::command]
+fn approve_pending_pairing(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    offer_id: String,
+) -> Result<(), String> {
+    state
+        .approve_pending(&offer_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reject_pending_pairing(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    offer_id: String,
+) -> Result<(), String> {
+    state.reject_pending(&offer_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::SingleRendererLaunch;
+use crate::audio_protocol::{audio_stream_command, SystemAudioDelivery};
 use crate::cursor_protocol::{cursor_stream_command, CursorStreamDelivery};
 
 pub(super) fn spawn(launch: SingleRendererLaunch) {
@@ -36,6 +37,25 @@ fn sync_cursor_stream(
     // socket error) to avoid a busy retry loop, then refresh periodically so
     // a datagram lost after send_to succeeds is eventually healed.
     let _ = send_viewer_command(socket, peer, cursor_stream_command(requested), token);
+    delivery.record_attempt(requested, now_us);
+}
+
+fn sync_audio_stream(
+    control: &RendererControl,
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    token: &[u8],
+    delivery: &mut SystemAudioDelivery,
+) {
+    let requested = control.audio_requested.load(Ordering::SeqCst);
+    let now_us = monotonic_us();
+    if !delivery.needs_send(requested, now_us) {
+        return;
+    }
+    // SNDON/SNDOFF are idempotent, exactly like the cursor commands: every
+    // attempt is recorded to avoid a busy retry loop, and the 1s cadence
+    // heals a datagram lost after send_to succeeds.
+    let _ = send_viewer_command(socket, peer, audio_stream_command(requested), token);
     delivery.record_attempt(requested, now_us);
 }
 
@@ -160,6 +180,7 @@ fn run(launch: SingleRendererLaunch) {
     );
     let mut recovery_gate = RecoveryRequestGate::default();
     let mut cursor_delivery = CursorStreamDelivery::default();
+    let mut audio_delivery = SystemAudioDelivery::default();
     if let Some(peer) = tcp_control_addr {
         // A longer TCP GOP must not introduce a startup deadlock: the
         // renderer may attach after the Host's first IDR was already
@@ -290,6 +311,13 @@ fn run(launch: SingleRendererLaunch) {
                     peer,
                     &viewer_control_token,
                     &mut cursor_delivery,
+                );
+                sync_audio_stream(
+                    &control_clone,
+                    &control_socket,
+                    peer,
+                    &viewer_control_token,
+                    &mut audio_delivery,
                 );
             }
             continue;
@@ -625,6 +653,14 @@ fn run(launch: SingleRendererLaunch) {
                     &viewer_control_token,
                     &mut cursor_delivery,
                 );
+                audio_delivery.reset();
+                sync_audio_stream(
+                    &control_clone,
+                    &control_socket,
+                    peer,
+                    &viewer_control_token,
+                    &mut audio_delivery,
+                );
                 continue;
             }
             // Keep accepting responses on the legacy media socket during a
@@ -695,6 +731,13 @@ fn run(launch: SingleRendererLaunch) {
                 peer,
                 &viewer_control_token,
                 &mut cursor_delivery,
+            );
+            sync_audio_stream(
+                &control_clone,
+                &control_socket,
+                peer,
+                &viewer_control_token,
+                &mut audio_delivery,
             );
         }
 

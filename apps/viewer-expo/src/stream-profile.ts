@@ -1,48 +1,41 @@
 export type StreamContentMode = "interactive" | "video";
 
+/**
+ * 화질 프로필의 수학적 정의. 사용자에게 보이는 라벨·설명은
+ * packages/ui-tokens/src/i18n.ts의 quality* 키가 유일한 원본이다 — 여기에
+ * 카피를 두면 i18n과 드리프트된다(디자인 리뷰 5단계에서 제거한 항목).
+ */
 export const STREAM_PROFILES = [
   {
     id: "latency",
-    label: "빠른 반응",
-    detail: "1080p 60fps",
     maxWidth: 1920,
     maxHeight: 1080,
     fps: 60,
     contentMode: "interactive",
-    hint: "움직임이 많은 화면에 적합",
   },
   {
     id: "video",
-    label: "동영상 우선",
-    detail: "최대 4K 60fps",
     maxWidth: 3840,
     maxHeight: 2160,
     fps: 60,
     allowUpscale: false,
     contentMode: "video",
-    hint: "4K 해상도와 큰 화면 변화에 강함",
   },
   {
     id: "balanced",
-    label: "균형",
-    detail: "1440p 60fps",
     maxWidth: 2560,
     maxHeight: 1440,
     fps: 60,
     contentMode: "interactive",
     role: "fallback",
-    hint: "글자 선명도와 반응 속도의 균형",
   },
   {
     id: "clarity",
-    label: "선명한 화면",
-    detail: "4K 60fps",
     maxWidth: 3840,
     maxHeight: 2160,
     fps: 60,
     allowUpscale: false,
     contentMode: "interactive",
-    hint: "빠르고 안정적인 Wi-Fi에 적합",
   },
 ] as const;
 

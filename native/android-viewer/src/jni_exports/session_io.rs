@@ -302,6 +302,23 @@ pub extern "C" fn leftcar_jni_set_cursor_stream(instance_c: *const c_char, enabl
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Record the viewer-side system-audio opt-in (SNDON/SNDOFF). Picked up by
+/// the renderer's idempotent command refresh — at the next token
+/// establishment or within its 1s cadence — so a toggle mid-stream applies
+/// without a reconfigure.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_set_audio_stream(instance_c: *const c_char, enabled: bool) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        control.audio_requested.store(enabled, Ordering::SeqCst);
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i32 {
     let guard = std::panic::catch_unwind(|| {

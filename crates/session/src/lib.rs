@@ -274,6 +274,15 @@ impl PairingService {
         self.offer_secrets.get(offer_id).cloned()
     }
 
+    /// The offer's own human verification code. Approval-based pairing passes
+    /// it back into [PairingService::approve] so the code factor is satisfied
+    /// by the Host user's explicit approval instead of a typed string.
+    pub fn offer_code(&self, offer_id: &str) -> Option<String> {
+        self.offers
+            .get(offer_id)
+            .map(|offer| offer.human_verification_code.clone())
+    }
+
     /// Find an active offer by the human verification code. The Host uses
     /// this for the direct `host endpoint + six-digit code` pairing flow.
     pub fn find_offer_by_code(&self, code: &str) -> Option<String> {

@@ -96,6 +96,13 @@
   Rust `get_screen_permission` → `SystemAlertBanners` 경고 배너(i18n `screenPermBannerTitle/Desc`).
   BetterDisplay 항목은 코드가 이미 f1a846e에서 제거돼 있어 문서만 정리했다.
 
+### 후속 (2026-09-09)
+
+- **QR 페어링 완결을 승인 모델로 구현**(fb188f3) — 백로그의 "QR이 PIN 입력을 없애주지 않음" 항목 해소. QR 스캔 → Mac 승인 카드 [허용] → 완료. 6자리 입력은 QR을 쓸 수 없는 기기·구버전 호스트용 폴백으로 유지.
+- **스트림 창 이해 개선**(6f9cc39) — 커서 오버레이 기본 켜기(입력 피드백), 입력 잠김 설명 배너(아이콘 900ms 페이드 → 지속 배너 "입력 잠김 · Mac의 Leftcar Host에서 허용"), 제스처 안내 재열람 물음표 칩.
+- **4K 품질 탭 구분**(1bf74a6) — "동영상 우선"/"선명한 화면" 문구로 인코더 튜닝 차이를 표기하고 `stream-profile.ts`의 죽은 카피를 제거.
+- **시스템 오디오 토글**(4dd192b) — `SNDON`/`SNDOFF` 멱등 커맨드, 1초 자기 치유 재전송, 뷰어별 뮤트.
+
 ## 6. 기기 검증 체크리스트 (사용자 수행)
 
 사전 준비: 호스트는 `tools/dev-host-macos.zsh`로 shim과 앱을 재빌드해 `/Applications/Leftcar Host.app`에

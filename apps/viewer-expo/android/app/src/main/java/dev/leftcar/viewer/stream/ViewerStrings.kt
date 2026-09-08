@@ -39,8 +39,15 @@ object ViewerStrings {
         else "원격 마우스와 키보드 입력 가능"
     val inputLocked: String
         get() = if (en) "Remote input locked" else "원격 마우스와 키보드 입력 잠김"
+    /** 잠김 동안 사라지지 않는 배너 문구. 입력이 죽은 이유와 승인 장소를 알려 준다. */
+    val inputLockedBanner: String
+        get() = if (en) "Input locked · Allow in Leftcar Host on your Mac"
+        else "입력 잠김 · Mac의 Leftcar Host에서 허용"
     val inputChecking: String
         get() = if (en) "Checking remote input status" else "원격 입력 상태 확인 중"
+
+    val gestureHelpDescription: String
+        get() = if (en) "Show touch gestures" else "터치 제스처 안내 보기"
 
     val statsDescription: String
         get() = if (en) "Stream details" else "화면 공유 상세 정보"

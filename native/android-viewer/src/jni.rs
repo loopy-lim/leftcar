@@ -123,6 +123,10 @@ pub(crate) struct RendererControl {
     // Viewer-side opt-in flag: when set, LCDON is sent once the authenticated
     // control token is established (and re-sent after a same-window rebind).
     pub(crate) cursor_requested: AtomicBool,
+    // Viewer-side system-audio opt-in: SNDON/SNDOFF ride the same idempotent
+    // 1s refresh as LCDON. Audio plays by default, matching the pre-toggle
+    // behavior, so the flag starts true.
+    pub(crate) audio_requested: AtomicBool,
 }
 
 impl RendererControl {
@@ -166,6 +170,7 @@ impl RendererControl {
             cursor_visible: AtomicBool::new(false),
             cursor_sequence: AtomicU32::new(0),
             cursor_requested: AtomicBool::new(false),
+            audio_requested: AtomicBool::new(true),
         }
     }
 

@@ -39,13 +39,15 @@ describe("viewer preferences", () => {
       profileId: "clarity",
       streamingPriority: "clarity",
       showFps: false,
-      localCursor: false,
+      localCursor: true,
+      localAudio: true,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({
       profileId: "auto",
       streamingPriority: "responsive",
       showFps: false,
-      localCursor: false,
+      localCursor: true,
+      localAudio: true,
     });
   });
 
@@ -59,6 +61,7 @@ describe("viewer preferences", () => {
       streamingPriority: "clarity",
       showFps: false,
       localCursor: true,
+      localAudio: true,
     });
     expect(parseViewerPreferences('{"profileId":"latency"}').streamingPriority).toBe(
       "responsive",
@@ -96,6 +99,7 @@ describe("viewer preferences", () => {
       streamingPriority: "clarity" as const,
       showFps: false,
       localCursor: true,
+      localAudio: false,
     };
 
     await writeViewerPreferences(store, preferences);
@@ -106,16 +110,28 @@ describe("viewer preferences", () => {
     });
   });
 
-  it("defaults localCursor to false and persists toggles", async () => {
-    expect(DEFAULT_VIEWER_PREFERENCES.localCursor).toBe(false);
-    expect(parseViewerPreferences(null).localCursor).toBe(false);
-    expect(parseViewerPreferences('{"showFps":true}').localCursor).toBe(false);
+  it("defaults localAudio to true and persists toggles", async () => {
+    expect(DEFAULT_VIEWER_PREFERENCES.localAudio).toBe(true);
+    expect(parseViewerPreferences(null).localAudio).toBe(true);
+    expect(parseViewerPreferences('{"showFps":true}').localAudio).toBe(true);
     expect(
-      parseViewerPreferences('{"localCursor":true,"showFps":true}').localCursor,
+      parseViewerPreferences('{"localAudio":false,"showFps":true}').localAudio,
+    ).toBe(false);
+    expect(
+      parseViewerPreferences('{"localAudio":"yes"}').localAudio,
     ).toBe(true);
+  });
+
+  it("defaults localCursor to true and persists toggles", async () => {
+    expect(DEFAULT_VIEWER_PREFERENCES.localCursor).toBe(true);
+    expect(parseViewerPreferences(null).localCursor).toBe(true);
+    expect(parseViewerPreferences('{"showFps":true}').localCursor).toBe(true);
+    expect(
+      parseViewerPreferences('{"localCursor":false,"showFps":true}').localCursor,
+    ).toBe(false);
     expect(
       parseViewerPreferences('{"localCursor":"yes"}').localCursor,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("recommends a profile from each display's actual pixel size", () => {
