@@ -114,31 +114,38 @@ expiry
 address_hints
 ```
 
-6자리 확인 번호는 Host 화면에 표시하고 QR에는 포함하지 않는다. Viewer는 사용자가 선택하거나 입력한 Host 주소로 연결한 뒤 이 번호만 제출한다. QR 스캔 경로는 호환성을 위해 남아 있을 수 있지만 직접 연결에 필수는 아니다.
+6자리 확인 번호는 Host 화면에 표시하고 QR에는 포함하지 않는다. QR 스캔 경로가 기본 흐름이다 — Viewer는 QR의 secret을 제시하고 §7.2의 Host 사용자 승인으로 페어링이 완결된다. 6자리 번호는 QR을 스캔할 수 없는 기기의 직접 입력 경로다.
 
 QR 전체를 log, analytics, crash report에 넣지 않는다.
 
 ### 7.2 흐름
 
-1. Host가 ephemeral secret을 생성하고 2분 expiry를 설정한다.
+1. Host가 ephemeral offer secret을 생성하고 2분 expiry를 설정한다.
 2. Viewer가 QR을 locally parse하고 expiry를 확인한다.
 3. Viewer가 제시된 address 중 직접 연결한다.
 4. secure handshake가 QR의 Host fingerprint와 일치하는지 확인한다.
-5. Viewer가 자신의 public identity와 offer proof를 보낸다.
-6. Host UI가 Viewer display name, fingerprint short code를 보여 준다.
-7. 사용자가 승인한다.
-8. 양쪽이 서로의 public identity를 저장한다.
-9. offer secret과 ephemeral state를 폐기한다.
-10. Viewer가 새 장기 credential로 session을 다시 인증한다.
+5. Viewer가 자신의 public identity와 offer secret을 제출한다(6자리 코드는 비운다).
+6. 아직 승인 전이면 Host는 `{"status":"pending"}`으로 답하고, Viewer는 최대 150초까지 약 2.5초 간격으로 같은 secret으로 다시 묻는다. pending 폴링은 offer를 소각하지 않는다.
+7. Host UI 승인 카드가 요청 기기 이름을 보여 주고 사용자가 [허용]/[거절]을 고른다. Host UI는 대기 목록을 약 1.5초 간격으로 갱신한다.
+8. 허용 시 양쪽이 서로의 public identity를 저장하고 Host는 완료 기록을 남긴다. Viewer의 다음 폴링이 같은 secret으로 token을 픽업한다(픽업도 constant-time 비교로 secret 소유를 다시 증명한다).
+9. 거절 시 offer를 소각하고 Viewer 폴러가 "pairing rejected"를 명시적으로 알린다.
+10. offer secret과 ephemeral state를 폐기한다.
+11. Viewer가 새 장기 credential로 session을 다시 인증한다.
+
+6자리 직접 입력(pair_by_code)은 QR을 스캔할 수 없는 기기와 구버전 Host를 위한 폴백 경로로 남는다. 새 Viewer가 구버전 Host에 QR 승인을 시도하면 "pairing failed"로 답하고 Viewer는 PIN 입력 화면으로 폴백한다. 승인된 페어링은 기존 paired device 목록에 나타나며 revoke를 지원한다.
 
 ### 7.3 규칙
 
-- QR 스캔만으로 승인하지 않고 Host 화면의 6자리 번호를 별도로 확인한다.
+- QR 시크릿 제시만으로 승인하지 않고 Host 사용자의 명시적 허용(승인 카드)을 요구한다. 6자리 코드는 QR을 쓸 수 없는 기기의 직접 입력 경로다.
 - offer는 single use다.
+- pending 폴링은 offer를 소각하지 않는다. 잘못된 secret 제출은 이전과 같이 3회 실패 시 offer를 소각한다.
+- token 픽업도 secret 소유 증명을 다시 요구한다(constant-time 비교).
+- 거절은 offer 소각 후 명시적으로 알린다.
 - 같은 offer의 concurrent request는 최대 하나만 승인한다.
 - expiry 판단은 wall clock 변경에 취약하지 않게 monotonic deadline도 함께 사용한다.
 - 짧은 human code만 인증 secret으로 사용하지 않는다.
 - pairing 중 Host identity mismatch는 override 버튼 없이 실패한다.
+- 구버전 호스트/뷰어 조합은 6자리 입력으로 폴백한다.
 
 ## 8. 세션 보안
 
