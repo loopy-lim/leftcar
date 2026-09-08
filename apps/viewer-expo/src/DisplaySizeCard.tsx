@@ -17,6 +17,7 @@ import {
 } from "./window-aspect-ratio";
 import type { ActiveStream } from "./catalog-model-types";
 import type { ThemeTokens } from "./theme";
+import { useAppLanguage } from "./i18n";
 
 /**
  * "화면 해상도" card: shows the current session resolution, offers preset
@@ -118,6 +119,7 @@ export function DisplaySizeCard({
   const [customWidth, setCustomWidth] = useState("");
   const [customHeight, setCustomHeight] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
+  const { t, format } = useAppLanguage();
 
   const currentWidth = stream?.activeTarget.width ?? null;
   const currentHeight = stream?.activeTarget.height ?? null;
@@ -145,7 +147,10 @@ export function DisplaySizeCard({
     const normalized = normalizeCustomSize(width, height);
     if (!normalized) {
       setCustomError(
-        `${MIN_WIDTH}×${MIN_HEIGHT}px 이상 ${MAX_WIDTH}×${MAX_HEIGHT}px 이하의 짝수 크기를 입력해 주세요.`,
+        format(t.viewer.customSizeError, {
+          min: `${MIN_WIDTH}×${MIN_HEIGHT}px`,
+          max: `${MAX_WIDTH}×${MAX_HEIGHT}px`,
+        }),
       );
       return;
     }
@@ -198,14 +203,17 @@ export function DisplaySizeCard({
   return (
     <View style={styles.card}>
       <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-        화면 해상도
+        {t.viewer.displaySizeTitle}
       </Text>
 
       <Text
         style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
-        accessibilityLabel={`현재 크기 ${stream.activeTarget.width} 곱하기 ${stream.activeTarget.height}`}
+        accessibilityLabel={format(t.viewer.displaySizeA11y, {
+          width: stream.activeTarget.width,
+          height: stream.activeTarget.height,
+        })}
       >
-        현재 {stream.activeTarget.width} × {stream.activeTarget.height} · {stream.fps} FPS
+        {t.viewer.displaySizeCurrentPrefix} {stream.activeTarget.width} × {stream.activeTarget.height} · {stream.fps} FPS
       </Text>
 
       <View style={styles.presetRow}>
@@ -229,17 +237,17 @@ export function DisplaySizeCard({
         <Text
           style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
         >
-          화면 비율
+          {t.viewer.aspectTitle}
         </Text>
         <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          창의 모양만 바꾸고 컴퓨터 해상도는 유지합니다.
+          {t.viewer.aspectHint}
         </Text>
         <View style={styles.presetRow}>
           {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (
             <PresetButton
               key={preset.id}
               label={preset.label}
-              detail={preset.ratio < 1 ? "세로" : "가로"}
+              detail={preset.ratio < 1 ? t.viewer.aspectPortrait : t.viewer.aspectLandscape}
               active={windowRatio === preset.id}
               disabled={resizing || !onSelectWindowRatio}
               colors={colors}
@@ -252,24 +260,24 @@ export function DisplaySizeCard({
       <View style={styles.inputRow}>
         <TextInput
           style={styles.input}
-          placeholder={`가로 (${MIN_WIDTH}~${MAX_WIDTH})`}
+          placeholder={format(t.viewer.customWidthPlaceholder, { min: MIN_WIDTH, max: MAX_WIDTH })}
           placeholderTextColor={colors.textMuted}
           keyboardType="number-pad"
           value={customWidth}
           editable={!resizing}
           onChangeText={setCustomWidth}
-          accessibilityLabel="사용자 지정 가로 크기 (픽셀)"
+          accessibilityLabel={t.viewer.customWidthA11y}
         />
         <Text style={{ fontSize: 13, color: colors.textMuted }}>×</Text>
         <TextInput
           style={styles.input}
-          placeholder={`세로 (${MIN_HEIGHT}~${MAX_HEIGHT})`}
+          placeholder={format(t.viewer.customHeightPlaceholder, { min: MIN_HEIGHT, max: MAX_HEIGHT })}
           placeholderTextColor={colors.textMuted}
           keyboardType="number-pad"
           value={customHeight}
           editable={!resizing}
           onChangeText={setCustomHeight}
-          accessibilityLabel="사용자 지정 세로 크기 (픽셀)"
+          accessibilityLabel={t.viewer.customHeightA11y}
         />
       </View>
       {customError ? (
@@ -283,7 +291,7 @@ export function DisplaySizeCard({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="크기 적용"
+        accessibilityLabel={t.viewer.applySizeA11y}
         accessibilityState={{ disabled: resizing }}
         style={styles.applyButton}
         disabled={resizing}
@@ -291,7 +299,7 @@ export function DisplaySizeCard({
       >
         {resizing ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : null}
         <Text style={{ fontSize: 13, fontWeight: "700", color: colors.btnPrimaryText }}>
-          {resizing ? "적용하는 중…" : "직접 입력 적용"}
+          {resizing ? t.viewer.applyingSize : t.viewer.applySizeLabel}
         </Text>
       </Pressable>
     </View>

@@ -158,6 +158,7 @@ function ViewerOptionsCard({
   onToggleCursor,
   colors,
 }: ViewerOptionsCardProps) {
+  const { t } = useAppLanguage();
   const cardStyle = {
     gap: 10,
     borderRadius: 12,
@@ -174,34 +175,34 @@ function ViewerOptionsCard({
   return (
     <View style={cardStyle}>
       <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-        시청 옵션
+        {t.viewer.viewerOptionsTitle}
       </Text>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            FPS 표시
+            {t.viewer.fpsToggleLabel}
           </Text>
         </View>
         <Switch
           value={showFps}
           onValueChange={onToggleFps}
-          accessibilityLabel="FPS 표시"
+          accessibilityLabel={t.viewer.fpsToggleLabel}
           {...switchColor}
         />
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            커서 오버레이
+            {t.viewer.cursorOverlayLabel}
           </Text>
           <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            영상 속 커서 대신 오버레이로 그려 입력 반응을 높입니다.
+            {t.viewer.cursorOverlayHint}
           </Text>
         </View>
         <Switch
           value={localCursor}
           onValueChange={onToggleCursor}
-          accessibilityLabel="커서 오버레이"
+          accessibilityLabel={t.viewer.cursorOverlayLabel}
           {...switchColor}
         />
       </View>
@@ -223,10 +224,23 @@ function EncoderExperimentChoices({ experiments, selected, requiresReconnect, co
   </View>;
 }
 
+const QUALITY_TAB_KEYS = {
+  auto: { label: "qualityAutoLabel", detail: "qualityAutoDetail" },
+  latency: { label: "qualityLatencyLabel", detail: "qualityLatencyDetail" },
+  video: { label: "qualityVideoLabel", detail: "qualityVideoDetail" },
+  balanced: { label: "qualityBalancedLabel", detail: "qualityBalancedDetail" },
+  clarity: { label: "qualityClarityLabel", detail: "qualityClarityDetail" },
+} as const;
+
 function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: ViewerProfileSelection; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
+  const { t } = useAppLanguage();
   return <View style={styles.qualitySegmentWrapper}><View style={styles.qualitySegmentTabs}>
-    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel="자동 추천: 디스플레이별 권장 품질"><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>자동 추천</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>디스플레이별</Text></Pressable>
-    {STREAM_PROFILES.map((p) => { const selected = p.id === profileId; return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{p.label}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{p.detail}</Text></Pressable>; })}
+    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel={t.viewer.qualityAutoA11y}><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>{t.viewer.qualityAutoLabel}</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>{t.viewer.qualityAutoDetail}</Text></Pressable>
+    {STREAM_PROFILES.map((p) => {
+      const selected = p.id === profileId;
+      const copy = QUALITY_TAB_KEYS[p.id];
+      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
+    })}
   </View></View>;
 }
 
