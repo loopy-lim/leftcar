@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -30,6 +30,10 @@ import {
   saveRecentHost,
   type RecentHostItem,
 } from "../src/recent-hosts";
+import {
+  DISCOVERY_HINT_DELAY_MS,
+  shouldShowDiscoveryHint,
+} from "../src/discovery-hint";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
@@ -68,6 +72,7 @@ interface DiscoveredHostsSectionProps {
   hosts: FoundHost[];
   busy: boolean;
   nsdAvailable: boolean;
+  emptyHint?: ReactNode;
   t: TranslationSchema;
   styles: ReturnType<typeof createStyles>;
   colors: ThemeTokens;
@@ -78,6 +83,7 @@ function DiscoveredHostsSection({
   hosts,
   busy,
   nsdAvailable,
+  emptyHint,
   t,
   styles,
   colors,
@@ -125,13 +131,16 @@ function DiscoveredHostsSection({
           ))}
         </View>
       ) : (
-        <View style={styles.emptyBox}>
-          <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
-          <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
-          <Text style={styles.emptyText}>
-            {t.viewer.emptyHostsDesc}
-          </Text>
-        </View>
+        <>
+          <View style={styles.emptyBox}>
+            <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
+            <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
+            <Text style={styles.emptyText}>
+              {t.viewer.emptyHostsDesc}
+            </Text>
+          </View>
+          {emptyHint}
+        </>
       )}
     </View>
   );
@@ -284,6 +293,48 @@ function ManualIpSection({
           <Text style={styles.primaryBtnText}>{t.viewer.btnConnectAction}</Text>
         )}
       </Pressable>
+    </View>
+  );
+}
+
+// "안내는 실패 지점에서 한 번" — compact hint shown at failure points (empty
+// discovery, connect error). Reuses the existing troubleshooting accordion
+// instead of duplicating its content.
+function ConnectHintCard({
+  showDetailsToggle,
+  t,
+  styles,
+  colors,
+  onExpandDetails,
+}: {
+  showDetailsToggle: boolean;
+  t: TranslationSchema;
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  onExpandDetails: () => void;
+}) {
+  return (
+    <View style={styles.connectHintCard}>
+      <View style={styles.connectHintRow}>
+        <Ionicons
+          name="information-circle-outline"
+          size={14}
+          color={colors.textSecondary}
+        />
+        <Text style={styles.connectHintText}>{t.viewer.connectHintBody}</Text>
+      </View>
+      {showDetailsToggle && (
+        <Pressable
+          style={styles.connectHintToggle}
+          onPress={onExpandDetails}
+          accessibilityRole="button"
+        >
+          <Text style={styles.connectHintToggleText}>
+            {t.viewer.connectHintDetailsToggle}
+          </Text>
+          <Ionicons name="chevron-down" size={12} color={colors.textMuted} />
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -441,6 +492,15 @@ export default function Host() {
   const [hasStoredToken, setHasStoredToken] = useState(false);
   const [recentHosts, setRecentHosts] = useState<RecentHostItem[]>([]);
   const [showTroubleshoot, setShowTroubleshoot] = useState(false);
+  const [discoverySettled, setDiscoverySettled] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(
+      () => setDiscoverySettled(true),
+      DISCOVERY_HINT_DELAY_MS,
+    );
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     void getStoredToken().then((token) => setHasStoredToken(!!token));
@@ -546,6 +606,13 @@ export default function Host() {
 
   const hosts = Object.values(found);
 
+  const expandTroubleshoot = useCallback(() => setShowTroubleshoot(true), []);
+
+  const showDiscoveryHint = shouldShowDiscoveryHint({
+    hostCount: hosts.length,
+    elapsedMs: discoverySettled ? DISCOVERY_HINT_DELAY_MS : 0,
+  });
+
   const connectManual = useCallback(() => {
     const endpoint = parseHostEndpoint(ip);
     if (!endpoint) {
@@ -563,9 +630,18 @@ export default function Host() {
         showsVerticalScrollIndicator={false}
       >
         {error && (
-          <View style={styles.errorCard}>
-            <Ionicons name="alert-circle" size={16} color={colors.textPrimary} />
-            <Text style={styles.errorText}>{error}</Text>
+          <View style={styles.errorBlock}>
+            <View style={styles.errorCard}>
+              <Ionicons name="alert-circle" size={16} color={colors.textPrimary} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+            <ConnectHintCard
+              showDetailsToggle={!showTroubleshoot}
+              t={t}
+              styles={styles}
+              colors={colors}
+              onExpandDetails={expandTroubleshoot}
+            />
           </View>
         )}
 
@@ -573,6 +649,17 @@ export default function Host() {
           hosts={hosts}
           busy={busy}
           nsdAvailable={Boolean(nsd)}
+          emptyHint={
+            showDiscoveryHint ? (
+              <ConnectHintCard
+                showDetailsToggle={!showTroubleshoot}
+                t={t}
+                styles={styles}
+                colors={colors}
+                onExpandDetails={expandTroubleshoot}
+              />
+            ) : undefined
+          }
           t={t}
           styles={styles}
           colors={colors}
@@ -655,6 +742,40 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       lineHeight: 16,
       flex: 1,
       fontWeight: "500",
+    },
+    errorBlock: {
+      gap: 8,
+    },
+    connectHintCard: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 10,
+      padding: 10,
+      gap: 6,
+    },
+    connectHintRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 6,
+    },
+    connectHintText: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      lineHeight: 15,
+      flex: 1,
+    },
+    connectHintToggle: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 3,
+      alignSelf: "flex-start",
+      paddingVertical: 2,
+    },
+    connectHintToggleText: {
+      color: colors.textPrimary,
+      fontSize: 11,
+      fontWeight: "600",
     },
     sectionCard: {
       backgroundColor: colors.bgSurface,
