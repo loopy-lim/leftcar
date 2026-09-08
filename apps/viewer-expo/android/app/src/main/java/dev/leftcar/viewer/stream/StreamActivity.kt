@@ -399,6 +399,50 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun normalizedY(event: MotionEvent, view: View): Float =
         normalizedPoint(view, event.x, event.y).second
 
+    /**
+     * 호스트가 원격 입력을 잠근 동안(상태 0)은 터치·마우스·키보드 이벤트를
+     * 전송 단계에 넣기 전에 조용히 버린다. 호스트도 자체 게이트에서 폐기하지만,
+     * 뷰어가 먼저 끊어야 잠금 내내 이어지는 UDP 전송·재전송과 무선 전력 낭비가
+     * 없어지고 입력 배지와 실제 동작이 일치한다. 상태를 아직 모를 때(-1)는
+     * 보낸다 — 세션 시작 직후 자동 허용 상태가 도착하기 전 첫 입력을 막지
+     * 않기 위해서다.
+     */
+    private fun remoteInputLocked(): Boolean = ViewerNative.inputStatus(instanceId) == 0
+
+    /** 잠금 중에는 전송하지 않고, 이벤트는 로컬에서 소비한 것으로 처리한다. */
+    private fun sendPointerUnlocked(
+        action: Int,
+        x: Float,
+        y: Float,
+        buttons: Int,
+        actionButton: Int,
+        horizontalScroll: Float,
+        verticalScroll: Float,
+    ): Boolean {
+        if (remoteInputLocked()) return true
+        return ViewerNative.sendPointer(
+            instanceId,
+            action,
+            x,
+            y,
+            buttons,
+            actionButton,
+            horizontalScroll,
+            verticalScroll,
+        ) == 0
+    }
+
+    private fun sendKeyUnlocked(
+        keyCode: Int,
+        scanCode: Int,
+        metaState: Int,
+        down: Boolean,
+        repeat: Int,
+    ): Boolean {
+        if (remoteInputLocked()) return true
+        return ViewerNative.sendKey(instanceId, keyCode, scanCode, metaState, down, repeat) == 0
+    }
+
     private fun hideTabletCursor() {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         hideTabletCursorRunnable.run()
@@ -475,8 +519,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
             else -> event.buttonState
         }
-        val result = ViewerNative.sendPointer(
-            instanceId,
+        return sendPointerUnlocked(
             action,
             normalizedX(event, view),
             normalizedY(event, view),
@@ -485,7 +528,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
         )
-        return result == 0
     }
 
     private val gestureHandler = Handler(Looper.getMainLooper())
@@ -510,8 +552,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             // Wheel-style scroll events carry axis payloads directly; the
             // finger state machine has no equivalent phase.
             val (nx, ny) = normalizedPoint(view, event.x, event.y)
-            ViewerNative.sendPointer(
-                instanceId,
+            sendPointerUnlocked(
                 4,
                 nx,
                 ny,
@@ -573,8 +614,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         when (command) {
             is TouchGestureCommand.Move -> {
                 val (nx, ny) = normalizedPoint(view, command.x, command.y)
-                ViewerNative.sendPointer(
-                    instanceId,
+                sendPointerUnlocked(
                     1,
                     nx,
                     ny,
@@ -586,8 +626,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
             is TouchGestureCommand.Button -> {
                 val (nx, ny) = normalizedPoint(view, command.x, command.y)
-                ViewerNative.sendPointer(
-                    instanceId,
+                sendPointerUnlocked(
                     if (command.down) 2 else 3,
                     nx,
                     ny,
@@ -598,8 +637,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 )
             }
             is TouchGestureCommand.Scroll -> {
-                ViewerNative.sendPointer(
-                    instanceId,
+                sendPointerUnlocked(
                     4,
                     normalizedPoint(view, gestureLastX, gestureLastY).first,
                     normalizedPoint(view, gestureLastX, gestureLastY).second,
@@ -631,15 +669,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             hud?.revealInput()
             hud?.revealStats()
         }
-        val result = ViewerNative.sendKey(
-            instanceId,
+        val result = sendKeyUnlocked(
             event.keyCode,
             event.scanCode,
             event.metaState,
             event.action == KeyEvent.ACTION_DOWN,
             event.repeatCount,
         )
-        return result == 0 || super.dispatchKeyEvent(event)
+        return result || super.dispatchKeyEvent(event)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
