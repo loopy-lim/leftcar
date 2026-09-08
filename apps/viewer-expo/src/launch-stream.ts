@@ -285,8 +285,8 @@ export async function startPreparedStream({
       encoderExperiment,
       args.displayName,
       args.showFps ?? false,
-      // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
-      args.localCursor ?? false,
+      // 커서 오버레이는 입력 피드백이라 기본(true) — 네이티브 기본값과 정합.
+      args.localCursor ?? true,
       currentLanguage(),
       // 오디오는 기본 전달(true) — 네이티브 기본값과 정합.
       args.localAudio ?? true,
@@ -492,7 +492,7 @@ export async function reconfigurePreparedStream({
       encoderExperiment,
       active.sourceName,
       active.showFps ?? false,
-      active.localCursor ?? false,
+      active.localCursor ?? true,
       currentLanguage(),
       active.localAudio ?? true,
     );

@@ -251,7 +251,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("splitDecoderName", decoderName)
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: false)
-                putExtra("localCursor", localCursor ?: false)
+                putExtra("localCursor", localCursor ?: true)
                 putExtra("localAudio", localAudio ?: true)
                 putExtra("language", language ?: "ko")
                 // A recovery reuses the existing document task and port. The

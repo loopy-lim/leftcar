@@ -370,12 +370,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * 첫 스트림 창에만 제스처 안내를 1회 보여준다. 닫힐 때 플래그를 저장해
-     * 이후 창에서는 다시 뜨지 않는다.
+     * 제스처 안내는 첫 스트림 창에서 자동으로 1회 보여 주고(force=false),
+     * 이후에는 HUD 물음표 칩으로 다시 연다(force=true). 닫힐 때 "본 적
+     * 있음" 플래그를 저장한다.
      */
-    private fun maybeShowGestureHint() {
+    private fun showGestureHint(force: Boolean) {
         val prefs = getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
-        if (prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
+        if (!force && prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
+        gestureHint?.dismiss()
         gestureHint = GestureHintOverlay(this) {
             prefs.edit().putBoolean(GestureHintOverlay.PREF_SHOWN, true).apply()
         }.also { it.show() }
@@ -731,7 +733,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
         setContentView(surfaces.root)
-        localCursorEnabled = intent?.getBooleanExtra("localCursor", false) ?: false
+        localCursorEnabled = intent?.getBooleanExtra("localCursor", true) ?: true
         localAudioEnabled = intent?.getBooleanExtra("localAudio", true) ?: true
         // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
         intent?.getStringExtra("language")?.let { stored ->
@@ -755,9 +757,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             showFps,
             ::handleTermination,
             ::markRenderHealthy,
-        )
+        ).also { hud -> hud.onGestureHelpTapped = { showGestureHint(true) } }
         hud?.show()
-        maybeShowGestureHint()
+        showGestureHint(false)
         surfaces.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()

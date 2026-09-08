@@ -9,10 +9,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
 import dev.leftcar.viewer.R
@@ -55,12 +57,18 @@ internal class StreamHudController(
 
     private val handler = Handler(Looper.getMainLooper())
     private var inputPopup: PopupWindow? = null
-    private var inputView: ImageView? = null
+    private var inputView: View? = null
+    private var inputIcon: ImageView? = null
+    private var inputLabel: TextView? = null
     private var lastInputStatus = Int.MIN_VALUE
     private var statsPopup: PopupWindow? = null
     private var statsView: TextView? = null
     private var rebindPopup: PopupWindow? = null
     private var rebindView: TextView? = null
+    private var helpPopup: PopupWindow? = null
+
+    /** 제스처 안내는 첫 창에서 1회만 자동 노출되므로, 이 칩이 유일한 재열람 경로다. */
+    var onGestureHelpTapped: (() -> Unit)? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -107,6 +115,7 @@ internal class StreamHudController(
 
     fun show() {
         showInput()
+        showGestureHelpChip()
         // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
         // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
         if (showDiagnostics) {
@@ -212,10 +221,14 @@ internal class StreamHudController(
         inputPopup?.dismiss()
         statsPopup?.dismiss()
         rebindPopup?.dismiss()
+        helpPopup?.dismiss()
         inputPopup = null
         statsPopup = null
         rebindPopup = null
+        helpPopup = null
         inputView = null
+        inputIcon = null
+        inputLabel = null
         statsView = null
         rebindView = null
         persistentFpsOverlay.stop()
@@ -234,36 +247,58 @@ internal class StreamHudController(
     private fun updateInput(status: Int) {
         if (status == lastInputStatus) return
         lastInputStatus = status
-        inputView?.apply {
-            when (status) {
-                1 -> {
-                    setImageResource(R.drawable.ic_remote_unlocked)
-                    contentDescription = ViewerStrings.inputAllowed
-                }
-                0 -> {
-                    setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = ViewerStrings.inputLocked
-                }
-                else -> {
-                    setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = ViewerStrings.inputChecking
-                }
+        val icon = inputIcon ?: return
+        when (status) {
+            1 -> {
+                icon.setImageResource(R.drawable.ic_remote_unlocked)
+                inputLabel?.text = ""
+                inputView?.contentDescription = ViewerStrings.inputAllowed
             }
-            background = badgeBackground(Color.argb(118, 15, 23, 42))
+            0 -> {
+                icon.setImageResource(R.drawable.ic_remote_locked)
+                inputLabel?.text = ViewerStrings.inputLockedBanner
+                inputView?.contentDescription = ViewerStrings.inputLockedBanner
+            }
+            else -> {
+                icon.setImageResource(R.drawable.ic_remote_locked)
+                inputLabel?.text = ""
+                inputView?.contentDescription = ViewerStrings.inputChecking
+            }
         }
-        revealInput()
+        inputView?.background = badgeBackground(Color.argb(118, 15, 23, 42))
+        if (status == 0) {
+            // 잠김 동안은 배너를 유지한다 — 입력이 죽은 이유와 승인 장소를
+            // 알려 주는 유일한 창구다.
+            handler.removeCallbacks(fadeInput)
+            inputView?.animate()?.cancel()
+            inputView?.alpha = 1f
+        } else {
+            revealInput()
+        }
     }
 
     private fun showInput() {
         if (inputPopup != null) return
-        val badge = ImageView(activity).apply {
+        val icon = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.CENTER
-            minimumWidth = dp(30)
-            minimumHeight = dp(30)
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            minimumWidth = dp(20)
+            minimumHeight = dp(20)
+        }
+        val label = TextView(activity).apply {
+            setTextColor(Color.argb(224, 255, 255, 255))
+            textSize = 11f
+        }
+        val badge = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(5), dp(8), dp(5))
+            addView(icon)
+            addView(label)
             alpha = 0f
             elevation = dp(2).toFloat()
         }
+        inputIcon = icon
+        inputLabel = label
         inputView = badge
         updateInput(-1)
         val popup = PopupWindow(
@@ -289,6 +324,47 @@ internal class StreamHudController(
                 )
                 handler.removeCallbacks(poll)
                 handler.post(poll)
+            }
+        }
+    }
+
+    /** 스트림 창 구석의 물음표 칩. 탭하면 [onGestureHelpTapped]로 제스처 안내를 다시 연다. */
+    private fun showGestureHelpChip() {
+        if (helpPopup != null) return
+        val chip = TextView(activity).apply {
+            text = "?"
+            setTextColor(Color.argb(224, 255, 255, 255))
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+            background = badgeBackground(Color.argb(118, 15, 23, 42))
+            alpha = 0.72f
+            contentDescription = ViewerStrings.gestureHelpDescription
+        }
+        chip.setOnClickListener {
+            onGestureHelpTapped?.invoke()
+        }
+        val popup = PopupWindow(
+            chip,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            false,
+        ).apply {
+            isFocusable = false
+            isOutsideTouchable = false
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            elevation = dp(2).toFloat()
+        }
+        helpPopup = popup
+        activity.window.decorView.post {
+            if (!activity.isFinishing && !activity.isDestroyed) {
+                popup.showAtLocation(
+                    activity.window.decorView,
+                    Gravity.TOP or Gravity.END,
+                    dp(12),
+                    dp(52),
+                )
             }
         }
     }
