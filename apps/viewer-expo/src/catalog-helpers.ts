@@ -2,6 +2,7 @@ import {
   isControlTransportError,
   type DisplayInfo,
 } from "./control";
+import { LocalizedError } from "./localized-error";
 import { controlClient, reconnectHost } from "./session";
 import { resolveStreamResolution } from "./stream-resolution";
 import type { StreamProfile } from "./stream-profile";
@@ -25,12 +26,13 @@ export function fitProfileToDisplay(
 }
 
 export function catalogErrorMessage(error: unknown): string {
+  if (error instanceof LocalizedError) return error.format();
   const message = String(error instanceof Error ? error.message : error);
   if (message.includes("SCShareableContent timed out")) {
-    return "화면 소스 조회가 지연되고 있습니다. 잠시 후 새로고침을 눌러 주세요.";
+    return new LocalizedError("errCatalogSourceSlow").format();
   }
   if (message.includes("screen-recording permission")) {
-    return "컴퓨터에서 화면 공유 권한이 꺼져 있습니다. Mac 시스템 설정에서 허용해 주세요.";
+    return new LocalizedError("errCatalogScreenPermission").format();
   }
   return message;
 }
@@ -40,7 +42,7 @@ export async function requestWithReconnect<T>(
   args?: unknown,
 ): Promise<T> {
   let client = controlClient();
-  if (!client) throw new Error("컴퓨터에 연결되어 있지 않습니다");
+  if (!client) throw new LocalizedError("errNotConnected");
   try {
     return await client.request<T>(command, args);
   } catch (error) {
