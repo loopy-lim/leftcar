@@ -708,6 +708,19 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 last_feedback_rendered = rendered;
                 last_feedback_joined = joined;
                 last_feedback = Instant::now();
+                // The system-audio opt-in rides this 1s cadence on the left
+                // tile: SNDON/SNDOFF are idempotent, so the periodic
+                // re-assert heals a dropped command datagram without an ACK
+                // plane, exactly like the single-session refresh loop. The
+                // host gates the plane per viewer, so one carrier suffices.
+                send_authenticated(
+                    &socket,
+                    peer,
+                    crate::audio_protocol::audio_stream_command(
+                        control.audio_requested.load(Ordering::SeqCst),
+                    ),
+                    &token,
+                );
             }
         }
     }

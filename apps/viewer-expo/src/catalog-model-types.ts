@@ -26,6 +26,7 @@ export interface ActiveStream {
   udpStability?: UdpStabilitySelection;
   showFps?: boolean;
   localCursor?: boolean;
+  localAudio?: boolean;
   mediaTransport: ResolvedTransport;
   viewerIps: string[];
   startedAt: number;

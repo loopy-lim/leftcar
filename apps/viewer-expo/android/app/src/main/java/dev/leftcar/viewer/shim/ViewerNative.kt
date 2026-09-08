@@ -103,6 +103,12 @@ object ViewerNative {
     external fun cursorState(instanceId: String): Long
     /** Record the cursor stream opt-in; applied at the next control token. */
     external fun setCursorStream(instanceId: String, enabled: Boolean): Int
+    /**
+     * Record the system-audio opt-in (SNDON/SNDOFF). Picked up by the
+     * renderer's idempotent command refresh, so a mid-stream toggle applies
+     * without a reconfigure.
+     */
+    external fun setAudioStream(instanceId: String, enabled: Boolean): Int
     /** Compact native renderer diagnostics; -1 when the stream is unavailable. */
     external fun streamStats(instanceId: String): Long
     /** LAN RTT + capture/encode/wire-to-decoder stage latency. */

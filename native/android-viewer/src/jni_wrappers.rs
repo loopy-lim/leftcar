@@ -137,6 +137,7 @@ extern "C" {
     fn leftcar_jni_poll_audio(instance: *const c_char, out: *mut u8, capacity: usize) -> i32;
     fn leftcar_jni_cursor_state(instance: *const c_char) -> i64;
     fn leftcar_jni_set_cursor_stream(instance: *const c_char, enabled: bool) -> i32;
+    fn leftcar_jni_set_audio_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
     fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
@@ -157,6 +158,7 @@ extern "C" {
 //   inputStatus(String): int
 //   cursorState(String): long
 //   setCursorStream(String, boolean): int
+//   setAudioStream(String, boolean): int
 //   streamStats(String): long
 //   streamLatency(String): long
 //   release(long, String): int

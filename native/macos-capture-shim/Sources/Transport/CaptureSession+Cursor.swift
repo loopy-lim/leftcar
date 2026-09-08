@@ -118,8 +118,12 @@ extension CaptureSession {
             // System audio rides the same stream as the video plane; the
             // receiver demuxes the LCAU datagrams on the media socket. One
             // live session per viewer captures it — two display streams to
-            // the same device must not both send the same audio.
-            config.capturesAudio = isSystemAudioOwner()
+            // the same device must not both send the same audio — and the
+            // viewer's SNDON/SNDOFF toggle gates the plane entirely.
+            config.capturesAudio = shouldCaptureSystemAudio(
+                owner: isSystemAudioOwner(),
+                viewerKey: viewerAddressKey
+            )
         }
         if #available(macOS 14.0, *) {
             config.shouldBeOpaque = true

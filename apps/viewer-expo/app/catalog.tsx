@@ -148,6 +148,8 @@ interface ViewerOptionsCardProps {
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
+  localAudio: boolean;
+  onToggleAudio: (localAudio: boolean) => void;
   colors: ThemeTokens;
 }
 
@@ -156,6 +158,8 @@ function ViewerOptionsCard({
   onToggleFps,
   localCursor,
   onToggleCursor,
+  localAudio,
+  onToggleAudio,
   colors,
 }: ViewerOptionsCardProps) {
   const { t } = useAppLanguage();
@@ -203,6 +207,22 @@ function ViewerOptionsCard({
           value={localCursor}
           onValueChange={onToggleCursor}
           accessibilityLabel={t.viewer.cursorOverlayLabel}
+          {...switchColor}
+        />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+            {t.viewer.audioToggleLabel}
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+            {t.viewer.audioToggleHint}
+          </Text>
+        </View>
+        <Switch
+          value={localAudio}
+          onValueChange={onToggleAudio}
+          accessibilityLabel={t.viewer.audioToggleLabel}
           {...switchColor}
         />
       </View>
@@ -257,6 +277,8 @@ interface CatalogHeaderProps {
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
+  localAudio: boolean;
+  onToggleAudio: (localAudio: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -282,6 +304,8 @@ function CatalogHeader({
   onToggleFps,
   localCursor,
   onToggleCursor,
+  localAudio,
+  onToggleAudio,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -374,6 +398,8 @@ function CatalogHeader({
             onToggleFps={onToggleFps}
             localCursor={localCursor}
             onToggleCursor={onToggleCursor}
+            localAudio={localAudio}
+            onToggleAudio={onToggleAudio}
             colors={colors}
           />
 
@@ -710,6 +736,8 @@ export default function Catalog() {
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}
             onToggleCursor={model.handleToggleCursor}
+            localAudio={model.localAudio}
+            onToggleAudio={model.handleToggleAudio}
             encoderExperiments={model.selectedEncoderExperiments}
             encoderExperiment={model.effectiveNextEncoderExperiment}
             onSelectEncoderExperiment={model.handleSelectEncoderExperiment}

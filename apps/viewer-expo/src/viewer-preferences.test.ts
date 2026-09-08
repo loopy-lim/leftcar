@@ -40,12 +40,14 @@ describe("viewer preferences", () => {
       streamingPriority: "clarity",
       showFps: false,
       localCursor: false,
+      localAudio: true,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({
       profileId: "auto",
       streamingPriority: "responsive",
       showFps: false,
       localCursor: false,
+      localAudio: true,
     });
   });
 
@@ -59,6 +61,7 @@ describe("viewer preferences", () => {
       streamingPriority: "clarity",
       showFps: false,
       localCursor: true,
+      localAudio: true,
     });
     expect(parseViewerPreferences('{"profileId":"latency"}').streamingPriority).toBe(
       "responsive",
@@ -96,6 +99,7 @@ describe("viewer preferences", () => {
       streamingPriority: "clarity" as const,
       showFps: false,
       localCursor: true,
+      localAudio: false,
     };
 
     await writeViewerPreferences(store, preferences);
@@ -104,6 +108,18 @@ describe("viewer preferences", () => {
     expect(JSON.parse(store.value ?? "{}")).toMatchObject({
       streamingPriority: "clarity",
     });
+  });
+
+  it("defaults localAudio to true and persists toggles", async () => {
+    expect(DEFAULT_VIEWER_PREFERENCES.localAudio).toBe(true);
+    expect(parseViewerPreferences(null).localAudio).toBe(true);
+    expect(parseViewerPreferences('{"showFps":true}').localAudio).toBe(true);
+    expect(
+      parseViewerPreferences('{"localAudio":false,"showFps":true}').localAudio,
+    ).toBe(false);
+    expect(
+      parseViewerPreferences('{"localAudio":"yes"}').localAudio,
+    ).toBe(true);
   });
 
   it("defaults localCursor to false and persists toggles", async () => {

@@ -23,6 +23,25 @@ const AUDIO_RING_CAPACITY: usize = 16;
 /// Header of the drained JNI blob: rate u16 BE, channels u8, rsv u8,
 /// frames u16 BE.
 pub const AUDIO_BLOB_HEADER_LEN: usize = 6;
+/// Viewer→host command that requests the system-audio plane. Plaintext,
+/// token-authenticated on the control channel — the same frame class as
+/// LCDON, so hosts predating the toggle drop it as an unknown datagram.
+pub const AUDIO_STREAM_ON: &[u8] = b"SNDON";
+/// Viewer→host command that stops the system-audio plane.
+pub const AUDIO_STREAM_OFF: &[u8] = b"SNDOFF";
+
+pub fn audio_stream_command(enabled: bool) -> &'static [u8] {
+    if enabled {
+        AUDIO_STREAM_ON
+    } else {
+        AUDIO_STREAM_OFF
+    }
+}
+
+/// Idempotent subscription refresh shared with the cursor plane: re-assert
+/// the requested state once per second so a dropped UDP command heals
+/// without an ACK plane.
+pub type SystemAudioDelivery = crate::cursor_protocol::CursorStreamDelivery;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioChunk {
@@ -184,6 +203,27 @@ mod tests {
 
     fn stereo_pcm(frames: usize) -> Vec<u8> {
         (0..frames * 4).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn audio_stream_commands_match_wire_contract() {
+        assert_eq!(AUDIO_STREAM_ON, b"SNDON");
+        assert_eq!(AUDIO_STREAM_OFF, b"SNDOFF");
+        assert_eq!(audio_stream_command(true), b"SNDON");
+        assert_eq!(audio_stream_command(false), b"SNDOFF");
+    }
+
+    #[test]
+    fn delivery_refreshes_until_acked_by_cadence() {
+        let mut delivery = SystemAudioDelivery::default();
+        // First attempt always fires, then a repeat inside the refresh
+        // window is suppressed.
+        assert!(delivery.needs_send(true, 0));
+        delivery.record_attempt(true, 0);
+        assert!(!delivery.needs_send(true, 500_000));
+        assert!(delivery.needs_send(true, 1_000_000));
+        // A state change fires immediately.
+        assert!(delivery.needs_send(false, 600_000));
     }
 
     #[test]

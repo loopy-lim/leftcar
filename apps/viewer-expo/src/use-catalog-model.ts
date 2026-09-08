@@ -251,6 +251,7 @@ export function useCatalogModel() {
           udpStability: active.udpStability,
           showFps: active.showFps ?? preferences.showFps,
           localCursor: active.localCursor ?? preferences.localCursor,
+          localAudio: active.localAudio ?? preferences.localAudio,
         },
       });
       return {
@@ -262,7 +263,14 @@ export function useCatalogModel() {
         qualityState: active.qualityState,
       };
     },
-    [catalogQuery.data, host, preferences.showFps, preferences.localCursor, refetchCatalog],
+    [
+      catalogQuery.data,
+      host,
+      preferences.showFps,
+      preferences.localCursor,
+      preferences.localAudio,
+      refetchCatalog,
+    ],
   );
 
   const reconfigureActiveStream = useCallback(
@@ -295,7 +303,7 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor, updateLocalAudio } =
     useStreamController(restoreActiveStream, reconfigureActiveStream);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
@@ -326,6 +334,16 @@ export function useCatalogModel() {
       ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
     }
   }, [setError, streams, updateLocalCursor]);
+
+  const handleToggleAudio = useCallback((localAudio: boolean) => {
+    setPreferences((current) => ({ ...current, localAudio }));
+    updateLocalAudio(localAudio);
+    if (launcher?.setAudioStream) {
+      void Promise.all(
+        streams.map((stream) => launcher.setAudioStream?.(`src-${stream.port}`, localAudio)),
+      ).catch(() => setError(currentTranslation().viewer.errAudioUpdate));
+    }
+  }, [setError, streams, updateLocalAudio]);
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
@@ -431,6 +449,7 @@ export function useCatalogModel() {
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
+            localAudio: preferences.localAudio,
           },
         });
         const acceptedTarget = {
@@ -461,6 +480,7 @@ export function useCatalogModel() {
           udpStability: started.udpStability,
           showFps: preferences.showFps,
           localCursor: preferences.localCursor,
+          localAudio: preferences.localAudio,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
           startedAt: Date.now(),
@@ -482,6 +502,7 @@ export function useCatalogModel() {
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
+      preferences.localAudio,
       selectedProfile,
       streamingPriority,
     ],
@@ -565,10 +586,12 @@ export function useCatalogModel() {
     visibleError,
     handleToggleFps,
     handleToggleCursor,
+    handleToggleAudio,
     profileId: preferences.profileId,
     streamingPriority,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
+    localAudio: preferences.localAudio,
     resizingSession,
   };
 }

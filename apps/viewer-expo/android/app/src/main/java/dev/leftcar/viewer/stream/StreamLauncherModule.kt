@@ -214,6 +214,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         showFps: Boolean?,
         localCursor: Boolean?,
         language: String?,
+        localAudio: Boolean?,
         promise: Promise,
     ) {
         ViewerStrings.applyLanguage(language)
@@ -251,6 +252,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("displayName", titleName)
                 putExtra("showFps", showFps ?: false)
                 putExtra("localCursor", localCursor ?: false)
+                putExtra("localAudio", localAudio ?: true)
                 putExtra("language", language ?: "ko")
                 // A recovery reuses the existing document task and port. The
                 // Activity keeps its Surface and swaps only the native
@@ -295,6 +297,23 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             promise.resolve(null)
         } catch (t: Throwable) {
             promise.reject("ERR_CURSOR_TOGGLE", t.message, t)
+        }
+    }
+
+    @ReactMethod
+    fun setAudioStream(instanceId: String, enabled: Boolean, promise: Promise) {
+        val target = liveStreams[instanceId]
+        if (target == null) {
+            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
+            return
+        }
+        launchStreamIntent(instanceId, target) { intent ->
+            intent.putExtra("localAudio", enabled)
+        }
+        try {
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("ERR_AUDIO_TOGGLE", t.message, t)
         }
     }
 

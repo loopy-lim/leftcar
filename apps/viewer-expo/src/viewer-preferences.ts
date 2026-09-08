@@ -20,6 +20,7 @@ export interface ViewerPreferences {
   streamingPriority: StreamingPriority;
   showFps: boolean;
   localCursor: boolean;
+  localAudio: boolean;
 }
 
 export type ViewerProfileSelection = StreamProfileId | "auto";
@@ -31,6 +32,8 @@ export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   // "실제 FPS 항상 표시"로 켠다.
   showFps: false,
   localCursor: false,
+  // 시스템 소리는 스트리밍과 함께 기본 전달한다. 토글 전 기본 동작과 같다.
+  localAudio: true,
 };
 
 export interface ViewerPreferencesStore {
@@ -110,6 +113,9 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
       localCursor: typeof parsed.localCursor === "boolean"
         ? parsed.localCursor
         : DEFAULT_VIEWER_PREFERENCES.localCursor,
+      localAudio: typeof parsed.localAudio === "boolean"
+        ? parsed.localAudio
+        : DEFAULT_VIEWER_PREFERENCES.localAudio,
     };
   } catch {
     return { ...DEFAULT_VIEWER_PREFERENCES };
@@ -137,6 +143,7 @@ export async function writeViewerPreferences(
       streamingPriority: preferences.streamingPriority,
       showFps: preferences.showFps,
       localCursor: preferences.localCursor,
+      localAudio: preferences.localAudio,
     }),
   );
 }

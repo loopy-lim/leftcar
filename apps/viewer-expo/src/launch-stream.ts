@@ -48,12 +48,19 @@ export interface StreamLauncher {
     showFps?: boolean,
     localCursor?: boolean,
     language?: string,
+    localAudio?: boolean,
   ): Promise<string>;
   cancelPreparedStream(
     port: number,
     encoderExperiment: EncoderExperimentId,
   ): Promise<void>;
   setCursorStream?(instanceId: string, enabled: boolean): Promise<void>;
+  /**
+   * 활성 스트림 창의 시스템 소리 전달(SNDON/SNDOFF)을 켜고 끈다. 네이티브
+   * 모듈이 구버전이면 setAudioStream가 없을 수 있고, 호출부는 best-effort로
+   * 무시한다.
+   */
+  setAudioStream?(instanceId: string, enabled: boolean): Promise<void>;
   /**
    * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
    * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
@@ -74,6 +81,7 @@ export interface StartStreamArgs {
   displayName?: string;
   showFps?: boolean;
   localCursor?: boolean;
+  localAudio?: boolean;
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
@@ -280,6 +288,8 @@ export async function startPreparedStream({
       // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
       args.localCursor ?? false,
       currentLanguage(),
+      // 오디오는 기본 전달(true) — 네이티브 기본값과 정합.
+      args.localAudio ?? true,
     );
     return {
       session,
@@ -484,6 +494,7 @@ export async function reconfigurePreparedStream({
       active.showFps ?? false,
       active.localCursor ?? false,
       currentLanguage(),
+      active.localAudio ?? true,
     );
     return {
       session: accepted.session,

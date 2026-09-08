@@ -256,6 +256,7 @@ describe("startPreparedStream", () => {
       false,
       false,
       "ko",
+      true,
     );
   });
 
@@ -311,6 +312,7 @@ describe("startPreparedStream", () => {
       false,
       false,
       "ko",
+      true,
     );
   });
 
@@ -336,6 +338,7 @@ describe("startPreparedStream", () => {
       false,
       false,
       "ko",
+      true,
     );
   });
 
@@ -361,6 +364,33 @@ describe("startPreparedStream", () => {
       false,
       true,
       "ko",
+      true,
+    );
+  });
+
+  it("forwards the local audio opt-out and defaults it to true for the native arg count", async () => {
+    const { control, launcher } = harness();
+
+    await startPreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      advertisedEncoderExperiments,
+      args: { ...args, localAudio: false },
+    });
+
+    expect(launcher.openStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      3840,
+      2160,
+      60,
+      "adaptiveQp",
+      undefined,
+      false,
+      false,
+      "ko",
+      false,
     );
   });
 

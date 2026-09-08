@@ -62,6 +62,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var cursorOverlay: CursorOverlayView? = null
     private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
+    private var localAudioEnabled: Boolean = true
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
@@ -280,6 +281,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             // A rebind builds a fresh renderer session, so the host opt-in
             // (LCDON) must ride again with the new control channel.
             enableCursorOverlay()
+            syncAudioStream()
         }
         hud?.onRebindFinished(result == 0)
         return result
@@ -356,6 +358,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ViewerNative.setCursorStream(instanceId, false)
         cursorOverlay?.stop()
         cursorOverlay = null
+    }
+
+    /**
+     * SNDON/SNDOFF는 멱등 커맨드라서 코어가 1초 주기로 재전송하므로 여기서는
+     * 렌더러에 뷰어의 현재 선호만 저장하면 된다. attach·재바인드 직후 호출해
+     * 새로 만들어진 세션에도 선호가 즉시 반영되게 한다.
+     */
+    private fun syncAudioStream() {
+        ViewerNative.setAudioStream(instanceId, localAudioEnabled)
     }
 
     /**
@@ -721,6 +732,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         setContentView(surfaces.root)
         localCursorEnabled = intent?.getBooleanExtra("localCursor", false) ?: false
+        localAudioEnabled = intent?.getBooleanExtra("localAudio", true) ?: true
         // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
         intent?.getStringExtra("language")?.let { stored ->
             ViewerStrings.applyLanguage(stored)
@@ -775,13 +787,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
         val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
         val nextLocalCursor = newIntent.getBooleanExtra("localCursor", localCursorEnabled)
+        val nextLocalAudio = newIntent.getBooleanExtra("localAudio", localAudioEnabled)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
         val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
-        val cursorOnly = nextLocalCursor != localCursorEnabled &&
+        val togglesOnly = (nextLocalCursor != localCursorEnabled ||
+            nextLocalAudio != localAudioEnabled) &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
             nextSplitVertical == splitVertical && nextShowFps == showFps
@@ -789,7 +803,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight ||
                 nextSplitVertical != splitVertical || nextShowFps != showFps ||
-                nextLocalCursor != localCursorEnabled
+                nextLocalCursor != localCursorEnabled || nextLocalAudio != localAudioEnabled
 
         setIntent(newIntent)
         if (newIntent.hasExtra("ownershipGeneration")) {
@@ -800,9 +814,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             // 다음 setIntent 이전 스트림 재구성에도 유지된다.
             applyWindowAspectRatio(newIntent.getFloatExtra(KEY_XR_WINDOW_RATIO, xrWindowRatio))
         }
-        if (cursorOnly) {
+        if (togglesOnly) {
             localCursorEnabled = nextLocalCursor
             if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
+            localAudioEnabled = nextLocalAudio
+            syncAudioStream()
             return
         }
         if (streamConfigurationChanged || reconnectRequested) {
@@ -811,6 +827,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             fps = nextFps
             showFps = nextShowFps
             localCursorEnabled = nextLocalCursor
+            localAudioEnabled = nextLocalAudio
             sourceWidth = nextWidth
             sourceHeight = nextHeight
             splitVertical = nextSplitVertical
@@ -993,6 +1010,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             hud?.armTerminationPolling()
             hud?.clearRebindIndicator()
             enableCursorOverlay()
+            syncAudioStream()
         }
         android.util.Log.i(
             "LeftcarStream",

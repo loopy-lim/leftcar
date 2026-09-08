@@ -86,6 +86,7 @@ pub(crate) fn spawn_live_stream_renderer(
         cursor_visible: AtomicBool::new(false),
         cursor_sequence: AtomicU32::new(0),
         cursor_requested: AtomicBool::new(false),
+        audio_requested: AtomicBool::new(true),
     });
     let control_clone = Arc::clone(&control);
 
