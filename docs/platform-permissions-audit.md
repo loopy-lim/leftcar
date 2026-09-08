@@ -22,7 +22,7 @@
   의도적으로 연기됨.
 
 빠진 것: 인앱 TCC 안내 흐름(거부 상태에서 사용자에게 "시스템 설정 → 화면 녹화" 안내
-UI), BetterDisplay 가이던스 에러 노출(호스트 UI 연결 지연 항목).
+UI).
 
 ### Android 뷰어 — 구현됨 (Expo 앱이 주력)
 
@@ -82,7 +82,7 @@ viewer-display-sizing-validation.md의 미검증 항목 + 위 권한 항목을 �
    bounds 충돌. (기능 완성도의 마지막 미검증 축)
 2. **cgvd-shim RESIZE GUI 세션 실측** — 모드 전환·지연, maxPixels 거부→FAILED,
    scale 1↔2 왕복, RESIZE 직후 PLACE.
-3. **macOS TCC 안내 UX + BetterDisplay 가이던스 에러 노출** — 권한 거부/부재 상태를
+3. **macOS TCC 안내 UX** — 권한 거부/부재 상태를
    호스트 UI에 명확히 표시(현재는 로그 경고뿐).
 4. **Android 권한 정리** — 미사용 `SYSTEM_ALERT_WINDOW` 제거(또는 실기능 연결),
    장시간 수신 시나리오에 대한 포그라운드 서비스 필요성 판단.
