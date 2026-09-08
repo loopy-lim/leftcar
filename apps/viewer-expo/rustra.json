@@ -1,6 +1,11 @@
 {
   "schema": "../../packages/control-generated/host/schema.json",
   "output": "./generated",
+  "codegen": {
+    "rustManifest": "../../crates/control-contract/Cargo.toml",
+    "rustPackage": "control-contract",
+    "rustBinary": "generate"
+  },
   "reactNative": {
     "moduleDir": "./modules/rustra-bridge",
     "rustManifest": "../../native/leftcar-rustra/Cargo.toml",

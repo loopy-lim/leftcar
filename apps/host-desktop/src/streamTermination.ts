@@ -21,6 +21,11 @@ export interface TerminationNotice {
 
 const TERMINAL_STATES = new Set(["error", "stopped", "unknown"]);
 
+/** 안내문을 우선 표시하고 영어 원문은 괄호 뒤에 붙여 진단 가능성을 유지한다. */
+function withRawDetail(raw: string, fallback: string): string {
+  return raw ? `${fallback} (${raw})` : fallback;
+}
+
 export function isTerminalSession(session: Pick<TerminationSession, "state">): boolean {
   return TERMINAL_STATES.has(session.state);
 }
@@ -49,16 +54,20 @@ export function createTerminationNotice(
     title = "화면 상태를 확인할 수 없어 종료했습니다";
     detail = "화면 공유 상태를 확인할 수 없어 연결을 안전하게 정리했습니다.";
     tone = "danger";
+  } else if (normalized.includes("screen recording") || normalized.includes("screen-recording")) {
+    title = "화면 공유 권한 문제로 종료했습니다";
+    detail = "컴퓨터의 화면 녹화 권한이 꺼져 있습니다. 시스템 설정에서 Leftcar Host를 허용해 주세요.";
+    tone = "danger";
   } else if (session.state === "error") {
     title = "문제가 생겨 화면 공유를 종료했습니다";
-    detail = error || "화면을 가져오거나 보내는 중 문제가 발생했습니다.";
+    detail = withRawDetail(error, "화면을 가져오거나 보내는 중 문제가 발생했습니다.");
     tone = "danger";
   } else if (session.state === "unknown") {
     title = "화면 공유 상태를 확인할 수 없습니다";
-    detail = error || "연결 상태를 확인할 수 없어 종료된 것으로 처리했습니다.";
+    detail = withRawDetail(error, "연결 상태를 확인할 수 없어 종료된 것으로 처리했습니다.");
     tone = "warning";
   } else if (error) {
-    detail = error;
+    detail = withRawDetail(error, "화면 공유가 문제로 종료되었습니다.");
     tone = "warning";
   }
 

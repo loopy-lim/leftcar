@@ -1,6 +1,6 @@
 /**
  * XR 창 비율 프리셋 — 태블릿 "화면 비율" 카드에서 선택해 활성
- * StreamActivity의 SpatialWindow 비율로 실시간 재적용한다. Mac 가상 화면
+ * StreamActivity의 SpatialWindow 비율로 실시간 재적용한다. 컴퓨터 화면
  * 해상도는 이 값의 영향을 받지 않는다.
  *
  * `ratio`는 가로÷세로이며 0.5~2.0으로 clamp된다. 9:16은 세로 창 지정이므로

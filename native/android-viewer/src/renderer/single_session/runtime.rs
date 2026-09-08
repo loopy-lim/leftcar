@@ -59,6 +59,7 @@ pub(crate) fn spawn_live_stream_renderer(
         port,
         split: false,
         input: Mutex::new(InputScheduler::new(fps)),
+        audio: Mutex::new(crate::audio_protocol::AudioRing::default()),
         input_enabled: AtomicI8::new(-1),
         rendered_frames: AtomicU64::new(0),
         stale_outputs: AtomicU64::new(0),

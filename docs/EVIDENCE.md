@@ -16,7 +16,7 @@
 | E11(신규) 페어링 + 미디어 출발지 검증 | 달성 | QR 페어링 + 토큰 인증 경로 유지, 미디어 역방향 peer 일치 검사 |
 | E12(신규) 네이티브 원격 입력 | 빌드·계약 달성, 실기기 대기 | Host 세션별 opt-in + macOS 접근성 권한 + 인증 UDP 입력 경로. 60fps→120Hz, 90fps→180Hz 목표의 장치 계측은 미달성 |
 | E13(신규) Windows 원격 Host | 소스·교차 컴파일 달성, 물리 실행 대기 | WGC monitor capture + Media Foundation hardware H.264 + SendInput + NSIS/Windows CI. 실제 Windows/GPU/Viewer E6는 미달성 |
-| E9(신규) Expo+Rustra 실기기 | 부분 달성 | 기존 `11ff71f` 경로는 JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측했다. 현재 `0.4.0`/`f8bab299` 핀은 코드젠·계약·Android native/Kotlin/APK 빌드까지 재검증했고 실기기 재검증은 대기 중이다. |
+| E9(신규) Expo+Rustra 실기기 | 달성 | 기존 `11ff71f` 경로는 JS → NativeModules.Rustra → JNI → rustra invoke_json으로 addNumbers(20,22)=42 + contract hash를 앱 화면에서 실측했다. `0.8.0`/`a9e3ee6` 핀(npm `@rustra/react-native` 0.7.0 / `@rustra/types` 0.8.0)은 코드젠(+`--check` 드리프트 게이트)·계약 테스트·Android native/Kotlin/APK 빌드를 재검증했고, TB710FU에서 생성 JSI 브리지의 lazy bootstrap → `initializeRustra().commands.addNumbers(20,22)` → `value=42` + 화면 계약 해시 `be754a50f3177d06`(생성 contract.ts와 일치)를 딥링크 `leftcar://rustra-proof`로 실측했다(2026-09-08, metro 8082 + adb reverse). |
 | E10(신규) RN 뷰어 + Tauri 호스트 재구축 | 달성 | v1 재구축: Tauri 호스트(제어 pull + 비디오 push) + RN 뷰어(OS 멀티윈도우, 소스당 창) + shim v2 다중 핸들 + NSD 자동발견 |
 | E6 종단간 | 부분 달성 | Mac CGDisplayStream → VideoToolbox → LAN UDP → TB710FU Qualcomm 저지연 디코더의 실제 화면 갱신 확인. 실제 포인터·키 입력과 4K60은 대기 |
 | E7 계측 장시간 | 미달성 | H51 대기 |

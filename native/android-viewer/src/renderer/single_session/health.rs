@@ -124,16 +124,26 @@ pub(super) struct ControlHealthState {
 }
 
 impl ControlHealthState {
+    /// A probe with no reply counts toward the unreachable limit only when the
+    /// media plane was also silent since the previous probe. Host media that
+    /// keeps arriving proves the peer is reachable; counting probe misses then
+    /// would tear down a live stream whenever a loss burst eats three small
+    /// datagrams while megabytes of video still flow.
     pub(super) fn probe_send_completed(
         &mut self,
         sequence: u32,
         sent: bool,
+        media_since_previous_probe: bool,
     ) -> ControlHealthAction {
-        if sent {
-            self.probe_sent(sequence)
-        } else {
-            ControlHealthAction::None
+        if !sent {
+            return ControlHealthAction::None;
         }
+        if media_since_previous_probe {
+            self.consecutive_misses = 0;
+            self.outstanding_sequence = Some(sequence);
+            return ControlHealthAction::None;
+        }
+        self.probe_sent(sequence)
     }
 
     pub(super) fn probe_sent(&mut self, sequence: u32) -> ControlHealthAction {
@@ -165,6 +175,7 @@ impl ControlHealthState {
 pub(super) fn run_control_probe_cycle<Drain, Send>(
     control_health: &mut ControlHealthState,
     next_probe_sequence: Option<u32>,
+    media_since_previous_probe: bool,
     drain_responses: Drain,
     send_probe: Send,
 ) -> ControlHealthAction
@@ -177,7 +188,11 @@ where
         return ControlHealthAction::None;
     };
     let sent = send_probe(sequence);
-    control_health.probe_send_completed(sequence, sent)
+    control_health.probe_send_completed(
+        sequence,
+        sent,
+        media_since_previous_probe,
+    )
 }
 
 #[cfg(test)]
@@ -401,6 +416,7 @@ mod tests {
         let action = run_control_probe_cycle(
             &mut health,
             Some(43),
+            false,
             |health| assert!(health.probe_acknowledged(42)),
             |_sequence| true,
         );
@@ -415,9 +431,39 @@ mod tests {
         assert_eq!(health.probe_sent(51), ControlHealthAction::None);
         assert_eq!(health.probe_sent(52), ControlHealthAction::None);
 
-        let action = run_control_probe_cycle(&mut health, Some(53), |_| {}, |_sequence| true);
+        let action =
+            run_control_probe_cycle(&mut health, Some(53), false, |_| {}, |_sequence| true);
 
         assert_eq!(action, ControlHealthAction::TerminateHostUnreachable);
+    }
+
+    #[test]
+    fn media_traffic_between_probes_never_counts_as_host_unreachable() {
+        let mut health = ControlHealthState::default();
+
+        // The link eats every probe reply, but host media keeps arriving:
+        // the peer is demonstrably reachable, so no miss is committed.
+        for sequence in 1..=6 {
+            assert_eq!(
+                health.probe_send_completed(sequence, true, true),
+                ControlHealthAction::None
+            );
+        }
+
+        // The moment media also goes silent, misses count from a clean slate
+        // and the third silent probe still terminates.
+        assert_eq!(
+            health.probe_send_completed(7, true, false),
+            ControlHealthAction::None
+        );
+        assert_eq!(
+            health.probe_send_completed(8, true, false),
+            ControlHealthAction::None
+        );
+        assert_eq!(
+            health.probe_send_completed(9, true, false),
+            ControlHealthAction::TerminateHostUnreachable
+        );
     }
 
     #[test]
@@ -425,25 +471,25 @@ mod tests {
         let mut health = ControlHealthState::default();
 
         assert_eq!(
-            health.probe_send_completed(41, true),
+            health.probe_send_completed(41, true, false),
             ControlHealthAction::None
         );
         assert_eq!(
-            health.probe_send_completed(42, false),
+            health.probe_send_completed(42, false, false),
             ControlHealthAction::None
         );
         assert!(health.probe_acknowledged(41));
 
         assert_eq!(
-            health.probe_send_completed(43, true),
+            health.probe_send_completed(43, true, false),
             ControlHealthAction::None
         );
         assert_eq!(
-            health.probe_send_completed(44, true),
+            health.probe_send_completed(44, true, false),
             ControlHealthAction::None
         );
         assert_eq!(
-            health.probe_send_completed(45, true),
+            health.probe_send_completed(45, true, false),
             ControlHealthAction::None
         );
     }

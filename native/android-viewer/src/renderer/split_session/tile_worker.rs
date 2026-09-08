@@ -342,9 +342,16 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             token.extend_from_slice(&packet[4..]);
                             if side == TileSide::Left {
                                 control.input.lock().unwrap().reset_session();
+                                control.audio.lock().unwrap().clear();
                             }
                             let _ = socket.send_to(packet, source);
                         } else if side == TileSide::Left {
+                            if crate::audio_protocol::accept_audio_packet(
+                                packet,
+                                &mut control.audio.lock().unwrap(),
+                            ) {
+                                continue;
+                            }
                             if let Some(ack) = parse_ack(packet, &token) {
                                 control.input.lock().unwrap().acknowledge(ack.sequence);
                                 if let Some(enabled) = ack.enabled {

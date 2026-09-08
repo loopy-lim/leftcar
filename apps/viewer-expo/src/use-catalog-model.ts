@@ -4,11 +4,13 @@ import { Alert, NativeModules } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { clearToken } from "./pairing";
+import { LocalizedError } from "./localized-error";
+import { currentTranslation } from "./language-store";
+import { interpolate } from "@leftcar/ui-tokens";
 import {
   reconfigurePreparedStream,
   startPreparedStream,
   type StreamLauncher,
-  type ViewerDisplayMetrics,
 } from "./launch-stream";
 import {
   formatErrorMessage,
@@ -34,7 +36,7 @@ import {
 } from "./stream-profile";
 import {
   resolveInitialStreamTarget,
-  type StreamingPriority,
+  streamingPriorityFromProfileId,
 } from "./streaming-policy";
 import {
   availableEncoderExperimentsForStreams,
@@ -54,12 +56,8 @@ import {
   requestWithReconnect,
 } from "./catalog-helpers";
 import {
-  streamTargetAfterVirtualResize,
-  type VirtualResizeTarget,
+  streamTargetAfterResize,
 } from "./display-resize";
-import type {
-  ResizeVirtualDisplayOutput,
-} from "./control";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
   fallbackTargetFor,
@@ -79,24 +77,9 @@ import {
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
-/** Best-effort tablet screen probe; older native modules simply omit it. */
-function managedDisplayId(displayName: string): string | undefined {
-  const match = displayName.match(/\[leftcar:([^\]]+)\]/);
-  return match?.[1] || undefined;
-}
-
-async function readViewerDisplayMetrics(
-  launcherInstance: StreamLauncher | undefined,
-): Promise<ViewerDisplayMetrics | undefined> {
-  if (!launcherInstance?.getDisplayMetrics) return undefined;
-  try {
-    return await launcherInstance.getDisplayMetrics();
-  } catch {
-    return undefined;
-  }
-}
-
 export function useCatalogModel() {
+  // 오류 문구는 발생 시점 언어를 따른다 — 훅 t를 넣으면 언어 전환마다
+  // 장기 콜백 신원이 흔들리므로 모듈 저장소에서 직접 읽는다.
   const [error, setError] = useState<string | null>(null);
   const [launchingIndex, setLaunchingIndex] = useState<number | null>(null);
   const [resizingSession, setResizingSession] = useState<number | null>(null);
@@ -114,6 +97,9 @@ export function useCatalogModel() {
   const [udpSettingsDirty, setUdpSettingsDirty] = useState(false);
   const [udpReconnecting, setUdpReconnecting] = useState(false);
   const host = controlHost();
+  // 시작 크기 우선순위는 별도 다이얼 없이 선택한 품질 프로필에서 파생한다
+  // (기존 streamingPriority 저장값은 마이그레이션 호환용으로만 남는다).
+  const streamingPriority = streamingPriorityFromProfileId(preferences.profileId);
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
     queryFn: () => requestWithReconnect<CatalogView>("getCatalog"),
@@ -143,13 +129,19 @@ export function useCatalogModel() {
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
       void (async () => {
+        // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
+        // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
+        const endpoint = controlHost();
         await clearToken();
         disconnectHost();
         Alert.alert(
-          "연결 승인이 필요해요",
-          "컴퓨터의 연결 승인이 만료되었거나 삭제되었습니다. 다시 승인해 주세요.",
+          currentTranslation().viewer.pairingRequiredTitle,
+          currentTranslation().viewer.pairingRequiredDesc,
         );
-        router.replace("/pairing");
+        router.replace({
+          pathname: "/pairing",
+          params: { endpoint },
+        });
       })();
     }
   }, [catalogQuery.error]);
@@ -218,12 +210,12 @@ export function useCatalogModel() {
   const restoreActiveStream = useCallback(
     async (active: ActiveStream): Promise<RestoredStream> => {
       if (!launcher) {
-        throw new Error("화면을 다시 연결할 기능을 시작할 수 없습니다");
+        throw new LocalizedError("errRestartLauncher");
       }
       const refreshed = await refetchCatalog();
       const currentCatalog = refreshed.data ?? catalogQuery.data;
       if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
-        throw new Error("현재 컴퓨터의 화면 공유 backend를 조회하지 못했습니다");
+        throw new LocalizedError("errBackendQuery");
       }
       const captureBackend = preferredCaptureBackend(
         currentCatalog,
@@ -259,8 +251,6 @@ export function useCatalogModel() {
           udpStability: active.udpStability,
           showFps: active.showFps ?? preferences.showFps,
           localCursor: active.localCursor ?? preferences.localCursor,
-          ...(active.viewerDisplay ? { viewerDisplay: active.viewerDisplay } : {}),
-          ...(active.virtualDisplayId ? { virtualDisplayId: active.virtualDisplayId } : {}),
         },
       });
       return {
@@ -282,7 +272,7 @@ export function useCatalogModel() {
       qualityState: AdaptiveQualityState,
     ): Promise<RestoredStream> => {
       if (!launcher) {
-        throw new Error("화면 해상도를 다시 연결할 기능을 시작할 수 없습니다");
+        throw new LocalizedError("errResizeLauncher");
       }
       const control = controlClient() ?? (await reconnectHost());
       const reconfigured = await reconfigurePreparedStream({
@@ -305,8 +295,8 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streams, syncAdaptiveTarget, updateLocalCursor } =
-    useStreamController(setError, restoreActiveStream, reconfigureActiveStream);
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
+    useStreamController(restoreActiveStream, reconfigureActiveStream);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
       patchStream(next.session, () => next);
@@ -333,16 +323,9 @@ export function useCatalogModel() {
     if (launcher?.setCursorStream) {
       void Promise.all(
         streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
-      ).catch(() => setError("열린 화면의 커서 설정을 바꾸지 못했습니다."));
+      ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
     }
   }, [setError, streams, updateLocalCursor]);
-
-  const handleSelectStreamingPriority = useCallback(
-    (priority: StreamingPriority) => {
-      setPreferences((current) => ({ ...current, streamingPriority: priority }));
-    },
-    [],
-  );
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
@@ -353,7 +336,7 @@ export function useCatalogModel() {
 
   /**
    * XR 창 비율 프리셋 선택. 네이티브 setWindowAspectRatio가 활성
-   * StreamActivity에 비율을 전달하고, Mac 가상 화면 해상도는 그대로 둔다.
+   * StreamActivity에 비율을 전달하고, 컴퓨터 화면 해상도는 그대로 둔다.
    * XR이 아닌 기기에서는 네이티브 호출이 실패하므로 조용히 무시하고 선택을
    * 되돌린다 — 카드는 어떤 기기에서도 비율 행을 노출한다.
    */
@@ -394,11 +377,11 @@ export function useCatalogModel() {
     async (display: DisplayInfo) => {
       const client = controlClient();
       if (!client) {
-        setError("컴퓨터와의 연결이 끊어졌습니다. 다시 연결해 주세요.");
+        setError(currentTranslation().viewer.connectionLostError);
         return;
       }
       if (!launcher) {
-        setError("화면을 여는 기능을 시작할 수 없습니다. 앱을 다시 실행해 주세요.");
+        setError(currentTranslation().viewer.launchFeatureError);
         return;
       }
       setLaunchingIndex(display.index);
@@ -417,7 +400,7 @@ export function useCatalogModel() {
         const maximumTarget = resolveStreamMaximum(display, preferences.profileId);
         const initialTarget = resolveInitialStreamTarget(
           display,
-          preferences.streamingPriority,
+          streamingPriority,
           maximumTarget,
         );
         const { width, height, fps } = initialTarget;
@@ -426,7 +409,6 @@ export function useCatalogModel() {
           height: maximumTarget.height,
           fps: maximumTarget.fps,
         };
-        const viewerDisplay = await readViewerDisplayMetrics(launcher);
         const started = await startPreparedStream({
           control: client,
           request: requestWithReconnect,
@@ -449,10 +431,6 @@ export function useCatalogModel() {
             udpStability: effectiveUdpStability,
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
-            ...(viewerDisplay ? { viewerDisplay } : {}),
-            ...(managedDisplayId(display.name)
-              ? { virtualDisplayId: managedDisplayId(display.name) }
-              : {}),
           },
         });
         const acceptedTarget = {
@@ -485,11 +463,6 @@ export function useCatalogModel() {
           localCursor: preferences.localCursor,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
-          // Display scale remains unknown until confirmed by the Host.
-          ...(viewerDisplay ? { viewerDisplay } : {}),
-          ...(managedDisplayId(display.name)
-            ? { virtualDisplayId: managedDisplayId(display.name) }
-            : {}),
           startedAt: Date.now(),
         });
       } catch (cause) {
@@ -509,8 +482,8 @@ export function useCatalogModel() {
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
-      preferences.streamingPriority,
       selectedProfile,
+      streamingPriority,
     ],
   );
 
@@ -527,58 +500,8 @@ export function useCatalogModel() {
   );
 
   /**
-   * Resize a managed virtual display, then move the session onto the new
-   * logical size through the existing reconfigure path.
-   *
-   * ID mapping note (Task 8 이후 연결): the viewer has no way to enumerate the
-   * host's managed virtual displays yet — the host-side listing lands with the
-   * Task 6/8 follow-up. Until then the model only exposes this id-taking
-   * function; the card wires a real id once a host-side list query exists.
-   * `handleResizeSession` below covers the interim "change the session size
-   * only" path.
-   */
-  const handleResizeVirtualDisplay = useCallback(
-    async (
-      active: ActiveStream,
-      virtualDisplayId: string,
-      width: number,
-      height: number,
-      scale: 1 | 2,
-      fps: number,
-    ): Promise<boolean> => {
-      setResizingSession(active.session);
-      try {
-        const output = await requestWithReconnect<ResizeVirtualDisplayOutput>(
-          "resizeVirtualDisplay",
-          { id: virtualDisplayId, width, height, scale },
-        );
-        const target: VirtualResizeTarget = {
-          width: output.logicalWidth,
-          height: output.logicalHeight,
-          fps,
-          scale: output.scale === 2 ? 2 : 1,
-        };
-        const accepted = await reconfigureActiveStream(active, target, "native");
-        const next = streamTargetAfterVirtualResize(active, target, accepted);
-        // 명시적 크기 변경 후 적응 상태를 새 목표로 다시 심는다 — 매 샘플마다가
-        // 아니라 실제 변경 때만 호출되므로 히스테리시스가 보존된다.
-        syncAdaptiveTarget(active.session, next.sourceTarget, next.activeTarget);
-        replaceStreamState(next);
-        return true;
-      } catch (cause) {
-        // Keep the previous size on failure — the session stays untouched.
-        setError(`가상 화면 크기 변경에 실패했습니다: ${formatErrorMessage(cause)}`);
-        return false;
-      } finally {
-        setResizingSession(null);
-      }
-    },
-    [reconfigureActiveStream, replaceStreamState, syncAdaptiveTarget],
-  );
-
-  /**
-   * Interim path without a managed-display id: reconfigure the session
-   * resolution only (no host-side virtual display change).
+   * Explicit resolution change: reconfigure the session through the existing
+   * reconfigure path and re-seed the adaptive state to the accepted target.
    */
   const handleResizeSession = useCallback(
     async (
@@ -591,12 +514,14 @@ export function useCatalogModel() {
       try {
         const target = { width, height, fps };
         const accepted = await reconfigureActiveStream(active, target, "native");
-        const next = streamTargetAfterVirtualResize(active, target, accepted);
+        const next = streamTargetAfterResize(active, target, accepted);
+        // 명시적 크기 변경 후 적응 상태를 새 목표로 다시 심는다 — 매 샘플마다가
+        // 아니라 실제 변경 때만 호출되므로 히스테리시스가 보존된다.
         syncAdaptiveTarget(active.session, next.sourceTarget, next.activeTarget);
         replaceStreamState(next);
         return true;
       } catch (cause) {
-        setError(`화면 해상도 전환에 실패했습니다: ${formatErrorMessage(cause)}`);
+        setError(interpolate(currentTranslation().viewer.errResizeFailed, { detail: formatErrorMessage(cause) }));
         return false;
       } finally {
         setResizingSession(null);
@@ -607,9 +532,11 @@ export function useCatalogModel() {
 
   const visibleError = error
     ? error
-    : catalogQuery.error
-      ? catalogErrorMessage(catalogQuery.error)
-      : null;
+    : streamError
+      ? streamError
+      : catalogQuery.error
+        ? catalogErrorMessage(catalogQuery.error)
+        : null;
 
   return {
     displays,
@@ -618,10 +545,8 @@ export function useCatalogModel() {
     handleApplyUdpStability,
     handleRefresh,
     handleResizeSession,
-    handleResizeVirtualDisplay,
     handleSelectEncoderExperiment,
     handleSelectProfile,
-    handleSelectStreamingPriority,
     handleSelectUdpStability,
     handleSelectWindowAspectRatio,
     windowRatio,
@@ -641,7 +566,7 @@ export function useCatalogModel() {
     handleToggleFps,
     handleToggleCursor,
     profileId: preferences.profileId,
-    streamingPriority: preferences.streamingPriority,
+    streamingPriority,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
     resizingSession,

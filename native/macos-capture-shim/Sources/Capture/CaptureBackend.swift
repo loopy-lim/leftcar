@@ -64,72 +64,6 @@ struct NativePixelModeCandidate {
     let pixelHeight: Int
 }
 
-private struct ManagedDisplayMode {
-    let displayUUID: String
-    let generation: UInt64
-    let logicalWidth: Int
-    let logicalHeight: Int
-    let pixelWidth: Int
-    let pixelHeight: Int
-}
-
-private let managedDisplayModesLock = NSLock()
-private var managedDisplayModes: [CGDirectDisplayID: ManagedDisplayMode] = [:]
-
-func registerManagedDisplayMode(
-    displayID: CGDirectDisplayID,
-    generation: UInt64,
-    logicalWidth: Int,
-    logicalHeight: Int,
-    pixelWidth: Int,
-    pixelHeight: Int
-) -> Bool {
-    guard displayID != 0, generation != 0, logicalWidth > 0, logicalHeight > 0,
-          pixelWidth >= logicalWidth, pixelHeight >= logicalHeight else { return false }
-    guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
-          let uuidString = CFUUIDCreateString(nil, uuid) as String? else { return false }
-    managedDisplayModesLock.lock()
-    managedDisplayModes[displayID] = ManagedDisplayMode(
-        displayUUID: uuidString,
-        generation: generation,
-        logicalWidth: logicalWidth,
-        logicalHeight: logicalHeight,
-        pixelWidth: pixelWidth,
-        pixelHeight: pixelHeight
-    )
-    managedDisplayModesLock.unlock()
-    return true
-}
-
-func clearManagedDisplayMode(displayID: CGDirectDisplayID, generation: UInt64) {
-    managedDisplayModesLock.lock()
-    if managedDisplayModes[displayID]?.generation == generation {
-        managedDisplayModes.removeValue(forKey: displayID)
-    }
-    managedDisplayModesLock.unlock()
-}
-
-func managedPixelSize(
-    for displayID: CGDirectDisplayID,
-    logicalWidth: Int,
-    logicalHeight: Int
-) -> NativePixelSize? {
-    managedDisplayModesLock.lock()
-    let mode = managedDisplayModes[displayID]
-    managedDisplayModesLock.unlock()
-    guard let mode else { return nil }
-    guard CGDisplayIsActive(displayID) != 0,
-          let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
-          (CFUUIDCreateString(nil, uuid) as String?) == mode.displayUUID else { return nil }
-    if logicalWidth == mode.logicalWidth, logicalHeight == mode.logicalHeight {
-        return NativePixelSize(width: mode.pixelWidth, height: mode.pixelHeight)
-    }
-    if logicalWidth == mode.logicalHeight, logicalHeight == mode.logicalWidth {
-        return NativePixelSize(width: mode.pixelHeight, height: mode.pixelWidth)
-    }
-    return nil
-}
-
 func nativePixelModeCandidate(
     logicalWidth: Int,
     logicalHeight: Int,
@@ -271,14 +205,6 @@ func nativePixelSize(
     let logicalWidth = CGDisplayPixelsWide(displayID)
     let logicalHeight = CGDisplayPixelsHigh(displayID)
     let currentMode = CGDisplayCopyDisplayMode(displayID).map(nativePixelModeCandidate)
-    if currentMode == nil,
-       let managed = managedPixelSize(
-           for: displayID,
-           logicalWidth: logicalWidth,
-           logicalHeight: logicalHeight
-       ) {
-        return (managed.width, managed.height)
-    }
     let options = [kCGDisplayShowDuplicateLowResolutionModes as String: true] as CFDictionary
     let matchingModes = (CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode] ?? [])
         .filter { mode in

@@ -2,7 +2,7 @@ package dev.leftcar.viewer.stream
 
 /**
  * XR 창 비율 프리셋. 태블릿 카드에서 선택한 비율을 SpatialWindow에 그대로
- * 재적용한다. Mac 가상 화면 해상도는 이 값의 영향을 받지 않는다.
+ * 재적용한다. 컴퓨터 화면 해상도는 이 값의 영향을 받지 않는다.
  */
 internal enum class WindowAspectRatioPreset(val ratio: Float) {
     WIDE_16_10(1.6f),

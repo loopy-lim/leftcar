@@ -1,4 +1,6 @@
 import { connect, type ControlClient } from "./control";
+import { markConnected } from "./auto-reconnect";
+import { LocalizedError } from "./localized-error";
 import { getStoredToken, isTrustedHost } from "./pairing";
 import { getUsbState } from "./usb";
 
@@ -24,7 +26,7 @@ export function controlHost(): string {
 
 export async function connectHost(host: string, port = 7777): Promise<ControlClient> {
   if (!isTrustedHost(host)) {
-    throw new Error("신뢰하는 같은 Wi-Fi 또는 Tailscale의 컴퓨터만 연결할 수 있습니다");
+    throw new LocalizedError("trustedHostError");
   }
   const usb = await getUsbState();
   let c: ControlClient;
@@ -44,12 +46,13 @@ export async function connectHost(host: string, port = 7777): Promise<ControlCli
   hostAddr = `${host}:${port}`;
   hostTarget = host;
   hostPort = port;
+  markConnected();
   return c;
 }
 
 /** Reopen the control socket after the host app was restarted. */
 export async function reconnectHost(): Promise<ControlClient> {
-  if (!hostTarget) throw new Error("연결할 컴퓨터 주소가 없습니다");
+  if (!hostTarget) throw new LocalizedError("errNoReconnectTarget");
   if (reconnectInFlight) return reconnectInFlight;
 
   reconnectInFlight = (async () => {
@@ -67,6 +70,7 @@ export async function reconnectHost(): Promise<ControlClient> {
     }
     if (previous && previous !== c) previous.close();
     client = c;
+    markConnected();
     return c;
   })();
   try {

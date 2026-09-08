@@ -27,7 +27,9 @@ export type ViewerProfileSelection = StreamProfileId | "auto";
 export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   profileId: "auto",
   streamingPriority: "responsive",
-  showFps: true,
+  // 진단 표시(FPS 배지·상세 통계 HUD)는 기본 끔. 필요하면 카탈로그의
+  // "실제 FPS 항상 표시"로 켠다.
+  showFps: false,
   localCursor: false,
 };
 

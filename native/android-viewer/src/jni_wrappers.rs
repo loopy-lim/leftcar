@@ -19,6 +19,8 @@ unsafe fn env_functions(env: *mut JNIEnv) -> *mut *mut c_void {
 
 const JNI_GET_STRING_UTF_CHARS: usize = 169;
 const JNI_RELEASE_STRING_UTF_CHARS: usize = 170;
+const JNI_GET_ARRAY_LENGTH: usize = 171;
+const JNI_SET_BYTE_ARRAY_REGION: usize = 208;
 const JNI_EXCEPTION_CHECK: usize = 228;
 
 unsafe fn get_utf(env: *mut JNIEnv, jstr: *mut jobject) -> Option<CString> {
@@ -132,6 +134,7 @@ extern "C" {
     ) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_poll_audio(instance: *const c_char, out: *mut u8, capacity: usize) -> i32;
     fn leftcar_jni_cursor_state(instance: *const c_char) -> i64;
     fn leftcar_jni_set_cursor_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;

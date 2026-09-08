@@ -1,0 +1,1 @@
+{"version":3,"file":"rkyv-engine-routes.d.ts","sourceRoot":"","sources":["../src/rkyv-engine-routes.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,gBAAgB,EAAE,iBAAiB,EAAE,MAAM,0BAA0B,CAAC;AAEpF,wBAAgB,sBAAsB,CACpC,OAAO,EAAE,iBAAiB,EAC1B,YAAY,EAAE,CAAC,CAAC,EAAE,SAAS,EAAE,MAAM,EAAE,OAAO,EAAE,MAAM,EAAE,IAAI,CAAC,EAAE,OAAO,KAAK,CAAC,GACzE,gBAAgB,CAoFlB"}

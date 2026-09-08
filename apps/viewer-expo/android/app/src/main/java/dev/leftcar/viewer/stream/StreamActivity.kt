@@ -13,6 +13,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PointerIcon
+import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.View
@@ -37,7 +38,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var host: String = ""
     private var port: Int = 5000
     private var fps: Int = 60
-    private var showFps: Boolean = true
+    private var showFps: Boolean = false
     private var sourceWidth: Int = 1920
     private var sourceHeight: Int = 1080
     private var splitVertical = false
@@ -57,7 +58,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
     }
     private var hud: StreamHudController? = null
+    private var gestureHint: GestureHintOverlay? = null
     private var cursorOverlay: CursorOverlayView? = null
+    private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
@@ -151,7 +154,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 // Keep the visible Activity and Surface alive. First retry the
                 // renderer directly on the same port; only exhaust the short
                 // native budget before asking React/Host to recreate the session.
-                hud?.showRebindIndicator("화면을 같은 창에서 다시 연결하는 중")
+                hud?.showRebindIndicator(ViewerStrings.rebindReconnecting)
                 scheduleRenderRecovery()
             } else {
                 // A complete Wi-Fi outage tears down the Host session, so the
@@ -161,7 +164,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 recoveryRetryRunnable = null
                 recoveryRetryPolicy.reset()
                 recoveryFallbackEmitted = false
-                hud?.showRebindIndicator("컴퓨터 연결을 같은 창에서 다시 연결하는 중")
+                hud?.showRebindIndicator(ViewerStrings.rebindReconnectingControl)
             }
             return
         }
@@ -355,6 +358,18 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         cursorOverlay = null
     }
 
+    /**
+     * 첫 스트림 창에만 제스처 안내를 1회 보여준다. 닫힐 때 플래그를 저장해
+     * 이후 창에서는 다시 뜨지 않는다.
+     */
+    private fun maybeShowGestureHint() {
+        val prefs = getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+        if (prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
+        gestureHint = GestureHintOverlay(this) {
+            prefs.edit().putBoolean(GestureHintOverlay.PREF_SHOWN, true).apply()
+        }.also { it.show() }
+    }
+
     private fun lifecycleEvent(code: Int) {
         if (nativeState != 0L && !released) {
             ViewerNative.updateWindowEvent(
@@ -366,27 +381,67 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun normalizedX(event: MotionEvent, view: View): Float =
-        mapAspectFitPoint(
-            event.x,
-            event.y,
-            view.width,
-            view.height,
-            if (streamSurfaces?.right != null) sourceWidth / 2 else sourceWidth,
-            sourceHeight,
-        ).first.let { x ->
-            if (streamSurfaces?.right != null && view === streamSurfaces?.right) 0.5f + x * 0.5f else x * if (streamSurfaces?.right != null) 0.5f else 1f
+    private fun normalizedPoint(view: View, x: Float, y: Float): Pair<Float, Float> {
+        val split = streamSurfaces?.right != null
+        val videoWidth = if (split) sourceWidth / 2 else sourceWidth
+        val mapped = mapAspectFitPoint(x, y, view.width, view.height, videoWidth, sourceHeight)
+        val nx = when {
+            !split -> mapped.first
+            view === streamSurfaces?.right -> 0.5f + mapped.first * 0.5f
+            else -> mapped.first * 0.5f
         }
+        return nx to mapped.second
+    }
+
+    private fun normalizedX(event: MotionEvent, view: View): Float =
+        normalizedPoint(view, event.x, event.y).first
 
     private fun normalizedY(event: MotionEvent, view: View): Float =
-        mapAspectFitPoint(
-            event.x,
-            event.y,
-            view.width,
-            view.height,
-            if (streamSurfaces?.right != null) sourceWidth / 2 else sourceWidth,
-            sourceHeight,
-        ).second
+        normalizedPoint(view, event.x, event.y).second
+
+    /**
+     * 호스트가 원격 입력을 잠근 동안(상태 0)은 터치·마우스·키보드 이벤트를
+     * 전송 단계에 넣기 전에 조용히 버린다. 호스트도 자체 게이트에서 폐기하지만,
+     * 뷰어가 먼저 끊어야 잠금 내내 이어지는 UDP 전송·재전송과 무선 전력 낭비가
+     * 없어지고 입력 배지와 실제 동작이 일치한다. 상태를 아직 모를 때(-1)는
+     * 보낸다 — 세션 시작 직후 자동 허용 상태가 도착하기 전 첫 입력을 막지
+     * 않기 위해서다.
+     */
+    private fun remoteInputLocked(): Boolean = ViewerNative.inputStatus(instanceId) == 0
+
+    /** 잠금 중에는 전송하지 않고, 이벤트는 로컬에서 소비한 것으로 처리한다. */
+    private fun sendPointerUnlocked(
+        action: Int,
+        x: Float,
+        y: Float,
+        buttons: Int,
+        actionButton: Int,
+        horizontalScroll: Float,
+        verticalScroll: Float,
+    ): Boolean {
+        if (remoteInputLocked()) return true
+        return ViewerNative.sendPointer(
+            instanceId,
+            action,
+            x,
+            y,
+            buttons,
+            actionButton,
+            horizontalScroll,
+            verticalScroll,
+        ) == 0
+    }
+
+    private fun sendKeyUnlocked(
+        keyCode: Int,
+        scanCode: Int,
+        metaState: Int,
+        down: Boolean,
+        repeat: Int,
+    ): Boolean {
+        if (remoteInputLocked()) return true
+        return ViewerNative.sendKey(instanceId, keyCode, scanCode, metaState, down, repeat) == 0
+    }
 
     private fun hideTabletCursor() {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
@@ -417,8 +472,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun forwardPointer(event: MotionEvent, view: View): Boolean {
-        val touchLike = event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) ||
-            event.isFromSource(InputDevice.SOURCE_STYLUS)
+        // Touchscreen input goes through the gesture machine (tap, drag,
+        // two-finger scroll, long-press right click); physical mice and
+        // styluses keep the direct event mapping below.
+        if (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+            return forwardTouchGesture(event, view)
+        }
+        // Touchscreen events never reach here (routed to the gesture machine
+        // above), so only the stylus still counts as touch-like.
+        val touchLike = event.isFromSource(InputDevice.SOURCE_STYLUS)
         updateTabletCursor(event, view)
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
@@ -457,8 +519,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
             else -> event.buttonState
         }
-        val result = ViewerNative.sendPointer(
-            instanceId,
+        return sendPointerUnlocked(
             action,
             normalizedX(event, view),
             normalizedY(event, view),
@@ -467,7 +528,126 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
         )
-        return result == 0
+    }
+
+    private val gestureHandler = Handler(Looper.getMainLooper())
+    // Activity field initializers run before onCreate attaches the base
+    // context, so anything needing Context must wait for first use.
+    private val touchGestures by lazy {
+        TouchGestureStateMachine(
+            touchSlopPx = ViewConfiguration.get(this).scaledTouchSlop.toFloat(),
+        )
+    }
+    private var longPressRunnable: Runnable? = null
+    private var gestureLastX = 0f
+    private var gestureLastY = 0f
+
+    private fun forwardTouchGesture(event: MotionEvent, view: View): Boolean {
+        updateTabletCursor(event, view)
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            hud?.revealInput()
+            hud?.revealStats()
+        }
+        if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
+            // Wheel-style scroll events carry axis payloads directly; the
+            // finger state machine has no equivalent phase.
+            val (nx, ny) = normalizedPoint(view, event.x, event.y)
+            sendPointerUnlocked(
+                4,
+                nx,
+                ny,
+                0,
+                0,
+                event.getAxisValue(MotionEvent.AXIS_HSCROLL),
+                event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+            )
+            return true
+        }
+        var centroidX = 0f
+        var centroidY = 0f
+        for (index in 0 until event.pointerCount) {
+            centroidX += event.getX(index)
+            centroidY += event.getY(index)
+        }
+        if (event.pointerCount > 0) {
+            centroidX /= event.pointerCount
+            centroidY /= event.pointerCount
+        }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN,
+            MotionEvent.ACTION_MOVE,
+            -> {
+                gestureLastX = event.x
+                gestureLastY = event.y
+            }
+        }
+        val commands = touchGestures.onTouchEvent(
+            event.actionMasked,
+            event.pointerCount,
+            event.x,
+            event.y,
+            centroidX,
+            centroidY,
+        )
+        commands.forEach { command -> runGestureCommand(command, view) }
+        syncLongPressTimer(view)
+        return true
+    }
+
+    private fun syncLongPressTimer(view: View) {
+        longPressRunnable?.let(gestureHandler::removeCallbacks)
+        longPressRunnable = null
+        if (!touchGestures.longPressPending) return
+        val x = gestureLastX
+        val y = gestureLastY
+        val runnable = Runnable {
+            longPressRunnable = null
+            val fired = touchGestures.longPressFired(x, y)
+            fired.forEach { runGestureCommand(it, view) }
+        }
+        longPressRunnable = runnable
+        gestureHandler.postDelayed(runnable, ViewConfiguration.getLongPressTimeout().toLong())
+    }
+
+    private fun runGestureCommand(command: TouchGestureCommand, view: View) {
+        when (command) {
+            is TouchGestureCommand.Move -> {
+                val (nx, ny) = normalizedPoint(view, command.x, command.y)
+                sendPointerUnlocked(
+                    1,
+                    nx,
+                    ny,
+                    command.buttons,
+                    0,
+                    0f,
+                    0f,
+                )
+            }
+            is TouchGestureCommand.Button -> {
+                val (nx, ny) = normalizedPoint(view, command.x, command.y)
+                sendPointerUnlocked(
+                    if (command.down) 2 else 3,
+                    nx,
+                    ny,
+                    command.button,
+                    command.button,
+                    0f,
+                    0f,
+                )
+            }
+            is TouchGestureCommand.Scroll -> {
+                sendPointerUnlocked(
+                    4,
+                    normalizedPoint(view, gestureLastX, gestureLastY).first,
+                    normalizedPoint(view, gestureLastX, gestureLastY).second,
+                    0,
+                    0,
+                    command.horizontalLines,
+                    command.verticalLines,
+                )
+            }
+        }
     }
 
     private fun isRemoteKey(keyCode: Int): Boolean = keyCode !in setOf(
@@ -489,15 +669,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             hud?.revealInput()
             hud?.revealStats()
         }
-        val result = ViewerNative.sendKey(
-            instanceId,
+        val result = sendKeyUnlocked(
             event.keyCode,
             event.scanCode,
             event.metaState,
             event.action == KeyEvent.ACTION_DOWN,
             event.repeatCount,
         )
-        return result == 0 || super.dispatchKeyEvent(event)
+        return result || super.dispatchKeyEvent(event)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -542,12 +721,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         setContentView(surfaces.root)
         localCursorEnabled = intent?.getBooleanExtra("localCursor", false) ?: false
-        val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: "디스플레이"
+        // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
+        intent?.getStringExtra("language")?.let { stored ->
+            ViewerStrings.applyLanguage(stored)
+            getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+                .edit().putString(ViewerStrings.PREF_LANGUAGE, stored).apply()
+        } ?: ViewerStrings.applyLanguage(
+            getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+                .getString(ViewerStrings.PREF_LANGUAGE, null),
+        )
+        val displayName = intent?.getStringExtra("displayName")?.takeIf { it.isNotBlank() } ?: ViewerStrings.displayFallback
         title = displayName
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             setTaskDescription(android.app.ActivityManager.TaskDescription(displayName))
         }
-        showFps = intent?.getBooleanExtra("showFps", true) ?: true
+        showFps = intent?.getBooleanExtra("showFps", false) ?: false
         hud = StreamHudController(
             this,
             instanceId,
@@ -557,10 +745,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             ::markRenderHealthy,
         )
         hud?.show()
+        maybeShowGestureHint()
         surfaces.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()
         nativeState = ViewerNative.start()
+        // Host audio is a passive plane: start draining with the renderer and
+        // keep running across surface transitions. Rebinds clear the native
+        // ring via the LCH1 challenge, so a replacement session never plays
+        // stale chunks.
+        audioPlayer = StreamAudioPlayer(instanceId).also { it.start() }
         lifecycleEvent(1) // ACTIVITY_CREATE
         applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
     }
@@ -727,7 +921,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
         cancelPendingSurfaceAttach()
-        hud?.showRebindIndicator("화면을 다시 연결할 준비 중")
+        hud?.showRebindIndicator(ViewerStrings.rebindPreparing)
         setContentView(next.root)
         next.requestFocus()
         window.decorView.post { hideSystemBars() }
@@ -926,8 +1120,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
+        gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()
         cursorOverlay = null
+        audioPlayer?.stop()
+        audioPlayer = null
+        gestureHint?.dismiss()
+        gestureHint = null
         hud?.stop()
         hud = null
         releaseNetworkLocks()

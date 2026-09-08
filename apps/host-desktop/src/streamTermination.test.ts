@@ -50,7 +50,7 @@ describe("stream termination presentation", () => {
     expect(notice.tone).toBe("warning");
   });
 
-  it("does not hide an unexpected backend error", () => {
+  it("leads with a friendly message but keeps an unexpected backend error visible", () => {
     const notice = createTerminationNotice({
       ...baseSession,
       state: "error",
@@ -58,7 +58,21 @@ describe("stream termination presentation", () => {
     });
 
     expect(notice.title).toBe("문제가 생겨 화면 공유를 종료했습니다");
-    expect(notice.detail).toBe("encoder failed to start");
+    expect(notice.detail).toBe(
+      "화면을 가져오거나 보내는 중 문제가 발생했습니다. (encoder failed to start)",
+    );
+    expect(notice.tone).toBe("danger");
+  });
+
+  it("maps screen-recording permission failures to a settings guide", () => {
+    const notice = createTerminationNotice({
+      ...baseSession,
+      state: "error",
+      error: "startCapture failed: screen-recording permission required",
+    });
+
+    expect(notice.title).toBe("화면 공유 권한 문제로 종료했습니다");
+    expect(notice.detail).toContain("화면 녹화 권한");
     expect(notice.tone).toBe("danger");
   });
 });

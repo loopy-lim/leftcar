@@ -37,6 +37,13 @@ import OSLog
     defer { registryLock.unlock() }
     return body(&registry)
 }
+
+/// Remove a session from the handle table (startup failure and stop paths).
+/// The removed session, when present, is returned by `withRegistry`; the
+/// stop paths already hold their own reference, so discard it here.
+ func removeFromRegistry(_ handle: UInt32) {
+    _ = withRegistry { $0.removeValue(forKey: handle) }
+}
  var lastErrorUTF8: UnsafeMutablePointer<CChar> = UnsafeMutablePointer<CChar>(strdup(""))
 
  func setLastError(_ message: String) {

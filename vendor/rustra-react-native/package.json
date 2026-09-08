@@ -1,34 +1,34 @@
 {
   "name": "@rustra/react-native",
-  "version": "0.4.0",
+  "version": "0.7.0",
   "description": "React Native adapter for rustra-bridge",
   "license": "MIT",
   "type": "module",
-  "main": "./index.js",
-  "types": "./index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "sideEffects": false,
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "import": "./index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "publishConfig": {
     "access": "public"
   },
   "files": [
-    "index.d.ts",
-    "index.js",
-    "utf8.d.ts",
-    "utf8.js"
+    "LICENSE",
+    "native/**/*",
+    "dist"
   ],
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist",
-    "test": "tsc --noEmit"
+    "clean": "rm -rf dist dist-test",
+    "test": "bun test src/index.test.ts",
+    "test:compile": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@rustra/types": "^0.4.0"
+    "@rustra/types": "^0.8.0"
   },
   "devDependencies": {
     "typescript": "^5.9.0"
@@ -39,6 +39,14 @@
     "react-native",
     "adapter"
   ],
+  "peerDependencies": {
+    "react-native": ">=0.76"
+  },
+  "peerDependenciesMeta": {
+    "react-native": {
+      "optional": true
+    }
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/loopy-lim/rustra.git",

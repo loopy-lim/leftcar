@@ -9,6 +9,7 @@
 #[cfg(target_os = "android")]
 use std::ffi::c_char;
 
+use crate::audio_protocol::AudioRing;
 use crate::input_protocol::InputScheduler;
 use crate::net_guard::host_is_valid;
 use crate::prepared_tcp::PreparedTcpBridge;
@@ -68,6 +69,9 @@ pub(crate) struct RendererControl {
     pub(crate) port: u16,
     pub(crate) split: bool,
     pub(crate) input: Mutex<InputScheduler>,
+    // Host audio plane (LCAU): newest chunks only, drained by the Kotlin
+    // playback thread through leftcar_jni_poll_audio.
+    pub(crate) audio: Mutex<AudioRing>,
     // -1 = waiting for authenticated Host state, 0 = locked, 1 = enabled.
     pub(crate) input_enabled: AtomicI8,
     pub(crate) rendered_frames: AtomicU64,
@@ -135,6 +139,7 @@ impl RendererControl {
             port,
             split: true,
             input: Mutex::new(InputScheduler::new(fps)),
+            audio: Mutex::new(AudioRing::default()),
             input_enabled: AtomicI8::new(-1),
             rendered_frames: AtomicU64::new(0),
             stale_outputs: AtomicU64::new(0),

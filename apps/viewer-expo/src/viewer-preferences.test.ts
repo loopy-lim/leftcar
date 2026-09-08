@@ -27,17 +27,18 @@ function memoryStore(initial: string | null = null): ViewerPreferencesStore & {
 }
 
 describe("viewer preferences", () => {
-  it("uses per-display recommendations and visible FPS overlay by default", () => {
+  it("uses per-display recommendations and quiet diagnostics by default", () => {
     expect(parseViewerPreferences(null)).toEqual(DEFAULT_VIEWER_PREFERENCES);
     expect(DEFAULT_VIEWER_PREFERENCES.profileId).toBe("auto");
     expect(DEFAULT_VIEWER_PREFERENCES.streamingPriority).toBe("responsive");
+    expect(DEFAULT_VIEWER_PREFERENCES.showFps).toBe(false);
   });
 
   it("keeps valid stored choices while recovering invalid fields independently", () => {
     expect(parseViewerPreferences('{"profileId":"clarity","showFps":"yes"}')).toEqual({
       profileId: "clarity",
       streamingPriority: "clarity",
-      showFps: true,
+      showFps: false,
       localCursor: false,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({

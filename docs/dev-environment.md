@@ -36,7 +36,7 @@
   실행해도** `CGGetActiveDisplayList`가 0을 반환한다 — WindowServer가 활성
   디스플레이를 아예 갖지 않기 때문이다. Aerospace option+1..9 전환은 화면 공유
   세션 안의 워크스페이스 전환일 뿐 활성 출력을 만들지 못한다.
-- 디스플레이 관련 실측(cgvd-spark 2단계 등) 전 확인 명령:
+- 디스플레이 관련 실측 전 확인 명령:
   `ioreg -r -k AppleClamshellState | grep ClamshellState` (Yes면 덮개 닫힘),
   `pmset -g systemstate`. **덮개를 열거나 외장 모니터를 켠 뒤 실행할 것.**
 
@@ -44,10 +44,7 @@
 
 | 대상 | 절차 | 실행 주체 |
 |---|---|---|
-| CGVirtualDisplay private API 존재 | `zsh tools/cgvd-spark/run-probe.zsh` 1단계 | 자동화 셸 가능 |
-| CGVirtualDisplay 생성/모드/HiDPI/SCK | `zsh tools/cgvd-spark/run-probe.zsh` 2단계 (~80초) | **GUI 터미널에서 직접** |
 | USB AOAP 물리 게이트 (T11) | `docs/usb-physical-validation.md` (검증 1~6) | **사람 + 폰 `HA2D6EMP`** |
-| BetterDisplay CLI 계약 | ADR-0005 + `docs/EVIDENCE.md` 가상 디스플레이 실험 섹션 | GUI(호스트 앱) |
 | 60분 soak·고모션·glass-to-glass | `docs/EVIDENCE.md` E4–E7 표 | 사람 + 기기 |
 
 ## Android 디바이스 확인 (자동화 셸에서 가능)

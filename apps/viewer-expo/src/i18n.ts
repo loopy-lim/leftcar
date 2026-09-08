@@ -1,23 +1,37 @@
-import { createElement, createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { createElement, createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import * as SecureStore from "expo-secure-store";
 import {
   getTranslation,
   interpolate,
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
+import { setCurrentLanguage } from "./language-store";
+
+const LANGUAGE_KEY = "leftcar.language";
+
+/**
+ * 시작 언어 결정 규칙: 저장된 선택이 우선하고, 없으면 OS 로케일이 영어권인지로
+ * 판단한다. 그 외 모든 로케일은 한국어(제품 기본)로 귀결된다.
+ */
+export function resolvePersistedLanguage(
+  stored: string | null,
+  locale: string,
+): SupportedLanguage {
+  if (stored === "ko" || stored === "en") return stored;
+  return locale.toLowerCase().startsWith("en") ? "en" : "ko";
+}
 
 function detectInitialLanguage(): SupportedLanguage {
   try {
     const locale = typeof Intl !== "undefined"
       ? Intl.DateTimeFormat().resolvedOptions().locale
       : "ko";
-    if (locale.toLowerCase().startsWith("en")) {
-      return "en";
-    }
+    return resolvePersistedLanguage(null, locale);
   } catch {
     // fallback
+    return "ko";
   }
-  return "ko";
 }
 
 interface LanguageContextValue {
@@ -31,13 +45,49 @@ interface LanguageContextValue {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  const [language, setLanguage] = useState<SupportedLanguage>(detectInitialLanguage);
+  const [language, setLanguageState] = useState<SupportedLanguage>(detectInitialLanguage);
 
-  const toggleLanguage = useCallback(() => {
-    setLanguage((prev) => (prev === "ko" ? "en" : "ko"));
+  // 저장된 선택이 있으면 감지된 로케일 값을 대체한다(마운트 후 1회).
+  useEffect(() => {
+    let active = true;
+    void SecureStore.getItemAsync(LANGUAGE_KEY)
+      .then((stored) => {
+        if (active && (stored === "ko" || stored === "en")) {
+          setLanguageState(stored);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
+  const persistLanguage = useCallback((lang: SupportedLanguage) => {
+    void SecureStore.setItemAsync(LANGUAGE_KEY, lang).catch(() => undefined);
+  }, []);
+
+  const setLanguage = useCallback(
+    (lang: SupportedLanguage) => {
+      setLanguageState(lang);
+      persistLanguage(lang);
+    },
+    [persistLanguage],
+  );
+
+  const toggleLanguage = useCallback(() => {
+    setLanguageState((prev) => {
+      const next = prev === "ko" ? "en" : "ko";
+      persistLanguage(next);
+      return next;
+    });
+  }, [persistLanguage]);
+
   const t = useMemo(() => getTranslation(language), [language]);
+
+  // React 바깥 모듈(세션/런처/오류 포맷터)이 같은 언어를 보게 한다.
+  useEffect(() => {
+    setCurrentLanguage(language);
+  }, [language]);
 
   const format = useCallback((template: string, params?: Record<string, string | number>) => {
     return interpolate(template, params);
@@ -51,7 +101,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       toggleLanguage,
       format,
     }),
-    [language, t, toggleLanguage, format],
+    [language, t, setLanguage, toggleLanguage, format],
   );
 
   return createElement(LanguageContext.Provider, { value }, children);

@@ -8,7 +8,6 @@ import {
   View,
 } from "react-native";
 import {
-  customSizeScale,
   displaySizePresets,
   normalizeCustomSize,
 } from "./display-size";
@@ -18,30 +17,18 @@ import {
 } from "./window-aspect-ratio";
 import type { ActiveStream } from "./catalog-model-types";
 import type { ThemeTokens } from "./theme";
+import { useAppLanguage } from "./i18n";
 
 /**
- * "가상 화면 크기" card: shows the current session size, offers preset
- * candidates (tablet match when metrics are known, 1080p/1440p/4K), and a
- * manual pixel input. Applies through the model's resize handlers, falling
- * back to a session-only resolution change while the host-side managed
- * display listing is unavailable.
+ * "화면 해상도" card: shows the current session resolution, offers preset
+ * candidates (1080p/1440p/4K), and a manual pixel input. Applies through the
+ * model's session reconfigure path.
  */
 
 export interface DisplaySizeCardProps {
   stream: ActiveStream | null;
-  tabletMatch: { width: number; height: number } | null;
   resizing: boolean;
-  /** Managed virtual display id, when the viewer knows one. Task 8 wiring. */
-  virtualDisplayId?: string | null;
   colors: ThemeTokens;
-  onResizeVirtualDisplay: (
-    stream: ActiveStream,
-    virtualDisplayId: string,
-    width: number,
-    height: number,
-    scale: 1 | 2,
-    fps: number,
-  ) => Promise<boolean>;
   onResizeSession: (
     stream: ActiveStream,
     width: number,
@@ -123,11 +110,8 @@ function PresetButton({
 
 export function DisplaySizeCard({
   stream,
-  tabletMatch,
   resizing,
-  virtualDisplayId,
   colors,
-  onResizeVirtualDisplay,
   onResizeSession,
   windowRatio = null,
   onSelectWindowRatio,
@@ -135,30 +119,24 @@ export function DisplaySizeCard({
   const [customWidth, setCustomWidth] = useState("");
   const [customHeight, setCustomHeight] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
+  const { t, format } = useAppLanguage();
 
   const currentWidth = stream?.activeTarget.width ?? null;
   const currentHeight = stream?.activeTarget.height ?? null;
-  const currentScale: 1 | 2 = stream?.scale ?? 1;
   const presets = useMemo(
     () =>
       displaySizePresets(
-        tabletMatch,
         currentWidth !== null && currentHeight !== null
-          ? { width: currentWidth, height: currentHeight, scale: currentScale }
+          ? { width: currentWidth, height: currentHeight }
           : null,
       ),
-    [tabletMatch, currentWidth, currentHeight, currentScale],
+    [currentWidth, currentHeight],
   );
 
   if (!stream) return null;
 
-  const applyPreset = (width: number, height: number, scale: 1 | 2) => {
+  const applyPreset = (width: number, height: number) => {
     if (resizing || !stream) return;
-    if (virtualDisplayId) {
-      void onResizeVirtualDisplay(stream, virtualDisplayId, width, height, scale, stream.fps);
-      return;
-    }
-    // No managed-display id yet: change the session resolution only.
     void onResizeSession(stream, width, height, stream.fps);
   };
 
@@ -169,22 +147,14 @@ export function DisplaySizeCard({
     const normalized = normalizeCustomSize(width, height);
     if (!normalized) {
       setCustomError(
-        `${MIN_WIDTH}×${MIN_HEIGHT}px 이상 ${MAX_WIDTH}×${MAX_HEIGHT}px 이하의 짝수 크기를 입력해 주세요.`,
+        format(t.viewer.customSizeError, {
+          min: `${MIN_WIDTH}×${MIN_HEIGHT}px`,
+          max: `${MAX_WIDTH}×${MAX_HEIGHT}px`,
+        }),
       );
       return;
     }
     setCustomError(null);
-    if (virtualDisplayId) {
-      void onResizeVirtualDisplay(
-        stream,
-        virtualDisplayId,
-        normalized.width,
-        normalized.height,
-        customSizeScale(normalized.width, normalized.height),
-        stream.fps,
-      );
-      return;
-    }
     void onResizeSession(stream, normalized.width, normalized.height, stream.fps);
   };
 
@@ -232,61 +202,52 @@ export function DisplaySizeCard({
 
   return (
     <View style={styles.card}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          가상 화면 크기
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          {virtualDisplayId
-            ? "컴퓨터의 가상 화면 크기를 바꾸고 열린 창에 바로 적용합니다."
-            : "열린 화면 창의 해상도를 바로 바꿉니다. 가상 화면까지 바꾸려면 호스트 목록 조회가 필요합니다."}
-        </Text>
-      </View>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+        {t.viewer.displaySizeTitle}
+      </Text>
 
       <Text
         style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
-        accessibilityLabel={`현재 크기 ${stream.activeTarget.width} 곱하기 ${stream.activeTarget.height}`}
+        accessibilityLabel={format(t.viewer.displaySizeA11y, {
+          width: stream.activeTarget.width,
+          height: stream.activeTarget.height,
+        })}
       >
-        현재 {stream.activeTarget.width} × {stream.activeTarget.height} · {stream.fps} FPS
+        {t.viewer.displaySizeCurrentPrefix} {stream.activeTarget.width} × {stream.activeTarget.height} · {stream.fps} FPS
       </Text>
 
       <View style={styles.presetRow}>
-        {presets.map((preset) => {
-          // Scale matters only once the stream's scale is known; an unknown
-          // scale keeps the legacy width/height-only comparison.
-          const active =
-            stream.activeTarget.width === preset.width &&
-            stream.activeTarget.height === preset.height &&
-            (stream.scale === undefined || stream.scale === preset.scale);
-          return (
-            <PresetButton
-              key={`${preset.label}-${preset.width}x${preset.height}`}
-              label={preset.label}
-              detail={`${preset.width} × ${preset.height}${preset.scale === 2 ? " · 2x" : ""}`}
-              active={active}
-              disabled={resizing}
-              colors={colors}
-              onPress={() => applyPreset(preset.width, preset.height, preset.scale)}
-            />
-          );
-        })}
+        {presets.map((preset) => (
+          <PresetButton
+            key={`${preset.label}-${preset.width}x${preset.height}`}
+            label={preset.label}
+            detail={`${preset.width} × ${preset.height}`}
+            active={
+              stream.activeTarget.width === preset.width &&
+              stream.activeTarget.height === preset.height
+            }
+            disabled={resizing}
+            colors={colors}
+            onPress={() => applyPreset(preset.width, preset.height)}
+          />
+        ))}
       </View>
 
       <View style={{ gap: 4 }}>
         <Text
           style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
         >
-          화면 비율
+          {t.viewer.aspectTitle}
         </Text>
         <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          열린 창의 종횡비만 바꿉니다. 컴퓨터 화면 해상도는 그대로 유지됩니다.
+          {t.viewer.aspectHint}
         </Text>
         <View style={styles.presetRow}>
           {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (
             <PresetButton
               key={preset.id}
               label={preset.label}
-              detail={preset.ratio < 1 ? "세로" : "가로"}
+              detail={preset.ratio < 1 ? t.viewer.aspectPortrait : t.viewer.aspectLandscape}
               active={windowRatio === preset.id}
               disabled={resizing || !onSelectWindowRatio}
               colors={colors}
@@ -299,24 +260,24 @@ export function DisplaySizeCard({
       <View style={styles.inputRow}>
         <TextInput
           style={styles.input}
-          placeholder={`가로 (${MIN_WIDTH}~${MAX_WIDTH})`}
+          placeholder={format(t.viewer.customWidthPlaceholder, { min: MIN_WIDTH, max: MAX_WIDTH })}
           placeholderTextColor={colors.textMuted}
           keyboardType="number-pad"
           value={customWidth}
           editable={!resizing}
           onChangeText={setCustomWidth}
-          accessibilityLabel="사용자 지정 가로 크기 (픽셀)"
+          accessibilityLabel={t.viewer.customWidthA11y}
         />
         <Text style={{ fontSize: 13, color: colors.textMuted }}>×</Text>
         <TextInput
           style={styles.input}
-          placeholder={`세로 (${MIN_HEIGHT}~${MAX_HEIGHT})`}
+          placeholder={format(t.viewer.customHeightPlaceholder, { min: MIN_HEIGHT, max: MAX_HEIGHT })}
           placeholderTextColor={colors.textMuted}
           keyboardType="number-pad"
           value={customHeight}
           editable={!resizing}
           onChangeText={setCustomHeight}
-          accessibilityLabel="사용자 지정 세로 크기 (픽셀)"
+          accessibilityLabel={t.viewer.customHeightA11y}
         />
       </View>
       {customError ? (
@@ -330,7 +291,7 @@ export function DisplaySizeCard({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="크기 적용"
+        accessibilityLabel={t.viewer.applySizeA11y}
         accessibilityState={{ disabled: resizing }}
         style={styles.applyButton}
         disabled={resizing}
@@ -338,7 +299,7 @@ export function DisplaySizeCard({
       >
         {resizing ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : null}
         <Text style={{ fontSize: 13, fontWeight: "700", color: colors.btnPrimaryText }}>
-          {resizing ? "적용하는 중…" : "직접 입력 적용"}
+          {resizing ? t.viewer.applyingSize : t.viewer.applySizeLabel}
         </Text>
       </Pressable>
     </View>

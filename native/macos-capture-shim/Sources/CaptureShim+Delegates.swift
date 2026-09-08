@@ -39,7 +39,14 @@ final class CaptureOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen else { return }
+        guard type == .screen else {
+            if type == .audio, let session {
+                session.audioQueue.async { [weak session] in
+                    session?.handleAudioSampleBuffer(sampleBuffer)
+                }
+            }
+            return
+        }
         session?.handleFrame(sampleBuffer)
     }
 

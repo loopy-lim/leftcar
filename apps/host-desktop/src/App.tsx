@@ -33,7 +33,6 @@ import { trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
 import PairingPanel from "./PairingPanel";
-import DisplayManagerCard from "./DisplayManagerCard";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -47,18 +46,38 @@ import {
   terminationNoticeVariants,
 } from "./lib/variants";
 
-function hostErrorMessage(cause: unknown, t: TranslationSchema): string {
+type HostErrorKind =
+  | "remote-desktop-permission"
+  | "screen-permission"
+  | "network"
+  | "service"
+  | "generic";
+
+interface HostErrorView {
+  message: string;
+  kind: HostErrorKind;
+}
+
+/**
+ * 원시 오류 문자열을 번역된 안내문과 안정적인 종류로 바꾼다. 버튼 분기는
+ * 반드시 kind로 한다 — 번역된 문구(예: 한국어 "권한")에 포함 여부로 매칭하면
+ * 다른 언어 UI에서 버튼이 사라진다.
+ */
+function hostErrorView(cause: unknown, t: TranslationSchema): HostErrorView {
   const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
+  if (message.includes("remote desktop")) {
+    return { message: t.host.screenPermissionError, kind: "remote-desktop-permission" };
+  }
   if (message.includes("permission") || message.includes("not authorized")) {
-    return t.host.screenPermissionError;
+    return { message: t.host.screenPermissionError, kind: "screen-permission" };
   }
   if (message.includes("no lan interface")) {
-    return t.host.networkNotFoundError;
+    return { message: t.host.networkNotFoundError, kind: "network" };
   }
   if (message.includes("invoke") || message.includes("initialization")) {
-    return t.host.appServiceInitError;
+    return { message: t.host.appServiceInitError, kind: "service" };
   }
-  return t.host.connectionCheckError;
+  return { message: t.host.connectionCheckError, kind: "generic" };
 }
 interface StatusView {
   sessions: SessionRow[];
@@ -82,8 +101,11 @@ function useHostStatus(t: TranslationSchema) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<HostErrorView | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
+  // Assume granted until the first poll answers so the warning never flashes
+  // on a healthy host.
+  const [screenPermission, setScreenPermission] = useState(true);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
   const [lanIp, setLanIp] = useState<string | null>(null);
@@ -94,13 +116,15 @@ function useHostStatus(t: TranslationSchema) {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission, hostPlatform, actualControlPort, actualLanIp] = await Promise.all([
-        invoke<StatusView>("get_status"),
-        invoke<boolean>("get_input_permission"),
-        invoke<HostSnapshotView["platform"]>("get_host_platform"),
-        invoke<number>("get_control_port"),
-        invoke<string | null>("get_lan_ip").catch(() => null),
-      ]);
+      const [status, permission, screenGranted, hostPlatform, actualControlPort, actualLanIp] =
+        await Promise.all([
+          invoke<StatusView>("get_status"),
+          invoke<boolean>("get_input_permission"),
+          invoke<boolean>("get_screen_permission"),
+          invoke<HostSnapshotView["platform"]>("get_host_platform"),
+          invoke<number>("get_control_port"),
+          invoke<string | null>("get_lan_ip").catch(() => null),
+        ]);
       const statusSessions = status.sessions || [];
       const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
       let nextTerminationNotice: TerminationNotice | null = null;
@@ -147,12 +171,13 @@ function useHostStatus(t: TranslationSchema) {
       );
       setError(null);
       setInputPermission(permission);
+      setScreenPermission(screenGranted);
       setPlatform(hostPlatform);
       setControlPort(actualControlPort);
       setLanIp(actualLanIp);
       setLastUpdated(new Date());
     } catch (cause) {
-      setError(hostErrorMessage(cause, t));
+      setError(hostErrorView(cause, t));
     }
   }, [t]);
 
@@ -180,6 +205,7 @@ function useHostStatus(t: TranslationSchema) {
     dismissTerminationNotice,
     error,
     inputPermission,
+    screenPermission,
     platform,
     controlPort,
     lanIp,
@@ -562,309 +588,11 @@ function TerminationBanner({
   );
 }
 
-interface VirtualDisplayExperimentSectionProps {
-  platform: HostSnapshotView["platform"];
-  enabled: boolean;
-  language: SupportedLanguage;
-  t: TranslationSchema;
-  onToggle: () => void;
-}
-
-/// Opt-in gate for the BetterDisplay experiment (design flow step 1: toggle,
-/// default off). When `enabled` is false the VirtualDisplayCard is not
-/// rendered at all, so no virtual display or tablet session command can be
-/// invoked.
-function VirtualDisplayExperimentSection({
-  platform,
-  enabled,
-  language,
-  t,
-  onToggle,
-}: VirtualDisplayExperimentSectionProps) {
-  const label = language === "ko" ? "가상 화면" : "Virtual screen";
-  const purpose = language === "ko"
-    ? "태블릿에서 쓸 추가 작업 화면"
-    : "An extra workspace for your tablet";
-  const advanced = language === "ko" ? "고급 세션 제어" : "Advanced session controls";
-  return (
-    <section className="troubleshoot-card" aria-label={label}>
-      <details>
-        <summary className="virtual-screen-summary">
-          <span className="virtual-screen-heading"><Monitor size={16} />{label}</span>
-          <span className="virtual-screen-purpose">{purpose}</span>
-          <ChevronDown className="virtual-screen-chevron" size={15} aria-hidden="true" />
-        </summary>
-        <div className="virtual-screen-content">
-          <div className="virtual-screen-opt-in">
-            <div>
-              <strong>{t.host.virtualDisplayExperiment}</strong>
-              <p>{t.host.virtualDisplayToggleDesc}</p>
-            </div>
-          <button
-            className={controlToggleVariants({ active: enabled })}
-            onClick={onToggle}
-            aria-pressed={enabled}
-            aria-label={t.host.virtualDisplayExperiment}
-            title={enabled ? t.host.virtualDisplayToggleOn : t.host.virtualDisplayToggleOff}
-          >
-            {enabled ? t.host.virtualDisplayToggleOn : t.host.virtualDisplayToggleOff}
-          </button>
-          </div>
-          {enabled && <DisplayManagerCard enabled={platform === "macos"} language={language} />}
-          {enabled && (
-            <details className="virtual-screen-advanced">
-              <summary>{advanced}</summary>
-              <VirtualDisplayCard platform={platform} t={t} />
-            </details>
-          )}
-        </div>
-      </details>
-    </section>
-  );
-}
-
-interface VirtualDisplayCardProps {
-  platform: HostSnapshotView["platform"];
-  t: TranslationSchema;
-}
-
-type TabletSessionUiState = "Idle" | "Streaming" | "Clamshell" | "Creating" | "Failed";
-
-type ParsedTabletStatus =
-  | { state: "Idle"; clamshell: null; onBattery: false }
-  | { state: "Streaming"; clamshell: false; onBattery: boolean }
-  | { state: "Clamshell"; clamshell: true; onBattery: boolean }
-  | { state: "Creating"; clamshell: null; onBattery: false }
-  | { state: "Failed"; clamshell: null; detail: string; onBattery: false };
-
-/// `tablet_display_status` returns one flat string
-/// ("idle" | "streaming" | "clamshell" | "creating" | "failed: <detail>",
-/// optionally suffixed ";battery" while a session is live on battery power);
-/// parse it once so the card matches on a discriminated union instead of raw
-/// substrings.
-function parseTabletStatus(raw: string): ParsedTabletStatus {
-  // The battery suffix rides the live states only (backend contract); strip
-  // it first so the base-state matching below stays exact-string.
-  const onBattery = raw.endsWith(";battery");
-  const base = onBattery ? raw.slice(0, -";battery".length) : raw;
-  if (base === "streaming") return { state: "Streaming", clamshell: false, onBattery };
-  if (base === "clamshell") return { state: "Clamshell", clamshell: true, onBattery };
-  if (base === "creating") return { state: "Creating", clamshell: null, onBattery: false };
-  if (base === "idle") return { state: "Idle", clamshell: null, onBattery: false };
-  const detail = base.startsWith("failed: ") ? base.slice("failed: ".length) : base;
-  return { state: "Failed", clamshell: null, detail, onBattery: false };
-}
-
-function tabletPillLabel(state: TabletSessionUiState, t: TranslationSchema): string {
-  switch (state) {
-    case "Streaming":
-      return t.host.tabletDisplayStreaming;
-    case "Clamshell":
-      return t.host.tabletDisplayClamshell;
-    case "Creating":
-      return t.host.statusChecking;
-    default:
-      return t.host.tabletDisplayIdle;
-  }
-}
-
-/// The three tablet-session fields arrive together from one
-/// `tablet_display_status` parse and always change together, so they live as a
-/// single state object (kept consistent by construction) instead of parallel
-/// useStates that must be updated in lockstep.
-interface TabletSessionView {
-  state: TabletSessionUiState;
-  clamshell: boolean | null;
-  onBattery: boolean;
-}
-
-const IDLE_TABLET_SESSION: TabletSessionView = {
-  state: "Idle",
-  clamshell: null,
-  onBattery: false,
-};
-
-function useVirtualDisplayCard(platform: HostSnapshotView["platform"], t: TranslationSchema) {
-  const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useState<string | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [tabletSession, setTabletSession] = useState<TabletSessionView>(IDLE_TABLET_SESSION);
-  const didSyncStatus = useRef(false);
-  const { state: sessionState, clamshell, onBattery } = tabletSession;
-
-  const syncSessionStatus = useCallback(async () => {
-    try {
-      const parsed = parseTabletStatus(await invoke<string>("tablet_display_status"));
-      setTabletSession({
-        state: parsed.state,
-        clamshell: parsed.clamshell,
-        onBattery: parsed.onBattery,
-      });
-      if (parsed.state === "Failed") {
-        setCreated(null);
-        setFailure(parsed.detail);
-      }
-    } catch {
-      // Best-effort sync; transient bridge errors must not overwrite the
-      // failure line, and non-macOS platforms skip the call entirely.
-    }
-  }, []);
-
-  // Sync once on mount so a session that survived a reload shows live state.
-  useEffect(() => {
-    if (didSyncStatus.current || platform !== "macos") return;
-    didSyncStatus.current = true;
-    void syncSessionStatus();
-  }, [platform, syncSessionStatus]);
-
-  // While a session is live, poll the backend so the pill can observe the
-  // lid closing: `tablet_display_status` derives clamshell from ioreg per
-  // call, and without polling it would never be asked again after start.
-  // Idle/Failed clear the interval — lid info is meaningless without a
-  // session — and unmount cleanup stops the loop.
-  const sessionLive =
-    sessionState === "Streaming" || sessionState === "Clamshell" || sessionState === "Creating";
-  useEffect(() => {
-    if (!sessionLive) return;
-    const interval = setInterval(() => {
-      void syncSessionStatus();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [sessionLive, syncSessionStatus]);
-
-  const startSession = async () => {
-    setBusy(true);
-    try {
-      await invoke<string>("tablet_display_start", {
-        providerKind: "betterdisplay",
-        name: "Leftcar Tablet",
-        width: 1920,
-        height: 1200,
-      });
-      setCreated(t.host.tabletDisplayStarted);
-      setFailure(null);
-      setTabletSession({ state: "Streaming", clamshell: false, onBattery: false });
-      await syncSessionStatus();
-    } catch (cause) {
-      setCreated(null);
-      setTabletSession(IDLE_TABLET_SESSION);
-      // Provider errors arrive pre-localized; show them verbatim.
-      setFailure(String(cause instanceof Error ? cause.message : cause));
-      // "Already running" and lock errors mean the backend state we reset away
-      // may still exist — reconcile from the source of truth.
-      await syncSessionStatus();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stopSession = async () => {
-    setBusy(true);
-    try {
-      await invoke<string>("tablet_display_stop");
-      setCreated(t.host.tabletDisplayStopped);
-      setFailure(null);
-      setTabletSession(IDLE_TABLET_SESSION);
-      await syncSessionStatus();
-    } catch (cause) {
-      setCreated(null);
-      setFailure(String(cause instanceof Error ? cause.message : cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return { busy, created, failure, sessionState, clamshell, onBattery, startSession, stopSession };
-}
-
-function VirtualDisplayCard({ platform, t }: VirtualDisplayCardProps) {
-  const { busy, created, failure, sessionState, clamshell, onBattery, startSession, stopSession } = useVirtualDisplayCard(platform, t);
-  const pillActive = sessionState === "Streaming" || sessionState === "Clamshell";
-  return (
-    <div className="virtual-session-controls" aria-label={t.host.tabletDisplayTitle}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Monitor size={16} />
-          <span>{t.host.tabletDisplayTitle}</span>
-        </div>
-        <div className={statusPillVariants({ state: pillActive ? "active" : "idle" })}>
-          <span className="status-dot" />
-          <span>{tabletPillLabel(sessionState, t)}</span>
-        </div>
-      </div>
-      <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-        {t.host.virtualDisplayHint}
-      </p>
-      <VirtualDisplayNotices clamshell={clamshell} onBattery={onBattery} sessionState={sessionState} created={created} failure={failure} t={t} />
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-        <button
-          className={buttonVariants({ variant: "primary", size: "sm" })}
-          disabled={busy || platform !== "macos" || sessionState === "Streaming" || sessionState === "Clamshell" || sessionState === "Creating"}
-          onClick={() => void startSession()}
-        >
-          {t.host.tabletDisplayStart}
-        </button>
-        <button
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-          disabled={busy || platform !== "macos" || sessionState === "Idle" || sessionState === "Failed"}
-          onClick={() => void stopSession()}
-        >
-          {t.host.tabletDisplayStop}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-interface VirtualDisplayNoticesProps {
-  clamshell: boolean | null;
-  onBattery: boolean;
-  sessionState: TabletSessionUiState;
-  created: string | null;
-  failure: string | null;
-  t: TranslationSchema;
-}
-
-function VirtualDisplayNotices({
-  clamshell,
-  onBattery,
-  sessionState,
-  created,
-  failure,
-  t,
-}: VirtualDisplayNoticesProps) {
-  const live = sessionState === "Streaming" || sessionState === "Clamshell";
-  return (
-    <>
-      {clamshell === true && (
-        <p className="virtual-session-note">{t.host.tabletDisplayClamshellHint}</p>
-      )}
-      {onBattery && live && (
-        <p className="virtual-session-note virtual-session-note-icon" role="status">
-          <AlertTriangle size={13} />
-          {t.host.tabletDisplayBattery}
-        </p>
-      )}
-      {created && (
-        <p className="font-emerald virtual-session-result">
-          <Check size={13} strokeWidth={2.5} />
-          {created}
-        </p>
-      )}
-      {failure && (
-        <p className="font-rose virtual-session-result">
-          <AlertTriangle size={13} />
-          {failure}
-        </p>
-      )}
-    </>
-  );
-}
-
 interface SystemAlertBannersProps {
-  error: string | null;
+  error: HostErrorView | null;
   inputActionError: string | null;
   inputPermission: boolean;
+  screenPermission: boolean;
   platform: HostSnapshotView["platform"];
   inputBusy: number | "permission" | null;
   t: TranslationSchema;
@@ -876,6 +604,7 @@ function SystemAlertBanners({
   error,
   inputActionError,
   inputPermission,
+  screenPermission,
   platform,
   inputBusy,
   t,
@@ -888,10 +617,10 @@ function SystemAlertBanners({
         <div className={bannerAlertVariants({ tone: "danger" })}>
           <div className="banner-text">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <AlertTriangle size={16} /> {error}
+              <AlertTriangle size={16} /> {error.message}
             </span>
           </div>
-          {platform === "macos" && error.includes("Remote Desktop") && (
+          {platform === "macos" && error.kind === "remote-desktop-permission" && (
             <button
               className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "remote_desktop" })}
@@ -899,7 +628,7 @@ function SystemAlertBanners({
               {t.host.openRemoteDesktopSettings}
             </button>
           )}
-          {platform === "macos" && error.includes("권한") && !error.includes("Remote Desktop") && (
+          {platform === "macos" && error.kind === "screen-permission" && (
             <button
               className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
@@ -907,6 +636,25 @@ function SystemAlertBanners({
               {t.host.openScreenCaptureSettings}
             </button>
           )}
+        </div>
+      )}
+
+      {/* The danger banner above already covers a screen-permission failure;
+          the proactive warning only fills the gap before anything has failed. */}
+      {platform === "macos" && !screenPermission && error?.kind !== "screen-permission" && (
+        <div className={bannerAlertVariants({ tone: "warning" })}>
+          <div className="banner-text">
+            <strong>{t.host.screenPermBannerTitle}</strong>
+            <p>{t.host.screenPermBannerDesc}</p>
+          </div>
+          <div className="banner-actions">
+            <button
+              className={buttonVariants({ variant: "primary", size: "sm" })}
+              onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
+            >
+              {t.host.openScreenCaptureSettings}
+            </button>
+          </div>
         </div>
       )}
 
@@ -1083,6 +831,7 @@ function Dashboard() {
     dismissTerminationNotice,
     error,
     inputPermission,
+    screenPermission,
     platform,
     controlPort,
     lanIp,
@@ -1100,21 +849,6 @@ function Dashboard() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
     return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
   });
-  // Opt-in experiment gate: default off, persisted like the other host settings.
-  const [virtualDisplayExperiment, setVirtualDisplayExperiment] = useState<boolean>(() => {
-    return localStorage.getItem("leftcar_virtual_display_experiment") === "on";
-  });
-
-  const toggleVirtualDisplayExperiment = useCallback(() => {
-    setVirtualDisplayExperiment((prev) => !prev);
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "leftcar_virtual_display_experiment",
-      virtualDisplayExperiment ? "on" : "off",
-    );
-  }, [virtualDisplayExperiment]);
 
   const isStreaming = sessions.length > 0;
 
@@ -1153,7 +887,7 @@ function Dashboard() {
     try {
       await invoke("open_system_settings", { pane: "accessibility" });
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     }
   };
 
@@ -1169,7 +903,7 @@ function Dashboard() {
       }
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }
@@ -1185,7 +919,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }
@@ -1201,7 +935,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setQualityBusy(null);
     }
@@ -1215,7 +949,7 @@ function Dashboard() {
       await refresh();
       setPendingStopSession(null);
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }
@@ -1273,6 +1007,7 @@ function Dashboard() {
           error={error}
           inputActionError={inputActionError}
           inputPermission={inputPermission}
+          screenPermission={screenPermission}
           platform={platform}
           inputBusy={inputBusy}
           t={t}
@@ -1300,14 +1035,6 @@ function Dashboard() {
             onOpenPairing={() => setShowPairingModal(true)}
           />
         )}
-
-        <VirtualDisplayExperimentSection
-          platform={platform}
-          enabled={virtualDisplayExperiment}
-          language={language}
-          t={t}
-          onToggle={toggleVirtualDisplayExperiment}
-        />
       </main>
 
       <DashboardFooter

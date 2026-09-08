@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setCurrentLanguage } from "./language-store";
 
 // control.ts talks to react-native-tcp-socket; the socket is faked at the
 // module boundary with an EventEmitter-style mock. No real sockets.
@@ -75,6 +76,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+// 포맷 문구는 테스트에서 한국어로 고정한다.
+setCurrentLanguage("ko");
 
 describe("connect token injection", () => {
   it("adds the provider token to every request envelope", async () => {
@@ -197,15 +201,41 @@ describe("unauthorized error handling", () => {
 
 describe("formatErrorMessage and socket error handling", () => {
   it("formats Error objects, strings, error code objects, and null/undefined without undefined", () => {
-    expect(formatErrorMessage(new Error("custom error"))).toBe("custom error");
-    expect(formatErrorMessage("string error")).toBe("string error");
+    // 매핑되지 않은 영어 원문은 친절한 안내문 뒤 괄호로 붙는다.
+    expect(formatErrorMessage(new Error("custom error"))).toBe(
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (custom error)",
+    );
+    expect(formatErrorMessage("string error")).toBe(
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (string error)",
+    );
     expect(formatErrorMessage({ code: "ECONNREFUSED" })).toBe(
       "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.",
     );
-    expect(formatErrorMessage({ message: "msg error" })).toBe("msg error");
-    expect(formatErrorMessage({ error: "err property" })).toBe("err property");
+    expect(formatErrorMessage({ message: "msg error" })).toBe(
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (msg error)",
+    );
+    expect(formatErrorMessage({ error: "err property" })).toBe(
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (err property)",
+    );
     expect(formatErrorMessage(undefined)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     expect(formatErrorMessage(null)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+  });
+
+  it("keeps already-curated Korean messages untouched", () => {
+    expect(formatErrorMessage(new Error("신뢰하는 같은 Wi-Fi의 컴퓨터만 연결할 수 있습니다"))).toBe(
+      "신뢰하는 같은 Wi-Fi의 컴퓨터만 연결할 수 있습니다",
+    );
+  });
+
+  it("maps host screen-recording permission failures to a settings guide", () => {
+    expect(
+      formatErrorMessage(
+        new Error("startStream failed: screen-recording permission is not granted to Leftcar Host"),
+      ),
+    ).toBe("컴퓨터에서 화면 공유 권한이 꺼져 있습니다. Mac 시스템 설정에서 Leftcar를 허용해 주세요.");
+    expect(formatErrorMessage(new Error("Screen Recording permission required"))).toBe(
+      "컴퓨터에서 화면 공유 권한이 꺼져 있습니다. Mac 시스템 설정에서 Leftcar를 허용해 주세요.",
+    );
   });
 
   it("handles non-Error socket errors without producing 'control connection error: undefined'", async () => {

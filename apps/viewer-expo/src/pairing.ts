@@ -1,6 +1,8 @@
 import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { connect } from "./control";
+import { LocalizedError } from "./localized-error";
+import { currentTranslation } from "./language-store";
 
 /**
  * Host pairing: connect to the selected Host endpoint, submit the six-digit
@@ -156,7 +158,7 @@ export async function clearToken(): Promise<void> {
 
 /** Human-readable label sent with the pair request (host UI display only). */
 export function deviceName(): string {
-  return Constants.deviceName || "Android 뷰어";
+  return Constants.deviceName || currentTranslation().viewer.deviceLabel;
 }
 
 /**
@@ -165,11 +167,11 @@ export function deviceName(): string {
  */
 export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
   if (!isTrustedHost(p.host)) {
-    throw new Error("같은 Wi-Fi 또는 Tailscale에 있는 컴퓨터만 연결할 수 있습니다");
+    throw new LocalizedError("trustedHostError");
   }
   const pairingCode = code.trim().replace(/\s+/g, "");
   if (!/^\d{6}$/.test(pairingCode)) {
-    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
+    throw new LocalizedError("errPairingCodeInvalid");
   }
   const client = await connect(p.host, p.port);
   try {
@@ -181,7 +183,7 @@ export async function pairWithHost(p: QrPayload, code: string): Promise<string> 
       deviceName: deviceName(),
     });
     if (!/^[0-9a-f]{64}$/.test(token)) {
-      throw new Error("컴퓨터의 연결 승인 응답을 확인할 수 없습니다");
+      throw new LocalizedError("errPairingResponseInvalid");
     }
     await SecureStore.setItemAsync(TOKEN_KEY, token);
     return token;
@@ -202,11 +204,11 @@ export async function pairWithHostByCode(
   code: string,
 ): Promise<string> {
   if (!isTrustedHost(host)) {
-    throw new Error("같은 Wi-Fi 또는 Tailscale에 있는 컴퓨터만 연결할 수 있습니다");
+    throw new LocalizedError("trustedHostError");
   }
   const pairingCode = code.trim().replace(/\s+/g, "");
   if (!/^\d{6}$/.test(pairingCode)) {
-    throw new Error("6자리 인증 코드를 정확히 입력해 주세요");
+    throw new LocalizedError("errPairingCodeInvalid");
   }
   const client = await connect(host, port);
   try {
@@ -216,7 +218,7 @@ export async function pairWithHostByCode(
       deviceName: deviceName(),
     });
     if (!/^[0-9a-f]{64}$/.test(token)) {
-      throw new Error("컴퓨터의 연결 승인 응답을 확인할 수 없습니다");
+      throw new LocalizedError("errPairingResponseInvalid");
     }
     await SecureStore.setItemAsync(TOKEN_KEY, token);
     return token;

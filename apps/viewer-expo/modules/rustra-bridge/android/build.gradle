@@ -1,3 +1,11 @@
+// ── rustra generated ────────────────────────────────────────
+// File:   android/build.gradle
+// Source: schema.json (single source of truth for this file)
+// Regen:  rustra codegen --config rustra.json
+// Stage:  rust-probe schema → ts renderer
+// DO NOT EDIT — changes will be overwritten and fail codegen --check.
+// ────────────────────────────────────────────────────────────
+
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
 
@@ -32,11 +40,7 @@ android {
     targetSdk = extOr("targetSdkVersion", 36)
     externalNativeBuild.cmake {
       cppFlags "-std=c++20"
-      arguments "-DANDROID_STL=c++_shared",
-        "-DRUSTRA_ADAPTER_ROOT=$adapterRoot",
-        "-DRUSTRA_GENERATED_ROOT=$generatedRoot",
-        "-DRUSTRA_LIB_NAME=leftcar_rustra",
-        "-DRUSTRA_LEGACY_BENCHMARKS=OFF"
+      arguments "-DANDROID_STL=c++_shared", "-DRUSTRA_ADAPTER_ROOT=$adapterRoot", "-DRUSTRA_GENERATED_ROOT=$generatedRoot", "-DRUSTRA_LIB_NAME=leftcar_rustra", "-DRUSTRA_LEGACY_BENCHMARKS=OFF"
     }
     ndk { abiFilters "x86_64", "arm64-v8a" }
   }
@@ -47,25 +51,15 @@ android {
 }
 
 tasks.register("buildRustAndroid") {
-  inputs.files(fileTree(rustManifest.parentFile) {
-    include "**/*.rs", "**/Cargo.toml", "Cargo.lock"
-    exclude "target/**", "**/node_modules/**", "**/build/**"
-  })
-  inputs.property("profile", gradle.startParameter.taskNames.any {
-    it.toLowerCase().contains("release")
-  } ? "release" : "debug")
+  inputs.files(fileTree(rustManifest.parentFile) { include "**/*.rs", "**/Cargo.toml", "Cargo.lock"; exclude "target/**", "**/node_modules/**", "**/build/**" })
+  inputs.property("profile", gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") } ? "release" : "debug")
   outputs.dir(rustLibsDir)
   outputs.cacheIf { true }
   doLast {
     def release = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
-    rustraExec.execOperations.exec {
-      workingDir projectDir
-      environment "RUSTRA_PROFILE", release ? "release" : "debug"
-      commandLine "sh", "build-rust-android.sh"
-    }
+    rustraExec.execOperations.exec { workingDir projectDir; environment "RUSTRA_PROFILE", release ? "release" : "debug"; commandLine "sh", "build-rust-android.sh" }
   }
 }
 preBuild.dependsOn "buildRustAndroid"
-
 repositories { google(); mavenCentral() }
 dependencies { implementation "com.facebook.react:react-android" }

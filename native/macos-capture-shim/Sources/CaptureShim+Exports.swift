@@ -21,30 +21,6 @@ import Security
 import Darwin
 import OSLog
 
-@_cdecl("leftcar_capture_register_managed_display_mode_v1")
-public func leftcarCaptureRegisterManagedDisplayModeV1(
-    displayID: UInt32,
-    generation: UInt64,
-    logicalWidth: UInt32,
-    logicalHeight: UInt32,
-    pixelWidth: UInt32,
-    pixelHeight: UInt32
-) -> Int32 {
-    registerManagedDisplayMode(
-        displayID: displayID,
-        generation: generation,
-        logicalWidth: Int(logicalWidth),
-        logicalHeight: Int(logicalHeight),
-        pixelWidth: Int(pixelWidth),
-        pixelHeight: Int(pixelHeight)
-    ) ? 0 : -1
-}
-
-@_cdecl("leftcar_capture_clear_managed_display_mode_v1")
-public func leftcarCaptureClearManagedDisplayModeV1(displayID: UInt32, generation: UInt64) {
-    clearManagedDisplayMode(displayID: displayID, generation: generation)
-}
-
 @_cdecl("leftcar_capture_has_persistent_access_v1")
 public func leftcarCaptureHasPersistentAccessV1() -> Int32 {
     hasPersistentContentCaptureEntitlement() ? 1 : 0
@@ -290,25 +266,46 @@ public func leftcarCaptureStartV6(
         udpStability: udpStability
     )
 
+    // Register before setup: the stream configuration consults the registry
+    // to decide system-audio ownership, so the session (and its handle) must
+    // already be visible when setupScreenCaptureKit builds that
+    // configuration. Every failure path below removes the entry again.
+    let handle = withRegistry { reg in
+        let h = nextHandle
+        nextHandle += 1
+        session.sessionHandle = h
+        reg[h] = session
+        return h
+    }
+
     // Establish the media socket first. Capture callbacks can then be accepted
     // immediately without losing the initial CFG/IDR while the viewer listener
     // is still racing to bind its port.
     let connected = session.connectSocket()
-    guard connected else { return 0 }
+    guard connected else {
+        removeFromRegistry(handle)
+        return 0
+    }
 
     let started: Bool
     switch backend {
     case .screenCaptureKit:
-        guard hasPersistentContentCaptureEntitlement() else {
+        // The persistent-content-capture entitlement grants VNC-style
+        // no-reconsent capture; ordinary Screen Recording consent supports
+        // the same SCK path — including its system-audio plane. Only a Mac
+        // with neither consent falls through to the error below.
+        guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
             setLastError(
-                "persistent ScreenCaptureKit access is not approved; use the automatic cgDisplayStream backend"
+                "screen-recording permission is not granted to Leftcar Host"
             )
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
             setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
@@ -322,6 +319,7 @@ public func leftcarCaptureStartV6(
         )
         guard let filter = selection.filter else {
             setLastError(selection.error ?? "screen capture returned no display")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
@@ -330,22 +328,18 @@ public func leftcarCaptureStartV6(
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
             setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
         started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
     }
     guard started else {
+        removeFromRegistry(handle)
         session.stop()
         return 0
     }
 
-    let handle = withRegistry { reg in
-        let h = nextHandle
-        nextHandle += 1
-        reg[h] = session
-        return h
-    }
     session.startPerformanceLogging()
     return handle
 }
@@ -360,6 +354,7 @@ public func leftcarCaptureStopV2(handle: UInt32) -> Int32 {
         return 1
     }
     session.stop()
+    transferSystemAudioOwnership(afterRemoving: session)
     return 0
 }
 
@@ -380,9 +375,11 @@ public func leftcarCaptureStopV3(handle: UInt32, reasonCode: Int32) -> Int32 {
             code: UInt8(clamping: reasonCode),
             reason: reasonCode == 2 ? "host operator stopped the stream" : "stream stopped"
         )
+        transferSystemAudioOwnership(afterRemoving: session)
         return 0
     }
     session.stop()
+    transferSystemAudioOwnership(afterRemoving: session)
     return 0
 }
 
@@ -409,6 +406,11 @@ public func leftcarCaptureLastErrorV2() -> UnsafePointer<CChar> {
 @_cdecl("leftcar_capture_input_permission_v1")
 public func leftcarCaptureInputPermissionV1() -> Int32 {
     CGPreflightPostEventAccess() ? 1 : 0
+}
+
+@_cdecl("leftcar_capture_screen_permission_v1")
+public func leftcarCaptureScreenPermissionV1() -> Int32 {
+    hasScreenCaptureAccess() ? 1 : 0
 }
 
 @_cdecl("leftcar_capture_request_input_permission_v1")

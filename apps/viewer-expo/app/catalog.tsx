@@ -14,6 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import type { DisplayInfo } from "../src/control";
+import { controlClient } from "../src/session";
 import {
   getUsbState,
   subscribeUsbState,
@@ -33,13 +34,10 @@ import type {
   UdpStabilitySelection,
 } from "../src/udp-stability";
 import {
-  isStreamingPriority,
   resolveInitialStreamTarget,
-  STREAMING_PRIORITIES,
   type StreamingPriority,
 } from "../src/streaming-policy";
 import {
-  recommendedStreamProfileId,
   resolveStreamMaximum,
   resolveViewerProfileId,
   type ViewerProfileSelection,
@@ -160,6 +158,7 @@ function ViewerOptionsCard({
   onToggleCursor,
   colors,
 }: ViewerOptionsCardProps) {
+  const { t } = useAppLanguage();
   const cardStyle = {
     gap: 10,
     borderRadius: 12,
@@ -175,127 +174,37 @@ function ViewerOptionsCard({
 
   return (
     <View style={cardStyle}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          시청 옵션
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          스트림 창의 FPS 표시와 원격 커서 렌더링 방식을 선택합니다.
-        </Text>
-      </View>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+        {t.viewer.viewerOptionsTitle}
+      </Text>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            실제 FPS 항상 표시
-          </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            새로 여는 스트림 창의 오른쪽 아래에 표시합니다.
+            {t.viewer.fpsToggleLabel}
           </Text>
         </View>
         <Switch
           value={showFps}
           onValueChange={onToggleFps}
-          accessibilityLabel="실제 FPS 항상 표시"
+          accessibilityLabel={t.viewer.fpsToggleLabel}
           {...switchColor}
         />
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            원격 커서 로컬 표시
+            {t.viewer.cursorOverlayLabel}
           </Text>
           <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            Mac 커서를 화면 속 영상 대신 오버레이로 그려 입력 반응 속도를 높입니다.
+            {t.viewer.cursorOverlayHint}
           </Text>
         </View>
         <Switch
           value={localCursor}
           onValueChange={onToggleCursor}
-          accessibilityLabel="원격 커서 로컬 표시"
+          accessibilityLabel={t.viewer.cursorOverlayLabel}
           {...switchColor}
         />
-      </View>
-    </View>
-  );
-}
-
-const PRIORITY_LABELS: Record<StreamingPriority, { label: string; detail: string }> = {
-  responsive: { label: "반응 속도 우선", detail: "빠른 입력" },
-  clarity: { label: "화질 우선", detail: "선명한 화면" },
-};
-
-function StreamingPriorityCard({
-  streamingPriority,
-  preview,
-  onSelect,
-  colors,
-}: {
-  streamingPriority: StreamingPriority;
-  preview: {
-    maximum: { width: number; height: number };
-    targets: Record<StreamingPriority, { width: number; height: number }>;
-  } | null;
-  onSelect: (priority: StreamingPriority) => void;
-  colors: ThemeTokens;
-}) {
-  return (
-    <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          화면 우선순위
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          {preview
-            ? `새로 여는 화면은 선택한 시작 크기로 열리고, 연결과 재생 상태에 따라 최대 ${preview.maximum.width} × ${preview.maximum.height}까지 자동으로 조절됩니다.`
-            : "시작 크기 선택은 새로 여는 화면에 적용됩니다. 화면 품질은 연결과 재생 상태에 따라 자동으로 조절됩니다."}
-        </Text>
-      </View>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-        {STREAMING_PRIORITIES.map((priority) => {
-          const chosen = priority === streamingPriority;
-          const target = preview?.targets[priority];
-          return (
-            <Pressable
-              key={priority}
-              accessibilityRole="button"
-              accessibilityState={{ selected: chosen }}
-              accessibilityLabel={`${PRIORITY_LABELS[priority].label}${target ? `: 시작 ${target.width} 곱하기 ${target.height}` : ""}`}
-              style={{
-                flexBasis: "31%",
-                flexGrow: 1,
-                gap: 2,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: chosen ? colors.btnPrimaryBg : colors.borderSubtle,
-                backgroundColor: chosen ? colors.btnPrimaryBg : colors.bgSubtle,
-                paddingHorizontal: 10,
-                paddingVertical: 10,
-              }}
-              onPress={() => onSelect(priority)}
-            >
-              <Text
-                style={{
-                  fontSize: 13,
-                  fontWeight: "700",
-                  color: chosen ? colors.btnPrimaryText : colors.textPrimary,
-                }}
-              >
-                {PRIORITY_LABELS[priority].label}
-              </Text>
-              <Text
-                style={{
-                  fontSize: 11,
-                  lineHeight: 15,
-                  color: chosen ? colors.btnPrimaryText : colors.textSecondary,
-                  opacity: chosen ? 0.85 : 1,
-                }}
-              >
-                {PRIORITY_LABELS[priority].detail}
-                {target ? ` · 시작 ${target.width} × ${target.height}` : ""}
-              </Text>
-            </Pressable>
-          );
-        })}
       </View>
     </View>
   );
@@ -315,10 +224,23 @@ function EncoderExperimentChoices({ experiments, selected, requiresReconnect, co
   </View>;
 }
 
+const QUALITY_TAB_KEYS = {
+  auto: { label: "qualityAutoLabel", detail: "qualityAutoDetail" },
+  latency: { label: "qualityLatencyLabel", detail: "qualityLatencyDetail" },
+  video: { label: "qualityVideoLabel", detail: "qualityVideoDetail" },
+  balanced: { label: "qualityBalancedLabel", detail: "qualityBalancedDetail" },
+  clarity: { label: "qualityClarityLabel", detail: "qualityClarityDetail" },
+} as const;
+
 function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: ViewerProfileSelection; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
+  const { t } = useAppLanguage();
   return <View style={styles.qualitySegmentWrapper}><View style={styles.qualitySegmentTabs}>
-    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel="자동 추천: 디스플레이별 권장 품질"><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>자동 추천</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>디스플레이별</Text></Pressable>
-    {STREAM_PROFILES.map((p) => { const selected = p.id === profileId; return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{p.label}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{p.detail}</Text></Pressable>; })}
+    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel={t.viewer.qualityAutoA11y}><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>{t.viewer.qualityAutoLabel}</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>{t.viewer.qualityAutoDetail}</Text></Pressable>
+    {STREAM_PROFILES.map((p) => {
+      const selected = p.id === profileId;
+      const copy = QUALITY_TAB_KEYS[p.id];
+      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
+    })}
   </View></View>;
 }
 
@@ -331,12 +253,6 @@ interface CatalogHeaderProps {
   refreshing: boolean;
   onRefresh: () => void;
   onSelectProfile: (id: ViewerProfileSelection) => void;
-  streamingPriority: StreamingPriority;
-  priorityPreview: {
-    maximum: { width: number; height: number };
-    targets: Record<StreamingPriority, { width: number; height: number }>;
-  } | null;
-  onSelectStreamingPriority: (priority: StreamingPriority) => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
@@ -362,9 +278,6 @@ function CatalogHeader({
   refreshing,
   onRefresh,
   onSelectProfile,
-  streamingPriority,
-  priorityPreview,
-  onSelectStreamingPriority,
   showFps,
   onToggleFps,
   localCursor,
@@ -432,13 +345,6 @@ function CatalogHeader({
       ) : null}
 
       <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
-
-      <StreamingPriorityCard
-        streamingPriority={streamingPriority}
-        preview={priorityPreview}
-        onSelect={onSelectStreamingPriority}
-        colors={colors}
-      />
 
       {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
       {hasAdvancedOptions ? (
@@ -508,7 +414,9 @@ function CatalogHeader({
 
 function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalogStyles> }) {
   const { t } = useAppLanguage();
+  const { colors } = useAppTheme();
   const [state, setState] = useState<UsbAccessoryState>({ attached: false, controlPort: 0 });
+  const [requesting, setRequesting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -521,6 +429,22 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
       subscription.remove();
     };
   }, []);
+
+  const canRequestPermission =
+    !state.attached && !state.permissionPending && state.accessoryPresent === true;
+
+  // 화면을 열 때와 같은 requestUsb 제어 명령으로 시스템 권한 다이얼로그를
+  // 미리 띄운다. 상태 갱신은 USB 구독이 담당한다.
+  const handleGrantPermission = useCallback(() => {
+    if (requesting) return;
+    const client = controlClient();
+    if (!client) return;
+    setRequesting(true);
+    client
+      .request("requestUsb")
+      .catch(() => undefined)
+      .finally(() => setRequesting(false));
+  }, [requesting]);
 
   if (!state.attached && !state.permissionPending && !state.accessoryPresent) {
     return null;
@@ -536,6 +460,19 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
             ? t.viewer.usbPending
             : t.viewer.usbDetected}
       </Text>
+      {canRequestPermission && !requesting ? (
+        <Pressable
+          onPress={handleGrantPermission}
+          style={styles.transportAction}
+          accessibilityRole="button"
+          accessibilityLabel={t.viewer.usbGrantAction}
+        >
+          <Text style={styles.transportActionText}>{t.viewer.usbGrantAction}</Text>
+        </Pressable>
+      ) : null}
+      {canRequestPermission && requesting ? (
+        <ActivityIndicator size="small" color={colors.textPrimary} />
+      ) : null}
     </View>
   );
 }
@@ -562,7 +499,6 @@ function DisplayListItem({
   colors,
 }: DisplayListItemProps) {
   const { t } = useAppLanguage();
-  const recommendedId = recommendedStreamProfileId(display);
   const effectiveProfileId = resolveViewerProfileId(profileSelection, display);
   const profile = STREAM_PROFILES.find((candidate) => candidate.id === effectiveProfileId)
     ?? STREAM_PROFILES[0];
@@ -574,7 +510,6 @@ function DisplayListItem({
     streamingPriority,
     resolveStreamMaximum(display, profileSelection),
   );
-  const recommendedProfile = STREAM_PROFILES.find((candidate) => candidate.id === recommendedId);
   const handlePress = useCallback(() => onOpen(display), [display, onOpen]);
   return (
     <Pressable
@@ -601,12 +536,6 @@ function DisplayListItem({
             <Text style={styles.chipText}>{profile.fps} FPS</Text>
           </View>
         </View>
-        {recommendedProfile ? (
-          <Text style={styles.displayRecommendation} numberOfLines={1}>
-            추천: {recommendedProfile.label}
-            {profile.id === recommendedId ? " · 현재 선택과 일치" : ""}
-          </Text>
-        ) : null}
       </View>
 
       <View style={[styles.openBtn, isLaunching && styles.btnDisabled]}>
@@ -685,7 +614,6 @@ function CatalogFooter({
   streams,
   onStop,
   resizingSession,
-  onResizeVirtualDisplay,
   onResizeSession,
   windowRatio,
   onSelectWindowRatio,
@@ -695,7 +623,6 @@ function CatalogFooter({
   streams: ActiveStream[];
   onStop: (stream: ActiveStream) => void;
   resizingSession: number | null;
-  onResizeVirtualDisplay: React.ComponentProps<typeof DisplaySizeCard>["onResizeVirtualDisplay"];
   onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
   windowRatio: React.ComponentProps<typeof DisplaySizeCard>["windowRatio"];
   onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
@@ -704,15 +631,8 @@ function CatalogFooter({
 }) {
   const { t } = useAppLanguage();
   if (streams.length === 0) return null;
-  // The card drives the first active stream; multi-stream sizing needs the
-  // host-side managed display listing (Task 8 이후 연결).
+  // The card drives the first active stream.
   const primaryStream = streams[0];
-  const tabletMatch = primaryStream.viewerDisplay
-    ? {
-        width: primaryStream.viewerDisplay.physicalWidth,
-        height: primaryStream.viewerDisplay.physicalHeight,
-      }
-    : null;
   return (
     <View style={styles.activeSection}>
       <View style={styles.activeSectionHeader}>
@@ -726,10 +646,7 @@ function CatalogFooter({
       ))}
       <DisplaySizeCard
         stream={primaryStream}
-        tabletMatch={tabletMatch}
-        virtualDisplayId={primaryStream.virtualDisplayId}
         resizing={resizingSession === primaryStream.session}
-        onResizeVirtualDisplay={onResizeVirtualDisplay}
         onResizeSession={onResizeSession}
         windowRatio={windowRatio}
         onSelectWindowRatio={onSelectWindowRatio}
@@ -743,20 +660,6 @@ export default function Catalog() {
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createCatalogStyles(colors, isDark), [colors, isDark]);
   const model = useCatalogModel();
-
-  // 실제 WxH 미리보기: 첫 번째 디스플레이 기준으로 우선순위별 시작 크기를
-  // 계산한다 (열 때와 동일한 공유 최대 헬퍼 사용 — AUTO는 실제 clarity
-  // 목표, 수동 프로필은 기존 상한).
-  const priorityPreview = useMemo(() => {
-    const display = model.displays[0];
-    if (!display) return null;
-    const maximum = resolveStreamMaximum(display, model.profileId);
-    const targets = {
-      responsive: resolveInitialStreamTarget(display, "responsive", maximum),
-      clarity: resolveInitialStreamTarget(display, "clarity", maximum),
-    };
-    return { maximum, targets };
-  }, [model.displays, model.profileId]);
 
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
@@ -803,9 +706,6 @@ export default function Catalog() {
             refreshing={model.refreshing}
             onRefresh={model.handleRefresh}
             onSelectProfile={model.handleSelectProfile}
-            streamingPriority={model.streamingPriority}
-            priorityPreview={priorityPreview}
-            onSelectStreamingPriority={model.handleSelectStreamingPriority}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}
@@ -832,7 +732,6 @@ export default function Catalog() {
             streams={model.streams}
             onStop={model.stopStream}
             resizingSession={model.resizingSession}
-            onResizeVirtualDisplay={model.handleResizeVirtualDisplay}
             onResizeSession={model.handleResizeSession}
             windowRatio={model.windowRatio}
             onSelectWindowRatio={model.handleSelectWindowAspectRatio}

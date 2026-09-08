@@ -6,42 +6,6 @@ import VideoToolbox
 @main
 struct EncodePolicyTests {
     static func main() {
-        let managedModeTestDisplayID = CGMainDisplayID()
-        precondition(registerManagedDisplayMode(
-            displayID: managedModeTestDisplayID,
-            generation: 1,
-            logicalWidth: 1600,
-            logicalHeight: 1000,
-            pixelWidth: 3200,
-            pixelHeight: 2000
-        ))
-        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000)
-            == NativePixelSize(width: 3200, height: 2000))
-        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1000, logicalHeight: 1600)
-            == NativePixelSize(width: 2000, height: 3200))
-        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 1)
-        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000) == nil)
-        precondition(registerManagedDisplayMode(
-            displayID: managedModeTestDisplayID,
-            generation: 2,
-            logicalWidth: 1920,
-            logicalHeight: 1200,
-            pixelWidth: 1920,
-            pixelHeight: 1200
-        ))
-        precondition(registerManagedDisplayMode(
-            displayID: managedModeTestDisplayID,
-            generation: 3,
-            logicalWidth: 1600,
-            logicalHeight: 1000,
-            pixelWidth: 3200,
-            pixelHeight: 2000
-        ))
-        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 2)
-        precondition(managedPixelSize(for: managedModeTestDisplayID, logicalWidth: 1600, logicalHeight: 1000)
-            == NativePixelSize(width: 3200, height: 2000))
-        clearManagedDisplayMode(displayID: managedModeTestDisplayID, generation: 3)
-
         let overlappingDirtyRegions = dirtyRegionMotionSample(
             rects: [
                 CGRect(x: 0, y: 0, width: 50, height: 50),
@@ -257,7 +221,7 @@ struct EncodePolicyTests {
                 receiverLoss: 0,
                 renderedFps: 60,
                 targetFps: 60
-            ) == 0.25
+            ) == 0.4
         )
         precondition(
             adaptiveEncoderQualityHint(
@@ -279,9 +243,65 @@ struct EncodePolicyTests {
                 targetFps: 60
             ) == 0.5
         )
+        // One overloaded window must not floor quality: the cut is gradual
+        // and each step keeps a recovery path.
+        precondition(
+            adaptiveEncoderQualityHint(
+                current: 0.5,
+                encodeOutputP95Us: 6_000,
+                captureQueueWaitP95Us: 1_000,
+                receiverLoss: 1,
+                renderedFps: 60,
+                targetFps: 60
+            ) == 0.4
+        )
+        // A 90%-of-target renderer still counts as healthy headroom for
+        // recovery — the old exact `>= targetFps` gate froze low quality
+        // forever on viewers that sat at 55-59fps.
+        precondition(
+            adaptiveEncoderQualityHint(
+                current: 0.35,
+                encodeOutputP95Us: 11_000,
+                captureQueueWaitP95Us: 1_000,
+                receiverLoss: 0,
+                renderedFps: 55,
+                targetFps: 60
+            ) == 0.4
+        )
+        // Below the 90% band the renderer is overloaded territory: the hint
+        // takes a gradual cut (0.35 - 0.10 rounds to 0.25 in Float), never a
+        // rise.
+        precondition(
+            adaptiveEncoderQualityHint(
+                current: 0.35,
+                encodeOutputP95Us: 11_000,
+                captureQueueWaitP95Us: 1_000,
+                receiverLoss: 0,
+                renderedFps: 50,
+                targetFps: 60
+            ) == 0.25
+        )
         precondition(adaptiveQualityBitrateScale(qualityHint: 0.25) == 0.55)
         precondition(adaptiveQualityBitrateScale(qualityHint: 0.5) == 1.0)
         precondition(adaptiveQualityBitrateScale(qualityHint: 0.375) == 0.775)
+        // Delta AUs get a size-aware budget: at least two frame budgets
+        // (33_334us at 60fps) and, for larger AUs, twice their legitimate
+        // pacing floor (4ms per burst range) plus 20ms slack. A flat budget
+        // used to abort every high-motion frame on a healthy link.
+        precondition(udpAccessUnitSendDeadlineUs(isKeyframe: false, fps: 60, dataFragmentCount: 7, burstDatagrams: 4) == 36_000)
+        precondition(udpAccessUnitSendDeadlineUs(isKeyframe: false, fps: 30, dataFragmentCount: 7, burstDatagrams: 4) == 66_668)
+        precondition(udpAccessUnitSendDeadlineUs(isKeyframe: false, fps: 60, dataFragmentCount: 43, burstDatagrams: 4) == 108_000)
+        precondition(udpAccessUnitSendDeadlineUs(isKeyframe: false, fps: 1, dataFragmentCount: 1, burstDatagrams: 8) == 2_000_000)
+        precondition(udpAccessUnitSendDeadlineUs(isKeyframe: true, fps: 60, dataFragmentCount: 43, burstDatagrams: 4) == 750_000)
+        // Congestion-cut memory: a cut from 31Mbps parks the raise ceiling at
+        // 90% of the failing level; 30 clean windows relax it by 10% at a
+        // time, capped by the policy ceiling.
+        precondition(adaptiveRaiseCeilingAfterCongestion(failingBitrate: 31_000_000) == 27_900_000)
+        precondition(adaptiveRaiseCeilingAfterCongestion(failingBitrate: 1) == 1)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 0, cleanStreak: 100, globalCeiling: 40_000_000) == 0)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 29, globalCeiling: 40_000_000) == 27_900_000)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 30, globalCeiling: 40_000_000) == 30_690_000)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 39_000_000, cleanStreak: 30, globalCeiling: 40_000_000) == 40_000_000)
         precondition(
             encoderBitrateApplicationRoute(
                 hasSingleSession: true,
@@ -2430,5 +2450,37 @@ struct EncodePolicyTests {
         precondition(snapshot.count == 2)
         precondition(snapshot.bytes == 200)
         precondition(snapshot.oldestAgeUs == 1)
+
+        // Audio plane framing (LCAU): float→int16 LE conversion, clamping,
+        // and the datagram header the Android parser mirrors exactly.
+        let interleaved = CaptureSession.int16LeAudio([0.0, 1.0, -1.0, 0.5])
+        precondition(interleaved.count == 8)
+        precondition(Array(interleaved[0..<2]) == [0, 0])
+        precondition(Array(interleaved[2..<4]) == [0xff, 0x7f]) // 32767
+        precondition(Array(interleaved[4..<6]) == [0x01, 0x80]) // -32767
+        precondition(Array(interleaved[6..<8]) == [0x00, 0x40]) // 16384
+        let clamped = CaptureSession.int16LeAudio([2.0, -2.0])
+        precondition(Array(clamped[0..<2]) == [0xff, 0x7f])
+        precondition(Array(clamped[2..<4]) == [0x01, 0x80])
+
+        let planar = CaptureSession.int16LeAudio(planar: [[0.1, -0.1], [0.2, -0.2]])
+        precondition(planar.count == 8)
+        // Frame 0 = L(0.1) then R(-0.1): L bytes must differ from R bytes.
+        precondition(planar[0] != planar[2] || planar[1] != planar[3])
+
+        let pcm = CaptureSession.int16LeAudio([0.25, -0.25])
+        let datagram = CaptureSession.audioDatagram(
+            sequence: 5,
+            sampleRate: 48_000,
+            channels: 2,
+            pcm: pcm[...]
+        )
+        precondition(datagram.count == 12 + 4)
+        precondition(datagram.prefix(4) == Data("LCAU".utf8))
+        precondition(datagram[4] == 0 && datagram[5] == 5)
+        precondition(datagram[6] == 187 && datagram[7] == 128) // 48000 BE
+        precondition(datagram[8] == 2 && datagram[9] == 0)
+        precondition(datagram[10] == 0 && datagram[11] == 1) // 1 frame
+        precondition(datagram.suffix(4) == Data(pcm))
     }
 }

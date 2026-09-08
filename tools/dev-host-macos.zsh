@@ -9,11 +9,8 @@ built_app="$host_dir/src-tauri/target/release/bundle/macos/Leftcar Host.app"
 installed_app="/Applications/Leftcar Host.app"
 process_name="leftcar-host-desktop"
 shim_output="$repo_root/native/macos-capture-shim/libleftcar_capture.dylib"
-cgvd_output="$repo_root/tools/cgvd-shim/.build/release/cgvd-shim"
 built_shim="$built_app/Contents/Resources/libleftcar_capture.dylib"
-bundled_cgvd="$built_app/Contents/Resources/cgvd-shim"
 installed_shim="$installed_app/Contents/Resources/libleftcar_capture.dylib"
-installed_cgvd="$installed_app/Contents/Resources/cgvd-shim"
 
 codesign_requirement() {
   /usr/bin/codesign -d -r- "$1" 2>&1 \
@@ -35,21 +32,9 @@ verify_same_shim() {
   fi
 }
 
-verify_executable_resource() {
-  local expected=$1
-  local bundled=$2
-  local label=$3
-  verify_same_shim "$expected" "$bundled" "$label"
-  if [[ ! -x "$bundled" ]]; then
-    print -u2 "$label is not executable: $bundled"
-    exit 1
-  fi
-}
-
 # Tauri bundles the dylib as an opaque resource. Rebuild it explicitly so a
 # successful desktop build cannot silently install stale capture/encoder code.
 "$repo_root/tools/build-macos-capture-shim.zsh" library "$shim_output"
-/usr/bin/swift build -c release --package-path "$repo_root/tools/cgvd-shim"
 
 cd "$host_dir"
 bun run tauri build \
@@ -62,9 +47,7 @@ if [[ ! -d "$built_app" ]]; then
 fi
 
 verify_same_shim "$shim_output" "$built_shim" "Built Host"
-verify_executable_resource "$cgvd_output" "$bundled_cgvd" "Built Host CGVD shim"
 /usr/bin/codesign --verify --deep --strict "$built_app"
-/usr/bin/codesign --verify --strict "$bundled_cgvd"
 built_requirement=$(codesign_requirement "$built_app")
 if [[ -z "$built_requirement" ]]; then
   print -u2 "The built Host has no stable designated signing requirement."
@@ -99,11 +82,17 @@ if /usr/bin/pgrep -x "$process_name" >/dev/null 2>&1; then
   /usr/bin/pkill -TERM -x "$process_name"
 fi
 
+# ditto merges into an existing bundle without deleting stale files; a leftover
+# resource that the fresh seal does not cover fails strict codesign
+# verification. Remove the old bundle first (the Screen Recording approval
+# follows the stable designated requirement, not the directory inode).
+if [[ -d "$installed_app" ]]; then
+  /bin/rm -rf "$installed_app"
+fi
+
 /usr/bin/ditto "$built_app" "$installed_app"
 verify_same_shim "$shim_output" "$installed_shim" "Installed Host"
-verify_executable_resource "$cgvd_output" "$installed_cgvd" "Installed Host CGVD shim"
 /usr/bin/codesign --verify --deep --strict "$installed_app"
-/usr/bin/codesign --verify --strict "$installed_cgvd"
 /usr/bin/open "$installed_app"
 
 print "Installed and launched one stable Leftcar Host: $installed_app"

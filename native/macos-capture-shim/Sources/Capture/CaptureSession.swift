@@ -53,6 +53,15 @@ final class CaptureSession {
      let tcpWriteLock = NSLock()
      var tcpControlBuffer = Data()
      var viewerControlToken = Data()
+    // Audio plane (LCAU). PCM chunks are converted and sent on this serial
+    // queue; the datagram sequence is single-owner here, so it needs no
+    // separate lock.
+     let audioQueue = DispatchQueue(label: "leftcar.audio", qos: .userInteractive)
+     var audioSequence: UInt16 = 0
+    // Set once, under the registry lock, at insertion — before setup can ask
+    // the registry who owns the system-audio plane. Never mutated after.
+    var sessionHandle: UInt32 = 0
+    var loggedFirstAudioCallback = false
      let inputQueue = DispatchQueue(label: "leftcar.input", qos: .userInteractive)
      let inputLock = NSLock()
      var inputReadSource: DispatchSourceRead?
@@ -296,7 +305,21 @@ final class CaptureSession {
      var receiverFeedbackNs: UInt64 = 0
      var receiverRenderedFps: UInt32?
      var lastAdaptedReceiverLoss: UInt64 = 0
+    // Latency baseline of the previous adaptation window. A viewer whose
+    // Wi-Fi power-save keeps RTT/wire latency above the high thresholds
+    // (observed ~200ms on a headset) reports high latency in EVERY window;
+    // comparing against the previous window distinguishes that steady
+    // baseline from congestion that a bitrate cut could actually relieve.
+     var lastAdaptedRttMs: UInt16 = .max
+     var lastAdaptedWireMs: UInt16 = .max
      var stableBitrateWindows = 0
+    // Congestion-cut memory: a confirmed cut records ~90% of the bitrate that
+    // was active when the link collapsed. Raises climb back toward that level
+    // but not beyond it, so a marginal link does not sawtooth raise→collapse
+    // repeatedly. Thirty consecutive clean windows relax the ceiling by 10%,
+    // letting a genuinely improving link reclaim headroom in ~30s steps.
+     var adaptiveRaiseCeilingBitrate: Int = 0
+     var adaptiveCeilingCleanStreak = 0
     // WindowServer dirty regions provide pre-encode spatial evidence while
     // encoded AU shape remains the fallback for capture backends without that
     // metadata. Both signals drive one reconnect-free interactive/video state.

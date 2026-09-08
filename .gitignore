@@ -2,6 +2,8 @@
 node_modules/
 .expo/
 dist/
+# vendored rustra reference copies ship their payload in dist/ (0.7+ layout)
+!vendor/*/dist/
 *.log
 .DS_Store
 apps/viewer-android/android/.gradle/
@@ -33,3 +35,6 @@ apps/viewer-expo/modules/rustra-bridge/build/
 apps/viewer-expo/modules/rustra-bridge/android/build/
 apps/viewer-expo/modules/rustra-bridge/android/src/main/cpp/libs/
 .worktrees/
+
+# loop-me local agent state
+.loop/

@@ -1,4 +1,6 @@
 import type { ControlClient, ReconfigureStreamOutput } from "./control";
+import { currentLanguage } from "./language-store";
+import { LocalizedError } from "./localized-error";
 import {
   getUsbState,
   resolveTransport,
@@ -26,24 +28,14 @@ import {
   type UdpStabilitySelection,
 } from "./udp-stability";
 
-/**
- * Physical metrics of the viewer's own screen, reported at stream start so
- * the Host can size a virtual display to match the tablet.
- */
-export interface ViewerDisplayMetrics {
-  physicalWidth: number;
-  physicalHeight: number;
-  densityDpi: number;
-}
-
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
-  getDisplayMetrics?(): Promise<ViewerDisplayMetrics>;
   prepareStream(
     port: number,
     host: string,
     mediaTransport: string,
     encoderExperiment: EncoderExperimentId,
+    language?: string,
   ): Promise<void>;
   openStream(
     port: number,
@@ -55,6 +47,7 @@ export interface StreamLauncher {
     displayName?: string,
     showFps?: boolean,
     localCursor?: boolean,
+    language?: string,
   ): Promise<string>;
   cancelPreparedStream(
     port: number,
@@ -62,7 +55,7 @@ export interface StreamLauncher {
   ): Promise<void>;
   setCursorStream?(instanceId: string, enabled: boolean): Promise<void>;
   /**
-   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. Mac 가상 화면 해상도는
+   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
    * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
    * 호출부는 best-effort로 이를 무시한다.
    */
@@ -84,8 +77,6 @@ export interface StartStreamArgs {
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
-  viewerDisplay?: ViewerDisplayMetrics;
-  virtualDisplayId?: string;
 }
 
 export interface StartedStream {
@@ -222,7 +213,7 @@ export async function startPreparedStream({
         )
       : null;
     if (args.udpStability && udpOptions && !udpStability) {
-      throw new Error("선택한 UDP 안정성 설정을 이 컴퓨터에서 지원하지 않습니다.");
+      throw new LocalizedError("errUdpUnsupported");
     }
     try {
       await launcher.prepareStream(
@@ -230,6 +221,7 @@ export async function startPreparedStream({
         host,
         mediaTransport,
         encoderExperiment,
+        currentLanguage(),
       );
     } catch (error) {
       const canFallBackToSingleEncoder = selectedEncoderExperiment === "auto" &&
@@ -247,15 +239,13 @@ export async function startPreparedStream({
         host,
         mediaTransport,
         encoderExperiment,
+        currentLanguage(),
       );
     }
     const { udpStability: _requestedUdpStability, ...baseArgs } = args;
     const startArgs = {
       ...baseArgs,
       ...(viewerIps.length > 0 ? { viewerIps } : {}),
-      // Omitted entirely for legacy Hosts — the contract treats a missing
-      // field as the historical wire shape.
-      ...(args.viewerDisplay ? { viewerDisplay: args.viewerDisplay } : {}),
       mediaTransport,
       encoderExperiment,
       ...(mediaTransport === "udp" && udpStability
@@ -286,9 +276,10 @@ export async function startPreparedStream({
       fps,
       encoderExperiment,
       args.displayName,
-      args.showFps ?? true,
+      args.showFps ?? false,
       // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
       args.localCursor ?? false,
+      currentLanguage(),
     );
     return {
       session,
@@ -391,6 +382,7 @@ export async function reconfigurePreparedStream({
       host,
       active.mediaTransport,
       desiredExperiment,
+      currentLanguage(),
     );
   } catch (error) {
     if (!promotion) {
@@ -406,6 +398,7 @@ export async function reconfigurePreparedStream({
       host,
       active.mediaTransport,
       preparedExperiment,
+      currentLanguage(),
     );
   }
   try {
@@ -448,6 +441,7 @@ export async function reconfigurePreparedStream({
         host,
         active.mediaTransport,
         preparedExperiment,
+        currentLanguage(),
       );
       accepted = await control.request<ReconfigureStreamOutput>(
         "reconfigureStream",
@@ -468,9 +462,7 @@ export async function reconfigurePreparedStream({
         // the split encoder mid-transition). The freshly prepared split
         // listeners cannot serve a single stream; report the mismatch
         // instead of attaching with an empty token.
-        throw new Error(
-          "컴퓨터가 분할 인코딩 전환을 수락하지 않아 해상도 전환을 마치지 못했습니다.",
-        );
+        throw new LocalizedError("errSplitEncodeRejected");
       }
     }
     // An accepted single mode keeps the existing preparation: it was bound
@@ -489,8 +481,9 @@ export async function reconfigurePreparedStream({
       accepted.fps,
       encoderExperiment,
       active.sourceName,
-      active.showFps ?? true,
+      active.showFps ?? false,
       active.localCursor ?? false,
+      currentLanguage(),
     );
     return {
       session: accepted.session,

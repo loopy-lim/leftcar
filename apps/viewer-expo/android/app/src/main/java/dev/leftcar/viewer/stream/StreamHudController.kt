@@ -42,7 +42,7 @@ internal class StreamHudController(
     private val activity: Activity,
     private val instanceId: String,
     private val sourceFps: Int,
-    private val showPersistentFps: Boolean,
+    private val showDiagnostics: Boolean,
     private val onTermination: (Int) -> Unit,
     private val onRenderedFrame: () -> Unit = {},
 ) {
@@ -107,8 +107,12 @@ internal class StreamHudController(
 
     fun show() {
         showInput()
-        showStats()
-        if (showPersistentFps) persistentFpsOverlay.show()
+        // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
+        // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
+        if (showDiagnostics) {
+            showStats()
+            persistentFpsOverlay.show()
+        }
     }
 
     fun armTerminationPolling() {
@@ -126,7 +130,7 @@ internal class StreamHudController(
             textSize = 12f
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = badgeBackground(Color.argb(168, 15, 23, 42))
-            contentDescription = "화면 공유 재연결 중"
+            contentDescription = ViewerStrings.rebindDescription
         }.also { view ->
             rebindView = view
             rebindPopup = PopupWindow(
@@ -169,7 +173,7 @@ internal class StreamHudController(
             armTerminationPolling()
             clearRebindIndicator()
         } else {
-            showRebindIndicator("화면을 다시 연결하지 못했습니다. 현재 창에서 재시도합니다")
+            showRebindIndicator(ViewerStrings.rebindFailed)
         }
         handler.removeCallbacks(poll)
         handler.post(poll)
@@ -234,15 +238,15 @@ internal class StreamHudController(
             when (status) {
                 1 -> {
                     setImageResource(R.drawable.ic_remote_unlocked)
-                    contentDescription = "원격 마우스와 키보드 입력 가능"
+                    contentDescription = ViewerStrings.inputAllowed
                 }
                 0 -> {
                     setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = "원격 마우스와 키보드 입력 잠김"
+                    contentDescription = ViewerStrings.inputLocked
                 }
                 else -> {
                     setImageResource(R.drawable.ic_remote_locked)
-                    contentDescription = "원격 입력 상태 확인 중"
+                    contentDescription = ViewerStrings.inputChecking
                 }
             }
             background = badgeBackground(Color.argb(118, 15, 23, 42))
@@ -350,7 +354,7 @@ internal class StreamHudController(
             background = badgeBackground(Color.argb(92, 15, 23, 42))
             alpha = 0f
             text = "SRC $sourceFps / DISPLAY -- Hz  NET --/-- ms  CAP→SURF --/-- ms\n-- FPS  FEED -- ms"
-            contentDescription = "화면 공유 상세 정보"
+            contentDescription = ViewerStrings.statsDescription
         }
         statsView = stats
         val popup = PopupWindow(

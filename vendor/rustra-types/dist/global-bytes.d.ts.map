@@ -1,0 +1,1 @@
+{"version":3,"file":"global-bytes.d.ts","sourceRoot":"","sources":["../src/global-bytes.ts"],"names":[],"mappings":"AAIA,OAAO,KAAK,EAAE,aAAa,EAAE,MAAM,aAAa,CAAC;AAEjD,2EAA2E;AAC3E,wBAAgB,oBAAoB,CAAC,CAAC,EACpC,SAAS,EAAE,MAAM,EACjB,OAAO,EAAE,MAAM,EACf,IAAI,EAAE,OAAO,EACb,KAAK,EAAE,UAAU,GAAG,WAAW,GAAG,MAAM,EAAE,EAC1C,OAAO,CAAC,EAAE,aAAa,GACtB,OAAO,CAAC,CAAC,CAAC,CAsCZ"}
