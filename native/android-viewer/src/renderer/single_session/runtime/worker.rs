@@ -217,6 +217,10 @@ fn run(launch: SingleRendererLaunch) {
     let mut control_health = ControlHealthState::default();
     let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
     let mut last_feedback_rendered_frames = 0u64;
+    // Host media arrived since the previous latency probe. Liveness evidence
+    // for the control health gate: while media flows, probe loss is just
+    // loss, not an unreachable peer.
+    let mut media_since_probe = false;
 
     while !control_clone.stop.load(Ordering::Relaxed) {
         if control_clone.suspend.load(Ordering::SeqCst) {
@@ -316,9 +320,15 @@ fn run(launch: SingleRendererLaunch) {
             let probe_due = !viewer_control_token.is_empty()
                 && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL;
             let next_probe_sequence = probe_due.then(|| latency_probe_sequence.wrapping_add(1));
+            let media_since_previous_probe = if next_probe_sequence.is_some() {
+                std::mem::take(&mut media_since_probe)
+            } else {
+                false
+            };
             let control_health_action = run_control_probe_cycle(
                 &mut control_health,
                 next_probe_sequence,
+                media_since_previous_probe,
                 |control_health| loop {
                     match control_socket.recv_from(&mut control_buf) {
                         Ok((received, source)) if source == peer => {
@@ -534,6 +544,7 @@ fn run(launch: SingleRendererLaunch) {
                 log_info!("rejected media datagram from {peer}: not the paired host");
                 continue;
             }
+            media_since_probe = true;
             if host_peer != Some(peer) {
                 log_info!("UDP sender active: {peer}");
                 host_peer = Some(peer);
