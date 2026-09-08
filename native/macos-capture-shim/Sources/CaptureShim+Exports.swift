@@ -266,11 +266,26 @@ public func leftcarCaptureStartV6(
         udpStability: udpStability
     )
 
+    // Register before setup: the stream configuration consults the registry
+    // to decide system-audio ownership, so the session (and its handle) must
+    // already be visible when setupScreenCaptureKit builds that
+    // configuration. Every failure path below removes the entry again.
+    let handle = withRegistry { reg in
+        let h = nextHandle
+        nextHandle += 1
+        session.sessionHandle = h
+        reg[h] = session
+        return h
+    }
+
     // Establish the media socket first. Capture callbacks can then be accepted
     // immediately without losing the initial CFG/IDR while the viewer listener
     // is still racing to bind its port.
     let connected = session.connectSocket()
-    guard connected else { return 0 }
+    guard connected else {
+        removeFromRegistry(handle)
+        return 0
+    }
 
     let started: Bool
     switch backend {
@@ -283,12 +298,14 @@ public func leftcarCaptureStartV6(
             setLastError(
                 "screen-recording permission is not granted to Leftcar Host"
             )
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
             setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
@@ -302,6 +319,7 @@ public func leftcarCaptureStartV6(
         )
         guard let filter = selection.filter else {
             setLastError(selection.error ?? "screen capture returned no display")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
@@ -310,22 +328,18 @@ public func leftcarCaptureStartV6(
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
             setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+            removeFromRegistry(handle)
             session.stop()
             return 0
         }
         started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
     }
     guard started else {
+        removeFromRegistry(handle)
         session.stop()
         return 0
     }
 
-    let handle = withRegistry { reg in
-        let h = nextHandle
-        nextHandle += 1
-        reg[h] = session
-        return h
-    }
     session.startPerformanceLogging()
     return handle
 }
@@ -340,6 +354,7 @@ public func leftcarCaptureStopV2(handle: UInt32) -> Int32 {
         return 1
     }
     session.stop()
+    transferSystemAudioOwnership(afterRemoving: session)
     return 0
 }
 
@@ -360,9 +375,11 @@ public func leftcarCaptureStopV3(handle: UInt32, reasonCode: Int32) -> Int32 {
             code: UInt8(clamping: reasonCode),
             reason: reasonCode == 2 ? "host operator stopped the stream" : "stream stopped"
         )
+        transferSystemAudioOwnership(afterRemoving: session)
         return 0
     }
     session.stop()
+    transferSystemAudioOwnership(afterRemoving: session)
     return 0
 }
 

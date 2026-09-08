@@ -61,8 +61,12 @@ extension CaptureSession {
     /// chunked straight onto the media transport — no codec, no queueing,
     /// one datagram per chunk. The serial audioQueue owns the sequence, so
     /// no additional lock domain is needed.
-    func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        if audioSequence == 0 {
+     func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        // audioSequence wraps (UInt16) roughly every six minutes at 48kHz;
+        // gate the one-shot logs on their own flag instead.
+        let isFirstAudioBuffer = !loggedFirstAudioCallback
+        if isFirstAudioBuffer {
+            loggedFirstAudioCallback = true
             NSLog("Leftcar first audio callback for %@", targetLabel)
         }
         stateLock.lock()
@@ -81,7 +85,7 @@ extension CaptureSession {
               asbd.mBitsPerChannel == 32,
               asbd.mChannelsPerFrame >= 1, asbd.mChannelsPerFrame <= 2
         else { return }
-        if audioSequence == 0 {
+        if isFirstAudioBuffer {
             NSLog(
                 "Leftcar first audio buffer rate=%.0f channels=%d flags=%x",
                 asbd.mSampleRate,

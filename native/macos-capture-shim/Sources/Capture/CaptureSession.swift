@@ -58,6 +58,10 @@ final class CaptureSession {
     // separate lock.
      let audioQueue = DispatchQueue(label: "leftcar.audio", qos: .userInteractive)
      var audioSequence: UInt16 = 0
+    // Set once, under the registry lock, at insertion — before setup can ask
+    // the registry who owns the system-audio plane. Never mutated after.
+    var sessionHandle: UInt32 = 0
+    var loggedFirstAudioCallback = false
      let inputQueue = DispatchQueue(label: "leftcar.input", qos: .userInteractive)
      let inputLock = NSLock()
      var inputReadSource: DispatchSourceRead?
