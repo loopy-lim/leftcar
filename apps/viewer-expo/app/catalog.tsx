@@ -34,13 +34,10 @@ import type {
   UdpStabilitySelection,
 } from "../src/udp-stability";
 import {
-  isStreamingPriority,
   resolveInitialStreamTarget,
-  STREAMING_PRIORITIES,
   type StreamingPriority,
 } from "../src/streaming-policy";
 import {
-  recommendedStreamProfileId,
   resolveStreamMaximum,
   resolveViewerProfileId,
   type ViewerProfileSelection,
@@ -176,127 +173,37 @@ function ViewerOptionsCard({
 
   return (
     <View style={cardStyle}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          시청 옵션
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          스트림 창의 FPS 표시와 원격 커서 렌더링 방식을 선택합니다.
-        </Text>
-      </View>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+        시청 옵션
+      </Text>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            실제 FPS 항상 표시
-          </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            새로 여는 스트림 창의 오른쪽 아래에 표시합니다.
+            FPS 표시
           </Text>
         </View>
         <Switch
           value={showFps}
           onValueChange={onToggleFps}
-          accessibilityLabel="실제 FPS 항상 표시"
+          accessibilityLabel="FPS 표시"
           {...switchColor}
         />
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            원격 커서 로컬 표시
+            커서 오버레이
           </Text>
           <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            Mac 커서를 화면 속 영상 대신 오버레이로 그려 입력 반응 속도를 높입니다.
+            영상 속 커서 대신 오버레이로 그려 입력 반응을 높입니다.
           </Text>
         </View>
         <Switch
           value={localCursor}
           onValueChange={onToggleCursor}
-          accessibilityLabel="원격 커서 로컬 표시"
+          accessibilityLabel="커서 오버레이"
           {...switchColor}
         />
-      </View>
-    </View>
-  );
-}
-
-const PRIORITY_LABELS: Record<StreamingPriority, { label: string; detail: string }> = {
-  responsive: { label: "반응 속도 우선", detail: "빠른 입력" },
-  clarity: { label: "화질 우선", detail: "선명한 화면" },
-};
-
-function StreamingPriorityCard({
-  streamingPriority,
-  preview,
-  onSelect,
-  colors,
-}: {
-  streamingPriority: StreamingPriority;
-  preview: {
-    maximum: { width: number; height: number };
-    targets: Record<StreamingPriority, { width: number; height: number }>;
-  } | null;
-  onSelect: (priority: StreamingPriority) => void;
-  colors: ThemeTokens;
-}) {
-  return (
-    <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          화면 우선순위
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          {preview
-            ? `새로 여는 화면은 선택한 시작 크기로 열리고, 연결과 재생 상태에 따라 최대 ${preview.maximum.width} × ${preview.maximum.height}까지 자동으로 조절됩니다.`
-            : "시작 크기 선택은 새로 여는 화면에 적용됩니다. 화면 품질은 연결과 재생 상태에 따라 자동으로 조절됩니다."}
-        </Text>
-      </View>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-        {STREAMING_PRIORITIES.map((priority) => {
-          const chosen = priority === streamingPriority;
-          const target = preview?.targets[priority];
-          return (
-            <Pressable
-              key={priority}
-              accessibilityRole="button"
-              accessibilityState={{ selected: chosen }}
-              accessibilityLabel={`${PRIORITY_LABELS[priority].label}${target ? `: 시작 ${target.width} 곱하기 ${target.height}` : ""}`}
-              style={{
-                flexBasis: "31%",
-                flexGrow: 1,
-                gap: 2,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: chosen ? colors.btnPrimaryBg : colors.borderSubtle,
-                backgroundColor: chosen ? colors.btnPrimaryBg : colors.bgSubtle,
-                paddingHorizontal: 10,
-                paddingVertical: 10,
-              }}
-              onPress={() => onSelect(priority)}
-            >
-              <Text
-                style={{
-                  fontSize: 13,
-                  fontWeight: "700",
-                  color: chosen ? colors.btnPrimaryText : colors.textPrimary,
-                }}
-              >
-                {PRIORITY_LABELS[priority].label}
-              </Text>
-              <Text
-                style={{
-                  fontSize: 11,
-                  lineHeight: 15,
-                  color: chosen ? colors.btnPrimaryText : colors.textSecondary,
-                  opacity: chosen ? 0.85 : 1,
-                }}
-              >
-                {PRIORITY_LABELS[priority].detail}
-                {target ? ` · 시작 ${target.width} × ${target.height}` : ""}
-              </Text>
-            </Pressable>
-          );
-        })}
       </View>
     </View>
   );
@@ -332,12 +239,6 @@ interface CatalogHeaderProps {
   refreshing: boolean;
   onRefresh: () => void;
   onSelectProfile: (id: ViewerProfileSelection) => void;
-  streamingPriority: StreamingPriority;
-  priorityPreview: {
-    maximum: { width: number; height: number };
-    targets: Record<StreamingPriority, { width: number; height: number }>;
-  } | null;
-  onSelectStreamingPriority: (priority: StreamingPriority) => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
@@ -363,9 +264,6 @@ function CatalogHeader({
   refreshing,
   onRefresh,
   onSelectProfile,
-  streamingPriority,
-  priorityPreview,
-  onSelectStreamingPriority,
   showFps,
   onToggleFps,
   localCursor,
@@ -433,13 +331,6 @@ function CatalogHeader({
       ) : null}
 
       <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
-
-      <StreamingPriorityCard
-        streamingPriority={streamingPriority}
-        preview={priorityPreview}
-        onSelect={onSelectStreamingPriority}
-        colors={colors}
-      />
 
       {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
       {hasAdvancedOptions ? (
@@ -594,7 +485,6 @@ function DisplayListItem({
   colors,
 }: DisplayListItemProps) {
   const { t } = useAppLanguage();
-  const recommendedId = recommendedStreamProfileId(display);
   const effectiveProfileId = resolveViewerProfileId(profileSelection, display);
   const profile = STREAM_PROFILES.find((candidate) => candidate.id === effectiveProfileId)
     ?? STREAM_PROFILES[0];
@@ -606,7 +496,6 @@ function DisplayListItem({
     streamingPriority,
     resolveStreamMaximum(display, profileSelection),
   );
-  const recommendedProfile = STREAM_PROFILES.find((candidate) => candidate.id === recommendedId);
   const handlePress = useCallback(() => onOpen(display), [display, onOpen]);
   return (
     <Pressable
@@ -633,12 +522,6 @@ function DisplayListItem({
             <Text style={styles.chipText}>{profile.fps} FPS</Text>
           </View>
         </View>
-        {recommendedProfile ? (
-          <Text style={styles.displayRecommendation} numberOfLines={1}>
-            추천: {recommendedProfile.label}
-            {profile.id === recommendedId ? " · 현재 선택과 일치" : ""}
-          </Text>
-        ) : null}
       </View>
 
       <View style={[styles.openBtn, isLaunching && styles.btnDisabled]}>
@@ -764,20 +647,6 @@ export default function Catalog() {
   const styles = useMemo(() => createCatalogStyles(colors, isDark), [colors, isDark]);
   const model = useCatalogModel();
 
-  // 실제 WxH 미리보기: 첫 번째 디스플레이 기준으로 우선순위별 시작 크기를
-  // 계산한다 (열 때와 동일한 공유 최대 헬퍼 사용 — AUTO는 실제 clarity
-  // 목표, 수동 프로필은 기존 상한).
-  const priorityPreview = useMemo(() => {
-    const display = model.displays[0];
-    if (!display) return null;
-    const maximum = resolveStreamMaximum(display, model.profileId);
-    const targets = {
-      responsive: resolveInitialStreamTarget(display, "responsive", maximum),
-      clarity: resolveInitialStreamTarget(display, "clarity", maximum),
-    };
-    return { maximum, targets };
-  }, [model.displays, model.profileId]);
-
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
       <DisplayListItem
@@ -823,9 +692,6 @@ export default function Catalog() {
             refreshing={model.refreshing}
             onRefresh={model.handleRefresh}
             onSelectProfile={model.handleSelectProfile}
-            streamingPriority={model.streamingPriority}
-            priorityPreview={priorityPreview}
-            onSelectStreamingPriority={model.handleSelectStreamingPriority}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}

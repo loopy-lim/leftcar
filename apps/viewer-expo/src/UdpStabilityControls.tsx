@@ -18,11 +18,11 @@ const PRESET_COPY: Record<
     hint: "네트워크 상태에 맞게 손실 복구와 전송량을 자동 조절합니다.",
   },
   responsive: {
-    label: "빠른 반응",
+    label: "저지연",
     hint: "원활한 Wi-Fi 환경에서 지연 시간을 최소화합니다.",
   },
   balanced: {
-    label: "균형",
+    label: "표준",
     hint: "표준 전송 속도와 손실 복구를 균형 있게 유지합니다.",
   },
   stable: {
@@ -157,12 +157,7 @@ export function UdpStabilityControls({
         padding: 12,
       }}
     >
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>전송 안정성</Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          해상도·FPS는 유지하고 전송 및 패킷 복구 방식만 조절합니다.
-        </Text>
-      </View>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>전송 안정성</Text>
 
       <PresetChoices options={options} selection={selection} colors={colors} onChange={onChange} />
 

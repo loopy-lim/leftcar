@@ -321,10 +321,6 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       fontWeight: "700",
       color: colors.textPrimary,
     },
-    displayRecommendation: {
-      fontSize: 10,
-      color: colors.textMuted,
-    },
     chipsRow: {
       flexDirection: "row",
       alignItems: "center",

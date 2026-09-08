@@ -1,4 +1,5 @@
 import { connect, type ControlClient } from "./control";
+import { markConnected } from "./auto-reconnect";
 import { getStoredToken, isTrustedHost } from "./pairing";
 import { getUsbState } from "./usb";
 
@@ -44,6 +45,7 @@ export async function connectHost(host: string, port = 7777): Promise<ControlCli
   hostAddr = `${host}:${port}`;
   hostTarget = host;
   hostPort = port;
+  markConnected();
   return c;
 }
 
@@ -67,6 +69,7 @@ export async function reconnectHost(): Promise<ControlClient> {
     }
     if (previous && previous !== c) previous.close();
     client = c;
+    markConnected();
     return c;
   })();
   try {

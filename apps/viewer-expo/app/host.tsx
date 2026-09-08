@@ -239,9 +239,6 @@ function ManualIpSection({
   return (
     <View style={styles.sectionCard}>
       <Text style={styles.sectionTitle}>{t.viewer.manualTitle}</Text>
-      <Text style={styles.fieldDesc}>
-        {t.viewer.manualDesc}
-      </Text>
 
       <View style={styles.inputRow}>
         <TextInput
@@ -378,42 +375,56 @@ function PairingManagementSection({
   onClearToken: () => void;
   onOpenPairing: () => void;
 }) {
+  const [open, setOpen] = useState(false);
   return (
     <View style={styles.sectionCard}>
-      <Text style={styles.sectionTitle}>{t.viewer.rememberTitle}</Text>
-      <Text style={styles.fieldDesc}>
-        {hasStoredToken
-          ? t.viewer.rememberHasToken
-          : t.viewer.rememberNoToken}
-      </Text>
-      <View style={styles.pairingActionRow}>
-        {hasStoredToken && (
+      <Pressable
+        style={styles.troubleshootToggle}
+        onPress={() => setOpen((prev) => !prev)}
+        accessibilityRole="button"
+        accessibilityLabel={t.viewer.rememberTitle}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+          <Ionicons name="key-outline" size={16} color={colors.textSecondary} />
+          <Text style={styles.troubleshootToggleText}>{t.viewer.rememberTitle}</Text>
+        </View>
+        <Ionicons
+          name={open ? "chevron-up" : "chevron-down"}
+          size={15}
+          color={colors.textMuted}
+        />
+      </Pressable>
+
+      {open && (
+        <View style={styles.pairingActionRow}>
+          {hasStoredToken && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.dangerBtn,
+                pressed && styles.btnPressed,
+              ]}
+              onPress={onClearToken}
+            >
+              <Text style={styles.dangerBtnText}>{t.viewer.btnClearToken}</Text>
+            </Pressable>
+          )}
           <Pressable
             style={({ pressed }) => [
-              styles.dangerBtn,
+              styles.secondaryBtn,
               pressed && styles.btnPressed,
             ]}
-            onPress={onClearToken}
+            onPress={onOpenPairing}
           >
-            <Text style={styles.dangerBtnText}>{t.viewer.btnClearToken}</Text>
+            <Ionicons
+              name="qr-code-outline"
+              size={14}
+              color={colors.textPrimary}
+              style={{ marginRight: 4 }}
+            />
+            <Text style={styles.secondaryBtnText}>{t.viewer.btnNewPair}</Text>
           </Pressable>
-        )}
-        <Pressable
-          style={({ pressed }) => [
-            styles.secondaryBtn,
-            pressed && styles.btnPressed,
-          ]}
-          onPress={onOpenPairing}
-        >
-          <Ionicons
-            name="qr-code-outline"
-            size={14}
-            color={colors.textPrimary}
-            style={{ marginRight: 4 }}
-          />
-          <Text style={styles.secondaryBtnText}>{t.viewer.btnNewPair}</Text>
-        </Pressable>
-      </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -780,11 +791,6 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.textMuted,
       fontSize: 11,
       textAlign: "center",
-      lineHeight: 16,
-    },
-    fieldDesc: {
-      color: colors.textSecondary,
-      fontSize: 11,
       lineHeight: 16,
     },
     inputRow: {

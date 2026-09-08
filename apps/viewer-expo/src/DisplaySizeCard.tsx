@@ -197,14 +197,9 @@ export function DisplaySizeCard({
 
   return (
     <View style={styles.card}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-          화면 해상도
-        </Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          열린 화면 창의 해상도를 바로 바꿉니다.
-        </Text>
-      </View>
+      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
+        화면 해상도
+      </Text>
 
       <Text
         style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
@@ -237,7 +232,7 @@ export function DisplaySizeCard({
           화면 비율
         </Text>
         <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
-          열린 창의 종횡비만 바꿉니다. 컴퓨터 화면 해상도는 그대로 유지됩니다.
+          창의 모양만 바꾸고 컴퓨터 해상도는 유지합니다.
         </Text>
         <View style={styles.presetRow}>
           {WINDOW_ASPECT_RATIO_PRESETS.map((preset) => (

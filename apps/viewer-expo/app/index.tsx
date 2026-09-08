@@ -17,6 +17,12 @@ import {
   controlHost,
   disconnectHost,
 } from "../src/session";
+import {
+  markPairingStale,
+  markUserDisconnected,
+  noteAutoReconnectAttempt,
+  shouldAutoReconnectFromGate,
+} from "../src/auto-reconnect";
 import { clearToken, formatHostEndpoint } from "../src/pairing";
 import {
   formatErrorMessage,
@@ -135,6 +141,7 @@ export default function Hub() {
   const [hostAddr, setHostAddr] = useState<string>("");
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [lastHost, setLastHost] = useState<RecentHostItem | null>(null);
+  const [autoConnecting, setAutoConnecting] = useState<boolean>(false);
 
   const checkConnection = useCallback(() => {
     const client = controlClient();
@@ -143,7 +150,49 @@ export default function Hub() {
     setHostAddr(addr);
   }, []);
 
+  /**
+   * 조용한 백그라운드 재연결. 저장된 연결이 있으면 홈 화면 진입 시 스스로
+   * 다시 연결해 "계속 연결됨" 상태를 유지한다. 실패는 알리지 않고 대기
+   * 상태와 원탭 띠로 안내한다 — 사용자가 직접 해제했거나(userDisconnected),
+   * 자동 시도 중 승인 만료(401)를 만났다면(pairingStale) 더 시도하지 않는다.
+   */
+  const attemptAutoReconnect = useCallback(
+    async (target: RecentHostItem | null) => {
+      const now = Date.now();
+      if (
+        target === null ||
+        !shouldAutoReconnectFromGate(!!controlClient(), true, now)
+      ) {
+        return;
+      }
+      noteAutoReconnectAttempt(now);
+      setAutoConnecting(true);
+      try {
+        await connectHost(target.host, target.port);
+        try {
+          await controlClient()?.request<CatalogView>("getCatalog");
+        } catch (e) {
+          if (isUnauthorizedError(e)) {
+            await clearToken();
+            disconnectHost();
+            markPairingStale();
+            return;
+          }
+          throw e;
+        }
+        void saveRecentHost(target.host, target.port, target.name);
+        checkConnection();
+      } catch {
+        // 네트워크 실패는 조용히 넘긴다. 대기 화면의 원탭 띠가 재시도 경로.
+      } finally {
+        setAutoConnecting(false);
+      }
+    },
+    [checkConnection],
+  );
+
   const handleDisconnect = useCallback(() => {
+    markUserDisconnected();
     disconnectHost();
     checkConnection();
   }, [checkConnection]);
@@ -151,10 +200,12 @@ export default function Hub() {
   useFocusEffect(
     useCallback(() => {
       checkConnection();
-      void getRecentHosts().then((hosts) => {
-        setLastHost(hosts[0] ?? null);
-      });
       const client = controlClient();
+      void getRecentHosts().then((hosts) => {
+        const target = hosts[0] ?? null;
+        setLastHost(target);
+        if (!client) void attemptAutoReconnect(target);
+      });
       if (client) {
         client.request<CatalogView>("getCatalog").catch((e) => {
           if (isUnauthorizedError(e)) {
@@ -172,7 +223,7 @@ export default function Hub() {
           }
         });
       }
-    }, [checkConnection, t])
+    }, [attemptAutoReconnect, checkConnection, t])
   );
 
   return (
@@ -189,13 +240,7 @@ export default function Hub() {
               <Ionicons name="desktop-outline" size={18} color={colors.btnPrimaryText} />
             </View>
             <View style={styles.titleColumn}>
-              <View style={styles.titleBadgeRow}>
-                <Text style={styles.appTitle}>{t.viewer.brandTitle}</Text>
-                <View style={styles.versionBadge}>
-                  <Text style={styles.versionBadgeText}>{t.viewer.brandBadge}</Text>
-                </View>
-              </View>
-              <Text style={styles.appSubtitle}>{t.viewer.brandSubtitle}</Text>
+              <Text style={styles.appTitle}>{t.viewer.brandTitle}</Text>
             </View>
             <Pressable
               onPress={toggleLanguage}
@@ -222,12 +267,7 @@ export default function Hub() {
               </Text>
             </View>
 
-            <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
-              <Text style={styles.heroDesc}>
-                {t.viewer.connectedHeroDesc}
-              </Text>
-            </View>
+            <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
 
             <View style={styles.heroActionRow}>
               <Pressable
@@ -263,20 +303,21 @@ export default function Hub() {
           <View style={styles.heroCardStandby}>
             <View style={styles.cardTopRow}>
               <View style={styles.badgeStandby}>
-                <View style={styles.dotStandby} />
-                <Text style={styles.badgeStandbyText}>{t.viewer.standbyBadge}</Text>
+                {autoConnecting ? null : <View style={styles.dotStandby} />}
+                {autoConnecting ? (
+                  <ActivityIndicator size="small" color={colors.textSecondary} />
+                ) : null}
+                <Text style={styles.badgeStandbyText}>
+                  {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyBadge}
+                </Text>
               </View>
-              <Text style={styles.networkHintText}>{t.viewer.wifiHint}</Text>
             </View>
 
-            <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>{t.viewer.standbyHeroTitle}</Text>
-              <Text style={styles.heroDesc}>
-                {t.viewer.standbyHeroDesc}
-              </Text>
-            </View>
+            <Text style={styles.heroTitle}>
+              {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyHeroTitle}
+            </Text>
 
-            {lastHost && (
+            {lastHost && !autoConnecting && (
               <RecentHostQuickConnect item={lastHost} onFinished={checkConnection} />
             )}
 
@@ -308,72 +349,6 @@ export default function Hub() {
             </View>
           </View>
         )}
-
-        {/* 3-Step Setup Guide */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.viewer.guideTitle}</Text>
-
-          <View style={styles.stepsContainer}>
-            {/* Step 1 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadgeColumn}>
-                <View style={styles.stepBadge}>
-                  <Text style={styles.stepNum}>1</Text>
-                </View>
-                <View style={styles.stepLine} />
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step1Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step1Desc}</Text>
-              </View>
-            </View>
-
-            {/* Step 2 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadgeColumn}>
-                <View style={styles.stepBadge}>
-                  <Text style={styles.stepNum}>2</Text>
-                </View>
-                <View style={styles.stepLine} />
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step2Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step2Desc}</Text>
-              </View>
-            </View>
-
-            {/* Step 3 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadgeColumn}>
-                <View style={styles.stepBadge}>
-                  <Text style={styles.stepNum}>3</Text>
-                </View>
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step3Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step3Desc}</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        {/* Quick Specs Grid (2 Column Clean Layout) */}
-        <View style={styles.featureGrid}>
-          <View style={styles.featureBox}>
-            <View style={styles.featureIconBox}>
-              <Ionicons name="flash" size={15} color={colors.textPrimary} />
-            </View>
-            <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
-            <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
-          </View>
-          <View style={styles.featureBox}>
-            <View style={styles.featureIconBox}>
-              <Ionicons name="tv" size={15} color={colors.textPrimary} />
-            </View>
-            <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
-            <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
-          </View>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -415,34 +390,11 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       flex: 1,
       gap: 2,
     },
-    titleBadgeRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
     appTitle: {
       color: colors.textPrimary,
       fontSize: 18,
       fontWeight: "700",
       letterSpacing: -0.3,
-    },
-    versionBadge: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      paddingHorizontal: 6,
-      paddingVertical: 1,
-      borderRadius: 5,
-    },
-    versionBadgeText: {
-      color: colors.textSecondary,
-      fontSize: 10,
-      fontWeight: "700",
-      fontFamily: "monospace",
-    },
-    appSubtitle: {
-      color: colors.textMuted,
-      fontSize: 12,
     },
     langToggleBtn: {
       flexDirection: "row",
@@ -528,10 +480,6 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       fontSize: 11,
       fontWeight: "600",
     },
-    networkHintText: {
-      color: colors.textDim,
-      fontSize: 11,
-    },
     endpointLabel: {
       color: colors.textMuted,
       fontSize: 12,
@@ -540,19 +488,11 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       flex: 1,
       textAlign: "right",
     },
-    heroBody: {
-      gap: 3,
-    },
     heroTitle: {
       fontSize: 15,
       fontWeight: "700",
       color: colors.textPrimary,
       letterSpacing: -0.2,
-    },
-    heroDesc: {
-      fontSize: 12,
-      color: colors.textSecondary,
-      lineHeight: 17,
     },
     heroActionRow: {
       flexDirection: "row",
@@ -630,107 +570,6 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     btnPressed: {
       opacity: 0.8,
       transform: [{ scale: 0.98 }],
-    },
-
-    /* Setup Guide */
-    sectionCard: {
-      backgroundColor: colors.bgSurface,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      padding: 16,
-      gap: 14,
-    },
-    sectionTitle: {
-      fontSize: 11,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.04,
-    },
-    stepsContainer: {
-      gap: 0,
-    },
-    stepItem: {
-      flexDirection: "row",
-      alignItems: "flex-start",
-      gap: 12,
-    },
-    stepBadgeColumn: {
-      alignItems: "center",
-      width: 22,
-    },
-    stepBadge: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: colors.btnPrimaryBg,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    stepNum: {
-      color: colors.btnPrimaryText,
-      fontSize: 10,
-      fontWeight: "700",
-      fontFamily: "monospace",
-    },
-    stepLine: {
-      width: 1.5,
-      height: 22,
-      backgroundColor: colors.borderSubtle,
-      marginVertical: 2,
-    },
-    stepInfo: {
-      flex: 1,
-      gap: 2,
-      paddingBottom: 10,
-    },
-    stepName: {
-      fontSize: 13,
-      fontWeight: "600",
-      color: colors.textPrimary,
-    },
-    stepText: {
-      fontSize: 11,
-      color: colors.textSecondary,
-      lineHeight: 16,
-    },
-
-    /* 2-Column Feature Grid */
-    featureGrid: {
-      flexDirection: "row",
-      gap: 10,
-    },
-    featureBox: {
-      flex: 1,
-      backgroundColor: colors.bgSurface,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      padding: 14,
-      gap: 4,
-    },
-    featureIconBox: {
-      width: 28,
-      height: 28,
-      borderRadius: 7,
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 2,
-    },
-    featureValue: {
-      fontSize: 12,
-      fontWeight: "700",
-      color: colors.textPrimary,
-      fontVariant: ["tabular-nums"],
-    },
-    featureLabel: {
-      fontSize: 11,
-      color: colors.textMuted,
-      lineHeight: 15,
     },
   });
 }

@@ -33,7 +33,7 @@ import {
 } from "./stream-profile";
 import {
   resolveInitialStreamTarget,
-  type StreamingPriority,
+  streamingPriorityFromProfileId,
 } from "./streaming-policy";
 import {
   availableEncoderExperimentsForStreams,
@@ -92,6 +92,9 @@ export function useCatalogModel() {
   const [udpSettingsDirty, setUdpSettingsDirty] = useState(false);
   const [udpReconnecting, setUdpReconnecting] = useState(false);
   const host = controlHost();
+  // 시작 크기 우선순위는 별도 다이얼 없이 선택한 품질 프로필에서 파생한다
+  // (기존 streamingPriority 저장값은 마이그레이션 호환용으로만 남는다).
+  const streamingPriority = streamingPriorityFromProfileId(preferences.profileId);
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
     queryFn: () => requestWithReconnect<CatalogView>("getCatalog"),
@@ -319,13 +322,6 @@ export function useCatalogModel() {
     }
   }, [setError, streams, updateLocalCursor]);
 
-  const handleSelectStreamingPriority = useCallback(
-    (priority: StreamingPriority) => {
-      setPreferences((current) => ({ ...current, streamingPriority: priority }));
-    },
-    [],
-  );
-
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
       setEncoderExperiment(id);
@@ -399,7 +395,7 @@ export function useCatalogModel() {
         const maximumTarget = resolveStreamMaximum(display, preferences.profileId);
         const initialTarget = resolveInitialStreamTarget(
           display,
-          preferences.streamingPriority,
+          streamingPriority,
           maximumTarget,
         );
         const { width, height, fps } = initialTarget;
@@ -481,8 +477,8 @@ export function useCatalogModel() {
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
-      preferences.streamingPriority,
       selectedProfile,
+      streamingPriority,
     ],
   );
 
@@ -544,7 +540,6 @@ export function useCatalogModel() {
     handleResizeSession,
     handleSelectEncoderExperiment,
     handleSelectProfile,
-    handleSelectStreamingPriority,
     handleSelectUdpStability,
     handleSelectWindowAspectRatio,
     windowRatio,
@@ -564,7 +559,7 @@ export function useCatalogModel() {
     handleToggleFps,
     handleToggleCursor,
     profileId: preferences.profileId,
-    streamingPriority: preferences.streamingPriority,
+    streamingPriority,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
     resizingSession,

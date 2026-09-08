@@ -141,7 +141,7 @@ function PairingModeCard({ mode, permission, requestPermission, code, busy, hasC
     </Pressable>
   </View>;
   return <View style={styles.card}>
-    <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text><Text style={styles.cardDesc}>{t.viewer.qrScanHint}</Text>
+    <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text>
     {!permission ? <View style={styles.cameraBox}><ActivityIndicator color={colors.textPrimary} /></View> : !permission.granted ? <View style={styles.cameraNotice}>
       <Ionicons name="camera-outline" size={28} color={colors.textPrimary} style={{ marginBottom: 4 }} /><Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text><Text style={styles.cameraNoticeText}>{t.viewer.cameraPermDesc}</Text><Pressable onPress={requestPermission} style={styles.permissionBtn}><Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text></Pressable>
     </View> : <View style={styles.scannerWrapper}><CameraView style={styles.camera} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={(result) => { const value = result.data?.trim(); if (value) onQrScanned(value); }}><View style={styles.scanOverlay}><View style={styles.scanFrame}><View style={[styles.cornerBracket, styles.cornerTopLeft]} /><View style={[styles.cornerBracket, styles.cornerTopRight]} /><View style={[styles.cornerBracket, styles.cornerBottomLeft]} /><View style={[styles.cornerBracket, styles.cornerBottomRight]} /></View><View style={styles.scanHintBox}><Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text></View></View></CameraView></View>}
@@ -359,20 +359,6 @@ export default function Pairing() {
         )}
 
         <PairingModeCard mode={mode} permission={permission} requestPermission={requestPermission} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
-
-        {/* Security / Help Card */}
-        <View style={styles.tipBox}>
-          <View style={styles.tipTitleRow}>
-            <Ionicons name="shield-checkmark-outline" size={15} color={colors.textPrimary} />
-            <Text style={styles.tipTitle}>{t.viewer.pairingTipTitle}</Text>
-          </View>
-          <Text style={styles.tipText}>
-            • {t.viewer.pairingTipCode}
-          </Text>
-          <Text style={styles.tipText}>
-            • {t.viewer.pairingTipNetwork}
-          </Text>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -630,29 +616,6 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.btnPrimaryText,
       fontSize: 13,
       fontWeight: "600",
-    },
-    tipBox: {
-      backgroundColor: colors.bgSubtle,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      padding: 14,
-      gap: 5,
-    },
-    tipTitleRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    tipTitle: {
-      color: colors.textPrimary,
-      fontSize: 12,
-      fontWeight: "700",
-    },
-    tipText: {
-      color: colors.textSecondary,
-      fontSize: 11,
-      lineHeight: 16,
     },
     btnPressed: {
       opacity: 0.8,
