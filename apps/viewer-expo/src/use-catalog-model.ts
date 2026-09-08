@@ -121,13 +121,19 @@ export function useCatalogModel() {
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
       void (async () => {
+        // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
+        // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
+        const endpoint = controlHost();
         await clearToken();
         disconnectHost();
         Alert.alert(
           "연결 승인이 필요해요",
           "컴퓨터의 연결 승인이 만료되었거나 삭제되었습니다. 다시 승인해 주세요.",
         );
-        router.replace("/pairing");
+        router.replace({
+          pathname: "/pairing",
+          params: { endpoint },
+        });
       })();
     }
   }, [catalogQuery.error]);

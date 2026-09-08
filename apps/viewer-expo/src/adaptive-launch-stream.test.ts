@@ -79,7 +79,7 @@ describe("adaptive stream receipts", () => {
       60,
       "auto",
       "Main",
-      true,
+      false,
       false,
     );
   });
@@ -134,7 +134,7 @@ describe("adaptive stream receipts", () => {
       60,
       "auto",
       "Main",
-      true,
+      false,
       false,
     );
   });
@@ -196,7 +196,7 @@ describe("reconfigure encoder mode transitions", () => {
     });
     expect(native.prepareStream).toHaveBeenCalledWith(5010, "192.168.0.134", "udp", "auto");
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", true, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false,
     );
   });
 
@@ -233,7 +233,7 @@ describe("reconfigure encoder mode transitions", () => {
     );
     // 수신기는 Host가 실제 수락한 모드로 열어야 한다.
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", true, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
     );
     expect(result.encoderExperiment).toBe("splitVertical");
   });
@@ -493,7 +493,7 @@ describe("reconfigure encoder mode transitions", () => {
     );
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", true, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "auto", "Main", false, false,
     );
     expect(result.encoderExperiment).toBe("auto");
   });
@@ -523,7 +523,7 @@ describe("reconfigure encoder mode transitions", () => {
     expect(native.prepareStream).toHaveBeenCalledTimes(1);
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", true, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
     );
   });
 
@@ -547,7 +547,7 @@ describe("reconfigure encoder mode transitions", () => {
     expect(native.prepareStream).toHaveBeenCalledTimes(1);
     expect(native.cancelPreparedStream).not.toHaveBeenCalled();
     expect(native.openStream).toHaveBeenCalledWith(
-      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", true, false,
+      5010, "192.168.0.134", 3840, 2160, 60, "splitVertical", "Main", false, false,
     );
   });
 

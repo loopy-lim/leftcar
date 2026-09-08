@@ -112,7 +112,6 @@ function OtpPinInput({
                       ? colors.borderStrong
                       : colors.borderSubtle,
                 },
-                isCurrent && stylesLocal.otpBoxActive,
               ]}
             >
               <Text
@@ -135,7 +134,7 @@ function PairingModeCard({ mode, permission, requestPermission, code, busy, hasC
   const { t } = useAppLanguage();
   if (mode === "code") return <View style={styles.card}>
     <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
-    <Text style={styles.cardDesc}>{hasCodeTarget ? t.viewer.pinDesc : t.viewer.invalidHostError}</Text>
+    <Text style={styles.cardDesc}>{hasCodeTarget ? t.viewer.pinDesc : t.viewer.pinNoTargetDesc}</Text>
     <OtpPinInput code={code} onChangeCode={onCodeChange} disabled={busy} colors={colors} />
     <Pressable style={({ pressed }) => [styles.primaryBtn, !canSubmitCode && styles.btnDisabled, pressed && canSubmitCode && styles.btnPressed]} onPress={onSubmit} disabled={!canSubmitCode}>
       {busy ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>}
@@ -173,9 +172,6 @@ const stylesLocal = StyleSheet.create({
     borderWidth: 1.5,
     alignItems: "center",
     justifyContent: "center",
-  },
-  otpBoxActive: {
-    borderColor: "#4a90e2",
   },
   otpDigit: {
     fontSize: 20,
@@ -218,7 +214,7 @@ export default function Pairing() {
       if (trimmed.length !== 6) {
         dispatch({
           type: "update",
-          patch: { error: t.viewer.pinTitle },
+          patch: { error: t.viewer.invalidPinError },
         });
         return;
       }
@@ -227,7 +223,7 @@ export default function Pairing() {
         patch: {
           busy: true,
           error: null,
-          statusMessage: "...",
+          statusMessage: t.viewer.pairingBusy,
         },
       });
       try {
@@ -368,13 +364,13 @@ export default function Pairing() {
         <View style={styles.tipBox}>
           <View style={styles.tipTitleRow}>
             <Ionicons name="shield-checkmark-outline" size={15} color={colors.textPrimary} />
-            <Text style={styles.tipTitle}>안전한 기기 페어링</Text>
+            <Text style={styles.tipTitle}>{t.viewer.pairingTipTitle}</Text>
           </View>
           <Text style={styles.tipText}>
-            • 6자리 인증 코드는 매번 새로 생성되며 2분 후 만료됩니다.
+            • {t.viewer.pairingTipCode}
           </Text>
           <Text style={styles.tipText}>
-            • 신뢰할 수 있는 동일 Wi-Fi 환경에서만 연결하세요.
+            • {t.viewer.pairingTipNetwork}
           </Text>
         </View>
       </ScrollView>

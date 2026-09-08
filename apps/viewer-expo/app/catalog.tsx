@@ -14,6 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import type { DisplayInfo } from "../src/control";
+import { controlClient } from "../src/session";
 import {
   getUsbState,
   subscribeUsbState,
@@ -508,7 +509,9 @@ function CatalogHeader({
 
 function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalogStyles> }) {
   const { t } = useAppLanguage();
+  const { colors } = useAppTheme();
   const [state, setState] = useState<UsbAccessoryState>({ attached: false, controlPort: 0 });
+  const [requesting, setRequesting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -521,6 +524,22 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
       subscription.remove();
     };
   }, []);
+
+  const canRequestPermission =
+    !state.attached && !state.permissionPending && state.accessoryPresent === true;
+
+  // 화면을 열 때와 같은 requestUsb 제어 명령으로 시스템 권한 다이얼로그를
+  // 미리 띄운다. 상태 갱신은 USB 구독이 담당한다.
+  const handleGrantPermission = useCallback(() => {
+    if (requesting) return;
+    const client = controlClient();
+    if (!client) return;
+    setRequesting(true);
+    client
+      .request("requestUsb")
+      .catch(() => undefined)
+      .finally(() => setRequesting(false));
+  }, [requesting]);
 
   if (!state.attached && !state.permissionPending && !state.accessoryPresent) {
     return null;
@@ -536,6 +555,19 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
             ? t.viewer.usbPending
             : t.viewer.usbDetected}
       </Text>
+      {canRequestPermission && !requesting ? (
+        <Pressable
+          onPress={handleGrantPermission}
+          style={styles.transportAction}
+          accessibilityRole="button"
+          accessibilityLabel={t.viewer.usbGrantAction}
+        >
+          <Text style={styles.transportActionText}>{t.viewer.usbGrantAction}</Text>
+        </Pressable>
+      ) : null}
+      {canRequestPermission && requesting ? (
+        <ActivityIndicator size="small" color={colors.textPrimary} />
+      ) : null}
     </View>
   );
 }

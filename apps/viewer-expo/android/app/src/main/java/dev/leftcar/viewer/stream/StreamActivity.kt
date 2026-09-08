@@ -38,7 +38,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var host: String = ""
     private var port: Int = 5000
     private var fps: Int = 60
-    private var showFps: Boolean = true
+    private var showFps: Boolean = false
     private var sourceWidth: Int = 1920
     private var sourceHeight: Int = 1080
     private var splitVertical = false
@@ -689,7 +689,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             setTaskDescription(android.app.ActivityManager.TaskDescription(displayName))
         }
-        showFps = intent?.getBooleanExtra("showFps", true) ?: true
+        showFps = intent?.getBooleanExtra("showFps", false) ?: false
         hud = StreamHudController(
             this,
             instanceId,

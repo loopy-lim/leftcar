@@ -1,5 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,10 +11,23 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
-import { controlClient, controlHost, disconnectHost } from "../src/session";
-import { clearToken } from "../src/pairing";
-import { isUnauthorizedError, type CatalogView } from "../src/control";
-import { getRecentHosts, type RecentHostItem } from "../src/recent-hosts";
+import {
+  connectHost,
+  controlClient,
+  controlHost,
+  disconnectHost,
+} from "../src/session";
+import { clearToken, formatHostEndpoint } from "../src/pairing";
+import {
+  formatErrorMessage,
+  isUnauthorizedError,
+  type CatalogView,
+} from "../src/control";
+import {
+  getRecentHosts,
+  saveRecentHost,
+  type RecentHostItem,
+} from "../src/recent-hosts";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -26,6 +41,90 @@ function openHostPicker() {
 
 function openPairing() {
   router.push("/pairing");
+}
+
+/**
+ * 대기 화면의 최근 컴퓨터 원탭 재연결 띠. 연결 진행/실패 상태를 스스로
+ * 소유하고, 승인 만료(401)면 페어링 화면으로 안내한다.
+ */
+function RecentHostQuickConnect({
+  item,
+  onFinished,
+}: {
+  item: RecentHostItem;
+  onFinished: () => void;
+}) {
+  const { colors, isDark } = useAppTheme();
+  const { t } = useAppLanguage();
+  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConnect = useCallback(async () => {
+    if (connecting) return;
+    setConnecting(true);
+    setError(null);
+    try {
+      await connectHost(item.host, item.port);
+      try {
+        await controlClient()?.request<CatalogView>("getCatalog");
+      } catch (e) {
+        if (isUnauthorizedError(e)) {
+          await clearToken();
+          disconnectHost();
+          Alert.alert(t.viewer.pairingRequiredTitle, t.viewer.pairingRequiredDesc);
+          router.push({
+            pathname: "/pairing",
+            params: { endpoint: formatHostEndpoint(item.host, item.port) },
+          });
+          return;
+        }
+        throw e;
+      }
+      void saveRecentHost(item.host, item.port, item.name);
+      router.push("/catalog");
+    } catch (e) {
+      setError(formatErrorMessage(e));
+    } finally {
+      setConnecting(false);
+      onFinished();
+    }
+  }, [connecting, item, onFinished, t]);
+
+  return (
+    <View style={styles.recentQuickColumn}>
+      <Pressable
+        onPress={() => void handleConnect()}
+        disabled={connecting}
+        style={({ pressed }) => [
+          styles.recentQuickStrip,
+          pressed && !connecting && styles.btnPressed,
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={`${t.viewer.recentHostsTitle}: ${item.name || item.host}`}
+      >
+        {connecting ? (
+          <ActivityIndicator size="small" color={colors.textSecondary} />
+        ) : (
+          <Ionicons name="time-outline" size={13} color={colors.textSecondary} />
+        )}
+        <Text style={styles.recentQuickText} numberOfLines={1}>
+          {connecting ? (
+            t.viewer.connectingToHost
+          ) : (
+            <>
+              {t.viewer.recentHostsTitle}:{" "}
+              <Text style={{ fontWeight: "700", color: colors.textPrimary }}>
+                {item.name || item.host}
+              </Text>
+            </>
+          )}
+        </Text>
+        <Ionicons name="chevron-forward" size={13} color={colors.textDim} />
+      </Pressable>
+      {error ? <Text style={styles.recentQuickError}>{error}</Text> : null}
+    </View>
+  );
 }
 
 export default function Hub() {
@@ -60,14 +159,20 @@ export default function Hub() {
         client.request<CatalogView>("getCatalog").catch((e) => {
           if (isUnauthorizedError(e)) {
             void (async () => {
+              const endpoint = controlHost();
               await clearToken();
               disconnectHost();
               checkConnection();
+              Alert.alert(t.viewer.pairingRequiredTitle, t.viewer.pairingRequiredDesc);
+              router.push({
+                pathname: "/pairing",
+                params: { endpoint },
+              });
             })();
           }
         });
       }
-    }, [checkConnection])
+    }, [checkConnection, t])
   );
 
   return (
@@ -172,20 +277,7 @@ export default function Hub() {
             </View>
 
             {lastHost && (
-              <Pressable
-                onPress={openHostPicker}
-                style={({ pressed }) => [
-                  styles.recentQuickStrip,
-                  pressed && styles.btnPressed,
-                ]}
-                accessibilityRole="button"
-              >
-                <Ionicons name="time-outline" size={13} color={colors.textSecondary} />
-                <Text style={styles.recentQuickText} numberOfLines={1}>
-                  {t.viewer.recentHostsTitle}: <Text style={{ fontWeight: "700", color: colors.textPrimary }}>{lastHost.name || lastHost.host}</Text>
-                </Text>
-                <Ionicons name="chevron-forward" size={13} color={colors.textDim} />
-              </Pressable>
+              <RecentHostQuickConnect item={lastHost} onFinished={checkConnection} />
             )}
 
             <View style={styles.heroActionRow}>
@@ -521,6 +613,14 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       borderRadius: 8,
       paddingHorizontal: 10,
       paddingVertical: 7,
+    },
+    recentQuickColumn: {
+      gap: 6,
+    },
+    recentQuickError: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      lineHeight: 15,
     },
     recentQuickText: {
       color: colors.textSecondary,

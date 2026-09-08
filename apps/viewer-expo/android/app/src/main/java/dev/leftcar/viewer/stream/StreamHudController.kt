@@ -42,7 +42,7 @@ internal class StreamHudController(
     private val activity: Activity,
     private val instanceId: String,
     private val sourceFps: Int,
-    private val showPersistentFps: Boolean,
+    private val showDiagnostics: Boolean,
     private val onTermination: (Int) -> Unit,
     private val onRenderedFrame: () -> Unit = {},
 ) {
@@ -107,8 +107,12 @@ internal class StreamHudController(
 
     fun show() {
         showInput()
-        showStats()
-        if (showPersistentFps) persistentFpsOverlay.show()
+        // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
+        // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
+        if (showDiagnostics) {
+            showStats()
+            persistentFpsOverlay.show()
+        }
     }
 
     fun armTerminationPolling() {

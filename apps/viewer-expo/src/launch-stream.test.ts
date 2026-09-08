@@ -248,7 +248,7 @@ describe("startPreparedStream", () => {
       60,
       "splitVertical",
       undefined,
-      true,
+      false,
       false,
     );
   });
@@ -302,7 +302,7 @@ describe("startPreparedStream", () => {
       60,
       "adaptiveQp",
       "LG UltraFine (1)",
-      true,
+      false,
       false,
     );
   });
@@ -350,7 +350,7 @@ describe("startPreparedStream", () => {
       60,
       "adaptiveQp",
       undefined,
-      true,
+      false,
       true,
     );
   });

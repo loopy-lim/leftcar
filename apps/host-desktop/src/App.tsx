@@ -46,18 +46,38 @@ import {
   terminationNoticeVariants,
 } from "./lib/variants";
 
-function hostErrorMessage(cause: unknown, t: TranslationSchema): string {
+type HostErrorKind =
+  | "remote-desktop-permission"
+  | "screen-permission"
+  | "network"
+  | "service"
+  | "generic";
+
+interface HostErrorView {
+  message: string;
+  kind: HostErrorKind;
+}
+
+/**
+ * 원시 오류 문자열을 번역된 안내문과 안정적인 종류로 바꾼다. 버튼 분기는
+ * 반드시 kind로 한다 — 번역된 문구(예: 한국어 "권한")에 포함 여부로 매칭하면
+ * 다른 언어 UI에서 버튼이 사라진다.
+ */
+function hostErrorView(cause: unknown, t: TranslationSchema): HostErrorView {
   const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
+  if (message.includes("remote desktop")) {
+    return { message: t.host.screenPermissionError, kind: "remote-desktop-permission" };
+  }
   if (message.includes("permission") || message.includes("not authorized")) {
-    return t.host.screenPermissionError;
+    return { message: t.host.screenPermissionError, kind: "screen-permission" };
   }
   if (message.includes("no lan interface")) {
-    return t.host.networkNotFoundError;
+    return { message: t.host.networkNotFoundError, kind: "network" };
   }
   if (message.includes("invoke") || message.includes("initialization")) {
-    return t.host.appServiceInitError;
+    return { message: t.host.appServiceInitError, kind: "service" };
   }
-  return t.host.connectionCheckError;
+  return { message: t.host.connectionCheckError, kind: "generic" };
 }
 interface StatusView {
   sessions: SessionRow[];
@@ -81,7 +101,7 @@ function useHostStatus(t: TranslationSchema) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<HostErrorView | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
@@ -151,7 +171,7 @@ function useHostStatus(t: TranslationSchema) {
       setLanIp(actualLanIp);
       setLastUpdated(new Date());
     } catch (cause) {
-      setError(hostErrorMessage(cause, t));
+      setError(hostErrorView(cause, t));
     }
   }, [t]);
 
@@ -562,7 +582,7 @@ function TerminationBanner({
 }
 
 interface SystemAlertBannersProps {
-  error: string | null;
+  error: HostErrorView | null;
   inputActionError: string | null;
   inputPermission: boolean;
   platform: HostSnapshotView["platform"];
@@ -588,10 +608,10 @@ function SystemAlertBanners({
         <div className={bannerAlertVariants({ tone: "danger" })}>
           <div className="banner-text">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <AlertTriangle size={16} /> {error}
+              <AlertTriangle size={16} /> {error.message}
             </span>
           </div>
-          {platform === "macos" && error.includes("Remote Desktop") && (
+          {platform === "macos" && error.kind === "remote-desktop-permission" && (
             <button
               className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "remote_desktop" })}
@@ -599,7 +619,7 @@ function SystemAlertBanners({
               {t.host.openRemoteDesktopSettings}
             </button>
           )}
-          {platform === "macos" && error.includes("권한") && !error.includes("Remote Desktop") && (
+          {platform === "macos" && error.kind === "screen-permission" && (
             <button
               className={buttonVariants({ variant: "ghost", size: "sm" })}
               onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
@@ -838,7 +858,7 @@ function Dashboard() {
     try {
       await invoke("open_system_settings", { pane: "accessibility" });
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     }
   };
 
@@ -854,7 +874,7 @@ function Dashboard() {
       }
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }
@@ -870,7 +890,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }
@@ -886,7 +906,7 @@ function Dashboard() {
       setInputActionError(null);
       await refresh();
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setQualityBusy(null);
     }
@@ -900,7 +920,7 @@ function Dashboard() {
       await refresh();
       setPendingStopSession(null);
     } catch (cause) {
-      setInputActionError(hostErrorMessage(cause, t));
+      setInputActionError(hostErrorView(cause, t).message);
     } finally {
       setInputBusy(null);
     }

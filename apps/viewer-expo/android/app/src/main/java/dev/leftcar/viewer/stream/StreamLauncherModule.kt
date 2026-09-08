@@ -245,7 +245,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                 putExtra("splitVertical", splitVertical)
                 putExtra("splitDecoderName", decoderName)
                 putExtra("displayName", titleName)
-                putExtra("showFps", showFps ?: true)
+                putExtra("showFps", showFps ?: false)
                 putExtra("localCursor", localCursor ?: false)
                 // A recovery reuses the existing document task and port. The
                 // Activity keeps its Surface and swaps only the native

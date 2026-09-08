@@ -270,7 +270,7 @@ export async function startPreparedStream({
       fps,
       encoderExperiment,
       args.displayName,
-      args.showFps ?? true,
+      args.showFps ?? false,
       // 미옵트인 기본(false)과 정합 — 네이티브 인자 수 계약을 채우는 파이프.
       args.localCursor ?? false,
     );
@@ -473,7 +473,7 @@ export async function reconfigurePreparedStream({
       accepted.fps,
       encoderExperiment,
       active.sourceName,
-      active.showFps ?? true,
+      active.showFps ?? false,
       active.localCursor ?? false,
     );
     return {

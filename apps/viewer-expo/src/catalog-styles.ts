@@ -80,6 +80,22 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     transportText: {
       color: colors.textSecondary,
       fontSize: 12,
+      flex: 1,
+    },
+    transportAction: {
+      backgroundColor: colors.btnSecondaryBg,
+      borderWidth: 1,
+      borderColor: colors.btnSecondaryBorder,
+      borderRadius: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    transportActionText: {
+      color: colors.btnSecondaryText,
+      fontSize: 11,
+      fontWeight: "600",
     },
     btnHostChange: {
       backgroundColor: colors.btnSecondaryBg,

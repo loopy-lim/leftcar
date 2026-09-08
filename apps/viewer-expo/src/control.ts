@@ -212,6 +212,13 @@ export function formatErrorMessage(err: unknown): string {
   if (normalized.includes("offer not found")) {
     return "연결 코드가 만료되었습니다. 컴퓨터에서 새 연결 코드를 만들어 주세요.";
   }
+  if (
+    normalized.includes("screen-recording permission") ||
+    normalized.includes("screen recording permission") ||
+    message.includes("화면 공유 권한")
+  ) {
+    return "컴퓨터에서 화면 공유 권한이 꺼져 있습니다. Mac 시스템 설정에서 Leftcar를 허용해 주세요.";
+  }
   if (normalized.includes("timeout")) {
     return "컴퓨터가 응답하지 않습니다. 같은 네트워크인지 확인한 뒤 다시 시도해 주세요.";
   }
@@ -222,7 +229,13 @@ export function formatErrorMessage(err: unknown): string {
   ) {
     return "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.";
   }
-  return message;
+  // 이 코드베이스의 안내 문구는 한국어로 작성되므로 한글이 섞인 메시지는
+  // 이미 큐레이된 것이다. 그 외(주로 매핑되지 않은 영어 원문)는 친절한
+  // 안내문 뒤에 원문을 괄호로 붙여 진단 가능성을 유지한다.
+  if (/[가-힣]/.test(message)) {
+    return message;
+  }
+  return `문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (${message})`;
 }
 
 export function isControlTransportError(error: unknown): boolean {
