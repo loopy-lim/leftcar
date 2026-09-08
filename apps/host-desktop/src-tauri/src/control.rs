@@ -965,6 +965,10 @@ impl ControlServer {
         self.backend.request_input_permission()
     }
 
+    pub fn screen_permission(&self) -> Result<bool, String> {
+        self.backend.screen_permission()
+    }
+
     pub fn set_session_input(&self, session_id: u32, enabled: bool) -> Result<(), String> {
         let handle = {
             let state = self.sessions.lock().unwrap();
@@ -2224,6 +2228,52 @@ mod tests {
         let session = server.snapshot().sessions.remove(0);
         assert!(session.input_enabled);
         assert_eq!(session.input_rate_hz, 120);
+    }
+
+    #[test]
+    fn screen_permission_passes_the_backend_answer_through() {
+        // The fake has no TCC gate, so the trait default reports granted.
+        let server = ControlServer::new(backend(), test_pairing());
+        assert!(server.screen_permission().unwrap());
+
+        struct ScreenDeniedBackend;
+        impl CaptureBackend for ScreenDeniedBackend {
+            fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+                Ok(Vec::new())
+            }
+
+            fn start(
+                &self,
+                _source_index: u32,
+                _ip: &str,
+                _port: u16,
+                _w: u32,
+                _h: u32,
+                _fps: u32,
+                _capture_backend: &str,
+                _media_transport: &str,
+                _content_mode: &str,
+                _encoder_experiment: EncoderExperiment,
+                _udp_stability: &AppliedUdpStability,
+            ) -> Result<u32, String> {
+                Err("not under test".into())
+            }
+
+            fn stop(&self, _handle: u32) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn stats(&self, _handle: u32) -> Result<StatsInfo, String> {
+                Err("not under test".into())
+            }
+
+            fn screen_permission(&self) -> Result<bool, String> {
+                Ok(false)
+            }
+        }
+
+        let server = ControlServer::new(Arc::new(ScreenDeniedBackend), test_pairing());
+        assert!(!server.screen_permission().unwrap());
     }
 
     fn input_test_backend(permission: bool) -> Arc<FakeBackend> {

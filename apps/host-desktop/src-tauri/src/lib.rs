@@ -75,6 +75,7 @@ pub fn run() {
             get_lan_ip,
             get_input_permission,
             request_input_permission,
+            get_screen_permission,
             open_system_settings,
             set_session_input,
             set_session_quality,
@@ -305,6 +306,13 @@ fn request_input_permission(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> Result<bool, String> {
     state.request_input_permission()
+}
+
+#[tauri::command]
+fn get_screen_permission(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<bool, String> {
+    state.screen_permission()
 }
 
 #[tauri::command]

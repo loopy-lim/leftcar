@@ -103,6 +103,9 @@ function useHostStatus(t: TranslationSchema) {
   const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
   const [error, setError] = useState<HostErrorView | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
+  // Assume granted until the first poll answers so the warning never flashes
+  // on a healthy host.
+  const [screenPermission, setScreenPermission] = useState(true);
   const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
   const [lanIp, setLanIp] = useState<string | null>(null);
@@ -113,13 +116,15 @@ function useHostStatus(t: TranslationSchema) {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission, hostPlatform, actualControlPort, actualLanIp] = await Promise.all([
-        invoke<StatusView>("get_status"),
-        invoke<boolean>("get_input_permission"),
-        invoke<HostSnapshotView["platform"]>("get_host_platform"),
-        invoke<number>("get_control_port"),
-        invoke<string | null>("get_lan_ip").catch(() => null),
-      ]);
+      const [status, permission, screenGranted, hostPlatform, actualControlPort, actualLanIp] =
+        await Promise.all([
+          invoke<StatusView>("get_status"),
+          invoke<boolean>("get_input_permission"),
+          invoke<boolean>("get_screen_permission"),
+          invoke<HostSnapshotView["platform"]>("get_host_platform"),
+          invoke<number>("get_control_port"),
+          invoke<string | null>("get_lan_ip").catch(() => null),
+        ]);
       const statusSessions = status.sessions || [];
       const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
       let nextTerminationNotice: TerminationNotice | null = null;
@@ -166,6 +171,7 @@ function useHostStatus(t: TranslationSchema) {
       );
       setError(null);
       setInputPermission(permission);
+      setScreenPermission(screenGranted);
       setPlatform(hostPlatform);
       setControlPort(actualControlPort);
       setLanIp(actualLanIp);
@@ -199,6 +205,7 @@ function useHostStatus(t: TranslationSchema) {
     dismissTerminationNotice,
     error,
     inputPermission,
+    screenPermission,
     platform,
     controlPort,
     lanIp,
@@ -585,6 +592,7 @@ interface SystemAlertBannersProps {
   error: HostErrorView | null;
   inputActionError: string | null;
   inputPermission: boolean;
+  screenPermission: boolean;
   platform: HostSnapshotView["platform"];
   inputBusy: number | "permission" | null;
   t: TranslationSchema;
@@ -596,6 +604,7 @@ function SystemAlertBanners({
   error,
   inputActionError,
   inputPermission,
+  screenPermission,
   platform,
   inputBusy,
   t,
@@ -627,6 +636,25 @@ function SystemAlertBanners({
               {t.host.openScreenCaptureSettings}
             </button>
           )}
+        </div>
+      )}
+
+      {/* The danger banner above already covers a screen-permission failure;
+          the proactive warning only fills the gap before anything has failed. */}
+      {platform === "macos" && !screenPermission && error?.kind !== "screen-permission" && (
+        <div className={bannerAlertVariants({ tone: "warning" })}>
+          <div className="banner-text">
+            <strong>{t.host.screenPermBannerTitle}</strong>
+            <p>{t.host.screenPermBannerDesc}</p>
+          </div>
+          <div className="banner-actions">
+            <button
+              className={buttonVariants({ variant: "primary", size: "sm" })}
+              onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
+            >
+              {t.host.openScreenCaptureSettings}
+            </button>
+          </div>
         </div>
       )}
 
@@ -803,6 +831,7 @@ function Dashboard() {
     dismissTerminationNotice,
     error,
     inputPermission,
+    screenPermission,
     platform,
     controlPort,
     lanIp,
@@ -978,6 +1007,7 @@ function Dashboard() {
           error={error}
           inputActionError={inputActionError}
           inputPermission={inputPermission}
+          screenPermission={screenPermission}
           platform={platform}
           inputBusy={inputBusy}
           t={t}

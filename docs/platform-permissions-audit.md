@@ -21,8 +21,11 @@
 - hardened runtime / 활성 entitlements: `2026-08-25-v0.2-hardening.md` 계획에 따라
   의도적으로 연기됨.
 
-빠진 것: 인앱 TCC 안내 흐름(거부 상태에서 사용자에게 "시스템 설정 → 화면 녹화" 안내
-UI).
+2026-09-08 추가: 인앱 TCC 안내 흐름 구현 — shim `leftcar_capture_screen_permission_v1`
+(`CGPreflightScreenCaptureAccess` 전용, 프롬프트 없음) → Rust `get_screen_permission`
+(백엔드 트레이트 기본값은 "문제 없음", 구 shim에서도 오탐 없음) → 대시보드 경고 배너
+("화면 기록 권한 필요" + 설정 열기 버튼, 허용 후 앱 재시작 안내). 스트림 실패로 같은
+종류의 오류 배너가 이미 떠 있으면 중복 표시하지 않는다.
 
 ### Android 뷰어 — 구현됨 (Expo 앱이 주력)
 
@@ -82,8 +85,9 @@ viewer-display-sizing-validation.md의 미검증 항목 + 위 권한 항목을 �
    bounds 충돌. (기능 완성도의 마지막 미검증 축)
 2. **cgvd-shim RESIZE GUI 세션 실측** — 모드 전환·지연, maxPixels 거부→FAILED,
    scale 1↔2 왕복, RESIZE 직후 PLACE.
-3. **macOS TCC 안내 UX** — 권한 거부/부재 상태를
-   호스트 UI에 명확히 표시(현재는 로그 경고뿐).
+3. ~~**macOS TCC 안내 UX**~~ — 2026-09-08 완료. 호스트 대시보드가 화면 기록 권한 부재를
+   사전 경고 배너로 표시한다(위 macOS 절). 실기 확인은
+   `docs/2026-09-08-usability-review.md` §6 체크리스트 4번.
 4. **Android 권한 정리** — 미사용 `SYSTEM_ALERT_WINDOW` 제거(또는 실기능 연결),
    장시간 수신 시나리오에 대한 포그라운드 서비스 필요성 판단.
 5. **Windows 실기 검증 준비** — WGC 동의 흐름(`RequestAccessAsync` 추가 여부 포함),

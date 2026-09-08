@@ -63,6 +63,12 @@ pub trait CaptureBackend: Send + Sync {
     fn request_input_permission(&self) -> Result<bool, String> {
         Ok(false)
     }
+    /// Whether the OS currently lets this process capture the screen (macOS
+    /// TCC "Screen Recording"). Backends without such a gate report `true`
+    /// so the dashboard never warns about a permission that does not exist.
+    fn screen_permission(&self) -> Result<bool, String> {
+        Ok(true)
+    }
     fn set_input_enabled(&self, _handle: u32, _enabled: bool) -> Result<(), String> {
         Err("remote input is unavailable in this capture backend".into())
     }

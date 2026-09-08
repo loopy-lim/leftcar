@@ -391,6 +391,11 @@ public func leftcarCaptureInputPermissionV1() -> Int32 {
     CGPreflightPostEventAccess() ? 1 : 0
 }
 
+@_cdecl("leftcar_capture_screen_permission_v1")
+public func leftcarCaptureScreenPermissionV1() -> Int32 {
+    hasScreenCaptureAccess() ? 1 : 0
+}
+
 @_cdecl("leftcar_capture_request_input_permission_v1")
 public func leftcarCaptureRequestInputPermissionV1() -> Int32 {
     CGRequestPostEventAccess() ? 1 : 0

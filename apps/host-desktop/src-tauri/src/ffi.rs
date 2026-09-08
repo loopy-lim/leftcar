@@ -8,6 +8,7 @@
 //!   leftcar_capture_last_error_v2() -> cstr
 //!   leftcar_capture_input_permission_v1() -> granted
 //!   leftcar_capture_request_input_permission_v1() -> granted
+//!   leftcar_capture_screen_permission_v1() -> granted (optional; older shims lack it)
 //!   leftcar_capture_set_input_enabled_v1(handle, enabled)
 //!   leftcar_capture_set_quality_v1(handle, quality_percent)
 //!   leftcar_capture_has_persistent_access_v1() -> granted
@@ -799,6 +800,20 @@ impl CaptureBackend for FfiBackend {
             let function: Symbol<unsafe extern "C" fn() -> i32> = lib
                 .get(b"leftcar_capture_request_input_permission_v1")
                 .map_err(|error| error.to_string())?;
+            Ok(function() == 1)
+        }
+    }
+
+    fn screen_permission(&self) -> Result<bool, String> {
+        let lib = self.lib()?;
+        unsafe {
+            // A shim built before this query cannot answer; stay quiet rather
+            // than warn about a state we cannot observe.
+            let Ok(function) = lib
+                .get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_screen_permission_v1")
+            else {
+                return Ok(true);
+            };
             Ok(function() == 1)
         }
     }
