@@ -52,7 +52,11 @@ final class CaptureSession {
      var sock: Int32 = -1
      let tcpWriteLock = NSLock()
      var tcpControlBuffer = Data()
-     var viewerControlToken = Data()
+    // Viewer-generated media key material. Every datagram crosses the socket
+    // AEAD-sealed: `s2c` (send) covers everything this session emits, `c2s`
+    // (receive) opens everything the viewer sends. Possession of the key
+    // replaces the legacy plaintext challenge-token suffix authentication.
+     let mediaCrypto: MediaSessionCrypto
     // Audio plane (LCAU). PCM chunks are converted and sent on this serial
     // queue; the datagram sequence is single-owner here, so it needs no
     // separate lock.
@@ -421,7 +425,8 @@ final class CaptureSession {
         mediaTransport: MediaTransportKind = .udp,
         contentMode: StreamContentMode = .interactive,
         requestedEncoderExperiment: EncoderExperiment = .auto,
-        udpStability: AppliedUdpStability = .legacy
+        udpStability: AppliedUdpStability = .legacy,
+        mediaKey: Data
     ) {
         self.targetAddr = targetAddr
         self.targetPort = targetPort
@@ -433,6 +438,10 @@ final class CaptureSession {
         self.mediaTransport = mediaTransport
         self.contentMode = contentMode
         self.appliedUdpStability = udpStability
+        guard let mediaCrypto = MediaSessionCrypto(mediaKey: mediaKey) else {
+            fatalError("capture session requires a 32-byte media key")
+        }
+        self.mediaCrypto = mediaCrypto
         self.udpBurstPolicyState = UdpBurstPolicyState(applied: udpStability)
         self.activeUdpBurstDatagrams = udpStability.burstDatagrams
         self.activeUdpFecParityShards = udpStability.fecParityShards

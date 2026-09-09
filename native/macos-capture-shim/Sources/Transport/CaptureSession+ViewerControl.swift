@@ -46,8 +46,10 @@ extension CaptureSession {
             consumeViewerTCPControl(fd)
             return
         }
-        var bytes = [UInt8](repeating: 0, count: 512)
-        let token = viewerControlToken
+        // Sealed viewer datagrams carry +24B AEAD overhead; the previous
+        // plaintext budget (512) plus headroom keeps legal IME text and the
+        // widest feedback frame intact.
+        var bytes = [UInt8](repeating: 0, count: 640)
         while true {
             var source = sockaddr_in()
             var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -66,12 +68,11 @@ extension CaptureSession {
                 }
             }
             guard count > 0 else { break }
-            let payload = Data(bytes[0..<count])
-            guard payload.count >= token.count,
-                  payload.suffix(token.count) == token else {
+            // AEAD possession is the authentication: anything that does not
+            // open under the session media key is dropped without parsing.
+            guard let message = mediaCrypto.open(Data(bytes[0..<count])) else {
                 continue
             }
-            let message = Data(payload.dropLast(token.count))
             let sourcePort = UInt16(bigEndian: source.sin_port)
             let sourceSide = viewerControlSide(
                 sourcePort: sourcePort,
@@ -161,13 +162,12 @@ extension CaptureSession {
                 // Keep all untrusted TCP parsing on Array. Foundation.Data
                 // slices may retain a non-zero index and can trap when a
                 // later Collection operation assumes a zero-based buffer.
-                let payloadBytes = Array(payload)
-                let tokenBytes = Array(viewerControlToken)
-                guard payloadBytes.count >= tokenBytes.count,
-                      Array(payloadBytes.suffix(tokenBytes.count)) == tokenBytes else {
+                // The sealed payload must open under the session media key
+                // before any of it is interpreted.
+                guard let opened = mediaCrypto.open(Data(payload)) else {
                     continue
                 }
-                let messageBytes = Array(payloadBytes.dropLast(tokenBytes.count))
+                let messageBytes = Array(opened)
                 if messageBytes == Array("BYE".utf8) {
                     print("viewer close signal received for \(targetLabel)")
                     requestViewerStop()
@@ -386,7 +386,6 @@ extension CaptureSession {
         withUnsafeBytes(of: &hostReceiveBE) { response.append(contentsOf: $0) }
         var hostSendBE = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
         withUnsafeBytes(of: &hostSendBE) { response.append(contentsOf: $0) }
-        response.append(viewerControlToken)
         _ = sendControlPayload(response, fd: fd, destination: destination)
     }
 
@@ -414,7 +413,6 @@ extension CaptureSession {
         let enabled = inputEnabled
         inputLock.unlock()
         ack.append(enabled ? 1 : 0)
-        ack.append(viewerControlToken)
         _ = sendControlPayload(ack, fd: fd, destination: destination)
     }
 }

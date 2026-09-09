@@ -1,7 +1,9 @@
 //! FFI backend: drives the macOS capture shim dylib (v2 handle-based C ABI)
 //! through libloading. Symbol set:
 //!   leftcar_capture_list_displays() -> JSON [{index,name,width,height}]
-//!   leftcar_capture_start_v2(ip, port, display, w, h, fps) -> handle
+//!   leftcar_capture_start_v8(ip, port, display, w, h, fps, backend, transport,
+//!       contentMode, encoderExperiment, udpProfile, burst, parity, adaptive,
+//!       mediaKey, mediaKeyLen) -> handle
 //!   leftcar_capture_stop_v2(handle)
 //!   leftcar_capture_stats_v2(handle) -> JSON {frames,bytes,state,fps,kbps}
 //!   leftcar_capture_free_string(ptr)
@@ -104,10 +106,27 @@ impl FfiBackend {
         unsafe {
             let lib = self.lib()?;
             type CPtr = *mut std::ffi::c_char;
+            // v8 (sealed media start) is the minimum start ABI; older shims
+            // cannot produce encrypted media and are rejected at load time.
             let _ = lib
-                .get::<unsafe extern "C" fn(CPtr, u16, u32, u32, u32, u32) -> u32>(
-                    b"leftcar_capture_start_v2",
-                )
+                .get::<unsafe extern "C" fn(
+                    CPtr,
+                    u16,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    CPtr,
+                    CPtr,
+                    CPtr,
+                    CPtr,
+                    CPtr,
+                    u8,
+                    u8,
+                    i32,
+                    *const u8,
+                    u32,
+                ) -> u32>(b"leftcar_capture_start_v8")
                 .map_err(|e| e.to_string())?;
             let _ = lib
                 .get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_capture_stop_v2")
@@ -540,6 +559,7 @@ impl CaptureBackend for FfiBackend {
         content_mode: &str,
         encoder_experiment: EncoderExperiment,
         udp_stability: &AppliedUdpStability,
+        media_key: &[u8; 32],
     ) -> Result<u32, String> {
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
@@ -552,7 +572,10 @@ impl CaptureBackend for FfiBackend {
         let c_udp_profile = CString::new(udp_stability.applied.as_str())
             .map_err(|_| "UDP stability profile contains NUL")?;
         unsafe {
-            type StartV7 = unsafe extern "C" fn(
+            // v8 is the sealed-media ABI: identical to v7 plus the trailing
+            // viewer-generated 32-byte media key. There is deliberately no
+            // plaintext fallback — a shim without v8 cannot start a stream.
+            type StartV8 = unsafe extern "C" fn(
                 *const std::ffi::c_char,
                 u16,
                 u32,
@@ -567,171 +590,36 @@ impl CaptureBackend for FfiBackend {
                 u8,
                 u8,
                 i32,
+                *const u8,
+                u32,
             ) -> u32;
-            type StartV6 = unsafe extern "C" fn(
-                *const std::ffi::c_char,
-                u16,
-                u32,
-                u32,
-                u32,
-                u32,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-            ) -> u32;
-            type StartV5 = unsafe extern "C" fn(
-                *const std::ffi::c_char,
-                u16,
-                u32,
-                u32,
-                u32,
-                u32,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-            ) -> u32;
-            type StartV4 = unsafe extern "C" fn(
-                *const std::ffi::c_char,
-                u16,
-                u32,
-                u32,
-                u32,
-                u32,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-            ) -> u32;
-            type StartV3 = unsafe extern "C" fn(
-                *const std::ffi::c_char,
-                u16,
-                u32,
-                u32,
-                u32,
-                u32,
-                *const std::ffi::c_char,
-            ) -> u32;
-            let legacy_udp = udp_stability.burst_datagrams == 8
-                && udp_stability.fec_parity_shards == 2
-                && !udp_stability.adaptive_pacing;
-            let v7_handle = if media_transport == "udp" {
-                match lib.get::<StartV7>(b"leftcar_capture_start_v7") {
-                    Ok(f) => Some(f(
-                        c_ip.as_ptr(),
-                        port,
-                        source_index,
-                        w,
-                        h,
-                        fps,
-                        c_backend.as_ptr(),
-                        c_transport.as_ptr(),
-                        c_content_mode.as_ptr(),
-                        c_encoder_experiment.as_ptr(),
-                        c_udp_profile.as_ptr(),
-                        udp_stability.burst_datagrams,
-                        udp_stability.fec_parity_shards,
-                        i32::from(udp_stability.adaptive_pacing),
-                    )),
-                    Err(_) if !legacy_udp => {
-                        return Err(
-                            "capture shim does not support the requested UDP stability profile"
-                                .into(),
-                        );
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-            let handle = if let Some(handle) = v7_handle {
-                handle
-            } else if let Ok(f) = lib.get::<StartV6>(b"leftcar_capture_start_v6") {
-                f(
-                    c_ip.as_ptr(),
-                    port,
-                    source_index,
-                    w,
-                    h,
-                    fps,
-                    c_backend.as_ptr(),
-                    c_transport.as_ptr(),
-                    c_content_mode.as_ptr(),
-                    c_encoder_experiment.as_ptr(),
-                )
-            } else if encoder_experiment != EncoderExperiment::Auto {
-                return Err(format!(
-                    "capture shim does not support encoder experiment {}",
-                    encoder_experiment.as_str()
-                ));
-            } else if let Ok(f) = lib.get::<StartV5>(b"leftcar_capture_start_v5") {
-                f(
-                    c_ip.as_ptr(),
-                    port,
-                    source_index,
-                    w,
-                    h,
-                    fps,
-                    c_backend.as_ptr(),
-                    c_transport.as_ptr(),
-                    c_content_mode.as_ptr(),
-                )
-            } else {
-                match lib.get::<StartV4>(b"leftcar_capture_start_v4") {
-                    Ok(f) if content_mode == "interactive" => f(
-                        c_ip.as_ptr(),
-                        port,
-                        source_index,
-                        w,
-                        h,
-                        fps,
-                        c_backend.as_ptr(),
-                        c_transport.as_ptr(),
-                    ),
-                    Ok(_) => {
-                        return Err(
-                            "capture shim does not support the requested content mode".into()
-                        );
-                    }
-                    Err(_) if media_transport == "udp" && content_mode == "interactive" => {
-                        match lib.get::<StartV3>(b"leftcar_capture_start_v3") {
-                            Ok(f) => f(
-                                c_ip.as_ptr(),
-                                port,
-                                source_index,
-                                w,
-                                h,
-                                fps,
-                                c_backend.as_ptr(),
-                            ),
-                            Err(_) if capture_backend == "screenCaptureKit" => {
-                                let f: Symbol<
-                                    unsafe extern "C" fn(
-                                        *const std::ffi::c_char,
-                                        u16,
-                                        u32,
-                                        u32,
-                                        u32,
-                                        u32,
-                                    )
-                                        -> u32,
-                                > = lib
-                                    .get(b"leftcar_capture_start_v2")
-                                    .map_err(|e| e.to_string())?;
-                                f(c_ip.as_ptr(), port, source_index, w, h, fps)
-                            }
-                            Err(_) => {
-                                return Err(
-                                    "capture shim does not support selectable backends".into()
-                                );
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        return Err(
-                            "capture shim does not support the requested media transport".into(),
-                        );
-                    }
+            let f = match lib.get::<StartV8>(b"leftcar_capture_start_v8") {
+                Ok(f) => f,
+                Err(_) => {
+                    return Err(
+                        "capture shim does not support media-path encryption (rebuild native/macos-capture-shim)"
+                            .into(),
+                    );
                 }
             };
+            let handle = f(
+                c_ip.as_ptr(),
+                port,
+                source_index,
+                w,
+                h,
+                fps,
+                c_backend.as_ptr(),
+                c_transport.as_ptr(),
+                c_content_mode.as_ptr(),
+                c_encoder_experiment.as_ptr(),
+                c_udp_profile.as_ptr(),
+                udp_stability.burst_datagrams,
+                udp_stability.fec_parity_shards,
+                i32::from(udp_stability.adaptive_pacing),
+                media_key.as_ptr(),
+                media_key.len() as u32,
+            );
             if handle == 0 {
                 let err_f: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib
                     .get(b"leftcar_capture_last_error_v2")

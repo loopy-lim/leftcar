@@ -4,13 +4,15 @@ pub(super) fn send_viewer_command(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
     command: &[u8],
-    token: &[u8],
+    crypto: &crate::media_crypto::MediaSessionCrypto,
 ) -> bool {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return false;
     }
-    let authenticated = crate::media_datagram::frame_authenticated(command, token);
-    if let Err(error) = socket.send_to(&authenticated, peer) {
+    let Some(sealed) = crypto.seal(command) else {
+        return false;
+    };
+    if let Err(error) = socket.send_to(&sealed, peer) {
         log_info!("failed to send viewer command: {error}");
         false
     } else {
@@ -38,13 +40,15 @@ pub(super) fn wall_clock_ms() -> u64 {
 pub(super) fn send_latency_probe(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::MediaSessionCrypto,
     sequence: u32,
 ) -> bool {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return false;
     }
-    let probe = encode_latency_probe(sequence, wall_clock_ms(), token);
+    let Some(probe) = crypto.seal(&encode_latency_probe(sequence, wall_clock_ms())) else {
+        return false;
+    };
     if let Err(error) = socket.send_to(&probe, peer) {
         log_info!("failed to send latency probe: {error}");
         false
@@ -64,37 +68,36 @@ pub(super) fn feedback_latency_value(value: u64) -> u16 {
 pub(super) fn send_receiver_feedback(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::MediaSessionCrypto,
     stats: &RendererStats,
     incomplete_aus: u64,
     control: &RendererControl,
     rendered_fps: u16,
 ) {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return;
     }
-    let feedback = encode_receiver_feedback(
-        ReceiverFeedback {
-            frame_gaps: stats.frame_gaps.min(u64::from(u32::MAX)) as u32,
-            input_drops: stats.input_drops.min(u64::from(u32::MAX)) as u32,
-            incomplete_aus: incomplete_aus.min(u64::from(u32::MAX)) as u32,
-            stale_frames: stats.stale_inputs.min(u64::from(u32::MAX)) as u32,
-            network_rtt_ms: feedback_latency_value(control.network_rtt_ms.load(Ordering::Relaxed)),
-            wire_to_decoder_ms: feedback_latency_value(
-                control.wire_to_decoder_ms.load(Ordering::Relaxed),
-            ),
-            stale_input_drops: control
-                .stale_input_drops
-                .load(Ordering::Relaxed)
-                .min(u64::from(u32::MAX)) as u32,
-            output_burst_discards: control
-                .output_burst_discards
-                .load(Ordering::Relaxed)
-                .min(u64::from(u32::MAX)) as u32,
-            rendered_fps,
-        },
-        token,
-    );
+    let Some(feedback) = crypto.seal(&encode_receiver_feedback(ReceiverFeedback {
+        frame_gaps: stats.frame_gaps.min(u64::from(u32::MAX)) as u32,
+        input_drops: stats.input_drops.min(u64::from(u32::MAX)) as u32,
+        incomplete_aus: incomplete_aus.min(u64::from(u32::MAX)) as u32,
+        stale_frames: stats.stale_inputs.min(u64::from(u32::MAX)) as u32,
+        network_rtt_ms: feedback_latency_value(control.network_rtt_ms.load(Ordering::Relaxed)),
+        wire_to_decoder_ms: feedback_latency_value(
+            control.wire_to_decoder_ms.load(Ordering::Relaxed),
+        ),
+        stale_input_drops: control
+            .stale_input_drops
+            .load(Ordering::Relaxed)
+            .min(u64::from(u32::MAX)) as u32,
+        output_burst_discards: control
+            .output_burst_discards
+            .load(Ordering::Relaxed)
+            .min(u64::from(u32::MAX)) as u32,
+        rendered_fps,
+    })) else {
+        return;
+    };
     if let Err(error) = socket.send_to(&feedback, peer) {
         log_info!("failed to send receiver feedback: {error}");
     }
@@ -139,10 +142,10 @@ pub(super) fn clock_corrected_age_ms(
 pub(super) fn flush_input(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::MediaSessionCrypto,
     control: &RendererControl,
 ) {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return;
     }
     // Two candidates allow an immediately due reliable transition and the
@@ -150,7 +153,7 @@ pub(super) fn flush_input(
     for _ in 0..2 {
         let outbound = control.input.lock().unwrap().next_ready(monotonic_us());
         let Some(outbound) = outbound else { break };
-        let packet = encode_input(&outbound, token);
+        let Some(packet) = crypto.seal(&encode_input(&outbound)) else { break };
         if let Err(error) = socket.send_to(&packet, peer) {
             log_info!("failed to send input datagram: {error}");
             break;
@@ -158,18 +161,22 @@ pub(super) fn flush_input(
     }
 }
 
-pub(super) fn request_idr(socket: &std::net::UdpSocket, peer: std::net::SocketAddr, token: &[u8]) {
-    send_viewer_command(socket, peer, crate::media_datagram::COMMAND_IDR, token);
+pub(super) fn request_idr(
+    socket: &std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    crypto: &crate::media_crypto::MediaSessionCrypto,
+) {
+    send_viewer_command(socket, peer, crate::media_datagram::COMMAND_IDR, crypto);
 }
 
 pub(super) fn request_idr_debounced(
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::MediaSessionCrypto,
     gate: &mut RecoveryRequestGate,
     control: &RendererControl,
 ) {
-    if token.is_empty()
+    if !crypto.is_established()
         || recovery_request_suppressed(
             monotonic_us(),
             control
@@ -180,6 +187,6 @@ pub(super) fn request_idr_debounced(
         return;
     }
     if gate.should_request(std::time::Instant::now()) {
-        request_idr(socket, peer, token);
+        request_idr(socket, peer, crypto);
     }
 }

@@ -715,7 +715,8 @@ struct SplitPipelineTests {
                 fps: 60,
                 backend: .screenCaptureKit,
                 mediaTransport: .udp,
-                requestedEncoderExperiment: .splitVertical
+                requestedEncoderExperiment: .splitVertical,
+                mediaKey: Data((0..<32).map { UInt8($0) })
             )
             guard let carrierBuffer = makeProbePixelBuffer(width: 4, height: 4) else {
                 preconditionFailure("carrier pixel buffer")
@@ -794,7 +795,8 @@ struct SplitPipelineTests {
                 fps: 60,
                 backend: .screenCaptureKit,
                 mediaTransport: .udp,
-                requestedEncoderExperiment: .splitVertical
+                requestedEncoderExperiment: .splitVertical,
+                mediaKey: Data((0..<32).map { UInt8($0) })
             )
             fputs("split genuine-PLI: session built\n", stderr)
             // Complete the startup pair so the session is in steady state.

@@ -26,18 +26,11 @@ pub const MAX_DATAGRAM_BYTES: usize = 1_400;
 /// MAX_DATAGRAM so reassembly never truncates a legal datagram.
 pub const MEDIA_BUFFER_BYTES: usize = 2_048;
 
-/// Viewer → host media-socket command bodies (sent authenticated).
+/// Viewer → host media-socket command bodies. Each one is AEAD-sealed with
+/// the session media key at the socket boundary (`media_crypto`), which is
+/// what authenticates it — there is no inline session token.
 pub const COMMAND_IDR: &[u8] = b"IDR";
 pub const COMMAND_BYE: &[u8] = b"BYE";
-
-/// The authenticated viewer→host framing: body bytes followed by the raw
-/// session token. Shared so the wire shape has one authored home.
-pub fn frame_authenticated(body: &[u8], token: &[u8]) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(body.len() + token.len());
-    packet.extend_from_slice(body);
-    packet.extend_from_slice(token);
-    packet
-}
 pub const MAX_FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM_BYTES - FRAME_HEADER_V2_LEN;
 // Four AUs tolerate a short Wi-Fi scheduling/reordering burst. Completed AUs
 // are still returned immediately, so this does not create a playback queue.

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(super) const RENDER_IDR_DEADLINE: Duration = Duration::from_millis(250);
@@ -8,24 +9,27 @@ pub(super) const RENDER_MAX_RECOVERY_RETRIES: u8 = 4;
 pub(super) const RENDER_TERMINATE_DEADLINE: Duration = Duration::from_secs(12);
 pub(super) const MISSED_CONTROL_PROBE_LIMIT: u8 = 3;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub(super) struct InitialControlState {
     pub(super) host_peer: Option<SocketAddr>,
-    pub(super) input_endpoint: Option<(SocketAddr, Vec<u8>)>,
+    pub(super) input_endpoint: Option<(SocketAddr, crate::media_crypto::SharedMediaCrypto)>,
 }
 
+/// Seed the control state from the preflight handshake: once the sealed LCH1
+/// challenge completed, the learned peer plus the shared session crypto drive
+/// the input worker until a later host datagram re-points them.
 pub(super) fn initial_control_state(
     tcp_control_peer: Option<SocketAddr>,
     prepared_peer: Option<SocketAddr>,
-    token: &[u8],
+    crypto: &crate::media_crypto::SharedMediaCrypto,
 ) -> InitialControlState {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return InitialControlState::default();
     }
     let host_peer = tcp_control_peer.or(prepared_peer);
     InitialControlState {
         host_peer,
-        input_endpoint: host_peer.map(|peer| (peer, token.to_vec())),
+        input_endpoint: host_peer.map(|peer| (peer, Arc::clone(crypto))),
     }
 }
 
@@ -385,25 +389,27 @@ mod tests {
 
     #[test]
     fn authenticated_preflight_seeds_control_peer_and_input_endpoint() {
+        use crate::media_crypto::MediaSessionCrypto;
         let peer = "192.0.2.10:5002".parse().unwrap();
+        let crypto = std::sync::Arc::new(MediaSessionCrypto::new([7u8; 32]));
+        crypto.establish();
 
-        let initial = initial_control_state(None, Some(peer), b"viewer-token");
+        let initial = initial_control_state(None, Some(peer), &crypto);
 
         assert_eq!(initial.host_peer, Some(peer));
-        assert_eq!(
-            initial.input_endpoint,
-            Some((peer, b"viewer-token".to_vec()))
-        );
+        assert!(initial.input_endpoint.is_some());
     }
 
     #[test]
-    fn preflight_peer_without_authenticated_token_seeds_no_control_state() {
+    fn preflight_peer_without_authenticated_handshake_seeds_no_control_state() {
+        use crate::media_crypto::MediaSessionCrypto;
         let peer = "192.0.2.10:5002".parse().unwrap();
+        let crypto = std::sync::Arc::new(MediaSessionCrypto::new([7u8; 32]));
 
-        assert_eq!(
-            initial_control_state(None, Some(peer), b""),
-            Default::default()
-        );
+        let initial = initial_control_state(None, Some(peer), &crypto);
+
+        assert_eq!(initial.host_peer, None);
+        assert!(initial.input_endpoint.is_none());
     }
 
     #[test]

@@ -107,19 +107,18 @@ extension CaptureSession {
 
     /// Best-effort authenticated termination notice so a live viewer can close
     /// its window immediately instead of waiting for its own stale-frame
-    /// timeout. A dead viewer simply never receives it.
+    /// timeout. A dead viewer simply never receives it. The notice itself is
+    /// sealed at the socket boundary like every other host datagram.
     func notifyViewerTermination(code: UInt8, reason: String) {
         stateLock.lock()
         let fd = sock
-        let token = viewerControlToken
         stateLock.unlock()
-        guard fd >= 0, !token.isEmpty else {
+        guard fd >= 0 else {
             markStopped(reason)
             return
         }
         var notice = Data("LCT1".utf8)
         notice.append(code)
-        notice.append(token)
         if mediaTransport.usesTCP {
             _ = sendTCPFrame(notice, fd: fd)
             markStopped(reason)

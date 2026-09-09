@@ -504,6 +504,7 @@ export function useCatalogModel() {
           localAudio: preferences.localAudio,
           viewerIps: started.viewerIps,
           mediaTransport: started.mediaTransport,
+          mediaKey: started.mediaKey,
           startedAt: Date.now(),
         });
       } catch (cause) {

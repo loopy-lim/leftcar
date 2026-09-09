@@ -50,7 +50,9 @@ Host user approval
   └─ Viewer pairing approval
 
 Untrusted LAN
-  └─ authenticated control channel with explicit remaining plaintext transport risk
+  └─ control channel: secure-channel 핸드셰이크(QR 핀 + X25519/Ed25519 +
+     ChaCha20-Poly1305) 필수. 루프백 진단 경로만 평문 허용.
+     미디어 경로는 별도 세션 키 AEAD로 암호화한다(§20).
 
 Viewer app
   ├─ TypeScript UI: untrusted for secrets and media bytes
@@ -80,7 +82,7 @@ Platform codec
 | T-13 | malicious update/dependency | lockfile, checksum, signed release, SBOM/audit |
 | T-14 | protected content 우회 | blank/protected error를 정상 처리, bypass 시도 금지 |
 
-v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용한다. 미디어는 제어 peer와 같은 사설 LAN 후보 중 난수 UDP 왕복을 증명한 주소에만 전송하지만 내용 자체는 평문이다.
+v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용했다. 2026-09-09 강화(§20)로 제어 평면은 QR로 핀한 호스트 Ed25519 키에 묶인 암호 채널이 되었고, 미디어는 세션 키 AEAD로 암호화한다.
 공개 인터넷 노출이 필요한 경우 TLS + PAKE + certificate/pinning 기반의 추가 상호인증/암호화가 요구된다.
 
 ## 6. 장치 identity
@@ -372,7 +374,7 @@ stream_task_restore_requires_reauthentication
 - [ ] threat model review 완료
 - [ ] paired/unpaired negative test 완료
 - [ ] source capability test 완료
-- [ ] transport 암호화와 identity binding 확인
+- [ ] transport 암호화와 identity binding 확인 (제어·미디어 평면 구현 완료 — 실기기 스트리밍 검증만 남음, §20)
 - [ ] protocol/packet fuzz 결과 보관
 - [ ] JNI/unsafe review 완료
 - [ ] diagnostics redaction test 완료
@@ -381,3 +383,42 @@ stream_task_restore_requires_reauthentication
 - [ ] debug secret/frame dump 제거
 - [ ] revoke/stop all 실기기 확인
 - [ ] protected content 비우회 확인
+
+## 20. 2026-09-09 보안 강화 구현
+
+외부 원격 제품(RustDesk·AnyDesk·TeamViewer·CRD·Parsec·Moonlight) 대비 격차 분석의 후속 구현.
+
+### 구현 완료
+
+- **제어 평면 세션 암호화** (`crates/secure-channel`): 호스트 장기 Ed25519
+  정체키(QR v2 `k` 필드로 뷰어에 핀) + 뷰어 임시 X25519로 PFS 세션 키 합의,
+  ServerHello 전사 서명으로 MITM·재생 차단, 이후 모든 줄을
+  ChaCha20-Poly1305 봉인 프레임으로 교환. 루프백 진단 경로(tools, 테스트)만
+  평문 유지. Rust↔TS 상호 운용은 고정 벡터로 잠김.
+- **호스트 정체키 영속**: `data_dir/leftcar-host/host_identity.json`(0600).
+- **:7777 무차별 백오프**: 60초 창 5회 토큰 실패 시 60초 차단(루프백 제외).
+- **철회 즉시 효력**: 세션을 장치에 귀속(`authorize_device`)해 revoke 시
+  라이브 스트림을 강제 종료 — §18 `revocation_closes_existing_streams` 충족.
+- **토큰 저장소 분리**: macOS Keychain / Windows Credential Manager 우선,
+  0600 파일 폴백. 구버전 인라인 토큰은 기동 시 자동 이관 후 메타데이터
+  파일에서 삭제.
+- **세션 감사 로그**: 시작/종료·철회를 `sessions.jsonl`(0600)에 JSONL 기록
+  (장치·IP·사유만, 토큰·키 금지).
+
+### 진행·잔여
+
+- **미디어 경로 AEAD(구현 완료, 실기기 검증 대기)**: 뷰어가 CSPRNG로 세션
+  키 32B를 생성해 네이티브 prepare와 (암호화된 제어 채널의) startStream
+  args로 전달한다. 호스트 셸macOS shim은 CryptoKit ChaChaPoly, Windows·
+  뷰어 네이티브는 DatagramSealer로 같은 와이어 레이아웃
+  (`counter‖tag‖ct`)을 쓴다. LCH1 도달성 증명도 봉인 프레임으로 대체됐고
+  토큰 접미사 인증은 제거됐다(평문 미디어 경로 부재 — 구식 shim/뷰어는
+  시작 거부). 키 없는 startStream은 실패한다. 세션 내 카운터는 전송 전환과
+  무관하게 유지되며, split 4K 타일이 하나의 암호 인스턴스를 공유한다.
+- T-05 source capability(페어링 후 소스별 승인) 미구현 — 현재 토큰 보유자는
+  모든 디스플레이 열람·스트림 시작 가능. 입력은 OS 권한이 있으면 세션 시작에
+  자동 활성화되므로 §9의 "소스 승인만으로 입력 capability 자동 획득 금지"와
+  충돌한다. 다음 배치 후보.
+- 프라이버시 모드(호스트 화면 블랭크), 잠금 on disconnect, 유휴 타임아웃,
+  토큰 만료/로테이션, dylib/APK 서명(§17·§19) 미구현.
+- USB AOAP 제어 채널은 물리 접근 전제로 평문 유지(v1).

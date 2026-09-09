@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setRandomSource } from "./secure-channel";
+
+// 미디어 키 경로를 결정적으로 고정한다(0..31 → base64url).
+setRandomSource((length) => Uint8Array.from({ length }, (_, i) => i));
 import { setCurrentLanguage } from "./language-store";
 import type { ControlClient } from "./control";
 import {
@@ -109,6 +113,7 @@ describe("startPreparedStream", () => {
 
     expect(control.request).toHaveBeenCalledWith("startStream", {
       ...stableArgs,
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       viewerIps: ["192.168.0.42"],
       udpStability: {
@@ -177,6 +182,7 @@ describe("startPreparedStream", () => {
       ).resolves.toEqual({
         session: 17,
         viewerIps: ["192.168.0.42"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb",
         encoderExperiment: "adaptiveQp",
       });
@@ -184,6 +190,7 @@ describe("startPreparedStream", () => {
       expect(preparedTransports).toEqual(["usb"]);
       expect(control.request).toHaveBeenCalledWith("startStream", {
         ...args,
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb",
         viewerIps: ["192.168.0.42"],
       });
@@ -206,6 +213,7 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       viewerIps: ["192.168.0.42"],
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       encoderExperiment: "adaptiveQp",
     });
@@ -213,6 +221,7 @@ describe("startPreparedStream", () => {
     expect(preparedTransports).toEqual(["udp"]);
     expect(control.request).toHaveBeenCalledWith("startStream", {
       ...args,
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       viewerIps: ["192.168.0.42"],
     });
@@ -244,6 +253,7 @@ describe("startPreparedStream", () => {
       "udp",
       "splitVertical",
       "ko",
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     );
     expect(launcher.openStream).toHaveBeenCalledWith(
       5003,
@@ -452,11 +462,13 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       viewerIps: [],
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       encoderExperiment: "adaptiveQp",
     });
     expect(control.request).toHaveBeenCalledWith("startStream", {
       ...args,
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
     });
   });
@@ -501,12 +513,14 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       viewerIps: ["192.168.0.42"],
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       encoderExperiment: "auto",
     });
     expect(control.request).toHaveBeenCalledWith("startStream", {
       ...sub4KArgs,
       encoderExperiment: "auto",
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
       viewerIps: ["192.168.0.42"],
     });
@@ -540,6 +554,7 @@ describe("startPreparedStream", () => {
       "udp",
       "splitVertical",
       "ko",
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     );
   });
 
@@ -574,6 +589,7 @@ describe("startPreparedStream", () => {
       "udp",
       "splitVertical",
       "ko",
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     );
     expect(launcher.cancelPreparedStream).toHaveBeenCalledWith(
       5003,
@@ -586,6 +602,7 @@ describe("startPreparedStream", () => {
       "udp",
       "auto",
       "ko",
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     );
     expect(control.request).toHaveBeenCalledWith("startStream", expect.objectContaining({
       mediaTransport: "udp",
@@ -622,6 +639,7 @@ describe("startPreparedStream", () => {
       "udp",
       "splitVertical",
       "ko",
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     );
     expect(calls.indexOf("prepare")).toBeLessThan(calls.indexOf("start"));
   });
@@ -633,6 +651,7 @@ describe("startPreparedStream", () => {
         session: 1,
         captureBackend: "cgDisplayStream",
         viewerIps: ["10.0.0.1"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "udp" as const,
         encoderExperiment: "auto" as const,
         startedAt: 1,
@@ -643,6 +662,7 @@ describe("startPreparedStream", () => {
         session: 2,
         captureBackend: "cgDisplayStream",
         viewerIps: ["10.0.0.2"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb" as const,
         encoderExperiment: "adaptiveQp" as const,
         startedAt: 2,
@@ -657,6 +677,7 @@ describe("startPreparedStream", () => {
         session: 11,
         captureBackend: "screenCaptureKit",
         viewerIps: ["10.0.0.11"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb",
         encoderExperiment: "adaptiveQp",
       },
@@ -670,6 +691,7 @@ describe("startPreparedStream", () => {
         session: 22,
         captureBackend: "screenCaptureKit",
         viewerIps: ["10.0.0.22"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "udp",
         encoderExperiment: "auto",
       },
@@ -683,6 +705,7 @@ describe("startPreparedStream", () => {
         session: 11,
         captureBackend: "screenCaptureKit",
         viewerIps: ["10.0.0.11"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb",
         encoderExperiment: "adaptiveQp",
         startedAt: 101,
@@ -692,6 +715,7 @@ describe("startPreparedStream", () => {
         session: 22,
         captureBackend: "screenCaptureKit",
         viewerIps: ["10.0.0.22"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "udp",
         encoderExperiment: "auto",
         startedAt: 202,
@@ -710,6 +734,7 @@ describe("startPreparedStream", () => {
         session: 11,
         captureBackend: "screenCaptureKit",
         viewerIps: ["10.0.0.11"],
+        mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "udp",
         encoderExperiment: "auto",
       },
@@ -745,6 +770,7 @@ describe("reconfigurePreparedStream", () => {
       encoderExperiment: "auto",
       mediaTransport: "udp",
       viewerIps: ["192.168.0.42"],
+      mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       startedAt: 1,
       ...overrides,
     };

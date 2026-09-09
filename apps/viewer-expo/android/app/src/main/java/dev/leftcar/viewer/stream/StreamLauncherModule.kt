@@ -18,6 +18,21 @@ import dev.leftcar.viewer.shim.ViewerNative
 import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+     * Decode the viewer-generated media key (32 bytes of unpadded base64url,
+     * produced by the JS `bytesToBase64Url`). Returns null for malformed
+     * input so the prepare call fails closed instead of starting unsealed.
+     */
+internal fun decodeMediaKey(value: String): ByteArray? = try {
+    val decoded = android.util.Base64.decode(
+        value,
+        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP,
+    )
+    if (decoded.size == 32) decoded else null
+} catch (_: IllegalArgumentException) {
+    null
+}
+
 internal fun isCurrentActiveTerminationContext(
     registeredContext: Any?,
     queuedContext: Any?,
@@ -152,9 +167,15 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         mediaTransport: String,
         encoderExperiment: String,
         language: String?,
+        mediaKey: String?,
         promise: Promise,
     ) {
         ViewerStrings.applyLanguage(language)
+        val keyBytes = mediaKey?.let { decodeMediaKey(it) }
+        if (keyBytes == null) {
+            promise.reject("ERR_STREAM_PREPARE", "missing or malformed media key")
+            return
+        }
         val splitVertical = encoderExperiment == "splitVertical"
         val decoderName = if (splitVertical) {
             SplitDecoderCapability.findQualifiedCodecName()
@@ -169,9 +190,9 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             return
         }
         val result = if (splitVertical) {
-            ViewerNative.prepareSplitStream(port, host, mediaTransport)
+            ViewerNative.prepareSplitStream(port, host, mediaTransport, keyBytes)
         } else {
-            ViewerNative.prepareStream(port, host, mediaTransport)
+            ViewerNative.prepareStream(port, host, mediaTransport, keyBytes)
         }
         if (result == 0) {
             if (decoderName != null) splitDecoderByPort[port] = decoderName

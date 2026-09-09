@@ -2,11 +2,23 @@
 
 use crate::jni::*;
 use crate::log_info;
+use crate::media_crypto::SharedMediaCrypto;
 use crate::net_guard::host_is_valid;
 use crate::prepared_udp::split_ports;
 use crate::usb_bridge::UsbBridge;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
+
+/// Decode the media key delivered through JNI. Exactly 32 bytes; the JS side
+/// generates them with `randomBytes(32)` and the Kotlin bridge copies the
+/// array verbatim.
+fn media_key_from_parts(key: *const u8, key_len: usize) -> Option<[u8; 32]> {
+    if key.is_null() || key_len != 32 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(key, key_len) };
+    Some(bytes.try_into().ok()?)
+}
 
 // The renderer session modules are Android-gated in renderer/mod.rs (they
 // drive MediaCodec/ANativeWindow through the decoder). Host test builds only
@@ -87,8 +99,13 @@ pub extern "C" fn leftcar_jni_prepare_port(
     port: u16,
     host_c: *const c_char,
     transport_c: *const c_char,
+    key: *const u8,
+    key_len: usize,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
+        let Some(media_key) = media_key_from_parts(key, key_len) else {
+            return LEFTCAR_ERR_INVALID;
+        };
         if host_c.is_null() {
             return LEFTCAR_ERR_NULL;
         }
@@ -108,7 +125,7 @@ pub extern "C" fn leftcar_jni_prepare_port(
         ) {
             return LEFTCAR_ERR_INVALID;
         }
-        match prepare_udp_receiver(port, &host, &transport) {
+        match prepare_udp_receiver(port, &host, &transport, &media_key) {
             Ok(()) => {
                 log_info!(
                     "prepared {} listener(s) on port {port} for {host}",
@@ -133,8 +150,13 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
     base_port: u16,
     host_c: *const c_char,
     transport_c: *const c_char,
+    key: *const u8,
+    key_len: usize,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
+        let Some(media_key) = media_key_from_parts(key, key_len) else {
+            return LEFTCAR_ERR_INVALID;
+        };
         if host_c.is_null() {
             return LEFTCAR_ERR_NULL;
         }
@@ -154,11 +176,23 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
         let Ok((left_port, right_port)) = split_ports(base_port) else {
             return LEFTCAR_ERR_INVALID;
         };
-        if let Err(error) = prepare_udp_receiver(left_port, &host, "udp") {
+        // Both tiles share ONE media-crypto instance: their sends must stay
+        // inside the host's single c2s replay window, so the counter sequence
+        // must not fork between the left and right sockets.
+        let shared: SharedMediaCrypto = Arc::new(crate::media_crypto::MediaSessionCrypto::new(
+            media_key,
+        ));
+        {
+            let mut guard = crate::jni::MEDIA_CRYPTO.lock().unwrap();
+            let map = guard.get_or_insert_with(Default::default);
+            map.insert(left_port, Arc::clone(&shared));
+            map.insert(right_port, Arc::clone(&shared));
+        }
+        if let Err(error) = prepare_split_receiver(left_port, &host, &shared) {
             log_info!("failed to prepare split left listener: {error}");
             return LEFTCAR_ERR_STATE;
         }
-        if let Err(error) = prepare_udp_receiver(right_port, &host, "udp") {
+        if let Err(error) = prepare_split_receiver(right_port, &host, &shared) {
             let _ = cancel_prepared_receiver(left_port);
             log_info!("failed to prepare split right listener: {error}");
             return LEFTCAR_ERR_STATE;
@@ -173,9 +207,16 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
 /// calls this before `prepare_port`; the bridge's loopback control port is
 /// then used by the JS control client.
 #[no_mangle]
-pub extern "C" fn leftcar_jni_prepare_usb(fd: i32) -> i32 {
+pub extern "C" fn leftcar_jni_prepare_usb(
+    fd: i32,
+    key: *const u8,
+    key_len: usize,
+) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let bridge = match UsbBridge::start(fd) {
+        let Some(media_key) = media_key_from_parts(key, key_len) else {
+            return LEFTCAR_ERR_INVALID;
+        };
+        let bridge = match UsbBridge::start(fd, media_key) {
             Ok(bridge) => bridge,
             Err(error) => {
                 log_info!("failed to prepare USB bridge: {error}");
@@ -184,6 +225,28 @@ pub extern "C" fn leftcar_jni_prepare_usb(fd: i32) -> i32 {
         };
         *PREPARED_USB_BRIDGE.lock().unwrap() = Some(bridge);
         LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+/// Re-point the live USB bridge's media crypto at a shared instance. Used
+/// when the accessory attached before JS generated the session key.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_set_usb_media_key(key: *const u8, key_len: usize) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        let Some(key) = media_key_from_parts(key, key_len) else {
+            return LEFTCAR_ERR_INVALID;
+        };
+        let bridge = PREPARED_USB_BRIDGE.lock().unwrap();
+        match bridge.as_ref() {
+            Some(bridge) => {
+                bridge.set_media_crypto(std::sync::Arc::new(
+                    crate::media_crypto::MediaSessionCrypto::new(key),
+                ));
+                LEFTCAR_OK
+            }
+            None => LEFTCAR_ERR_STATE,
+        }
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }

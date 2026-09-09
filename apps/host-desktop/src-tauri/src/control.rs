@@ -6,8 +6,9 @@
 
 use crate::backend::SharedBackend;
 use control_contract::host::{
-    CatalogView, EncoderExperiment, EncoderExperimentInfo, ReconfigureStreamInput,
-    ReconfigureStreamOutput, SessionView, StartStreamInput, StartStreamOutput, StatusView,
+    decode_media_key, CatalogView, EncoderExperiment, EncoderExperimentInfo,
+    ReconfigureStreamInput, ReconfigureStreamOutput, SessionView, StartStreamInput,
+    StartStreamOutput, StatusView,
 };
 use control_contract::udp_stability::{
     host_udp_stability_capabilities, resolve_udp_stability, AppliedUdpStability,
@@ -38,6 +39,10 @@ struct ReconfigureSnapshot {
     content_mode: String,
     encoder_experiment: EncoderExperiment,
     udp_stability: Option<AppliedUdpStability>,
+    /// Media-path AEAD key of the live session. The replacement stream keeps
+    /// the viewer's original key so the already-sealed media sockets continue
+    /// to authenticate across a reconfigure.
+    media_key: [u8; 32],
     width: u32,
     height: u32,
     fps_target: u32,
@@ -61,6 +66,10 @@ struct Session {
     viewer_port: u16,
     media_transport: String,
     udp_stability: Option<AppliedUdpStability>,
+    /// Viewer-generated media key sealing every datagram on this session's
+    /// media path. Cloned from the startStream request over the encrypted
+    /// control plane; never logged, never echoed back.
+    media_key: [u8; 32],
     input_enabled: bool,
     input_rate_hz: u32,
     terminal_since: Option<Instant>,
@@ -139,6 +148,10 @@ struct StartPlan {
     transport: &'static str,
     content_mode: &'static str,
     udp_stability: AppliedUdpStability,
+    /// Viewer-generated media key decoded from base64url. Every media datagram
+    /// is AEAD-sealed with it in both directions; possession replaces the old
+    /// plaintext challenge-token suffix authentication.
+    media_key: [u8; 32],
 }
 
 fn canonical_encoder_experiment(id: EncoderExperiment) -> EncoderExperimentInfo {
@@ -485,6 +498,7 @@ impl ControlServer {
             &previous.content_mode,
             encoder_experiment,
             udp_stability,
+            &previous.media_key,
         )
     }
 
@@ -526,6 +540,7 @@ impl ControlServer {
                 content_mode: session.content_mode.clone(),
                 encoder_experiment: session.encoder_experiment,
                 udp_stability: session.udp_stability.clone(),
+                media_key: session.media_key,
                 width: session.width,
                 height: session.height,
                 fps_target: session.fps_target,
@@ -1077,6 +1092,16 @@ impl ControlServer {
         if let Err(e) = validate_stream_shape(input.width, input.height, input.fps) {
             return Err(e);
         }
+        // The media path has no plaintext mode. A missing or malformed key is
+        // rejected up front so no capture session can start unsealed.
+        let media_key = match input.media_key.as_deref() {
+            Some(key) => decode_media_key(key)?,
+            None => {
+                return Err(
+                    "media encryption key is required — update the viewer app".into(),
+                )
+            }
+        };
         if !self.backend.supports_capture_backend(&input.capture_backend) {
             return Err("unsupported capture backend".into());
         }
@@ -1136,6 +1161,7 @@ impl ControlServer {
             transport,
             content_mode,
             udp_stability,
+            media_key,
         })
     }
 
@@ -1299,6 +1325,7 @@ impl ControlServer {
                         plan.content_mode,
                         input.encoder_experiment,
                         &plan.udp_stability,
+                        &plan.media_key,
                     ) {
                         Ok(handle) => match self.wait_for_first_frame(handle).await {
                             Ok(()) => {
@@ -1353,6 +1380,7 @@ impl ControlServer {
                                     media_transport: transport.into(),
                                     udp_stability: (transport == "udp")
                                         .then(|| plan.udp_stability.clone()),
+                                    media_key: plan.media_key,
                                     input_enabled,
                                     input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
@@ -1831,6 +1859,9 @@ fn err(error: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// Canonical base64url spelling of bytes 0..32, used by startStream tests.
+    const TEST_MEDIA_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
     #[test]
     fn split_vertical_requires_exact_4k60_udp_and_safe_base_port() {
         let parse = |width, height, fps, media_transport: &str, viewer_port| {
@@ -1929,6 +1960,7 @@ mod tests {
             _content_mode: &str,
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
+            _media_key: &[u8; 32],
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -2265,7 +2297,7 @@ mod tests {
         let line = request(
             &mut sock,
             "startStream",
-            r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
+            r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
             &token,
         )
         .await;
@@ -2331,7 +2363,7 @@ mod tests {
             let line = request(
                 &mut sock,
                 "startStream",
-                r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
+                r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
                 &token,
             )
             .await;
@@ -2580,6 +2612,7 @@ mod tests {
                 viewer_port: 5001,
                 media_transport: "udp".into(),
                 udp_stability: None,
+                media_key: [0u8; 32],
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
@@ -2639,6 +2672,7 @@ mod tests {
                 viewer_port: 5001,
                 media_transport: "udp".into(),
                 udp_stability: None,
+                media_key: [0u8; 32],
                 input_enabled: true,
                 input_rate_hz: 120,
                 terminal_since: None,
@@ -2693,6 +2727,7 @@ mod tests {
                 viewer_port: 5001,
                 media_transport: "udp".into(),
                 udp_stability: None,
+                media_key: [0u8; 32],
                 input_enabled: false,
                 input_rate_hz: 120,
                 terminal_since: None,
@@ -2734,6 +2769,7 @@ mod tests {
                 _content_mode: &str,
                 _encoder_experiment: EncoderExperiment,
                 _udp_stability: &AppliedUdpStability,
+                _media_key: &[u8; 32],
             ) -> Result<u32, String> {
                 Err("not under test".into())
             }
@@ -2785,7 +2821,8 @@ mod tests {
                     "width": 1920,
                     "height": 1080,
                     "fps": 60,
-                    "mediaTransport": "udp"
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
                 }),
                 "192.168.0.9", None)
             .await;
@@ -2811,7 +2848,8 @@ mod tests {
                     "width": 1920,
                     "height": 1080,
                     "fps": 60,
-                    "mediaTransport": "udp"
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
                 }),
                 "192.168.0.9",
                 Some("viewer-1"),
@@ -2843,7 +2881,8 @@ mod tests {
                     "width": 1920,
                     "height": 1080,
                     "fps": 60,
-                    "mediaTransport": "udp"
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
                 }),
                 "192.168.0.9", None)
             .await;
@@ -2916,6 +2955,7 @@ mod tests {
                 viewer_port: 5002,
                 media_transport: "udp".into(),
                 udp_stability: None,
+                media_key: [0u8; 32],
                 input_enabled: false,
                 input_rate_hz: 180,
                 terminal_since: None,
@@ -2946,6 +2986,7 @@ mod tests {
             _content_mode: &str,
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
+            _media_key: &[u8; 32],
         ) -> Result<u32, String> {
             Ok(9)
         }
@@ -3028,6 +3069,7 @@ mod tests {
             _content_mode: &str,
             encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
+            _media_key: &[u8; 32],
         ) -> Result<u32, String> {
             self.starts
                 .lock()
@@ -3322,6 +3364,7 @@ mod tests {
                     viewer_port: 5002,
                     media_transport: "udp".into(),
                     udp_stability: None,
+                    media_key: [0u8; 32],
                     input_enabled: false,
                     input_rate_hz: 180,
                     terminal_since: None,

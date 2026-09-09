@@ -134,8 +134,10 @@ pub struct OutboundInput {
     pub event: InputEvent,
 }
 
-pub fn encode_input(outbound: &OutboundInput, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(INPUT_HEADER_LEN + 16 + token.len());
+/// One input datagram. The frame is AEAD-sealed with the session media key
+/// before it leaves the socket boundary; there is no inline session token.
+pub fn encode_input(outbound: &OutboundInput) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(INPUT_HEADER_LEN + 16);
     bytes.extend_from_slice(INPUT_MAGIC);
     bytes.extend_from_slice(&outbound.sequence.to_be_bytes());
     bytes.push(outbound.event.kind());
@@ -145,7 +147,6 @@ pub fn encode_input(outbound: &OutboundInput, token: &[u8]) -> Vec<u8> {
         0
     });
     outbound.event.encode_payload(&mut bytes);
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -155,30 +156,23 @@ pub struct InputAck {
     pub enabled: Option<bool>,
 }
 
-pub fn parse_ack(packet: &[u8], token: &[u8]) -> Option<InputAck> {
-    if token.is_empty() || packet.get(..4)? != ACK_MAGIC {
+pub fn parse_ack(packet: &[u8]) -> Option<InputAck> {
+    if packet.get(..4)? != ACK_MAGIC {
         return None;
     }
-    let (token_offset, enabled) = match packet.len().checked_sub(token.len())? {
-        8 => (8, None),
-        9 => (9, Some(*packet.get(8)? != 0)),
+    let enabled = match packet.len() {
+        8 => None,
+        9 => Some(*packet.get(8)? != 0),
         _ => return None,
     };
-    if packet[token_offset..] != *token {
-        return None;
-    }
     Some(InputAck {
         sequence: u32::from_be_bytes(packet[4..8].try_into().ok()?),
         enabled,
     })
 }
 
-pub fn parse_input_status(packet: &[u8], token: &[u8]) -> Option<bool> {
-    if token.is_empty()
-        || packet.len() != 5 + token.len()
-        || &packet[..4] != STATUS_MAGIC
-        || packet[5..] != *token
-    {
+pub fn parse_input_status(packet: &[u8]) -> Option<bool> {
+    if packet.len() != 5 || &packet[..4] != STATUS_MAGIC {
         return None;
     }
     match packet[4] {
@@ -188,12 +182,11 @@ pub fn parse_input_status(packet: &[u8], token: &[u8]) -> Option<bool> {
     }
 }
 
-pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(16 + token.len());
+pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(LATENCY_PROBE_MAGIC);
     bytes.extend_from_slice(&sequence.to_be_bytes());
     bytes.extend_from_slice(&viewer_send_ms.to_be_bytes());
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -218,21 +211,16 @@ impl TerminationReason {
     }
 }
 
-pub fn encode_termination(reason: TerminationReason, token: &[u8]) -> Vec<u8> {
+pub fn encode_termination(reason: TerminationReason) -> Vec<u8> {
     let code = reason.code();
-    let mut bytes = Vec::with_capacity(5 + token.len());
+    let mut bytes = Vec::with_capacity(5);
     bytes.extend_from_slice(TERMINATION_MAGIC);
     bytes.push(code);
-    bytes.extend_from_slice(token);
     bytes
 }
 
-pub fn parse_termination(packet: &[u8], token: &[u8]) -> Option<TerminationReason> {
-    if token.is_empty()
-        || packet.len() != 5 + token.len()
-        || &packet[..4] != TERMINATION_MAGIC
-        || packet[5..] != *token
-    {
+pub fn parse_termination(packet: &[u8]) -> Option<TerminationReason> {
+    if packet.len() != 5 || &packet[..4] != TERMINATION_MAGIC {
         return None;
     }
     match packet[4] {
@@ -258,8 +246,8 @@ pub struct ReceiverFeedback {
     pub rendered_fps: u16,
 }
 
-pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(34 + token.len());
+pub fn encode_receiver_feedback(feedback: ReceiverFeedback) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(34);
     bytes.extend_from_slice(RECEIVER_FEEDBACK_MAGIC);
     bytes.extend_from_slice(&feedback.frame_gaps.to_be_bytes());
     bytes.extend_from_slice(&feedback.input_drops.to_be_bytes());
@@ -270,7 +258,6 @@ pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec
     bytes.extend_from_slice(&feedback.stale_input_drops.to_be_bytes());
     bytes.extend_from_slice(&feedback.output_burst_discards.to_be_bytes());
     bytes.extend_from_slice(&feedback.rendered_fps.to_be_bytes());
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -282,12 +269,8 @@ pub struct LatencyProbeResponse {
     pub host_send_ms: u64,
 }
 
-pub fn parse_latency_probe_response(packet: &[u8], token: &[u8]) -> Option<LatencyProbeResponse> {
-    if token.is_empty()
-        || packet.len() != 32 + token.len()
-        || &packet[..4] != LATENCY_RESPONSE_MAGIC
-        || packet[32..] != *token
-    {
+pub fn parse_latency_probe_response(packet: &[u8]) -> Option<LatencyProbeResponse> {
+    if packet.len() != 32 || &packet[..4] != LATENCY_RESPONSE_MAGIC {
         return None;
     }
     Some(LatencyProbeResponse {
@@ -481,6 +464,12 @@ impl InputScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::{MediaSessionCrypto, CHALLENGE_PREFIX};
+    use secure_channel::DatagramSealer;
+
+    fn key(bytes: u8) -> [u8; 32] {
+        (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()
+    }
 
     #[test]
     fn pointer_rate_is_twice_stream_fps() {
@@ -493,13 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_latency_probe_separates_rtt_and_clock_offset() {
-        let token = b"session-token";
-        let request = encode_latency_probe(7, 1_000, token);
+    fn latency_probe_separates_rtt_and_clock_offset() {
+        let request = encode_latency_probe(7, 1_000);
         assert_eq!(&request[..4], LATENCY_PROBE_MAGIC);
         assert_eq!(&request[4..8], &7u32.to_be_bytes());
         assert_eq!(&request[8..16], &1_000u64.to_be_bytes());
-        assert_eq!(&request[16..], token);
 
         // Android clock t0=1000/t3=1010, Host clock is +100 ms. The LAN adds
         // 5 ms each way and Host spends 1 ms constructing the response.
@@ -508,8 +495,7 @@ mod tests {
         packet.extend_from_slice(&1_000u64.to_be_bytes());
         packet.extend_from_slice(&1_105u64.to_be_bytes());
         packet.extend_from_slice(&1_106u64.to_be_bytes());
-        packet.extend_from_slice(token);
-        let response = parse_latency_probe_response(&packet, token).unwrap();
+        let response = parse_latency_probe_response(&packet).unwrap();
         assert_eq!(
             estimate_latency(response, 1_011),
             Some(LatencyEstimate {
@@ -517,44 +503,43 @@ mod tests {
                 host_clock_offset_ms: 100,
             })
         );
-        assert!(parse_latency_probe_response(&packet, b"wrong-token").is_none());
+        // A host response can only arrive opened from the media key; a
+        // truncated frame is not a probe response.
+        assert!(parse_latency_probe_response(&packet[..31]).is_none());
     }
 
     #[test]
-    fn termination_notice_round_trips_and_rejects_wrong_token() {
-        let token = b"session-token";
+    fn termination_notice_round_trips() {
         for reason in [
             TerminationReason::HealthCheck,
             TerminationReason::HostForced,
             TerminationReason::HostStopped,
         ] {
-            let packet = encode_termination(reason, token);
+            let packet = encode_termination(reason);
             assert_eq!(&packet[..4], TERMINATION_MAGIC);
-            assert_eq!(packet.len(), 5 + token.len());
-            assert_eq!(parse_termination(&packet, token), Some(reason));
+            assert_eq!(packet.len(), 5);
+            assert_eq!(parse_termination(&packet), Some(reason));
         }
-        let packet = encode_termination(TerminationReason::HostForced, token);
-        assert_eq!(parse_termination(&packet, b"wrong-token"), None);
-        assert_eq!(parse_termination(&packet[..4], token), None);
+        let packet = encode_termination(TerminationReason::HostForced);
+        assert_eq!(parse_termination(&packet[..4]), None);
+        let mut foreign = packet.clone();
+        foreign[0] = b'X';
+        assert_eq!(parse_termination(&foreign), None);
     }
 
     #[test]
-    fn receiver_feedback_is_fixed_width_and_nonce_authenticated() {
-        let token = b"session-token";
-        let packet = encode_receiver_feedback(
-            ReceiverFeedback {
-                frame_gaps: 1,
-                input_drops: 2,
-                incomplete_aus: 3,
-                stale_frames: 4,
-                network_rtt_ms: 5,
-                wire_to_decoder_ms: 6,
-                stale_input_drops: 7,
-                output_burst_discards: 8,
-                rendered_fps: 60,
-            },
-            token,
-        );
+    fn receiver_feedback_is_fixed_width() {
+        let packet = encode_receiver_feedback(ReceiverFeedback {
+            frame_gaps: 1,
+            input_drops: 2,
+            incomplete_aus: 3,
+            stale_frames: 4,
+            network_rtt_ms: 5,
+            wire_to_decoder_ms: 6,
+            stale_input_drops: 7,
+            output_burst_discards: 8,
+            rendered_fps: 60,
+        });
         assert_eq!(&packet[..4], RECEIVER_FEEDBACK_MAGIC);
         assert_eq!(&packet[4..8], &1u32.to_be_bytes());
         assert_eq!(&packet[8..12], &2u32.to_be_bytes());
@@ -565,8 +550,7 @@ mod tests {
         assert_eq!(&packet[24..28], &7u32.to_be_bytes());
         assert_eq!(&packet[28..32], &8u32.to_be_bytes());
         assert_eq!(&packet[32..34], &60u16.to_be_bytes());
-        assert_eq!(packet.len(), 34 + token.len());
-        assert_eq!(&packet[34..], token);
+        assert_eq!(packet.len(), 34);
     }
 
     #[test]
@@ -665,35 +649,26 @@ mod tests {
     }
 
     #[test]
-    fn wire_format_binds_ack_to_session_token() {
-        let token = b"session-token";
-        let outbound = OutboundInput {
-            sequence: 7,
-            event: InputEvent::ReleaseAll,
-        };
-        let packet = encode_input(&outbound, token);
-        assert_eq!(&packet[..4], INPUT_MAGIC);
-        assert_eq!(&packet[4..8], &7u32.to_be_bytes());
-        assert_eq!(*packet.last().unwrap(), *token.last().unwrap());
-
+    fn sealed_ack_and_status_round_trip_like_the_host_wire() {
+        // The host builds these plaintext frames and seals them at the socket
+        // boundary; the viewer opens them before parsing.
+        let crypto = MediaSessionCrypto::new(key(7));
         let mut ack = ACK_MAGIC.to_vec();
         ack.extend_from_slice(&7u32.to_be_bytes());
-        ack.extend_from_slice(token);
+        let sealed_ack = crypto.seal(&ack).unwrap();
         assert_eq!(
-            parse_ack(&ack, token),
+            parse_ack(&crypto.open(&sealed_ack).unwrap()),
             Some(InputAck {
                 sequence: 7,
                 enabled: None,
             })
         );
-        assert_eq!(parse_ack(&ack, b"other-token"), None);
 
         let mut stateful_ack = ACK_MAGIC.to_vec();
         stateful_ack.extend_from_slice(&7u32.to_be_bytes());
         stateful_ack.push(1);
-        stateful_ack.extend_from_slice(token);
         assert_eq!(
-            parse_ack(&stateful_ack, token),
+            parse_ack(&crypto.open(&crypto.seal(&stateful_ack).unwrap()).unwrap()),
             Some(InputAck {
                 sequence: 7,
                 enabled: Some(true),
@@ -702,15 +677,23 @@ mod tests {
 
         let mut status = STATUS_MAGIC.to_vec();
         status.push(0);
-        status.extend_from_slice(token);
-        assert_eq!(parse_input_status(&status, token), Some(false));
+        assert_eq!(
+            parse_input_status(&crypto.open(&crypto.seal(&status).unwrap()).unwrap()),
+            Some(false)
+        );
         status[4] = 1;
-        assert_eq!(parse_input_status(&status, token), Some(true));
+        assert_eq!(
+            parse_input_status(&crypto.open(&crypto.seal(&status).unwrap()).unwrap()),
+            Some(true)
+        );
+        // A frame sealed under a different key never opens, so it can never
+        // reach these parsers.
+        let impostor = DatagramSealer::new(key(8));
+        assert!(crypto.open(&impostor.seal(&status).unwrap()).is_none());
     }
 
     #[test]
     fn every_event_matches_the_host_wire_layout() {
-        let token = b"nonce";
         let cases = [
             (
                 InputEvent::PointerMove {
@@ -767,11 +750,10 @@ mod tests {
         ];
 
         for (event, kind, reliable, message_len) in cases {
-            let packet = encode_input(&OutboundInput { sequence: 7, event }, token);
-            assert_eq!(packet.len(), message_len + token.len());
+            let packet = encode_input(&OutboundInput { sequence: 7, event });
+            assert_eq!(packet.len(), message_len);
             assert_eq!(packet[8], kind);
             assert_eq!(packet[9] & INPUT_FLAG_RELIABLE != 0, reliable);
-            assert_eq!(&packet[message_len..], token);
         }
     }
 
@@ -784,15 +766,16 @@ mod tests {
 
     #[test]
     fn text_payload_round_trips_utf8_bytes_and_requeues_until_ack() {
-        let token = b"nonce";
         let event = InputEvent::Text {
             text: "안녕하세요 world".to_string(),
         };
         assert!(event.is_reliable());
-        let packet = encode_input(&OutboundInput { sequence: 3, event }, token);
+        let packet = encode_input(&OutboundInput { sequence: 3, event });
         assert_eq!(packet[8], 6);
-        let payload = &packet[10..packet.len() - token.len()];
-        assert_eq!(std::str::from_utf8(payload).unwrap(), "안녕하세요 world");
+        assert_eq!(
+            std::str::from_utf8(&packet[10..]).unwrap(),
+            "안녕하세요 world"
+        );
 
         // Reliable semantics: the scheduler retransmits until acknowledged so
         // a lost datagram can never silently swallow committed IME text.
@@ -809,5 +792,28 @@ mod tests {
         );
         assert!(scheduler.acknowledge(first.sequence));
         assert!(scheduler.next_ready(20_002).is_none());
+    }
+
+    #[test]
+    fn sealed_challenge_and_input_survive_one_crypto_instance() {
+        // The session key seals every direction: challenge echo, input, and
+        // the host's acks all flow through the same MediaSessionCrypto.
+        let crypto = MediaSessionCrypto::new(key(9));
+        let host_tx = DatagramSealer::new(key(9));
+        let challenge = [CHALLENGE_PREFIX, b"nonce"].concat();
+        let opened = crypto
+            .open_challenge(&host_tx.seal(&challenge).unwrap())
+            .unwrap();
+        crypto.establish();
+        let echo = crypto.seal(&opened).unwrap();
+        let mut host_rx = DatagramSealer::new(key(9));
+        assert_eq!(host_rx.open(&echo).unwrap(), challenge);
+
+        let input = encode_input(&OutboundInput {
+            sequence: 1,
+            event: InputEvent::ReleaseAll,
+        });
+        let sealed_input = crypto.seal(&input).unwrap();
+        assert_eq!(host_rx.open(&sealed_input).unwrap(), input);
     }
 }

@@ -59,6 +59,7 @@ impl CaptureBackend for RecordingBackend {
         _content_mode: &str,
         _encoder_experiment: EncoderExperiment,
         udp_stability: &AppliedUdpStability,
+        _media_key: &[u8; 32],
     ) -> Result<u32, String> {
         self.started_ips.lock().unwrap().push(ip.to_owned());
         self.started_udp_stability
@@ -180,7 +181,11 @@ impl CaptureBackend for RecordingBackend {
 }
 
 fn pairing() -> Arc<PairingServer> {
-    Arc::new(PairingServer::new([7u8; 32], None))
+    Arc::new(PairingServer::new(
+        [7u8; 32],
+        None,
+        Box::new(leftcar_host_desktop::pairing::FileTokenStore::new(None)),
+    ))
 }
 
 async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>) {
@@ -286,7 +291,7 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
     let response = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":0,"viewerPort":5000,"width":3840,"height":2160,"fps":60,"udpStability":{"profile":"stable","viewer":{"version":1,"maxFecParityShards":4,"splitFeedbackBytes":120}}}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5000,"width":3840,"height":2160,"fps":60,"udpStability":{"profile":"stable","viewer":{"version":1,"maxFecParityShards":4,"splitFeedbackBytes":120}}}"#,
         &token,
     )
     .await;
@@ -317,7 +322,7 @@ async fn encoder_experiment_is_carried_to_session_and_reserved_profiles_are_reje
     let start = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"adaptiveQp"}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"adaptiveQp"}"#,
         &token,
     )
     .await;
@@ -350,7 +355,7 @@ async fn encoder_experiment_is_carried_to_session_and_reserved_profiles_are_reje
     let reserved = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"splitHorizontal"}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5002,"width":3840,"height":2160,"fps":60,"encoderExperiment":"splitHorizontal"}"#,
         &token,
     )
     .await;
@@ -398,7 +403,7 @@ async fn test_full_stream_lifecycle() {
     let start_resp = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":0,"viewerPort":5000,"width":1920,"height":1080,"fps":90}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5000,"width":1920,"height":1080,"fps":90}"#,
         &token,
     )
     .await;
@@ -450,7 +455,7 @@ async fn test_full_stream_lifecycle() {
     let start2_resp = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":1,"viewerPort":5001,"width":2560,"height":1440,"fps":90}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":1,"viewerPort":5001,"width":2560,"height":1440,"fps":90}"#,
         &token,
     )
     .await;
@@ -587,7 +592,7 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
     let resp = send_request(
         &mut sock,
         "startStream",
-        r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90,"viewerIps":["1.2.3.4"]}"#,
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90,"viewerIps":["1.2.3.4"]}"#,
         &token,
     )
     .await;

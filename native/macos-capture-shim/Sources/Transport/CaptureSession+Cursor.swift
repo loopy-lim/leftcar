@@ -53,10 +53,6 @@ extension CaptureSession {
                 fps: fps,
                 bounds: bounds
             )
-            // The coordinator embeds the session token inside every encoded
-            // packet (encodeCursorPacket appends it) and stays silent until a
-            // token is installed, so enabling must carry the current token.
-            coordinator.setToken(viewerControlToken)
             coordinator.setEnabled(true)
             cursorCoordinator = coordinator
         } else {
@@ -291,9 +287,8 @@ extension CaptureSession {
         let fd = cursorStreamFD
         let destination = cursorStreamDestination
         cursorLock.unlock()
-        // The coordinator already embeds the session token inside the
-        // encoded LCD1 packet; appending it again would break the wire
-        // layout the viewer's parser expects.
+        // The packet is sealed together with every other host datagram at the
+        // socket boundary; the wire layout carries no inline session token.
         _ = sendControlPayload(payload, fd: fd, destination: destination)
     }
 

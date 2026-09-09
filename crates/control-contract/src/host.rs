@@ -815,6 +815,33 @@ pub struct StartStreamInput {
     /// is intentionally the legacy wire policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<UdpStabilityRequest>,
+    /// Viewer-generated 32-byte media key (base64url). Seals every media
+    /// datagram with ChaCha20-Poly1305 in both directions; it arrives over the
+    /// already-encrypted control plane, so it never crosses the media path in
+    /// the clear. Older viewers omit the field and the host rejects the start:
+    /// the plaintext media path no longer exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_key: Option<String>,
+}
+
+/// Decode and validate a viewer-supplied media key. Exactly 32 bytes of
+/// standard base64url (no padding produced by the viewer's `bytesToBase64Url`).
+pub fn decode_media_key(value: &str) -> std::result::Result<[u8; 32], String> {
+    use base64::Engine as _;
+    if value.is_empty() || value.len() > 64 {
+        return Err("media key must be 32 bytes of base64url".into());
+    }
+    let mut normalized = value.to_owned();
+    // Accept, but do not require, canonical unpadded input.
+    while normalized.len() % 4 != 0 {
+        normalized.push('=');
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(normalized.as_bytes())
+        .map_err(|_| "media key is not valid base64url".to_owned())?;
+    decoded
+        .try_into()
+        .map_err(|_| "media key must decode to exactly 32 bytes".to_owned())
 }
 
 fn default_capture_backend() -> String {
@@ -1277,9 +1304,39 @@ mod stream_control_tests {
         let json = r#"{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#;
         let v: StartStreamInput = serde_json::from_str(json).unwrap();
         assert_eq!(v.udp_stability, None);
+        assert_eq!(v.media_key, None);
         // Legacy payloads must not gain the optional keys on re-serialization.
         let back = serde_json::to_string(&v).unwrap();
         assert!(!back.contains("udpStability"));
+        assert!(!back.contains("mediaKey"));
+    }
+
+    #[test]
+    fn media_key_roundtrips_and_decodes_to_32_bytes() {
+        const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+        let json = format!(
+            r#"{{"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90,"mediaKey":"{KEY}"}}"#
+        );
+        let v: StartStreamInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(v.media_key.as_deref(), Some(KEY));
+        let key = decode_media_key(KEY).unwrap();
+        let expected: [u8; 32] = (0u8..32).collect::<Vec<u8>>().try_into().unwrap();
+        assert_eq!(key, expected);
+        // Canonical unpadded and padded spellings decode identically.
+        assert_eq!(
+            decode_media_key(&format!("{KEY}=")).unwrap(),
+            decode_media_key(KEY).unwrap()
+        );
+    }
+
+    #[test]
+    fn media_key_rejects_bad_base64_and_wrong_lengths() {
+        assert!(decode_media_key("").is_err());
+        assert!(decode_media_key("abcd").is_err(), "3 decoded bytes");
+        assert!(decode_media_key("/+/+").is_err(), "not base64url-safe text");
+        let long = "A".repeat(100);
+        assert!(decode_media_key(&long).is_err());
+        assert!(decode_media_key("!!!!").is_err(), "invalid symbols");
     }
 
     #[test]

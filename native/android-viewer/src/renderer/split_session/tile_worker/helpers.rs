@@ -109,10 +109,10 @@ pub(super) fn process_restored(
 pub(super) fn flush_input(
     socket: &UdpSocket,
     peer: SocketAddr,
-    token: &[u8],
+    crypto: &SharedMediaCrypto,
     control: &RendererControl,
 ) {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return;
     }
     for _ in 0..2 {
@@ -124,7 +124,9 @@ pub(super) fn flush_input(
         let Some(outbound) = outbound else {
             break;
         };
-        let packet = encode_input(&outbound, token);
+        let Some(packet) = crypto.seal(&encode_input(&outbound)) else {
+            break;
+        };
         if socket.send_to(&packet, peer).is_err() {
             break;
         }
@@ -329,32 +331,43 @@ pub(super) fn expand_sequence(current: u64, previous: Option<u16>, raw: u16) -> 
     epoch | u64::from(raw)
 }
 
-pub(super) fn send_authenticated(socket: &UdpSocket, peer: SocketAddr, body: &[u8], token: &[u8]) {
-    if token.is_empty() {
+pub(super) fn send_authenticated(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    body: &[u8],
+    crypto: &SharedMediaCrypto,
+) {
+    if !crypto.is_established() {
         return;
     }
-    let packet = crate::media_datagram::frame_authenticated(body, token);
+    let Some(packet) = crypto.seal(body) else {
+        return;
+    };
     let _ = socket.send_to(&packet, peer);
 }
 
-/// One authenticated send_to whose kernel result is reported. Acceptance by
-/// the kernel is a transmit attempt only — actual delivery is never known
-/// from UDP — so callers must treat `Ok(())` as `Transmitted`, not delivered.
+/// One sealed send_to whose kernel result is reported. Acceptance by the
+/// kernel is a transmit attempt only — actual delivery is never known from
+/// UDP — so callers must treat `Ok(())` as `Transmitted`, not delivered.
 pub(super) fn send_authenticated_checked(
     socket: &UdpSocket,
     peer: SocketAddr,
     body: &[u8],
-    token: &[u8],
+    crypto: &SharedMediaCrypto,
 ) -> std::io::Result<()> {
-    if token.is_empty() {
+    if !crypto.is_established() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "no session token",
+            "sealed handshake not established",
         ));
     }
-    socket
-        .send_to(&crate::media_datagram::frame_authenticated(body, token), peer)
-        .map(|_| ())
+    let Some(packet) = crypto.seal(body) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sealed frame construction failed",
+        ));
+    };
+    socket.send_to(&packet, peer).map(|_| ())
 }
 
 pub(super) fn rate(current: u64, previous: u64, elapsed_ms: u64) -> u16 {

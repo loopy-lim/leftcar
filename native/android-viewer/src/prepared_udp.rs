@@ -3,10 +3,13 @@
 //! The Host proves that a viewer owns its media port before capture starts.
 //! Android used to open the stream Activity only after writing `startStream`,
 //! so a slow Activity/Surface creation could miss the bounded challenge and
-//! leave a black window. This listener binds first, echoes only authenticated
-//! Host candidates, then hands the same socket and challenge token to the
-//! renderer once its Surface exists.
+//! leave a black window. This listener binds first, answers only datagrams
+//! that open under the session media key (the sealed `LCH1` challenge), then
+//! hands the same socket and the shared session crypto to the renderer once
+//! its Surface exists. Sharing one `MediaSessionCrypto` instance keeps the
+//! AEAD counters continuous across the handoff.
 
+use crate::media_crypto::{CHALLENGE_PREFIX, SharedMediaCrypto};
 use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -15,15 +18,20 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const CHALLENGE_PREFIX: &[u8] = b"LCH1";
-const MAX_CHALLENGE_BYTES: usize = 128;
+/// Sealed challenge + AEAD overhead; genuine host challenges fit easily.
+const MAX_CHALLENGE_BYTES: usize = 192;
 
-/// Recognize a Host `LCH1` reachability challenge and return the challenge
-/// token (the bytes after the prefix). Shared by the preflight worker and
-/// both renderers so the acceptance rule cannot drift.
-pub fn learn_challenge(packet: &[u8]) -> Option<&[u8]> {
-    let rest = packet.strip_prefix(CHALLENGE_PREFIX)?;
-    (!rest.is_empty() && packet.len() <= MAX_CHALLENGE_BYTES).then_some(rest)
+/// Recognize a Host `LCH1` reachability challenge from an already-opened
+/// plaintext. Shared by the preflight worker and both renderers so the
+/// acceptance rule cannot drift.
+pub fn is_challenge(plaintext: &[u8]) -> bool {
+    plaintext.starts_with(CHALLENGE_PREFIX) && plaintext.len() <= MAX_CHALLENGE_BYTES
+}
+
+/// `Some(plaintext)` when the opened frame is a reachability challenge, so
+/// callers can echo the identical plaintext sealed in their own direction.
+pub fn is_challenge_packet(plaintext: &[u8]) -> Option<&[u8]> {
+    is_challenge(plaintext).then_some(plaintext)
 }
 
 pub fn split_ports(base_port: u16) -> Result<(u16, u16), &'static str> {
@@ -36,14 +44,18 @@ pub fn split_ports(base_port: u16) -> Result<(u16, u16), &'static str> {
 pub struct PreparedUdpReceiver {
     socket: UdpSocket,
     expected_host: String,
-    token: Arc<Mutex<Vec<u8>>>,
+    crypto: SharedMediaCrypto,
     peer: Arc<Mutex<Option<SocketAddr>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl PreparedUdpReceiver {
-    pub fn bind(port: u16, expected_host: String) -> io::Result<Self> {
+    pub fn bind(
+        port: u16,
+        expected_host: String,
+        crypto: SharedMediaCrypto,
+    ) -> io::Result<Self> {
         if !hosts_are_valid(&expected_host) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -55,13 +67,12 @@ impl PreparedUdpReceiver {
         // Keep cancellation/handoff quantization below one 60 Hz frame.
         socket.set_read_timeout(Some(Duration::from_millis(10)))?;
         let worker_socket = socket.try_clone()?;
-        let token = Arc::new(Mutex::new(Vec::new()));
-        let worker_token = Arc::clone(&token);
         let peer = Arc::new(Mutex::new(None));
         let worker_peer = Arc::clone(&peer);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_host = expected_host.clone();
+        let worker_crypto = Arc::clone(&crypto);
         let worker = thread::Builder::new()
             .name(format!("leftcar-prepared-udp-{port}"))
             .spawn(move || {
@@ -69,14 +80,20 @@ impl PreparedUdpReceiver {
                 while !worker_stop.load(Ordering::SeqCst) {
                     match worker_socket.recv_from(&mut packet) {
                         Ok((size, peer))
-                            if peer_allowed(Some(peer), &worker_host)
-                                && learn_challenge(&packet[..size]).is_some() =>
+                            if peer_allowed(Some(peer), &worker_host) =>
                         {
-                            let challenge = &packet[..size];
-                            *worker_token.lock().unwrap() =
-                                challenge[CHALLENGE_PREFIX.len()..].to_vec();
-                            *worker_peer.lock().unwrap() = Some(peer);
-                            let _ = worker_socket.send_to(challenge, peer);
+                            // Only a sealed frame that opens under the
+                            // session key — and carries the LCH1 prefix —
+                            // is answered. Everything else is dropped
+                            // without parsing.
+                            if let Some(plaintext) =
+                                worker_crypto.open_challenge(&packet[..size])
+                            {
+                                *worker_peer.lock().unwrap() = Some(peer);
+                                if let Some(reply) = worker_crypto.seal(&plaintext) {
+                                    let _ = worker_socket.send_to(&reply, peer);
+                                }
+                            }
                         }
                         Ok(_) => {
                             // Media can arrive immediately after the Host's
@@ -95,7 +112,7 @@ impl PreparedUdpReceiver {
         Ok(Self {
             socket,
             expected_host,
-            token,
+            crypto,
             peer,
             stop,
             worker: Some(worker),
@@ -110,13 +127,18 @@ impl PreparedUdpReceiver {
         &self.expected_host
     }
 
-    pub fn into_socket_and_token(mut self) -> io::Result<(UdpSocket, Vec<u8>, Option<SocketAddr>)> {
+    pub fn shared_crypto(&self) -> SharedMediaCrypto {
+        Arc::clone(&self.crypto)
+    }
+
+    pub fn into_socket_and_media_crypto(
+        mut self,
+    ) -> io::Result<(UdpSocket, SharedMediaCrypto, Option<SocketAddr>)> {
         self.stop_worker();
         let _ = self.socket.set_read_timeout(None);
-        let token = self.token.lock().unwrap().clone();
         let peer = *self.peer.lock().unwrap();
         let socket = self.socket.try_clone()?;
-        Ok((socket, token, peer))
+        Ok((socket, Arc::clone(&self.crypto), peer))
     }
 
     fn stop_worker(&mut self) {
@@ -136,6 +158,11 @@ impl Drop for PreparedUdpReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::MediaSessionCrypto;
+
+    fn test_key(bytes: u8) -> [u8; 32] {
+        (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()
+    }
 
     #[test]
     fn split_ports_are_consecutive_and_bounded() {
@@ -144,35 +171,59 @@ mod tests {
     }
 
     #[test]
-    fn echoes_host_challenge_then_hands_socket_to_renderer() {
-        let prepared = PreparedUdpReceiver::bind(0, "127.0.0.1".into()).unwrap();
+    fn echoes_sealed_challenge_then_hands_socket_and_crypto_to_renderer() {
+        let crypto: SharedMediaCrypto =
+            Arc::new(MediaSessionCrypto::new(test_key(1)));
+        let prepared =
+            PreparedUdpReceiver::bind(0, "127.0.0.1".into(), Arc::clone(&crypto)).unwrap();
         let port = prepared.port().unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
 
-        let challenge = b"LCH1race-free-token";
-        sender.send_to(challenge, ("127.0.0.1", port)).unwrap();
-        let mut response = [0u8; 128];
+        // Host side: seal the LCH1 challenge with the shared key.
+        let host_tx = secure_channel::DatagramSealer::new(test_key(1));
+        let challenge = [CHALLENGE_PREFIX, b"race-free-nonce".as_slice()].concat();
+        sender
+            .send_to(&host_tx.seal(&challenge).unwrap(), ("127.0.0.1", port))
+            .unwrap();
+        let mut response = [0u8; 256];
         let (size, _) = sender.recv_from(&mut response).unwrap();
-        assert_eq!(&response[..size], challenge);
+        // The echo is sealed under the viewer's own direction; the host
+        // opens it with its own receiving window.
+        let mut host_rx = secure_channel::DatagramSealer::new(test_key(1));
+        assert_eq!(host_rx.open(&response[..size]).unwrap(), challenge);
 
-        let (socket, token, peer) = prepared.into_socket_and_token().unwrap();
-        assert_eq!(token, b"race-free-token");
+        // Unauthenticated datagrams are never echoed.
+        sender
+            .send_to(b"LCH1plaintext-forgery", ("127.0.0.1", port))
+            .unwrap();
+        let mut noise = [0u8; 4];
+        sender
+            .send_to(b"keep-alive", ("127.0.0.1", port))
+            .unwrap();
+        assert!(sender.recv_from(&mut noise).is_err());
+
+        let (socket, handed_crypto, peer) = prepared.into_socket_and_media_crypto().unwrap();
+        assert!(Arc::ptr_eq(&handed_crypto, &crypto));
         assert_eq!(peer, Some(sender.local_addr().unwrap()));
         socket
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
-        sender.send_to(b"media", ("127.0.0.1", port)).unwrap();
-        let mut media = [0u8; 16];
+        sender
+            .send_to(&host_tx.seal(b"media").unwrap(), ("127.0.0.1", port))
+            .unwrap();
+        let mut media = [0u8; 64];
         let (size, _) = socket.recv_from(&mut media).unwrap();
-        assert_eq!(&media[..size], b"media");
+        assert_eq!(crypto.open(&media[..size]).unwrap(), b"media");
     }
 
     #[test]
     fn rejects_non_ip_host_before_binding() {
-        let error = match PreparedUdpReceiver::bind(0, "leftcar.local".into()) {
+        let crypto: SharedMediaCrypto =
+            Arc::new(MediaSessionCrypto::new(test_key(2)));
+        let error = match PreparedUdpReceiver::bind(0, "leftcar.local".into(), crypto) {
             Ok(_) => panic!("hostname must be rejected"),
             Err(error) => error,
         };

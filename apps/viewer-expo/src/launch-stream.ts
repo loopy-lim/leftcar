@@ -22,6 +22,7 @@ import {
   selectAutomaticEncoderExperiment,
   type EncoderExperimentId,
 } from "./encoder-experiment";
+import { randomBytes, bytesToBase64Url } from "./secure-channel";
 import { STREAM_TARGET_FPS } from "./streaming-policy";
 import {
   VIEWER_UDP_CAPABILITIES,
@@ -38,6 +39,10 @@ export interface StreamLauncher {
     mediaTransport: string,
     encoderExperiment: EncoderExperimentId,
     language?: string,
+    /** 뷰어가 생성한 32바이트 세션 미디어 키(base64url). 네이티브 리스너가
+     * 봉인된 LCH1 도전에 startStream 이전에 응답할 수 있게 한다. 네이티브
+     * 계층은 키가 없으면 fail-closed이므로 런처는 항상 전달해야 한다. */
+    mediaKey?: string,
   ): Promise<void>;
   openStream(
     port: number,
@@ -97,6 +102,8 @@ export interface StartStreamArgs {
 
 export interface StartedStream {
   session: number;
+  /** 뷰어가 생성한 세션 미디어 키 — 재구성(reconfigure) 시 그대로 재사용된다. */
+  mediaKey: string;
   width?: number;
   height?: number;
   fps?: number;
@@ -145,6 +152,25 @@ interface StartPreparedStreamInput {
 const USB_ATTACH_TIMEOUT_MS = 5_000;
 const USB_ATTACH_POLL_MS = 100;
 
+/**
+ * USB 액세서리는 스트림 시작 전에 먼저 붙을 수 있다. 봉인 경로가 유지되도록
+ * 생성된 세션 키를 라이브 USB 브리지에 미리 등록한다. 네이티브 모듈이 구버전
+ * 이면 이 등록이 없을 수 있고, 그때는 prepareStream 경로의 키 전달만으로
+ * 동작한다(테스트 환경처럼 react-native를 못 부르는 경우 조용히 건너뛴다).
+ */
+function registerUsbMediaKey(mediaKey: string): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { NativeModules } = require("react-native");
+    const native = NativeModules?.UsbAccessory as
+      | { setSessionMediaKey?(key: string): Promise<void> }
+      | undefined;
+    native?.setSessionMediaKey?.(mediaKey).catch(() => undefined);
+  } catch {
+    // react-native를 불러올 수 없는 환경(단위 테스트)에서는 생략한다.
+  }
+}
+
 async function waitForUsbAccessory(initial: UsbAccessoryState): Promise<UsbAccessoryState> {
   let state = initial;
   const deadline = Date.now() + USB_ATTACH_TIMEOUT_MS;
@@ -185,6 +211,12 @@ export async function startPreparedStream({
       .filter((address) => typeof address === "string" && address.length > 0)
       .slice(0, 4);
     let usbState = await getUsbState();
+    // 뷰어가 세션 미디어 키를 생성한다. 암호화된 제어 평면으로 호스트에
+    // 전달되고, 네이티브 준비 리스너는 같은 키로 봉인된 도전에 응답한다.
+    // USB는 액세서리가 키 생성보다 먼저 붙을 수 있으므로 라이브 브리지에
+    // 같은 키를 미리 등록한다(구버전 모듈은 없을 수 있어 best-effort).
+    const mediaKey = bytesToBase64Url(randomBytes(32));
+    registerUsbMediaKey(mediaKey);
     const requestedTransport = selectedEncoderExperiment === "splitVertical"
       ? "udp"
       : args.mediaTransport.trim().toLowerCase();
@@ -238,6 +270,7 @@ export async function startPreparedStream({
         mediaTransport,
         encoderExperiment,
         currentLanguage(),
+        mediaKey,
       );
     } catch (error) {
       const canFallBackToSingleEncoder = selectedEncoderExperiment === "auto" &&
@@ -256,6 +289,7 @@ export async function startPreparedStream({
         mediaTransport,
         encoderExperiment,
         currentLanguage(),
+        mediaKey,
       );
     }
     const { udpStability: _requestedUdpStability, ...baseArgs } = args;
@@ -264,6 +298,7 @@ export async function startPreparedStream({
       ...(viewerIps.length > 0 ? { viewerIps } : {}),
       mediaTransport,
       encoderExperiment,
+      mediaKey,
       ...(mediaTransport === "udp" && udpStability
         ? {
             udpStability: {
@@ -310,6 +345,7 @@ export async function startPreparedStream({
       viewerIps,
       mediaTransport,
       encoderExperiment,
+      mediaKey,
       ...(udpStability ? { udpStability } : {}),
     };
   } catch (error) {
@@ -405,6 +441,7 @@ export async function reconfigurePreparedStream({
       active.mediaTransport,
       desiredExperiment,
       currentLanguage(),
+      active.mediaKey,
     );
   } catch (error) {
     if (!promotion) {
@@ -421,6 +458,7 @@ export async function reconfigurePreparedStream({
       active.mediaTransport,
       preparedExperiment,
       currentLanguage(),
+      active.mediaKey,
     );
   }
   try {
@@ -464,6 +502,7 @@ export async function reconfigurePreparedStream({
         active.mediaTransport,
         preparedExperiment,
         currentLanguage(),
+        active.mediaKey,
       );
       accepted = await control.request<ReconfigureStreamOutput>(
         "reconfigureStream",
@@ -517,6 +556,7 @@ export async function reconfigurePreparedStream({
       viewerIps: active.viewerIps,
       mediaTransport: active.mediaTransport,
       encoderExperiment,
+      mediaKey: active.mediaKey,
       udpStability: active.udpStability,
     };
   } catch (error) {

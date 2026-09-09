@@ -158,22 +158,20 @@ fn read_i32(data: &[u8], offset: usize) -> i32 {
     i32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
-pub fn authenticated<'a>(datagram: &'a [u8], token: &[u8]) -> Option<&'a [u8]> {
-    datagram
-        .strip_suffix(token)
-        .filter(|message| !message.is_empty())
+/// `LCH1 ‖ nonce` challenge body. It is sent AEAD-sealed (media-path key);
+/// the random nonce gives the reachability proof freshness, and possession of
+/// the key — not the nonce — is what authenticates every later datagram.
+pub fn challenge(nonce: &[u8]) -> Vec<u8> {
+    [b"LCH1".as_slice(), nonce].concat()
 }
 
-pub fn challenge(token: &[u8]) -> Vec<u8> {
-    [b"LCH1".as_slice(), token].concat()
-}
-
-pub fn input_ack(sequence: u32, enabled: bool, token: &[u8]) -> Vec<u8> {
-    let mut ack = Vec::with_capacity(9 + token.len());
+/// Reliable-input acknowledgement. The sealed frame authenticates it; there
+/// is no plaintext token suffix.
+pub fn input_ack(sequence: u32, enabled: bool) -> Vec<u8> {
+    let mut ack = Vec::with_capacity(9);
     ack.extend_from_slice(b"LCA1");
     ack.extend_from_slice(&sequence.to_be_bytes());
     ack.push(u8::from(enabled));
-    ack.extend_from_slice(token);
     ack
 }
 
@@ -186,11 +184,10 @@ pub const TERMINATION_STOPPED: u8 = 3;
 
 /// Authenticated session-termination notice. The viewer stops rendering and
 /// closes its window when it receives one instead of timing out on its own.
-pub fn termination(reason: u8, token: &[u8]) -> Vec<u8> {
-    let mut notice = Vec::with_capacity(5 + token.len());
+pub fn termination(reason: u8) -> Vec<u8> {
+    let mut notice = Vec::with_capacity(5);
     notice.extend_from_slice(b"LCT1");
     notice.push(reason);
-    notice.extend_from_slice(token);
     notice
 }
 
@@ -447,15 +444,72 @@ mod tests {
 
     #[test]
     fn input_ack_carries_the_current_host_permission_state() {
-        let enabled = input_ack(7, true, b"nonce");
+        let enabled = input_ack(7, true);
         assert_eq!(&enabled[..4], b"LCA1");
         assert_eq!(&enabled[4..8], &7u32.to_be_bytes());
         assert_eq!(enabled[8], 1);
-        assert_eq!(&enabled[9..], b"nonce");
 
-        let disabled = input_ack(8, false, b"nonce");
+        let disabled = input_ack(8, false);
         assert_eq!(disabled[8], 0);
-        assert_eq!(&disabled[9..], b"nonce");
+        assert_eq!(disabled.len(), 9);
+    }
+
+    #[test]
+    fn sealed_viewer_input_round_trips_through_host_parse() {
+        // Media-path sealing wraps the whole input datagram. Host side: open
+        // with the c2s opener, then run the plaintext through the sequencer.
+        let key = [7u8; 32];
+        let tx = secure_channel::DatagramSealer::new(key);
+        let mut rx = secure_channel::DatagramSealer::new(key);
+        let mut packet = Vec::from(b"LCI1".as_slice());
+        packet.extend_from_slice(&1u32.to_be_bytes());
+        packet.extend_from_slice(&[5, 1]);
+        let sealed = tx.seal(&packet).unwrap();
+        // Sealed frames add exactly counter + tag bytes over the plaintext.
+        assert_eq!(sealed.len(), packet.len() + 24);
+        let opened = rx.open(&sealed).unwrap();
+        assert_eq!(opened, packet);
+        assert!(matches!(
+            InputSequencer::default().accept(&opened),
+            InputDecision::ApplyAndAck { sequence: 1, .. }
+        ));
+        // A tampered or replayed datagram never reaches the wire parsers.
+        assert_eq!(rx.open(&sealed), Err(secure_channel::OpenError::Replay));
+        // A fresh (unseen) counter with a flipped Poly1305 tag byte must fail
+        // authentication, not merely look like a replay.
+        let fresh = tx.seal(&packet).unwrap();
+        let mut tampered = fresh;
+        tampered[9] ^= 1;
+        assert_eq!(rx.open(&tampered), Err(secure_channel::OpenError::Auth));
+    }
+
+    #[test]
+    fn sealed_reachability_challenge_round_trips() {
+        // The host seals `LCH1+nonce`; the authenticated viewer echoes the
+        // same plaintext under its own direction; the host compares plaintext.
+        let key = [9u8; 32];
+        let host_tx = secure_channel::DatagramSealer::new(key);
+        let host_rx = secure_channel::DatagramSealer::new(key);
+        let viewer_tx = secure_channel::DatagramSealer::new(key);
+        let viewer_rx = secure_channel::DatagramSealer::new(key);
+        let plaintext = challenge(b"nonce-32-bytes-long-aaaaaaaaaaaa!");
+        let wire_challenge = host_tx.seal(&plaintext).unwrap();
+        assert!(!wire_challenge.starts_with(b"LCH1"), "wire bytes are sealed");
+        let opened = viewer_rx.open(&wire_challenge).unwrap();
+        assert_eq!(opened, plaintext);
+        assert!(opened.starts_with(b"LCH1"));
+        let echo = viewer_tx.seal(&opened).unwrap();
+        assert_eq!(host_rx.open(&echo).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn termination_notice_matches_viewer_wire_format() {
+        let notice = termination(TERMINATION_HEALTH);
+        assert_eq!(&notice[..4], b"LCT1");
+        assert_eq!(notice[4], TERMINATION_HEALTH);
+        // The Android parser accepts exactly 5 bytes; a length drift would
+        // silently drop every notice during a rolling upgrade.
+        assert_eq!(notice.len(), 5);
     }
 
     #[test]
@@ -466,18 +520,6 @@ mod tests {
             h264_parameter_sets(&annex_b),
             vec![vec![0x67, 1], vec![0x68, 2]]
         );
-    }
-
-    #[test]
-    fn termination_notice_matches_viewer_wire_format() {
-        let token = b"nonce";
-        let notice = termination(TERMINATION_HEALTH, token);
-        assert_eq!(&notice[..4], b"LCT1");
-        assert_eq!(notice[4], TERMINATION_HEALTH);
-        assert_eq!(&notice[5..], token);
-        // The Android parser accepts exactly 5 + token bytes; a length drift
-        // would silently drop every notice during a rolling upgrade.
-        assert_eq!(notice.len(), 5 + token.len());
     }
 
     #[test]

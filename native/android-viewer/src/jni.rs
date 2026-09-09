@@ -11,6 +11,7 @@ use std::ffi::c_char;
 
 use crate::audio_protocol::AudioRing;
 use crate::input_protocol::InputScheduler;
+use crate::media_crypto::{MediaSessionCrypto, SharedMediaCrypto};
 use crate::net_guard::host_is_valid;
 use crate::prepared_tcp::PreparedTcpBridge;
 use crate::prepared_udp::PreparedUdpReceiver;
@@ -370,6 +371,13 @@ pub(crate) static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpRecei
 pub(crate) static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> =
     Mutex::new(None);
 pub(crate) static PREPARED_USB_BRIDGE: Mutex<Option<UsbBridge>> = Mutex::new(None);
+/// One shared media-crypto instance per prepared port. The prepared UDP
+/// listener, the TCP bridge, and the claiming renderer all seal/open through
+/// the same instance so the AEAD counters never fork mid-session. Split
+/// streams register one instance under both tile ports: both tiles' sends
+/// must stay inside the host's single replay window.
+pub(crate) static MEDIA_CRYPTO: Mutex<Option<HashMap<u16, SharedMediaCrypto>>> =
+    Mutex::new(None);
 pub(crate) enum MediaBridge {
     Tcp(PreparedTcpBridge),
     Usb(UsbBridge),
@@ -380,6 +388,14 @@ impl MediaBridge {
         match self {
             Self::Tcp(bridge) => bridge.control_addr(),
             Self::Usb(bridge) => bridge.control_addr(),
+        }
+    }
+
+    /// The session crypto this bridge shares with the renderer.
+    pub(crate) fn shared_crypto(&self) -> Option<SharedMediaCrypto> {
+        match self {
+            Self::Tcp(bridge) => Some(bridge.shared_crypto()),
+            Self::Usb(bridge) => bridge.shared_crypto(),
         }
     }
 
@@ -470,10 +486,16 @@ pub(crate) fn cancel_prepared_receiver(port: u16) -> bool {
         .unwrap()
         .get_or_insert_with(HashMap::new)
         .remove(&port);
+    take_media_crypto(port);
     prepared.is_some()
 }
 
-fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result<(), String> {
+fn prepare_tcp_bridge(
+    port: u16,
+    expected_host: &str,
+    transport: &str,
+    crypto: &SharedMediaCrypto,
+) -> Result<(), String> {
     let (bind_host, allowed_hosts) = if matches!(transport, "tcp" | "auto") {
         // Auto must be able to accept the direct Wi-Fi attempt first and the
         // loopback ADB fallback later. Admission is still restricted to the
@@ -483,9 +505,12 @@ fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result
     } else {
         ("127.0.0.1", "127.0.0.1".to_owned())
     };
-    let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts).map_err(|error| {
-        format!("failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}")
-    })?;
+    let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts, Arc::clone(crypto))
+        .map_err(|error| {
+            format!(
+                "failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}"
+            )
+        })?;
     PREPARED_TCP_BRIDGES
         .lock()
         .unwrap()
@@ -521,13 +546,73 @@ pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
     })
 }
 
+/// Build (or reuse) the one media-crypto instance for `port`. `key` must be
+/// the viewer-generated session key; a re-prepare with a different key
+/// replaces the instance, which is safe because the host cannot send any
+/// sealed frame before `startStream` completes.
+pub(crate) fn register_media_crypto(
+    port: u16,
+    key: &[u8; 32],
+) -> SharedMediaCrypto {
+    let crypto: SharedMediaCrypto = Arc::new(MediaSessionCrypto::new(*key));
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, Arc::clone(&crypto));
+    crypto
+}
+
+/// Claim and remove the media crypto registered for `port`.
+pub(crate) fn take_media_crypto(port: u16) -> Option<SharedMediaCrypto> {
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+/// Split variant: bind one tile listener against an already-shared crypto
+/// instance (both tiles must share one AEAD counter sequence).
+pub(crate) fn prepare_split_receiver(
+    port: u16,
+    expected_host: &str,
+    crypto: &SharedMediaCrypto,
+) -> Result<(), String> {
+    let stale = PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port);
+    drop(stale);
+    let prepared = PreparedUdpReceiver::bind(port, expected_host.to_owned(), Arc::clone(crypto))
+        .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, prepared);
+    Ok(())
+}
+
 pub(crate) fn prepare_udp_receiver(
     port: u16,
     expected_host: &str,
     transport: &str,
+    media_key: &[u8; 32],
 ) -> Result<(), String> {
     if port == 0 || !host_is_valid(expected_host) {
         return Err("invalid prepared media port or host".into());
+    }
+    // One shared instance per logical stream: the listener worker answers the
+    // sealed challenge through it and hands the same Arc to the renderer.
+    let crypto = register_media_crypto(port, media_key);
+    if matches!(transport, "usb") {
+        // The AOAP bridge echo path must stay inside the same counter
+        // sequence, so hand the prepared instance to the live bridge.
+        if let Some(bridge) = PREPARED_USB_BRIDGE.lock().unwrap().as_ref() {
+            bridge.set_media_crypto(Arc::clone(&crypto));
+        }
     }
 
     // A Host restart does not send a terminal packet to an existing UDP
@@ -564,7 +649,7 @@ pub(crate) fn prepare_udp_receiver(
     } else {
         expected_host.to_owned()
     };
-    let prepared = PreparedUdpReceiver::bind(port, prepared_hosts)
+    let prepared = PreparedUdpReceiver::bind(port, prepared_hosts, Arc::clone(&crypto))
         .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
     PREPARED_RECEIVERS
         .lock()
@@ -572,8 +657,9 @@ pub(crate) fn prepare_udp_receiver(
         .get_or_insert_with(HashMap::new)
         .insert(port, prepared);
     if matches!(transport, "tcp" | "adbTcp" | "auto") {
-        if let Err(error) = prepare_tcp_bridge(port, expected_host, transport) {
+        if let Err(error) = prepare_tcp_bridge(port, expected_host, transport, &crypto) {
             let _ = cancel_prepared_receiver(port);
+            take_media_crypto(port);
             return Err(error);
         }
     }
@@ -789,7 +875,12 @@ mod split_receiver_tests {
     static STORE_LOCK: Mutex<()> = Mutex::new(());
 
     fn bind_prepared() -> PreparedUdpReceiver {
-        PreparedUdpReceiver::bind(0, HOST.to_owned()).unwrap()
+        PreparedUdpReceiver::bind(
+            0,
+            HOST.to_owned(),
+            std::sync::Arc::new(crate::media_crypto::MediaSessionCrypto::new([3u8; 32])),
+        )
+        .unwrap()
     }
 
     fn insert_prepared(port: u16, receiver: PreparedUdpReceiver) {

@@ -18,6 +18,7 @@ pub mod jni;
 mod jni_exports;
 #[cfg(target_os = "android")]
 pub mod jni_wrappers;
+pub mod media_crypto;
 pub mod media_datagram;
 /// Host-testable media-plane peer admission check. Not android-gated so
 /// `cargo test --workspace` (host target only in CI) exercises it.

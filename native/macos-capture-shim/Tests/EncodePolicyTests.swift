@@ -138,7 +138,8 @@ struct EncodePolicyTests {
                 burstDatagrams: 4,
                 fecParityShards: 2,
                 adaptivePacing: true
-            )
+            ),
+            mediaKey: Data((0..<32).map { UInt8($0) })
         )
         precondition(regionMotionSession.currentUdpBurstLimit() == 4)
         regionMotionSession.observeCaptureMotion(
@@ -163,7 +164,8 @@ struct EncodePolicyTests {
                 burstDatagrams: 4,
                 fecParityShards: 2,
                 adaptivePacing: true
-            )
+            ),
+            mediaKey: Data((0..<32).map { UInt8($0) })
         )
         accessUnitMotionSession.stateLock.lock()
         accessUnitMotionSession.currentAverageBitrate = 24_000_000
@@ -752,29 +754,38 @@ struct EncodePolicyTests {
                 parseEncoderExperimentCString($0.baseAddress)
             } == .failure("unknown encoder experiment: invalid UTF-8")
         )
-        let invalidV6Start = "127.0.0.1".withCString { ip in
+        let invalidV8Start = "127.0.0.1".withCString { ip in
             "cg".withCString { backend in
                 "udp".withCString { transport in
                     "video".withCString { contentMode in
                         invalidExperimentUTF8.withUnsafeBufferPointer { experiment in
-                            leftcarCaptureStartV6(
-                                ip: ip,
-                                port: 9,
-                                displayIndex: 0,
-                                width: 3_840,
-                                height: 2_160,
-                                fps: 60,
-                                backendName: backend,
-                                transportName: transport,
-                                contentModeName: contentMode,
-                                encoderExperimentName: experiment.baseAddress
-                            )
+                            var mediaKey = (0..<32).map { UInt8($0) }
+                            return mediaKey.withUnsafeMutableBufferPointer { key in
+                                leftcarCaptureStartV8(
+                                    ip: ip,
+                                    port: 9,
+                                    displayIndex: 0,
+                                    width: 3_840,
+                                    height: 2_160,
+                                    fps: 60,
+                                    backendName: backend,
+                                    transportName: transport,
+                                    contentModeName: contentMode,
+                                    encoderExperimentName: experiment.baseAddress,
+                                    udpProfileName: "legacy",
+                                    udpBurstDatagrams: 8,
+                                    udpFecParityShards: 2,
+                                    udpAdaptivePacing: 0,
+                                    mediaKey: key.baseAddress,
+                                    mediaKeyLen: UInt32(key.count)
+                                )
+                            }
                         }
                     }
                 }
             }
         }
-        precondition(invalidV6Start == 0)
+        precondition(invalidV8Start == 0)
         precondition(
             String(cString: leftcarCaptureLastErrorV2())
                 == "unknown encoder experiment: invalid UTF-8"
@@ -2411,7 +2422,8 @@ struct EncodePolicyTests {
                 burstDatagrams: 2,
                 fecParityShards: 4,
                 adaptivePacing: false
-            )
+            ),
+            mediaKey: Data((0..<32).map { UInt8($0) })
         )
         let strongParity = strongFecSession.fecParityDatagrams(
             auID: 7,

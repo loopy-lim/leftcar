@@ -4,12 +4,12 @@ import CoreGraphics
 @main
 struct CursorStreamTests {
     static func main() {
-        let token = Data("session-token".utf8)
         let contentRect = CGRect(x: 0, y: 0, width: 1920, height: 1200)
 
-        // Wire format: LCD1 | seq u32 BE | x u16 BE | y u16 BE | vis u8 | shape u8 | token
+        // Wire format: LCD1 | seq u32 BE | x u16 BE | y u16 BE | vis u8 | shape u8
+        // (the packet is sealed with the session media key at the socket
+        // boundary, so the inline token the old format carried is gone).
         var coordinator = CursorStreamCoordinator(fps: 60, bounds: contentRect)
-        coordinator.setToken(token)
         coordinator.setEnabled(true)
         coordinator.note(position: CGPoint(x: 960, y: 600), visible: true)
         // First packet after enable is immediate even without a tick.
@@ -18,8 +18,8 @@ struct CursorStreamTests {
         }
         let expectedX = UInt16((960 / 1920.0 * 65535.0).rounded())
         let expectedY = UInt16((600 / 1200.0 * 65535.0).rounded())
-        precondition(packet.count == 14 + token.count,
-                     "packet must be fixed 14 bytes plus the session token")
+        precondition(packet.count == 14,
+                     "packet must be exactly the fixed 14 bytes")
         precondition(packet.prefix(4) == Data("LCD1".utf8), "magic must be LCD1")
         precondition(packet[8] == UInt8(expectedX >> 8) && packet[9] == UInt8(truncatingIfNeeded: expectedX),
                      "x must be the bounds-normalized u16 big-endian value")
@@ -27,7 +27,6 @@ struct CursorStreamTests {
                      "y must be the bounds-normalized u16 big-endian value")
         precondition(packet[12] == 1, "visibility must be 1 for an on-screen cursor")
         precondition(packet[13] == 0, "shape is reserved and always 0")
-        precondition(packet.suffix(token.count) == token, "packet must end with the session token")
 
         // Coalesced duplicate state produces no packet.
         precondition(coordinator.packetDue(nowUs: 1_000) == nil,
@@ -84,7 +83,6 @@ struct CursorStreamTests {
         // instead of inventing a (0, 0, hidden) sample; the first real
         // observation flushes immediately.
         var freshStream = CursorStreamCoordinator(fps: 60, bounds: contentRect)
-        freshStream.setToken(token)
         freshStream.setEnabled(true)
         precondition(freshStream.packetDue(nowUs: 1) == nil,
                      "enable without any observation must not fabricate a sample")
@@ -95,7 +93,6 @@ struct CursorStreamTests {
         // Observations while disabled are still recorded, so a later enable
         // flushes the current truth — never the stale pre-disable position.
         var toggled = CursorStreamCoordinator(fps: 60, bounds: contentRect)
-        toggled.setToken(token)
         toggled.setEnabled(true)
         toggled.note(position: CGPoint(x: 100, y: 100), visible: true)
         precondition(toggled.packetDue(nowUs: 1) != nil, "priming send for the toggle scenario")
@@ -116,7 +113,6 @@ struct CursorStreamTests {
         // Re-enabling an already-enabled stream is a no-op: it must not reset
         // the pacing deadline and allow an early duplicate send.
         var paced = CursorStreamCoordinator(fps: 60, bounds: contentRect)
-        paced.setToken(token)
         paced.setEnabled(true)
         paced.note(position: CGPoint(x: 10, y: 10), visible: true)
         precondition(paced.packetDue(nowUs: 10_000) != nil, "priming send for the pacing scenario")
@@ -125,30 +121,36 @@ struct CursorStreamTests {
         precondition(paced.packetDue(nowUs: 10_001) == nil,
                      "a redundant enable must not reset the polling interval")
 
-        // Token semantics: reinstalling the same token is a no-op, a new
-        // token flushes the current state bound to the new token, and an
-        // empty token silences the stream.
-        var authenticated = CursorStreamCoordinator(fps: 60, bounds: contentRect)
-        authenticated.setToken(token)
-        authenticated.setEnabled(true)
-        authenticated.note(position: CGPoint(x: 960, y: 600), visible: true)
-        precondition(authenticated.packetDue(nowUs: 1) != nil, "priming send for the token scenario")
-        authenticated.setToken(token)
-        precondition(authenticated.packetDue(nowUs: 2) == nil,
-                     "reinstalling the same token must not mark state dirty")
-        let renewedToken = Data("renewed-token".utf8)
-        authenticated.setToken(renewedToken)
-        let rebound = authenticated.packetDue(nowUs: 9_000)
-        precondition(rebound != nil, "a new token flushes the current state for the new viewer")
-        precondition(rebound!.suffix(renewedToken.count) == renewedToken,
-                     "flushed packet must carry the newly installed token")
-        authenticated.setToken(Data())
-        precondition(authenticated.packetDue(nowUs: 18_000) == nil,
-                     "an empty token clears authentication and silences the stream")
+
+        // MediaSealer interop self-test: the wire layout must match
+        // crates/secure-channel exactly — counter u64 BE ‖ tag 16B ‖ ct with
+        // nonce 00{4} ‖ counter u64 BE. Round trip through two directions
+        // sharing one key, then verify the replay window rejects reuse.
+        let key = Data((0..<32).map { UInt8($0) })
+        var hostToViewer = MediaSealer(mediaKey: key)!
+        var viewerToHost = MediaSealer(mediaKey: key)!
+        let plaintext = Data("LCH1challenge-plaintext".utf8)
+        guard let sealed = hostToViewer.seal(plaintext) else {
+            fatalError("seal of a small challenge must succeed")
+        }
+        precondition(sealed.count == plaintext.count + 24,
+                     "sealed frame adds exactly counter + tag bytes")
+        precondition(sealed.prefix(4) != Data("LCH1".utf8),
+                     "wire bytes must not leak the plaintext prefix")
+        precondition(hostToViewer.seal(plaintext)! != sealed,
+                     "a fresh counter must produce a different frame")
+        precondition(viewerToHost.open(sealed)! == plaintext,
+                     "the peer direction must open the same-key frame")
+        precondition(viewerToHost.open(sealed) == nil,
+                     "replaying the same frame must be rejected")
+        var tampered = sealed
+        tampered[8] ^= 0xff
+        precondition(viewerToHost.open(tampered) == nil,
+                     "a forged frame must fail authentication")
+
 
         // Degenerate capture rects normalize every axis to 0.
         var degenerate = CursorStreamCoordinator(fps: 60, bounds: CGRect(x: 5, y: 7, width: 0, height: 0))
-        degenerate.setToken(token)
         degenerate.setEnabled(true)
         degenerate.note(position: CGPoint(x: 100, y: 100), visible: true)
         let collapsed = degenerate.packetDue(nowUs: 1)

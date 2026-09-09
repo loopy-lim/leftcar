@@ -10,6 +10,7 @@ use crate::input_protocol::{
     encode_input, parse_ack, parse_input_status, parse_termination, TerminationReason,
 };
 use crate::jni::RendererControl;
+use crate::media_crypto::SharedMediaCrypto;
 use crate::log_info;
 use crate::media_datagram::{
     discard_fec_groups, parse_fragment, parse_parity, CompletedFecGroups, CompletedFrameSequencer,
@@ -69,7 +70,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
         control,
         release_window_on_exit,
     } = launch;
-    let (socket, mut token, mut peer) = match prepared.into_socket_and_token() {
+    let (socket, crypto, mut peer) = match prepared.into_socket_and_media_crypto() {
         Ok(value) => value,
         Err(_) => {
             let _ = events.send(CoordinatorEvent::Fatal);
@@ -215,7 +216,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         current_request,
                         request,
                         peer.is_some(),
-                        !token.is_empty(),
+                        crypto.is_established(),
                     ) {
                         IdrSendDecision::CancelStale => {
                             log_info!(
@@ -249,7 +250,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         }
                         IdrSendDecision::ReportUnsentNoToken => {
                             log_info!(
-                                "split {:?} paired IDR request NOT sent to {}: no session token yet (episode={}, request={})",
+                                "split {:?} paired IDR request NOT sent to {}: sealed handshake not established yet (episode={}, request={})",
                                 side,
                                 peer.map(|peer| peer.to_string())
                                     .unwrap_or_else(|| "unknown peer".into()),
@@ -279,7 +280,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 &socket,
                                 peer,
                                 crate::media_datagram::COMMAND_IDR,
-                                &token,
+                                &crypto,
                             ) {
                                 Ok(()) => IdrRequestOutcome::Transmitted,
                                 Err(error) => {
@@ -303,12 +304,12 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 TileCommand::Stop { send_bye } => {
                     if send_bye {
                         if let Some(peer) = peer {
-                            send_authenticated(&socket, peer, crate::media_datagram::COMMAND_BYE, &token);
+                            send_authenticated(&socket, peer, crate::media_datagram::COMMAND_BYE, &crypto);
                             log_info!(
-                                "split {:?} sent stream close signal peer={} authenticated={}",
+                                "split {:?} sent stream close signal peer={} established={}",
                                 side,
                                 peer,
-                                !token.is_empty()
+                                crypto.is_established()
                             );
                         } else {
                             log_info!(
@@ -334,15 +335,21 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 match socket.recv_from(&mut buffer) {
                     Ok((size, source)) if peer_allowed(Some(source), &expected_host) => {
                         peer = Some(source);
-                        let packet = &buffer[..size];
-                        if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
-                            token.clear();
-                            token.extend_from_slice(challenge);
+                        // Open before parsing: only datagrams sealed with the
+                        // session media key are trusted on this socket.
+                        let Some(opened) = crypto.open(&buffer[..size]) else {
+                            continue;
+                        };
+                        let packet = opened.as_slice();
+                        if let Some(challenge) = crate::prepared_udp::is_challenge_packet(packet) {
+                            crypto.establish();
                             if side == TileSide::Left {
                                 control.input.lock().unwrap().reset_session();
                                 control.audio.lock().unwrap().clear();
                             }
-                            let _ = socket.send_to(packet, source);
+                            if let Some(reply) = crypto.seal(challenge) {
+                                let _ = socket.send_to(&reply, source);
+                            }
                         } else if side == TileSide::Left {
                             if crate::audio_protocol::accept_audio_packet(
                                 packet,
@@ -350,7 +357,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             ) {
                                 continue;
                             }
-                            if let Some(ack) = parse_ack(packet, &token) {
+                            if let Some(ack) = parse_ack(packet) {
                                 control.input.lock().unwrap().acknowledge(ack.sequence);
                                 if let Some(enabled) = ack.enabled {
                                     control
@@ -359,13 +366,13 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 }
                                 continue;
                             }
-                            if let Some(enabled) = parse_input_status(packet, &token) {
+                            if let Some(enabled) = parse_input_status(packet) {
                                 control
                                     .input_enabled
                                     .store(i8::from(enabled), Ordering::SeqCst);
                                 continue;
                             }
-                            if let Some(reason) = parse_termination(packet, &token) {
+                            if let Some(reason) = parse_termination(packet) {
                                 let code = reason.code();
                                 control
                                     .termination_reason
@@ -610,7 +617,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
 
         if side == TileSide::Left {
             if let Some(peer) = peer {
-                flush_input(&socket, peer, &token, &control);
+                flush_input(&socket, peer, &crypto, &control);
             }
         }
 
@@ -700,7 +707,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                     fmt(&telemetry.gap_to_first_output_us)
                 );
                 let body = split_feedback_body(snapshot);
-                send_authenticated(&socket, peer, &body, &token);
+                send_authenticated(&socket, peer, &body, &crypto);
                 last_feedback_rendered = rendered;
                 last_feedback_joined = joined;
                 last_feedback = Instant::now();
@@ -717,7 +724,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         crate::audio_protocol::audio_stream_command(
                             control.audio_requested.load(Ordering::SeqCst),
                         ),
-                        &token,
+                        &crypto,
                     );
                 }
             }

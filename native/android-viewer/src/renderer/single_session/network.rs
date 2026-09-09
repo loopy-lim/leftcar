@@ -72,8 +72,12 @@ pub(super) fn sockaddr_in_for_addr(addr: std::net::SocketAddr) -> Option<libc::s
     Some(raw)
 }
 
-pub(super) type InputEndpoint =
-    std::sync::Arc<std::sync::Mutex<Option<(std::net::SocketAddr, Vec<u8>)>>>;
+/// The learned host endpoint plus the session media crypto. The endpoint is
+/// installed once a sealed host datagram (typically the LCH1 challenge) opens
+/// under the session key; the input worker seals through the same instance.
+pub(super) type InputEndpoint = std::sync::Arc<
+    std::sync::Mutex<Option<(std::net::SocketAddr, crate::media_crypto::SharedMediaCrypto)>>,
+>;
 
 pub(super) fn spawn_input_worker(
     socket: std::net::UdpSocket,
@@ -85,8 +89,8 @@ pub(super) fn spawn_input_worker(
         .spawn(move || {
             while !control.stop.load(Ordering::Relaxed) {
                 let target = endpoint.lock().unwrap().clone();
-                if let Some((peer, token)) = target {
-                    flush_input(&socket, peer, &token, &control);
+                if let Some((peer, crypto)) = target {
+                    flush_input(&socket, peer, &crypto, &control);
                 }
                 std::thread::park_timeout(std::time::Duration::from_millis(2));
             }
@@ -94,14 +98,15 @@ pub(super) fn spawn_input_worker(
         .expect("leftcar input worker must start")
 }
 
+/// Parse an already-opened host plaintext (the caller opens every datagram
+/// with the session media crypto before dispatch).
 pub(super) fn consume_viewer_response(
     packet: &[u8],
-    token: &[u8],
     control_health: &mut ControlHealthState,
     control: &RendererControl,
     stats: &mut RendererStats,
 ) -> bool {
-    if let Some(response) = parse_latency_probe_response(packet, token) {
+    if let Some(response) = parse_latency_probe_response(packet) {
         if control_health.probe_acknowledged(response.sequence) {
             if let Some(estimate) = estimate_latency(response, wall_clock_ms()) {
                 store_smoothed_latency(&control.network_rtt_ms, estimate.network_rtt_ms);
@@ -111,7 +116,7 @@ pub(super) fn consume_viewer_response(
         }
         return true;
     }
-    if let Some(reason) = parse_termination(packet, token) {
+    if let Some(reason) = parse_termination(packet) {
         let code = reason.code();
         log_info!(
             "host terminated stream: reason={} ({})",
@@ -130,7 +135,7 @@ pub(super) fn consume_viewer_response(
         control.stop.store(true, Ordering::SeqCst);
         return true;
     }
-    if let Some(ack) = parse_ack(packet, token) {
+    if let Some(ack) = parse_ack(packet) {
         control.input.lock().unwrap().acknowledge(ack.sequence);
         if let Some(enabled) = ack.enabled {
             control
@@ -139,13 +144,13 @@ pub(super) fn consume_viewer_response(
         }
         return true;
     }
-    if let Some(enabled) = parse_input_status(packet, token) {
+    if let Some(enabled) = parse_input_status(packet) {
         control
             .input_enabled
             .store(if enabled { 1 } else { 0 }, Ordering::SeqCst);
         return true;
     }
-    if let Some(sample) = parse_cursor_sample(packet, token) {
+    if let Some(sample) = parse_cursor_sample(packet) {
         apply_cursor_sample(control, sample);
         return true;
     }

@@ -6,6 +6,7 @@
 //! channel, while viewer feedback/control packets use a small UDP side channel
 //! and are framed back onto the same TCP connection.
 
+use crate::media_crypto::SharedMediaCrypto;
 use crate::net_guard::peer_allowed;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -57,11 +58,17 @@ pub struct PreparedTcpBridge {
     stop: Arc<AtomicBool>,
     control_addr: std::net::SocketAddr,
     media_rx: Receiver<Vec<u8>>,
+    crypto: SharedMediaCrypto,
     worker: Option<JoinHandle<()>>,
 }
 
 impl PreparedTcpBridge {
-    pub fn bind(port: u16, bind_host: &str, allowed_hosts: &str) -> io::Result<Self> {
+    pub fn bind(
+        port: u16,
+        bind_host: &str,
+        allowed_hosts: &str,
+        crypto: SharedMediaCrypto,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((bind_host, port))?;
         listener.set_nonblocking(true)?;
         let udp = UdpSocket::bind("127.0.0.1:0")?;
@@ -71,15 +78,32 @@ impl PreparedTcpBridge {
         let allowed_hosts = allowed_hosts.to_owned();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let bridge_crypto = Arc::clone(&crypto);
         let worker = thread::Builder::new()
             .name(format!("leftcar-tcp-{port}"))
-            .spawn(move || run_bridge(listener, udp, allowed_hosts, media_tx, worker_stop))?;
+            .spawn(move || {
+                run_bridge(
+                    listener,
+                    udp,
+                    allowed_hosts,
+                    media_tx,
+                    bridge_crypto,
+                    worker_stop,
+                )
+            })?;
         Ok(Self {
             stop,
             control_addr,
             media_rx,
+            crypto,
             worker: Some(worker),
         })
+    }
+
+    /// The session crypto shared with the prepared UDP listener and the
+    /// renderer, so the AEAD counters stay continuous across the handoff.
+    pub fn shared_crypto(&self) -> SharedMediaCrypto {
+        Arc::clone(&self.crypto)
     }
 
     /// UDP endpoint used by the renderer to send IDR/input/control packets
@@ -128,6 +152,7 @@ fn run_bridge(
     udp: UdpSocket,
     allowed_hosts: String,
     media_tx: SyncSender<Vec<u8>>,
+    crypto: SharedMediaCrypto,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::SeqCst) {
@@ -160,6 +185,7 @@ fn run_bridge(
                 let write_stream = Arc::new(Mutex::new(write_stream));
                 let handshake_stream = Arc::clone(&write_stream);
                 let read_stream = stream;
+                let handshake_crypto = Arc::clone(&crypto);
                 let read_thread = thread::spawn(move || {
                     tcp_to_media_channel(
                         read_stream,
@@ -167,6 +193,7 @@ fn run_bridge(
                         &global_read_stop,
                         &read_stop,
                         &handshake_stream,
+                        &handshake_crypto,
                     );
                 });
                 let write_thread = thread::spawn(move || {
@@ -190,6 +217,7 @@ fn tcp_to_media_channel(
     global_stop: &AtomicBool,
     connection_stop: &AtomicBool,
     write_stream: &Arc<Mutex<TcpStream>>,
+    crypto: &SharedMediaCrypto,
 ) {
     let mut input = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut buffer = [0u8; READ_BUFFER_BYTES];
@@ -213,29 +241,27 @@ fn tcp_to_media_channel(
                     }
                     let payload = input[4..frame_end].to_vec();
                     input.drain(..frame_end);
-                    if payload.starts_with(b"LCH1") {
-                        // Host media setup uses a framed challenge before it
-                        // starts capture. Echo it on the same TCP connection;
-                        // the renderer also receives it so it can authenticate
-                        // reverse IDR/input/feedback traffic.
-                        let mut response = Vec::with_capacity(payload.len() + 4);
-                        response.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-                        response.extend_from_slice(&payload);
-                        let write_result = write_stream
-                            .lock()
-                            .map_err(|_| io::Error::other("TCP writer lock poisoned"))
-                            .and_then(|mut socket| socket.write_all(&response));
-                        if write_result.is_err() {
-                            connection_stop.store(true, Ordering::SeqCst);
-                            return;
+                    // The framed payload is sealed. Only a frame that opens
+                    // under the session key with the LCH1 prefix is echoed;
+                    // media frames stay sealed end to end and are opened by
+                    // the renderer.
+                    if let Some(plaintext) = crypto.open_challenge(&payload) {
+                        if let Some(reply) = crypto.seal(&plaintext) {
+                            let mut response = Vec::with_capacity(reply.len() + 4);
+                            response.extend_from_slice(&(reply.len() as u32).to_be_bytes());
+                            response.extend_from_slice(&reply);
+                            let write_result = write_stream
+                                .lock()
+                                .map_err(|_| io::Error::other("TCP writer lock poisoned"))
+                                .and_then(|mut socket| socket.write_all(&response));
+                            if write_result.is_err() {
+                                connection_stop.store(true, Ordering::SeqCst);
+                                return;
+                            }
+                            bridge_log("TCP sealed handshake echoed");
                         }
-                        bridge_log(&format!(
-                            "TCP handshake echoed frame={} prefix={:?}",
-                            payload.len(),
-                            &payload[..payload.len().min(4)]
-                        ));
                     }
-                    if payload.starts_with(b"LCH1") || payload.starts_with(b"CFG") {
+                    if payload.starts_with(b"CFG") || payload.starts_with(b"CF2") {
                         bridge_log(&format!(
                             "TCP -> renderer frame={} prefix={:?}",
                             payload.len(),

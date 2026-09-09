@@ -20,7 +20,7 @@ fn sync_cursor_stream(
     control: &RendererControl,
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::SharedMediaCrypto,
     delivery: &mut CursorStreamDelivery,
 ) {
     let requested = control.cursor_requested.load(Ordering::SeqCst);
@@ -36,7 +36,7 @@ fn sync_cursor_stream(
     // LCDON/LCDOFF are idempotent. Record every local attempt (including a
     // socket error) to avoid a busy retry loop, then refresh periodically so
     // a datagram lost after send_to succeeds is eventually healed.
-    let _ = send_viewer_command(socket, peer, cursor_stream_command(requested), token);
+    let _ = send_viewer_command(socket, peer, cursor_stream_command(requested), crypto);
     delivery.record_attempt(requested, now_us);
 }
 
@@ -44,7 +44,7 @@ fn sync_audio_stream(
     control: &RendererControl,
     socket: &std::net::UdpSocket,
     peer: std::net::SocketAddr,
-    token: &[u8],
+    crypto: &crate::media_crypto::SharedMediaCrypto,
     delivery: &mut SystemAudioDelivery,
 ) {
     let requested = control.audio_requested.load(Ordering::SeqCst);
@@ -55,14 +55,14 @@ fn sync_audio_stream(
     // SNDON/SNDOFF are idempotent, exactly like the cursor commands: every
     // attempt is recorded to avoid a busy retry loop, and the 1s cadence
     // heals a datagram lost after send_to succeeds.
-    let _ = send_viewer_command(socket, peer, audio_stream_command(requested), token);
+    let _ = send_viewer_command(socket, peer, audio_stream_command(requested), crypto);
     delivery.record_attempt(requested, now_us);
 }
 
 struct RenderHealthRuntime<'a> {
     control_socket: &'a std::net::UdpSocket,
     host_peer: Option<std::net::SocketAddr>,
-    viewer_control_token: &'a [u8],
+    crypto: &'a crate::media_crypto::SharedMediaCrypto,
     control: &'a RendererControl,
     decoder: &'a mut Option<viewer_decoder::AndroidDecoder>,
     codec_config: &'a mut Option<viewer_decoder::CodecConfig>,
@@ -115,7 +115,7 @@ impl RenderHealthRuntime<'_> {
             request_idr_debounced(
                 self.control_socket,
                 peer,
-                self.viewer_control_token,
+                self.crypto,
                 self.recovery_gate,
                 self.control,
             );
@@ -141,11 +141,12 @@ fn run(launch: SingleRendererLaunch) {
     // intentionally independent from Surface creation so Host can finish
     // the TCP reachability proof before the Activity attaches.
     let tcp_bridge = tcp_bridge;
-    let (socket, prepared_token, prepared_peer) = match prepared_receiver {
-        Some(prepared) => match prepared.into_socket_and_token() {
-            Ok(parts) => {
+    let (socket, crypto, prepared_peer) = match prepared_receiver {
+        Some(prepared) => match prepared.into_socket_and_media_crypto() {
+            Ok((socket, crypto, peer)) => {
                 log_info!("claimed prepared UDP listener on port {port}");
-                parts
+                take_media_crypto(port);
+                (socket, crypto, peer)
             }
             Err(error) => {
                 log_info!("FAILED to claim prepared UDP port {port}: {error}");
@@ -154,15 +155,25 @@ fn run(launch: SingleRendererLaunch) {
                 return;
             }
         },
-        None => match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
-            Ok(socket) => (socket, Vec::new(), None),
-            Err(e) => {
-                log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
+        None => {
+            // No prepared listener (direct rebind path): the session crypto
+            // registered at prepare time still drives the sealed sends.
+            let Some(crypto) = take_media_crypto(port) else {
+                log_info!("no session media crypto registered for port {port}");
                 remove_renderer_if_current(&instance_str, &control_clone);
                 control_clone.finished.store(true, Ordering::SeqCst);
                 return;
+            };
+            match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
+                Ok(socket) => (socket, crypto, None),
+                Err(e) => {
+                    log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
+                    remove_renderer_if_current(&instance_str, &control_clone);
+                    control_clone.finished.store(true, Ordering::SeqCst);
+                    return;
+                }
             }
-        },
+        }
     };
     let control_socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => socket,
@@ -184,30 +195,29 @@ fn run(launch: SingleRendererLaunch) {
     if let Some(peer) = tcp_control_addr {
         // A longer TCP GOP must not introduce a startup deadlock: the
         // renderer may attach after the Host's first IDR was already
-        // consumed by the preflight listener. Send the authenticated
-        // recovery request directly into the bridge before any media
-        // datagram establishes host_peer. Register it in the same gate
-        // used by the LCH1/first-packet paths so startup cannot emit
-        // duplicate IDR requests and create a false initial frame gap.
-        if !prepared_token.is_empty() && recovery_gate.should_request(std::time::Instant::now()) {
-            request_idr(&control_socket, peer, &prepared_token);
+        // consumed by the preflight listener. Send the sealed recovery
+        // request directly into the bridge before any media datagram
+        // establishes host_peer. Register it in the same gate used by the
+        // LCH1/first-packet paths so startup cannot emit duplicate IDR
+        // requests and create a false initial frame gap.
+        if crypto.is_established() && recovery_gate.should_request(std::time::Instant::now()) {
+            request_idr(&control_socket, peer, &crypto);
             log_info!("requested initial IDR through TCP media bridge at {peer}");
         }
     } else if let Some(peer) = prepared_peer {
-        if !prepared_token.is_empty() && recovery_gate.should_request(std::time::Instant::now()) {
-            request_idr(&control_socket, peer, &prepared_token);
+        if crypto.is_established() && recovery_gate.should_request(std::time::Instant::now()) {
+            request_idr(&control_socket, peer, &crypto);
             log_info!("requested initial IDR from prepared UDP host at {peer}");
         }
     }
     let mut buf = vec![0u8; 2_048];
     let mut media_buffers = [[0u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE];
     let mut control_buf = vec![0u8; 512];
-    // The preflight challenge has already authenticated this endpoint and
-    // token. Seed both control paths so the cloned input worker and socket
-    // loop remain live while the media plane is intentionally silent.
-    let initial_control = initial_control_state(tcp_control_addr, prepared_peer, &prepared_token);
+    // The preflight sealed challenge has already authenticated this
+    // endpoint. Seed both control paths so the cloned input worker and
+    // socket loop remain live while the media plane is intentionally silent.
+    let initial_control = initial_control_state(tcp_control_addr, prepared_peer, &crypto);
     let mut host_peer = initial_control.host_peer;
-    let mut viewer_control_token = prepared_token;
     let input_endpoint: InputEndpoint =
         std::sync::Arc::new(std::sync::Mutex::new(initial_control.input_endpoint));
     let input_worker = match control_socket.try_clone() {
@@ -273,13 +283,15 @@ fn run(launch: SingleRendererLaunch) {
                     Ok((received, peer)) if peer_allowed(Some(peer), &expected_host) => {
                         host_peer = Some(peer);
                         let packet = &buf[..received];
-                        if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
-                            viewer_control_token.clear();
-                            viewer_control_token.extend_from_slice(challenge);
-                            *input_endpoint.lock().unwrap() =
-                                Some((peer, viewer_control_token.clone()));
+                        // Open before parsing: only a datagram sealed with
+                        // the session key can be a host challenge.
+                        if let Some(plaintext) = crypto.open_challenge(packet) {
+                            crypto.establish();
+                            *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
                             control_clone.input.lock().unwrap().reset_session();
-                            let _ = socket.send_to(packet, peer);
+                            if let Some(reply) = crypto.seal(&plaintext) {
+                                let _ = socket.send_to(&reply, peer);
+                            }
                         }
                         // Video/config packets are intentionally discarded
                         // until a replacement Surface requests a fresh IDR.
@@ -297,11 +309,11 @@ fn run(launch: SingleRendererLaunch) {
             }
             control_clone.suspended.store(false, Ordering::SeqCst);
             if let Some(peer) = host_peer {
-                *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
                 request_idr_debounced(
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut recovery_gate,
                     &control_clone,
                 );
@@ -309,14 +321,14 @@ fn run(launch: SingleRendererLaunch) {
                     &control_clone,
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut cursor_delivery,
                 );
                 sync_audio_stream(
                     &control_clone,
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut audio_delivery,
                 );
             }
@@ -332,7 +344,7 @@ fn run(launch: SingleRendererLaunch) {
                 request_idr_debounced(
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut recovery_gate,
                     &control_clone,
                 );
@@ -343,9 +355,9 @@ fn run(launch: SingleRendererLaunch) {
             // Pointer samples run at 2x stream FPS (180Hz for 90fps) and
             // never wait behind the media socket's fragment queue.
             if input_worker.is_none() {
-                flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
+                flush_input(&control_socket, peer, &crypto, &control_clone);
             }
-            let probe_due = !viewer_control_token.is_empty()
+            let probe_due = crypto.is_established()
                 && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL;
             let next_probe_sequence = probe_due.then(|| latency_probe_sequence.wrapping_add(1));
             let media_since_previous_probe = if next_probe_sequence.is_some() {
@@ -362,7 +374,6 @@ fn run(launch: SingleRendererLaunch) {
                         Ok((received, source)) if source == peer => {
                             let _ = consume_viewer_response(
                                 &control_buf[..received],
-                                &viewer_control_token,
                                 control_health,
                                 &control_clone,
                                 &mut renderer_stats,
@@ -380,9 +391,7 @@ fn run(launch: SingleRendererLaunch) {
                         }
                     }
                 },
-                |sequence| {
-                    send_latency_probe(&control_socket, peer, &viewer_control_token, sequence)
-                },
+                |sequence| send_latency_probe(&control_socket, peer, &crypto, sequence),
             );
             if control_clone.stop.load(Ordering::Relaxed) {
                 continue;
@@ -411,7 +420,7 @@ fn run(launch: SingleRendererLaunch) {
                 send_receiver_feedback(
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &renderer_stats,
                     reassembler.incomplete_evictions(),
                     &control_clone,
@@ -442,7 +451,7 @@ fn run(launch: SingleRendererLaunch) {
                     RenderHealthRuntime {
                         control_socket: &control_socket,
                         host_peer,
-                        viewer_control_token: &viewer_control_token,
+                        crypto: &crypto,
                         control: &control_clone,
                         decoder: &mut decoder,
                         codec_config: &mut codec_config,
@@ -512,7 +521,7 @@ fn run(launch: SingleRendererLaunch) {
                                 expired_frames,
                                 expired_count,
                                 &control_socket,
-                                &viewer_control_token,
+                                &crypto,
                                 fps,
                                 &control_clone,
                                 &mut codec_config,
@@ -529,7 +538,7 @@ fn run(launch: SingleRendererLaunch) {
                     RenderHealthRuntime {
                         control_socket: &control_socket,
                         host_peer,
-                        viewer_control_token: &viewer_control_token,
+                        crypto: &crypto,
                         control: &control_clone,
                         decoder: &mut decoder,
                         codec_config: &mut codec_config,
@@ -576,7 +585,7 @@ fn run(launch: SingleRendererLaunch) {
             if host_peer != Some(peer) {
                 log_info!("UDP sender active: {peer}");
                 host_peer = Some(peer);
-                *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
                 reassembler.clear();
                 frame_sequencer.clear();
                 fec_groups.clear();
@@ -612,7 +621,7 @@ fn run(launch: SingleRendererLaunch) {
                     request_idr_debounced(
                         &control_socket,
                         peer,
-                        &viewer_control_token,
+                        &crypto,
                         &mut recovery_gate,
                         &control_clone,
                     );
@@ -620,11 +629,16 @@ fn run(launch: SingleRendererLaunch) {
             }
 
             let packet = &media_buffer[..received];
-            if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
-                viewer_control_token.clear();
-                viewer_control_token.extend_from_slice(challenge);
+            // Open before parsing: a datagram that fails to open under the
+            // session media key is dropped without any parsing.
+            let Some(opened) = crypto.open(packet) else {
+                continue;
+            };
+            let packet = opened.as_slice();
+            if let Some(challenge) = crate::prepared_udp::is_challenge_packet(packet) {
+                crypto.establish();
                 control_health = ControlHealthState::default();
-                *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
+                *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
                 control_clone.input.lock().unwrap().reset_session();
                 // Audio chunks from the replaced session must never play
                 // into the new one.
@@ -633,15 +647,17 @@ fn run(launch: SingleRendererLaunch) {
                 // rebind cannot keep showing stale coordinates forever.
                 control_clone.cursor_active.store(-1, Ordering::SeqCst);
                 control_clone.cursor_sequence.store(0, Ordering::SeqCst);
-                if let Err(error) = socket.send_to(packet, peer) {
-                    log_info!("failed to echo UDP reachability challenge: {error}");
-                } else {
-                    log_info!("UDP reachability challenge verified for {peer}");
+                if let Some(reply) = crypto.seal(challenge) {
+                    if let Err(error) = socket.send_to(&reply, peer) {
+                        log_info!("failed to echo UDP reachability challenge: {error}");
+                    } else {
+                        log_info!("UDP reachability challenge verified for {peer}");
+                    }
                 }
                 request_idr_debounced(
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut recovery_gate,
                     &control_clone,
                 );
@@ -650,7 +666,7 @@ fn run(launch: SingleRendererLaunch) {
                     &control_clone,
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut cursor_delivery,
                 );
                 audio_delivery.reset();
@@ -658,16 +674,13 @@ fn run(launch: SingleRendererLaunch) {
                     &control_clone,
                     &control_socket,
                     peer,
-                    &viewer_control_token,
+                    &crypto,
                     &mut audio_delivery,
                 );
                 continue;
             }
-            // Keep accepting responses on the legacy media socket during a
-            // rolling Host/Viewer upgrade.
             if consume_viewer_response(
                 packet,
-                &viewer_control_token,
                 &mut control_health,
                 &control_clone,
                 &mut renderer_stats,
@@ -729,14 +742,14 @@ fn run(launch: SingleRendererLaunch) {
                 &control_clone,
                 &control_socket,
                 peer,
-                &viewer_control_token,
+                &crypto,
                 &mut cursor_delivery,
             );
             sync_audio_stream(
                 &control_clone,
                 &control_socket,
                 peer,
-                &viewer_control_token,
+                &crypto,
                 &mut audio_delivery,
             );
         }
@@ -745,7 +758,7 @@ fn run(launch: SingleRendererLaunch) {
             completed_frames,
             completed_count,
             &control_socket,
-            &viewer_control_token,
+            &crypto,
             fps,
             &control_clone,
             &mut codec_config,
@@ -760,7 +773,7 @@ fn run(launch: SingleRendererLaunch) {
         RenderHealthRuntime {
             control_socket: &control_socket,
             host_peer,
-            viewer_control_token: &viewer_control_token,
+            crypto: &crypto,
             control: &control_clone,
             decoder: &mut decoder,
             codec_config: &mut codec_config,
@@ -785,12 +798,12 @@ fn run(launch: SingleRendererLaunch) {
                 .lock()
                 .unwrap()
                 .push(InputEvent::ReleaseAll);
-            flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
+            flush_input(&control_socket, peer, &crypto, &control_clone);
             send_viewer_command(
                 &control_socket,
                 peer,
                 crate::media_datagram::COMMAND_BYE,
-                &viewer_control_token,
+                &crypto,
             );
             log_info!("Sent stream close signal for instance {}", instance_str);
         }

@@ -29,6 +29,9 @@ export interface ActiveStream {
   localAudio?: boolean;
   mediaTransport: ResolvedTransport;
   viewerIps: string[];
+  /** Viewer-generated session media key (base64url). Seals the media path;
+   * reused verbatim when this session is reconfigured. */
+  mediaKey: string;
   startedAt: number;
 }
 

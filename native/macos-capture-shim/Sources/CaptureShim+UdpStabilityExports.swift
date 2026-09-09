@@ -1,10 +1,13 @@
 import Foundation
 
-/// v7 carries only the UDP policy already canonicalized by the Rust control
-/// server. The shim validates the discrete preset tuple again at the ABI
-/// boundary so a direct caller cannot create an unsupported hot-path state.
-@_cdecl("leftcar_capture_start_v7")
-public func leftcarCaptureStartV7(
+/// v8 is the sealed-media ABI: the retired v7 UDP-policy parameter set plus
+/// the trailing viewer-generated 32-byte media key. The key arrives over the
+/// encrypted control plane and AEAD-seals every media datagram in both
+/// directions. There is deliberately no plaintext fallback — a nil or
+/// wrong-length key fails the start, and the unsealed v2..v7 exports no
+/// longer exist.
+@_cdecl("leftcar_capture_start_v8")
+public func leftcarCaptureStartV8(
     ip: UnsafePointer<CChar>,
     port: UInt16,
     displayIndex: UInt32,
@@ -18,7 +21,9 @@ public func leftcarCaptureStartV7(
     udpProfileName: UnsafePointer<CChar>?,
     udpBurstDatagrams: UInt8,
     udpFecParityShards: UInt8,
-    udpAdaptivePacing: Int32
+    udpAdaptivePacing: Int32,
+    mediaKey: UnsafePointer<UInt8>?,
+    mediaKeyLen: UInt32
 ) -> UInt32 {
     let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
     guard let backend = CaptureBackendKind.parse(rawBackend) else {
@@ -53,6 +58,11 @@ public func leftcarCaptureStartV7(
         )
         return 0
     }
+    guard let mediaKey, mediaKeyLen == 32 else {
+        setLastError("missing or malformed media encryption key (\(mediaKeyLen) bytes)")
+        return 0
+    }
+    let keyData = Data(bytes: mediaKey, count: Int(mediaKeyLen))
     return startCaptureSession(
         ip: ip,
         port: port,
@@ -64,6 +74,7 @@ public func leftcarCaptureStartV7(
         mediaTransport: mediaTransport,
         contentMode: contentMode,
         encoderExperiment: encoderExperiment,
-        udpStability: udpStability
+        udpStability: udpStability,
+        mediaKey: keyData
     )
 }

@@ -5,7 +5,7 @@ pub(super) fn present_completed_frames(
     completed_frames: [Option<(std::net::SocketAddr, FramePacket)>; MEDIA_BATCH_SIZE],
     completed_count: usize,
     control_socket: &std::net::UdpSocket,
-    viewer_control_token: &[u8],
+    crypto: &crate::media_crypto::SharedMediaCrypto,
     fps: u32,
     control: &RendererControl,
     codec_config: &mut Option<viewer_decoder::CodecConfig>,
@@ -61,13 +61,7 @@ pub(super) fn present_completed_frames(
             // discarded stale frame would be another false loss.
             *last_frame_id = None;
             resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
-            request_idr_debounced(
-                control_socket,
-                peer,
-                viewer_control_token,
-                recovery_gate,
-                control,
-            );
+            request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
             continue;
         }
 
@@ -111,13 +105,7 @@ pub(super) fn present_completed_frames(
                         // image while a fresh IDR is requested.
                         *last_frame_id = None;
                         resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
-                        request_idr_debounced(
-                            control_socket,
-                            peer,
-                            viewer_control_token,
-                            recovery_gate,
-                            control,
-                        );
+                        request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                 }
                 FrameGapReason::LiveEdgeDiscard { missing } => {
@@ -138,13 +126,7 @@ pub(super) fn present_completed_frames(
                         // another IDR request for this same episode.
                         *last_frame_id = None;
                         resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
-                        request_idr_debounced(
-                            control_socket,
-                            peer,
-                            viewer_control_token,
-                            recovery_gate,
-                            control,
-                        );
+                        request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                 }
                 FrameGapReason::RecoverySkip { missing } => {
@@ -179,23 +161,11 @@ pub(super) fn present_completed_frames(
                     Some(FeedOutcome::ResyncRequired) => {
                         *last_frame_id = None;
                         resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
-                        request_idr_debounced(
-                            control_socket,
-                            peer,
-                            viewer_control_token,
-                            recovery_gate,
-                            control,
-                        );
+                        request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                     Some(FeedOutcome::FatalError) => {
                         reset_decoder(decoder, codec_config, awaiting_keyframe);
-                        request_idr_debounced(
-                            control_socket,
-                            peer,
-                            viewer_control_token,
-                            recovery_gate,
-                            control,
-                        );
+                        request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                     None => {}
                 }

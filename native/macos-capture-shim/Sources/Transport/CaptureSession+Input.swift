@@ -16,7 +16,6 @@ extension CaptureSession {
         inputLock.unlock()
         var status = Data("LCS1".utf8)
         status.append(enabled ? 1 : 0)
-        status.append(viewerControlToken)
         _ = sendControlPayload(status, fd: fd)
     }
 

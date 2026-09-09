@@ -13,7 +13,8 @@ pub const CURSOR_STREAM_OFF: &[u8] = b"LCDOFF";
 /// Refresh the idempotent subscription state once per second. This bounds
 /// control traffic while healing a dropped UDP command without an ACK plane.
 pub const CURSOR_STREAM_REFRESH_US: u64 = 1_000_000;
-/// Fixed payload width between the magic and the session token.
+/// Fixed payload width. The datagram is AEAD-sealed at the socket
+/// boundary, so the inline session token the old format carried is gone.
 pub const CURSOR_SAMPLE_LEN: usize = 14;
 
 pub fn cursor_stream_command(enabled: bool) -> &'static [u8] {
@@ -61,12 +62,8 @@ pub struct CursorSample {
     pub visible: bool,
 }
 
-pub fn parse_cursor_sample(packet: &[u8], token: &[u8]) -> Option<CursorSample> {
-    if token.is_empty()
-        || packet.len() != CURSOR_SAMPLE_LEN + token.len()
-        || packet.get(..4)? != CURSOR_MAGIC
-        || packet[CURSOR_SAMPLE_LEN..] != *token
-    {
+pub fn parse_cursor_sample(packet: &[u8]) -> Option<CursorSample> {
+    if packet.len() != CURSOR_SAMPLE_LEN || packet.get(..4)? != CURSOR_MAGIC {
         return None;
     }
     Some(CursorSample {
@@ -80,26 +77,31 @@ pub fn parse_cursor_sample(packet: &[u8], token: &[u8]) -> Option<CursorSample> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::MediaSessionCrypto;
 
-    fn encode(sequence: u32, x: u16, y: u16, visible: bool, token: &[u8]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(CURSOR_SAMPLE_LEN + token.len());
+    fn key(bytes: u8) -> [u8; 32] {
+        (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()
+    }
+
+    fn encode(sequence: u32, x: u16, y: u16, visible: bool) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(CURSOR_SAMPLE_LEN);
         bytes.extend_from_slice(CURSOR_MAGIC);
         bytes.extend_from_slice(&sequence.to_be_bytes());
         bytes.extend_from_slice(&x.to_be_bytes());
         bytes.extend_from_slice(&y.to_be_bytes());
         bytes.push(u8::from(visible));
         bytes.push(0);
-        bytes.extend_from_slice(token);
         bytes
     }
 
     #[test]
-    fn cursor_sample_round_trips_with_token_binding() {
-        let token = b"session-token";
-        let packet = encode(7, 0x1234, 0xabcd, true, token);
-        assert_eq!(packet.len(), CURSOR_SAMPLE_LEN + token.len());
+    fn cursor_sample_round_trips_and_is_sealed_on_the_wire() {
+        let crypto = MediaSessionCrypto::new(key(1));
+        let packet = encode(7, 0x1234, 0xabcd, true);
+        assert_eq!(packet.len(), CURSOR_SAMPLE_LEN);
+        let sealed = crypto.seal(&packet).unwrap();
         assert_eq!(
-            parse_cursor_sample(&packet, token),
+            parse_cursor_sample(&crypto.open(&sealed).unwrap()),
             Some(CursorSample {
                 sequence: 7,
                 x: 0x1234,
@@ -107,29 +109,19 @@ mod tests {
                 visible: true,
             })
         );
-        assert_eq!(parse_cursor_sample(&packet, b"wrong-token"), None);
-    }
-
-    #[test]
-    fn same_length_wrong_token_is_rejected() {
-        let token = b"session-token";
-        let packet = encode(3, 1, 2, true, token);
-        assert_eq!(parse_cursor_sample(&packet, b"session-tokeN"), None);
+        // Without the key there is no plaintext to parse.
+        assert!(parse_cursor_sample(&sealed).is_none());
     }
 
     #[test]
     fn truncated_or_foreign_packets_are_rejected() {
-        let token = b"nonce";
-        assert_eq!(parse_cursor_sample(&[], token), None);
-        assert_eq!(parse_cursor_sample(&[0u8; 13], token), None);
-        let packet = encode(1, 0, 0, false, token);
-        assert_eq!(
-            parse_cursor_sample(&packet[..packet.len() - 1], token),
-            None
-        );
-        let mut foreign = encode(1, 0, 0, false, token);
+        assert_eq!(parse_cursor_sample(&[]), None);
+        assert_eq!(parse_cursor_sample(&[0u8; 13]), None);
+        let packet = encode(1, 0, 0, false);
+        assert_eq!(parse_cursor_sample(&packet[..packet.len() - 1]), None);
+        let mut foreign = packet.clone();
         foreign[0] = b'X';
-        assert_eq!(parse_cursor_sample(&foreign, token), None);
+        assert_eq!(parse_cursor_sample(&foreign), None);
     }
 
     #[test]

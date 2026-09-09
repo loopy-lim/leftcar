@@ -26,6 +26,7 @@ function active(session: number, port: number): ActiveStream {
     encoderExperiment: "auto",
     mediaTransport: "udp",
     viewerIps: ["192.168.0.42"],
+    mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     startedAt: 1,
   };
 }

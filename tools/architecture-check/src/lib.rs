@@ -138,6 +138,8 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "viewer-decoder",
                 "fec-core",
                 "usb-mux",
+                // 미디어 경로 AEAD 봉인 — fec-core와 같은 무의존 하위 계층.
+                "secure-channel",
                 "libc",
             ],
         ),

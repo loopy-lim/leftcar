@@ -48,19 +48,26 @@ extension CaptureSession {
     /// TCP carries the existing CFG/G/control payloads as independent frames.
     /// The Android USB bridge converts them back to loopback UDP datagrams, so
     /// the decoder and its recovery telemetry stay identical on both paths.
+    /// The 4-byte length prefix stays plaintext for framing; the payload is
+    /// AEAD-sealed once here, at the lowest-level sender.
      func sendTCPFrame(_ data: Data, fd: Int32) -> Int {
-        guard isValidTcpMediaFrameLength(data.count) else { return -1 }
-        var length = UInt32(data.count).bigEndian
-        var framed = Data(capacity: data.count + 4)
+        guard !data.isEmpty, let sealed = mediaCrypto.seal(data),
+              isValidTcpMediaFrameLength(sealed.count) else { return -1 }
+        var length = UInt32(sealed.count).bigEndian
+        var framed = Data(capacity: sealed.count + 4)
         withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
-        framed.append(data)
+        framed.append(sealed)
         tcpWriteLock.lock()
         defer { tcpWriteLock.unlock() }
         return sendTCPBytes(framed, fd: fd) == framed.count ? data.count : -1
     }
 
+    /// Lowest-level UDP sender. Sealing happens exactly here so every
+    /// datagram this session emits (video, audio, cursor, acks, notices,
+    /// reachability challenge) shares one AEAD boundary.
      func send(_ data: Data, fd: Int32, to addr: inout sockaddr_in) -> Int {
-        return data.withUnsafeBytes { raw in
+        guard let sealed = mediaCrypto.seal(data) else { return -1 }
+        return sealed.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return -1 }
             return withUnsafePointer(to: &addr) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
@@ -225,12 +232,17 @@ extension CaptureSession {
             return false
         }
 
-        let token = Data(UUID().uuidString.utf8)
+        // Reachability proof: a random nonce sealed under the session media
+        // key. Only a viewer holding the key can open it and echo the same
+        // plaintext sealed in its own direction — the nonce itself is not a
+        // secret and the token-suffix scheme it replaced is gone.
+        let nonce = Data(UUID().uuidString.utf8)
         var challenge = Data("LCH1".utf8)
-        challenge.append(token)
+        challenge.append(nonce)
         guard sendTCPFrame(challenge, fd: sock) == challenge.count,
               let response = receiveTCPFrame(fd: sock, timeoutMs: 2_000),
-              response == challenge else {
+              let opened = mediaCrypto.open(response),
+              opened == challenge else {
             let reason = "TCP media handshake failed for \(targetLabel)"
             close(sock)
             sock = -1
@@ -245,7 +257,6 @@ extension CaptureSession {
         if originalFlags >= 0 {
             _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
         }
-        viewerControlToken = token
         inputLock.lock()
         lastReliableInputSequence = 0
         lastPointerInputSequence = 0
@@ -301,11 +312,12 @@ extension CaptureSession {
         // A paired viewer may reach the control port through a Tailscale
         // subnet router even when both devices share Wi-Fi. Prove that the
         // physical media candidate owns its UDP port before any screen bytes
-        // are captured or sent. The echoed nonce also authenticates reverse
-        // IDR/BYE messages when their VPN source address differs.
-        let token = Data(UUID().uuidString.utf8)
+        // are captured or sent. The challenge is sealed under the session
+        // media key and the echo must open to the identical plaintext; AEAD
+        // possession authenticates every later reverse message.
+        let nonce = Data(UUID().uuidString.utf8)
         var challenge = Data("LCH1".utf8)
-        challenge.append(token)
+        challenge.append(nonce)
         var challengeVerified = false
         let requiresSplitPair = requestedEncoderExperiment == .splitVertical
         var verifiedTilePorts = Set<UInt16>()
@@ -336,8 +348,9 @@ extension CaptureSession {
                     }
                 }
             }
-            if count == challenge.count,
-               Data(response[0..<count]) == challenge {
+            if count > 0,
+               let opened = mediaCrypto.open(Data(response[0..<count])),
+               opened == challenge {
                 let sourcePort = UInt16(bigEndian: source.sin_port)
                 if sourcePort == targetPort {
                     verifiedTilePorts.insert(targetPort)
@@ -364,7 +377,6 @@ extension CaptureSession {
             }
             return false
         }
-        viewerControlToken = token
         inputLock.lock()
         lastReliableInputSequence = 0
         lastPointerInputSequence = 0
