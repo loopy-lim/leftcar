@@ -1,5 +1,17 @@
 import TcpSocket from "react-native-tcp-socket";
 import type { AdaptiveQualityState } from "./adaptive-resolution";
+import {
+  StreamSealer,
+  base64UrlToBytes,
+  bytesToBase64Url,
+  clientFinish,
+  createClientHello,
+  encodeClientHello,
+  parseSealedLine,
+  parseServerHello,
+  sealedLine,
+  type ClientHello,
+} from "./secure-channel";
 import type { EncoderExperimentId } from "./encoder-experiment";
 import { currentTranslation } from "./language-store";
 import { LocalizedError } from "./localized-error";
@@ -186,6 +198,8 @@ export interface ReconfigureStreamOutput {
 export interface ControlClient {
   request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T>;
   close(): void;
+  /** 서버가 서명으로 증명한 호스트 공개키(b64url). 평문(루프백) 모드면 없다. */
+  readonly hostKey?: string | null;
 }
 
 export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized";
@@ -219,6 +233,9 @@ export function formatErrorMessage(err: unknown): string {
   const normalized = message.toLowerCase();
   if (normalized.includes("unauthorized")) {
     return t.errUnauthorized;
+  }
+  if (normalized.includes("pinned key")) {
+    return t.errHostKeyMismatch;
   }
   if (normalized.includes("pairing failed")) {
     return t.errPairingRejected;
@@ -264,17 +281,35 @@ export function isUnauthorizedError(error: unknown): boolean {
   return error instanceof ControlRequestError && error.kind === "unauthorized";
 }
 
+/** 루프백 제어 경로(USB 네이티브 프록시, 진단 도구)는 평문 JSON을 유지한다. */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
+}
+
 /**
  * Supplies the pairing token injected into every request envelope. Polled
  * per-request so a freshly completed pairing is picked up without a reconnect.
  */
 export type TokenProvider = () => Promise<string | null>;
 
+export interface ConnectOptions {
+  /**
+   * QR(v2)에서 핀한 호스트 Ed25519 공개키(b64url 32B). ServerHello의 서명
+   * 키가 이것과 다르면 중간자로 간주하고 연결을 끊는다. 없으면 TOFU —
+   * 검증된 키를 onHostKey로 되돌려 호출자가 핀하게 한다.
+   */
+  pinnedHostKey?: string | null;
+  /** 핸드셰이크로 증명된 호스트 공개키(b64url). TOFU 핀 저장용. */
+  onHostKey?: (hostKey: string) => void;
+}
+
 export function connect(
   host: string,
   port = DEFAULT_CONTROL_PORT,
   timeoutMs = 5000,
   tokenProvider?: TokenProvider,
+  options?: ConnectOptions,
 ): Promise<ControlClient> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -294,119 +329,215 @@ export function connect(
     // SecureStore/JS turn. Opening a native viewer activity can pause React Native
     // immediately after the call site.
     let cachedToken: string | null | undefined;
+    // 루프백이 아닌 피어는 secure-channel 핸드셰이크가 필수다.
+    const secure = !isLoopbackHost(host);
+    let mode: "handshake" | "plain" | "sealed" = secure ? "handshake" : "plain";
+    let tx: StreamSealer | null = null;
+    let rx: StreamSealer | null = null;
+    let clientHostKey: string | null = null;
+    let helloSecret: Uint8Array | null = null;
+    let hello: ClientHello | null = null;
+    let buffer = "";
+    const textEncoder = new TextEncoder();
+    const textDecoder = new TextDecoder();
+
+    const fail = (message: string) => {
+      const e = new ControlRequestError(message, "transport");
+      terminalError = e;
+      if (!settled) {
+        settled = true;
+        reject(e);
+      }
+      for (const [, h] of pending) {
+        clearTimeout(h.timer);
+        h.reject(e);
+      }
+      pending.clear();
+      socket.destroy();
+    };
 
     const socket = TcpSocket.createConnection({ host, port }, () => {
       if (settled) return;
-      settled = true;
-      resolve({
-        request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T> {
-          const issue = (token: string | null) => new Promise<T>((res, rej) => {
-            if (terminalError) {
-              rej(terminalError);
-              return;
-            }
-            const id = nextId++;
-            const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
-            const payload = JSON.stringify(envelope) + "\n";
-            const requestTimeout = REQUEST_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
-            const timer = setTimeout(() => {
-              const handler = pending.get(id);
-              if (!handler) return;
-              pending.delete(id);
-              handler.reject(new ControlRequestError(`control request timeout: ${command}`, "timeout"));
-              // Responses do not carry request ids. Once one request times
-              // out, a delayed response could otherwise be matched to the
-              // next request on this socket.
-              socket.destroy();
-            }, requestTimeout);
-            pending.set(id, {
-              resolve: res as (v: unknown) => void,
-              reject: rej,
-              timer,
-            });
-            try {
-              socket.write(payload, "utf8", (writeError) => {
-                if (!writeError) {
-                  onWritten?.();
-                  return;
-                }
-                if (!pending.has(id)) return;
-                const handler = pending.get(id);
-                pending.delete(id);
-                clearTimeout(handler?.timer ?? timer);
-                const msg = formatErrorMessage(writeError);
-                (handler?.reject ?? rej)(
-                  new ControlRequestError(`control write error: ${msg}`, "transport"),
-                );
-              });
-            } catch (e) {
-              const handler = pending.get(id);
-              pending.delete(id);
-              clearTimeout(handler?.timer ?? timer);
-              const msg = formatErrorMessage(e);
-              rej(new ControlRequestError(`control write error: ${msg}`, "transport"));
-            }
-          });
-          if (cachedToken !== undefined) {
-            return issue(cachedToken);
-          }
-          if (!tokenProvider) {
-            cachedToken = null;
-            return issue(cachedToken);
-          }
-          // The initial lookup may be asynchronous, but a rejection occurs
-          // before an id is allocated. Every later request is issued
-          // synchronously through the cached branch above.
-          return tokenProvider().then((token) => {
-            cachedToken = token;
-            return issue(token);
-          });
-        },
-        close() {
-          terminalError = new ControlRequestError("control connection closed", "transport");
-          socket.destroy();
-        },
+      if (!secure) {
+        settled = true;
+        resolve(makeClient());
+        return;
+      }
+      const handshake = createClientHello();
+      helloSecret = handshake.secret;
+      hello = handshake.hello;
+      socket.write(`${encodeClientHello(handshake.hello)}\n`, "utf8", (writeError) => {
+        if (writeError) fail(`secure handshake write error: ${formatErrorMessage(writeError)}`);
       });
     });
 
-    let buffer = "";
+    const makeClient = (): ControlClient => ({
+      request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T> {
+        const issue = (token: string | null) => new Promise<T>((res, rej) => {
+          if (terminalError) {
+            rej(terminalError);
+            return;
+          }
+          const id = nextId++;
+          const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
+          const payload = JSON.stringify(envelope) + "\n";
+          const requestTimeout = REQUEST_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
+          const timer = setTimeout(() => {
+            const handler = pending.get(id);
+            if (!handler) return;
+            pending.delete(id);
+            handler.reject(new ControlRequestError(`control request timeout: ${command}`, "timeout"));
+            // Responses do not carry request ids. Once one request times
+            // out, a delayed response could otherwise be matched to the
+            // next request on this socket.
+            socket.destroy();
+          }, requestTimeout);
+          pending.set(id, {
+            resolve: res as (v: unknown) => void,
+            reject: rej,
+            timer,
+          });
+          try {
+            const wire =
+              mode === "sealed" && tx
+                ? sealedLine(tx.seal(textEncoder.encode(payload))) + "\n"
+                : payload;
+            socket.write(wire, "utf8", (writeError) => {
+              if (!writeError) {
+                onWritten?.();
+                return;
+              }
+              if (!pending.has(id)) return;
+              const handler = pending.get(id);
+              pending.delete(id);
+              clearTimeout(handler?.timer ?? timer);
+              const msg = formatErrorMessage(writeError);
+              (handler?.reject ?? rej)(
+                new ControlRequestError(`control write error: ${msg}`, "transport"),
+              );
+            });
+          } catch (e) {
+            const handler = pending.get(id);
+            pending.delete(id);
+            clearTimeout(handler?.timer ?? timer);
+            const msg = formatErrorMessage(e);
+            rej(new ControlRequestError(`control write error: ${msg}`, "transport"));
+          }
+        });
+        if (cachedToken !== undefined) {
+          return issue(cachedToken);
+        }
+        if (!tokenProvider) {
+          cachedToken = null;
+          return issue(cachedToken);
+        }
+        // The initial lookup may be asynchronous, but a rejection occurs
+        // before an id is allocated. Every later request is issued
+        // synchronously through the cached branch above.
+        return tokenProvider().then((token) => {
+          cachedToken = token;
+          return issue(token);
+        });
+      },
+      close() {
+        terminalError = new ControlRequestError("control connection closed", "transport");
+        socket.destroy();
+      },
+      hostKey: clientHostKey,
+    });
+
+    /** 한 줄의 평문 JSON을 응답 매칭으로 처리한다. */
+    const handlePlainTextLine = (line: string) => {
+      if (!line.trim()) return;
+      let parsed: { ok?: boolean; result?: unknown; error?: string };
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return;
+      }
+      // FIFO match: server replies in request order
+      const oldest = [...pending.entries()][0];
+      if (!oldest) return;
+      const [id, handlers] = oldest;
+      pending.delete(id);
+      clearTimeout(handlers.timer);
+      if (parsed.ok) {
+        handlers.resolve(parsed.result);
+      } else {
+        if (parsed.error === "unauthorized") {
+          cachedToken = undefined;
+        }
+        // The host closes the connection right after "unauthorized"; this
+        // rejection is registered (and pending cleared) before the close
+        // handler runs, so the specific error wins over the generic one.
+        handlers.reject(
+          new ControlRequestError(
+            parsed.error ?? "control error",
+            parsed.error === "unauthorized" ? "unauthorized" : "remote",
+          ),
+        );
+      }
+    };
+
+    const drain = () => {
+      while (true) {
+        const nl = buffer.indexOf("\n");
+        if (nl < 0) return;
+        const raw = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (mode === "handshake") {
+          try {
+            const serverHello = parseServerHello(raw);
+            const pinned = options?.pinnedHostKey
+              ? base64UrlToBytes(options.pinnedHostKey)
+              : null;
+            const result = clientFinish(helloSecret as Uint8Array, hello as ClientHello, serverHello, pinned);
+            tx = new StreamSealer(result.keys.c2s);
+            rx = new StreamSealer(result.keys.s2c);
+            clientHostKey = bytesToBase64Url(result.spk);
+            mode = "sealed";
+            const confirm = JSON.stringify({
+              hello: "ok",
+              nc: bytesToBase64Url((hello as ClientHello).nc),
+            });
+            socket.write(
+              `${sealedLine(tx.seal(textEncoder.encode(confirm)))}\n`,
+              "utf8",
+              (writeError) => {
+                if (writeError) fail(`secure handshake write error: ${formatErrorMessage(writeError)}`);
+              },
+            );
+            options?.onHostKey?.(clientHostKey);
+            settled = true;
+            resolve(makeClient());
+          } catch (e) {
+            fail(`secure handshake failed: ${formatErrorMessage(e)}`);
+          }
+          continue;
+        }
+        if (mode === "sealed") {
+          const frame = parseSealedLine(raw);
+          if (!frame) {
+            fail("control channel expected a sealed frame");
+            return;
+          }
+          let plaintext: Uint8Array;
+          try {
+            plaintext = (rx as StreamSealer).open(frame);
+          } catch (e) {
+            fail(`sealed frame rejected: ${formatErrorMessage(e)}`);
+            return;
+          }
+          handlePlainTextLine(textDecoder.decode(plaintext));
+          continue;
+        }
+        handlePlainTextLine(raw);
+      }
+    };
 
     socket.on("data", (data: Buffer | string) => {
       buffer += typeof data === "string" ? data : data.toString("utf8");
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        if (!line.trim()) continue;
-        let parsed: { ok?: boolean; result?: unknown; error?: string };
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        // FIFO match: server replies in request order
-        const oldest = [...pending.entries()][0];
-        if (!oldest) continue;
-        const [id, handlers] = oldest;
-        pending.delete(id);
-        clearTimeout(handlers.timer);
-        if (parsed.ok) {
-          handlers.resolve(parsed.result);
-        } else {
-          if (parsed.error === "unauthorized") {
-            cachedToken = undefined;
-          }
-          // The host closes the connection right after "unauthorized"; this
-          // rejection is registered (and pending cleared) before the close
-          // handler runs, so the specific error wins over the generic one.
-          handlers.reject(
-            new ControlRequestError(
-              parsed.error ?? "control error",
-              parsed.error === "unauthorized" ? "unauthorized" : "remote",
-            ),
-          );
-        }
-      }
+      drain();
     });
 
     socket.on("error", (err: unknown) => {

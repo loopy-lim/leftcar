@@ -5,6 +5,8 @@ export interface RecentHostItem {
   host: string;
   port: number;
   name?: string;
+  /** 호스트 공개키(b64url 32B) — 핸드셰이크 핀. v2 페어링 이후 채워진다. */
+  hostKey?: string;
   lastConnected: number;
 }
 
@@ -27,7 +29,9 @@ export function parseRecentHosts(raw: string | null): RecentHostItem[] {
           Number.isInteger(item.port) &&
           item.port > 0 &&
           item.port <= 65535 &&
-          typeof item.lastConnected === "number"
+          typeof item.lastConnected === "number" &&
+          (!("hostKey" in item) ||
+            typeof (item as { hostKey?: unknown }).hostKey === "string")
         );
       })
       .slice(0, MAX_RECENT_HOSTS);
@@ -42,18 +46,27 @@ export function updateRecentHostsList(
   port = DEFAULT_CONTROL_PORT,
   name?: string,
   now = Date.now(),
+  hostKey?: string,
 ): RecentHostItem[] {
   const normalizedHost = host.trim().toLowerCase();
   if (!normalizedHost) return current;
 
+  const previous = current.find(
+    (item) => item.host.toLowerCase() === normalizedHost && item.port === port,
+  );
   const filtered = current.filter(
     (item) => !(item.host.toLowerCase() === normalizedHost && item.port === port),
   );
 
+  // 핀이 있는 엔트리는 갱신 시에도 유지한다 — 키 없는 재연결이 핀을 지우고
+  // 다음 연결을 TOFU로 강등시키지 않게 한다.
+  const resolvedHostKey = hostKey !== undefined ? hostKey : previous?.hostKey;
+
   const newItem: RecentHostItem = {
     host: host.trim(),
     port,
-    ...(name?.trim() ? { name: name.trim() } : {}),
+    ...(name?.trim() ? { name: name.trim() } : previous?.name ? { name: previous.name } : {}),
+    ...(resolvedHostKey ? { hostKey: resolvedHostKey } : {}),
     lastConnected: now,
   };
 
@@ -84,10 +97,11 @@ export async function saveRecentHost(
   host: string,
   port = DEFAULT_CONTROL_PORT,
   name?: string,
+  hostKey?: string,
 ): Promise<RecentHostItem[]> {
   try {
     const current = await getRecentHosts();
-    const updated = updateRecentHostsList(current, host, port, name);
+    const updated = updateRecentHostsList(current, host, port, name, Date.now(), hostKey);
     await SecureStore.setItemAsync(RECENT_HOSTS_KEY, JSON.stringify(updated));
     return updated;
   } catch {

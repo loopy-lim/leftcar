@@ -75,11 +75,12 @@ const store = (SecureStore as unknown as { __store: Map<string, string> }).__sto
 
 const OFFER_ID = "offer-123e4567-e89b-42d3-a456-426614174000";
 const OFFER_SECRET = "A".repeat(43);
+const HOST_KEY = "B".repeat(43);
 const validQr =
-  `{"v":1,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","h":"192.168.1.5","p":7777}`;
+  `{"v":2,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","k":"${HOST_KEY}","h":"192.168.1.5","p":7777}`;
 
 function makePayload(): QrPayload {
-  return { id: OFFER_ID, secret: OFFER_SECRET, host: "192.168.1.5", port: 7777 };
+  return { id: OFFER_ID, secret: OFFER_SECRET, hostKey: HOST_KEY, host: "192.168.1.5", port: 7777 };
 }
 
 const TOKEN_64HEX = "a".repeat(64);
@@ -98,6 +99,7 @@ describe("parseQrPayload", () => {
     expect(parseQrPayload(validQr)).toEqual({
       id: OFFER_ID,
       secret: OFFER_SECRET,
+      hostKey: HOST_KEY,
       host: "192.168.1.5",
       port: 7777,
     });
@@ -105,19 +107,21 @@ describe("parseQrPayload", () => {
 
   it("never trusts a code embedded in a QR payload", () => {
     const qrWithCode =
-      `{"v":1,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","h":"192.168.1.5","p":7777,"c":"123456"}`;
+      `{"v":2,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","k":"${HOST_KEY}","h":"192.168.1.5","p":7777,"c":"123456"}`;
     expect(parseQrPayload(qrWithCode)).toEqual({
       id: OFFER_ID,
       secret: OFFER_SECRET,
+      hostKey: HOST_KEY,
       host: "192.168.1.5",
       port: 7777,
     });
   });
 
   it("parseQrPayload_wrong_version_and_missing_fields → null", () => {
-    expect(parseQrPayload('{"v":2,"id":"o","s":"s","h":"1.2.3.4","p":7777}')).toBeNull();
+    expect(parseQrPayload('{"v":1,"id":"o","s":"s","h":"1.2.3.4","p":7777}')).toBeNull(); // v1은 거부
+    expect(parseQrPayload(`{"v":2,"id":"o","s":"s","h":"1.2.3.4","p":7777}`)).toBeNull(); // missing k
     expect(
-      parseQrPayload('{"v":1,"id":"o","h":"1.2.3.4","p":7777}'),
+      parseQrPayload('{"v":2,"id":"o","h":"1.2.3.4","p":7777}'),
     ).toBeNull(); // missing s
     expect(
       parseQrPayload('{"v":1,"id":"o","s":"s","p":7777}'),
@@ -185,7 +189,9 @@ describe("pairWithHost", () => {
     requestMock.mockResolvedValueOnce({ token: TOKEN_64HEX });
     const token = await pairWithHost(makePayload(), "123456");
     expect(token).toBe(TOKEN_64HEX);
-    expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777);
+    expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777, 5000, undefined, {
+      pinnedHostKey: HOST_KEY,
+    });
     expect(requestMock).toHaveBeenCalledWith("pair", {
       offerId: OFFER_ID,
       secret: OFFER_SECRET,
@@ -210,7 +216,9 @@ describe("pairWithHost", () => {
     const token = await pairWithHostByCode("192.168.1.5", 7777, "123 456");
 
     expect(token).toBe(TOKEN_64HEX);
-    expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777);
+    expect(connect).toHaveBeenCalledWith("192.168.1.5", 7777, 5000, undefined, {
+      pinnedHostKey: null,
+    });
     expect(requestMock).toHaveBeenCalledWith("pair", {
       code: "123456",
       deviceId: expect.any(String),

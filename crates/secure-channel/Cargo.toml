@@ -1,0 +1,18 @@
+[package]
+name = "secure-channel"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[dev-dependencies]
+hex = { version = "0.4", default-features = false, features = ["std"] }

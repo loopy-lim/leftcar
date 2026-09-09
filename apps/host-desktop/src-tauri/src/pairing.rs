@@ -31,7 +31,8 @@ impl session::Clock for WallClock {
 
 struct Inner {
     service: session::PairingService,
-    fingerprint: String,
+    /// QR `k` 필드와 offer 핑거프린트 메타데이터의 원천.
+    host_public_key: [u8; 32],
     fail_counts: HashMap<String, u32>,
     paired: Vec<PairedDevice>,
     /// offer ids this server created (the raw secret stays inside the
@@ -126,7 +127,7 @@ impl PairingServer {
     /// Loads persisted devices from `store_path` if it exists. A corrupt or
     /// unreadable file is logged and ignored — pairing state is rebuildable,
     /// the host must not refuse to start.
-    pub fn new(fingerprint: String, store_path: Option<PathBuf>) -> Self {
+    pub fn new(host_public_key: [u8; 32], store_path: Option<PathBuf>) -> Self {
         let paired = store_path
             .as_deref()
             .and_then(load_devices)
@@ -136,7 +137,7 @@ impl PairingServer {
                 service: session::PairingService::new(Box::new(WallClock {
                     epoch: OnceLock::new(),
                 })),
-                fingerprint,
+                host_public_key,
                 fail_counts: HashMap::new(),
                 paired,
                 live_offers: std::collections::HashSet::new(),
@@ -170,7 +171,11 @@ impl PairingServer {
         inner.completed.clear();
         inner.rejected.clear();
 
-        let fingerprint = inner.fingerprint.clone();
+        let fingerprint = inner
+            .host_public_key
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         let offer = inner.service.begin_offer(fingerprint);
         // Borrow the secret only to encode it into the QR payload; the
         // service's own copy (the only other one) is zeroized on approve/
@@ -180,10 +185,13 @@ impl PairingServer {
             .service
             .take_secret_for_qr(&offer.ephemeral_offer_id)
             .expect("secret exists right after begin_offer");
+        // v2: `k` = 호스트 Ed25519 공개키(base64url 32B). 뷰어는 이 키를 핀해
+        // 제어 평면 핸드셰이크의 ServerHello 서명을 검증한다(secure-channel).
         let payload = json!({
-            "v": 1,
+            "v": 2,
             "id": offer.ephemeral_offer_id,
             "s": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0),
+            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.host_public_key),
             "h": host_ip,
             "p": port,
         })
@@ -663,11 +671,16 @@ mod tests {
 
     #[test]
     fn begin_pairing_creates_qr_payload_and_code() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
 
         let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
-        assert_eq!(payload["v"], json!(1));
+        assert_eq!(payload["v"], json!(2));
+        // QR은 호스트 공개키를 실어야 한다(뷰어 핀 검증용).
+        let host_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload["k"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(host_key, [7u8; 32]);
         assert!(payload["id"].as_str().unwrap().starts_with("offer-"));
         assert_eq!(payload["h"], json!("192.168.0.10"));
         assert_eq!(payload["p"], json!(7777));
@@ -697,7 +710,7 @@ mod tests {
 
     #[test]
     fn pair_with_correct_secret_and_code_issues_token() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let offer_id = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap()["id"]
             .as_str()
@@ -725,7 +738,7 @@ mod tests {
 
     #[test]
     fn pair_with_wrong_code_fails() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap();
@@ -741,7 +754,7 @@ mod tests {
 
     #[test]
     fn pair_with_wrong_secret_fails_with_same_message() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap();
@@ -756,7 +769,7 @@ mod tests {
 
     #[test]
     fn three_failed_attempts_burn_offer() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -775,7 +788,7 @@ mod tests {
 
     #[test]
     fn authorize_accepts_issued_token_and_rejects_others() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -795,7 +808,7 @@ mod tests {
     fn persisted_devices_survive_restart() {
         let path = temp_store_path("restart");
         let token = {
-            let server = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+            let server = PairingServer::new([7u8; 32], Some(path.clone()));
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -805,7 +818,7 @@ mod tests {
                 .unwrap()
         };
 
-        let restarted = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+        let restarted = PairingServer::new([7u8; 32], Some(path.clone()));
         assert!(restarted.authorize(&token));
         assert_eq!(restarted.list_devices().len(), 1);
         assert_eq!(restarted.list_devices()[0].device_id, "viewer-1");
@@ -816,7 +829,7 @@ mod tests {
     fn corrupt_store_is_ignored_not_fatal() {
         let path = temp_store_path("corrupt");
         std::fs::write(&path, b"{not json").unwrap();
-        let server = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+        let server = PairingServer::new([7u8; 32], Some(path.clone()));
         assert!(server.list_devices().is_empty());
         let view = server.begin_pairing("192.168.0.10", 7777);
         assert_eq!(view.code.len(), 6);
@@ -827,7 +840,7 @@ mod tests {
     fn revoke_removes_token_and_persists() {
         let path = temp_store_path("revoke");
         let token = {
-            let server = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+            let server = PairingServer::new([7u8; 32], Some(path.clone()));
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -838,14 +851,14 @@ mod tests {
         };
 
         {
-            let server = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+            let server = PairingServer::new([7u8; 32], Some(path.clone()));
             assert!(server.authorize(&token));
             assert!(server.revoke("viewer-1"));
             assert!(!server.authorize(&token));
             assert!(server.list_devices().is_empty());
         }
         // persisted across restart
-        let restarted = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+        let restarted = PairingServer::new([7u8; 32], Some(path.clone()));
         assert!(!restarted.authorize(&token));
         assert!(restarted.list_devices().is_empty());
         let _ = std::fs::remove_file(&path);
@@ -853,7 +866,7 @@ mod tests {
 
     #[test]
     fn replacing_or_canceling_an_offer_invalidates_old_qr_codes() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let first = server.begin_pairing("192.168.0.10", 7777);
         let second = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&first.qr_payload).unwrap();
@@ -900,7 +913,7 @@ mod tests {
 
     #[test]
     fn device_views_never_expose_authentication_tokens() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
         server
@@ -922,7 +935,7 @@ mod tests {
     fn store_file_has_restricted_permissions() {
         let path = temp_store_path("perms");
         {
-            let server = PairingServer::new("leftcar-host".into(), Some(path.clone()));
+            let server = PairingServer::new([7u8; 32], Some(path.clone()));
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -954,7 +967,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_waits_pending_then_approves_and_pickup_issues_token() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         // 첫 제시: 아직 Mac 승인 전 — Pending 상태 신호.
@@ -991,7 +1004,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_rejection_tells_the_poller() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         assert!(matches!(
@@ -1009,7 +1022,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_rejects_without_a_pending_request() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
         assert_eq!(
             server.approve_pending(&offer_id).unwrap_err(),
@@ -1023,7 +1036,7 @@ mod tests {
 
     #[test]
     fn approval_pending_polls_do_not_burn_the_offer() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         // 승인 대기 폴링은 실패 횟수를 올리지 않는다 — 5번 넘게 반복해도.
@@ -1041,7 +1054,7 @@ mod tests {
 
     #[test]
     fn approved_token_is_delivered_only_to_the_approved_device() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
@@ -1063,7 +1076,7 @@ mod tests {
 
     #[test]
     fn revoking_one_device_keeps_another_devices_pending_pickup() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
@@ -1088,7 +1101,7 @@ mod tests {
 
     #[test]
     fn wrong_secret_polls_still_burn_the_offer_after_three_tries() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
         let wrong = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
 
@@ -1109,7 +1122,7 @@ mod tests {
 
     #[test]
     fn new_begin_pairing_invalidates_outstanding_approvals() {
-        let server = PairingServer::new("leftcar-host".into(), None);
+        let server = PairingServer::new([7u8; 32], None);
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),

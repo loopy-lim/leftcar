@@ -23,6 +23,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use base64::Engine as _;
 use tokio::net::{TcpListener, TcpStream};
 
 /// Geometry and transport facts of the live session being reconfigured,
@@ -299,6 +300,8 @@ const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ControlServer {
     backend: SharedBackend,
     pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    /// 제어 평면 핸드셰이크의 ServerHello 서명에 쓰이는 호스트 정체 키.
+    identity: std::sync::Arc<secure_channel::HostIdentity>,
     control_port: AtomicU16,
     sessions: Mutex<State>,
 }
@@ -312,10 +315,12 @@ impl ControlServer {
     pub fn new(
         backend: SharedBackend,
         pairing: std::sync::Arc<crate::pairing::PairingServer>,
+        identity: std::sync::Arc<secure_channel::HostIdentity>,
     ) -> Self {
         Self {
             backend,
             pairing,
+            identity,
             control_port: AtomicU16::new(crate::PREFERRED_CONTROL_PORT),
             sessions: Mutex::new(State {
                 next: 1,
@@ -1361,14 +1366,39 @@ impl ControlServer {
 async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     let (rd, mut wr) = sock.into_split();
     let mut lines = BufReader::new(rd).lines();
+    let Some(first_line) = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, lines.next_line())
+        .await
+        .ok()
+        .and_then(|read| read.ok())
+        .flatten()
+    else {
+        return;
+    };
+    let Some((mut crypto, mut pending)) =
+        negotiate(&first_line, &mut lines, &mut wr, server, peer).await
+    else {
+        return;
+    };
     loop {
-        // Reap half-open connections: a peer that vanished without FIN never
-        // unblocks this read otherwise, and its task leaks for the process
-        // lifetime. The viewer's 2s status poll makes 15s a generous budget.
-        let line = match tokio::time::timeout(CONTROL_IDLE_TIMEOUT, lines.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => break,
-            Ok(Err(_)) | Err(_) => break,
+        let raw = match pending.take() {
+            Some(line) => line,
+            None => {
+                // Reap half-open connections: a peer that vanished without FIN never
+                // unblocks this read otherwise, and its task leaks for the process
+                // lifetime. The viewer's 2s status poll makes 15s a generous budget.
+                match tokio::time::timeout(CONTROL_IDLE_TIMEOUT, lines.next_line()).await {
+                    Ok(Ok(Some(line))) => line,
+                    Ok(Ok(None)) => break,
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let line = match crypto.decode(raw) {
+            Ok(line) => line,
+            Err(_) => break,
         };
         if line.trim().is_empty() {
             continue;
@@ -1390,8 +1420,9 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                     && !local_pairing
                     && !server.pairing.authorize(token.as_deref().unwrap_or(""))
                 {
-                    write_line(
+                    let _ = write_response(
                         &mut wr,
+                        &mut crypto,
                         &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
                     )
                     .await;
@@ -1402,10 +1433,152 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
         };
-        if wr.write_all(resp.as_bytes()).await.is_err() || wr.write_all(b"\n").await.is_err() {
+        if write_response(&mut wr, &mut crypto, &resp).await.is_err() {
             break;
         }
     }
+}
+
+/// 한 연결의 봉인 상태. 루프백 진단 클라이언트(tools/, 테스트)는 평문을
+/// 유지하고, 그 외 피어는 secure-channel 핸드셰이크가 필수다.
+enum ConnCrypto {
+    Plain,
+    Secure {
+        tx: secure_channel::StreamSealer,
+        rx: secure_channel::StreamSealer,
+    },
+}
+
+impl ConnCrypto {
+    /// 수신 줄을 평문 JSON으로 되돌린다. 봉인 프레임은 `{"e":"<b64url>"}`.
+    fn decode(&mut self, raw: String) -> Result<String, ()> {
+        match self {
+            ConnCrypto::Plain => Ok(raw),
+            ConnCrypto::Secure { rx, .. } => {
+                let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ())?;
+                let encoded = parsed.get("e").and_then(|v| v.as_str()).ok_or(())?;
+                let frame = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(encoded)
+                    .map_err(|_| ())?;
+                let plaintext = rx.open(&frame).map_err(|_| ())?;
+                String::from_utf8(plaintext).map_err(|_| ())
+            }
+        }
+    }
+
+    /// 응답 JSON을 전송 형식으로 감싼다.
+    fn encode(&mut self, body: &str) -> Result<String, ()> {
+        match self {
+            ConnCrypto::Plain => Ok(body.to_owned()),
+            ConnCrypto::Secure { tx, .. } => {
+                let frame = tx.seal(body.as_bytes()).map_err(|_| ())?;
+                let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(frame);
+                Ok(json!({ "e": encoded }).to_string())
+            }
+        }
+    }
+}
+
+async fn write_response(
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    crypto: &mut ConnCrypto,
+    body: &str,
+) -> Result<(), ()> {
+    let wire = crypto.encode(body)?;
+    let _ = wr.write_all(wire.as_bytes()).await;
+    let _ = wr.write_all(b"\n").await;
+    Ok(())
+}
+
+async fn refuse_handshake(wr: &mut tokio::net::tcp::OwnedWriteHalf) {
+    write_line(
+        wr,
+        &serde_json::to_string(&err("handshake required")).unwrap_or_default(),
+    )
+    .await;
+}
+
+#[derive(serde::Deserialize)]
+struct ClientHelloLine {
+    /// 필수 필드 — 평문 명령 JSON과 구조 자체가 겹치지 않게 한다.
+    hello: String,
+    nc: String,
+    xk: String,
+}
+
+/// 첫 줄로 전송 모드를 정한다. ClientHello면 봉인 핸드셰이크를 끝까지 마치고
+/// Secure를, 루프백 평문이면 Plain(첫 줄을 되돌려 명령 루프가 처리)을, 그
+/// 외엔 오류 한 줄과 함께 None(연결 종료)을 돌려준다.
+async fn negotiate(
+    first_line: &str,
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>,
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    server: &ControlServer,
+    peer: &str,
+) -> Option<(ConnCrypto, Option<String>)> {
+
+    let hello: ClientHelloLine = match serde_json::from_str::<ClientHelloLine>(first_line) {
+        Ok(v) if v.hello == "c" => v,
+        _ => {
+            if is_loopback_peer(peer) {
+                return Some((ConnCrypto::Plain, Some(first_line.to_owned())));
+            }
+            refuse_handshake(wr).await;
+            return None;
+        }
+    };
+    let (Some(nc), Some(xk)) = (b64_bytes32(&hello.nc), b64_bytes32(&hello.xk)) else {
+        refuse_handshake(wr).await;
+        return None;
+    };
+    let client = secure_channel::ClientHello { nc, xk };
+    let (hello_out, keys) = secure_channel::accept_client(&server.identity, &client);
+    let reply = json!({
+        "v": 1,
+        "hello": "s",
+        "ns": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.ns),
+        "xk": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.xk),
+        "spk": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.spk),
+        "sig": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.sig),
+    });
+    write_line(wr, &reply.to_string()).await;
+    let mut rx = secure_channel::StreamSealer::new(keys.c2s);
+    let tx = secure_channel::StreamSealer::new(keys.s2c);
+    // 키 확인: 클라이언트의 첫 봉인 프레임은 {"hello":"ok","nc":<에코>}여야
+    // 한다 — 핸드셰이크 유래 값의 되돌림으로 두 방향 키를 모두 증명한다.
+    let confirmation = match tokio::time::timeout(CONTROL_IDLE_TIMEOUT, lines.next_line()).await {
+        Ok(Ok(Some(line))) => line,
+        _ => return None,
+    };
+    let expected_nc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nc);
+    let confirmed = (|| {
+        let parsed: serde_json::Value = serde_json::from_str(&confirmation).ok()?;
+        let frame = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parsed.get("e")?.as_str()?)
+            .ok()?;
+        let plaintext = rx.open(&frame).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).ok()?;
+        Some(
+            value.get("hello")?.as_str()? == "ok"
+                && value.get("nc")?.as_str()? == expected_nc,
+        )
+    })() == Some(true);
+    if !confirmed {
+        write_line(
+            wr,
+            &serde_json::to_string(&err("handshake failed")).unwrap_or_default(),
+        )
+        .await;
+        return None;
+    }
+    Some((ConnCrypto::Secure { tx, rx }, None))
+}
+
+fn b64_bytes32(encoded: &str) -> Option<[u8; 32]> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()?;
+    bytes.try_into().ok()
 }
 
 fn is_loopback_peer(peer: &str) -> bool {
@@ -1676,10 +1849,11 @@ mod tests {
     }
 
     fn test_pairing() -> std::sync::Arc<crate::pairing::PairingServer> {
-        std::sync::Arc::new(crate::pairing::PairingServer::new(
-            "leftcar-host".into(),
-            None,
-        ))
+        std::sync::Arc::new(crate::pairing::PairingServer::new([7u8; 32], None))
+    }
+
+    fn test_identity() -> std::sync::Arc<secure_channel::HostIdentity> {
+        std::sync::Arc::new(secure_channel::HostIdentity::from_seed([42u8; 32]))
     }
 
     async fn spawn_server_with_pairing(
@@ -1687,7 +1861,7 @@ mod tests {
     ) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing));
+        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing, test_identity()));
         server.set_control_port(addr.port());
         tokio::spawn(async move { server.run(listener).await });
         addr
@@ -1715,6 +1889,137 @@ mod tests {
             buf.push(byte[0]);
         }
         String::from_utf8(buf).unwrap()
+    }
+
+    // -- 봉인 제어 평면 (secure-channel 핸드셰이크) ---------------------------
+
+    #[tokio::test]
+    async fn secure_handshake_seals_commands_and_pairing_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let unb64 = |encoded: &str| -> [u8; 32] {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        async fn read_line(sock: &mut tokio::net::TcpStream) -> String {
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                use tokio::io::AsyncReadExt;
+                sock.read_exact(&mut byte).await.unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            String::from_utf8(buf).unwrap()
+        }
+
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        // 핸드셰이크: ClientHello → ServerHello(핀된 키로 검증) → 키 확인.
+        let mut nc = [0u8; 32];
+        secure_channel::random_bytes(&mut nc);
+        let mut secret_seed = [0u8; 32];
+        secure_channel::random_bytes(&mut secret_seed);
+        let secret = x25519_dalek::StaticSecret::from(secret_seed);
+        let client = secure_channel::ClientHello {
+            nc,
+            xk: x25519_dalek::PublicKey::from(&secret).to_bytes(),
+        };
+        sock.write_all(
+            format!(
+                "{}\n",
+                json!({ "v": 1, "hello": "c", "nc": b64(&nc), "xk": b64(&client.xk) })
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let hello_value: serde_json::Value =
+            serde_json::from_str(&read_line(&mut sock).await).unwrap();
+        let server_hello = secure_channel::ServerHello {
+            ns: unb64(hello_value["ns"].as_str().unwrap()),
+            xk: unb64(hello_value["xk"].as_str().unwrap()),
+            spk: unb64(hello_value["spk"].as_str().unwrap()),
+            sig: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(hello_value["sig"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        };
+        let pinned = test_identity().public_key();
+        let (keys, spk) =
+            secure_channel::client_finish(&secret, &client, &server_hello, Some(&pinned))
+                .unwrap();
+        assert_eq!(spk, pinned);
+        let mut send = secure_channel::StreamSealer::new(keys.c2s.clone());
+        let mut recv = secure_channel::StreamSealer::new(keys.s2c.clone());
+
+        let confirm = json!({ "hello": "ok", "nc": b64(&nc) });
+        let frame = send.seal(confirm.to_string().as_bytes()).unwrap();
+        sock.write_all(format!("{}\n", json!({ "e": b64(&frame) })).as_bytes())
+            .await
+            .unwrap();
+
+        // 봉인된 pair 요청 — 페어링 토큰이 이제 암호화 채널로만 이동한다.
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
+        let args = json!({
+            "offerId": payload["id"],
+            "secret": payload["s"],
+            "code": "",
+            "deviceId": "sealed-viewer",
+            "deviceName": "Sealed Viewer",
+        });
+        let pair_request = json!({ "command": "pair", "args": args, "token": null });
+        let frame = send.seal(pair_request.to_string().as_bytes()).unwrap();
+        sock.write_all(format!("{}\n", json!({ "e": b64(&frame) })).as_bytes())
+            .await
+            .unwrap();
+
+        // 서버의 pending 응답을 먼저 회수한다(비동기 경합 제거).
+        let first_response: serde_json::Value =
+            serde_json::from_slice(&recv.open(&{
+                let line = read_line(&mut sock).await;
+                let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(parsed["e"].as_str().unwrap())
+                    .unwrap()
+            })
+            .unwrap())
+            .unwrap();
+        assert_eq!(first_response["result"]["status"], "pending", "{first_response}");
+
+        // 승인 → 같은 봉인 채널로 픽업 폴링.
+        pairing.approve_pending(payload["id"].as_str().unwrap()).unwrap();
+        let frame = send.seal(pair_request.to_string().as_bytes()).unwrap();
+        sock.write_all(format!("{}\n", json!({ "e": b64(&frame) })).as_bytes())
+            .await
+            .unwrap();
+        let response_value: serde_json::Value =
+            serde_json::from_slice(&recv.open(&{
+                let line = read_line(&mut sock).await;
+                let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(parsed["e"].as_str().unwrap())
+                    .unwrap()
+            })
+            .unwrap())
+            .unwrap();
+        let token = response_value["result"]["token"].as_str().unwrap().to_owned();
+        assert_eq!(token.len(), 64, "{response_value}");
+
+        // 루프백 평문 경로는 진단 호환을 위해 살아 있어야 한다.
+        let mut plain = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let line = request(&mut plain, "getStatus", "{}", &token).await;
+        assert!(line.contains("\"ok\":true"), "{line}");
     }
 
     /// Pair via the real pairing flow and return the issued token.
@@ -1864,7 +2169,7 @@ mod tests {
         assert_eq!(response["result"]["code"].as_str().unwrap().len(), 6);
         let payload: serde_json::Value =
             serde_json::from_str(response["result"]["qr_payload"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["v"], 1);
+        assert_eq!(payload["v"], 2);
         assert_eq!(payload["p"], addr.port());
     }
 
@@ -2046,6 +2351,7 @@ mod tests {
                 stopped: stopped.clone(),
             }),
             test_pairing(),
+            test_identity(),
         );
         server.sessions.lock().unwrap().live.insert(
             1,
@@ -2103,6 +2409,7 @@ mod tests {
                 stopped: stopped.clone(),
             }),
             test_pairing(),
+            test_identity(),
         );
         server.sessions.lock().unwrap().live.insert(
             1,
@@ -2156,7 +2463,7 @@ mod tests {
 
     #[test]
     fn set_session_input_toggles_a_live_session() {
-        let server = ControlServer::new(backend(), test_pairing());
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
         server.sessions.lock().unwrap().live.insert(
             1,
             Session {
@@ -2193,7 +2500,7 @@ mod tests {
     #[test]
     fn screen_permission_passes_the_backend_answer_through() {
         // The fake has no TCC gate, so the trait default reports granted.
-        let server = ControlServer::new(backend(), test_pairing());
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
         assert!(server.screen_permission().unwrap());
 
         struct ScreenDeniedBackend;
@@ -2232,7 +2539,7 @@ mod tests {
             }
         }
 
-        let server = ControlServer::new(Arc::new(ScreenDeniedBackend), test_pairing());
+        let server = ControlServer::new(Arc::new(ScreenDeniedBackend), test_pairing(), test_identity());
         assert!(!server.screen_permission().unwrap());
     }
 
@@ -2255,7 +2562,7 @@ mod tests {
     #[tokio::test]
     async fn start_stream_auto_enables_input_when_permission_is_granted() {
         let fake = input_test_backend(true);
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
 
         let resp = server
             .dispatch(
@@ -2282,7 +2589,7 @@ mod tests {
     #[tokio::test]
     async fn start_stream_leaves_input_off_without_permission() {
         let fake = input_test_backend(false);
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
 
         let resp = server
             .dispatch(
@@ -2309,7 +2616,7 @@ mod tests {
     #[tokio::test]
     async fn reconfigure_stream_carries_input_enablement_to_replacement() {
         let fake = input_test_backend(true);
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
         server.set_session_input(1, true).unwrap();
         assert_eq!(*fake.input_calls.lock().unwrap(), vec![(7, true)]);
@@ -2421,6 +2728,7 @@ mod tests {
         let server = Arc::new(ControlServer::new(
             Arc::new(CaptureQueueAgeBackend),
             test_pairing(),
+            test_identity(),
         ));
         seed_live_session(&server, EncoderExperiment::Auto, 3840, 2160);
 
@@ -2518,7 +2826,7 @@ mod tests {
             input_permission: true,
             input_calls: Mutex::new(Vec::new()),
         });
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
 
         let resp = server
@@ -2569,7 +2877,7 @@ mod tests {
             input_permission: true,
             input_calls: Mutex::new(Vec::new()),
         });
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
 
         let resp = server
@@ -2615,7 +2923,7 @@ mod tests {
             input_permission: true,
             input_calls: Mutex::new(Vec::new()),
         });
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
 
         let resp = server
@@ -2661,7 +2969,7 @@ mod tests {
             input_permission: true,
             input_calls: Mutex::new(Vec::new()),
         });
-        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
 
         let resp = server
@@ -2697,7 +3005,7 @@ mod tests {
             fail_experiments: vec![EncoderExperiment::SplitVertical],
             stops: AtomicUsize::new(0),
         });
-        let server = Arc::new(ControlServer::new(backend.clone(), test_pairing()));
+        let server = Arc::new(ControlServer::new(backend.clone(), test_pairing(), test_identity()));
         seed_live_session(&server, EncoderExperiment::Auto, 2560, 1440);
 
         let resp = server
@@ -2755,7 +3063,7 @@ mod tests {
                 input_permission: true,
                 input_calls: Mutex::new(Vec::new()),
             });
-            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
             // dispatcher의 split 시작 검증은 진단 플래그를 요구하므로 라이브
             // split 세션을 직접 시드한다 — 이 테스트의 대상은 reconfigure의
             // 교체 세션 실험 선택이다.
@@ -2835,7 +3143,7 @@ mod tests {
                 input_permission: true,
                 input_calls: Mutex::new(Vec::new()),
             });
-            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
             seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
 
             let resp = server
@@ -2880,7 +3188,7 @@ mod tests {
                 input_permission: true,
                 input_calls: Mutex::new(Vec::new()),
             });
-            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing()));
+            let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
             seed_live_session(&server, EncoderExperiment::SplitVertical, 3840, 2160);
 
             let resp = server

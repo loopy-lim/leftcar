@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+fn test_identity() -> std::sync::Arc<secure_channel::HostIdentity> {
+    std::sync::Arc::new(secure_channel::HostIdentity::from_seed([42u8; 32]))
+}
+
 fn fake_backend() -> SharedBackend {
     Arc::new(FakeBackend {
         displays: vec![
@@ -176,12 +180,12 @@ impl CaptureBackend for RecordingBackend {
 }
 
 fn pairing() -> Arc<PairingServer> {
-    Arc::new(PairingServer::new("leftcar-host".into(), None))
+    Arc::new(PairingServer::new([7u8; 32], None))
 }
 
 async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>) {
     let p = pairing();
-    let server = Arc::new(ControlServer::new(fake_backend(), p.clone()));
+    let server = Arc::new(ControlServer::new(fake_backend(), p.clone(), test_identity()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -270,7 +274,7 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
         started_ips: Mutex::new(Vec::new()),
         started_udp_stability: Mutex::new(Vec::new()),
     });
-    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone()));
+    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone(), test_identity()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -380,6 +384,7 @@ async fn test_full_stream_lifecycle() {
             started_udp_stability: Mutex::new(Vec::new()),
         }),
         p.clone(),
+        test_identity(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -569,7 +574,7 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
         started_ips: Mutex::new(Vec::new()),
         started_udp_stability: Mutex::new(Vec::new()),
     });
-    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone()));
+    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone(), test_identity()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

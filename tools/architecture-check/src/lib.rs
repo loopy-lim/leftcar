@@ -123,6 +123,8 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         // desktop and Android facades can use the same bounded hot path.
         ("fec-core", &[]),
         ("usb-mux", &[]),
+        // 세션 암호 프리미티브 — fec-core와 같은 무의존 하위 계층.
+        ("secure-channel", &[]),
         ("media-model", &["domain"]),
         ("control-contract", &["domain", "media-model"]),
         ("session", &["domain"]),

@@ -1,6 +1,7 @@
 import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { connect, ControlRequestError } from "./control";
+import { rememberPinnedHostKey } from "./pinned-host-keys";
 import { DEFAULT_CONTROL_PORT } from "./defaults";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
@@ -15,6 +16,8 @@ import { currentTranslation } from "./language-store";
 export interface QrPayload {
   id: string;
   secret: string;
+  /** 호스트 Ed25519 공개키(b64url 32B) — 핸드셰이크 핀의 원천. */
+  hostKey: string;
   host: string;
   port: number;
 }
@@ -31,6 +34,7 @@ interface RawQrPayload {
   v?: unknown;
   id?: unknown;
   s?: unknown;
+  k?: unknown;
   h?: unknown;
   p?: unknown;
 }
@@ -38,6 +42,8 @@ interface RawQrPayload {
 const OFFER_ID_PATTERN =
   /^offer-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OFFER_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/** 호스트 Ed25519 공개키(b64url 32B = 43문자). */
+export const HOST_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * The current transport is protected by pairing but not encrypted by TLS.
@@ -113,7 +119,11 @@ export function canSubmitPairingCode(
   return hasHostTarget && !busy && /^\d{6}$/.test(normalized);
 }
 
-/** `{"v":1,"id":..,"s":..,"h":..,"p":..}` → QrPayload; null on any mismatch. */
+/**
+ * `{"v":2,"id":..,"s":..,"k":..,"h":..,"p":..}` → QrPayload; null on any
+ * mismatch. v2부터 `k`(호스트 공개키)가 필수다 — 핀 없는 연결은 중간자를
+ * 감지할 수 없으므로 QR이 핀의 원천이다.
+ */
 export function parseQrPayload(text: string): QrPayload | null {
   if (!text || typeof text !== "string") return null;
   let raw: RawQrPayload;
@@ -123,11 +133,13 @@ export function parseQrPayload(text: string): QrPayload | null {
     return null;
   }
   if (
-    raw.v !== 1 ||
+    raw.v !== 2 ||
     typeof raw.id !== "string" ||
     !OFFER_ID_PATTERN.test(raw.id) ||
     typeof raw.s !== "string" ||
     !OFFER_SECRET_PATTERN.test(raw.s) ||
+    typeof raw.k !== "string" ||
+    !HOST_KEY_PATTERN.test(raw.k) ||
     typeof raw.h !== "string" ||
     !isTrustedHost(raw.h) ||
     typeof raw.p !== "number" ||
@@ -137,7 +149,7 @@ export function parseQrPayload(text: string): QrPayload | null {
   ) {
     return null;
   }
-  return { id: raw.id, secret: raw.s, host: raw.h, port: raw.p };
+  return { id: raw.id, secret: raw.s, hostKey: raw.k, host: raw.h, port: raw.p };
 }
 
 /** Stable per-install device label shown in the host's paired-device list. */
@@ -173,13 +185,19 @@ const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
  * belongs to its issuing host and self-heals via 401 on connect).
  */
 export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
-  return pairAndStore(p.host, p.port, code, (pairingCode, deviceId, deviceName) => ({
-    offerId: p.id,
-    secret: p.secret,
-    code: pairingCode,
-    deviceId,
-    deviceName,
-  }));
+  return pairAndStore(
+    p.host,
+    p.port,
+    code,
+    (pairingCode, deviceId, deviceName) => ({
+      offerId: p.id,
+      secret: p.secret,
+      code: pairingCode,
+      deviceId,
+      deviceName,
+    }),
+    { pinnedHostKey: p.hostKey },
+  );
 }
 
 /** Complete pairing directly against the selected Host endpoint. */
@@ -188,6 +206,7 @@ export async function pairWithHostByCode(
   port = DEFAULT_CONTROL_PORT,
   code: string,
 ): Promise<string> {
+  // 수동 입력 경로는 핀이 없다 — TOFU로 첫 핸드셰이크의 키를 핀한다.
   return pairAndStore(host, port, code, (pairingCode, deviceId, deviceName) => ({
     code: pairingCode,
     deviceId,
@@ -211,6 +230,7 @@ async function pairAndStore(
     deviceId: string,
     deviceName: string,
   ) => Record<string, unknown>,
+  options?: { pinnedHostKey?: string | null },
 ): Promise<string> {
   if (!isTrustedHost(host)) {
     throw new LocalizedError("trustedHostError");
@@ -219,7 +239,9 @@ async function pairAndStore(
   if (!PAIRING_CODE_PATTERN.test(pairingCode)) {
     throw new LocalizedError("errPairingCodeInvalid");
   }
-  const client = await connect(host, port);
+  const client = await connect(host, port, 5000, undefined, {
+    pinnedHostKey: options?.pinnedHostKey ?? null,
+  });
   try {
     const { token } = await client.request<{ token: string }>(
       "pair",
@@ -229,6 +251,7 @@ async function pairAndStore(
       throw new LocalizedError("errPairingResponseInvalid");
     }
     await SecureStore.setItemAsync(TOKEN_KEY, token);
+    if (client.hostKey) rememberPinnedHostKey(host, port, client.hostKey);
     return token;
   } finally {
     // The pairing connection is single-purpose; the token travels via secure
@@ -291,7 +314,9 @@ export async function pairWithHostApproval(
 
   while (Date.now() < deadline) {
     throwIfAborted(options.signal);
-    const client = await connect(p.host, p.port);
+    const client = await connect(p.host, p.port, 5000, undefined, {
+      pinnedHostKey: p.hostKey,
+    });
     try {
       const response = await client.request<{ token?: string; status?: string }>(
         "pair",
@@ -302,6 +327,7 @@ export async function pairWithHostApproval(
           throw new LocalizedError("errPairingResponseInvalid");
         }
         await SecureStore.setItemAsync(TOKEN_KEY, response.token);
+        if (client.hostKey) rememberPinnedHostKey(p.host, p.port, client.hostKey);
         return { kind: "approved", token: response.token };
       }
       if (response.status === "pending") {

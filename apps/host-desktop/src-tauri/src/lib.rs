@@ -10,6 +10,7 @@ pub mod control;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
+pub mod identity;
 pub mod pairing;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
@@ -48,11 +49,19 @@ fn fatal_startup_error(message: String) -> ! {
 pub fn run() {
     let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = backend.clone();
+    // 호스트 정체 키: QR과 핸드셰이크 서명의 뿌리. 최초 기동에서 생성·영속된다.
+    let identity = Arc::new(identity::load_or_create(
+        identity::default_identity_path().as_deref(),
+    ));
     let pairing = Arc::new(pairing::PairingServer::new(
-        "leftcar-host".into(),
+        identity.public_key(),
         pairing::PairingServer::default_store_path(),
     ));
-    let server = Arc::new(control::ControlServer::new(backend.clone(), pairing.clone()));
+    let server = Arc::new(control::ControlServer::new(
+        backend.clone(),
+        pairing.clone(),
+        identity.clone(),
+    ));
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
