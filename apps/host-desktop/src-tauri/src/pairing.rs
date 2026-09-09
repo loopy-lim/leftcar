@@ -95,8 +95,10 @@ pub struct PendingPairingView {
 }
 
 /// 승인 완료 후 뷰어 폴링이 픽업하는 레코드. 메모리에만 살고 다음 offer가
-/// 만들어지면 지워진다.
+/// 만들어지면 지워진다. 승인은 특정 기기의 요청에 대한 것이므로 픽업도 그
+/// 기기만 할 수 있다 — 같은 QR을 찍은 다른 기기는 토큰을 받을 수 없다.
 struct CompletedPairing {
+    device_id: String,
     token: String,
     secret: session::OfferSecret,
 }
@@ -231,36 +233,9 @@ impl PairingServer {
         let device = domain::ids::DeviceId::from_raw(device_id)
             .map_err(|_| PairingServerError::PairingFailed)?;
         match inner.service.approve(offer_id, device, &secret_proof, code) {
-            Ok(_device) => {
-                inner.fail_counts.remove(offer_id);
-                let token = session::OfferSecret::from_random();
-                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
-                let paired = PairedDevice {
-                    device_id: device_id.to_owned(),
-                    name: name.to_owned(),
-                    token_hex: token_hex.clone(),
-                    paired_at: unix_timestamp_utc(),
-                };
-                inner
-                    .paired
-                    .retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
-                inner.paired.push(paired.clone());
-                inner.live_offers.remove(offer_id); // single-use: offer consumed
-                if self.persist(inner.paired.clone()).is_err() {
-                    // pairing itself succeeded; persistence is best-effort but
-                    // surfaced so callers/tests can detect a broken store
-                    eprintln!("leftcar: paired-device persistence failed");
-                }
-                Ok(token_hex)
-            }
+            Ok(_device) => Ok(self.complete_pairing(&mut inner, offer_id, device_id, name)),
             Err(_) => {
-                let count = inner.fail_counts.entry(offer_id.to_owned()).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    inner.service.cancel(offer_id);
-                    inner.live_offers.remove(offer_id);
-                    inner.fail_counts.remove(offer_id);
-                }
+                Self::record_pair_failure(&mut inner, offer_id);
                 Err(PairingServerError::PairingFailed)
             }
         }
@@ -279,13 +254,7 @@ impl PairingServer {
         let Some(offer_id) = inner.service.find_offer_by_code(code) else {
             let live: Vec<String> = inner.live_offers.iter().cloned().collect();
             for offer_id in live {
-                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    inner.service.cancel(&offer_id);
-                    inner.live_offers.remove(&offer_id);
-                    inner.fail_counts.remove(&offer_id);
-                }
+                Self::record_pair_failure(&mut inner, &offer_id);
             }
             return Err(PairingServerError::PairingFailed);
         };
@@ -301,36 +270,54 @@ impl PairingServer {
             .map_err(|_| PairingServerError::PairingFailed)?;
 
         match inner.service.approve(&offer_id, device, &secret.0, code) {
-            Ok(_device) => {
-                inner.fail_counts.remove(&offer_id);
-                let token = session::OfferSecret::from_random();
-                let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
-                let paired = PairedDevice {
-                    device_id: device_id.to_owned(),
-                    name: name.to_owned(),
-                    token_hex: token_hex.clone(),
-                    paired_at: unix_timestamp_utc(),
-                };
-                inner
-                    .paired
-                    .retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
-                inner.paired.push(paired);
-                inner.live_offers.remove(&offer_id);
-                if self.persist(inner.paired.clone()).is_err() {
-                    eprintln!("leftcar: paired-device persistence failed");
-                }
-                Ok(token_hex)
-            }
+            Ok(_device) => Ok(self.complete_pairing(&mut inner, &offer_id, device_id, name)),
             Err(_) => {
-                let count = inner.fail_counts.entry(offer_id.clone()).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    inner.service.cancel(&offer_id);
-                    inner.live_offers.remove(&offer_id);
-                    inner.fail_counts.remove(&offer_id);
-                }
+                Self::record_pair_failure(&mut inner, &offer_id);
                 Err(PairingServerError::PairingFailed)
             }
+        }
+    }
+
+    /// Mint the pairing token, register the device, consume the offer, and
+    /// persist. Shared success tail of every pairing flow.
+    fn complete_pairing(
+        &self,
+        inner: &mut Inner,
+        offer_id: &str,
+        device_id: &str,
+        name: &str,
+    ) -> String {
+        inner.fail_counts.remove(offer_id);
+        let token = session::OfferSecret::from_random();
+        let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+        let paired = PairedDevice {
+            device_id: device_id.to_owned(),
+            name: name.to_owned(),
+            token_hex: token_hex.clone(),
+            paired_at: unix_timestamp_utc(),
+        };
+        inner
+            .paired
+            .retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
+        inner.paired.push(paired);
+        inner.live_offers.remove(offer_id); // single-use: offer consumed
+        if self.persist(inner.paired.clone()).is_err() {
+            // pairing itself succeeded; persistence is best-effort but
+            // surfaced so callers/tests can detect a broken store
+            eprintln!("leftcar: paired-device persistence failed");
+        }
+        token_hex
+    }
+
+    /// Count a failed attempt against `offer_id`; three failures burn the
+    /// offer (docs §7: 무차별 시도는 오퍼 폐기로 끝난다).
+    fn record_pair_failure(inner: &mut Inner, offer_id: &str) {
+        let count = inner.fail_counts.entry(offer_id.to_owned()).or_insert(0);
+        *count += 1;
+        if *count >= 3 {
+            inner.service.cancel(offer_id);
+            inner.live_offers.remove(offer_id);
+            inner.fail_counts.remove(offer_id);
         }
     }
 
@@ -357,7 +344,9 @@ impl PairingServer {
             return Err(PairingServerError::PairingFailed);
         };
         if let Some(record) = inner.completed.get(offer_id) {
-            if session::constant_time_eq(&record.secret.0, &proof) {
+            if record.device_id == device_id
+                && session::constant_time_eq(&record.secret.0, &proof)
+            {
                 return Ok(record.token.clone());
             }
             return Err(PairingServerError::PairingFailed);
@@ -370,13 +359,7 @@ impl PairingServer {
             .take_secret_for_qr(offer_id)
             .ok_or(PairingServerError::PairingFailed)?;
         if !session::constant_time_eq(&expected.0, &proof) {
-            let count = inner.fail_counts.entry(offer_id.to_owned()).or_insert(0);
-            *count += 1;
-            if *count >= 3 {
-                inner.service.cancel(offer_id);
-                inner.live_offers.remove(offer_id);
-                inner.fail_counts.remove(offer_id);
-            }
+            Self::record_pair_failure(inner, offer_id);
             return Err(PairingServerError::PairingFailed);
         }
         inner.pending.insert(
@@ -400,6 +383,7 @@ impl PairingServer {
             .pending
             .remove(offer_id)
             .ok_or(PairingServerError::OfferNotFound)?;
+        let approved_device_id = request.device_id.clone();
         let Some(secret) = inner.service.take_secret_for_qr(offer_id) else {
             return Err(PairingServerError::PairingFailed);
         };
@@ -431,10 +415,14 @@ impl PairingServer {
                 inner.completed.insert(
                     offer_id.to_owned(),
                     CompletedPairing {
+                        device_id: approved_device_id,
                         token: token_hex,
                         secret,
                     },
                 );
+                // 승인으로 offer는 소진됐다 — 이후 픽업은 completed 레코드로만
+                // 이뤄지고, 소진된 offer에 새 대기 요청이 붙는 일은 없다.
+                inner.live_offers.remove(offer_id);
                 Ok(())
             }
             Err(_) => Err(PairingServerError::PairingFailed),
@@ -503,9 +491,14 @@ impl PairingServer {
     /// device was not paired.
     pub fn revoke(&self, device_id: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        // 철회된 기기가 미픽업 승인 토큰으로 되짚어 들어오지 않게 한다.
-        inner.completed.clear();
-        inner.pending.clear();
+        // 철회된 기기가 미픽업 승인 토큰으로 되짚어 들어오지 못하게 한다.
+        // 철회 대상이 아닌 기기의 진행 중 요청·미픽업 토큰은 그대로 둔다.
+        inner
+            .pending
+            .retain(|_, request| request.device_id != device_id);
+        inner
+            .completed
+            .retain(|_, record| record.device_id != device_id);
         let before = inner.paired.len();
         inner.paired.retain(|d| d.device_id != device_id);
         let removed = inner.paired.len() != before;
@@ -530,6 +523,9 @@ impl PairingServer {
         count
     }
 
+    /// Token-bearing records for in-crate tests only; the UI reads
+    /// [PairingServer::list_device_views].
+    #[cfg(test)]
     pub fn list_devices(&self) -> Vec<PairedDevice> {
         self.inner.lock().unwrap().paired.clone()
     }
@@ -1041,6 +1037,53 @@ mod tests {
         assert!(server
             .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
             .is_ok());
+    }
+
+    #[test]
+    fn approved_token_is_delivered_only_to_the_approved_device() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+        server.approve_pending(&offer_id).unwrap();
+
+        // 같은 QR 시크릿을 가진 다른 기기는 승인의 대상이 아니므로 토큰을
+        // 받을 수 없다(촬영·공유된 QR의 두 번째 수신자 차단).
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-2", "Nexus 7"),
+            Err(PairingServerError::PairingFailed)
+        ));
+        assert!(server
+            .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
+            .is_ok());
+        assert_eq!(server.list_devices().len(), 1);
+    }
+
+    #[test]
+    fn revoking_one_device_keeps_another_devices_pending_pickup() {
+        let server = PairingServer::new("leftcar-host".into(), None);
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+        server.approve_pending(&offer_id).unwrap();
+
+        // 다른 기기 철회는 viewer-1의 미픽업 토큰을 건드리지 않는다.
+        assert!(!server.revoke("viewer-2"));
+        assert!(server
+            .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
+            .is_ok());
+
+        // 정작 viewer-1을 철회하면 승인 레코드도 함께 사라진다.
+        assert!(server.revoke("viewer-1"));
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::OfferNotFound)
+        ));
+        assert!(server.list_devices().is_empty());
     }
 
     #[test]

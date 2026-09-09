@@ -227,11 +227,14 @@ describe("pairWithHost", () => {
     expect(closeMock).toHaveBeenCalledTimes(1); // closed even on failure
   });
 
-  it("failure clears any previously stored token (defensive)", async () => {
-    store.set("leftcar.token", "stale");
+  it("failure keeps a previously stored token for another host", async () => {
+    // 토큰은 발급한 호스트의 것이다 — 다른 호스트에 대한 실패한 페어링
+    // 시도(예: 옛 호스트 QR 폴백에서 코드 오타)가 그 토큰을 지우면
+    // 이미 페어링된 기기가 잠긴다. 만료 토큰은 연결 시 401로 자정된다.
+    store.set("leftcar.token", "a".repeat(64));
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
-    expect(store.get("leftcar.token")).toBeUndefined();
+    expect(store.get("leftcar.token")).toBe("a".repeat(64));
   });
 
   it("rejects a malformed issued token instead of storing it", async () => {
@@ -353,6 +356,33 @@ describe("approval-based QR pairing", () => {
     await expect(
       pairWithHostApproval(makePayload(), { pollMs: 1, timeoutMs: 30 }),
     ).rejects.toMatchObject({ message: "leftcar:errPairingApprovalTimeout" });
+  });
+
+  it("stops polling when the caller aborts (screen unmounted)", async () => {
+    requestMock.mockResolvedValue({ status: "pending" });
+    const controller = new AbortController();
+    const onPending = vi.fn(() => controller.abort());
+
+    await expect(
+      pairWithHostApproval(makePayload(), {
+        pollMs: 1,
+        signal: controller.signal,
+        onPending,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(onPending).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      pairWithHostApproval(makePayload(), { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("classifies rejection errors for the caller", () => {

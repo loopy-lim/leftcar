@@ -29,8 +29,6 @@ extern "C" {
     fn ANativeWindow_release(window: *mut c_void);
 }
 
-const MEDIA_BUFFER_BYTES: usize = 2_048;
-const COMMAND_IDR: &[u8] = b"IDR";
 
 pub(super) struct TileWorkerLaunch {
     pub(super) side: TileSide,
@@ -97,7 +95,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
         }
         return;
     }
-    let mut buffer = [0u8; MEDIA_BUFFER_BYTES];
+    let mut buffer = [0u8; crate::media_datagram::MEDIA_BUFFER_BYTES];
     let mut reassembler = FrameReassembler::default();
     let mut sequencer = CompletedFrameSequencer::default();
     let mut fec_groups: HashMap<(u16, u16), FecGroup> = HashMap::new();
@@ -280,7 +278,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             let outcome = match send_authenticated_checked(
                                 &socket,
                                 peer,
-                                COMMAND_IDR,
+                                crate::media_datagram::COMMAND_IDR,
                                 &token,
                             ) {
                                 Ok(()) => IdrRequestOutcome::Transmitted,
@@ -305,7 +303,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 TileCommand::Stop { send_bye } => {
                     if send_bye {
                         if let Some(peer) = peer {
-                            send_authenticated(&socket, peer, b"BYE", &token);
+                            send_authenticated(&socket, peer, crate::media_datagram::COMMAND_BYE, &token);
                             log_info!(
                                 "split {:?} sent stream close signal peer={} authenticated={}",
                                 side,
@@ -337,9 +335,9 @@ fn tile_worker(launch: TileWorkerLaunch) {
                     Ok((size, source)) if peer_allowed(Some(source), &expected_host) => {
                         peer = Some(source);
                         let packet = &buffer[..size];
-                        if packet.starts_with(b"LCH1") && packet.len() > 4 {
+                        if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
                             token.clear();
-                            token.extend_from_slice(&packet[4..]);
+                            token.extend_from_slice(challenge);
                             if side == TileSide::Left {
                                 control.input.lock().unwrap().reset_session();
                                 control.audio.lock().unwrap().clear();
@@ -368,11 +366,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 continue;
                             }
                             if let Some(reason) = parse_termination(packet, &token) {
-                                let code = match reason {
-                                    TerminationReason::HealthCheck => 1,
-                                    TerminationReason::HostForced => 2,
-                                    TerminationReason::HostStopped => 3,
-                                };
+                                let code = reason.code();
                                 control.termination_reason.store(code, Ordering::SeqCst);
                                 let _ = events.send(CoordinatorEvent::Fatal);
                                 continue;
@@ -709,18 +703,21 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 last_feedback_joined = joined;
                 last_feedback = Instant::now();
                 // The system-audio opt-in rides this 1s cadence on the left
-                // tile: SNDON/SNDOFF are idempotent, so the periodic
+                // tile only: SNDON/SNDOFF are idempotent, so the periodic
                 // re-assert heals a dropped command datagram without an ACK
                 // plane, exactly like the single-session refresh loop. The
-                // host gates the plane per viewer, so one carrier suffices.
-                send_authenticated(
-                    &socket,
-                    peer,
-                    crate::audio_protocol::audio_stream_command(
-                        control.audio_requested.load(Ordering::SeqCst),
-                    ),
-                    &token,
-                );
+                // host gates the plane per viewer, so one carrier suffices —
+                // the right tile must not double the command stream.
+                if side == TileSide::Left {
+                    send_authenticated(
+                        &socket,
+                        peer,
+                        crate::audio_protocol::audio_stream_command(
+                            control.audio_requested.load(Ordering::SeqCst),
+                        ),
+                        &token,
+                    );
+                }
             }
         }
     }

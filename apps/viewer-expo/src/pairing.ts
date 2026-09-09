@@ -1,6 +1,7 @@
 import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { connect, ControlRequestError } from "./control";
+import { DEFAULT_CONTROL_PORT } from "./defaults";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
 
@@ -72,7 +73,7 @@ export function parseHostEndpoint(endpoint: string): HostEndpoint | null {
 
   const separator = trimmed.lastIndexOf(":");
   if (separator < 0) {
-    return isTrustedHost(trimmed) ? { host: trimmed, port: 7777 } : null;
+    return isTrustedHost(trimmed) ? { host: trimmed, port: DEFAULT_CONTROL_PORT } : null;
   }
 
   const host = trimmed.slice(0, separator).trim();
@@ -161,71 +162,77 @@ export function deviceName(): string {
   return Constants.deviceName || currentTranslation().viewer.deviceLabel;
 }
 
+/** Pairing requests carry a six-digit human verification code. */
+const PAIRING_CODE_PATTERN = /^\d{6}$/;
+/** Issued tokens are 64 hex characters. */
+const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+
 /**
  * Complete pairing against the QR offer host. On success the issued token is
- * persisted; on any failure nothing is kept (a stale token is dropped too).
+ * persisted; on failure any previously stored token is left untouched (it
+ * belongs to its issuing host and self-heals via 401 on connect).
  */
 export async function pairWithHost(p: QrPayload, code: string): Promise<string> {
-  if (!isTrustedHost(p.host)) {
-    throw new LocalizedError("trustedHostError");
-  }
-  const pairingCode = code.trim().replace(/\s+/g, "");
-  if (!/^\d{6}$/.test(pairingCode)) {
-    throw new LocalizedError("errPairingCodeInvalid");
-  }
-  const client = await connect(p.host, p.port);
-  try {
-    const { token } = await client.request<{ token: string }>("pair", {
-      offerId: p.id,
-      secret: p.secret,
-      code: pairingCode,
-      deviceId: await getDeviceId(),
-      deviceName: deviceName(),
-    });
-    if (!/^[0-9a-f]{64}$/.test(token)) {
-      throw new LocalizedError("errPairingResponseInvalid");
-    }
-    await SecureStore.setItemAsync(TOKEN_KEY, token);
-    return token;
-  } catch (e) {
-    await clearToken();
-    throw e;
-  } finally {
-    // The pairing connection is single-purpose; the token travels via secure
-    // storage into the main control session, so always release the socket.
-    client.close();
-  }
+  return pairAndStore(p.host, p.port, code, (pairingCode, deviceId, deviceName) => ({
+    offerId: p.id,
+    secret: p.secret,
+    code: pairingCode,
+    deviceId,
+    deviceName,
+  }));
 }
 
 /** Complete pairing directly against the selected Host endpoint. */
 export async function pairWithHostByCode(
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
   code: string,
+): Promise<string> {
+  return pairAndStore(host, port, code, (pairingCode, deviceId, deviceName) => ({
+    code: pairingCode,
+    deviceId,
+    deviceName,
+  }));
+}
+
+/**
+ * Shared pairing tail: connect, request, validate, persist, release. A
+ * failure must NOT clear the stored token: the token belongs to whichever
+ * host issued it, and a failed attempt against another host (typo'd code,
+ * old host without approval support) must not lock the user out of an
+ * already-paired machine. Stale tokens self-heal on connect via 401.
+ */
+async function pairAndStore(
+  host: string,
+  port: number,
+  code: string,
+  args: (
+    pairingCode: string,
+    deviceId: string,
+    deviceName: string,
+  ) => Record<string, unknown>,
 ): Promise<string> {
   if (!isTrustedHost(host)) {
     throw new LocalizedError("trustedHostError");
   }
   const pairingCode = code.trim().replace(/\s+/g, "");
-  if (!/^\d{6}$/.test(pairingCode)) {
+  if (!PAIRING_CODE_PATTERN.test(pairingCode)) {
     throw new LocalizedError("errPairingCodeInvalid");
   }
   const client = await connect(host, port);
   try {
-    const { token } = await client.request<{ token: string }>("pair", {
-      code: pairingCode,
-      deviceId: await getDeviceId(),
-      deviceName: deviceName(),
-    });
-    if (!/^[0-9a-f]{64}$/.test(token)) {
+    const { token } = await client.request<{ token: string }>(
+      "pair",
+      args(pairingCode, await getDeviceId(), deviceName()),
+    );
+    if (!TOKEN_PATTERN.test(token)) {
       throw new LocalizedError("errPairingResponseInvalid");
     }
     await SecureStore.setItemAsync(TOKEN_KEY, token);
     return token;
-  } catch (e) {
-    await clearToken();
-    throw e;
   } finally {
+    // The pairing connection is single-purpose; the token travels via secure
+    // storage into the main control session, so always release the socket.
     client.close();
   }
 }
@@ -264,11 +271,14 @@ export async function pairWithHostApproval(
     pollMs?: number;
     timeoutMs?: number;
     onPending?: () => void;
+    /** Cancels the poll loop (screen unmounted, scan superseded). */
+    signal?: AbortSignal;
   } = {},
 ): Promise<PairingApprovalResult> {
   if (!isTrustedHost(p.host)) {
     throw new LocalizedError("trustedHostError");
   }
+  throwIfAborted(options.signal);
   const pollMs = options.pollMs ?? 2_500;
   const deadline = Date.now() + (options.timeoutMs ?? PAIRING_APPROVAL_TIMEOUT_MS);
   const args = {
@@ -280,6 +290,7 @@ export async function pairWithHostApproval(
   };
 
   while (Date.now() < deadline) {
+    throwIfAborted(options.signal);
     const client = await connect(p.host, p.port);
     try {
       const response = await client.request<{ token?: string; status?: string }>(
@@ -287,7 +298,7 @@ export async function pairWithHostApproval(
         args,
       );
       if (typeof response.token === "string") {
-        if (!/^[0-9a-f]{64}$/.test(response.token)) {
+        if (!TOKEN_PATTERN.test(response.token)) {
           throw new LocalizedError("errPairingResponseInvalid");
         }
         await SecureStore.setItemAsync(TOKEN_KEY, response.token);
@@ -295,7 +306,7 @@ export async function pairWithHostApproval(
       }
       if (response.status === "pending") {
         options.onPending?.();
-        await delay(pollMs);
+        await delay(pollMs, options.signal);
         continue;
       }
       throw new LocalizedError("errPairingResponseInvalid");
@@ -306,7 +317,7 @@ export async function pairWithHostApproval(
       // 개별 요청 타임아웃은 흐름을 죽이지 않는다 — 호스트가 한 순간
       // 바빠도 다음 폴링이 상태를 회수한다.
       if (e instanceof ControlRequestError && e.kind === "timeout") {
-        await delay(pollMs);
+        await delay(pollMs, options.signal);
         continue;
       }
       throw e;
@@ -317,6 +328,30 @@ export async function pairWithHostApproval(
   throw new LocalizedError("errPairingApprovalTimeout");
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function abortError(): Error {
+  const error = new Error("pairing approval polling aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

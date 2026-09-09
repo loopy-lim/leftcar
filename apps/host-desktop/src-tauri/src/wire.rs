@@ -5,10 +5,14 @@
 //! prevents a Windows host from subtly diverging from the macOS shim.
 
 pub const MAX_DATAGRAM: usize = 1_400;
-const MEDIA_HEADER: usize = 17;
+/// Legacy `LT` frame header length.
+pub const FRAME_HEADER_V1_LEN: usize = 17;
+/// Current `L2` frame header length.
+pub const FRAME_HEADER_V2_LEN: usize = 33;
+const MEDIA_HEADER: usize = FRAME_HEADER_V1_LEN;
 // Keep the legacy host inside the Android receiver's V2 payload stride. This
 // lets both wire versions share one bounded contiguous reassembly layout.
-pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - 33;
+pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - FRAME_HEADER_V2_LEN;
 pub const PARITY_HEADER: usize = 19;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +39,12 @@ pub enum InputEvent {
         meta_state: u32,
         down: bool,
         repeat: u16,
+    },
+    /// Committed IME text: raw UTF-8 after the 10-byte header, length implied
+    /// by the datagram size. Senders must keep one event inside the control
+    /// socket's 512-byte receive buffer.
+    Text {
+        text: String,
     },
     ReleaseAll,
 }
@@ -114,6 +124,17 @@ impl InputSequencer {
                 down: message[18] != 0,
                 repeat: read_u16(message, 19),
             },
+            // IME text: variable-length UTF-8 payload. Malformed bytes come
+            // only from a hostile or broken viewer, so they are dropped
+            // without an ack exactly like a wrong-length key event.
+            6 if message.len() > 10 => {
+                let Ok(text) = std::str::from_utf8(&message[10..]) else {
+                    return InputDecision::Ignore;
+                };
+                InputEvent::Text {
+                    text: text.to_owned(),
+                }
+            }
             _ => return InputDecision::Ignore,
         };
         self.last_reliable = sequence;
@@ -225,16 +246,6 @@ pub fn parity_datagrams_for_group(
             (datagram.len() <= MAX_DATAGRAM).then_some(datagram)
         })
         .collect()
-}
-
-/// Compatibility helper for callers that represent one complete group.
-pub fn parity_datagrams(
-    group_id: u16,
-    k: u8,
-    host_wall_ms: u64,
-    parity_shards: &[Vec<u8>],
-) -> Vec<Vec<u8>> {
-    parity_datagrams_for_group(group_id, k, 0, u16::from(k), host_wall_ms, parity_shards)
 }
 
 pub fn config_datagram(parameter_sets: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -370,7 +381,7 @@ mod tests {
     #[test]
     fn parity_datagrams_stay_under_mtu_and_carry_group_identity() {
         let shards = vec![vec![9u8; 500], vec![8u8; 500]];
-        let datagrams = parity_datagrams(77, 8, 1_000, &shards);
+        let datagrams = parity_datagrams_for_group(77, 8, 0, 8, 1_000, &shards);
         assert_eq!(datagrams.len(), 2);
         for (index, datagram) in datagrams.iter().enumerate() {
             assert!(datagram.len() <= MAX_DATAGRAM);
@@ -398,6 +409,40 @@ mod tests {
         assert_eq!(sequencer.accept(&packet), InputDecision::AckDuplicate(1));
         packet[7] = 3;
         assert_eq!(sequencer.accept(&packet), InputDecision::Ignore);
+    }
+
+    #[test]
+    fn text_input_decodes_and_acks_like_other_reliable_events() {
+        let mut sequencer = InputSequencer::default();
+        let mut packet = Vec::from(b"LCI1".as_slice());
+        packet.extend_from_slice(&1u32.to_be_bytes());
+        packet.extend_from_slice(&[6, 1]);
+        packet.extend_from_slice("가나2".as_bytes());
+        let InputDecision::ApplyAndAck {
+            sequence,
+            event: InputEvent::Text { text },
+        } = sequencer.accept(&packet)
+        else {
+            panic!("expected ApplyAndAck for a well-formed text event");
+        };
+        assert_eq!(sequence, 1);
+        assert_eq!(text, "가나2");
+        assert_eq!(sequencer.accept(&packet), InputDecision::AckDuplicate(1));
+    }
+
+    #[test]
+    fn text_input_with_malformed_utf8_is_dropped_without_ack() {
+        let mut sequencer = InputSequencer::default();
+        let mut packet = Vec::from(b"LCI1".as_slice());
+        packet.extend_from_slice(&1u32.to_be_bytes());
+        packet.extend_from_slice(&[6, 1]);
+        packet.extend_from_slice(&[0xff, 0xfe]);
+        assert_eq!(sequencer.accept(&packet), InputDecision::Ignore);
+        // An empty payload (header only) is not a text event either.
+        let mut empty = Vec::from(b"LCI1".as_slice());
+        empty.extend_from_slice(&1u32.to_be_bytes());
+        empty.extend_from_slice(&[6, 1]);
+        assert_eq!(sequencer.accept(&empty), InputDecision::Ignore);
     }
 
     #[test]

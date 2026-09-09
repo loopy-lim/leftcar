@@ -41,6 +41,7 @@ impl InputInjector {
                 vertical_milli,
             } => self.scroll(horizontal_milli, vertical_milli),
             InputEvent::Key { key_code, down, .. } => self.key(key_code, down),
+            InputEvent::Text { text } => self.text(&text),
             InputEvent::ReleaseAll => self.release_all(),
         }
     }
@@ -121,6 +122,21 @@ impl InputInjector {
         }
         Ok(())
     }
+
+    /// Committed IME text. KEYEVENTF_UNICODE types the exact UTF-16 units, so
+    /// layout-independent text (Hangul, emoji, surrogate pairs) arrives as
+    /// typed without synthesizing per-key events. No key state is retained:
+    /// each unit is a complete down+up pair.
+    fn text(&mut self, text: &str) -> Result<(), String> {
+        let inputs: Vec<INPUT> = text
+            .encode_utf16()
+            .flat_map(|unit| [unicode_input(unit, false), unicode_input(unit, true)])
+            .collect();
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        send(&inputs)
+    }
 }
 
 impl Drop for InputInjector {
@@ -164,6 +180,25 @@ fn send_keyboard(virtual_key: u16, down: bool) -> Result<(), String> {
         },
     };
     send(&[input])
+}
+
+fn unicode_input(unit: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: if up {
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                } else {
+                    KEYEVENTF_UNICODE
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
