@@ -371,12 +371,18 @@ export function connect(
         resolve(makeClient());
         return;
       }
-      const handshake = createClientHello();
-      helloSecret = handshake.secret;
-      hello = handshake.hello;
-      socket.write(`${encodeClientHello(handshake.hello)}\n`, "utf8", (writeError) => {
-        if (writeError) fail(`secure handshake write error: ${formatErrorMessage(writeError)}`);
-      });
+      try {
+        const handshake = createClientHello();
+        helloSecret = handshake.secret;
+        hello = handshake.hello;
+        socket.write(`${encodeClientHello(handshake.hello)}\n`, "utf8", (writeError) => {
+          if (writeError) fail(`secure handshake write error: ${formatErrorMessage(writeError)}`);
+        });
+      } catch (e) {
+        // 네이티브 콜백 안의 동기 예외는 앱 전체를 강제종료시킨다 — 반드시
+        // connect() 프로미스의 rejection으로 바꾼다.
+        fail(`secure handshake failed: ${formatErrorMessage(e)}`);
+      }
     });
 
     const makeClient = (): ControlClient => ({

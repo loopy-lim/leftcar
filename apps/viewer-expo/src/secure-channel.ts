@@ -32,22 +32,22 @@ export function setRandomSource(source: RandomSource | null): void {
 }
 
 function defaultRandomSource(length: number): Uint8Array {
-  // 1) 표준 WebCrypto(노드/테스트, 최신 RN 런타임)
+  // 1) 표준 WebCrypto(노드/테스트)
   const globalCrypto = (globalThis as { crypto?: { getRandomValues(b: Uint8Array): Uint8Array } })
     .crypto;
   if (globalCrypto?.getRandomValues) {
     return globalCrypto.getRandomValues(new Uint8Array(length));
   }
-  // 2) 기기 네이티브 모듈(Kotlin SecureRandom, LeftcarCrypto.randomBytes)
+  // 2) 기기: expo-crypto의 getRandomValues는 동기 호출이다(Hermes).
+  //    네이티브 브릿지 모듈은 비동기라 핸드셰이크의 동기 경로에 못 쓴다.
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { NativeModules } = require("react-native");
-    const native = NativeModules?.LeftcarCrypto;
-    if (native?.randomBytes) {
-      return base64UrlToBytes(native.randomBytes(length) as string);
+    const ExpoCrypto = require("expo-crypto");
+    if (typeof ExpoCrypto.getRandomValues === "function") {
+      return ExpoCrypto.getRandomValues(new Uint8Array(length)) as Uint8Array;
     }
   } catch {
-    // react-native를 못 불러오는 환경이라면 아래 오류가 정확한 원인을 알린다.
+    // expo-crypto 미탑재 환경 — 아래 오류가 정확한 원인을 알린다.
   }
   throw new Error("no CSPRNG available for secure channel");
 }
