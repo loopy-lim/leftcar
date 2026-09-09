@@ -9,10 +9,12 @@ pub mod audit;
 pub mod backend;
 pub mod control;
 pub mod fec;
+pub mod file_transfer;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod identity;
 pub mod pairing;
+pub mod settings;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -61,12 +63,17 @@ pub fn run() {
         pairing::token_store(pairing_store_path),
     ));
     let audit = Arc::new(audit::SessionAudit::new(audit::SessionAudit::default_path()));
+    // 파일 공유 게이트: 기본 꺼짐, 승인 토글처럼 영속된다(0600 settings.json).
+    let settings = Arc::new(settings::SharedSettings::load_or_default(
+        settings::default_settings_path(),
+    ));
     let server = Arc::new(control::ControlServer::new(
         backend.clone(),
         pairing.clone(),
         identity.clone(),
     ));
     server.set_audit(audit.clone());
+    server.set_settings(settings.clone());
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -101,11 +108,18 @@ pub fn run() {
             reject_pending_pairing,
             list_paired_devices,
             revoke_paired_device,
-            revoke_all_devices
+            revoke_all_devices,
+            get_file_share,
+            set_file_share,
+            add_share_files,
+            list_share_queue,
+            remove_share_file
         ])
         .setup(move |app| {
             app.manage(server);
             app.manage(pairing);
+            app.manage(audit);
+            app.manage(settings);
             app.manage(ControlEndpoint { port: control_port });
             warm_display_catalog(warmup_backend);
 
@@ -461,6 +475,69 @@ fn revoke_all_devices(
         serde_json::json!({ "devices": count }),
     );
     count
+}
+
+#[tauri::command]
+fn get_file_share(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+) -> bool {
+    settings.file_share()
+}
+
+#[tauri::command]
+fn set_file_share(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_file_share(enabled)?;
+    audit_state.log(
+        "file_share_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+/// 파일 공유 대기열에 파일을 올린다. 다이얼로그 취소는 no-op(빈 목록)이다.
+/// rfd의 동기 패널은 메인 스레드에서 호출하면 막히므로 블로킹 스레드에서
+/// 띄운다(Tauri 명령은 기본적으로 메인 스레드에서 실행된다).
+#[tauri::command]
+async fn add_share_files(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<Vec<file_transfer::ShareQueueEntry>, String> {
+    let server = server.inner().clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("Leftcar — 파일 공유")
+            .pick_files()
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|error| format!("file dialog failed: {error:?}"))?;
+    let transfers = server.file_transfer_state();
+    let mut entries = Vec::new();
+    for path in picked {
+        match transfers.add_share_file(path) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => eprintln!("leftcar: shared file rejected: {error}"),
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+fn list_share_queue(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Vec<file_transfer::ShareQueueEntry> {
+    server.file_transfer_state().queue_entries()
+}
+
+#[tauri::command]
+fn remove_share_file(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    queue_id: String,
+) -> bool {
+    server.file_transfer_state().remove_share_file(&queue_id)
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

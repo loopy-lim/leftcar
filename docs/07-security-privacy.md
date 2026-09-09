@@ -404,6 +404,7 @@ stream_task_restore_requires_reauthentication
   파일에서 삭제.
 - **세션 감사 로그**: 시작/종료·철회를 `sessions.jsonl`(0600)에 JSONL 기록
   (장치·IP·사유만, 토큰·키 금지).
+- 파일 전송 v1(호스트 게이트 기본 꺼짐, 20MiB 상한, 1MiB 청크, 암호화된 제어 채널 경유, 전송 기록은 감사 로그에 메타만).
 
 ### 진행·잔여
 

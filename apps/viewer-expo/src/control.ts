@@ -19,10 +19,18 @@ import { DEFAULT_CONTROL_PORT } from "./defaults";
 
 
 /** 명령별 요청 타임아웃: 스트림 시작은 첫 프레임 대기까지, 카탈로그는
- * 나열 조회까지의 실측 여유를 담는다. 나머지는 짧은 기본값을 쓴다. */
+ * 나열 조회까지의 실측 여유를 담는다. 나머지는 짧은 기본값을 쓴다.
+ * 파일 청크 1개는 최대 1 MiB(base64 ≈ 1.4 MB)라 느린 링크 대비 여유를 둔다. */
 const REQUEST_TIMEOUT_MS: Record<string, number> = {
   startStream: 25_000,
   getCatalog: 15_000,
+  sendFileBegin: 15_000,
+  sendFileChunk: 30_000,
+  sendFileEnd: 15_000,
+  listShareQueue: 15_000,
+  fetchFileBegin: 15_000,
+  fetchFileChunk: 30_000,
+  fetchFileEnd: 15_000,
 };
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
