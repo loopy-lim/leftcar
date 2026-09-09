@@ -141,7 +141,11 @@ pub(super) fn queue_parity_packet(
                 let Some(oldest) = fec_group_order.pop_front() else {
                     break;
                 };
-                fec_groups.remove(&oldest);
+                if let Some(group) = fec_groups.remove(&oldest) {
+                    renderer_stats
+                        .pressure
+                        .record_unrecoverable_group(group.missing_data_fragments());
+                }
             }
             let Some(group) = FecGroup::new(parity.id, parity.k, parity.base, parity.total) else {
                 return true;
@@ -201,7 +205,11 @@ pub(super) fn queue_fragment_packet(
             let Some(oldest) = fec_group_order.pop_front() else {
                 break;
             };
-            fec_groups.remove(&oldest);
+            if let Some(group) = fec_groups.remove(&oldest) {
+                renderer_stats
+                    .pressure
+                    .record_unrecoverable_group(group.missing_data_fragments());
+            }
         }
         if let Some(group) = FecGroup::new(fragment.id, group_k as u8, group_base, fragment.count) {
             fec_groups.insert(group_key, group);

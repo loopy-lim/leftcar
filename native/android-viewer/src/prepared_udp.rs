@@ -18,6 +18,14 @@ use std::time::Duration;
 const CHALLENGE_PREFIX: &[u8] = b"LCH1";
 const MAX_CHALLENGE_BYTES: usize = 128;
 
+/// Recognize a Host `LCH1` reachability challenge and return the challenge
+/// token (the bytes after the prefix). Shared by the preflight worker and
+/// both renderers so the acceptance rule cannot drift.
+pub fn learn_challenge(packet: &[u8]) -> Option<&[u8]> {
+    let rest = packet.strip_prefix(CHALLENGE_PREFIX)?;
+    (!rest.is_empty() && packet.len() <= MAX_CHALLENGE_BYTES).then_some(rest)
+}
+
 pub fn split_ports(base_port: u16) -> Result<(u16, u16), &'static str> {
     let right_port = base_port
         .checked_add(1)
@@ -62,9 +70,7 @@ impl PreparedUdpReceiver {
                     match worker_socket.recv_from(&mut packet) {
                         Ok((size, peer))
                             if peer_allowed(Some(peer), &worker_host)
-                                && size > CHALLENGE_PREFIX.len()
-                                && size <= MAX_CHALLENGE_BYTES
-                                && packet[..size].starts_with(CHALLENGE_PREFIX) =>
+                                && learn_challenge(&packet[..size]).is_some() =>
                         {
                             let challenge = &packet[..size];
                             *worker_token.lock().unwrap() =

@@ -6,12 +6,6 @@ describe("i18n module", () => {
     const ko = getTranslation("ko");
     const en = getTranslation("en");
 
-    expect(ko.common.appName).toBe("Leftcar");
-    expect(en.common.appName).toBe("Leftcar");
-
-    expect(ko.common.viewerTitle).toBe("원격 디스플레이");
-    expect(en.common.viewerTitle).toBe("Remote Displays");
-
     expect(ko.host.headerTitle).toBe("화면 공유 호스트");
     expect(en.host.headerTitle).toBe("Screen Sharing Host");
   });

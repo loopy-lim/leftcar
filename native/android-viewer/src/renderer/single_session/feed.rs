@@ -73,7 +73,7 @@ pub(super) fn feed_and_render(
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
@@ -83,6 +83,7 @@ pub(super) fn feed_and_render(
                 .live_edge_discards
                 .saturating_add(stats.pressure.decoder_output_discards),
             stats.pressure.fec_recovered_fragments,
+            stats.pressure.unrecoverable_fec_groups,
             stats.queued,
             stats.input_drops,
             stats.completed_batch,

@@ -109,7 +109,7 @@ jobs:
         run: |
           echo "## Evidence level summary" >> $GITHUB_STEP_SUMMARY
           echo "- E1 unit/property: covered by rust-fast + ts jobs" >> $GITHUB_STEP_SUMMARY
-          echo "- E2 integration: L5 loopback in transport-api tests" >> $GITHUB_STEP_SUMMARY
+          echo "- E2 integration: control_e2e (host Rust) + contract tests (TS)" >> $GITHUB_STEP_SUMMARY
           echo "- E3 build: android-compile job" >> $GITHUB_STEP_SUMMARY
           echo "- E4 emulator: NOT WIRED (H05/H08 device phase)" >> $GITHUB_STEP_SUMMARY
           echo "- E5 target Android device: PENDING — requires device lab (G1 gate)" >> $GITHUB_STEP_SUMMARY

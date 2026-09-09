@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveStreamResolution } from "./stream-resolution";
 import {
-  createAdaptiveResolutionState,
+  deriveQualityState,
   fallbackTargetFor,
   observeAdaptiveResolution,
   recordAdaptiveResolutionResult,
@@ -57,7 +57,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("downshifts on the second congested window", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const first = observeAdaptiveResolution(
       state,
       observation(1_000, {
@@ -85,7 +85,7 @@ describe("source-compatible adaptive resolution", () => {
   it("counts chronic completed recovery episodes as congestion evidence", () => {
     // Regression: recurring recovery episodes used to reset congestion windows
     // forever, permanently blocking downshift on a struggling link.
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     for (const nowMs of [1_000, 2_000, 3_000]) {
       const result = observeAdaptiveResolution(
         state,
@@ -115,7 +115,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("does not treat completed recovery episodes alone as congestion", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     for (const nowMs of [1_000, 2_000, 3_000]) {
       const result = observeAdaptiveResolution(
         state,
@@ -128,7 +128,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("still pauses measurements while a recovery burst is actively in progress", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     state = observeAdaptiveResolution(
       state,
       observation(1_000, { queueAgeUs: 120_000 }),
@@ -145,7 +145,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("does not count a recovery-observed window as stable for upshift", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const downshift = observeAdaptiveResolution(
       observeAdaptiveResolution(
         state,
@@ -172,7 +172,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("ignores recovery-burst loss and never downshifts a 1440p source", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const recovering = observeAdaptiveResolution(
       state,
       observation(1_000, {
@@ -185,7 +185,7 @@ describe("source-compatible adaptive resolution", () => {
     expect(recovering.action.kind).toBe("keep");
     expect(recovering.state.congestionWindows).toBe(0);
 
-    state = createAdaptiveResolutionState({ width: 2560, height: 1440, fps: 60 });
+    state = seedAdaptiveResolutionState({ width: 2560, height: 1440, fps: 60 }, { width: 2560, height: 1440, fps: 60 });
     state = observeAdaptiveResolution(
       state,
       observation(1_000, { receiverLossDelta: 3, encodedFps: 40, transmittedFps: 40 }),
@@ -197,7 +197,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("downshifts on sustained queue pressure even without receiver packet loss", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     state = observeAdaptiveResolution(
       state,
       observation(1_000, { queueAgeUs: 120_000 }),
@@ -210,7 +210,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("uses a Host bitrate-floor collapse as explicit downshift evidence", () => {
-    let state = createAdaptiveResolutionState({ width: 3200, height: 2000, fps: 60 });
+    let state = seedAdaptiveResolutionState({ width: 3200, height: 2000, fps: 60 }, { width: 3200, height: 2000, fps: 60 });
     state = observeAdaptiveResolution(
       state,
       observation(1_000, { floorCollapseDelta: 1 }),
@@ -226,7 +226,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("does not treat an idle low-fps source as congestion", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     for (const nowMs of [1_000, 2_000, 3_000]) {
       const result = observeAdaptiveResolution(
         state,
@@ -238,7 +238,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("honors cooldown after a failed downshift", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const first = observeAdaptiveResolution(state, observation(1_000, { queueAgeUs: 120_000 }));
     const second = observeAdaptiveResolution(first.state, observation(2_000, { queueAgeUs: 120_000 }));
     state = recordAdaptiveResolutionResult(second.state, second.action, false, 2_000).state;
@@ -248,7 +248,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("stores the target actually accepted by the renderer", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const action = { kind: "downshift" as const, target: { width: 2560, height: 1440, fps: 60 } };
     const result = recordAdaptiveResolutionResult(
       state,
@@ -262,7 +262,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("reports native when a downshift is accepted at the source target", () => {
-    const state = createAdaptiveResolutionState(sourceTarget);
+    const state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const result = recordAdaptiveResolutionResult(
       state,
       { kind: "downshift", target: { width: 2560, height: 1440, fps: 60 } },
@@ -275,7 +275,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("upshifts once after four stable windows and the five-second cooldown", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const downshift = observeAdaptiveResolution(
       observeAdaptiveResolution(
         state,
@@ -302,7 +302,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("does not upscale while measured encoder output remains slow", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     state = recordAdaptiveResolutionResult(
       state,
       { kind: "downshift", target: { width: 2560, height: 1440, fps: 60 } },
@@ -320,7 +320,7 @@ describe("source-compatible adaptive resolution", () => {
   });
 
   it("keeps fallback after a failed upshift and resets the stability window", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const downshift = observeAdaptiveResolution(
       observeAdaptiveResolution(
         state,
@@ -351,7 +351,7 @@ describe("receiver renderedFps pressure", () => {
   it("downshifts when the receiver freezes while Host-side encoding still reports 60", () => {
     // 회귀: encodedFps는 60을 유지하지만 수신기 renderedFps가 얼어 붙은
     // 상태(손실 동반)는 혼잡 증거가 되어야 한다.
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     state = observeAdaptiveResolution(
       state,
       observation(1_000, {
@@ -377,7 +377,7 @@ describe("receiver renderedFps pressure", () => {
   });
 
   it("counts sustained renderedFps collapse with completed recovery episodes as congestion", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const first = observeAdaptiveResolution(
       state,
       observation(1_000, {
@@ -401,7 +401,7 @@ describe("receiver renderedFps pressure", () => {
   it("ignores receiver loss when no renderedFps observation exists (older hosts)", () => {
     // renderedFps를 알 수 없으면 기존 동작을 유지한다: 손실만으로는
     // encodedFps 60에서 혼잡으로 보지 않는다.
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     for (const nowMs of [1_000, 2_000, 3_000]) {
       const result = observeAdaptiveResolution(
         state,
@@ -419,7 +419,7 @@ describe("receiver renderedFps pressure", () => {
   it("does not treat a low renderedFps sample by itself as congestion", () => {
     // 정적 화면에서 renderedFps가 낮게 측정되더라도 손실·복구·큐 압력이
     // 없으면 혼잡이 아니다 (idle-safe).
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     for (const nowMs of [1_000, 2_000, 3_000]) {
       const result = observeAdaptiveResolution(
         state,
@@ -436,7 +436,7 @@ describe("receiver renderedFps pressure", () => {
   });
 
   it("withholds upshift while the fresh receiver frame rate stays deficit", () => {
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     const downshift = observeAdaptiveResolution(
       observeAdaptiveResolution(
         state,
@@ -513,7 +513,7 @@ describe("seedAdaptiveResolutionState", () => {
   it("re-seeding for an explicit target change resets counters without touching sample logic", () => {
     // 명시적 해상도 변경 후 동기화는 상태를 다시 심는다 — 매 샘플마다
     // 히스테리시스를 무효화하지 않는다 (호출부가 변경 시에만 호출).
-    let state = createAdaptiveResolutionState(sourceTarget);
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
     state = observeAdaptiveResolution(
       state,
       observation(1_000, { queueAgeUs: 120_000 }),
@@ -527,5 +527,23 @@ describe("seedAdaptiveResolutionState", () => {
     expect(state.congestionWindows).toBe(0);
     expect(state.qualityState).toBe("native");
     expect(state.fallbackTarget).toBeNull();
+  });
+});
+
+describe("deriveQualityState", () => {
+  const native = { width: 3840, height: 2160, fps: 60 };
+  const fallback = { width: 2560, height: 1440, fps: 60 };
+
+  it("prefers the host-reported state even when it is not native", () => {
+    // 회귀: ?? 와 ?: 의 우선순위로 "fallback" 보고가 "native"로 뒤집혔다.
+    expect(deriveQualityState(native, native, "fallback")).toBe("fallback");
+    expect(deriveQualityState(fallback, native, "downshifting")).toBe(
+      "downshifting",
+    );
+  });
+
+  it("derives native exactly when the accepted target matches the source", () => {
+    expect(deriveQualityState(native, native)).toBe("native");
+    expect(deriveQualityState(fallback, native)).toBe("fallback");
   });
 });

@@ -86,7 +86,6 @@ pub fn run() {
             approve_pending_pairing,
             reject_pending_pairing,
             list_paired_devices,
-            revoke_device,
             revoke_paired_device,
             revoke_all_devices
         ])
@@ -414,14 +413,6 @@ fn list_paired_devices(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
 ) -> Vec<pairing::PairedDeviceView> {
     state.list_device_views()
-}
-
-#[tauri::command]
-fn revoke_device(
-    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-    device_id: String,
-) -> bool {
-    state.revoke(&device_id)
 }
 
 #[tauri::command]

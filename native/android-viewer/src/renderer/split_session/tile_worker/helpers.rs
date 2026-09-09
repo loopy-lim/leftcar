@@ -152,7 +152,8 @@ pub(super) fn process_frame(
     control: &RendererControl,
     telemetry: &mut TileLatencyTelemetry,
 ) {
-    let keyframe = is_keyframe(&frame.au);
+    let keyframe =
+        crate::media_datagram::is_keyframe(&frame.au, viewer_decoder::VideoCodec::H264);
     let gap = decide_split_frame_gap(*last_id, frame.id, keyframe, *awaiting_keyframe);
     if gap.missing > 0 {
         stats.fec(side).record_gap_event(gap.missing);
@@ -317,12 +318,6 @@ pub(super) fn process_frame(
     }
 }
 
-pub(super) fn is_keyframe(au: &[u8]) -> bool {
-    viewer_decoder::split_annexb(au)
-        .iter()
-        .any(|nal| viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR))
-}
-
 pub(super) fn expand_sequence(current: u64, previous: Option<u16>, raw: u16) -> u64 {
     let Some(previous) = previous else {
         return u64::from(raw);
@@ -338,9 +333,7 @@ pub(super) fn send_authenticated(socket: &UdpSocket, peer: SocketAddr, body: &[u
     if token.is_empty() {
         return;
     }
-    let mut packet = Vec::with_capacity(body.len() + token.len());
-    packet.extend_from_slice(body);
-    packet.extend_from_slice(token);
+    let packet = crate::media_datagram::frame_authenticated(body, token);
     let _ = socket.send_to(&packet, peer);
 }
 
@@ -359,10 +352,9 @@ pub(super) fn send_authenticated_checked(
             "no session token",
         ));
     }
-    let mut packet = Vec::with_capacity(body.len() + token.len());
-    packet.extend_from_slice(body);
-    packet.extend_from_slice(token);
-    socket.send_to(&packet, peer).map(|_| ())
+    socket
+        .send_to(&crate::media_datagram::frame_authenticated(body, token), peer)
+        .map(|_| ())
 }
 
 pub(super) fn rate(current: u64, previous: u64, elapsed_ms: u64) -> u16 {

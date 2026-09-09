@@ -4,13 +4,10 @@
  */
 
 export interface HostSnapshotView {
-  hostId: string;
   platform: "macos" | "windows" | "linux";
   pairingState:
     | "unpaired" | "advertising" | "awaiting_host_approval"
     | "paired_offline" | "connecting" | "connected" | "revoked";
-  pairedDevices: Array<{ deviceId: string; displayName: string }>;
-  approvedSources: Array<{ sourceId: string; displayName: string }>;
   activeStreamCount: number;
 }
 
@@ -21,9 +18,4 @@ export function trayStatus(snapshot: HostSnapshotView): string {
   }
   if (snapshot.pairingState === "connected") return "Leftcar — 연결됨, 대기 중";
   return "Leftcar";
-}
-
-/** Stop-all must be always available while capturing (docs/07 §10). */
-export function canStopAll(snapshot: HostSnapshotView): boolean {
-  return snapshot.activeStreamCount > 0;
 }

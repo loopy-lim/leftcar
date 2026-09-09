@@ -161,11 +161,8 @@ function useHostStatus(t: TranslationSchema) {
       if (nextTerminationNotice) setTerminationNotice(nextTerminationNotice);
       setBanner(
         trayStatus({
-          hostId: "local",
           platform: hostPlatform,
           pairingState: "connected",
-          pairedDevices: [],
-          approvedSources: [],
           activeStreamCount: activeSessions.length,
         } satisfies HostSnapshotView),
       );
@@ -702,7 +699,6 @@ function SystemAlertBanners({
 }
 
 interface IdleStudioViewProps {
-  controlPort: number;
   t: TranslationSchema;
   onOpenPairing: () => void;
 }
@@ -909,51 +905,49 @@ function Dashboard() {
     }
   };
 
-  const toggleSessionInput = async (session: SessionRow) => {
-    setInputBusy(session.session);
+  // 공통 뼈대: busy 표시 → 명령 → 오류 해제 → 갱신 → 마무리. 성공/실패
+  // 문구가 하나뿐이므로 네 핸들러가 같은 순서를 재사용한다.
+  const runSessionAction = async <B extends number | "permission">(
+    setBusy: (value: B | null) => void,
+    busyValue: B,
+    action: () => Promise<void>,
+    onSuccess?: () => void,
+  ): Promise<void> => {
+    setBusy(busyValue);
     try {
-      await invoke("set_session_input", {
+      await action();
+      setInputActionError(null);
+      await refresh();
+      onSuccess?.();
+    } catch (cause) {
+      setInputActionError(hostErrorView(cause, t).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleSessionInput = (session: SessionRow) =>
+    runSessionAction(setInputBusy, session.session, () =>
+      invoke("set_session_input", {
         session: session.session,
         enabled: !session.inputEnabled,
-      });
-      setInputActionError(null);
-      await refresh();
-    } catch (cause) {
-      setInputActionError(hostErrorView(cause, t).message);
-    } finally {
-      setInputBusy(null);
-    }
-  };
+      }),
+    );
 
-  const setSessionQuality = async (session: SessionRow, quality: number | null) => {
-    setQualityBusy(session.session);
-    try {
-      await invoke("set_session_quality", {
-        session: session.session,
-        quality,
-      });
-      setInputActionError(null);
-      await refresh();
-    } catch (cause) {
-      setInputActionError(hostErrorView(cause, t).message);
-    } finally {
-      setQualityBusy(null);
-    }
-  };
+  const setSessionQuality = (session: SessionRow, quality: number | null) =>
+    runSessionAction(
+      setQualityBusy,
+      session.session,
+      () => invoke("set_session_quality", { session: session.session, quality }),
+    );
 
-  const forceStopSession = async (session: SessionRow) => {
-    setInputBusy(session.session);
-    try {
-      await invoke("force_stop_session", { session: session.session });
-      setInputActionError(null);
-      await refresh();
-      setPendingStopSession(null);
-    } catch (cause) {
-      setInputActionError(hostErrorView(cause, t).message);
-    } finally {
-      setInputBusy(null);
-    }
-  };
+  const forceStopSession = (session: SessionRow) =>
+    runSessionAction(
+      setInputBusy,
+      session.session,
+      () => invoke("force_stop_session", { session: session.session }),
+      () => setPendingStopSession(null),
+    );
 
   const copyAddressInfo = () => {
     const textToCopy = lanIp ? `${lanIp}:${controlPort}` : `:${controlPort}`;
@@ -970,12 +964,11 @@ function Dashboard() {
     });
   };
 
-  const themeLabel =
-    theme === "light"
-      ? t.common.themeLight
-      : theme === "dark"
-        ? t.common.themeDark
-        : t.common.themeSystem;
+  const themeLabel = {
+    light: t.common.themeLight,
+    dark: t.common.themeDark,
+    system: t.common.themeSystem,
+  }[theme];
 
   return (
     <div className="host-window">
@@ -1030,7 +1023,6 @@ function Dashboard() {
           />
         ) : (
           <IdleStudioView
-            controlPort={controlPort}
             t={t}
             onOpenPairing={() => setShowPairingModal(true)}
           />

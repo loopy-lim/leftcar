@@ -124,31 +124,10 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("fec-core", &[]),
         ("usb-mux", &[]),
         ("media-model", &["domain"]),
-        ("network-protocol", &["domain"]),
         ("control-contract", &["domain", "media-model"]),
-        ("session", &["domain", "media-model"]),
-        ("transport-api", &["domain", "media-model"]),
-        (
-            "transport-quic",
-            &["domain", "media-model", "transport-api"],
-        ),
-        (
-            "host-core",
-            &[
-                "domain",
-                "media-model",
-                "network-protocol",
-                "transport-api",
-                "session",
-            ],
-        ),
-        (
-            "viewer-core",
-            &["domain", "media-model", "transport-api", "session"],
-        ),
-        ("diagnostics", &["domain"]),
-        ("macos-capture", &["domain", "media-model"]),
-        ("macos-encode", &["domain", "media-model"]),
+        ("session", &["domain"]),
+        ("host-core", &["domain", "media-model"]),
+        ("viewer-core", &["domain", "media-model"]),
         (
             "android-viewer",
             &[
@@ -161,7 +140,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
             ],
         ),
         ("leftcar-rustra", &["control-contract"]),
-        ("viewer-decoder", &["media-model", "libc"]),
+        ("viewer-decoder", &["libc"]),
         ("architecture-check", &[]),
     ];
 
@@ -193,10 +172,8 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         }
         // Video hot path: crates in the video plane must not depend on the
         // control contract, and the contract must not appear in media-model.
-        if matches!(
-            crate_name.as_str(),
-            "media-model" | "transport-api" | "transport-quic"
-        ) && info.internal_deps.iter().any(|d| d == "control-contract")
+        if crate_name == "media-model"
+            && info.internal_deps.iter().any(|d| d == "control-contract")
         {
             out.push(Violation {
                 rule: "video-plane-has-no-control-contract".into(),
@@ -204,10 +181,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
             });
         }
         // No crate except platform facades and apps may touch platform SDKs.
-        if !matches!(
-            crate_name.as_str(),
-            "macos-capture" | "macos-encode" | "control-contract"
-        ) {
+        if crate_name != "control-contract" {
             for dep in &info.external_deps {
                 if FORBIDDEN_PLATFORM_DEPS.contains(&dep.as_str()) {
                     out.push(Violation {

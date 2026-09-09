@@ -1,17 +1,5 @@
 use super::*;
 
-pub(super) fn is_keyframe(au: &[u8], codec: viewer_decoder::VideoCodec) -> bool {
-    viewer_decoder::split_annexb(au)
-        .iter()
-        .any(|nal| match codec {
-            viewer_decoder::VideoCodec::H264 => {
-                viewer_decoder::nal_type(nal.bytes) == Some(viewer_decoder::NAL_IDR)
-            }
-            viewer_decoder::VideoCodec::Hevc => viewer_decoder::hevc_nal_type(nal.bytes)
-                .is_some_and(|nal_type| matches!(nal_type, 19..=21)),
-        })
-}
-
 pub(super) fn reset_decoder(
     decoder: &mut Option<viewer_decoder::AndroidDecoder>,
     codec_config: &mut Option<viewer_decoder::CodecConfig>,

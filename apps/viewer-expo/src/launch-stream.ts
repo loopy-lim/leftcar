@@ -11,6 +11,8 @@ import type { StreamContentMode } from "./stream-profile";
 import type { ActiveStream } from "./catalog-model-types";
 import {
   isExact4K,
+  SPLIT_4K_HEIGHT,
+  SPLIT_4K_WIDTH,
   type AdaptiveQualityState,
   type AdaptiveTarget,
 } from "./adaptive-resolution";
@@ -364,7 +366,11 @@ function resolveReconfigureExperiment(
     active.mediaTransport === "udp" &&
     isExact4K(target) &&
     target.fps === STREAM_TARGET_FPS &&
-    availableEncoderExperiments(input.advertisedEncoderExperiments, 3840, 2160)
+    availableEncoderExperiments(
+      input.advertisedEncoderExperiments,
+      SPLIT_4K_WIDTH,
+      SPLIT_4K_HEIGHT,
+    )
       .some((experiment) => experiment.id === "splitVertical");
   return promote ? "splitVertical" : active.encoderExperiment;
 }

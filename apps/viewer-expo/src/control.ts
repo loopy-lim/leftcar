@@ -3,6 +3,16 @@ import type { AdaptiveQualityState } from "./adaptive-resolution";
 import type { EncoderExperimentId } from "./encoder-experiment";
 import { currentTranslation } from "./language-store";
 import { LocalizedError } from "./localized-error";
+import { DEFAULT_CONTROL_PORT } from "./defaults";
+
+
+/** 명령별 요청 타임아웃: 스트림 시작은 첫 프레임 대기까지, 카탈로그는
+ * 나열 조회까지의 실측 여유를 담는다. 나머지는 짧은 기본값을 쓴다. */
+const REQUEST_TIMEOUT_MS: Record<string, number> = {
+  startStream: 25_000,
+  getCatalog: 15_000,
+};
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 /**
  * Control-plane client (design §제어평면): viewer pulls from the host's
@@ -262,7 +272,7 @@ export type TokenProvider = () => Promise<string | null>;
 
 export function connect(
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
   timeoutMs = 5000,
   tokenProvider?: TokenProvider,
 ): Promise<ControlClient> {
@@ -298,11 +308,7 @@ export function connect(
             const id = nextId++;
             const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
             const payload = JSON.stringify(envelope) + "\n";
-            const requestTimeout = command === "startStream"
-              ? 25_000
-              : command === "getCatalog"
-                ? 15_000
-                : 5_000;
+            const requestTimeout = REQUEST_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
             const timer = setTimeout(() => {
               const handler = pending.get(id);
               if (!handler) return;

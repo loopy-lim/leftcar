@@ -1,4 +1,5 @@
 import * as SecureStore from "expo-secure-store";
+import { DEFAULT_CONTROL_PORT } from "./defaults";
 
 export interface RecentHostItem {
   host: string;
@@ -38,7 +39,7 @@ export function parseRecentHosts(raw: string | null): RecentHostItem[] {
 export function updateRecentHostsList(
   current: RecentHostItem[],
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
   name?: string,
   now = Date.now(),
 ): RecentHostItem[] {
@@ -62,7 +63,7 @@ export function updateRecentHostsList(
 export function filterOutHost(
   current: RecentHostItem[],
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
 ): RecentHostItem[] {
   const normalizedHost = host.trim().toLowerCase();
   return current.filter(
@@ -81,7 +82,7 @@ export async function getRecentHosts(): Promise<RecentHostItem[]> {
 
 export async function saveRecentHost(
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
   name?: string,
 ): Promise<RecentHostItem[]> {
   try {
@@ -96,7 +97,7 @@ export async function saveRecentHost(
 
 export async function removeRecentHost(
   host: string,
-  port = 7777,
+  port = DEFAULT_CONTROL_PORT,
 ): Promise<RecentHostItem[]> {
   try {
     const current = await getRecentHosts();

@@ -202,7 +202,7 @@ impl DispatchLedger {
     /// Aggregate form of `in_flight` + `retained_request`; the android
     /// wiring logs the two states separately, this stays in the host-tested
     /// pure-state contract.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn has_pending_request(&self) -> bool {
         self.outstanding.is_some() || self.retained
     }
@@ -288,7 +288,7 @@ impl DispatchLedger {
     /// reports exactly once) and is inert. The production wiring uses
     /// `on_outcome_stamped` with the id carried on the event; this path
     /// form keeps the pure 2-tick contract testable standalone.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn on_outcome(
         &mut self,
         side: TileSide,

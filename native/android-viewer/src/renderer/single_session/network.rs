@@ -9,12 +9,12 @@ pub(super) struct MediaBatch {
 
 pub(super) fn recv_media_batch(
     socket: &std::net::UdpSocket,
-    buffers: &mut [[u8; MEDIA_DATAGRAM_BYTES]; MEDIA_BATCH_SIZE],
+    buffers: &mut [[u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE],
 ) -> std::io::Result<MediaBatch> {
     let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
     let mut iovecs: [libc::iovec; MEDIA_BATCH_SIZE] = std::array::from_fn(|index| libc::iovec {
         iov_base: buffers[index].as_mut_ptr().cast(),
-        iov_len: MEDIA_DATAGRAM_BYTES,
+        iov_len: crate::media_datagram::MEDIA_BUFFER_BYTES,
     });
     let mut messages: [libc::mmsghdr; MEDIA_BATCH_SIZE] =
         std::array::from_fn(|_| unsafe { std::mem::zeroed() });
@@ -112,11 +112,7 @@ pub(super) fn consume_viewer_response(
         return true;
     }
     if let Some(reason) = parse_termination(packet, token) {
-        let code = match reason {
-            crate::input_protocol::TerminationReason::HealthCheck => 1,
-            crate::input_protocol::TerminationReason::HostForced => 2,
-            crate::input_protocol::TerminationReason::HostStopped => 3,
-        };
+        let code = reason.code();
         log_info!(
             "host terminated stream: reason={} ({})",
             code,
@@ -184,8 +180,8 @@ pub(super) fn configure_single_session_sockets(
     let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(2)));
     let _ = control_socket.set_nonblocking(true);
     let receive_buffer: libc::c_int = 512 * 1024;
-    let media_tos: libc::c_int = 0x88;
-    let control_tos: libc::c_int = 0xb8;
+    let media_tos: libc::c_int = crate::socket_tuning::MEDIA_TOS;
+    let control_tos: libc::c_int = crate::socket_tuning::CONTROL_TOS;
     unsafe {
         libc::setsockopt(
             socket.as_raw_fd(),

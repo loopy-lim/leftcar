@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { diagnosticValueVariants } from "./diagnosticStyles";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
-import { cn } from "./lib/cn";
+import { cn } from "@leftcar/ui-tokens";
 import { inspectorButtonVariants } from "./lib/variants";
 import type { SessionRow } from "./sessionTypes";
 

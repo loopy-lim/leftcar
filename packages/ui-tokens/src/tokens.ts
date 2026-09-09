@@ -64,11 +64,3 @@ export const colors = {
 
 export type ThemeMode = "light" | "dark";
 export type ThemeTokens = { [K in keyof typeof colors.light]: string };
-
-export const radii = {
-  sm: 4,
-  md: 8,
-  lg: 12,
-  xl: 16,
-  full: 9999,
-} as const;

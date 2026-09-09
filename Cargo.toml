@@ -3,16 +3,10 @@ resolver = "2"
 members = [
     "crates/domain",
     "crates/media-model",
-    "crates/network-protocol",
     "crates/session",
-    "crates/transport-api",
-    "crates/transport-quic",
     "crates/host-core",
-    "crates/macos-capture",
-    "crates/macos-encode",
     "crates/viewer-core",
     "crates/viewer-decoder",
-    "crates/diagnostics",
     "crates/fec-core",
     "crates/usb-mux",
     "crates/control-contract",
@@ -30,8 +24,6 @@ repository = "leftcar"
 [workspace.dependencies]
 domain = { path = "crates/domain" }
 media-model = { path = "crates/media-model" }
-network-protocol = { path = "crates/network-protocol" }
-transport-api = { path = "crates/transport-api" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,5 +35,3 @@ zeroize = "1"
 
 [profile.release]
 lto = "thin"
-
-# integration tests live in crates/transport-api/tests (L5 loopback)

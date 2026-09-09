@@ -200,7 +200,7 @@ fn run(launch: SingleRendererLaunch) {
         }
     }
     let mut buf = vec![0u8; 2_048];
-    let mut media_buffers = [[0u8; MEDIA_DATAGRAM_BYTES]; MEDIA_BATCH_SIZE];
+    let mut media_buffers = [[0u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE];
     let mut control_buf = vec![0u8; 512];
     // The preflight challenge has already authenticated this endpoint and
     // token. Seed both control paths so the cloned input worker and socket
@@ -273,9 +273,9 @@ fn run(launch: SingleRendererLaunch) {
                     Ok((received, peer)) if peer_allowed(Some(peer), &expected_host) => {
                         host_peer = Some(peer);
                         let packet = &buf[..received];
-                        if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
+                        if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
                             viewer_control_token.clear();
-                            viewer_control_token.extend_from_slice(&packet[4..]);
+                            viewer_control_token.extend_from_slice(challenge);
                             *input_endpoint.lock().unwrap() =
                                 Some((peer, viewer_control_token.clone()));
                             control_clone.input.lock().unwrap().reset_session();
@@ -466,7 +466,7 @@ fn run(launch: SingleRendererLaunch) {
                     continue;
                 }
             };
-            if packet.len() > MEDIA_DATAGRAM_BYTES {
+            if packet.len() > crate::media_datagram::MEDIA_BUFFER_BYTES {
                 log_info!(
                     "TCP media frame exceeds datagram capacity: {} bytes",
                     packet.len()
@@ -620,9 +620,9 @@ fn run(launch: SingleRendererLaunch) {
             }
 
             let packet = &media_buffer[..received];
-            if packet.len() > 4 && packet.len() <= 128 && &packet[..4] == b"LCH1" {
+            if let Some(challenge) = crate::prepared_udp::learn_challenge(packet) {
                 viewer_control_token.clear();
-                viewer_control_token.extend_from_slice(&packet[4..]);
+                viewer_control_token.extend_from_slice(challenge);
                 control_health = ControlHealthState::default();
                 *input_endpoint.lock().unwrap() = Some((peer, viewer_control_token.clone()));
                 control_clone.input.lock().unwrap().reset_session();
@@ -786,7 +786,12 @@ fn run(launch: SingleRendererLaunch) {
                 .unwrap()
                 .push(InputEvent::ReleaseAll);
             flush_input(&control_socket, peer, &viewer_control_token, &control_clone);
-            send_viewer_command(&control_socket, peer, b"BYE", &viewer_control_token);
+            send_viewer_command(
+                &control_socket,
+                peer,
+                crate::media_datagram::COMMAND_BYE,
+                &viewer_control_token,
+            );
             log_info!("Sent stream close signal for instance {}", instance_str);
         }
     } else {

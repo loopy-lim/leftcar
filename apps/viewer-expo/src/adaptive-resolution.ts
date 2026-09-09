@@ -76,8 +76,12 @@ const FALLBACK_MAX_WIDTH = 2_560;
 const FALLBACK_MAX_HEIGHT = 1_440;
 const FALLBACK_MIN_DIMENSION = 720;
 
+/** Split-4K 계약 해상도 — Host가 (width, height, fps) 정확 일치를 강제한다. */
+export const SPLIT_4K_WIDTH = 3_840;
+export const SPLIT_4K_HEIGHT = 2_160;
+
 export function isExact4K(target: AdaptiveTarget): boolean {
-  return target.width === 3_840 && target.height === 2_160;
+  return target.width === SPLIT_4K_WIDTH && target.height === SPLIT_4K_HEIGHT;
 }
 
 export function fallbackTargetFor(sourceTarget: AdaptiveTarget): AdaptiveTarget | null {
@@ -101,12 +105,6 @@ export function fallbackTargetFor(sourceTarget: AdaptiveTarget): AdaptiveTarget 
   if (width > maxWidth || height > maxHeight) return null;
   if (width >= sourceTarget.width && height >= sourceTarget.height) return null;
   return { width, height, fps: sourceTarget.fps };
-}
-
-export function createAdaptiveResolutionState(
-  sourceTarget: AdaptiveTarget,
-): AdaptiveResolutionState {
-  return seedAdaptiveResolutionState(sourceTarget, sourceTarget);
 }
 
 /**
@@ -247,6 +245,18 @@ export function observeAdaptiveResolution(
   return { state: nextState, action: { kind: "keep" } };
 }
 
+export function deriveQualityState(
+  acceptedTarget: AdaptiveTarget,
+  sourceTarget: AdaptiveTarget,
+  reported?: AdaptiveQualityState,
+): AdaptiveQualityState {
+  if (reported) return reported;
+  return acceptedTarget.width === sourceTarget.width &&
+    acceptedTarget.height === sourceTarget.height
+    ? "native"
+    : "fallback";
+}
+
 export function recordAdaptiveResolutionResult(
   state: AdaptiveResolutionState,
   action: AdaptiveResolutionAction,
@@ -261,10 +271,7 @@ export function recordAdaptiveResolutionResult(
     return {
       state: {
         ...state,
-        qualityState: state.activeTarget.width === state.sourceTarget.width &&
-          state.activeTarget.height === state.sourceTarget.height
-          ? "native"
-          : "fallback",
+      qualityState: deriveQualityState(state.activeTarget, state.sourceTarget),
         congestionWindows: 0,
         stableWindows: 0,
         cooldownUntilMs: nowMs + REBIND_COOLDOWN_MS,
@@ -273,13 +280,11 @@ export function recordAdaptiveResolutionResult(
     };
   }
   const activeTarget = acceptedTarget ? { ...acceptedTarget } : { ...action.target };
-  const acceptedNative = activeTarget.width === state.sourceTarget.width &&
-    activeTarget.height === state.sourceTarget.height;
   return {
     state: {
       ...state,
       activeTarget,
-      qualityState: acceptedNative ? "native" : "fallback",
+      qualityState: deriveQualityState(activeTarget, state.sourceTarget),
       congestionWindows: 0,
       stableWindows: 0,
       cooldownUntilMs: nowMs + REBIND_COOLDOWN_MS,

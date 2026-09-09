@@ -40,7 +40,7 @@ pub(super) fn present_completed_frames(
             .as_ref()
             .map(|config| config.codec)
             .unwrap_or(viewer_decoder::VideoCodec::H264);
-        let keyframe = is_keyframe(&frame.au, codec);
+        let keyframe = crate::media_datagram::is_keyframe(&frame.au, codec);
         let capture_age_ms =
             clock_corrected_age_ms(frame.capture_wall_ms, renderer_stats.host_clock_offset_ms);
         let rtt_ms = control.network_rtt_ms.load(Ordering::Relaxed);

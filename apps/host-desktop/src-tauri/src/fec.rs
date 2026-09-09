@@ -41,9 +41,9 @@ pub fn parity_datagrams_for_media(
         .iter()
         .map(|datagram| {
             let header = if datagram.get(7..9) == Some(b"L2") {
-                33
+                wire::FRAME_HEADER_V2_LEN
             } else if datagram.get(7..9) == Some(b"LT") {
-                17
+                wire::FRAME_HEADER_V1_LEN
             } else {
                 return None;
             };

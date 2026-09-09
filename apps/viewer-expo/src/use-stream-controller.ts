@@ -397,7 +397,7 @@ export function useStreamController(
           target === active.mediaTransport ||
           !shouldSwitchTransport(
             active.mediaTransport,
-            usbState,
+            target,
             active.encoderExperiment,
           )
         ) {

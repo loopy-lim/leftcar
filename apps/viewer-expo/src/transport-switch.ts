@@ -1,4 +1,4 @@
-import { resolveTransport, type ResolvedTransport, type UsbAccessoryState } from "./usb";
+import type { ResolvedTransport } from "./usb";
 import type { EncoderExperimentId } from "./encoder-experiment";
 
 /**
@@ -7,11 +7,10 @@ import type { EncoderExperimentId } from "./encoder-experiment";
  */
 export function shouldSwitchTransport(
   current: string,
-  usbState: Pick<UsbAccessoryState, "attached">,
+  desired: ResolvedTransport,
   encoderExperiment?: EncoderExperimentId,
 ): boolean {
   if (encoderExperiment === "splitVertical") return false;
   if (current !== "udp" && current !== "usb") return false;
-  const desired: ResolvedTransport = resolveTransport(usbState, "auto");
   return desired !== current;
 }

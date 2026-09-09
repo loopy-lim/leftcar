@@ -1,7 +1,7 @@
 //! Host core: source registry, pipeline orchestration, teardown (H15–H20 fake path).
 //!
 //! Real ScreenCaptureKit/VideoToolbox adapters live behind platform facades
-//! (macos-capture/macos-encode); this crate is validated with fakes (E1/E2).
+//! in the host app; this crate is validated with fakes (E1/E2).
 
 use domain::ids::{SessionId, SourceId};
 use domain::lease::{LeaseEvent, LeaseTable};

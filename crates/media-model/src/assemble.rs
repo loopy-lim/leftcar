@@ -5,7 +5,7 @@ use crate::fragment::{Fragment, FragmentHeader};
 use crate::frame::{EncodedFrame, FrameKind, StreamEpoch};
 use bytes::Bytes;
 use domain::ids::{SessionId, SourceId};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 pub const MAX_INCOMPLETE_PER_SOURCE: usize = 2;
@@ -285,41 +285,6 @@ impl PartialFrame {
         self.received
             .iter()
             .map(|s| s.clone().expect("complete frame"))
-    }
-}
-
-/// Bounded queue helper used by stages (docs/03 §6.3 spirit).
-#[derive(Debug)]
-pub struct BoundedQueue<T> {
-    items: VecDeque<T>,
-    cap: usize,
-}
-
-impl<T> BoundedQueue<T> {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            items: VecDeque::new(),
-            cap,
-        }
-    }
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-    /// Push, dropping the oldest item if over cap. Returns the dropped item.
-    pub fn push_evict(&mut self, item: T) -> Option<T> {
-        let dropped = if self.items.len() == self.cap {
-            self.items.pop_front()
-        } else {
-            None
-        };
-        self.items.push_back(item);
-        dropped
-    }
-    pub fn pop(&mut self) -> Option<T> {
-        self.items.pop_front()
     }
 }
 

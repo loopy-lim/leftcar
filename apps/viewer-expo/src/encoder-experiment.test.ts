@@ -5,7 +5,6 @@ import {
   availableEncoderExperimentsForStreams,
   normalizeEncoderExperiments,
   selectAutomaticEncoderExperiment,
-  resolveEncoderExperiment,
   resolveEncoderExperimentForStream,
   type EncoderExperimentInfo,
 } from "./encoder-experiment";
@@ -84,12 +83,12 @@ describe("encoder experiment selector", () => {
   });
 
   it("resolves a stale selection and old-host capability to automatic", () => {
-    expect(resolveEncoderExperiment("adaptiveQp", [advertised[0]])).toBe("auto");
-    expect(resolveEncoderExperiment("adaptiveQp", undefined)).toBe("auto");
+    expect(resolveEncoderExperimentForStream("adaptiveQp", [advertised[0]], 3840, 2160)).toBe("auto");
+    expect(resolveEncoderExperimentForStream("adaptiveQp", undefined, 3840, 2160)).toBe("auto");
   });
 
   it("keeps a selected profile when the Host still advertises it", () => {
-    expect(resolveEncoderExperiment("adaptiveQp", advertised)).toBe("adaptiveQp");
+    expect(resolveEncoderExperimentForStream("adaptiveQp", advertised, 3840, 2160)).toBe("adaptiveQp");
   });
 
   it("forces an advertised adaptive selection to automatic for an actual 1440p stream", () => {

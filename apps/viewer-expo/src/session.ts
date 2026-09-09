@@ -1,4 +1,5 @@
 import { connect, type ControlClient } from "./control";
+import { DEFAULT_CONTROL_PORT } from "./defaults";
 import { markConnected } from "./auto-reconnect";
 import { LocalizedError } from "./localized-error";
 import { getStoredToken, isTrustedHost } from "./pairing";
@@ -12,7 +13,7 @@ import { getUsbState } from "./usb";
 let client: ControlClient | null = null;
 let hostAddr = "";
 let hostTarget = "";
-let hostPort = 7777;
+let hostPort = DEFAULT_CONTROL_PORT;
 let nextPort = 5001;
 let reconnectInFlight: Promise<ControlClient> | null = null;
 
@@ -24,7 +25,7 @@ export function controlHost(): string {
   return hostAddr;
 }
 
-export async function connectHost(host: string, port = 7777): Promise<ControlClient> {
+export async function connectHost(host: string, port = DEFAULT_CONTROL_PORT): Promise<ControlClient> {
   if (!isTrustedHost(host)) {
     throw new LocalizedError("trustedHostError");
   }

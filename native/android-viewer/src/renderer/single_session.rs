@@ -49,7 +49,6 @@ pub(crate) fn suppress_resize_recovery(instance_str: &str) {
 }
 
 const MEDIA_BATCH_SIZE: usize = 16;
-const MEDIA_DATAGRAM_BYTES: usize = 2_048;
 /// Media is disposable. Waiting for a codec slot or output buffer would make
 /// every newer frame arrive behind an older one, so the hot path is strictly
 /// non-blocking and recovers from a missed AU at the next IDR.

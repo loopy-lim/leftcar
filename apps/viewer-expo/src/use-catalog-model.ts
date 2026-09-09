@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Alert, NativeModules } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
-import { clearToken } from "./pairing";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
 import { interpolate } from "@leftcar/ui-tokens";
@@ -12,6 +11,7 @@ import {
   startPreparedStream,
   type StreamLauncher,
 } from "./launch-stream";
+import { handleUnauthorized } from "./connect-flow";
 import {
   formatErrorMessage,
   isUnauthorizedError,
@@ -60,6 +60,7 @@ import {
 } from "./display-resize";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
+  deriveQualityState,
   fallbackTargetFor,
   type AdaptiveQualityState,
   type AdaptiveTarget,
@@ -152,21 +153,11 @@ export function useCatalogModel() {
 
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
-      void (async () => {
-        // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
-        // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
-        const endpoint = controlHost();
-        await clearToken();
-        disconnectHost();
-        Alert.alert(
-          currentTranslation().viewer.pairingRequiredTitle,
-          currentTranslation().viewer.pairingRequiredDesc,
-        );
-        router.replace({
-          pathname: "/pairing",
-          params: { endpoint },
-        });
-      })();
+      // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
+      // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
+      void handleUnauthorized({
+        navigate: { endpoint: controlHost(), replace: true },
+      });
     }
   }, [catalogQuery.error]);
 
@@ -499,12 +490,11 @@ export function useCatalogModel() {
           sourceTarget,
           activeTarget: acceptedTarget,
           fallbackTarget: fallbackTargetFor(sourceTarget),
-          qualityState:
-            started.qualityState ??
-            (acceptedTarget.width === sourceTarget.width &&
-              acceptedTarget.height === sourceTarget.height)
-              ? "native"
-              : "fallback",
+          qualityState: deriveQualityState(
+            acceptedTarget,
+            sourceTarget,
+            started.qualityState,
+          ),
           captureBackend: effectiveCaptureBackend,
           contentMode: displayProfile.contentMode,
           encoderExperiment: started.encoderExperiment,

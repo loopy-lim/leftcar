@@ -21,6 +21,23 @@ pub const FRAME_HEADER_V1_LEN: usize = 17;
 pub const FRAME_HEADER_V2_LEN: usize = 33;
 pub const PARITY_HEADER_LEN: usize = 19;
 pub const MAX_DATAGRAM_BYTES: usize = 1_400;
+
+/// Per-socket receive buffer capacity on the viewer; larger than
+/// MAX_DATAGRAM so reassembly never truncates a legal datagram.
+pub const MEDIA_BUFFER_BYTES: usize = 2_048;
+
+/// Viewer → host media-socket command bodies (sent authenticated).
+pub const COMMAND_IDR: &[u8] = b"IDR";
+pub const COMMAND_BYE: &[u8] = b"BYE";
+
+/// The authenticated viewer→host framing: body bytes followed by the raw
+/// session token. Shared so the wire shape has one authored home.
+pub fn frame_authenticated(body: &[u8], token: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(body.len() + token.len());
+    packet.extend_from_slice(body);
+    packet.extend_from_slice(token);
+    packet
+}
 pub const MAX_FRAGMENT_PAYLOAD: usize = MAX_DATAGRAM_BYTES - FRAME_HEADER_V2_LEN;
 // Four AUs tolerate a short Wi-Fi scheduling/reordering burst. Completed AUs
 // are still returned immediately, so this does not create a playback queue.
@@ -126,6 +143,7 @@ pub struct ReceiverPressure {
     pub decoder_input_drops: u64,
     pub decoder_output_discards: u64,
     pub fec_recovered_fragments: u64,
+    pub unrecoverable_fec_groups: u64,
 }
 
 impl ReceiverPressure {
@@ -143,6 +161,15 @@ impl ReceiverPressure {
 
     pub fn record_fec_recovery(&mut self, count: usize) {
         self.fec_recovered_fragments = self.fec_recovered_fragments.saturating_add(count as u64);
+    }
+
+    /// Parity with the split renderer's telemetry: an evicted group still
+    /// owing fragments is unrecoverable, not merely forgotten.
+    pub fn record_unrecoverable_group(&mut self, missing_data_fragments: usize) {
+        if missing_data_fragments == 0 {
+            return;
+        }
+        self.unrecoverable_fec_groups = self.unrecoverable_fec_groups.saturating_add(1);
     }
 }
 
@@ -508,7 +535,7 @@ impl CompletedFrameSequencer {
 
     fn push_at(&mut self, frame: ReassembledFrame, now: Instant) -> Vec<ReassembledFrame> {
         let Some(last) = self.last_delivered else {
-            if is_random_access_au(&frame.au, self.codec) {
+            if is_keyframe(&frame.au, self.codec) {
                 self.last_delivered = Some(frame.id);
                 let mut expected = frame.id.wrapping_add(1);
                 let mut contiguous = Vec::with_capacity(MAX_COMPLETED_REORDER);
@@ -596,7 +623,9 @@ impl CompletedFrameSequencer {
     }
 }
 
-fn is_random_access_au(au: &[u8], codec: viewer_decoder::VideoCodec) -> bool {
+/// One random-access access unit (H264 IDR / HEVC IRAP). Canonical
+/// keyframe test shared by host reassembly and both renderers.
+pub fn is_keyframe(au: &[u8], codec: viewer_decoder::VideoCodec) -> bool {
     viewer_decoder::split_annexb(au)
         .iter()
         .any(|nal| match codec {
@@ -1476,19 +1505,19 @@ mod tests {
         let h264_pps_with_nri_one = [0, 0, 0, 1, 0x28, 0x01];
         let h264_idr = [0, 0, 0, 1, 0x65, 0x01];
         let hevc_idr = [0, 0, 0, 1, 0x28, 0x01];
-        assert!(!is_random_access_au(
+        assert!(!is_keyframe(
             &h264_pps_with_nri_one,
             viewer_decoder::VideoCodec::H264
         ));
-        assert!(is_random_access_au(
+        assert!(is_keyframe(
             &h264_idr,
             viewer_decoder::VideoCodec::H264
         ));
-        assert!(is_random_access_au(
+        assert!(is_keyframe(
             &hevc_idr,
             viewer_decoder::VideoCodec::Hevc
         ));
-        assert!(!is_random_access_au(
+        assert!(!is_keyframe(
             &h264_idr,
             viewer_decoder::VideoCodec::Hevc
         ));

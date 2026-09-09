@@ -1,5 +1,10 @@
 # 24주 구현 로드맵
 
+> 2026-09-09: 미연결 상태로 남아 있던 spec 크레이트(network-protocol, transport-api,
+> transport-quic, diagnostics, macos-capture, macos-encode)를 워크스페이스에서
+> 제거했다. 아래 로드맵의 해당 크레이트 대상 항목은 실현 시점에 실제 구현 위치
+> (src-tauri wire/fec, native/android-viewer media_datagram 등)에 맞춰 다시 잡는다.
+
 문서 상태: 실행 가능한 계획안 0.1  
 계획 시작점: 빈 제품 저장소, Rustra는 외부 프로젝트  
 구현 범위: 이 문서는 코드 구현을 포함하지 않는다. 다른 작업자가 순서대로 실행하기 위한 handoff다.

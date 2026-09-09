@@ -129,6 +129,15 @@ fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> R
     )
 }
 
+/// Validated startStream parameters; transport and content mode are the
+/// wire-canonical spellings.
+struct StartPlan {
+    name: String,
+    transport: &'static str,
+    content_mode: &'static str,
+    udp_stability: AppliedUdpStability,
+}
+
 fn canonical_encoder_experiment(id: EncoderExperiment) -> EncoderExperimentInfo {
     let (label, hint) = match id {
         EncoderExperiment::Auto => ("자동", "호스트가 사용 가능한 인코더 경로를 선택합니다."),
@@ -587,10 +596,6 @@ impl ControlServer {
         }
     }
 
-    pub async fn bind(&self, addr: &str) -> std::io::Result<std::net::SocketAddr> {
-        TcpListener::bind(addr).await?.local_addr()
-    }
-
     /// Accept loop — runs until the process exits.
     pub async fn run(self: std::sync::Arc<Self>, listener: TcpListener) {
         loop {
@@ -623,108 +628,17 @@ impl ControlServer {
 
             for (id, s) in &mut state.live {
                 let mut metrics = self.backend.stats(s.handle).unwrap_or_else(|_| StatsInfo {
-                    frames: 0,
-                    bytes: 0,
                     state: "stopped".into(),
-                    fps: 0,
-                    kbps: 0,
-                    fps_target: 0,
-                    encoder_experiment_diagnostics_available: false,
                     encoder_experiment_requested: "auto".into(),
                     encoder_experiment_applied: "rateControl".into(),
-                    encoder_experiment_fallback_reason: None,
-                    encoder_frame_drops: 0,
-                    encoder_frame_drop_fps: 0,
-                    valid_encode_output_fps: 0,
-                    encode_submit_call_p50_us: 0,
-                    encode_submit_call_p95_us: 0,
-                    encoder_callback_p50_us: 0,
-                    encoder_callback_p95_us: 0,
-                    packetization_in_flight: 0,
-                    base_frame_qp: None,
-                    base_frame_qp_changes: 0,
-                    capture_fps: 0,
-                    encode_submit_fps: 0,
-                    encode_output_fps: 0,
-                    rendered_fps: None,
-                    capture_callbacks: 0,
-                    encode_output_callbacks: 0,
-                    encode_submit_failures: 0,
-                    encode_in_flight: 0,
-                    dropped: 0,
-                    network_dropped: 0,
-                    network_queue_dropped: 0,
-                    recovery_frames_dropped: 0,
-                    udp_send_failures: 0,
-                    udp_send_retries: 0,
-                    recovery_keyframes: 0,
-                    recovery_requests_suppressed: 0,
-                    capture_queue_dropped: 0,
-                    capture_to_encode_us: 0,
-                    max_capture_to_encode_us: 0,
-                    capture_queue_wait_us: 0,
-                    max_capture_queue_wait_us: 0,
-                    encode_output_us: 0,
-                    max_encode_output_us: 0,
-                    packetization_us: 0,
-                    max_packetization_us: 0,
-                    send_block_us: 0,
-                    max_send_block_us: 0,
-                    send_pace_us: 0,
-                    max_send_pace_us: 0,
-                    pending_frame: 0,
-                    pending_frame_bytes: 0,
-                    pending_frame_oldest_age_us: 0,
                     capture_backend: "unknown".into(),
                     media_transport: "unknown".into(),
-                    first_capture_ms: 0,
-                    first_encode_ms: 0,
-                    first_send_ms: 0,
-                    current_bitrate: 0,
                     encoder_mode: "unknown".into(),
                     encoder_id: "unknown".into(),
-                    encoder_hardware_accelerated: None,
                     encoder_preset: "unknown".into(),
                     encoder_profile: "unknown".into(),
-                    encoder_applied_properties: Vec::new(),
-                    encoder_unsupported_properties: Vec::new(),
-                    encoder_rejected_properties: Vec::new(),
-                    encoder_fallback_reason: None,
-                    quality_hint: None,
-                    quality_override: None,
-                    quality_adaptation_checks: 0,
-                    quality_adaptation_changes: 0,
-                    quality_adaptation_rejections: 0,
                     quality_adaptation_last_status: "not_checked".into(),
-                    capture_interval_p95_us: 0,
-                    capture_to_encode_p95_us: 0,
-                    capture_queue_wait_p95_us: 0,
-                    encode_output_p95_us: 0,
-                    packetization_p95_us: 0,
-                    encode_output_interval_p95_us: 0,
-                    send_block_p95_us: 0,
-                    send_pace_p95_us: 0,
-                    last_au_bytes: 0,
-                    last_au_fragments: 0,
-                    last_au_parity: 0,
-                    last_au_datagrams: 0,
-                    last_au_expected_datagrams: 0,
-                    last_au_send_us: 0,
-                    last_au_is_keyframe: false,
-                    max_au_bytes: 0,
-                    max_au_fragments: 0,
-                    sent_datagrams: 0,
-                    sent_parity_datagrams: 0,
                     error: Some("backend stats unavailable".into()),
-                    receiver_frame_gaps: 0,
-                    receiver_input_drops: 0,
-                    receiver_incomplete_aus: 0,
-                    receiver_stale_frames: 0,
-                    receiver_stale_input_drops: None,
-                    receiver_output_burst_discards: 0,
-                    receiver_rtt_ms: None,
-                    receiver_wire_ms: None,
-                    receiver_feedback_age_ms: None,
                     ..StatsInfo::default()
                 });
 
@@ -754,181 +668,7 @@ impl ControlServer {
                     s.terminal_since = None;
                 }
 
-                sessions.push(SessionView {
-                    session: *id,
-                    source_index: s.source_index,
-                    source_name: s.source_name.clone(),
-                    viewer_addr: s.viewer_addr.clone(),
-                    width: s.width,
-                    height: s.height,
-                    state: metrics.state,
-                    fps: metrics.fps,
-                    kbps: metrics.kbps,
-                    fps_target: s.fps_target,
-                    quality_state: s.quality_state.clone(),
-                    udp_stability: s.udp_stability.clone(),
-                    encoder_experiment_diagnostics_available: metrics
-                        .encoder_experiment_diagnostics_available,
-                    encoder_experiment_requested: metrics.encoder_experiment_requested,
-                    encoder_experiment_applied: metrics.encoder_experiment_applied,
-                    encoder_experiment_fallback_reason: metrics.encoder_experiment_fallback_reason,
-                    encoder_frame_drops: metrics.encoder_frame_drops,
-                    encoder_frame_drop_fps: metrics.encoder_frame_drop_fps,
-                    valid_encode_output_fps: metrics.valid_encode_output_fps,
-                    encode_submit_call_p50_us: metrics.encode_submit_call_p50_us,
-                    encode_submit_call_p95_us: metrics.encode_submit_call_p95_us,
-                    encoder_callback_p50_us: metrics.encoder_callback_p50_us,
-                    encoder_callback_p95_us: metrics.encoder_callback_p95_us,
-                    packetization_in_flight: metrics.packetization_in_flight,
-                    base_frame_qp: metrics.base_frame_qp,
-                    base_frame_qp_changes: metrics.base_frame_qp_changes,
-                    capture_fps: metrics.capture_fps,
-                    encode_submit_fps: metrics.encode_submit_fps,
-                    encode_output_fps: metrics.encode_output_fps,
-                    rendered_fps: metrics.rendered_fps,
-                    capture_callbacks: metrics.capture_callbacks,
-                    encode_output_callbacks: metrics.encode_output_callbacks,
-                    encode_submit_failures: metrics.encode_submit_failures,
-                    encode_in_flight: metrics.encode_in_flight,
-                    input_enabled: s.input_enabled,
-                    input_rate_hz: s.input_rate_hz,
-                    dropped: metrics.dropped,
-                    network_dropped: metrics.network_dropped,
-                    network_queue_dropped: metrics.network_queue_dropped,
-                    recovery_frames_dropped: metrics.recovery_frames_dropped,
-                    udp_send_failures: metrics.udp_send_failures,
-                    udp_send_retries: metrics.udp_send_retries,
-                    recovery_keyframes: metrics.recovery_keyframes,
-                    recovery_requests_suppressed: metrics.recovery_requests_suppressed,
-                    capture_queue_dropped: metrics.capture_queue_dropped,
-                    capture_to_encode_us: metrics.capture_to_encode_us,
-                    max_capture_to_encode_us: metrics.max_capture_to_encode_us,
-                    capture_queue_wait_us: metrics.capture_queue_wait_us,
-                    max_capture_queue_wait_us: metrics.max_capture_queue_wait_us,
-                    encode_output_us: metrics.encode_output_us,
-                    max_encode_output_us: metrics.max_encode_output_us,
-                    packetization_us: metrics.packetization_us,
-                    max_packetization_us: metrics.max_packetization_us,
-                    send_block_us: metrics.send_block_us,
-                    max_send_block_us: metrics.max_send_block_us,
-                    send_pace_us: metrics.send_pace_us,
-                    max_send_pace_us: metrics.max_send_pace_us,
-                    pending_frame: metrics.pending_frame,
-                    pending_frame_bytes: metrics.pending_frame_bytes,
-                    pending_frame_oldest_age_us: metrics.pending_frame_oldest_age_us,
-                    frames: metrics.frames,
-                    bytes: metrics.bytes,
-                    capture_backend: metrics.capture_backend,
-                    media_transport: metrics.media_transport,
-                    first_capture_ms: metrics.first_capture_ms,
-                    first_encode_ms: metrics.first_encode_ms,
-                    first_send_ms: metrics.first_send_ms,
-                    current_bitrate: metrics.current_bitrate,
-                    bitrate_floor_collapse_count: metrics.bitrate_floor_collapse_count,
-                    bitrate_floor_collapse_last_reason: metrics.bitrate_floor_collapse_last_reason,
-                    encoder_mode: metrics.encoder_mode,
-                    encoder_id: metrics.encoder_id,
-                    encoder_hardware_accelerated: metrics.encoder_hardware_accelerated,
-                    encoder_preset: metrics.encoder_preset,
-                    encoder_profile: metrics.encoder_profile,
-                    encoder_applied_properties: metrics.encoder_applied_properties,
-                    encoder_unsupported_properties: metrics.encoder_unsupported_properties,
-                    encoder_rejected_properties: metrics.encoder_rejected_properties,
-                    encoder_fallback_reason: metrics.encoder_fallback_reason,
-                    quality_hint: metrics.quality_hint,
-                    quality_override: metrics.quality_override,
-                    quality_adaptation_checks: metrics.quality_adaptation_checks,
-                    quality_adaptation_changes: metrics.quality_adaptation_changes,
-                    quality_adaptation_rejections: metrics.quality_adaptation_rejections,
-                    quality_adaptation_last_status: metrics.quality_adaptation_last_status,
-                    capture_interval_p95_us: metrics.capture_interval_p95_us,
-                    capture_to_encode_p95_us: metrics.capture_to_encode_p95_us,
-                    capture_queue_wait_p95_us: metrics.capture_queue_wait_p95_us,
-                    encode_output_p95_us: metrics.encode_output_p95_us,
-                    packetization_p95_us: metrics.packetization_p95_us,
-                    encode_output_interval_p95_us: metrics.encode_output_interval_p95_us,
-                    send_block_p95_us: metrics.send_block_p95_us,
-                    send_pace_p95_us: metrics.send_pace_p95_us,
-                    last_au_bytes: metrics.last_au_bytes,
-                    last_au_fragments: metrics.last_au_fragments,
-                    last_au_parity: metrics.last_au_parity,
-                    last_au_datagrams: metrics.last_au_datagrams,
-                    last_au_expected_datagrams: metrics.last_au_expected_datagrams,
-                    last_au_send_us: metrics.last_au_send_us,
-                    last_au_is_keyframe: metrics.last_au_is_keyframe,
-                    max_au_bytes: metrics.max_au_bytes,
-                    max_au_fragments: metrics.max_au_fragments,
-                    sent_datagrams: metrics.sent_datagrams,
-                    sent_parity_datagrams: metrics.sent_parity_datagrams,
-                    error: metrics.error,
-                    receiver_frame_gaps: metrics.receiver_frame_gaps,
-                    receiver_input_drops: metrics.receiver_input_drops,
-                    receiver_incomplete_aus: metrics.receiver_incomplete_aus,
-                    receiver_stale_frames: metrics.receiver_stale_frames,
-                    receiver_stale_input_drops: metrics.receiver_stale_input_drops,
-                    receiver_output_burst_discards: metrics.receiver_output_burst_discards,
-                    receiver_rtt_ms: metrics.receiver_rtt_ms,
-                    receiver_wire_ms: metrics.receiver_wire_ms,
-                    receiver_feedback_age_ms: metrics.receiver_feedback_age_ms,
-                    udp_stability_profile: metrics.udp_stability_profile,
-                    udp_burst_datagrams: metrics.udp_burst_datagrams,
-                    udp_pacing_rate_multiplier: metrics.udp_pacing_rate_multiplier,
-                    udp_fec_parity_shards: metrics.udp_fec_parity_shards,
-                    udp_adaptive_pacing: metrics.udp_adaptive_pacing,
-                    udp_burst_reason: metrics.udp_burst_reason,
-                    receiver_media_datagrams: metrics.receiver_media_datagrams,
-                    receiver_data_datagrams: metrics.receiver_data_datagrams,
-                    receiver_parity_datagrams: metrics.receiver_parity_datagrams,
-                    receiver_fec_restored_fragments: metrics.receiver_fec_restored_fragments,
-                    receiver_unrecoverable_fec_groups: metrics.receiver_unrecoverable_fec_groups,
-                    receiver_max_missing_data_fragments: metrics
-                        .receiver_max_missing_data_fragments,
-                    receiver_one_frame_gap_events: metrics.receiver_one_frame_gap_events,
-                    receiver_multi_frame_gap_events: metrics.receiver_multi_frame_gap_events,
-                    receiver_paired_idr_episodes: metrics.receiver_paired_idr_episodes,
-                    receiver_suppressed_recovery_requests: metrics
-                        .receiver_suppressed_recovery_requests,
-                    receiver_fec_decode_failures: metrics.receiver_fec_decode_failures,
-                    split_direction: metrics.split_direction,
-                    split_preparation_p50_us: metrics.split_preparation_p50_us,
-                    split_preparation_p95_us: metrics.split_preparation_p95_us,
-                    split_pair_admission_drops: metrics.split_pair_admission_drops,
-                    encoded_pair_callback_p50_us: metrics.encoded_pair_callback_p50_us,
-                    encoded_pair_callback_p95_us: metrics.encoded_pair_callback_p95_us,
-                    encoded_pair_timeouts: metrics.encoded_pair_timeouts,
-                    encoded_pair_drops: metrics.encoded_pair_drops,
-                    left_valid_encode_output_fps: metrics.left_valid_encode_output_fps,
-                    right_valid_encode_output_fps: metrics.right_valid_encode_output_fps,
-                    left_encoder_frame_drops: metrics.left_encoder_frame_drops,
-                    right_encoder_frame_drops: metrics.right_encoder_frame_drops,
-                    left_bitrate_bps: metrics.left_bitrate_bps,
-                    right_bitrate_bps: metrics.right_bitrate_bps,
-                    aggregate_bitrate_bps: metrics.aggregate_bitrate_bps,
-                    left_receiver_loss: metrics.left_receiver_loss,
-                    right_receiver_loss: metrics.right_receiver_loss,
-                    left_rendered_fps: metrics.left_rendered_fps,
-                    right_rendered_fps: metrics.right_rendered_fps,
-                    joined_rendered_fps: metrics.joined_rendered_fps,
-                    pair_ready_delta_p95_us: metrics.pair_ready_delta_p95_us,
-                    pair_ready_delta_max_us: metrics.pair_ready_delta_max_us,
-                    pair_sync_timeouts: metrics.pair_sync_timeouts,
-                    unmatched_output_drops: metrics.unmatched_output_drops,
-                    paired_recovery_requests: metrics.paired_recovery_requests,
-                    paired_recovery_keyframes: metrics.paired_recovery_keyframes,
-                    split_test_injected_drops: metrics.split_test_injected_drops,
-                    split_flow_active_leases: metrics.split_flow_active_leases,
-                    split_flow_capacity: metrics.split_flow_capacity,
-                    split_pre_encode_admission_drops: metrics.split_pre_encode_admission_drops,
-                    split_encoded_queue_depth: metrics.split_encoded_queue_depth,
-                    split_encoded_queue_oldest_us: metrics.split_encoded_queue_oldest_us,
-                    split_capture_queue_oldest_us: metrics.split_capture_queue_oldest_us,
-                    split_recovery_boundary_discards: metrics.split_recovery_boundary_discards,
-                    split_post_encode_delta_drops: metrics.split_post_encode_delta_drops,
-                    split_wire_pairs_attempted: metrics.split_wire_pairs_attempted,
-                    split_wire_pair_send_failures: metrics.split_wire_pair_send_failures,
-                    split_keyframe_gap_recoveries: metrics.split_keyframe_gap_recoveries,
-                    split_delta_gap_recoveries: metrics.split_delta_gap_recoveries,
-                });
+                sessions.push(Self::session_view(*id, s, metrics));
             }
 
             let expired = expired_ids
@@ -951,6 +691,187 @@ impl ControlServer {
         }
 
         StatusView { sessions }
+    }
+
+    /// SessionView construction for one live session; the 1:1 metrics
+    /// plumbing lives here so `snapshot` stays focused on retention.
+    fn session_view(id: u32, s: &Session, metrics: StatsInfo) -> SessionView {
+        SessionView {
+            session: id,
+            source_index: s.source_index,
+            source_name: s.source_name.clone(),
+            viewer_addr: s.viewer_addr.clone(),
+            width: s.width,
+            height: s.height,
+            state: metrics.state,
+            fps: metrics.fps,
+            kbps: metrics.kbps,
+            fps_target: s.fps_target,
+            quality_state: s.quality_state.clone(),
+            udp_stability: s.udp_stability.clone(),
+            encoder_experiment_diagnostics_available: metrics
+                .encoder_experiment_diagnostics_available,
+            encoder_experiment_requested: metrics.encoder_experiment_requested,
+            encoder_experiment_applied: metrics.encoder_experiment_applied,
+            encoder_experiment_fallback_reason: metrics.encoder_experiment_fallback_reason,
+            encoder_frame_drops: metrics.encoder_frame_drops,
+            encoder_frame_drop_fps: metrics.encoder_frame_drop_fps,
+            valid_encode_output_fps: metrics.valid_encode_output_fps,
+            encode_submit_call_p50_us: metrics.encode_submit_call_p50_us,
+            encode_submit_call_p95_us: metrics.encode_submit_call_p95_us,
+            encoder_callback_p50_us: metrics.encoder_callback_p50_us,
+            encoder_callback_p95_us: metrics.encoder_callback_p95_us,
+            packetization_in_flight: metrics.packetization_in_flight,
+            base_frame_qp: metrics.base_frame_qp,
+            base_frame_qp_changes: metrics.base_frame_qp_changes,
+            capture_fps: metrics.capture_fps,
+            encode_submit_fps: metrics.encode_submit_fps,
+            encode_output_fps: metrics.encode_output_fps,
+            rendered_fps: metrics.rendered_fps,
+            capture_callbacks: metrics.capture_callbacks,
+            encode_output_callbacks: metrics.encode_output_callbacks,
+            encode_submit_failures: metrics.encode_submit_failures,
+            encode_in_flight: metrics.encode_in_flight,
+            input_enabled: s.input_enabled,
+            input_rate_hz: s.input_rate_hz,
+            dropped: metrics.dropped,
+            network_dropped: metrics.network_dropped,
+            network_queue_dropped: metrics.network_queue_dropped,
+            recovery_frames_dropped: metrics.recovery_frames_dropped,
+            udp_send_failures: metrics.udp_send_failures,
+            udp_send_retries: metrics.udp_send_retries,
+            recovery_keyframes: metrics.recovery_keyframes,
+            recovery_requests_suppressed: metrics.recovery_requests_suppressed,
+            capture_queue_dropped: metrics.capture_queue_dropped,
+            capture_to_encode_us: metrics.capture_to_encode_us,
+            max_capture_to_encode_us: metrics.max_capture_to_encode_us,
+            capture_queue_wait_us: metrics.capture_queue_wait_us,
+            max_capture_queue_wait_us: metrics.max_capture_queue_wait_us,
+            encode_output_us: metrics.encode_output_us,
+            max_encode_output_us: metrics.max_encode_output_us,
+            packetization_us: metrics.packetization_us,
+            max_packetization_us: metrics.max_packetization_us,
+            send_block_us: metrics.send_block_us,
+            max_send_block_us: metrics.max_send_block_us,
+            send_pace_us: metrics.send_pace_us,
+            max_send_pace_us: metrics.max_send_pace_us,
+            pending_frame: metrics.pending_frame,
+            pending_frame_bytes: metrics.pending_frame_bytes,
+            pending_frame_oldest_age_us: metrics.pending_frame_oldest_age_us,
+            frames: metrics.frames,
+            bytes: metrics.bytes,
+            capture_backend: metrics.capture_backend,
+            media_transport: metrics.media_transport,
+            first_capture_ms: metrics.first_capture_ms,
+            first_encode_ms: metrics.first_encode_ms,
+            first_send_ms: metrics.first_send_ms,
+            current_bitrate: metrics.current_bitrate,
+            bitrate_floor_collapse_count: metrics.bitrate_floor_collapse_count,
+            bitrate_floor_collapse_last_reason: metrics.bitrate_floor_collapse_last_reason,
+            encoder_mode: metrics.encoder_mode,
+            encoder_id: metrics.encoder_id,
+            encoder_hardware_accelerated: metrics.encoder_hardware_accelerated,
+            encoder_preset: metrics.encoder_preset,
+            encoder_profile: metrics.encoder_profile,
+            encoder_applied_properties: metrics.encoder_applied_properties,
+            encoder_unsupported_properties: metrics.encoder_unsupported_properties,
+            encoder_rejected_properties: metrics.encoder_rejected_properties,
+            encoder_fallback_reason: metrics.encoder_fallback_reason,
+            quality_hint: metrics.quality_hint,
+            quality_override: metrics.quality_override,
+            quality_adaptation_checks: metrics.quality_adaptation_checks,
+            quality_adaptation_changes: metrics.quality_adaptation_changes,
+            quality_adaptation_rejections: metrics.quality_adaptation_rejections,
+            quality_adaptation_last_status: metrics.quality_adaptation_last_status,
+            capture_interval_p95_us: metrics.capture_interval_p95_us,
+            capture_to_encode_p95_us: metrics.capture_to_encode_p95_us,
+            capture_queue_wait_p95_us: metrics.capture_queue_wait_p95_us,
+            encode_output_p95_us: metrics.encode_output_p95_us,
+            packetization_p95_us: metrics.packetization_p95_us,
+            encode_output_interval_p95_us: metrics.encode_output_interval_p95_us,
+            send_block_p95_us: metrics.send_block_p95_us,
+            send_pace_p95_us: metrics.send_pace_p95_us,
+            last_au_bytes: metrics.last_au_bytes,
+            last_au_fragments: metrics.last_au_fragments,
+            last_au_parity: metrics.last_au_parity,
+            last_au_datagrams: metrics.last_au_datagrams,
+            last_au_expected_datagrams: metrics.last_au_expected_datagrams,
+            last_au_send_us: metrics.last_au_send_us,
+            last_au_is_keyframe: metrics.last_au_is_keyframe,
+            max_au_bytes: metrics.max_au_bytes,
+            max_au_fragments: metrics.max_au_fragments,
+            sent_datagrams: metrics.sent_datagrams,
+            sent_parity_datagrams: metrics.sent_parity_datagrams,
+            error: metrics.error,
+            receiver_frame_gaps: metrics.receiver_frame_gaps,
+            receiver_input_drops: metrics.receiver_input_drops,
+            receiver_incomplete_aus: metrics.receiver_incomplete_aus,
+            receiver_stale_frames: metrics.receiver_stale_frames,
+            receiver_stale_input_drops: metrics.receiver_stale_input_drops,
+            receiver_output_burst_discards: metrics.receiver_output_burst_discards,
+            receiver_rtt_ms: metrics.receiver_rtt_ms,
+            receiver_wire_ms: metrics.receiver_wire_ms,
+            receiver_feedback_age_ms: metrics.receiver_feedback_age_ms,
+            udp_stability_profile: metrics.udp_stability_profile,
+            udp_burst_datagrams: metrics.udp_burst_datagrams,
+            udp_pacing_rate_multiplier: metrics.udp_pacing_rate_multiplier,
+            udp_fec_parity_shards: metrics.udp_fec_parity_shards,
+            udp_adaptive_pacing: metrics.udp_adaptive_pacing,
+            udp_burst_reason: metrics.udp_burst_reason,
+            receiver_media_datagrams: metrics.receiver_media_datagrams,
+            receiver_data_datagrams: metrics.receiver_data_datagrams,
+            receiver_parity_datagrams: metrics.receiver_parity_datagrams,
+            receiver_fec_restored_fragments: metrics.receiver_fec_restored_fragments,
+            receiver_unrecoverable_fec_groups: metrics.receiver_unrecoverable_fec_groups,
+            receiver_max_missing_data_fragments: metrics
+                .receiver_max_missing_data_fragments,
+            receiver_one_frame_gap_events: metrics.receiver_one_frame_gap_events,
+            receiver_multi_frame_gap_events: metrics.receiver_multi_frame_gap_events,
+            receiver_paired_idr_episodes: metrics.receiver_paired_idr_episodes,
+            receiver_suppressed_recovery_requests: metrics
+                .receiver_suppressed_recovery_requests,
+            receiver_fec_decode_failures: metrics.receiver_fec_decode_failures,
+            split_direction: metrics.split_direction,
+            split_preparation_p50_us: metrics.split_preparation_p50_us,
+            split_preparation_p95_us: metrics.split_preparation_p95_us,
+            split_pair_admission_drops: metrics.split_pair_admission_drops,
+            encoded_pair_callback_p50_us: metrics.encoded_pair_callback_p50_us,
+            encoded_pair_callback_p95_us: metrics.encoded_pair_callback_p95_us,
+            encoded_pair_timeouts: metrics.encoded_pair_timeouts,
+            encoded_pair_drops: metrics.encoded_pair_drops,
+            left_valid_encode_output_fps: metrics.left_valid_encode_output_fps,
+            right_valid_encode_output_fps: metrics.right_valid_encode_output_fps,
+            left_encoder_frame_drops: metrics.left_encoder_frame_drops,
+            right_encoder_frame_drops: metrics.right_encoder_frame_drops,
+            left_bitrate_bps: metrics.left_bitrate_bps,
+            right_bitrate_bps: metrics.right_bitrate_bps,
+            aggregate_bitrate_bps: metrics.aggregate_bitrate_bps,
+            left_receiver_loss: metrics.left_receiver_loss,
+            right_receiver_loss: metrics.right_receiver_loss,
+            left_rendered_fps: metrics.left_rendered_fps,
+            right_rendered_fps: metrics.right_rendered_fps,
+            joined_rendered_fps: metrics.joined_rendered_fps,
+            pair_ready_delta_p95_us: metrics.pair_ready_delta_p95_us,
+            pair_ready_delta_max_us: metrics.pair_ready_delta_max_us,
+            pair_sync_timeouts: metrics.pair_sync_timeouts,
+            unmatched_output_drops: metrics.unmatched_output_drops,
+            paired_recovery_requests: metrics.paired_recovery_requests,
+            paired_recovery_keyframes: metrics.paired_recovery_keyframes,
+            split_test_injected_drops: metrics.split_test_injected_drops,
+            split_flow_active_leases: metrics.split_flow_active_leases,
+            split_flow_capacity: metrics.split_flow_capacity,
+            split_pre_encode_admission_drops: metrics.split_pre_encode_admission_drops,
+            split_encoded_queue_depth: metrics.split_encoded_queue_depth,
+            split_encoded_queue_oldest_us: metrics.split_encoded_queue_oldest_us,
+            split_capture_queue_oldest_us: metrics.split_capture_queue_oldest_us,
+            split_recovery_boundary_discards: metrics.split_recovery_boundary_discards,
+            split_post_encode_delta_drops: metrics.split_post_encode_delta_drops,
+            split_wire_pairs_attempted: metrics.split_wire_pairs_attempted,
+            split_wire_pair_send_failures: metrics.split_wire_pair_send_failures,
+            split_keyframe_gap_recoveries: metrics.split_keyframe_gap_recoveries,
+            split_delta_gap_recoveries: metrics.split_delta_gap_recoveries,
+
+        }
     }
 
     pub fn input_permission(&self) -> Result<bool, String> {
@@ -1065,6 +986,76 @@ impl ControlServer {
         }
     }
 
+    /// Validate a startStream request up to transport candidate selection.
+    /// Every rejection path — shape, capture backend, encoder experiment,
+    /// media transport, UDP stability, split gating, AOAP — lives here in
+    /// input order so the dispatch arm stays focused on the attempt loop.
+    async fn plan_start(&self, input: &StartStreamInput) -> Result<StartPlan, String> {
+        if let Err(e) = validate_stream_shape(input.width, input.height, input.fps) {
+            return Err(e);
+        }
+        if !self.backend.supports_capture_backend(&input.capture_backend) {
+            return Err("unsupported capture backend".into());
+        }
+        let advertised = advertised_encoder_experiments(self.backend.encoder_experiments()?);
+        let split_diagnostic_enabled =
+            std::env::var("LEFTCAR_ENABLE_SPLIT_DIAGNOSTIC").is_ok_and(|value| value == "1");
+        if !encoder_experiment_is_startable(
+            &advertised,
+            input.encoder_experiment,
+            split_diagnostic_enabled,
+        ) {
+            return Err(format!(
+                "unsupported encoder experiment: {}",
+                input.encoder_experiment.as_str()
+            ));
+        }
+        let name = self
+            .backend
+            .list_displays()
+            .ok()
+            .and_then(|d| d.get(input.source_index as usize).cloned())
+            .map(|d| d.name)
+            .unwrap_or_else(|| format!("display {}", input.source_index));
+        let Some(transport) = normalize_media_transport(&input.media_transport) else {
+            return Err(format!(
+                "unsupported media transport: {}",
+                input.media_transport
+            ));
+        };
+        let Some(content_mode) = normalize_content_mode(&input.content_mode) else {
+            return Err(format!("unsupported content mode: {}", input.content_mode));
+        };
+        if input.udp_stability.is_some() && !matches!(transport, "udp" | "auto") {
+            return Err("UDP 안정성 설정은 UDP 또는 자동 전송에서만 사용할 수 있습니다".into());
+        }
+        let udp_stability =
+            resolve_udp_stability(input.udp_stability.as_ref(), &host_udp_stability_capabilities())?;
+        validate_split_start(input, transport)?;
+
+        // Do not claim a normal Android USB device merely because a
+        // cable was attached. AOAP negotiation is an explicit stream
+        // request; `auto` may fall back to Wi-Fi, while an explicit
+        // USB request reports the negotiation failure to the viewer.
+        if input.encoder_experiment != EncoderExperiment::SplitVertical
+            && matches!(transport, "usb" | "auto")
+        {
+            if let Err(error) = crate::aoap_control::ensure_usb_accessory().await {
+                if transport == "usb" {
+                    return Err(error);
+                }
+                eprintln!("AOAP unavailable; continuing with transport fallback: {error}");
+            }
+        }
+
+        Ok(StartPlan {
+            name,
+            transport,
+            content_mode,
+            udp_stability,
+        })
+    }
+
     pub(crate) async fn dispatch(
         &self,
         command: &str,
@@ -1159,80 +1150,10 @@ impl ControlServer {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
                 };
-                if let Err(e) = validate_stream_shape(input.width, input.height, input.fps) {
-                    return err(&e);
-                }
-                if !self
-                    .backend
-                    .supports_capture_backend(&input.capture_backend)
-                {
-                    return err("unsupported capture backend");
-                }
-                let advertised = match self.backend.encoder_experiments() {
-                    Ok(experiments) => advertised_encoder_experiments(experiments),
+                let plan = match self.plan_start(&input).await {
+                    Ok(plan) => plan,
                     Err(error) => return err(&error),
                 };
-                let split_diagnostic_enabled = std::env::var("LEFTCAR_ENABLE_SPLIT_DIAGNOSTIC")
-                    .is_ok_and(|value| value == "1");
-                if !encoder_experiment_is_startable(
-                    &advertised,
-                    input.encoder_experiment,
-                    split_diagnostic_enabled,
-                ) {
-                    return err(&format!(
-                        "unsupported encoder experiment: {}",
-                        input.encoder_experiment.as_str()
-                    ));
-                }
-                let name = self
-                    .backend
-                    .list_displays()
-                    .ok()
-                    .and_then(|d| d.get(input.source_index as usize).cloned())
-                    .map(|d| d.name)
-                    .unwrap_or_else(|| format!("display {}", input.source_index));
-                let requested_transport = normalize_media_transport(&input.media_transport)
-                    .ok_or_else(|| {
-                        format!("unsupported media transport: {}", input.media_transport)
-                    });
-                let requested_transport = match requested_transport {
-                    Ok(value) => value,
-                    Err(error) => return err(&error),
-                };
-                let content_mode = match normalize_content_mode(&input.content_mode) {
-                    Some(value) => value,
-                    None => {
-                        return err(&format!("unsupported content mode: {}", input.content_mode))
-                    }
-                };
-                if input.udp_stability.is_some() && !matches!(requested_transport, "udp" | "auto") {
-                    return err("UDP 안정성 설정은 UDP 또는 자동 전송에서만 사용할 수 있습니다");
-                }
-                let udp_stability = match resolve_udp_stability(
-                    input.udp_stability.as_ref(),
-                    &host_udp_stability_capabilities(),
-                ) {
-                    Ok(applied) => applied,
-                    Err(error) => return err(&error),
-                };
-                if let Err(error) = validate_split_start(&input, requested_transport) {
-                    return err(&error);
-                }
-
-                // Do not claim a normal Android USB device merely because a
-                // cable was attached. AOAP negotiation is an explicit stream
-                // request; `auto` may fall back to Wi-Fi, while an explicit
-                // USB request reports the negotiation failure to the viewer.
-                if input.encoder_experiment != EncoderExperiment::SplitVertical
-                    && matches!(requested_transport, "usb" | "auto")
-                {
-                    if let Err(error) = crate::aoap_control::ensure_usb_accessory().await {
-                        if requested_transport == "usb" {
-                            return err(&error);
-                        }
-                        eprintln!("AOAP unavailable; continuing with transport fallback: {error}");
-                    }
-                }
 
                 // A non-bypassable VPN can route a local control connection
                 // through a LAN subnet router, so its TCP peer is not always
@@ -1262,7 +1183,7 @@ impl ControlServer {
                 } else if usb_control {
                     build_attempts("usb", &[])
                 } else {
-                    build_attempts(requested_transport, &wifi_candidates)
+                    build_attempts(plan.transport, &wifi_candidates)
                 };
                 let mut last_error = None;
                 let mut started = None;
@@ -1291,9 +1212,9 @@ impl ControlServer {
                         input.fps,
                         &input.capture_backend,
                         transport,
-                        content_mode,
+                        plan.content_mode,
                         input.encoder_experiment,
-                        &udp_stability,
+                        &plan.udp_stability,
                     ) {
                         Ok(handle) => match self.wait_for_first_frame(handle).await {
                             Ok(()) => {
@@ -1334,19 +1255,19 @@ impl ControlServer {
                                 Session {
                                     handle,
                                     source_index: input.source_index,
-                                    source_name: name,
+                                    source_name: plan.name,
                                     width: input.width,
                                     height: input.height,
                                     fps_target: input.fps,
                                     quality_state: "native".into(),
                                     capture_backend: input.capture_backend.clone(),
-                                    content_mode: content_mode.into(),
+                                    content_mode: plan.content_mode.into(),
                                     encoder_experiment: input.encoder_experiment,
                                     viewer_addr,
                                     viewer_port: input.viewer_port,
                                     media_transport: transport.into(),
                                     udp_stability: (transport == "udp")
-                                        .then(|| udp_stability.clone()),
+                                        .then(|| plan.udp_stability.clone()),
                                     input_enabled,
                                     input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
                                     terminal_since: None,
@@ -1362,7 +1283,7 @@ impl ControlServer {
                             height: input.height,
                             fps: input.fps,
                             quality_state: "native".into(),
-                            udp_stability: (transport == "udp").then_some(udp_stability),
+                            udp_stability: (transport == "udp").then_some(plan.udp_stability.clone()),
                         })
                     }
                     None => err(&format!(

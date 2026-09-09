@@ -1,3 +1,5 @@
+import { SPLIT_4K_HEIGHT, SPLIT_4K_WIDTH } from "./adaptive-resolution";
+
 export type EncoderExperimentId =
   | "auto"
   | "rateControl"
@@ -68,7 +70,7 @@ export function is4KResolution(width: number, height: number): boolean {
   // Stream profiles use source width/height as-is; they do not rotate the
   // dimensions, so portrait 2160x3840 is intentionally not an equivalent 4K
   // selector resolution.
-  return width >= 3840 && height >= 2160;
+  return width >= SPLIT_4K_WIDTH && height >= SPLIT_4K_HEIGHT;
 }
 
 export function availableEncoderExperiments(
@@ -92,8 +94,8 @@ export function availableEncoderExperimentsForStreams(
   );
   return availableEncoderExperiments(
     advertised,
-    has4KStream ? 3840 : 0,
-    has4KStream ? 2160 : 0,
+    has4KStream ? SPLIT_4K_WIDTH : 0,
+    has4KStream ? SPLIT_4K_HEIGHT : 0,
   );
 }
 
@@ -107,13 +109,6 @@ export function resolveEncoderExperimentForStream(
   return available.some((experiment) => experiment.id === selected)
     ? selected
     : "auto";
-}
-
-export function resolveEncoderExperiment(
-  selected: EncoderExperimentId,
-  advertised: unknown,
-): EncoderExperimentId {
-  return resolveEncoderExperimentForStream(selected, advertised, 3840, 2160);
 }
 
 export function selectAutomaticEncoderExperiment(

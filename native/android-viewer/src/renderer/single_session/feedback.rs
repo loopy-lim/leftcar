@@ -9,9 +9,7 @@ pub(super) fn send_viewer_command(
     if token.is_empty() {
         return false;
     }
-    let mut authenticated = Vec::with_capacity(command.len() + token.len());
-    authenticated.extend_from_slice(command);
-    authenticated.extend_from_slice(token);
+    let authenticated = crate::media_datagram::frame_authenticated(command, token);
     if let Err(error) = socket.send_to(&authenticated, peer) {
         log_info!("failed to send viewer command: {error}");
         false
@@ -161,7 +159,7 @@ pub(super) fn flush_input(
 }
 
 pub(super) fn request_idr(socket: &std::net::UdpSocket, peer: std::net::SocketAddr, token: &[u8]) {
-    send_viewer_command(socket, peer, b"IDR", token);
+    send_viewer_command(socket, peer, crate::media_datagram::COMMAND_IDR, token);
 }
 
 pub(super) fn request_idr_debounced(
