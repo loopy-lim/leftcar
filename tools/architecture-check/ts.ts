@@ -27,7 +27,7 @@ function* walk(dir: string): Generator<string> {
     return;
   }
   for (const name of entries) {
-    if (name === "node_modules" || name === "dist" || name === ".git") continue;
+    if (name === "node_modules" || name === "dist" || name === ".git" || name === ".worktrees") continue;
     const full = join(dir, name);
     let st;
     try {
@@ -40,9 +40,15 @@ function* walk(dir: string): Generator<string> {
   }
 }
 
-function checkFiles(dir: string, patterns: Array<[RegExp, string]>, rule: string): void {
+function checkFiles(
+  dir: string,
+  patterns: Array<[RegExp, string]>,
+  rule: string,
+  allow?: (file: string) => boolean,
+): void {
   for (const file of walk(dir)) {
     if (!/\.(ts|tsx|kt)$/.test(file)) continue;
+    if (allow?.(file)) continue;
     const text = readFileSync(file, "utf8");
     for (const [re, why] of patterns) {
       if (re.test(text)) fail(rule, `${file}: ${why}`);
@@ -69,7 +75,21 @@ checkFiles(
 );
 
 // 2. The 120/180Hz input plane is native Kotlin/JNI/UDP. Keep it out of
-//    React/Rustra/JSON while continuing to deny clipboard and file transfer.
+//    React/Rustra/JSON while continuing to deny file transfer. Clipboard
+//    text sync is deliberately allowed again behind a double gate
+//    (docs/07 §20 policy change, 2026-09-09): expo-clipboard access lives
+//    ONLY in apps/viewer-expo/src/clipboard-sync.ts and the host-side gate
+//    still rejects every clipboard command while its toggle is closed.
+const CLIPBOARD_SYNC_FILES = new Set([
+  "apps/viewer-expo/src/clipboard-sync.ts",
+  // 테스트 파일은 모듈 경계 목 fixture로 모듈 이름을 적어야 한다 — 파일
+  // 상단 "test fixtures legitimately name the banned symbols" 예외와 같은
+  // 취지다.
+  "apps/viewer-expo/src/clipboard-sync.test.ts",
+]);
+const isClipboardSyncModule = (file: string): boolean =>
+  CLIPBOARD_SYNC_FILES.has(relative(ROOT, file).replaceAll("\\", "/"));
+
 for (const folder of [
   join(ROOT, "apps/viewer-android/src"),
   join(ROOT, "apps/viewer-expo/src"),
@@ -83,10 +103,18 @@ for (const folder of [
     ],
     "viewer-ts-no-high-rate-input",
   );
+  // docs/07 §20(정책 변경): 게이트 없는 클립보드 접근은 여전히 금지며,
+  // expo-clipboard 진입점은 단일 모듈로 한정한다.
+  checkFiles(
+    folder,
+    [[/["']expo-clipboard["']/, "expo-clipboard access outside clipboard-sync.ts"]],
+    "viewer-clipboard-single-gated-module",
+    isClipboardSyncModule,
+  );
 }
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
-const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
+const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|java\.security\.|kotlin\.)/; // java.security = SecureRandom(CSPRNG 어댑터, docs/07 §20)
 const JUNIT_IMPORT = /^import org\.junit\./;
 const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
   "import kotlinx.coroutines.Dispatchers",
