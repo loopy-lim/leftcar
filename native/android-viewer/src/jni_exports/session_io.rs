@@ -262,6 +262,43 @@ pub extern "C" fn leftcar_jni_input_key(
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Queue committed IME text as a reliable wire event. `data` holds UTF-8
+/// bytes copied out of the caller's Java byte array; an empty payload is a
+/// successful no-op because IMEs can legally commit empty strings. Payloads
+/// past the host control socket's 512-byte receive budget (header + token
+/// suffix included) can never be delivered and would stall the reliable
+/// queue, so they are rejected outright.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_input_text(
+    instance_c: *const c_char,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    let guard = std::panic::catch_unwind(|| {
+        if data.is_null() || len == 0 {
+            return LEFTCAR_OK;
+        }
+        if len > 400 {
+            return LEFTCAR_ERR_INVALID;
+        }
+        let control = match active_input_control(instance_c) {
+            Ok(control) => control,
+            Err(code) => return code,
+        };
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return LEFTCAR_ERR_INVALID;
+        };
+        control
+            .input
+            .lock()
+            .unwrap()
+            .push(InputEvent::Text { text: text.to_string() });
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
 /// Pack the newest LCD1 cursor sample for frame-rate polling.
 /// bits 0..15 x, 16..31 y, 32..61 sequence (low 30 bits), 63 visible.
 /// Returns -1 while the host has not opted in or no sample arrived yet.
@@ -418,5 +455,41 @@ mod cursor_export_tests {
             leftcar_jni_set_cursor_stream(missing.as_ptr(), true),
             LEFTCAR_ERR_STATE
         );
+    }
+
+    #[test]
+    fn input_text_queues_utf8_reliable_events() {
+        const KEY: &str = "text-jni-export-tests/queue";
+        let (instance, control) = installed_control(KEY);
+        let text = "안녕abc";
+        assert_eq!(
+            leftcar_jni_input_text(
+                instance.as_ptr(),
+                text.as_ptr(),
+                text.len(),
+            ),
+            LEFTCAR_OK
+        );
+        let queued = control.input.lock().unwrap().next_ready(1).unwrap();
+        assert_eq!(
+            queued.event,
+            InputEvent::Text {
+                text: text.to_string(),
+            }
+        );
+        drop_control(KEY, &control);
+    }
+
+    #[test]
+    fn input_text_rejects_invalid_utf8_and_empty_is_noop() {
+        const KEY: &str = "text-jni-export-tests/validation";
+        let (instance, control) = installed_control(KEY);
+        assert_eq!(
+            leftcar_jni_input_text(instance.as_ptr(), b"\xff\xfe".as_ptr(), 2),
+            LEFTCAR_ERR_INVALID
+        );
+        assert_eq!(leftcar_jni_input_text(instance.as_ptr(), b"a".as_ptr(), 0), LEFTCAR_OK);
+        assert!(control.input.lock().unwrap().next_ready(1).is_none());
+        drop_control(KEY, &control);
     }
 }

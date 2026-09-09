@@ -266,40 +266,6 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       opacity: 0.5,
     },
 
-    /* Miniature Display Aspect-Ratio Box */
-    miniatureBox: {
-      width: 44,
-      height: 40,
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: 0,
-    },
-    miniatureScreen: {
-      borderWidth: 1.5,
-      borderColor: colors.textPrimary,
-      borderRadius: 3,
-      backgroundColor: colors.bgSubtle,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    miniatureInner: {
-      width: "70%",
-      height: "50%",
-      backgroundColor: colors.borderCard,
-      borderRadius: 1,
-    },
-    miniatureStand: {
-      width: 3,
-      height: 3,
-      backgroundColor: colors.textPrimary,
-    },
-    miniatureBase: {
-      width: 14,
-      height: 2,
-      backgroundColor: colors.textPrimary,
-      borderRadius: 1,
-    },
-
     /* Display Cards */
     displayCard: {
       backgroundColor: colors.bgSurface,

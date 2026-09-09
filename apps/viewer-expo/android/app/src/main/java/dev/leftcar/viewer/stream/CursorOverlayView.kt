@@ -37,6 +37,8 @@ internal class CursorOverlayView(
     }
 
     private val choreographer = Choreographer.getInstance()
+    /** 창 폭 기반 커서 배율 — XR 대형 패널에서 18dp 화살표가 너무 작아진다. */
+    private val panelScale = StreamPanelDensity.scaleOf(activity)
     private val host = FrameLayout(activity)
     private var popup: PopupWindow? = null
     private var running = false
@@ -52,7 +54,7 @@ internal class CursorOverlayView(
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF0F172A.toInt()
         style = Paint.Style.STROKE
-        strokeWidth = resources.displayMetrics.density * 1.5f
+        strokeWidth = resources.displayMetrics.density * panelScale * 1.5f
     }
     private val arrow = Path()
 
@@ -185,10 +187,11 @@ internal class CursorOverlayView(
     private fun cursorHeightPx(): Int = dp(CURSOR_HEIGHT_DP)
 
     private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        StreamPanelDensity.dp(value.toFloat(), resources.displayMetrics.density, panelScale)
 
     override fun onDraw(canvas: Canvas) {
-        val density = resources.displayMetrics.density
+        // 크기(dp)와 동일한 panelScale로 화살표 경로를 그려야 뷰에 맞는다.
+        val density = resources.displayMetrics.density * panelScale
         arrow.rewind()
         arrow.moveTo(2f * density, 2f * density)
         arrow.lineTo(2f * density, 18f * density)

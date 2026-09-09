@@ -1,16 +1,17 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
+import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import {
   connectHost,
   controlClient,
@@ -23,7 +24,8 @@ import {
   noteAutoReconnectAttempt,
   shouldAutoReconnectFromGate,
 } from "../src/auto-reconnect";
-import { clearToken, formatHostEndpoint } from "../src/pairing";
+import { handleUnauthorized } from "../src/connect-flow";
+import { formatHostEndpoint } from "../src/pairing";
 import {
   formatErrorMessage,
   isUnauthorizedError,
@@ -62,7 +64,12 @@ function RecentHostQuickConnect({
 }) {
   const { colors, isDark } = useAppTheme();
   const { t } = useAppLanguage();
-  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,12 +83,9 @@ function RecentHostQuickConnect({
         await controlClient()?.request<CatalogView>("getCatalog");
       } catch (e) {
         if (isUnauthorizedError(e)) {
-          await clearToken();
-          disconnectHost();
-          Alert.alert(t.viewer.pairingRequiredTitle, t.viewer.pairingRequiredDesc);
-          router.push({
-            pathname: "/pairing",
-            params: { endpoint: formatHostEndpoint(item.host, item.port) },
+          await handleUnauthorized({
+            markStale: true,
+            navigate: { endpoint: formatHostEndpoint(item.host, item.port) },
           });
           return;
         }
@@ -95,7 +99,7 @@ function RecentHostQuickConnect({
       setConnecting(false);
       onFinished();
     }
-  }, [connecting, item, onFinished, t]);
+  }, [connecting, item, onFinished]);
 
   return (
     <View style={styles.recentQuickColumn}>
@@ -136,7 +140,12 @@ function RecentHostQuickConnect({
 export default function Hub() {
   const { colors, isDark } = useAppTheme();
   const { t, language, toggleLanguage } = useAppLanguage();
-  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
 
   const [hostAddr, setHostAddr] = useState<string>("");
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -173,9 +182,7 @@ export default function Hub() {
           await controlClient()?.request<CatalogView>("getCatalog");
         } catch (e) {
           if (isUnauthorizedError(e)) {
-            await clearToken();
-            disconnectHost();
-            markPairingStale();
+            await handleUnauthorized({ markStale: true });
             return;
           }
           throw e;
@@ -209,21 +216,14 @@ export default function Hub() {
       if (client) {
         client.request<CatalogView>("getCatalog").catch((e) => {
           if (isUnauthorizedError(e)) {
-            void (async () => {
-              const endpoint = controlHost();
-              await clearToken();
-              disconnectHost();
-              checkConnection();
-              Alert.alert(t.viewer.pairingRequiredTitle, t.viewer.pairingRequiredDesc);
-              router.push({
-                pathname: "/pairing",
-                params: { endpoint },
-              });
-            })();
+            void handleUnauthorized({
+              beforeNavigate: checkConnection,
+              navigate: { endpoint: controlHost() },
+            });
           }
         });
       }
-    }, [attemptAutoReconnect, checkConnection, t])
+    }, [attemptAutoReconnect, checkConnection])
   );
 
   return (

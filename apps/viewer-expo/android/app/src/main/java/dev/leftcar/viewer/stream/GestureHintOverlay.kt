@@ -29,10 +29,11 @@ internal class GestureHintOverlay(
 
     fun show() {
         if (popup != null || activity.isFinishing || activity.isDestroyed) return
+        val panelScale = StreamPanelDensity.scaleOf(activity)
         val confirmButton = TextView(activity).apply {
             text = ViewerStrings.gestureHintConfirm
             setTextColor(Color.argb(255, 140, 188, 255))
-            textSize = 13f
+            textSize = 13f * panelScale
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, dp(10), 0, 0)
         }
@@ -44,7 +45,7 @@ internal class GestureHintOverlay(
         TextView(activity).apply {
             text = ViewerStrings.gestureHintTitle
             setTextColor(Color.WHITE)
-            textSize = 15f
+            textSize = 15f * panelScale
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, dp(6))
         }.also(content::addView)
@@ -52,7 +53,7 @@ internal class GestureHintOverlay(
             TextView(activity).apply {
                 text = "$gesture — $action"
                 setTextColor(Color.argb(224, 255, 255, 255))
-                textSize = 12f
+                textSize = 12f * panelScale
                 setPadding(0, dp(3), 0, dp(3))
             }.also(content::addView)
         }
@@ -87,7 +88,11 @@ internal class GestureHintOverlay(
     }
 
     private fun dp(value: Int): Int =
-        (value * activity.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        StreamPanelDensity.dp(
+            value.toFloat(),
+            activity.resources.displayMetrics.density,
+            StreamPanelDensity.scaleOf(activity),
+        )
 
     private fun cardBackground() = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE

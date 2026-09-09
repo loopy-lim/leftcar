@@ -7,9 +7,11 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { connectHost, controlHost } from "../src/session";
@@ -27,7 +29,7 @@ import {
 } from "../src/pairing";
 import { formatErrorMessage } from "../src/control";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
-import { useAppLanguage } from "../src/i18n";
+import { useAppLanguage, type TranslationSchema } from "../src/i18n";
 
 type PairingMode = "qr" | "code";
 
@@ -132,22 +134,151 @@ function OtpPinInput({
   );
 }
 
-function PairingModeCard({ mode, permission, requestPermission, code, busy, hasCodeTarget, canSubmitCode, colors, styles, onCodeChange, onSubmit, onQrScanned }: { mode: PairingMode; permission: { granted: boolean } | null | undefined; requestPermission: () => void; code: string; busy: boolean; hasCodeTarget: boolean; canSubmitCode: boolean; colors: ThemeTokens; styles: ReturnType<typeof createStyles>; onCodeChange: (value: string) => void; onSubmit: () => void; onQrScanned: (value: string) => void }) {
+interface PairingModeCardProps {
+  mode: PairingMode;
+  permission: { granted: boolean } | null | undefined;
+  requestPermission: () => void;
+  code: string;
+  busy: boolean;
+  hasCodeTarget: boolean;
+  canSubmitCode: boolean;
+  colors: ThemeTokens;
+  styles: ReturnType<typeof createStyles>;
+  onCodeChange: (value: string) => void;
+  onSubmit: () => void;
+  onQrScanned: (value: string) => void;
+}
+
+function QrCameraLoading({ colors, styles }: { colors: ThemeTokens; styles: ReturnType<typeof createStyles> }) {
+  return (
+    <View style={styles.cameraBox}>
+      <ActivityIndicator color={colors.textPrimary} />
+    </View>
+  );
+}
+
+function QrCameraPermissionNotice({
+  colors,
+  styles,
+  t,
+  onGrant,
+}: {
+  colors: ThemeTokens;
+  styles: ReturnType<typeof createStyles>;
+  t: TranslationSchema;
+  onGrant: () => void;
+}) {
+  return (
+    <View style={styles.cameraNotice}>
+      <Ionicons
+        name="camera-outline"
+        size={28}
+        color={colors.textPrimary}
+        style={{ marginBottom: 4 }}
+      />
+      <Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text>
+      <Text style={styles.cameraNoticeText}>{t.viewer.cameraPermDesc}</Text>
+      <Pressable onPress={onGrant} style={styles.permissionBtn}>
+        <Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function QrScanner({
+  styles,
+  t,
+  onQrScanned,
+}: {
+  styles: ReturnType<typeof createStyles>;
+  t: TranslationSchema;
+  onQrScanned: (value: string) => void;
+}) {
+  return (
+    <View style={styles.scannerWrapper}>
+      <CameraView
+        style={styles.camera}
+        facing="back"
+        barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+        onBarcodeScanned={(result) => {
+          const value = result.data?.trim();
+          if (value) onQrScanned(value);
+        }}
+      >
+        <View style={styles.scanOverlay}>
+          <View style={styles.scanFrame}>
+            <View style={[styles.cornerBracket, styles.cornerTopLeft]} />
+            <View style={[styles.cornerBracket, styles.cornerTopRight]} />
+            <View style={[styles.cornerBracket, styles.cornerBottomLeft]} />
+            <View style={[styles.cornerBracket, styles.cornerBottomRight]} />
+          </View>
+          <View style={styles.scanHintBox}>
+            <Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text>
+          </View>
+        </View>
+      </CameraView>
+    </View>
+  );
+}
+
+function PairingModeCard({
+  mode,
+  permission,
+  requestPermission,
+  code,
+  busy,
+  hasCodeTarget,
+  canSubmitCode,
+  colors,
+  styles,
+  onCodeChange,
+  onSubmit,
+  onQrScanned,
+}: PairingModeCardProps) {
   const { t } = useAppLanguage();
-  if (mode === "code") return <View style={styles.card}>
-    <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
-    <Text style={styles.cardDesc}>{hasCodeTarget ? t.viewer.pinDesc : t.viewer.pinNoTargetDesc}</Text>
-    <OtpPinInput code={code} onChangeCode={onCodeChange} disabled={busy} colors={colors} />
-    <Pressable style={({ pressed }) => [styles.primaryBtn, !canSubmitCode && styles.btnDisabled, pressed && canSubmitCode && styles.btnPressed]} onPress={onSubmit} disabled={!canSubmitCode}>
-      {busy ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>}
-    </Pressable>
-  </View>;
-  return <View style={styles.card}>
-    <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text>
-    {!permission ? <View style={styles.cameraBox}><ActivityIndicator color={colors.textPrimary} /></View> : !permission.granted ? <View style={styles.cameraNotice}>
-      <Ionicons name="camera-outline" size={28} color={colors.textPrimary} style={{ marginBottom: 4 }} /><Text style={styles.cameraNoticeTitle}>{t.viewer.cameraPermNeeded}</Text><Text style={styles.cameraNoticeText}>{t.viewer.cameraPermDesc}</Text><Pressable onPress={requestPermission} style={styles.permissionBtn}><Text style={styles.permissionBtnText}>{t.viewer.btnGrantPerm}</Text></Pressable>
-    </View> : <View style={styles.scannerWrapper}><CameraView style={styles.camera} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={(result) => { const value = result.data?.trim(); if (value) onQrScanned(value); }}><View style={styles.scanOverlay}><View style={styles.scanFrame}><View style={[styles.cornerBracket, styles.cornerTopLeft]} /><View style={[styles.cornerBracket, styles.cornerTopRight]} /><View style={[styles.cornerBracket, styles.cornerBottomLeft]} /><View style={[styles.cornerBracket, styles.cornerBottomRight]} /></View><View style={styles.scanHintBox}><Text style={styles.scanHintText}>{t.viewer.qrScanHint}</Text></View></View></CameraView></View>}
-  </View>;
+  if (mode === "code") {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>{t.viewer.pinTitle}</Text>
+        <Text style={styles.cardDesc}>
+          {hasCodeTarget ? t.viewer.pinDesc : t.viewer.pinNoTargetDesc}
+        </Text>
+        <OtpPinInput code={code} onChangeCode={onCodeChange} disabled={busy} colors={colors} />
+        <Pressable
+          style={({ pressed }) => [
+            styles.primaryBtn,
+            !canSubmitCode && styles.btnDisabled,
+            pressed && canSubmitCode && styles.btnPressed,
+          ]}
+          onPress={onSubmit}
+          disabled={!canSubmitCode}
+        >
+          {busy ? (
+            <ActivityIndicator color={colors.btnPrimaryText} size="small" />
+          ) : (
+            <Text style={styles.primaryBtnText}>{t.viewer.btnSubmitPin}</Text>
+          )}
+        </Pressable>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>{t.viewer.tabQr}</Text>
+      {!permission ? (
+        <QrCameraLoading colors={colors} styles={styles} />
+      ) : !permission.granted ? (
+        <QrCameraPermissionNotice
+          colors={colors}
+          styles={styles}
+          t={t}
+          onGrant={requestPermission}
+        />
+      ) : (
+        <QrScanner styles={styles} t={t} onQrScanned={onQrScanned} />
+      )}
+    </View>
+  );
 }
 
 const stylesLocal = StyleSheet.create({
@@ -186,7 +317,12 @@ const stylesLocal = StyleSheet.create({
 export default function Pairing() {
   const { colors, isDark } = useAppTheme();
   const { t } = useAppLanguage();
-  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
 
   const params = useLocalSearchParams<{ endpoint?: string }>();
   const routeEndpoint = params.endpoint?.trim() || "";
@@ -202,6 +338,12 @@ export default function Pairing() {
 
   const host = scannedHost || resolvePairingHost(routeEndpoint, controlHost());
   const scanningLockRef = useRef(false);
+  // 승인 폴링은 화면이 떠 있는 동안만 산다 — 언마운트/새 스캔이 이전 폴링을
+  // 끊고, 승인 완료 후의 화면 전환도 취소된 스캔이 수행하지 않게 한다.
+  const approvalAbortRef = useRef<AbortController | null>(null);
+  // 자동 제출은 같은 코드를 두 번 제출하지 않는다 — 실패 후 busy가 풀려도
+  // 사용자가 코드를 고칠 때까지 재시도 루프가 돌지 않는다.
+  const lastAutoSubmittedCodeRef = useRef<string | null>(null);
   const hostEndpoint = parseHostEndpoint(host);
   const hasCodeTarget = Boolean(hostEndpoint);
   const canSubmitCode = canSubmitPairingCode(code, hasCodeTarget, busy);
@@ -209,6 +351,13 @@ export default function Pairing() {
   useEffect(() => {
     dispatch({ type: "update", patch: { error: null } });
   }, [code, mode]);
+
+  useEffect(
+    () => () => {
+      approvalAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const handlePairWithCode = useCallback(
     async (codeToPair: string) => {
@@ -250,7 +399,13 @@ export default function Pairing() {
 
   // Auto-submit code when 6 digits are typed and target is ready
   useEffect(() => {
-    if (code.length === 6 && canSubmitCode && !busy) {
+    if (
+      code.length === 6 &&
+      canSubmitCode &&
+      !busy &&
+      lastAutoSubmittedCodeRef.current !== code
+    ) {
+      lastAutoSubmittedCodeRef.current = code;
       void handlePairWithCode(code);
     }
   }, [code, canSubmitCode, busy, handlePairWithCode]);
@@ -272,6 +427,9 @@ export default function Pairing() {
         // QR 스캔으로 페어링이 완결된다: 시크릿을 제시하고 Mac 화면의
         // [허용]을 기다린다. 카메라는 계속 켜져 있어 다른 QR로 재시도도
         // 바로 가능하다.
+        approvalAbortRef.current?.abort();
+        const approvalAbort = new AbortController();
+        approvalAbortRef.current = approvalAbort;
         dispatch({
           type: "update",
           patch: {
@@ -281,6 +439,7 @@ export default function Pairing() {
           },
         });
         const result = await pairWithHostApproval(payload, {
+          signal: approvalAbort.signal,
           onPending: () =>
             dispatch({
               type: "update",
@@ -288,6 +447,7 @@ export default function Pairing() {
             }),
         });
         if (result.kind === "approved") {
+          if (approvalAbort.signal.aborted) return;
           await connectHost(payload.host, payload.port);
           router.replace("/catalog");
           return;
@@ -301,6 +461,10 @@ export default function Pairing() {
           },
         });
       } catch (e) {
+        if (e instanceof Error && e.name === "AbortError") {
+          // 화면 이탈·새 스캔으로 취소된 폴링 — 조용히 끝낸다.
+          return;
+        }
         if (isPairingUnsupportedError(e)) {
           // 구버전 호스트는 시크릿만으로 pair을 받지 않는다 — 6자리 입력으로
           // 전환한다(스캔한 대상은 그대로 유지).

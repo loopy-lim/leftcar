@@ -86,6 +86,12 @@ object ViewerNative {
         down: Boolean,
         repeat: Int,
     ): Int
+    /**
+     * Queue committed IME text as reliable wire events. [payload] is UTF-8
+     * bytes (not a Java string) so supplementary characters survive JNI;
+     * the byte array sidesteps modified-UTF-8's CESU-8 surrogate mangling.
+     */
+    external fun sendText(instanceId: String, payload: ByteArray): Int
     external fun releaseInput(instanceId: String): Int
     /** -1 waiting/unknown, 0 Host-locked, 1 remote input enabled. */
     external fun inputStatus(instanceId: String): Int

@@ -25,6 +25,9 @@ pub const INPUT_FLAG_RELIABLE: u8 = 1;
 pub const MAX_RELIABLE_QUEUE: usize = 256;
 const RELIABLE_RETRY_US: u64 = 20_000;
 const MAX_RELIABLE_ATTEMPTS: u8 = 12;
+/// Text chunks are committed user data, not held key state: give them a
+/// wider loss window before the fail-safe wipe clears the queue.
+const MAX_TEXT_ATTEMPTS: u8 = 48;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
@@ -51,6 +54,13 @@ pub enum InputEvent {
         down: bool,
         repeat: u16,
     },
+    /// Committed IME text (composition final state only, never the in-flight
+    /// composing buffer). Payload is raw UTF-8; the host derives its length
+    /// from the datagram size, so senders keep chunks small enough for the
+    /// control socket's 512-byte receive buffer.
+    Text {
+        text: String,
+    },
     ReleaseAll,
 }
 
@@ -65,6 +75,7 @@ impl InputEvent {
             Self::PointerButton { .. } => 2,
             Self::Scroll { .. } => 3,
             Self::Key { .. } => 4,
+            Self::Text { .. } => 6,
             Self::ReleaseAll => 5,
         }
     }
@@ -108,6 +119,9 @@ impl InputEvent {
                 out.extend_from_slice(&meta_state.to_be_bytes());
                 out.push(u8::from(*down));
                 out.extend_from_slice(&repeat.to_be_bytes());
+            }
+            Self::Text { text } => {
+                out.extend_from_slice(text.as_bytes());
             }
             Self::ReleaseAll => {}
         }
@@ -193,12 +207,19 @@ pub enum TerminationReason {
     HostStopped,
 }
 
+impl TerminationReason {
+    /// Wire code for this reason (the `TERMINATION_REASON_*` consts).
+    pub fn code(self) -> u8 {
+        match self {
+            TerminationReason::HealthCheck => TERMINATION_REASON_HEALTH,
+            TerminationReason::HostForced => TERMINATION_REASON_FORCED,
+            TerminationReason::HostStopped => TERMINATION_REASON_STOPPED,
+        }
+    }
+}
+
 pub fn encode_termination(reason: TerminationReason, token: &[u8]) -> Vec<u8> {
-    let code = match reason {
-        TerminationReason::HealthCheck => TERMINATION_REASON_HEALTH,
-        TerminationReason::HostForced => TERMINATION_REASON_FORCED,
-        TerminationReason::HostStopped => TERMINATION_REASON_STOPPED,
-    };
+    let code = reason.code();
     let mut bytes = Vec::with_capacity(5 + token.len());
     bytes.extend_from_slice(TERMINATION_MAGIC);
     bytes.push(code);
@@ -398,7 +419,12 @@ impl InputScheduler {
     /// while an acknowledgement is in flight.
     pub fn next_ready(&mut self, now_us: u64) -> Option<OutboundInput> {
         if let Some(pending) = self.pending.as_mut() {
-            if pending.attempts >= MAX_RELIABLE_ATTEMPTS {
+            let attempt_limit = if matches!(pending.outbound.event, InputEvent::Text { .. }) {
+                MAX_TEXT_ATTEMPTS
+            } else {
+                MAX_RELIABLE_ATTEMPTS
+            };
+            if pending.attempts >= attempt_limit {
                 self.dropped = self.dropped.saturating_add(1);
                 self.pending = None;
                 self.reliable.clear();
@@ -730,6 +756,14 @@ mod tests {
                 21,
             ),
             (InputEvent::ReleaseAll, 5, true, 10),
+            (
+                InputEvent::Text {
+                    text: "한글A".to_string(),
+                },
+                6,
+                true,
+                17,
+            ),
         ];
 
         for (event, kind, reliable, message_len) in cases {
@@ -746,5 +780,34 @@ mod tests {
         assert_eq!(normalized_axis(-1.0), 0);
         assert_eq!(normalized_axis(2.0), u16::MAX);
         assert_eq!(normalized_axis(f32::NAN), 0);
+    }
+
+    #[test]
+    fn text_payload_round_trips_utf8_bytes_and_requeues_until_ack() {
+        let token = b"nonce";
+        let event = InputEvent::Text {
+            text: "안녕하세요 world".to_string(),
+        };
+        assert!(event.is_reliable());
+        let packet = encode_input(&OutboundInput { sequence: 3, event }, token);
+        assert_eq!(packet[8], 6);
+        let payload = &packet[10..packet.len() - token.len()];
+        assert_eq!(std::str::from_utf8(payload).unwrap(), "안녕하세요 world");
+
+        // Reliable semantics: the scheduler retransmits until acknowledged so
+        // a lost datagram can never silently swallow committed IME text.
+        let mut scheduler = InputScheduler::new(60);
+        scheduler.push(InputEvent::Text {
+            text: "abc".to_string(),
+        });
+        let first = scheduler.next_ready(1).unwrap();
+        assert_eq!(first.sequence, 1);
+        assert!(scheduler.next_ready(20_000).is_none());
+        assert_eq!(
+            scheduler.next_ready(20_001).unwrap().sequence,
+            first.sequence
+        );
+        assert!(scheduler.acknowledge(first.sequence));
+        assert!(scheduler.next_ready(20_002).is_none());
     }
 }

@@ -63,6 +63,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
     private var localAudioEnabled: Boolean = true
+    private var textLens: TextInputLensView? = null
+    private var keyboardRequested = false
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
@@ -456,6 +458,76 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         return ViewerNative.sendKey(instanceId, keyCode, scanCode, metaState, down, repeat) == 0
     }
 
+    private fun sendTextUnlocked(text: String) {
+        if (remoteInputLocked()) return
+        ViewerNative.sendText(instanceId, text.toByteArray(Charsets.UTF_8))
+    }
+
+    /** IME 텍스트 계열의 편집 키는 다운/업 페어로 왕복시킨다. */
+    private fun sendKeyPairUnlocked(keyCode: Int) {
+        sendKeyUnlocked(keyCode, 0, 0, true, 0)
+        sendKeyUnlocked(keyCode, 0, 0, false, 0)
+    }
+
+    /**
+     * 소프트키보드(IME)를 붙일 1×1 렌즈. decorView에 한 번만 붙으므로
+     * Surface 재구성(rebuildStreamSurfaces)으로도 포커스·IME 상태가 유지된다.
+     */
+    private fun attachTextLens() {
+        val relay = TextInputRelay(
+            sendText = ::sendTextUnlocked,
+            sendBackspace = { count ->
+                repeat(count) { sendKeyPairUnlocked(TextInputRelay.KEYCODE_DEL) }
+            },
+            sendForwardDelete = { count ->
+                repeat(count) { sendKeyPairUnlocked(TextInputRelay.KEYCODE_FORWARD_DEL) }
+            },
+            sendEnter = { sendKeyPairUnlocked(TextInputRelay.KEYCODE_ENTER) },
+        )
+        val lens = TextInputLensView(this, relay).also { view ->
+            view.onImeVisibilityChanged = { visible ->
+                keyboardRequested = visible
+                hud?.setKeyboardChipActive(visible)
+            }
+            textLens = view
+        }
+        (window.decorView as android.view.ViewGroup).addView(
+            lens,
+            android.widget.FrameLayout.LayoutParams(1, 1),
+        )
+    }
+
+    /**
+     * HUD "ABC" 칩의 토글. 열 때는 포커스가 렌즈로 넘어가고(하드웨어 키는
+     * Activity dispatchKeyEvent가 여전히 Mac으로 포워딩한다), 닫으면 포커스를
+     * 스트림 Surface로 돌려 놓는다. [keyboardRequested]는 우리가 요청한 상태고,
+     * 렌즈의 insets 콜백(API 30+)이 뒤로가기 닫기 같은 시스템 주도 변화로
+     * 어긋난 상태를 실측값으로 되돌린다.
+     */
+    fun toggleSoftKeyboard() {
+        setSoftKeyboard(!keyboardRequested)
+    }
+
+    private fun setSoftKeyboard(active: Boolean) {
+        keyboardRequested = active
+        val lens = textLens ?: return
+        val imm = getSystemService(INPUT_METHOD_SERVICE)
+            as? android.view.inputmethod.InputMethodManager ?: return
+        if (active) {
+            lens.requestFocus()
+            // showSoftInput은 포커스 처리가 끝난 뒤에 호출돼야 확실히 붙는다.
+            lens.post {
+                if (!keyboardRequested || !lens.hasWindowFocus()) return@post
+                imm.showSoftInput(lens, 0)
+            }
+        } else {
+            imm.hideSoftInputFromWindow(lens.windowToken, 0)
+            lens.clearFocus()
+            streamSurfaces?.requestFocus()
+            hud?.setKeyboardChipActive(false)
+        }
+    }
+
     private fun hideTabletCursor() {
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         hideTabletCursorRunnable.run()
@@ -757,8 +829,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             showFps,
             ::handleTermination,
             ::markRenderHealthy,
-        ).also { hud -> hud.onGestureHelpTapped = { showGestureHint(true) } }
+        ).also { hud ->
+            hud.onGestureHelpTapped = { showGestureHint(true) }
+            hud.onKeyboardToggle = { toggleSoftKeyboard() }
+        }
         hud?.show()
+        attachTextLens()
         showGestureHint(false)
         surfaces.requestFocus()
         hideSystemBars()
@@ -900,6 +976,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             window.decorView.post { hideSystemBars() }
         } else {
             hideTabletCursor()
+            // 창 포커스를 잃으면 시스템이 IME를 닫으므로 요청 상태도 원점으로.
+            keyboardRequested = false
+            hud?.setKeyboardChipActive(false)
             ViewerNative.releaseInput(instanceId)
         }
     }
@@ -1143,6 +1222,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()
         cursorOverlay = null
+        textLens?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+        textLens = null
         audioPlayer?.stop()
         audioPlayer = null
         gestureHint?.dismiss()

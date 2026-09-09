@@ -66,9 +66,14 @@ internal class StreamHudController(
     private var rebindPopup: PopupWindow? = null
     private var rebindView: TextView? = null
     private var helpPopup: PopupWindow? = null
+    private var keyboardPopup: PopupWindow? = null
+    private var keyboardChip: TextView? = null
 
     /** 제스처 안내는 첫 창에서 1회만 자동 노출되므로, 이 칩이 유일한 재열람 경로다. */
     var onGestureHelpTapped: (() -> Unit)? = null
+
+    /** "ABC" 칩 탭 → Activity가 IME를 토글한다. */
+    var onKeyboardToggle: (() -> Unit)? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -116,12 +121,18 @@ internal class StreamHudController(
     fun show() {
         showInput()
         showGestureHelpChip()
+        showKeyboardChip()
         // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
         // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
         if (showDiagnostics) {
             showStats()
             persistentFpsOverlay.show()
         }
+    }
+
+    /** IME 표시 실측 상태(렌즈 inset 콜백)를 칩 강조로 반영한다. */
+    fun setKeyboardChipActive(active: Boolean) {
+        keyboardChip?.alpha = if (active) 1f else 0.72f
     }
 
     fun armTerminationPolling() {
@@ -136,7 +147,7 @@ internal class StreamHudController(
     fun showRebindIndicator(message: String) {
         val indicator = rebindView ?: TextView(activity).apply {
             setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f
+            textSize = 12f * panelScale
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = badgeBackground(Color.argb(168, 15, 23, 42))
             contentDescription = ViewerStrings.rebindDescription
@@ -222,10 +233,13 @@ internal class StreamHudController(
         statsPopup?.dismiss()
         rebindPopup?.dismiss()
         helpPopup?.dismiss()
+        keyboardPopup?.dismiss()
         inputPopup = null
         statsPopup = null
         rebindPopup = null
         helpPopup = null
+        keyboardPopup = null
+        keyboardChip = null
         inputView = null
         inputIcon = null
         inputLabel = null
@@ -235,7 +249,14 @@ internal class StreamHudController(
     }
 
     private fun dp(value: Int): Int =
-        (value * activity.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        StreamPanelDensity.dp(
+            value.toFloat(),
+            activity.resources.displayMetrics.density,
+            panelScale,
+        )
+
+    /** 창 폭 기반 HUD 배율 — XR 대형 패널에서 배지·칩이 확대된다. */
+    private val panelScale = StreamPanelDensity.scaleOf(activity)
 
     private fun badgeBackground(color: Int): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
@@ -286,7 +307,7 @@ internal class StreamHudController(
         }
         val label = TextView(activity).apply {
             setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 11f
+            textSize = 11f * panelScale
         }
         val badge = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -334,7 +355,7 @@ internal class StreamHudController(
         val chip = TextView(activity).apply {
             text = "?"
             setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f
+            textSize = 12f * panelScale
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(2), dp(8), dp(2))
@@ -364,6 +385,51 @@ internal class StreamHudController(
                     Gravity.TOP or Gravity.END,
                     dp(12),
                     dp(52),
+                )
+            }
+        }
+    }
+
+    /**
+     * 스트림 창 구석의 "ABC" 칩. 탭하면 [onKeyboardToggle]로 소프트키보드를
+     * 토글한다. "?"칩 아래 세 번째 슬롯에 세로로 쌓는다.
+     */
+    private fun showKeyboardChip() {
+        if (keyboardPopup != null) return
+        val chip = TextView(activity).apply {
+            text = "ABC"
+            setTextColor(Color.argb(224, 255, 255, 255))
+            textSize = 12f * panelScale
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+            background = badgeBackground(Color.argb(118, 15, 23, 42))
+            alpha = 0.72f
+            contentDescription = ViewerStrings.keyboardToggleDescription
+        }
+        keyboardChip = chip
+        chip.setOnClickListener {
+            onKeyboardToggle?.invoke()
+        }
+        val popup = PopupWindow(
+            chip,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            false,
+        ).apply {
+            isFocusable = false
+            isOutsideTouchable = false
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            elevation = dp(2).toFloat()
+        }
+        keyboardPopup = popup
+        activity.window.decorView.post {
+            if (!activity.isFinishing && !activity.isDestroyed) {
+                popup.showAtLocation(
+                    activity.window.decorView,
+                    Gravity.TOP or Gravity.END,
+                    dp(12),
+                    dp(92),
                 )
             }
         }
@@ -424,7 +490,7 @@ internal class StreamHudController(
         if (statsPopup != null) return
         val stats = TextView(activity).apply {
             setTextColor(Color.argb(196, 255, 255, 255))
-            textSize = 10f
+            textSize = 10f * panelScale
             typeface = Typeface.MONOSPACE
             setPadding(dp(9), dp(4), dp(9), dp(4))
             background = badgeBackground(Color.argb(92, 15, 23, 42))

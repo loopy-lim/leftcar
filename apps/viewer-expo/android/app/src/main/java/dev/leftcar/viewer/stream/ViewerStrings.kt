@@ -49,6 +49,10 @@ object ViewerStrings {
     val gestureHelpDescription: String
         get() = if (en) "Show touch gestures" else "터치 제스처 안내 보기"
 
+    val keyboardToggleDescription: String
+        get() = if (en) "Toggle the on-screen keyboard for typing on the computer"
+        else "컴퓨터로 타이핑할 소프트키보드 켜기/끄기"
+
     val statsDescription: String
         get() = if (en) "Stream details" else "화면 공유 상세 정보"
 

@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+  <!-- 설치 시점에 XR 앱으로 분류되게 한다. required=false이므로 비 XR 기기
+       (태블릿 뷰어) 설치는 그대로 허용되고, 런타임 분기는 기존
+       hasSystemFeature 프로브가 담당한다. -->
+  <uses-feature android:name="android.software.xr.api.spatial" android:required="false"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>

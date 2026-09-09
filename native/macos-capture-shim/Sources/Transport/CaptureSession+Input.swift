@@ -99,6 +99,10 @@ extension CaptureSession {
         case 5:
             guard message.count == 10 else { return false }
             if enabled { releaseInjectedInput() }
+        case 6:
+            // Variable-length UTF-8 payload after the 10-byte header.
+            guard message.count > 10 else { return false }
+            if enabled { injectText(message) }
         default:
             return false
         }
@@ -217,6 +221,38 @@ extension CaptureSession {
         return true
     }
 
+    /// User-level remote key remap, e.g. Caps Lock → F17 for personal
+    /// layouts: `defaults write NSGlobalDomain dev.leftcar.remoteKeyRemap
+    /// -dict 115 240`. Synthetic CGEvents bypass Karabiner/hidutil device
+    /// remaps, so this lookup is the one place a viewer key can be re-bound
+    /// on the host side. Missing/invalid entries are ignored.
+    var remoteKeyRemap: [UInt16: CGKeyCode] {
+        let domain = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
+        guard let table = domain?["dev.leftcar.remoteKeyRemap"] as? [String: Any] else {
+            return [:]
+        }
+        var remap: [UInt16: CGKeyCode] = [:]
+        for (rawKey, rawValue) in table {
+            guard let key = UInt16(rawKey),
+                  let target = remapTarget(rawValue) else { continue }
+            remap[key] = target
+        }
+        return remap
+    }
+
+    private func remapTarget(_ raw: Any) -> CGKeyCode? {
+        let number: NSNumber?
+        if let n = raw as? NSNumber {
+            number = n
+        } else if let s = raw as? String {
+            number = NumberFormatter().number(from: s)
+        } else {
+            number = nil
+        }
+        guard let n = number else { return nil }
+        return CGKeyCode(exactly: n)
+    }
+
      func keyboardFlags(metaState: UInt32) -> CGEventFlags {
         var flags: CGEventFlags = []
         if metaState & 0x0000_0001 != 0 { flags.insert(.maskShift) }
@@ -254,7 +290,9 @@ extension CaptureSession {
 
      func injectKey(_ message: Data) {
         let androidCode = readUInt16BE(message, at: 10)
-        guard let keyCode = macKeyCode(android: androidCode) else { return }
+        // 사용자 리맵이 우선한다(예: Caps Lock 115 → F17 240); 없으면 기본
+        // 안드로이드→Mac 키코드 표를 따른다.
+        guard let keyCode = remoteKeyRemap[androidCode] ?? macKeyCode(android: androidCode) else { return }
         let metaState = readUInt32BE(message, at: 14)
         let down = message[18] != 0
         let repeatCount = readUInt16BE(message, at: 19)
@@ -273,6 +311,37 @@ extension CaptureSession {
             pressedKeys.remove(keyCode)
         }
         event.post(tap: .cghidEventTap)
+    }
+
+    /// Committed IME text from the viewer. Types the exact string instead of
+    /// synthesizing hardware keys, which is what makes composed Hangul (and
+    /// any other layout-independent text) reach the Mac correctly. Keyboard
+    /// injection keeps the HID tap, which continues to deliver.
+    func injectText(_ message: Data) {
+        guard let text = String(data: message.dropFirst(10), encoding: .utf8),
+              !text.isEmpty else {
+            return
+        }
+        for character in text {
+            var units = Array(String(character).utf16)
+            units.withUnsafeMutableBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                let down = CGEvent(
+                    keyboardEventSource: nil,
+                    virtualKey: 0,
+                    keyDown: true
+                )
+                let up = CGEvent(
+                    keyboardEventSource: nil,
+                    virtualKey: 0,
+                    keyDown: false
+                )
+                down?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: base)
+                up?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: base)
+                down?.post(tap: .cghidEventTap)
+                up?.post(tap: .cghidEventTap)
+            }
+        }
     }
 
      func releaseInjectedInput() {

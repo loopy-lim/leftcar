@@ -10,12 +10,20 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
+import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import { connectHost, controlClient, disconnectHost } from "../src/session";
-import { formatErrorMessage, isUnauthorizedError, type CatalogView } from "../src/control";
+import {
+  formatErrorMessage,
+  isUnauthorizedError,
+  type CatalogView,
+} from "../src/control";
+import { DEFAULT_CONTROL_PORT } from "../src/defaults";
+import { handleUnauthorized } from "../src/connect-flow";
 import {
   clearToken,
   formatHostEndpoint,
@@ -121,7 +129,7 @@ function DiscoveredHostsSection({
                   {h.name || t.common.myComputer}
                 </Text>
                 <Text style={styles.hostAddr} numberOfLines={1}>
-                  {h.port === 7777 ? h.host : `${h.host}:${h.port}`}
+                  {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
                 </Text>
               </View>
               <View style={styles.connectChip}>
@@ -199,7 +207,7 @@ function RecentHostsSection({
                   {item.name || item.host}
                 </Text>
                 <Text style={styles.hostAddr} numberOfLines={1}>
-                  {item.port === 7777 ? item.host : `${item.host}:${item.port}`} ·{" "}
+                  {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
                   {interpolate(t.viewer.lastConnected, {
                     time: formatRelativeTime(item.lastConnected, language),
                   })}
@@ -483,7 +491,12 @@ function PairingManagementSection({
 export default function Host() {
   const { colors, isDark } = useAppTheme();
   const { t, language } = useAppLanguage();
-  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
 
   const [ip, setIp] = useState("");
   const [busy, setBusy] = useState(false);
@@ -550,7 +563,7 @@ export default function Host() {
     setError(null);
   }, [ip]);
 
-  const doConnect = useCallback(async (target: string, port = 7777) => {
+  const doConnect = useCallback(async (target: string, port = DEFAULT_CONTROL_PORT) => {
     setBusy(true);
     setError(null);
     try {
@@ -581,16 +594,9 @@ export default function Host() {
         setHasStoredToken(true);
       } catch (e) {
         if (isUnauthorizedError(e)) {
-          await clearToken();
-          disconnectHost();
-          setHasStoredToken(false);
-          Alert.alert(
-            t.viewer.pairingRequiredTitle,
-            t.viewer.pairingRequiredDesc,
-          );
-          router.push({
-            pathname: "/pairing",
-            params: { endpoint: formatHostEndpoint(target, port) },
+          await handleUnauthorized({
+            beforeNavigate: () => setHasStoredToken(false),
+            navigate: { endpoint: formatHostEndpoint(target, port) },
           });
           return;
         }

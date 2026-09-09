@@ -8,12 +8,14 @@ import {
   Switch,
   Text,
   View,
+  useWindowDimensions,
   type ViewStyle,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import type { DisplayInfo } from "../src/control";
+import { DEFAULT_CONTROL_PORT } from "../src/defaults";
 import { controlClient } from "../src/session";
 import {
   getUsbState,
@@ -28,6 +30,7 @@ import type {
   EncoderExperimentInfo,
 } from "../src/encoder-experiment";
 import { UdpStabilityControls } from "../src/UdpStabilityControls";
+import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import { createCatalogStyles } from "../src/catalog-styles";
 import type {
   UdpStabilityOptions,
@@ -693,7 +696,12 @@ function CatalogFooter({
 
 export default function Catalog() {
   const { colors, isDark } = useAppTheme();
-  const styles = useMemo(() => createCatalogStyles(colors, isDark), [colors, isDark]);
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createCatalogStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
   const model = useCatalogModel();
 
   const renderDisplay = useCallback(
@@ -735,7 +743,7 @@ export default function Catalog() {
         ListHeaderComponent={
           <CatalogHeader
             error={model.visibleError}
-            host={model.host || "localhost:7777"}
+            host={model.host || `localhost:${DEFAULT_CONTROL_PORT}`}
             loading={model.loading}
             profileId={model.profileId}
             refreshing={model.refreshing}
