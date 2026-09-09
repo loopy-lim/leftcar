@@ -122,7 +122,7 @@ pub(super) fn consume_viewer_response(
                 crate::input_protocol::TerminationReason::HostStopped => "stopped",
             }
         );
-        control.record_termination_reason(code);
+        control.record_termination_reason(i8::try_from(code).unwrap_or(-1));
         // Do not send BYE: the host initiated this termination and already
         // tore its session down. Stop the loop so the Activity can observe
         // the reason and close the window.

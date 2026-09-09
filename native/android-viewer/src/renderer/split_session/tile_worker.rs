@@ -367,7 +367,9 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             }
                             if let Some(reason) = parse_termination(packet, &token) {
                                 let code = reason.code();
-                                control.termination_reason.store(code, Ordering::SeqCst);
+                                control
+                                    .termination_reason
+                                    .store(i8::try_from(code).unwrap_or(-1), Ordering::SeqCst);
                                 let _ = events.send(CoordinatorEvent::Fatal);
                                 continue;
                             }

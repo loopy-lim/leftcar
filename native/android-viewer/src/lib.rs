@@ -28,6 +28,8 @@ pub mod prepared_tcp;
 pub mod prepared_udp;
 pub mod renderer;
 mod socket_tuning;
+// USB AOAP transport pipes are raw fds; there is no Windows surface.
+#[cfg(unix)]
 pub mod usb_bridge;
 use std::time::Duration;
 

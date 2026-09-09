@@ -70,3 +70,27 @@
 - **Rust 게이트 이중 재확인 (최종)**: (a) 구현 직후 전체 스위트 185 passed, (b) 타 세션 재구조화가 일시적으로 `viewer-core` 컴파일을 깨뜨리던 동안 `.worktrees` 격리 체크아웃(HEAD f961615 + 본 변경 4파일)에서 185 passed, (c) 재구조화 안정 후 **현재 트리에서 `cargo test -p android-viewer` 185 passed, 0 failed (exit 0)** — 커밋 전 조건은 해소됐다. 격리 작업 트리는 정리 완료(`git worktree list` = main만).
 - **Galaxy XR 실기**: 오프라인(192.168.0.249 연결 거부) — 미설치. 리뷰 §3 체크리스트(비율 프리셋·컨트롤러·키보드)를 사용자 실행 필요. IME commitText는 adb로 재현 불가해 실기 소프트키보드 타이핑 검증이 남아 있다.
 - **후속 과제**: 풀스페이스 극장 모드(§E), 컨트롤러 제스처 재매핑(§C), 2디스플레이 랑데부 실험(§F).
+
+## 후속 실기 검증·정리 (2026-09-09 저녁)
+
+### 커밋(12:57) 이후 발견·수정한 블로커
+
+- **안드로이드 타깃 컴파일 깨짐**: 2086b9e가 `TerminationReason::code()`를 u8화하면서 android 전용 호출부 2곳(`renderer/single_session/network.rs`, `renderer/split_session/tile_worker.rs`)이 i8 저장소에 u8을 그대로 넘겨 `cargo ndk` 빌드가 실패했다. `i8::try_from(code).unwrap_or(-1)` 변환으로 수정. 이 경로는 `cfg(target_os = "android")` 뒤라 호스트 타깃 `cargo test`에서는 발각되지 않았다 — **android-viewer 변경 후 `cargo ndk` 조합 빌드도 게이트로 돌려야 한다.**
+- **워크스페이스 전체 Windows 타깃 체크 통과**: `viewer-decoder`의 `stream_receiver` 빈은 Unix 전용(SO_RCVBUF raw setup)이라 `#[cfg(unix)]` 게이트를, `android-viewer`의 `usb_bridge` 모듈(AOAP raw fd)은 `#[cfg(unix)]`를 걸었다. 수정 후 `cargo check --workspace --target x86_64-pc-windows-msvc` 클린. 단, tauri 앱 자체(src-tauri)는 tauri-winres가 llvm-rc를 요구(본 기기 미설치)해 여전히 환경 블로커다. 수정 전에는 호스트 의존 크레이트 6종(control-contract/session/domain/fec-core/usb-mux/media-model)이 Windows 타깃에서 이미 클린이었다.
+
+### 태블릿(Lenovo TB710FU) 재빌드·E2E — 전부 통과
+
+`cargo ndk`(rustra+android-viewer, 185 tests) → `assembleRelease` → `adb install -r` 후:
+
+- 페어링 토큰 재설치 보존 + 무음 자동 재접속 확인(재시작 없이 "컴퓨터 연결됨").
+- stream-stats 수치: 1920x1080 @ 56~58fps, cap/enc 정렬, `inputEnabled=true`.
+- 탭→커서: 태블릿 스트림 (50%, 50%) 탭이 Mac (960, 540) 정중앙에 도달.
+- 숫자 키(adb key-event 경로): TextEdit에 그대로 도달.
+- **remoteKeyRemap 훅**: `defaults write -g dev.leftcar.remoteKeyRemap -dict 15 25` 상태에서 뷰어 "8"(Android 15)이 Mac "9"로 치환 기록, 비리맵 "7"은 통과 — injectKey 직전 치환 실증. 검증 후 default 삭제.
+- **ABC 칩·렌즈**: 칩 탭으로 IME 오픈(`mInputShown=true`), `dumpsys input_method`의 `mServedView`가 1×1 렌즈, 칩 하이라이트 전환 확인.
+- 밀도: 카탈로그·HUD 스모크에서 레이아웃 파손 없음(수치 곡선은 TS/Kotlin 단위 테스트로 담보).
+
+### 여전히 미검증
+
+- ~~실기 IME commitText → kind 6 주입까지~~ → **같은 날 밤 검증 완료(아래)**. ZUI 소프트키보드가 adb 주입 탭을 받지 않는(레이아웃 전환키도 무반응, 앱 윈도우는 정상 — 기기 입력 쿼크) 탓에 직접 타이핑 재현은 불가했고, 위조 LCI1 패킷도 컨트롤 토큰(LCH1 논스) 검증에 막혀 전송 불가했다. 대신 **commitText를 브로드캐스트로 호출하는 최소 테스트 IME**(aapt2+kotlinc+d8 핸드빌드, 설치 후 `ime set`, 검증 후 제거)로 렌즈 InputConnection에 한글 커밋 → **Mac TextEdit에 "안녕 마카" 도달 확인**. 릴레이 조합 버퍼 플러시(finishComposingText)도 함께 관찰됐다. 주의: ABC 오프 토글은 포커스를 스트림 Surface로 돌리므로, 그 직후의 commitText는 의도대로 폐기된다(fieldId=0/inputType=0 리바인드).
+- Galaxy XR 항목(상동). XR은 이날도 오프라인.

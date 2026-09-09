@@ -12,7 +12,19 @@
 use std::collections::HashMap;
 use std::net::UdpSocket;
 
+#[cfg(unix)]
 fn main() {
+    run();
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("stream_receiver: unix-only (raw SO_RCVBUF socket setup)");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
+fn run() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: stream_receiver <port> [seconds]");
