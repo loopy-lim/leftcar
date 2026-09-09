@@ -27,7 +27,7 @@ function* walk(dir: string): Generator<string> {
     return;
   }
   for (const name of entries) {
-    if (name === "node_modules" || name === "dist" || name === ".git") continue;
+    if (name === "node_modules" || name === "dist" || name === ".git" || name === ".worktrees") continue;
     const full = join(dir, name);
     let st;
     try {
@@ -86,7 +86,7 @@ for (const folder of [
 }
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
-const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
+const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|java\.security\.|kotlin\.)/; // java.security = SecureRandom(CSPRNG 어댑터, docs/07 §20)
 const JUNIT_IMPORT = /^import org\.junit\./;
 const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
   "import kotlinx.coroutines.Dispatchers",
