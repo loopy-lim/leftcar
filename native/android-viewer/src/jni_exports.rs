@@ -534,8 +534,19 @@ pub extern "C" fn leftcar_jni_attach_split_port(
             // `spawn` already consumed both receivers into the coordinator
             // thread, so they cannot be put back. Best-effort fresh binds
             // keep a retried attach from hitting an empty store forever.
-            let _ = prepare_udp_receiver(left_port, &host, "udp");
-            let _ = prepare_udp_receiver(right_port, &host, "udp");
+            // 같은 세션 키로 수신기를 되살린다. 재시도 attach는 호스트 쪽
+            // 세션 재시작과 세트라서 카운터 초기화도 서로 일치한다. 크립토가
+            // 이미 소모됐다면 바인드를 건너뛴다 — 키 없는 평문 수신기는
+            // 만들지 않는다.
+            if let (Some(left_crypto), Some(right_crypto)) = (
+                crate::jni::media_crypto_for(left_port),
+                crate::jni::media_crypto_for(right_port),
+            ) {
+                debug_assert_eq!(left_crypto.session_key(), right_crypto.session_key());
+                let key = left_crypto.session_key();
+                let _ = prepare_udp_receiver(left_port, &host, "udp", &key);
+                let _ = prepare_udp_receiver(right_port, &host, "udp", &key);
+            }
             log_info!("failed to start split renderer: {error}");
             return LEFTCAR_ERR_STATE;
         }

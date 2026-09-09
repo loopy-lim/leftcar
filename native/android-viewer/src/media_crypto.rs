@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const CHALLENGE_PREFIX: &[u8] = b"LCH1";
 
 pub struct MediaSessionCrypto {
+    /// 세션 키 사본 — [MediaSessionCrypto::session_key]가 재바인드 폴백에 쓴다.
+    key: [u8; 32],
     /// Outgoing direction (viewer → host).
     tx: DatagramSealer,
     /// Incoming direction (host → viewer).
@@ -30,8 +32,14 @@ pub struct MediaSessionCrypto {
 }
 
 impl MediaSessionCrypto {
+    /// 등록 시 쓴 세션 키 사본 — 재바인드 폴백이 같은 키로 재등록할 때 쓴다.
+    pub fn session_key(&self) -> [u8; 32] {
+        self.key
+    }
+
     pub fn new(key: [u8; 32]) -> Self {
         Self {
+            key,
             tx: DatagramSealer::new(key),
             rx: DatagramSealer::new(key),
             established: AtomicBool::new(false),

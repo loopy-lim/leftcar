@@ -563,6 +563,16 @@ pub(crate) fn register_media_crypto(
     crypto
 }
 
+/// Register를 소모하지 않고 등록된 크립토를 조회한다(재바인드 폴백용).
+pub(crate) fn media_crypto_for(port: u16) -> Option<SharedMediaCrypto> {
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(&port))
+        .cloned()
+}
+
 /// Claim and remove the media crypto registered for `port`.
 pub(crate) fn take_media_crypto(port: u16) -> Option<SharedMediaCrypto> {
     MEDIA_CRYPTO
