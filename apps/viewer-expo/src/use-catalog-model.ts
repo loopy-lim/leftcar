@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Alert, NativeModules } from "react-native";
 import * as SecureStore from "expo-secure-store";
@@ -75,6 +75,13 @@ import {
   type ViewerProfileSelection,
   type ViewerPreferences,
 } from "./viewer-preferences";
+import {
+  deviceClipboardIo,
+  loadClipboardShare,
+  saveClipboardShare,
+  startClipboardSync,
+  type ClipboardSyncLoop,
+} from "./clipboard-sync";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
@@ -150,6 +157,41 @@ export function useCatalogModel() {
     if (!preferencesLoaded) return;
     void writeViewerPreferences(SecureStore, preferences).catch(() => undefined);
   }, [preferences, preferencesLoaded]);
+
+  // 클립보드 공유 토글(U5): `leftcar.clipboardShare`(기본 꺼짐)에 저장하고,
+  // 켜져 있으면 제어 세션과 함께 폴링 루프를 돌린다. 호스트 게이트도 기본
+  // 꺼짐이므로 이중 잠금이다(docs/07 §20).
+  const clipboardSyncRef = useRef<ClipboardSyncLoop | null>(null);
+  const [clipboardShare, setClipboardShareState] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void loadClipboardShare(SecureStore).then((enabled) => {
+      if (active) setClipboardShareState(enabled);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!clipboardSyncRef.current) {
+      clipboardSyncRef.current = startClipboardSync({
+        getClient: () => controlClient(),
+        ...deviceClipboardIo,
+      });
+    }
+    clipboardSyncRef.current.setEnabled(clipboardShare);
+    return () => {
+      clipboardSyncRef.current?.stop();
+      clipboardSyncRef.current = null;
+    };
+  }, [clipboardShare]);
+
+  const handleToggleClipboardShare = useCallback((enabled: boolean) => {
+    setClipboardShareState(enabled);
+    void saveClipboardShare(SecureStore, enabled).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
@@ -610,6 +652,8 @@ export function useCatalogModel() {
     handleToggleFps,
     handleToggleCursor,
     handleToggleAudio,
+    handleToggleClipboardShare,
+    clipboardShare,
     profileId: preferences.profileId,
     streamingPriority,
     showFps: preferences.showFps,

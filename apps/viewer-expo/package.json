@@ -30,6 +30,7 @@
     "@tanstack/react-query": "^5.101.4",
     "expo": "~57.0.15",
     "expo-camera": "~57.0.4",
+    "expo-clipboard": "^57.0.1",
     "expo-constants": "~57.0.13",
     "expo-linking": "~57.0.7",
     "expo-router": "~57.0.15",

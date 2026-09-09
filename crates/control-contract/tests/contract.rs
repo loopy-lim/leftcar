@@ -177,6 +177,10 @@ fn unknown_command_is_rejected() {
 #[test]
 fn viewer_contract_does_not_expose_high_rate_input_commands() {
     // Input is a token-bound native datagram plane, not a Rustra command.
+    // docs/07 §20 (2026-09-09 정책 변경): 권한 게이트 클립보드 텍스트 동기화는
+    // 허용됐지만, 그 명령(setClipboard/getClipboard)은 호스트 dispatch의
+    // 원시 제어 명령으로만 존재한다. 타입 생성 계약(Rustra)에는 여전히
+    // 클립보드 심볼이 없어야 하므로 이 단언은 그대로 유효하다.
     let generated = viewer_package().generate_typescript().expect("generates");
     let surface = format!("{}{}", generated.commands_ts, generated.types_ts);
     for banned in [

@@ -153,6 +153,8 @@ interface ViewerOptionsCardProps {
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
   onToggleAudio: (localAudio: boolean) => void;
+  clipboardShare: boolean;
+  onToggleClipboardShare: (enabled: boolean) => void;
   colors: ThemeTokens;
 }
 
@@ -163,6 +165,8 @@ function ViewerOptionsCard({
   onToggleCursor,
   localAudio,
   onToggleAudio,
+  clipboardShare,
+  onToggleClipboardShare,
   colors,
 }: ViewerOptionsCardProps) {
   const { t } = useAppLanguage();
@@ -229,6 +233,23 @@ function ViewerOptionsCard({
           {...switchColor}
         />
       </View>
+      {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+            {t.viewer.clipboardShareLabel}
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+            {t.viewer.clipboardShareHint}
+          </Text>
+        </View>
+        <Switch
+          value={clipboardShare}
+          onValueChange={onToggleClipboardShare}
+          accessibilityLabel={t.viewer.clipboardShareLabel}
+          {...switchColor}
+        />
+      </View>
     </View>
   );
 }
@@ -282,6 +303,8 @@ interface CatalogHeaderProps {
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
   onToggleAudio: (localAudio: boolean) => void;
+  clipboardShare: boolean;
+  onToggleClipboardShare: (enabled: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -309,6 +332,8 @@ function CatalogHeader({
   onToggleCursor,
   localAudio,
   onToggleAudio,
+  clipboardShare,
+  onToggleClipboardShare,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -403,6 +428,8 @@ function CatalogHeader({
             onToggleCursor={onToggleCursor}
             localAudio={localAudio}
             onToggleAudio={onToggleAudio}
+            clipboardShare={clipboardShare}
+            onToggleClipboardShare={onToggleClipboardShare}
             colors={colors}
           />
 
@@ -755,6 +782,8 @@ export default function Catalog() {
             onToggleCursor={model.handleToggleCursor}
             localAudio={model.localAudio}
             onToggleAudio={model.handleToggleAudio}
+            clipboardShare={model.clipboardShare}
+            onToggleClipboardShare={model.handleToggleClipboardShare}
             encoderExperiments={model.selectedEncoderExperiments}
             encoderExperiment={model.effectiveNextEncoderExperiment}
             onSelectEncoderExperiment={model.handleSelectEncoderExperiment}

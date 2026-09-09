@@ -19,13 +19,15 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
+    atomic::{AtomicBool, AtomicU16, Ordering},
     Mutex,
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use base64::Engine as _;
 use tokio::net::{TcpListener, TcpStream};
+
+use crate::clipboard::ClipboardBackend;
 
 /// Geometry and transport facts of the live session being reconfigured,
 /// captured before the old backend handle is stopped.
@@ -311,6 +313,19 @@ const STARTUP_STATS_INTERVAL: Duration = Duration::from_millis(100);
 /// drop, laptop sleep, no FIN) would otherwise hold their task and socket
 /// open forever.
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// 클립보드 텍스트 상한(문자 수, U5 — 256KiB, docs/07 §20).
+const CLIPBOARD_MAX_CHARS: usize = 262_144;
+
+/// 클립보드 텍스트의 sha256(hex). 뷰어의 해시 짧은 폴링과 루프 방지에 쓰인다.
+fn clipboard_sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(text.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
 
 pub struct ControlServer {
     backend: SharedBackend,
@@ -323,6 +338,11 @@ pub struct ControlServer {
     auth_limiter: AuthRateLimiter,
     /// 세션 감사 로그(선택 — set_audit으로 주입).
     audit: std::sync::OnceLock<std::sync::Arc<crate::audit::SessionAudit>>,
+    /// 클립보드 텍스트 동기화 호스트 게이트(U5, 기본 꺼짐 — docs/07 §20).
+    clipboard_share: AtomicBool,
+    /// 클립보드 접근 백엔드(선택 — set_clipboard로 플러그인 구현을 주입;
+    /// 미주입 시 pbcopy/pbpaste 폴백).
+    clipboard: std::sync::OnceLock<std::sync::Arc<dyn ClipboardBackend>>,
 }
 
 struct State {
@@ -347,6 +367,8 @@ impl ControlServer {
             }),
             auth_limiter: AuthRateLimiter::new(),
             audit: std::sync::OnceLock::new(),
+            clipboard_share: AtomicBool::new(false),
+            clipboard: std::sync::OnceLock::new(),
         }
     }
 
@@ -356,6 +378,28 @@ impl ControlServer {
 
     pub fn set_audit(&self, audit: std::sync::Arc<crate::audit::SessionAudit>) {
         let _ = self.audit.set(audit);
+    }
+
+    /// 클립보드 텍스트 동기화 호스트 게이트(설정에서 기동 시 주입, 토글로
+    /// 즉시 전환된다). 기본값은 꺼짐 — 문서 §20의 이중 잠금 중 호스트 쪽.
+    pub fn set_clipboard_share(&self, enabled: bool) {
+        self.clipboard_share.store(enabled, Ordering::Release);
+    }
+
+    pub fn clipboard_share_enabled(&self) -> bool {
+        self.clipboard_share.load(Ordering::Acquire)
+    }
+
+    /// 플러그인 기반 클립보드 백엔드를 주입한다(lib.rs setup). 미주입 시
+    /// pbcopy/pbpaste 폴백이 쓰인다.
+    pub fn set_clipboard(&self, backend: std::sync::Arc<dyn ClipboardBackend>) {
+        let _ = self.clipboard.set(backend);
+    }
+
+    fn clipboard_backend(&self) -> std::sync::Arc<dyn ClipboardBackend> {
+        self.clipboard
+            .get_or_init(|| std::sync::Arc::new(crate::clipboard::SystemClipboard))
+            .clone()
     }
 
     fn audit_log(&self, event: &str, fields: serde_json::Value) {
@@ -1390,6 +1434,36 @@ impl ControlServer {
                             );
                             id
                         };
+                        // 세션 시작 시 입력 중재(U4b): 마지막 세션이 이긴다.
+                        // 새 세션의 입력이 실제로 켜졌을 때만 다른 라이브
+                        // 세션의 입력을 끊는다 — OS 권한이 없어 입력이 꺼진
+                        // 세션 시작은 기존 세션을 건드리지 않는다.
+                        if input_enabled {
+                            let displaced: Vec<(u32, u32)> = {
+                                let mut st = self.sessions.lock().unwrap();
+                                st.live
+                                    .iter_mut()
+                                    .filter_map(|(id, session)| {
+                                        if *id == session_id || !session.input_enabled {
+                                            return None;
+                                        }
+                                        session.input_enabled = false;
+                                        Some((*id, session.handle))
+                                    })
+                                    .collect()
+                            };
+                            for (_, other_handle) in &displaced {
+                                let _ = self.backend.set_input_enabled(*other_handle, false);
+                            }
+                            if !displaced.is_empty() {
+                                let from: Vec<u32> =
+                                    displaced.iter().map(|(id, _)| *id).collect();
+                                self.audit_log(
+                                    "input_reassigned",
+                                    json!({ "from": from, "to": session_id }),
+                                );
+                            }
+                        }
                         self.audit_log(
                             "session_started",
                             json!({
@@ -1474,6 +1548,8 @@ impl ControlServer {
                 }
             }
             "getStatus" => ok(self.snapshot()),
+            "setClipboard" => self.handle_set_clipboard(args, authenticated_device),
+            "getClipboard" => self.handle_get_clipboard(args),
             _ => {
                 // delegate stateless commands to the real rustra package (H02 path)
                 match control_contract::host::host_package().invoke_json(command, args) {
@@ -1486,6 +1562,82 @@ impl ControlServer {
 
     pub(crate) fn authorize_token(&self, token: &str) -> bool {
         self.pairing.authorize(token)
+    }
+
+    /// `setClipboard` 제어 명령(U5, docs/07 §20). 토큰 인증은 연결 레벨에서
+    /// 이미 끝난 상태이고, 여기서 호스트 게이트를 추가로 요구한다 — 토글이
+    /// 닫혀 있으면 모든 클립보드 명령을 거부한다(뷰어 측 게이트는 없다).
+    /// 텍스트는 절대 감사 로그에 쓰지 않는다 — 접근 메타데이터만 남긴다.
+    fn handle_set_clipboard(
+        &self,
+        args: serde_json::Value,
+        device: Option<&str>,
+    ) -> serde_json::Value {
+        #[derive(serde::Deserialize)]
+        struct SetClipboardArgs {
+            text: String,
+        }
+        let input: SetClipboardArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(e) => return err(&format!("bad args: {e}")),
+        };
+        if !self.clipboard_share_enabled() {
+            return err("clipboard share disabled");
+        }
+        if input.text.chars().count() > CLIPBOARD_MAX_CHARS {
+            return err("clipboard too large");
+        }
+        let backend = self.clipboard_backend();
+        // 루프 방지: 뷰어가 호스트의 현재 내용과 같은 텍스트를 되돌려
+        // 보내면(자기 반영 에코) 쓰지 않는다.
+        if let Ok(current) = backend.read_text() {
+            if clipboard_sha256_hex(&current) == clipboard_sha256_hex(&input.text) {
+                return ok(json!({}));
+            }
+        }
+        match backend.write_text(&input.text) {
+            Ok(()) => {
+                self.audit_log(
+                    "clipboard_write",
+                    json!({
+                        "device": device.unwrap_or("unknown"),
+                        "bytes": input.text.len(),
+                    }),
+                );
+                ok(json!({}))
+            }
+            Err(e) => err(&e),
+        }
+    }
+
+    /// `getClipboard` 제어 명령(U5). 뷰어가 마지막으로 본 해시를 보내면
+    /// 호스트가 현재 클립보드 텍스트의 sha256과 비교해 unchanged로 짧게
+    /// 끊낸다. 상한 초과는 set과 같은 경로로 거부한다.
+    fn handle_get_clipboard(&self, args: serde_json::Value) -> serde_json::Value {
+        #[derive(serde::Deserialize)]
+        struct GetClipboardArgs {
+            hash: String,
+        }
+        let input: GetClipboardArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(e) => return err(&format!("bad args: {e}")),
+        };
+        if !self.clipboard_share_enabled() {
+            return err("clipboard share disabled");
+        }
+        let backend = self.clipboard_backend();
+        let current = match backend.read_text() {
+            Ok(text) => text,
+            Err(e) => return err(&e),
+        };
+        if current.chars().count() > CLIPBOARD_MAX_CHARS {
+            return err("clipboard too large");
+        }
+        let hash = clipboard_sha256_hex(&current);
+        if input.hash == hash {
+            return ok(json!({ "unchanged": true }));
+        }
+        ok(json!({ "unchanged": false, "text": current, "hash": hash }))
     }
 }
 
@@ -2892,6 +3044,306 @@ mod tests {
         let session = state.live.values().next().unwrap();
         assert!(!session.input_enabled, "{resp}");
         assert!(fake.input_calls.lock().unwrap().is_empty(), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn second_start_stream_takes_input_from_the_older_session() {
+        // 입력 중재(U4b): 마지막 세션이 이긴다. 두 번째 startStream이 입력을
+        // 얻으면 첫 세션의 입력은 세션 상태와 백엔드 양쪽에서 꺼진다.
+        let fake = input_test_backend(true);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
+        {
+            // 기존 시드 패턴: 입력이 켜진 라이브 세션을 직접 심는다. 다음
+            // startStream이 id 2를 받도록 카운터도 맞춘다.
+            let mut st = server.sessions.lock().unwrap();
+            st.live.insert(
+                1,
+                Session {
+                    handle: 7,
+                    device_id: Some("viewer-1".into()),
+                    source_index: 0,
+                    source_name: "Main".into(),
+                    width: 1_920,
+                    height: 1_080,
+                    fps_target: 60,
+                    quality_state: "native".into(),
+                    capture_backend: "screenCaptureKit".into(),
+                    content_mode: "interactive".into(),
+                    encoder_experiment: EncoderExperiment::Auto,
+                    viewer_addr: "192.168.0.9:5002".into(),
+                    viewer_port: 5002,
+                    media_transport: "udp".into(),
+                    udp_stability: None,
+                    media_key: [0u8; 32],
+                    input_enabled: true,
+                    input_rate_hz: 120,
+                    terminal_since: None,
+                    terminal_error: None,
+                    backend_released: false,
+                },
+            );
+            st.next = 2;
+        }
+
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
+                }),
+                "192.168.0.9",
+                Some("viewer-2"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let state = server.sessions.lock().unwrap();
+        assert_eq!(state.live.len(), 2, "{resp}");
+        assert!(
+            !state.live.get(&1).unwrap().input_enabled,
+            "older session must lose input: {resp}"
+        );
+        assert!(
+            state.live.get(&2).unwrap().input_enabled,
+            "new session must win input: {resp}"
+        );
+        drop(state);
+        // 새 세션 활성화(true) 뒤 이전 세션도 백엔드에서 꺼진다(false).
+        assert_eq!(
+            *fake.input_calls.lock().unwrap(),
+            vec![(7, true), (7, false)],
+            "{resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_stream_without_input_permission_leaves_other_sessions_enabled() {
+        // OS 입력 권한이 없어 새 세션 입력이 꺼졌다면 기존 세션은 그대로다.
+        let fake = input_test_backend(false);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
+        {
+            let mut st = server.sessions.lock().unwrap();
+            st.live.insert(
+                1,
+                Session {
+                    handle: 7,
+                    device_id: Some("viewer-1".into()),
+                    source_index: 0,
+                    source_name: "Main".into(),
+                    width: 1_920,
+                    height: 1_080,
+                    fps_target: 60,
+                    quality_state: "native".into(),
+                    capture_backend: "screenCaptureKit".into(),
+                    content_mode: "interactive".into(),
+                    encoder_experiment: EncoderExperiment::Auto,
+                    viewer_addr: "192.168.0.9:5002".into(),
+                    viewer_port: 5002,
+                    media_transport: "udp".into(),
+                    udp_stability: None,
+                    media_key: [0u8; 32],
+                    input_enabled: true,
+                    input_rate_hz: 120,
+                    terminal_since: None,
+                    terminal_error: None,
+                    backend_released: false,
+                },
+            );
+            st.next = 2;
+        }
+
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
+                }),
+                "192.168.0.9",
+                Some("viewer-2"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let state = server.sessions.lock().unwrap();
+        assert!(
+            state.live.get(&1).unwrap().input_enabled,
+            "others must stay untouched: {resp}"
+        );
+        assert!(!state.live.get(&2).unwrap().input_enabled, "{resp}");
+        drop(state);
+        assert!(fake.input_calls.lock().unwrap().is_empty(), "{resp}");
+    }
+
+    // -- 클립보드 텍스트 동기화(U5, docs/07 §20) -----------------------------
+
+    struct FakeClipboard {
+        text: Mutex<String>,
+        writes: AtomicUsize,
+    }
+
+    impl FakeClipboard {
+        fn new(text: &str) -> Self {
+            Self {
+                text: Mutex::new(text.to_owned()),
+                writes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ClipboardBackend for FakeClipboard {
+        fn read_text(&self) -> Result<String, String> {
+            Ok(self.text.lock().unwrap().clone())
+        }
+
+        fn write_text(&self, text: &str) -> Result<(), String> {
+            *self.text.lock().unwrap() = text.to_owned();
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn clipboard_server(gate: bool) -> (Arc<ControlServer>, Arc<FakeClipboard>) {
+        let server = Arc::new(ControlServer::new(
+            backend(),
+            test_pairing(),
+            test_identity(),
+        ));
+        server.set_clipboard_share(gate);
+        let clipboard = Arc::new(FakeClipboard::new(""));
+        server.set_clipboard(clipboard.clone());
+        (server, clipboard)
+    }
+
+    #[tokio::test]
+    async fn clipboard_commands_are_rejected_while_the_host_gate_is_closed() {
+        let (server, clipboard) = clipboard_server(false);
+        let set = server
+            .dispatch(
+                "setClipboard",
+                json!({ "text": "hello" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(set["error"], "clipboard share disabled", "{set}");
+        let get = server
+            .dispatch(
+                "getClipboard",
+                json!({ "hash": "00" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(get["error"], "clipboard share disabled", "{get}");
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn oversize_clipboard_text_is_rejected() {
+        let (server, clipboard) = clipboard_server(true);
+        let oversized = "가".repeat(CLIPBOARD_MAX_CHARS + 1);
+        let resp = server
+            .dispatch(
+                "setClipboard",
+                json!({ "text": oversized }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["error"], "clipboard too large", "{resp}");
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn set_then_get_clipboard_round_trips_with_hash_short_circuit() {
+        let (server, clipboard) = clipboard_server(true);
+        let resp = server
+            .dispatch(
+                "setClipboard",
+                json!({ "text": "클립보드 동기화" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let unknown_hash = server
+            .dispatch(
+                "getClipboard",
+                json!({ "hash": "deadbeef" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(unknown_hash["result"]["unchanged"], false, "{unknown_hash}");
+        assert_eq!(unknown_hash["result"]["text"], "클립보드 동기화", "{unknown_hash}");
+        let hash = unknown_hash["result"]["hash"].as_str().unwrap().to_owned();
+
+        // 같은 해시로 다시 물으면 unchanged로 짧게 끊낸다.
+        let short = server
+            .dispatch(
+                "getClipboard",
+                json!({ "hash": hash }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(short["result"]["unchanged"], true, "{short}");
+
+        // 루프 방지: 호스트 현재 내용과 같은 setClipboard은 쓰지 않고 무시한다.
+        let echo = server
+            .dispatch(
+                "setClipboard",
+                json!({ "text": "클립보드 동기화" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(echo["ok"], true, "{echo}");
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 1, "{echo}");
+    }
+
+    #[tokio::test]
+    async fn clipboard_write_audits_metadata_only() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("leftcar-clipboard-audit-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (server, _) = clipboard_server(true);
+        server.set_audit(Arc::new(crate::audit::SessionAudit::new(Some(
+            path.clone(),
+        ))));
+
+        let secret = "감사 로그에 남으면 안 되는 본문";
+        let resp = server
+            .dispatch(
+                "setClipboard",
+                json!({ "text": secret }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"clipboard_write\""), "{body}");
+        assert!(body.contains("\"device\":\"viewer-1\""), "{body}");
+        assert!(
+            !body.contains(secret),
+            "audit must never contain clipboard text: {body}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

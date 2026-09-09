@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   AlertTriangle,
   AppWindow,
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Copy,
   Globe,
   HelpCircle,
@@ -33,6 +35,7 @@ import { trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
 import PairingPanel from "./PairingPanel";
+import Indicator from "./Indicator";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -92,6 +95,11 @@ export default function App() {
         <PairingPanel />
       </div>
     );
+  }
+
+  // "보고 있음" 배지 창(U4a) — 캡처되는 화면 위에 연결 중임을 드러낸다.
+  if (window.location.hash.startsWith("#/indicator")) {
+    return <Indicator />;
   }
 
   return <Dashboard />;
@@ -211,6 +219,25 @@ function useHostStatus(t: TranslationSchema) {
   };
 }
 
+/**
+ * 대시보드 쪽 보조 표시 경로(U4a): 자신의 상태 폴링 결과로 배지 창을
+ * show/hide 한다. 배지 라우트(#/indicator)가 숨겨진 대시보드 없이도 스스로
+ * 관리하는 주 경로를 갖고 있으므로, 두 경로는 같은 상태로 수렴한다.
+ */
+function useIndicatorWindow(isStreaming: boolean) {
+  useEffect(() => {
+    let cancelled = false;
+    void WebviewWindow.getByLabel("indicator").then((indicator) => {
+      if (!indicator || cancelled) return;
+      if (isStreaming) void indicator.show();
+      else void indicator.hide();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStreaming]);
+}
+
 interface DashboardHeaderProps {
   isStreaming: boolean;
   sessionCount: number;
@@ -328,12 +355,14 @@ interface DashboardFooterProps {
   lanIp: string | null;
   copiedToast: boolean;
   inputPermission: boolean;
+  clipboardShare: boolean;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   language: SupportedLanguage;
   t: TranslationSchema;
   onCopyAddress: () => void;
   onRequestPermission: () => void;
+  onToggleClipboardShare: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
@@ -385,6 +414,18 @@ function DashboardFooter(props: DashboardFooterProps) {
               <ShieldAlert size={13} /> {t.host.permRequired}
             </strong>
           )}
+        </button>
+        {/* 클립보드 공유 호스트 게이트(U5) — 세션 입력 토글과 같은 스타일. */}
+        <button
+          type="button"
+          className={controlToggleVariants({ active: props.clipboardShare })}
+          onClick={props.onToggleClipboardShare}
+          title={t.host.clipboardShareDesc}
+          aria-pressed={props.clipboardShare}
+        >
+          <ClipboardCheck size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+          {t.host.clipboardShareLabel}{" "}
+          <strong>{props.clipboardShare ? t.host.clipboardShareOn : t.host.clipboardShareOff}</strong>
         </button>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -847,6 +888,30 @@ function Dashboard() {
   });
 
   const isStreaming = sessions.length > 0;
+  useIndicatorWindow(isStreaming);
+
+  // 클립보드 공유 호스트 게이트(U5): 0600 settings.json에서 시작하며 토글은
+  // 즉시 효력을 가진다. 기본값은 꺼짐이다.
+  const [clipboardShare, setClipboardShare] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<boolean>("get_clipboard_share")
+      .then((enabled) => {
+        if (!cancelled) setClipboardShare(enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleClipboardShare = useCallback(() => {
+    const next = !clipboardShare;
+    setClipboardShare(next);
+    void invoke("set_clipboard_share", { enabled: next }).catch(() =>
+      setClipboardShare(!next),
+    );
+  }, [clipboardShare]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1034,12 +1099,14 @@ function Dashboard() {
         lanIp={lanIp}
         copiedToast={copiedToast}
         inputPermission={inputPermission}
+        clipboardShare={clipboardShare}
         platform={platform}
         lastUpdated={lastUpdated}
         language={language}
         t={t}
         onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
+        onToggleClipboardShare={toggleClipboardShare}
       />
 
       {showPairingModal && (

@@ -1,1 +1,1 @@
-{}
+{"indicator-window-controls":{"identifier":"indicator-window-controls","description":"보고 있음 배지(U4a): indicator 창이 스스로를 show/hide 하고 대시보드(main)도 보조 경로로 배지를 show/hide 할 수 있게 한다. 이 두 창에만 core:window show/hide를 연다.","local":true,"windows":["main","indicator"],"permissions":["core:window:allow-show","core:window:allow-hide"]}}

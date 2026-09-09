@@ -7,12 +7,14 @@ pub mod aoap_control;
 pub mod aoap_proxy;
 pub mod audit;
 pub mod backend;
+pub mod clipboard;
 pub mod control;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod identity;
 pub mod pairing;
+pub mod settings;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -67,6 +69,10 @@ pub fn run() {
         identity.clone(),
     ));
     server.set_audit(audit.clone());
+    // 클립보드 동기화 호스트 게이트(U5): 0600 settings.json에서 읽고,
+    // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
+    let host_settings = settings::load(settings::default_settings_path().as_deref());
+    server.set_clipboard_share(host_settings.clipboard_share);
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -82,6 +88,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_host_platform,
@@ -101,13 +108,21 @@ pub fn run() {
             reject_pending_pairing,
             list_paired_devices,
             revoke_paired_device,
-            revoke_all_devices
+            revoke_all_devices,
+            get_clipboard_share,
+            set_clipboard_share
         ])
         .setup(move |app| {
+            // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
+            // 이 주입이 없는 환경의 폴백일 뿐이다.
+            server.set_clipboard(Arc::new(clipboard::TauriClipboard::new(
+                app.handle().clone(),
+            )));
             app.manage(server);
             app.manage(pairing);
             app.manage(ControlEndpoint { port: control_port });
             warm_display_catalog(warmup_backend);
+            create_indicator_window(app);
 
             let show_item =
                 MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
@@ -213,6 +228,44 @@ fn show_pairing_window(app: &tauri::AppHandle) {
     .build()
     {
         eprintln!("failed to open pairing window: {e}");
+    }
+}
+
+/// Create the "보고 있음" indicator window (U4a). A streaming host must be
+/// visible on the captured desktop (TeamViewer-style no-stealth norm) — the
+/// tray alone is not enough. The borderless always-on-top badge starts
+/// hidden; the `#/indicator` route polls get_status and shows/hides itself.
+fn create_indicator_window(app: &tauri::App) {
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        "indicator",
+        WebviewUrl::App("index.html#/indicator".into()),
+    )
+    .title("Leftcar")
+    .decorations(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .resizable(false)
+    .inner_size(220.0, 30.0)
+    .visible(false);
+
+    // 주 디스플레이 우상단 — 물리 픽셀을 논리 좌표로 환산해 여백 12px에 띄운다.
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let margin = 12.0;
+        let x = monitor.size().width as f64 / scale - 220.0 - margin;
+        let y = margin;
+        builder = builder.position(x, y);
+    }
+
+    if let Err(error) = builder.build() {
+        eprintln!("failed to create indicator window: {error}");
+        return;
+    }
+    if let Some(window) = app.get_webview_window("indicator") {
+        // 배지가 클릭이나 포커스를 훔치지 않게 한다(가능한 버전에서만).
+        let _ = window.set_ignore_cursor_events(true);
+        let _ = window.set_visible_on_all_workspaces(true);
     }
 }
 
@@ -461,6 +514,31 @@ fn revoke_all_devices(
         serde_json::json!({ "devices": count }),
     );
     count
+}
+
+#[tauri::command]
+fn get_clipboard_share(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> bool {
+    state.clipboard_share_enabled()
+}
+
+#[tauri::command]
+fn set_clipboard_share(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    // 토글은 즉시 효력을 가지고 다음 기동까지 남는다(0600 settings.json).
+    state.set_clipboard_share(enabled);
+    if let Some(path) = settings::default_settings_path() {
+        settings::persist(
+            &path,
+            &settings::HostSettings {
+                clipboard_share: enabled,
+            },
+        )?;
+    }
+    Ok(enabled)
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.
