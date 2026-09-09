@@ -55,9 +55,11 @@ unsafe fn get_bytes(env: *mut JNIEnv, arr: *mut jobject) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = vec![0u8; len as usize];
-    let get: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, *mut c_void, i32) =
+    // GetByteArrayRegion(env, array, start, len, buf) — 5인자. start 슬롯에
+    // 버퍼 포인터가 들어가면 ART가 arraycopy 예외(offset=<포인터 잘림>)를 던진다.
+    let get: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, i32, i32, *mut c_void) =
         std::mem::transmute(*fns.add(JNI_GET_BYTE_ARRAY_REGION));
-    get(env, arr, bytes.as_mut_ptr().cast(), len);
+    get(env, arr, 0, len, bytes.as_mut_ptr().cast());
     Some(bytes)
 }
 

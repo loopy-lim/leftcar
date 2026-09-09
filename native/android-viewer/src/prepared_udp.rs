@@ -73,10 +73,14 @@ impl PreparedUdpReceiver {
         let worker_stop = Arc::clone(&stop);
         let worker_host = expected_host.clone();
         let worker_crypto = Arc::clone(&crypto);
+        let worker_port = port;
         let worker = thread::Builder::new()
             .name(format!("leftcar-prepared-udp-{port}"))
             .spawn(move || {
                 let mut packet = [0u8; 256];
+                log_info!(
+                    "prepared[{worker_port}]: listener armed, waiting for sealed challenge"
+                );
                 while !worker_stop.load(Ordering::SeqCst) {
                     match worker_socket.recv_from(&mut packet) {
                         Ok((size, peer))
@@ -89,10 +93,17 @@ impl PreparedUdpReceiver {
                             if let Some(plaintext) =
                                 worker_crypto.open_challenge(&packet[..size])
                             {
+                                log_info!(
+                                    "prepared[{worker_port}]: challenge {size}B opened, echoing"
+                                );
                                 *worker_peer.lock().unwrap() = Some(peer);
                                 if let Some(reply) = worker_crypto.seal(&plaintext) {
                                     let _ = worker_socket.send_to(&reply, peer);
                                 }
+                            } else {
+                                log_info!(
+                                    "prepared[{worker_port}]: sealed frame {size}B FAILED to open (key mismatch?)"
+                                );
                             }
                         }
                         Ok(_) => {

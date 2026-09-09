@@ -322,9 +322,13 @@ extension CaptureSession {
         let requiresSplitPair = requestedEncoderExperiment == .splitVertical
         var verifiedTilePorts = Set<UInt16>()
         var descriptor = pollfd(fd: sock, events: Int16(POLLIN), revents: 0)
+        leftcarPerformanceLogger.notice("reachability proof: sealed challenge -> \(self.targetLabel, privacy: .public)")
         for attempt in 0..<60 {
             if attempt % 4 == 0 {
-                _ = sendToViewer(challenge, fd: sock)
+                let sent = sendToViewer(challenge, fd: sock)
+                if attempt == 0 {
+                    leftcarPerformanceLogger.notice("reachability proof: challenge send=\(sent, privacy: .public)B challenge=\(challenge.count, privacy: .public)B")
+                }
                 if requiresSplitPair {
                     _ = sendToTile(challenge, side: .right, fd: sock)
                 }
@@ -348,8 +352,12 @@ extension CaptureSession {
                     }
                 }
             }
-            if count > 0,
-               let opened = mediaCrypto.open(Data(response[0..<count])),
+            // open은 카운터를 소모하므로 반드시 한 번만 한다.
+            let opened = count > 0 ? mediaCrypto.open(Data(response[0..<count])) : nil
+            if count > 0 {
+                leftcarPerformanceLogger.notice("reachability proof: response \(count, privacy: .public)B openOk=\(opened != nil, privacy: .public)")
+            }
+            if let opened = opened,
                opened == challenge {
                 let sourcePort = UInt16(bigEndian: source.sin_port)
                 if sourcePort == targetPort {
