@@ -43,7 +43,7 @@ pub async fn dispatch_control_line(
     }
     serde_json::to_string(
         &server
-            .dispatch(&envelope.command, envelope.args, peer)
+            .dispatch(&envelope.command, envelope.args, peer, None)
             .await,
     )
     .unwrap_or_else(|_| json!({"ok": false, "error": "serialization failed"}).to_string())

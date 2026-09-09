@@ -48,6 +48,8 @@ struct Session {
     handle: u32,
     source_index: u32,
     source_name: String,
+    /// 이 세션을 연 장치(토큰에서 귀속). revoke 시 즉시 차단에 쓴다.
+    device_id: Option<String>,
     width: u32,
     height: u32,
     fps_target: u32,
@@ -304,6 +306,10 @@ pub struct ControlServer {
     identity: std::sync::Arc<secure_channel::HostIdentity>,
     control_port: AtomicU16,
     sessions: Mutex<State>,
+    /// :7777 토큰 무차별 시도에 대한 IP별 백오프.
+    auth_limiter: AuthRateLimiter,
+    /// 세션 감사 로그(선택 — set_audit으로 주입).
+    audit: std::sync::OnceLock<std::sync::Arc<crate::audit::SessionAudit>>,
 }
 
 struct State {
@@ -326,11 +332,79 @@ impl ControlServer {
                 next: 1,
                 live: HashMap::new(),
             }),
+            auth_limiter: AuthRateLimiter::new(),
+            audit: std::sync::OnceLock::new(),
         }
     }
 
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
+    }
+
+    pub fn set_audit(&self, audit: std::sync::Arc<crate::audit::SessionAudit>) {
+        let _ = self.audit.set(audit);
+    }
+
+    fn audit_log(&self, event: &str, fields: serde_json::Value) {
+        if let Some(audit) = self.audit.get() {
+            audit.log(event, fields);
+        }
+    }
+
+    /// 장치 철회를 라이브 세션에 즉시 반영한다(문서 §18). 토큰이 이미
+    /// 무효라도 소켓이 살아 있던 구세대 세션을 강제 종료한다.
+    pub fn stop_sessions_for_device(&self, device_id: &str) -> usize {
+        let targets: Vec<(u32, u32)> = {
+            let mut st = self.sessions.lock().unwrap();
+            let mut removed: Vec<(u32, u32)> = Vec::new();
+            st.live.retain(|id, session| {
+                if session.device_id.as_deref() == Some(device_id) {
+                    removed.push((*id, session.handle));
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+        for (_, handle) in &targets {
+            let _ = self.backend.stop_with_reason(*handle, 2);
+        }
+        for (id, _) in &targets {
+            self.cleanup_stopped_media(*id);
+            self.audit_log(
+                "session_stopped",
+                json!({ "session": id, "device": device_id, "reason": "device_revoked" }),
+            );
+        }
+        targets.len()
+    }
+
+    /// 모든 라이브 세션 강제 종료(revoke_all 경로).
+    pub fn stop_all_sessions(&self) {
+        let targets: Vec<(u32, u32)> = {
+            let mut st = self.sessions.lock().unwrap();
+            let removed: Vec<(u32, u32)> =
+                st.live.iter().map(|(id, s)| (*id, s.handle)).collect();
+            st.live.clear();
+            removed
+        };
+        for (_, handle) in &targets {
+            let _ = self.backend.stop_with_reason(*handle, 2);
+        }
+        for (id, _) in &targets {
+            self.audit_log(
+                "session_stopped",
+                json!({ "session": id, "reason": "devices_revoked_all" }),
+            );
+        }
+    }
+
+    fn cleanup_stopped_media(&self, session_id: u32) {
+        let state = self.sessions.lock().unwrap();
+        if let Some(session) = state.live.get(&session_id) {
+            cleanup_media_transport(&session.media_transport, session.viewer_port);
+        }
     }
 
     /// Restore the previous capture geometry after a failed reconfigure. On
@@ -958,6 +1032,10 @@ impl ControlServer {
         session.terminal_error = Some("host operator stopped the stream".into());
         session.backend_released = true;
         cleanup_media_transport(&session.media_transport, session.viewer_port);
+        self.audit_log(
+            "session_stopped",
+            json!({ "session": session_id, "device": session.device_id, "reason": "operator_forced" }),
+        );
         Ok(())
     }
 
@@ -1066,6 +1144,7 @@ impl ControlServer {
         command: &str,
         args: serde_json::Value,
         viewer_ip: &str,
+        authenticated_device: Option<&str>,
     ) -> serde_json::Value {
         match command {
             "requestUsb" => match crate::aoap_control::ensure_usb_accessory().await {
@@ -1260,7 +1339,8 @@ impl ControlServer {
                                 Session {
                                     handle,
                                     source_index: input.source_index,
-                                    source_name: plan.name,
+                                    source_name: plan.name.clone(),
+                                    device_id: authenticated_device.map(str::to_owned),
                                     width: input.width,
                                     height: input.height,
                                     fps_target: input.fps,
@@ -1268,7 +1348,7 @@ impl ControlServer {
                                     capture_backend: input.capture_backend.clone(),
                                     content_mode: plan.content_mode.into(),
                                     encoder_experiment: input.encoder_experiment,
-                                    viewer_addr,
+                                    viewer_addr: viewer_addr.clone(),
                                     viewer_port: input.viewer_port,
                                     media_transport: transport.into(),
                                     udp_stability: (transport == "udp")
@@ -1282,6 +1362,16 @@ impl ControlServer {
                             );
                             id
                         };
+                        self.audit_log(
+                            "session_started",
+                            json!({
+                                "session": session_id,
+                                "device": authenticated_device.unwrap_or("unknown"),
+                                "viewer": viewer_addr.clone(),
+                                "transport": transport,
+                                "source": plan.name,
+                            }),
+                        );
                         ok(StartStreamOutput {
                             session: session_id,
                             width: input.width,
@@ -1339,6 +1429,14 @@ impl ControlServer {
                         match result {
                             Ok(()) => {
                                 cleanup_media_transport(&s.media_transport, s.viewer_port);
+                                self.audit_log(
+                                    "session_stopped",
+                                    json!({
+                                        "session": input.session,
+                                        "device": s.device_id,
+                                        "reason": input.reason.unwrap_or(3),
+                                    }),
+                                );
                                 ok(json!({}))
                             }
                             Err(e) => err(&e),
@@ -1374,11 +1472,16 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     else {
         return;
     };
+    if !server.auth_limiter.allow(peer) {
+        // 무차별 시도가 누적된 주소 — 응답조차 주지 않는다(백오프).
+        return;
+    }
     let Some((mut crypto, mut pending)) =
         negotiate(&first_line, &mut lines, &mut wr, server, peer).await
     else {
         return;
     };
+    let mut device: Option<String> = None;
     loop {
         let raw = match pending.take() {
             Some(line) => line,
@@ -1416,19 +1519,26 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 // issued by a completed pairing; on failure the connection is
                 // closed, not just the request rejected (design §2).
                 let local_pairing = cmd == "beginPairing" && is_loopback_peer(peer);
-                if cmd != "pair"
-                    && !local_pairing
-                    && !server.pairing.authorize(token.as_deref().unwrap_or(""))
-                {
-                    let _ = write_response(
-                        &mut wr,
-                        &mut crypto,
-                        &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
-                    )
-                    .await;
-                    break;
+                if device.is_none() && cmd != "pair" && !local_pairing {
+                    match server.pairing.authorize_device(token.as_deref().unwrap_or("")) {
+                        Some(device_id) => {
+                            device = Some(device_id);
+                            server.auth_limiter.record_success(peer);
+                        }
+                        None => {
+                            server.auth_limiter.record_failure(peer);
+                            let _ = write_response(
+                                &mut wr,
+                                &mut crypto,
+                                &serde_json::to_string(&err("unauthorized"))
+                                    .unwrap_or_default(),
+                            )
+                            .await;
+                            break;
+                        }
+                    }
                 }
-                let out = server.dispatch(&cmd, args, peer).await;
+                let out = server.dispatch(&cmd, args, peer, device.as_deref()).await;
                 serde_json::to_string(&out).unwrap_or_else(|_| "{\"ok\":false}".into())
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
@@ -1579,6 +1689,101 @@ fn b64_bytes32(encoded: &str) -> Option<[u8; 32]> {
         .decode(encoded)
         .ok()?;
     bytes.try_into().ok()
+}
+
+/// :7777 토큰 무차별 대입에 대한 IP별 백오프. 60초 창에 5회 실패하면 60초
+/// 차단한다. 루프백은 대상에서 제외한다(진단 도구·테스트).
+struct AuthRateLimiter {
+    failures: Mutex<HashMap<String, FailState>>,
+}
+
+#[derive(Clone, Copy)]
+struct FailState {
+    count: u32,
+    window_start: Instant,
+    blocked_until: Option<Instant>,
+}
+
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const AUTH_FAILURE_LIMIT: u32 = 5;
+const AUTH_BLOCK: Duration = Duration::from_secs(60);
+
+impl AuthRateLimiter {
+    fn new() -> Self {
+        Self {
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allow(&self, peer: &str) -> bool {
+        if is_loopback_peer(peer) {
+            return true;
+        }
+        let mut failures = self.failures.lock().unwrap();
+        let now = Instant::now();
+        failures.retain(|_, state| {
+            state.blocked_until.map(|until| until > now).unwrap_or(true)
+                || now.duration_since(state.window_start) < AUTH_FAILURE_WINDOW
+        });
+        match failures.get_mut(peer) {
+            Some(state) => !state
+                .blocked_until
+                .map(|until| until > now)
+                .unwrap_or(false),
+            None => true,
+        }
+    }
+
+    fn record_failure(&self, peer: &str) {
+        if is_loopback_peer(peer) {
+            return;
+        }
+        let mut failures = self.failures.lock().unwrap();
+        let now = Instant::now();
+        let state = failures.entry(peer.to_owned()).or_insert(FailState {
+            count: 0,
+            window_start: now,
+            blocked_until: None,
+        });
+        if now.duration_since(state.window_start) >= AUTH_FAILURE_WINDOW {
+            state.count = 0;
+            state.window_start = now;
+        }
+        state.count += 1;
+        if state.count >= AUTH_FAILURE_LIMIT {
+            state.blocked_until = Some(now + AUTH_BLOCK);
+        }
+    }
+
+    fn record_success(&self, peer: &str) {
+        if is_loopback_peer(peer) {
+            return;
+        }
+        self.failures.lock().unwrap().remove(peer);
+    }
+}
+
+#[cfg(test)]
+mod rate_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn five_failures_block_then_success_clears() {
+        let limiter = AuthRateLimiter::new();
+        let peer = "192.168.0.77";
+        assert!(limiter.allow(peer));
+        for _ in 0..4 {
+            limiter.record_failure(peer);
+            assert!(limiter.allow(peer));
+        }
+        limiter.record_failure(peer);
+        assert!(!limiter.allow(peer), "5th failure must block the peer");
+        // 루프백은 차단 대상이 아니다.
+        assert!(limiter.allow("127.0.0.1"));
+        // 성공은 카운터를 지운다.
+        limiter.record_success(peer);
+        assert!(limiter.allow(peer));
+    }
 }
 
 fn is_loopback_peer(peer: &str) -> bool {
@@ -1849,7 +2054,11 @@ mod tests {
     }
 
     fn test_pairing() -> std::sync::Arc<crate::pairing::PairingServer> {
-        std::sync::Arc::new(crate::pairing::PairingServer::new([7u8; 32], None))
+        std::sync::Arc::new(crate::pairing::PairingServer::new(
+                [7u8; 32],
+                None,
+                Box::new(crate::pairing::FileTokenStore::new(None)),
+            ))
     }
 
     fn test_identity() -> std::sync::Arc<secure_channel::HostIdentity> {
@@ -2357,6 +2566,7 @@ mod tests {
             1,
             Session {
                 handle: 7,
+                device_id: None,
                 source_index: 0,
                 source_name: "Main".into(),
                 width: 1_920,
@@ -2415,6 +2625,7 @@ mod tests {
             1,
             Session {
                 handle: 7,
+                device_id: None,
                 source_index: 0,
                 source_name: "Main".into(),
                 width: 1_920,
@@ -2468,6 +2679,7 @@ mod tests {
             1,
             Session {
                 handle: 7,
+                device_id: None,
                 source_index: 0,
                 source_name: "Main".into(),
                 width: 1_920,
@@ -2567,7 +2779,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "startStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "sourceIndex": 0,
                     "viewerPort": 5001,
                     "width": 1920,
@@ -2575,8 +2787,7 @@ mod tests {
                     "fps": 60,
                     "mediaTransport": "udp"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
 
@@ -2587,8 +2798,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_stream_leaves_input_off_without_permission() {
-        let fake = input_test_backend(false);
+    async fn revoking_a_device_stops_its_live_sessions_immediately() {
+        let fake = input_test_backend(true);
         let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
 
         let resp = server
@@ -2603,7 +2814,38 @@ mod tests {
                     "mediaTransport": "udp"
                 }),
                 "192.168.0.9",
+                Some("viewer-1"),
             )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(server.sessions.lock().unwrap().live.len(), 1);
+
+        // 철회 즉시 세션이 사라지고 백엔드 stop(사유 2)이 불린다.
+        let stopped = server.stop_sessions_for_device("viewer-1");
+        assert_eq!(stopped, 1);
+        assert_eq!(server.sessions.lock().unwrap().live.len(), 0);
+        assert!(fake.stops.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        // 다른 장치 철회는 세션을 건드리지 않는다.
+        assert_eq!(server.stop_sessions_for_device("viewer-2"), 0);
+    }
+
+    #[tokio::test]
+    async fn start_stream_leaves_input_off_without_permission() {
+        let fake = input_test_backend(false);
+        let server = Arc::new(ControlServer::new(fake.clone(), test_pairing(), test_identity()));
+
+        let resp = server
+            .dispatch(
+                "startStream",
+                                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp"
+                }),
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
 
@@ -2624,15 +2866,14 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 3840,
                     "height": 2160,
                     "fps": 60,
                     "qualityState": "native"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
 
@@ -2661,6 +2902,7 @@ mod tests {
             1,
             Session {
                 handle: 7,
+                device_id: None,
                 source_index: 0,
                 source_name: "Main".into(),
                 width,
@@ -2733,7 +2975,7 @@ mod tests {
         seed_live_session(&server, EncoderExperiment::Auto, 3840, 2160);
 
         let resp = server
-            .dispatch("getStatus", serde_json::json!({}), "192.168.0.9")
+            .dispatch("getStatus", serde_json::json!({}), "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
         assert_eq!(
@@ -2832,7 +3074,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 3840,
                     "height": 2160,
@@ -2840,8 +3082,7 @@ mod tests {
                     "qualityState": "native",
                     "encoderExperiment": "splitVertical"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
         // 교체 백엔드는 요청된 split 모드로 시작한다.
@@ -2883,7 +3124,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 2560,
                     "height": 1440,
@@ -2891,8 +3132,7 @@ mod tests {
                     "qualityState": "native",
                     "encoderExperiment": "auto"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], true, "{resp}");
         assert_eq!(
@@ -2929,7 +3169,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 2560,
                     "height": 1440,
@@ -2937,8 +3177,7 @@ mod tests {
                     "qualityState": "native",
                     "encoderExperiment": "splitVertical"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         let message = resp["error"].as_str().unwrap_or_default();
@@ -2975,7 +3214,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 3840,
                     "height": 2160,
@@ -2983,8 +3222,7 @@ mod tests {
                     "qualityState": "native",
                     "encoderExperiment": "splitHorizontal"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         let message = resp["error"].as_str().unwrap_or_default();
@@ -3011,7 +3249,7 @@ mod tests {
         let resp = server
             .dispatch(
                 "reconfigureStream",
-                serde_json::json!({
+                                serde_json::json!({
                     "session": 1,
                     "width": 3840,
                     "height": 2160,
@@ -3019,8 +3257,7 @@ mod tests {
                     "qualityState": "native",
                     "encoderExperiment": "splitVertical"
                 }),
-                "192.168.0.9",
-            )
+                "192.168.0.9", None)
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         // 교체 실패 시 정확히 이전 실제 모드/형태로 복구된다.
@@ -3071,6 +3308,7 @@ mod tests {
                 1,
                 Session {
                     handle: 7,
+                    device_id: None,
                     source_index: 0,
                     source_name: "Main".into(),
                     width: 3840,
@@ -3095,15 +3333,14 @@ mod tests {
             let resp = server
                 .dispatch(
                     "reconfigureStream",
-                    serde_json::json!({
+                                        serde_json::json!({
                         "session": 1,
                         "width": 1920,
                         "height": 1080,
                         "fps": 60,
                         "qualityState": "native"
                     }),
-                    "192.168.0.9",
-                )
+                    "192.168.0.9", None)
                 .await;
             assert_eq!(resp["ok"], true, "{resp}");
             assert_eq!(resp["result"]["width"], 1920, "{resp}");
@@ -3149,15 +3386,14 @@ mod tests {
             let resp = server
                 .dispatch(
                     "reconfigureStream",
-                    serde_json::json!({
+                                        serde_json::json!({
                         "session": 1,
                         "width": 3840,
                         "height": 2160,
                         "fps": 90,
                         "qualityState": "native"
                     }),
-                    "192.168.0.9",
-                )
+                    "192.168.0.9", None)
                 .await;
             assert_eq!(resp["ok"], false, "{resp}");
             let message = resp["error"].as_str().unwrap_or_default();
@@ -3194,15 +3430,14 @@ mod tests {
             let resp = server
                 .dispatch(
                     "reconfigureStream",
-                    serde_json::json!({
+                                        serde_json::json!({
                         "session": 1,
                         "width": 3840,
                         "height": 2160,
                         "fps": 30,
                         "qualityState": "native"
                     }),
-                    "192.168.0.9",
-                )
+                    "192.168.0.9", None)
                 .await;
             assert_eq!(resp["ok"], false, "{resp}");
             let message = resp["error"].as_str().unwrap_or_default();

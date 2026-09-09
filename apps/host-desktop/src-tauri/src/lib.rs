@@ -5,6 +5,7 @@
 pub mod aoap;
 pub mod aoap_control;
 pub mod aoap_proxy;
+pub mod audit;
 pub mod backend;
 pub mod control;
 pub mod fec;
@@ -53,15 +54,19 @@ pub fn run() {
     let identity = Arc::new(identity::load_or_create(
         identity::default_identity_path().as_deref(),
     ));
+    let pairing_store_path = pairing::PairingServer::default_store_path();
     let pairing = Arc::new(pairing::PairingServer::new(
         identity.public_key(),
-        pairing::PairingServer::default_store_path(),
+        pairing_store_path.clone(),
+        pairing::token_store(pairing_store_path),
     ));
+    let audit = Arc::new(audit::SessionAudit::new(audit::SessionAudit::default_path()));
     let server = Arc::new(control::ControlServer::new(
         backend.clone(),
         pairing.clone(),
         identity.clone(),
     ));
+    server.set_audit(audit.clone());
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -427,14 +432,35 @@ fn list_paired_devices(
 #[tauri::command]
 fn revoke_paired_device(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
     device_id: String,
 ) -> bool {
-    state.revoke(&device_id)
+    let removed = state.revoke(&device_id);
+    if removed {
+        // 철회는 즉시 효력을 가진다 — 라이브 스트림도 함께 끊는다(문서 §18).
+        let stopped = server.stop_sessions_for_device(&device_id);
+        audit_state.log(
+            "device_revoked",
+            serde_json::json!({ "device": device_id, "stopped_sessions": stopped }),
+        );
+    }
+    removed
 }
 
 #[tauri::command]
-fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) -> usize {
-    state.revoke_all()
+fn revoke_all_devices(
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+) -> usize {
+    let count = state.revoke_all();
+    server.stop_all_sessions();
+    audit_state.log(
+        "devices_revoked_all",
+        serde_json::json!({ "devices": count }),
+    );
+    count
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

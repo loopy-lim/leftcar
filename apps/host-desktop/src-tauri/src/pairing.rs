@@ -33,6 +33,7 @@ struct Inner {
     service: session::PairingService,
     /// QR `k` 필드와 offer 핑거프린트 메타데이터의 원천.
     host_public_key: [u8; 32],
+    token_store: Box<dyn TokenStore>,
     fail_counts: HashMap<String, u32>,
     paired: Vec<PairedDevice>,
     /// offer ids this server created (the raw secret stays inside the
@@ -58,6 +59,8 @@ pub struct PairingServer {
 pub struct PairedDevice {
     pub device_id: String,
     pub name: String,
+    /// 토큰은 [TokenStore]로만 저장된다(파일에는 절대 기록되지 않는다).
+    #[serde(default, skip_serializing)]
     pub token_hex: String,
     pub paired_at: String,
 }
@@ -127,17 +130,41 @@ impl PairingServer {
     /// Loads persisted devices from `store_path` if it exists. A corrupt or
     /// unreadable file is logged and ignored — pairing state is rebuildable,
     /// the host must not refuse to start.
-    pub fn new(host_public_key: [u8; 32], store_path: Option<PathBuf>) -> Self {
-        let paired = store_path
+    pub fn new(
+        host_public_key: [u8; 32],
+        store_path: Option<PathBuf>,
+        token_store: Box<dyn TokenStore>,
+    ) -> Self {
+        let mut paired: Vec<PairedDevice> = store_path
             .as_deref()
             .and_then(load_devices)
             .unwrap_or_default();
+        // 구버전 파일에는 token_hex가 인라인으로 있었다 — 토큰 저장소로
+        // 이관하고 파일에서는 지운다(마이그레이션은 1회).
+        let mut migrated = Vec::new();
+        let mut needs_rewrite = false;
+        for mut device in paired {
+            if !device.token_hex.is_empty() {
+                token_store.set(&device.device_id, &device.token_hex);
+                device.token_hex = String::new();
+                needs_rewrite = true;
+            }
+            device.token_hex = token_store.get(&device.device_id).unwrap_or_default();
+            migrated.push(device);
+        }
+        paired = migrated;
+        if needs_rewrite {
+            if let Some(path) = &store_path {
+                let _ = persist_devices(path, &paired);
+            }
+        }
         Self {
             inner: Mutex::new(Inner {
                 service: session::PairingService::new(Box::new(WallClock {
                     epoch: OnceLock::new(),
                 })),
                 host_public_key,
+                token_store,
                 fail_counts: HashMap::new(),
                 paired,
                 live_offers: std::collections::HashSet::new(),
@@ -298,6 +325,7 @@ impl PairingServer {
         inner.fail_counts.remove(offer_id);
         let token = session::OfferSecret::from_random();
         let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+        inner.token_store.set(device_id, &token_hex);
         let paired = PairedDevice {
             device_id: device_id.to_owned(),
             name: name.to_owned(),
@@ -406,6 +434,7 @@ impl PairingServer {
             Ok(_device) => {
                 let token = session::OfferSecret::from_random();
                 let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
+                inner.token_store.set(&request.device_id, &token_hex);
                 let paired = PairedDevice {
                     device_id: request.device_id,
                     name: request.device_name,
@@ -511,6 +540,7 @@ impl PairingServer {
         inner.paired.retain(|d| d.device_id != device_id);
         let removed = inner.paired.len() != before;
         if removed {
+            inner.token_store.delete(device_id);
             if let Err(e) = self.persist(inner.paired.clone()) {
                 eprintln!("leftcar: persist after revoke failed: {e}");
             }
@@ -518,10 +548,35 @@ impl PairingServer {
         removed
     }
 
+    /// 토큰으로 장치를 찾는다(상수 시간 비교). 세션을 장치에 귀속시켜
+    /// revoke 시 라이브 스트림을 즉시 끊기 위해 필요하다.
+    pub fn authorize_device(&self, token_hex: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.paired.is_empty() {
+            return None;
+        }
+        let Ok(bytes) = hex_decode32(token_hex) else {
+            return None;
+        };
+        inner
+            .paired
+            .iter()
+            .find(|d| {
+                session::constant_time_eq(
+                    &hex_decode32(&d.token_hex).unwrap_or([0u8; 32]),
+                    &bytes,
+                )
+            })
+            .map(|d| d.device_id.clone())
+    }
+
     /// Remove all paired devices and tokens; persists the change.
     pub fn revoke_all(&self) -> usize {
         let mut inner = self.inner.lock().unwrap();
         let count = inner.paired.len();
+        for device in &inner.paired {
+            inner.token_store.delete(&device.device_id);
+        }
         inner.paired.clear();
         inner.completed.clear();
         inner.pending.clear();
@@ -554,41 +609,46 @@ impl PairingServer {
 
     /// Best-effort persist; parent dirs created, file written 0600.
     fn persist(&self, devices: Vec<PairedDevice>) -> Result<(), PairingServerError> {
-        let Some(path) = &self.store_path else {
+        let Some(path) = self.store_path.as_ref() else {
             return Ok(());
         };
-        let body = serde_json::to_string_pretty(&devices).map_err(|e| {
-            eprintln!("leftcar: serialize paired devices: {e}");
-            PairingServerError::PersistenceFailed
-        })?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                eprintln!("leftcar: create store dir: {e}");
-                PairingServerError::PersistenceFailed
-            })?;
-        }
-        // Mode applies at creation: fs::write would create the file 0644 and
-        // leave it world-readable until a follow-up chmod lands.
-        #[cfg(unix)]
-        let file = {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .and_then(|mut f| f.write_all(body.as_bytes()))
-        };
-        #[cfg(not(unix))]
-        let file = std::fs::write(path, &body);
-        file.map_err(|e| {
-            eprintln!("leftcar: write store: {e}");
-            PairingServerError::PersistenceFailed
-        })?;
-        Ok(())
+        persist_devices(path, &devices)
     }
+}
+
+/// 장치 메타데이터(토큰 제외)를 0600 파일로 기록한다.
+fn persist_devices(path: &std::path::Path, devices: &[PairedDevice]) -> Result<(), PairingServerError> {
+    let body = serde_json::to_string_pretty(devices).map_err(|e| {
+        eprintln!("leftcar: serialize paired devices: {e}");
+        PairingServerError::PersistenceFailed
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            eprintln!("leftcar: create store dir: {e}");
+            PairingServerError::PersistenceFailed
+        })?;
+    }
+    // Mode applies at creation: fs::write would create the file 0644 and
+    // leave it world-readable until a follow-up chmod lands.
+    #[cfg(unix)]
+    let file = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut f| f.write_all(body.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::write(path, &body);
+    file.map_err(|e| {
+        eprintln!("leftcar: write store: {e}");
+        PairingServerError::PersistenceFailed
+    })?;
+    Ok(())
 }
 
 fn hex_decode32(s: &str) -> Result<[u8; 32], ()> {
@@ -655,6 +715,124 @@ fn load_devices(path: &std::path::Path) -> Option<Vec<PairedDevice>> {
     }
 }
 
+// -- 토큰 저장소 ---------------------------------------------------------------
+
+/// 페어링 토큰의 저장소. 운영에서는 OS 자격 증명 보관소(macOS Keychain /
+/// Windows Credential Manager)를 쓰고, 실패하거나 미지원 플랫폼에서는 0600
+/// 파일로 폴백한다. 파일에는 메타데이터만 두고 토큰은 저장소로 분리한다.
+pub trait TokenStore: Send + Sync {
+    fn set(&self, device_id: &str, token_hex: &str);
+    fn get(&self, device_id: &str) -> Option<String>;
+    fn delete(&self, device_id: &str);
+}
+
+/// 운영 플랫폼에 맞는 저장소를 고른다. OS 보관소가 1순위.
+pub fn token_store(fallback_path: Option<PathBuf>) -> Box<dyn TokenStore> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let _ = fallback_path;
+        Box::new(KeychainTokenStore)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Box::new(FileTokenStore::new(
+            fallback_path.map(|p| p.with_extension("tokens")),
+        ))
+    }
+}
+
+/// OS 자격 증명 보관소 (keyring 크레이트 → macOS Keychain / Windows Credential
+/// Manager). 생성 실패 시 호출부가 파일 폴백으로 내려간다.
+pub struct KeychainTokenStore;
+
+impl TokenStore for KeychainTokenStore {
+    fn set(&self, device_id: &str, token_hex: &str) {
+        if let Ok(entry) = keyring::Entry::new("leftcar-host", device_id) {
+            if let Err(e) = entry.set_password(token_hex) {
+                eprintln!("leftcar: keychain set failed for {device_id}: {e}");
+            }
+        }
+    }
+
+    fn get(&self, device_id: &str) -> Option<String> {
+        keyring::Entry::new("leftcar-host", device_id)
+            .ok()
+            .and_then(|entry| match entry.get_password() {
+                Ok(token) => Some(token),
+                Err(keyring::Error::NoEntry) => None,
+                Err(e) => {
+                    eprintln!("leftcar: keychain get failed for {device_id}: {e}");
+                    None
+                }
+            })
+    }
+
+    fn delete(&self, device_id: &str) {
+        if let Ok(entry) = keyring::Entry::new("leftcar-host", device_id) {
+            let _ = entry.delete_credential();
+        }
+    }
+}
+
+/// 파일 폴백 저장소 — 하나의 0600 JSON(장치 → 토큰) 토큰 파일.
+pub struct FileTokenStore {
+    path: Option<PathBuf>,
+}
+
+impl FileTokenStore {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+
+    fn write(&self, tokens: &std::collections::BTreeMap<String, String>) {
+        let Some(path) = &self.path else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::to_string(tokens).unwrap_or_else(|_| "{}".into());
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .and_then(|mut f| f.write_all(body.as_bytes()));
+        }
+        #[cfg(not(unix))]
+        let _ = std::fs::write(path, body);
+    }
+
+    fn read(&self) -> std::collections::BTreeMap<String, String> {
+        let Some(path) = &self.path else { return Default::default() };
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|body| serde_json::from_str(&body).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl TokenStore for FileTokenStore {
+    fn set(&self, device_id: &str, token_hex: &str) {
+        let mut tokens = self.read();
+        tokens.insert(device_id.to_owned(), token_hex.to_owned());
+        self.write(&tokens);
+    }
+
+    fn get(&self, device_id: &str) -> Option<String> {
+        self.read().get(device_id).cloned()
+    }
+
+    fn delete(&self, device_id: &str) {
+        let mut tokens = self.read();
+        tokens.remove(device_id);
+        self.write(&tokens);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,7 +849,7 @@ mod tests {
 
     #[test]
     fn begin_pairing_creates_qr_payload_and_code() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
 
         let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
@@ -710,7 +888,7 @@ mod tests {
 
     #[test]
     fn pair_with_correct_secret_and_code_issues_token() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let offer_id = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap()["id"]
             .as_str()
@@ -738,7 +916,7 @@ mod tests {
 
     #[test]
     fn pair_with_wrong_code_fails() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap();
@@ -754,7 +932,7 @@ mod tests {
 
     #[test]
     fn pair_with_wrong_secret_fails_with_same_message() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap();
@@ -769,7 +947,7 @@ mod tests {
 
     #[test]
     fn three_failed_attempts_burn_offer() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -788,7 +966,7 @@ mod tests {
 
     #[test]
     fn authorize_accepts_issued_token_and_rejects_others() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -805,10 +983,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_inline_tokens_migrate_into_the_token_store() {
+        let path = temp_store_path("migrate");
+        let tokens_path = path.with_extension("tokens");
+        // 구버전 형식: token_hex가 파일에 인라인.
+        let legacy = format!(
+            r#"[{{"device_id":"viewer-1","name":"Old","token_hex":"{}","paired_at":"unix:0"}}]"#,
+            "a".repeat(64)
+        );
+        std::fs::write(&path, legacy).unwrap();
+
+        let server = PairingServer::new(
+            [7u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(tokens_path.clone()))),
+        );
+        let token = "a".repeat(64);
+        assert!(server.authorize(&token), "migrated token must authorize");
+        assert_eq!(server.authorize_device(&token).as_deref(), Some("viewer-1"));
+        // 파일에서 토큰이 지워졌는지 확인.
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains(&token), "token must leave the metadata file");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&tokens_path);
+    }
+
+    #[test]
     fn persisted_devices_survive_restart() {
         let path = temp_store_path("restart");
         let token = {
-            let server = PairingServer::new([7u8; 32], Some(path.clone()));
+            let server = PairingServer::new(
+                [7u8; 32],
+                Some(path.clone()),
+                Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+            );
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -818,7 +1026,11 @@ mod tests {
                 .unwrap()
         };
 
-        let restarted = PairingServer::new([7u8; 32], Some(path.clone()));
+        let restarted = PairingServer::new(
+            [7u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+        );
         assert!(restarted.authorize(&token));
         assert_eq!(restarted.list_devices().len(), 1);
         assert_eq!(restarted.list_devices()[0].device_id, "viewer-1");
@@ -829,7 +1041,11 @@ mod tests {
     fn corrupt_store_is_ignored_not_fatal() {
         let path = temp_store_path("corrupt");
         std::fs::write(&path, b"{not json").unwrap();
-        let server = PairingServer::new([7u8; 32], Some(path.clone()));
+        let server = PairingServer::new(
+            [7u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+        );
         assert!(server.list_devices().is_empty());
         let view = server.begin_pairing("192.168.0.10", 7777);
         assert_eq!(view.code.len(), 6);
@@ -840,7 +1056,11 @@ mod tests {
     fn revoke_removes_token_and_persists() {
         let path = temp_store_path("revoke");
         let token = {
-            let server = PairingServer::new([7u8; 32], Some(path.clone()));
+            let server = PairingServer::new(
+                [7u8; 32],
+                Some(path.clone()),
+                Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+            );
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -851,14 +1071,22 @@ mod tests {
         };
 
         {
-            let server = PairingServer::new([7u8; 32], Some(path.clone()));
+            let server = PairingServer::new(
+                [7u8; 32],
+                Some(path.clone()),
+                Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+            );
             assert!(server.authorize(&token));
             assert!(server.revoke("viewer-1"));
             assert!(!server.authorize(&token));
             assert!(server.list_devices().is_empty());
         }
         // persisted across restart
-        let restarted = PairingServer::new([7u8; 32], Some(path.clone()));
+        let restarted = PairingServer::new(
+            [7u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+        );
         assert!(!restarted.authorize(&token));
         assert!(restarted.list_devices().is_empty());
         let _ = std::fs::remove_file(&path);
@@ -866,7 +1094,7 @@ mod tests {
 
     #[test]
     fn replacing_or_canceling_an_offer_invalidates_old_qr_codes() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let first = server.begin_pairing("192.168.0.10", 7777);
         let second = server.begin_pairing("192.168.0.10", 7777);
         let payload = serde_json::from_str::<serde_json::Value>(&first.qr_payload).unwrap();
@@ -913,7 +1141,7 @@ mod tests {
 
     #[test]
     fn device_views_never_expose_authentication_tokens() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let view = server.begin_pairing("192.168.0.10", 7777);
         let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
         server
@@ -935,7 +1163,11 @@ mod tests {
     fn store_file_has_restricted_permissions() {
         let path = temp_store_path("perms");
         {
-            let server = PairingServer::new([7u8; 32], Some(path.clone()));
+            let server = PairingServer::new(
+                [7u8; 32],
+                Some(path.clone()),
+                Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+            );
             let view = server.begin_pairing("192.168.0.10", 7777);
             let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
             let offer_id = payload["id"].as_str().unwrap().to_owned();
@@ -967,7 +1199,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_waits_pending_then_approves_and_pickup_issues_token() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         // 첫 제시: 아직 Mac 승인 전 — Pending 상태 신호.
@@ -1004,7 +1236,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_rejection_tells_the_poller() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         assert!(matches!(
@@ -1022,7 +1254,7 @@ mod tests {
 
     #[test]
     fn approval_pairing_rejects_without_a_pending_request() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
         assert_eq!(
             server.approve_pending(&offer_id).unwrap_err(),
@@ -1036,7 +1268,7 @@ mod tests {
 
     #[test]
     fn approval_pending_polls_do_not_burn_the_offer() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
 
         // 승인 대기 폴링은 실패 횟수를 올리지 않는다 — 5번 넘게 반복해도.
@@ -1054,7 +1286,7 @@ mod tests {
 
     #[test]
     fn approved_token_is_delivered_only_to_the_approved_device() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
@@ -1076,7 +1308,7 @@ mod tests {
 
     #[test]
     fn revoking_one_device_keeps_another_devices_pending_pickup() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
@@ -1101,7 +1333,7 @@ mod tests {
 
     #[test]
     fn wrong_secret_polls_still_burn_the_offer_after_three_tries() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, _secret_b64, _code) = begin_offer_parts(&server);
         let wrong = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
 
@@ -1122,7 +1354,7 @@ mod tests {
 
     #[test]
     fn new_begin_pairing_invalidates_outstanding_approvals() {
-        let server = PairingServer::new([7u8; 32], None);
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
         let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
         assert!(matches!(
             server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
