@@ -343,6 +343,11 @@ pub struct ControlServer {
     /// 클립보드 접근 백엔드(선택 — set_clipboard로 플러그인 구현을 주입;
     /// 미주입 시 pbcopy/pbpaste 폴백).
     clipboard: std::sync::OnceLock<std::sync::Arc<dyn ClipboardBackend>>,
+    /// 파일 공유 게이트(선택 — set_settings으로 주입; 없으면 꺼짐).
+    settings: std::sync::OnceLock<std::sync::Arc<crate::settings::SharedSettings>>,
+    /// 파일 전송 청크 상태와 호스트 공유 대기열. Tauri UI 명령도 같은
+    /// 인스턴스를 본다(공유 대기열 추가·삭제).
+    file_transfers: crate::file_transfer::FileTransferState,
 }
 
 struct State {
@@ -369,6 +374,8 @@ impl ControlServer {
             audit: std::sync::OnceLock::new(),
             clipboard_share: AtomicBool::new(false),
             clipboard: std::sync::OnceLock::new(),
+            settings: std::sync::OnceLock::new(),
+            file_transfers: crate::file_transfer::FileTransferState::default(),
         }
     }
 
@@ -400,6 +407,20 @@ impl ControlServer {
         self.clipboard
             .get_or_init(|| std::sync::Arc::new(crate::clipboard::SystemClipboard))
             .clone()
+    }
+
+    pub fn set_settings(&self, settings: std::sync::Arc<crate::settings::SharedSettings>) {
+        let _ = self.settings.set(settings);
+    }
+
+    /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
+    pub fn file_transfer_state(&self) -> &crate::file_transfer::FileTransferState {
+        &self.file_transfers
+    }
+
+    /// 파일 공유 게이트. 설정이 주입되지 않았으면 안전 쪽인 꺼짐이다.
+    fn file_share_gate(&self) -> bool {
+        self.settings.get().is_some_and(|s| s.file_share())
     }
 
     fn audit_log(&self, event: &str, fields: serde_json::Value) {
@@ -1550,6 +1571,176 @@ impl ControlServer {
             "getStatus" => ok(self.snapshot()),
             "setClipboard" => self.handle_set_clipboard(args, authenticated_device),
             "getClipboard" => self.handle_get_clipboard(args),
+            // -- 파일 전송 v1 (docs/07 §20) --------------------------------
+            // 모든 명령은 페어링으로 인증된 장치에만 허용되고, End를 제외한
+            // 명령은 file_share 게이트(기본 꺼짐)를 통과해야 한다.
+            "sendFileBegin" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct BeginArgs {
+                    name: String,
+                    size: u64,
+                }
+                let input: BeginArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                if !self.file_share_gate() {
+                    return err("file share disabled");
+                }
+                match self.file_transfers.begin_incoming(device, &input.name, input.size) {
+                    Ok(token) => {
+                        self.audit_log(
+                            "file_send_begin",
+                            json!({ "device": device, "name": input.name, "size": input.size }),
+                        );
+                        ok(json!({ "fileToken": token }))
+                    }
+                    Err(error) => err(&error),
+                }
+            }
+            "sendFileChunk" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ChunkArgs {
+                    file_token: String,
+                    data_base64: String,
+                    offset: u64,
+                }
+                let input: ChunkArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                if !self.file_share_gate() {
+                    return err("file share disabled");
+                }
+                match self.file_transfers.append_incoming(
+                    device,
+                    &input.file_token,
+                    &input.data_base64,
+                    input.offset,
+                ) {
+                    Ok(written) => ok(json!({ "written": written })),
+                    Err(error) => err(&error),
+                }
+            }
+            "sendFileEnd" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct EndArgs {
+                    file_token: String,
+                }
+                let input: EndArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                // 게이트는 다시 검사하지 않는다 — 진행 중 전송의 마무리는
+                // 게이트를 꺼도 완료할 수 있어야 .part 잔여물이 남지 않는다.
+                match self.file_transfers.finish_incoming(device, &input.file_token) {
+                    Ok((name, bytes)) => {
+                        self.audit_log(
+                            "file_received",
+                            json!({ "device": device, "name": name, "bytes": bytes }),
+                        );
+                        ok(json!({
+                            "path": crate::file_transfer::display_path(
+                                &crate::file_transfer::sanitize_device_name(device),
+                                &name,
+                            )
+                        }))
+                    }
+                    Err(error) => err(&error),
+                }
+            }
+            "listShareQueue" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                let _ = device;
+                if !self.file_share_gate() {
+                    return err("file share disabled");
+                }
+                ok(json!({ "queue": self.file_transfers.queue_entries() }))
+            }
+            "fetchFileBegin" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct FetchBeginArgs {
+                    queue_id: String,
+                }
+                let input: FetchBeginArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                if !self.file_share_gate() {
+                    return err("file share disabled");
+                }
+                match self.file_transfers.begin_outgoing(device, &input.queue_id) {
+                    Ok((token, name, size)) => {
+                        ok(json!({ "fileToken": token, "name": name, "size": size }))
+                    }
+                    Err(error) => err(&error),
+                }
+            }
+            "fetchFileChunk" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct FetchChunkArgs {
+                    file_token: String,
+                    offset: u64,
+                    length: u64,
+                }
+                let input: FetchChunkArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                if !self.file_share_gate() {
+                    return err("file share disabled");
+                }
+                match self
+                    .file_transfers
+                    .read_outgoing(device, &input.file_token, input.offset, input.length)
+                {
+                    Ok((data, size)) => ok(json!({ "data": data, "size": size })),
+                    Err(error) => err(&error),
+                }
+            }
+            "fetchFileEnd" => {
+                let Some(device) = authenticated_device else {
+                    return err("unauthorized");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct FetchEndArgs {
+                    file_token: String,
+                }
+                let input: FetchEndArgs = match serde_json::from_value(args) {
+                    Ok(v) => v,
+                    Err(_) => return err("bad args"),
+                };
+                match self.file_transfers.finish_outgoing(device, &input.file_token) {
+                    Ok(name) => {
+                        self.audit_log("file_fetched", json!({ "device": device, "name": name }));
+                        ok(json!({}))
+                    }
+                    Err(error) => err(&error),
+                }
+            }
             _ => {
                 // delegate stateless commands to the real rustra package (H02 path)
                 match control_contract::host::host_package().invoke_json(command, args) {
@@ -3947,5 +4138,354 @@ mod tests {
             assert!(!session.backend_released);
             assert!(session.terminal_error.is_none());
         }
+
+    // -- 파일 전송 v1 (게이트·검증·라운드트립) -----------------------------
+
+    use std::path::PathBuf;
+
+    /// 파일 전송 테스트용 서버: 임시 incoming 루트와 주입 가능한 게이트.
+    fn file_test_server(tag: &str) -> (ControlServer, PathBuf) {
+        use crate::settings::SharedSettings;
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "leftcar-ft-dispatch-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        server.file_transfers.set_incoming_root_for_tests(root.clone());
+        server.set_settings(SharedSettings::in_memory());
+        (server, root)
+    }
+
+    fn enable_file_share(server: &ControlServer) {
+        server
+            .settings
+            .get()
+            .unwrap()
+            .set_file_share(true)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_commands_require_an_authenticated_device() {
+        let (server, root) = file_test_server("unauth");
+        enable_file_share(&server);
+        for command in ["sendFileBegin", "listShareQueue", "fetchFileBegin"] {
+            let resp = server
+                .dispatch(command, serde_json::json!({ "name": "a.txt" }), "192.168.0.9", None)
+                .await;
+            assert_eq!(resp["error"], "unauthorized", "{command}: {resp}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_share_gate_defaults_off_and_rejects_uploads() {
+        let (server, root) = file_test_server("gateoff");
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "a.txt", "size": 3 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], "file share disabled", "{resp}");
+
+        enable_file_share(&server);
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "a.txt", "size": 3 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert!(resp["result"]["fileToken"].as_str().unwrap().len() == 32, "{resp}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_upload_rejects_unsafe_names_and_oversize() {
+        let (server, root) = file_test_server("names");
+        enable_file_share(&server);
+        for name in ["../x", "a/b", "a\\b", ".hidden", "..", ""] {
+            let resp = server
+                .dispatch(
+                    "sendFileBegin",
+                    serde_json::json!({ "name": name, "size": 3 }),
+                    "192.168.0.9",
+                    Some("viewer-1"),
+                )
+                .await;
+            assert_eq!(resp["ok"], false, "{name}: {resp}");
+        }
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "big.bin", "size": 21 * 1024 * 1024 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_chunk_enforcement_sequence_oversize_and_ownership() {
+        let (server, root) = file_test_server("chunks");
+        enable_file_share(&server);
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "seq.bin", "size": 6 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        let token = resp["result"]["fileToken"].as_str().unwrap().to_owned();
+
+        // 순서가 어긋난 오프셋은 거부된다.
+        let resp = server
+            .dispatch(
+                "sendFileChunk",
+                serde_json::json!({ "fileToken": token, "dataBase64": "eHg=", "offset": 2 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+
+        // 선언 크기 초과는 거부된다("xyzxyzx" = 7바이트 > size 6).
+        let resp = server
+            .dispatch(
+                "sendFileChunk",
+                serde_json::json!({ "fileToken": token, "dataBase64": "eHl6enl6eg==", "offset": 0 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+
+        // 1 MiB를 넘는 청크는 거부된다.("AAA" 349,525개 + 2바이트 = 1 MiB + 1B)
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "cap.bin", "size": 20 * 1024 * 1024 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        let cap_token = resp["result"]["fileToken"].as_str().unwrap().to_owned();
+        let oversized = format!("{}QQI=", "QUFB".repeat(349_525));
+        let resp = server
+            .dispatch(
+                "sendFileChunk",
+                serde_json::json!({
+                    "fileToken": cap_token,
+                    "dataBase64": oversized,
+                    "offset": 0
+                }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], "chunk is too large", "{resp}");
+
+        // 다른 장치의 토큰은 소유 검사에 걸린다.
+        let resp = server
+            .dispatch(
+                "sendFileChunk",
+                serde_json::json!({ "fileToken": token, "dataBase64": "eHg=", "offset": 0 }),
+                "192.168.0.9",
+                Some("viewer-2"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], "unknown file token", "{resp}");
+
+        // 정상 순차 전송은 written 누적을 돌려준다.
+        let resp = server
+            .dispatch(
+                "sendFileChunk",
+                serde_json::json!({ "fileToken": token, "dataBase64": "eHl6", "offset": 0 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["result"]["written"], 3, "{resp}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_roundtrip_upload_then_fetch_with_byte_equality() {
+        let (server, root) = file_test_server("roundtrip");
+        enable_file_share(&server);
+
+        // 업로드: begin → chunks → end("Hello world\n" = 12바이트).
+        let resp = server
+            .dispatch(
+                "sendFileBegin",
+                serde_json::json!({ "name": "roundtrip.txt", "size": 12 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        let token = resp["result"]["fileToken"].as_str().unwrap().to_owned();
+        for (data, offset) in [("SGVsbG8g", 0u64), ("d29ybGQK", 6u64)] {
+            let resp = server
+                .dispatch(
+                    "sendFileChunk",
+                    serde_json::json!({ "fileToken": token, "dataBase64": data, "offset": offset }),
+                    "192.168.0.9",
+                    Some("viewer-1"),
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+        }
+        let resp = server
+            .dispatch(
+                "sendFileEnd",
+                serde_json::json!({ "fileToken": token }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(
+            resp["result"]["path"],
+            "Downloads/leftcar/viewer-1/roundtrip.txt",
+            "{resp}"
+        );
+        let uploaded = std::fs::read(root.join("viewer-1").join("roundtrip.txt")).unwrap();
+        assert_eq!(uploaded, b"Hello world\n");
+
+        // 다운로드: 대기열 등록 → fetchBegin → chunks → fetchEnd.
+        let source = root.join("viewer-1").join("roundtrip.txt");
+        let entry = server
+            .file_transfers
+            .add_share_file(source.clone())
+            .unwrap();
+        let resp = server
+            .dispatch("listShareQueue", serde_json::json!({}), "192.168.0.9", Some("viewer-1"))
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(resp["result"]["queue"][0]["name"], "roundtrip.txt", "{resp}");
+
+        let resp = server
+            .dispatch(
+                "fetchFileBegin",
+                serde_json::json!({ "queueId": entry.queue_id }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert_eq!(resp["result"]["size"], 12, "{resp}");
+        let fetch_token = resp["result"]["fileToken"].as_str().unwrap().to_owned();
+
+        let mut fetched = Vec::new();
+        for (offset, length) in [(0u64, 6u64), (6, 6)] {
+            let resp = server
+                .dispatch(
+                    "fetchFileChunk",
+                    serde_json::json!({
+                        "fileToken": fetch_token,
+                        "offset": offset,
+                        "length": length
+                    }),
+                    "192.168.0.9",
+                    Some("viewer-1"),
+                )
+                .await;
+            assert_eq!(resp["ok"], true, "{resp}");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(resp["result"]["data"].as_str().unwrap())
+                .unwrap();
+            fetched.extend(decoded);
+        }
+        assert_eq!(fetched, uploaded, "fetched bytes must match the upload");
+
+        let resp = server
+            .dispatch(
+                "fetchFileEnd",
+                serde_json::json!({ "fileToken": fetch_token }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_missing_entries_and_bad_ranges() {
+        let (server, root) = file_test_server("fetchbad");
+        enable_file_share(&server);
+        let source = root.join("gone.txt");
+        std::fs::write(&source, b"abc").unwrap();
+        let entry = server.file_transfers.add_share_file(source).unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+
+        // 파일이 사라졌으면 fetchFileBegin은 실패한다.
+        let resp = server
+            .dispatch(
+                "fetchFileBegin",
+                serde_json::json!({ "queueId": entry.queue_id }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+
+        // 존재하지 않는 큐 항목도 오류.
+        let resp = server
+            .dispatch(
+                "fetchFileBegin",
+                serde_json::json!({ "queueId": "deadbeef" }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+
+        // 1 MiB를 넘는 length 요청은 거부된다.
+        let live = root.join("live.txt");
+        std::fs::write(&live, b"abc").unwrap();
+        let entry = server.file_transfers.add_share_file(live).unwrap();
+        let resp = server
+            .dispatch(
+                "fetchFileBegin",
+                serde_json::json!({ "queueId": entry.queue_id }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        let token = resp["result"]["fileToken"].as_str().unwrap().to_owned();
+        let resp = server
+            .dispatch(
+                "fetchFileChunk",
+                serde_json::json!({
+                    "fileToken": token,
+                    "offset": 0,
+                    "length": 1024 * 1024 + 1
+                }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
 }

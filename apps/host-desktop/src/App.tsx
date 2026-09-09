@@ -744,6 +744,121 @@ interface IdleStudioViewProps {
   onOpenPairing: () => void;
 }
 
+/**
+ * 파일 공유 카드: 승인 토글(fileShare)과 호스트가 고른 공유 대기열을
+ * 보여 준다. 게이트가 꺼져 있어도 대기열 관리는 가능하다 — 뷰어 쪽 명령만
+ * 게이트로 막힌다.
+ */
+interface ShareQueueEntryView {
+  queueId: string;
+  name: string;
+  size: number;
+}
+
+function formatShareFileSize(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${size} B`;
+}
+
+function FileShareCard({ t }: { t: TranslationSchema }) {
+  const [enabled, setEnabled] = useState(false);
+  const [entries, setEntries] = useState<ShareQueueEntryView[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [shareEnabled, queue] = await Promise.all([
+        invoke<boolean>("get_file_share"),
+        invoke<ShareQueueEntryView[]>("list_share_queue"),
+      ]);
+      setEnabled(shareEnabled);
+      setEntries(queue);
+    } catch {
+      // 대시보드 상단 배너가 이미 서비스 오류를 표시한다 — 카드는 조용히 유지.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const runShareAction = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      setActionError(null);
+      await refresh();
+    } catch {
+      setActionError(t.host.fileShareError);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      className="file-share-card"
+      aria-label={t.host.fileShareSection}
+      style={{
+        border: "1px solid var(--border-subtle, rgba(128,128,128,0.3))",
+        borderRadius: 12,
+        padding: "12px 16px",
+        marginBottom: 16,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <button
+          className={controlToggleVariants({ active: enabled })}
+          disabled={busy}
+          onClick={() => void runShareAction(() => invoke("set_file_share", { enabled: !enabled }))}
+          aria-pressed={enabled}
+        >
+          {enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}
+        </button>
+        <button
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          disabled={busy}
+          onClick={() => void runShareAction(() => invoke("add_share_files"))}
+        >
+          {t.host.fileShareAdd}
+        </button>
+      </div>
+      <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{t.host.fileShareHint}</span>
+      {actionError && (
+        <span style={{ fontSize: 11, color: "var(--danger, #e5484d)" }} role="alert">{actionError}</span>
+      )}
+      {entries.length === 0 ? (
+        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t.host.fileShareEmpty}</span>
+      ) : (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+          {entries.map((entry) => (
+            <li
+              key={entry.queueId}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12 }}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {entry.name} <span style={{ color: "var(--text-dim)" }}>({formatShareFileSize(entry.size)})</span>
+              </span>
+              <button
+                className={buttonVariants({ variant: "close" })}
+                onClick={() => void runShareAction(() => invoke("remove_share_file", { queueId: entry.queueId }))}
+                aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
   return (
     <div className="idle-center-container">
@@ -1072,6 +1187,8 @@ function Dashboard() {
           onRequestPermission={requestInputPermission}
           onOpenAccessibility={openAccessibilitySettings}
         />
+
+        <FileShareCard t={t} />
 
         {isStreaming ? (
           <StreamsListView

@@ -49,6 +49,7 @@ import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
 import { transportBadgeLabel } from "../src/transport-label";
 import { DisplaySizeCard } from "../src/DisplaySizeCard";
+import { FileTransferCard } from "../src/FileTransferCard";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -432,6 +433,8 @@ function CatalogHeader({
             onToggleClipboardShare={onToggleClipboardShare}
             colors={colors}
           />
+
+          <FileTransferCard colors={colors} />
 
           <EncoderExperimentChoices experiments={encoderExperiments} selected={encoderExperiment} requiresReconnect={requiresReconnect} colors={colors} t={t} onSelect={onSelectEncoderExperiment} />
 

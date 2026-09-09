@@ -10,6 +10,7 @@ pub mod backend;
 pub mod clipboard;
 pub mod control;
 pub mod fec;
+pub mod file_transfer;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod identity;
@@ -63,16 +64,20 @@ pub fn run() {
         pairing::token_store(pairing_store_path),
     ));
     let audit = Arc::new(audit::SessionAudit::new(audit::SessionAudit::default_path()));
+    // 파일 공유 게이트: 기본 꺼짐, 승인 토글처럼 영속된다(0600 settings.json).
+    let settings = Arc::new(settings::SharedSettings::load_or_default(
+        settings::default_settings_path(),
+    ));
     let server = Arc::new(control::ControlServer::new(
         backend.clone(),
         pairing.clone(),
         identity.clone(),
     ));
     server.set_audit(audit.clone());
-    // 클립보드 동기화 호스트 게이트(U5): 0600 settings.json에서 읽고,
+    // 클립보드 동기화 호스트 게이트(U5): 같은 0600 settings.json에서 읽고,
     // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
-    let host_settings = settings::load(settings::default_settings_path().as_deref());
-    server.set_clipboard_share(host_settings.clipboard_share);
+    server.set_clipboard_share(settings.clipboard_share());
+    server.set_settings(settings.clone());
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -110,7 +115,12 @@ pub fn run() {
             revoke_paired_device,
             revoke_all_devices,
             get_clipboard_share,
-            set_clipboard_share
+            set_clipboard_share,
+            get_file_share,
+            set_file_share,
+            add_share_files,
+            list_share_queue,
+            remove_share_file
         ])
         .setup(move |app| {
             // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
@@ -120,6 +130,8 @@ pub fn run() {
             )));
             app.manage(server);
             app.manage(pairing);
+            app.manage(audit);
+            app.manage(settings);
             app.manage(ControlEndpoint { port: control_port });
             warm_display_catalog(warmup_backend);
             create_indicator_window(app);
@@ -526,19 +538,76 @@ fn get_clipboard_share(
 #[tauri::command]
 fn set_clipboard_share(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
     enabled: bool,
 ) -> Result<bool, String> {
-    // 토글은 즉시 효력을 가지고 다음 기동까지 남는다(0600 settings.json).
+    // 토글은 즉시 효력을 가지고 file_share와 함께 0600 settings.json에 남는다.
+    settings.set_clipboard_share(enabled)?;
     state.set_clipboard_share(enabled);
-    if let Some(path) = settings::default_settings_path() {
-        settings::persist(
-            &path,
-            &settings::HostSettings {
-                clipboard_share: enabled,
-            },
-        )?;
-    }
     Ok(enabled)
+}
+
+#[tauri::command]
+fn get_file_share(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+) -> bool {
+    settings.file_share()
+}
+
+#[tauri::command]
+fn set_file_share(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_file_share(enabled)?;
+    audit_state.log(
+        "file_share_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+/// 파일 공유 대기열에 파일을 올린다. 다이얼로그 취소는 no-op(빈 목록)이다.
+/// rfd의 동기 패널은 메인 스레드에서 호출하면 막히므로 블로킹 스레드에서
+/// 띄운다(Tauri 명령은 기본적으로 메인 스레드에서 실행된다).
+#[tauri::command]
+async fn add_share_files(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<Vec<file_transfer::ShareQueueEntry>, String> {
+    let server = server.inner().clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("Leftcar — 파일 공유")
+            .pick_files()
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|error| format!("file dialog failed: {error:?}"))?;
+    let transfers = server.file_transfer_state();
+    let mut entries = Vec::new();
+    for path in picked {
+        match transfers.add_share_file(path) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => eprintln!("leftcar: shared file rejected: {error}"),
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+fn list_share_queue(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Vec<file_transfer::ShareQueueEntry> {
+    server.file_transfer_state().queue_entries()
+}
+
+#[tauri::command]
+fn remove_share_file(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    queue_id: String,
+) -> bool {
+    server.file_transfer_state().remove_share_file(&queue_id)
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.
