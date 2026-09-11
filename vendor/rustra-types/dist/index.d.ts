@@ -15,6 +15,8 @@ export * from './rkyv-engine.js';
 export * from './debug.js';
 export * from './global-batch-settled.js';
 export * from './inspector.js';
+export * from './device-status.js';
+export { invokeLoose } from './invoke-loose.js';
 export { createSchemaPostcardCodec } from './schema-postcard-codec.js';
 export { invokeCallbackWithAbort, invokeWithTimeout, invokeWithTimeoutHandledSignal, raceAbort, } from './cancel.js';
 export { decodeUtf8, encodeUtf8, exactArrayBuffer } from './utf8.js';

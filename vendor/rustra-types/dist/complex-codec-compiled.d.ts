@@ -56,6 +56,8 @@ export type CompiledVariant = {
     } | null;
     matcher: {
         kind: 'discriminator';
+        key: string;
+        value: unknown;
     } | {
         kind: 'singleProperty';
         key: string;

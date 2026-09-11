@@ -26,6 +26,21 @@ Key exports:
 - `InvokeOptions.signal` — AbortSignal — on abort, the promise rejects immediately and the
   cancellation propagates to the native side (when `invokeAsync`/`invokeCancel` are
   exposed), with error code `cancelled`
+- `invokeBatch()` / `invokeBatchSettled()` — batch invoke. The settled form always runs
+  entries sequentially per-entry (never the atomic wire batch) and reports each as
+  `fulfilled` / `rejected` / `unexecuted`, so a failed entry and the never-dispatched
+  entries after it are distinguishable (see "Timeout, Cancellation, and Retry Semantics"
+  in `docs/rust-api-guide.md`)
+- `withRetry(fn, options?)` — exponential-backoff retry limited to retryable failures
+  (`retries` default 2, `baseDelayMs` default 100, `retryIf` replaces the default
+  judgment, `signal` aborts mid-backoff as `CancelledError`); the last error is re-thrown
+  as-is
+- `configureDebug(sink)` / `RustraDebugEvent` — opt-in structured diagnostics sink.
+  `RUSTRA_DEBUG=1|true|verbose` additionally logs every event as `[rustra:debug]` and
+  dumps wire bytes as hex to stderr (`[rustra:wire]`); on React Native
+  `globalThis.__RUSTRA_DEBUG__ = true` enables the event log. Diagnostic events carry
+  optional `kind`/`reason` (`response.shape` from the JSON engine, `ndjson.unparsed`
+  from `@rustra/node`)
 - `RustraCommandError` — serializable error + `parseRustraErrorString`
 - rkyv V2 codec — pure-JS encoder/decoder for the Rust `invoke_rkyv_v2` round trip
 - `contractHash` verification — checks that the build-time contract matches the runtime
@@ -33,6 +48,10 @@ Key exports:
 - `RkyvV2EngineOptions` — engine options: `onContractMismatch` (opt-in degraded mode on
   hash mismatch), `schemaVersion`/`onSchemaStale` (warning when JS is staler than native),
   `maxPayloadBytes` (size pre-check of the payload right after encoding)
+- `invokeLoose()` — name-based loose invoke without the generated client (dynamic
+  development tier)
+- `registerDeviceStatusProvider()` / `getDeviceStatus()` — fail-open device
+  availability/permission lookup backed by a host-registered provider
 
 ## Related docs
 

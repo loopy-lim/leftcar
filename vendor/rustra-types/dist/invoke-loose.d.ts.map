@@ -1,0 +1,1 @@
+{"version":3,"file":"invoke-loose.d.ts","sourceRoot":"","sources":["../src/invoke-loose.ts"],"names":[],"mappings":"AAAA;;;;;;;;;GASG;AACH,OAAO,KAAK,EAAE,YAAY,EAAE,aAAa,EAAE,MAAM,aAAa,CAAC;AAE/D,wBAAgB,WAAW,CAAC,CAAC,GAAG,OAAO,EACrC,MAAM,EAAE,YAAY,EACpB,OAAO,EAAE,MAAM,EACf,IAAI,CAAC,EAAE,OAAO,EACd,OAAO,CAAC,EAAE,aAAa,GACtB,OAAO,CAAC,CAAC,CAAC,CAEZ"}

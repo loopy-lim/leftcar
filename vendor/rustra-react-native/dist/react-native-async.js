@@ -13,7 +13,8 @@ export function createAsyncEngine(native, options) {
     const invokeTypedAsyncById = hasByIdPath ? native.invokeTypedAsyncById.bind(native) : null;
     const staticIds = new Map();
     if (hasByIdPath) {
-        for (const [name, codec] of options.rkyvV2Codecs) {
+        // Array.from — Expo 의 ES5 타겟에서 Map 순회는 downlevelIteration 이 필요하다.
+        for (const [name, codec] of Array.from(options.rkyvV2Codecs)) {
             staticIds.set(name, codec.commandId);
         }
     }

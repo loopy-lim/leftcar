@@ -98,6 +98,31 @@ concurrency-safe하게 한 번만 수행합니다. 별도의 `installRustraJSI()
 로컬 생성 패키지를 하나만 두어 다른 Expo/Nitro/Turbo 모듈과 이름과 build target이
 겹치지 않게 합니다.
 
+## dev 핫코어 (dylib 핫스왑)
+
+dev에서는 앱 재빌드·리마운트 없이 Rust 코어 dylib를 스왑할 수 있습니다. 공용 C++
+브릿지의 모든 FFI 호출은 함수 포인터 테이블 경유라 스왑은 atomic 테이블 교체 한
+번이고 JS 재바인딩은 없습니다.
+
+- 발행: `rustra dev`의 `dev.target: "dylib"`가 cdylib를 빌드하고, parity 게이트를
+  통과한 뒤에만 `<stem>-hot-live<ext>`를 원자적(tmp + rename)으로 발행합니다. 게이트가
+  거절하면 기존 live 아티팩트가 그대로 남아 앱은 구 코어를 유지합니다(fail-closed).
+- iOS(시뮬레이터만): `RUSTRA_HOT_CORE_DIR` 환경변수에 디렉터를 지정하면 install 때
+  어댑터가 그 디렉터를 300ms 간격으로 폴링합니다. 이름 계약에 주의하세요 —
+  `RUSTRA_HOT_CORE_DIR`(RN)은 디렉터이고, Tauri 쪽 `RUSTRA_HOT_CORE`는 파일 경로로
+  서로 다른 변수입니다.
+- Android: 폴링 디렉터는 `<filesDir>/rustra/hot`이며 생성된 JNI glue가 같은 폴링을
+  켭니다.
+- 전달: dylib를 제자리 덮어쓰지 마세요. 임시 파일로 push/copy한 뒤 rename으로
+  제자리에 넣어야 합니다(CLI 발행도 그렇게 합니다). 프로세스가 매핑한 dylib를 같은
+  경로로 덮어쓰면 프로세스가 죽습니다 — iOS/macOS는 SIGKILL(코드 서명 변조),
+  Android는 SIGSEGV(수정된 파일 페이지 재로딩).
+
+스왑마다 코어 내부 상태(채널, 이벤트 컨텍스트)는 버려지고 새 코어에 이벤트 싱크가
+재등록됩니다. 구 코어는 의도적으로 unload하지 않습니다. dev에서
+`getRustraNative().hotCoreStatus()`가 마지막 스왑의 구/신 계약 해시(또는 마지막 오류)를
+돌려주고 기본 정적 빌드에서는 `null`입니다.
+
 ## 저수준 API
 
 직접 transport를 제어해야 할 때만 `createReactNativeEngine`, `createFastEngine`,

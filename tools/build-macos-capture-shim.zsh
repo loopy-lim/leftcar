@@ -5,7 +5,7 @@ set -euo pipefail
 tool_dir=${0:A:h}
 repo_root=${tool_dir:h}
 shim_root="$repo_root/native/macos-capture-shim"
-mode=${1:?"usage: build-macos-capture-shim.zsh <library|policy-test|adaptive-policy-test|split-test|cursor-test|audio-ownership-test|tile-throughput-probe> <output>"}
+mode=${1:?"usage: build-macos-capture-shim.zsh <library|policy-test|adaptive-policy-test|split-test|cursor-test|audio-ownership-test|retransmit-ring-test|tile-throughput-probe> <output>"}
 output=${2:?"missing output path"}
 
 typeset -a shim_sources frameworks framework_args
@@ -66,6 +66,13 @@ case "$mode" in
     /usr/bin/xcrun swiftc -O \
       "${shim_sources[@]}" \
       "$shim_root/Tests/SystemAudioOwnershipTests.swift" \
+      -o "$output" \
+      "${framework_args[@]}"
+    ;;
+  retransmit-ring-test)
+    /usr/bin/xcrun swiftc -O \
+      "${shim_sources[@]}" \
+      "$shim_root/Tests/RetransmitRingTests.swift" \
       -o "$output" \
       "${framework_args[@]}"
     ;;

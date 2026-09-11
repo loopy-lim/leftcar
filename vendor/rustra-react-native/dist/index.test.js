@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CancelledError, createReactNativeEngine, createRustraBootstrap, createChannel, getRustraNative, RustraCommandError, } from './index.js';
+import { CancelledError, createReactNativeEngine, createRustraBootstrap, createBytesChannel, createChannel, invokeTypedSync, getRustraNative, RustraCommandError, } from './index.js';
 import { decodeUtf8, encodeUtf8, exactArrayBuffer } from '@rustra/types';
 const encoder = new TextEncoder();
 test('Hermes fallback encodes and decodes Korean and emoji without WHATWG globals', async () => {
@@ -312,6 +312,60 @@ test('createChannel exposes a typed handle and idempotent close', () => {
     assert.equal(channel.close(), true);
     assert.equal(channel.close(), false);
     assert.deepEqual(dropped, [42]);
+});
+test('createBytesChannel round-trips binary frames without JSON parsing', () => {
+    let callback;
+    const dropped = [];
+    const frames = [];
+    const channel = createBytesChannel((payload) => frames.push(Array.from(payload)), {
+        createChannelBytes(next) {
+            callback = next;
+            return 7;
+        },
+        dropChannel(handle) {
+            dropped.push(handle);
+            return true;
+        },
+    });
+    assert.equal(channel.handle, 7);
+    callback(new Uint8Array([0xff, 0xfc, 0x00, 0xde]).buffer);
+    assert.deepEqual(frames, [[0xff, 0xfc, 0x00, 0xde]], 'bytes must arrive untouched');
+    assert.equal(channel.close(), true);
+    assert.equal(channel.close(), false);
+    assert.deepEqual(dropped, [7]);
+});
+test('invokeTypedSync returns the decoded value without a Promise hop', () => {
+    const native = {
+        invokeTyped(name, args) {
+            assert.equal(name, 'addNumbers');
+            assert.deepEqual(args, { a: 1, b: 2 });
+            return { value: 3 };
+        },
+    };
+    const result = invokeTypedSync('addNumbers', { a: 1, b: 2 }, native);
+    assert.deepEqual(result, { value: 3 }, 'sync path returns the decoded output directly');
+});
+test('invokeTypedSync normalizes C++ "code: message" JSError into RustraCommandError', () => {
+    const native = {
+        invokeTyped() {
+            throw new Error("platform.unavailable: command 'x' is declared for platforms [macos]");
+        },
+    };
+    assert.throws(() => invokeTypedSync('x', {}, native), (err) => {
+        assert.ok(err instanceof RustraCommandError);
+        assert.equal(err.code, 'platform.unavailable');
+        return true;
+    });
+});
+test('invokeTypedSync loud-fails on natives without the typed fast path', () => {
+    assert.throws(() => invokeTypedSync('x', {}, {}), /invokeTyped/);
+});
+test('createBytesChannel loud-fails on natives without the bytes path', () => {
+    const native = {
+        createChannel: () => 1,
+        dropChannel: () => true,
+    };
+    assert.throws(() => createBytesChannel(() => { }, native), /createChannelBytes/);
 });
 test('createChannel rejects an invalid native handle instead of creating an unusable channel', () => {
     const native = {
@@ -727,13 +781,11 @@ const A05_SLOT_ENGINE = {
 };
 test('A05: createRustraBootstrap exposes the lifecycle state surface', async () => {
     const { configure } = await import('@rustra/types');
-    let installs = 0;
     const native = {};
     configure(A05_SLOT_ENGINE);
     try {
         const bootstrap = createRustraBootstrap({
             install: async () => {
-                installs++;
                 await Promise.resolve();
             },
             getNative: () => native,
@@ -803,6 +855,329 @@ test('A05: concurrent ready calls share one initialization promise (react-native
     }
     finally {
         configure(A05_SLOT_ENGINE);
+    }
+});
+// ── dev 핫코어 상태 표면(hotCoreStatus) ─────────────────────
+// 네이티브 HostFunction 이 구현한다 — JS 표면은 __rustraNative 슬롯 통과 계약
+// (정적 모드 = null, 핫 모드 = 마지막 스왑 해시/오류)만 고정한다.
+test('hotCoreStatus passes the native swap report through __rustraNative', () => {
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    try {
+        // 정적 모드 — 네이티브가 null 을 돌려준다(스왑 표면 없음).
+        root.__rustraNative = { hotCoreStatus: () => null };
+        assert.equal(getRustraNative().hotCoreStatus?.(), null);
+        // 핫 모드 — 마지막 성공 스왑의 구/신 계약 해시를 관측한다.
+        root.__rustraNative = {
+            hotCoreStatus: () => ({
+                enabled: true,
+                swapped: true,
+                oldHash: 'deadbeef00000000',
+                newHash: 'cafebabe11111111',
+                error: '',
+            }),
+        };
+        const status = getRustraNative().hotCoreStatus?.();
+        assert.ok(status, 'hot mode must report a status object');
+        assert.equal(status.enabled, true);
+        assert.equal(status.swapped, true);
+        assert.equal(status.oldHash, 'deadbeef00000000');
+        assert.equal(status.newHash, 'cafebabe11111111');
+        assert.equal(status.error, '');
+    }
+    finally {
+        root.__rustraNative = previous;
+    }
+});
+test('hotCoreStatus reports the last swap error through __rustraNative', () => {
+    // 실패 스왑 — CLI 게이트 reject 등으로 dlopen 이 거절된 개발자 관측 경로.
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    try {
+        root.__rustraNative = {
+            hotCoreStatus: () => ({
+                enabled: true,
+                swapped: false,
+                oldHash: '',
+                newHash: '',
+                error: 'dlopen failed: symbol missing in hot dylib',
+            }),
+        };
+        const status = getRustraNative().hotCoreStatus?.();
+        assert.ok(status, 'failed swap must stay observable');
+        assert.equal(status.swapped, false);
+        assert.match(status.error, /dlopen failed/);
+    }
+    finally {
+        root.__rustraNative = previous;
+    }
+});
+// ── subscribeEvent pollMs — CallInvoker 없는 호스트의 JS 폴링 drain ─────────
+test('subscribeEvent pollMs drains queued events from a CallInvoker-less native', async () => {
+    // C++ 디스패처 계약 재현: CallInvoker 없으면 emit 이 큐에만 쌓이고 JS 의
+    // drainEvents() 폴링을 기다린다. onEvent 콜백은 큐 소비 시점에 호출된다.
+    const received = [];
+    let drainCount = 0;
+    const native = {
+        onEvent(name, callback) {
+            // 실 C++ HostFunction 과 동일 — 리스너 등록만 하고 큐는 drain 에서 소비.
+            listeners.set(name, callback);
+        },
+        offEvent(name) {
+            listeners.delete(name);
+        },
+        drainEvents() {
+            drainCount += 1;
+            // 큐에 쌓인 이벤트를 drain 이 소비하며 등록된 콜백을 호출한다.
+            const queued = queue.splice(0);
+            for (const [name, json] of queued)
+                listeners.get(name)?.(json);
+            return queued.length;
+        },
+    };
+    const listeners = new Map();
+    const queue = [];
+    // canonical (name, callback) 형태는 getRustraNative() 로 __rustraNative 를 읽는다.
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    root.__rustraNative = native;
+    try {
+        const unsubscribe = subscribeEvent('poll.tick', (payload) => received.push(payload), {
+            pollMs: 5,
+        });
+        // emit — CallInvoker 없으므로 큐에만 적재.
+        queue.push(['poll.tick', JSON.stringify({ step: 1 })]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.ok(drainCount >= 2, 'polling loop must run repeatedly');
+        assert.deepEqual(received, [{ step: 1 }], 'queued event must reach the callback via drain');
+        unsubscribe();
+        const drainsAtStop = drainCount;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(drainCount, drainsAtStop, 'unsubscribe must stop the polling loop');
+    }
+    finally {
+        root.__rustraNative = previous;
+    }
+});
+test('subscribeEvent pollMs delivers directly on onEvent hosts without waiting for drain', () => {
+    // CallInvoker 호스트 — onEvent 콜백이 즉시 호출되고 drain 은 비어 있어 무해.
+    const received = [];
+    const h = createEventNative();
+    h.native.drainEvents = () => 0;
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    root.__rustraNative = h.native;
+    try {
+        const unsubscribe = subscribeEvent('direct.tick', (payload) => received.push(payload), {
+            pollMs: 5,
+        });
+        h.emit('direct.tick', JSON.stringify({ ok: 1 }));
+        assert.deepEqual(received, [{ ok: 1 }]);
+        unsubscribe();
+    }
+    finally {
+        root.__rustraNative = previous;
+    }
+});
+test('subscribeEvent pollMs is ignored on natives without drainEvents', () => {
+    // drainEvents 미노출 — 옵션은 조용히 무시(푸시 전용 네이티브 보호).
+    const h = createEventNative();
+    const received = [];
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    root.__rustraNative = h.native;
+    try {
+        const unsubscribe = subscribeEvent('push.only', (payload) => received.push(payload), {
+            pollMs: 5,
+        });
+        h.emit('push.only', JSON.stringify({ v: 1 }));
+        assert.deepEqual(received, [{ v: 1 }]);
+        unsubscribe();
+    }
+    finally {
+        root.__rustraNative = previous;
+    }
+});
+// ── 채널 pollMs — CallInvoker 없는 호스트의 채널 큐 폴링 drain ─────────────
+test('createChannel pollMs drains queued frames from a CallInvoker-less native', async () => {
+    // C++ ChannelDispatcher 계약 재현: CallInvoker 없으면 send 가 큐에만 쌓이고 JS 의
+    // drainEvents() 폴링을 기다린다(이벤트 폴링 테스트의 채널 변주).
+    const received = [];
+    let drainCount = 0;
+    const callbacks = new Map();
+    const queue = [];
+    const native = {
+        createChannel(callback) {
+            callbacks.set(1, callback);
+            return 1;
+        },
+        dropChannel(handle) {
+            callbacks.delete(handle);
+            return true;
+        },
+        drainEvents() {
+            drainCount += 1;
+            // 큐에 쌓인 프레임을 drain 이 소비하며 등록된 콜백을 호출한다.
+            const queued = queue.splice(0);
+            for (const [handle, json] of queued)
+                callbacks.get(handle)?.(json);
+            return queued.length;
+        },
+    };
+    const channel = createChannel((payload) => received.push(payload), native, { pollMs: 5 });
+    try {
+        // send — CallInvoker 없으므로 큐에만 적재.
+        queue.push([channel.handle, JSON.stringify({ chunk: 1 })]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.ok(drainCount >= 2, 'polling loop must run repeatedly');
+        assert.deepEqual(received, [{ chunk: 1 }], 'queued frame must reach the callback via drain');
+    }
+    finally {
+        channel.close();
+    }
+});
+test('createChannel close releases polling demand — last close stops the loop', async () => {
+    // 폴링 루프는 네이티브 인스턴스당 수요 집계 — 채널 하나가 close 해도 다른
+    // 채널의 수요가 남으면 유지되고, 마지막 close 로 정지한다(타이머 해제).
+    let drainCount = 0;
+    let nextHandle = 0;
+    const callbacks = new Map();
+    const native = {
+        createChannel(callback) {
+            const handle = ++nextHandle;
+            callbacks.set(handle, callback);
+            return handle;
+        },
+        dropChannel(handle) {
+            callbacks.delete(handle);
+            return true;
+        },
+        drainEvents() {
+            drainCount += 1;
+            return 0;
+        },
+    };
+    const first = createChannel(() => { }, native, { pollMs: 5 });
+    const second = createChannel(() => { }, native, { pollMs: 5 });
+    try {
+        first.close(); // 수요 1 남음 — 루프는 계속.
+        const drainsAfterFirstClose = drainCount;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.ok(drainCount > drainsAfterFirstClose, 'loop must keep running while another channel holds polling demand');
+        second.close(); // 마지막 수요 해제 — 루프 정지.
+        const drainsAtStop = drainCount;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(drainCount, drainsAtStop, 'last close must stop the polling loop');
+    }
+    finally {
+        first.close();
+        second.close();
+    }
+});
+test('createChannel pollMs is ignored on natives without drainEvents', () => {
+    // drainEvents 미노출 — 옵션은 조용히 무시, 채널 생성 자체는 정상 동작한다.
+    const received = [];
+    const dropped = [];
+    let callback;
+    const native = {
+        createChannel(next) {
+            callback = next;
+            return 3;
+        },
+        dropChannel(handle) {
+            dropped.push(handle);
+            return true;
+        },
+    };
+    const channel = createChannel((payload) => received.push(payload), native, { pollMs: 5 });
+    assert.equal(channel.handle, 3);
+    callback(JSON.stringify({ ok: 1 }));
+    assert.deepEqual(received, [{ ok: 1 }], 'push delivery must work without a polling loop');
+    assert.equal(channel.close(), true);
+    assert.deepEqual(dropped, [3]);
+});
+test('createBytesChannel pollMs drains queued binary frames from a CallInvoker-less native', async () => {
+    const frames = [];
+    let drainCount = 0;
+    const callbacks = new Map();
+    const queue = [];
+    const native = {
+        createChannelBytes(next) {
+            callbacks.set(9, next);
+            return 9;
+        },
+        dropChannel(handle) {
+            callbacks.delete(handle);
+            return true;
+        },
+        drainEvents() {
+            drainCount += 1;
+            const queued = queue.splice(0);
+            for (const [handle, bytes] of queued)
+                callbacks.get(handle)?.(bytes.buffer);
+            return queued.length;
+        },
+    };
+    const channel = createBytesChannel((payload) => frames.push(Array.from(payload)), native, {
+        pollMs: 5,
+    });
+    try {
+        queue.push([channel.handle, new Uint8Array([0x01, 0x02, 0xff])]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.ok(drainCount >= 2, 'polling loop must run repeatedly');
+        assert.deepEqual(frames, [[1, 2, 255]], 'queued binary frame must arrive untouched via drain');
+    }
+    finally {
+        channel.close();
+    }
+});
+test('polling demand is shared between event subscriptions and channels on one native', async () => {
+    // 이벤트 구독 해제는 채널 폴링을 끄지 않고, pollMs 없는 구독이 남아 있어도
+    // 마지막 채널 close 로 루프가 정지한다(정지 조건 = pollMs 수요 합계 0).
+    let drainCount = 0;
+    const listeners = new Map();
+    const callbacks = new Map();
+    const native = {
+        onEvent(name, callback) {
+            listeners.set(name, callback);
+        },
+        offEvent(name) {
+            listeners.delete(name);
+        },
+        createChannel(callback) {
+            callbacks.set(1, callback);
+            return 1;
+        },
+        dropChannel(handle) {
+            callbacks.delete(handle);
+            return true;
+        },
+        drainEvents() {
+            drainCount += 1;
+            return 0;
+        },
+    };
+    const root = globalThis;
+    const previous = root.__rustraNative;
+    root.__rustraNative = native;
+    const unsubscribe = subscribeEvent('poll.tick', () => { }, { pollMs: 5 });
+    const passive = subscribeEvent('push.only', () => { }); // pollMs 없는 구독
+    const channel = createChannel(() => { }, native, { pollMs: 5 });
+    try {
+        unsubscribe(); // 채널 수요 남음 — 루프 유지.
+        const drainsAfterUnsubscribe = drainCount;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.ok(drainCount > drainsAfterUnsubscribe, 'event unsubscribe must not stop the loop while a channel holds demand');
+        channel.close(); // 마지막 수요 해제 — pollMs 없는 구독이 남아도 정지.
+        const drainsAtStop = drainCount;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(drainCount, drainsAtStop, 'last polling demand release must stop the loop');
+    }
+    finally {
+        unsubscribe();
+        passive();
+        channel.close();
+        root.__rustraNative = previous;
     }
 });
 //# sourceMappingURL=index.test.js.map

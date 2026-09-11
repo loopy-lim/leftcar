@@ -11,7 +11,7 @@
   "scripts": {
     "dev:host:macos": "zsh tools/dev-host-macos.zsh",
     "check:react-runtime": "bun tools/check-react-runtime-versions.mjs",
-    "typecheck": "bun run check:react-runtime && tsc -b",
+    "typecheck": "bun run check:react-runtime && tsc -b && bun run --cwd apps/viewer-expo typecheck && bun run --cwd apps/host-desktop typecheck",
     "test": "vitest run",
     "test:contract": "vitest run -c vitest.contract.config.ts",
     "test:architecture": "bun tools/architecture-check/ts.ts",

@@ -58,7 +58,7 @@
         "@noble/curves": "1",
         "@noble/hashes": "1",
         "@rustra/generated-react-native": "workspace:*",
-        "@rustra/react-native": "^0.7.0",
+        "@rustra/react-native": "^0.8.0",
         "@tanstack/react-query": "^5.101.4",
         "expo": "~57.0.15",
         "expo-camera": "~57.0.4",
@@ -91,7 +91,7 @@
       "name": "@rustra/generated-react-native",
       "version": "0.0.0",
       "peerDependencies": {
-        "@rustra/react-native": "^0.7.0",
+        "@rustra/react-native": "^0.8.0",
         "react-native": ">=0.76",
       },
     },
@@ -532,9 +532,9 @@
 
     "@rustra/generated-react-native": ["@rustra/generated-react-native@workspace:apps/viewer-expo/modules/rustra-bridge"],
 
-    "@rustra/react-native": ["@rustra/react-native@0.7.0", "", { "dependencies": { "@rustra/types": "^0.8.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-JdFMJbscOuuX5fSlXHwLTFT5bb5/YH5+QYHTMoaugrpfu0BKm3DCAvaebzkwuZdM7lr+a0VUuGFS4RamE9uKqA=="],
+    "@rustra/react-native": ["@rustra/react-native@0.8.0", "", { "dependencies": { "@rustra/types": "^0.9.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-l9gf856Nr3BLYOvScuk2FOydeZFXt7gJ+NACR+Y3qKsikSkYcNUxiaF0jxO918ABOGearzqbghFNyiz6GXT8Hg=="],
 
-    "@rustra/types": ["@rustra/types@0.8.0", "", {}, "sha512-PPz0e/wvcxi4mXup3yFlGK1zZVF3xdZwnbVyYuxU79kZj7Iqw6QBqa0peq8fUvbzJ/BO0+qYZvCjbcdU3F14yw=="],
+    "@rustra/types": ["@rustra/types@0.9.0", "", {}, "sha512-i8AyRx3F84mDMdH1TAjNX/xfvtTu34h2QWlq7+aVofFVW6dKor68Si0/n1qPT+DgfcmwEr30CX0tPcYwvmYAgw=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.27.12", "", {}, "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g=="],
 
