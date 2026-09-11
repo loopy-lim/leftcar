@@ -83,19 +83,31 @@ export function useStreamController(
   const statusQuery = useQuery({
     queryKey: ["host-status", host],
     queryFn: () => requestWithReconnect<StatusView>("getStatus"),
-    // 1s samples feed the adaptive-resolution observer only while a stream
-    // is live; the catalog screen falls back to the idle 2s cadence.
-    refetchInterval: streams.length > 0 ? 1_000 : 2_000,
+    // 2s samples while a stream is live (Q9/J1): each tick is a full JSON +
+    // ChaCha seal/open round trip over ~80 fields, a measurable thermal
+    // driver in freeform/XR. The adaptive-resolution observer tolerates this
+    // cadence — it counts congestion/stability windows, not seconds, and its
+    // only wall-clock gate is the 5s rebind cooldown. Downshift (~2 windows)
+    // and upshift (~4 windows) therefore react in ~4s/~8s instead of
+    // ~2s/~4s; the catalog screen already ran this cadence when idle.
+    refetchInterval: 2_000,
     staleTime: 1_000,
   });
   const statusView = statusQuery.data;
 
-  const { mutate: restartStream } = useMutation({
+  /**
+   * 재시작 뮤테이션 옵션 — 자동 복구(nativeTermination/hostStatus)와 전송
+   * 전환(transportSwitch)이 같은 restore→갱신→해제 골격을 쓰고 실패 메시지
+   * 키만 다르다. 훅 호출은 컴포넌트 최상위에서 펼친다(rules-of-hooks).
+   */
+  const restartMutationOptions = (
+    errorKey: "errRestoreFailed" | "errTransportSwitchFailed",
+  ) => ({
     mutationFn: async (request: RestartRequest) => {
       const restarted = await restoreStream(request.active);
       return { ...request, restarted };
     },
-    onSuccess: ({ active, restarted }) => {
+    onSuccess: ({ active, restarted }: RestartRequest & { restarted: RestoredStream }) => {
       updateStreams((previous) =>
         replaceRestartedStreamState(
           previous,
@@ -108,17 +120,18 @@ export function useStreamController(
       setStreamError(null);
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
-    onError: (error, _request) => {
+    onError: (error: unknown) => {
       // A failed bounded rebind keeps the existing logical stream visible so
       // the same Activity can retry on its current Surface; the caller owns
       // the explicit retry action and no automatic loop is created.
-      updateStreams((previous) => previous);
-      setStreamError(interpolate(currentTranslation().viewer.errRestoreFailed, { detail: formatErrorMessage(error) }));
+      setStreamError(interpolate(currentTranslation().viewer[errorKey], { detail: formatErrorMessage(error) }));
     },
-    onSettled: (_data, _error, request) => {
+    onSettled: (_data: unknown, _error: unknown, request: RestartRequest) => {
       releaseStreamRestore(heartbeatInFlight.current, request.active.session);
     },
   });
+
+  const { mutate: restartStream } = useMutation(restartMutationOptions("errRestoreFailed"));
 
   const restartStreamRef = useRef(restartStream);
   useEffect(() => {
@@ -173,32 +186,7 @@ export function useStreamController(
     return () => subscription.remove();
   }, []);
 
-  const { mutate: switchTransport } = useMutation({
-    mutationFn: async (active: ActiveStream) => {
-      const restarted = await restoreStream(active);
-      return { active, restarted };
-    },
-    onSuccess: ({ active, restarted }) => {
-      updateStreams((previous) =>
-        replaceRestartedStreamState(
-          previous,
-          active.session,
-          restarted,
-          Date.now(),
-          endUnownedRestart,
-        ),
-      );
-      setStreamError(null);
-      void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
-    },
-    onError: (error, active) => {
-      setStreamError(interpolate(currentTranslation().viewer.errTransportSwitchFailed, { detail: formatErrorMessage(error) }));
-    },
-    onSettled: (_data, _error, active) => {
-      releaseStreamRestore(heartbeatInFlight.current, active.session);
-    },
-  });
-
+  const { mutate: switchTransport } = useMutation(restartMutationOptions("errTransportSwitchFailed"));
   const switchTransportRef = useRef(switchTransport);
   useEffect(() => {
     switchTransportRef.current = switchTransport;
@@ -406,7 +394,7 @@ export function useStreamController(
         if (!claimStreamRestore(heartbeatInFlight.current, active.session)) {
           continue;
         }
-        switchTransportRef.current(active);
+        switchTransportRef.current({ active, trigger: "transportSwitch" });
       }
     }, 1_000);
     return () => clearTimeout(timer);

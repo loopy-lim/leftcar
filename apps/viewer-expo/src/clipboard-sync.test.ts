@@ -9,11 +9,13 @@ vi.mock("expo-clipboard", () => ({
 
 import {
   INITIAL_CLIPBOARD_SYNC_STATE,
+  CLIPBOARD_GATE_LATCH_LIMIT,
   CLIPBOARD_SYNC_INTERVAL_MS,
   clipboardHash,
   loadClipboardShare,
   parseClipboardShare,
   pollHostClipboard,
+  imageClipboardHash,
   pushDeviceClipboard,
   saveClipboardShare,
   startClipboardSync,
@@ -35,15 +37,18 @@ function fakeClient(handler: (command: string, args: unknown) => unknown): Clipb
 interface IoHarness {
   io: ClipboardSyncIo;
   writes: string[];
-  device: { text: string };
+  imageWrites: string[];
+  device: { text: string; image: string | null };
 }
 
 function fakeIo(initialDevice = ""): IoHarness {
-  const device = { text: initialDevice };
+  const device = { text: initialDevice, image: null as string | null };
   const writes: string[] = [];
+  const imageWrites: string[] = [];
   return {
     device,
     writes,
+    imageWrites,
     io: {
       getClient: () => null,
       readDeviceClipboard: async () => device.text,
@@ -51,12 +56,17 @@ function fakeIo(initialDevice = ""): IoHarness {
         writes.push(text);
         device.text = text;
       },
+      readDeviceClipboardImage: async () => device.image,
+      writeDeviceClipboardImage: async (base64: string) => {
+        imageWrites.push(base64);
+        device.image = base64;
+      },
     },
   };
 }
 
 function stateWith(lastHash: string, localText: string): ClipboardSyncState {
-  return { lastHash, localText };
+  return { lastHash, localText, localImageHash: "", gateRejections: 0 };
 }
 
 let memoryStore: Map<string, string>;
@@ -134,6 +144,34 @@ describe("pollHostClipboard", () => {
   });
 });
 
+describe("pollHostClipboard image", () => {
+  it("writes a host image to the device clipboard and records its hash", async () => {
+    const harness = fakeIo();
+    const image = "aG9zdC1pbWFnZQ==";
+    const hash = imageClipboardHash(image);
+    const client = fakeClient(() => ({ unchanged: false, imageBase64: image, hash }));
+    const next = await pollHostClipboard(
+      stateWith(clipboardHash("old"), "old"),
+      client,
+      harness.io,
+    );
+    expect(harness.imageWrites).toEqual([image]);
+    expect(next.lastHash).toBe(hash);
+    expect(next.localImageHash).toBe(hash);
+    expect(next.localText).toBe("");
+  });
+
+  it("leaves state alone when the host reports an image unchanged", async () => {
+    const harness = fakeIo();
+    const image = "aG9zdC1pbWFnZQ==";
+    const client = fakeClient(() => ({ unchanged: true }));
+    const state = stateWith(imageClipboardHash(image), "");
+    const next = await pollHostClipboard(state, client, harness.io);
+    expect(next).toBe(state);
+    expect(harness.imageWrites).toEqual([]);
+  });
+});
+
 describe("pushDeviceClipboard", () => {
   it("uploads local changes that differ from the host hash", async () => {
     const harness = fakeIo();
@@ -163,6 +201,54 @@ describe("pushDeviceClipboard", () => {
     expect(next).toBe(state);
   });
 
+  it("pushes a device image when the text clipboard is empty", async () => {
+    const harness = fakeIo();
+    harness.device.image = "aW1hZ2UtcG5n";
+    const sent: Array<{ command: string; args: unknown }> = [];
+    const client = fakeClient((command, args) => {
+      sent.push({ command, args });
+      return {};
+    });
+    const state = stateWith(clipboardHash("호스트"), "호스트");
+    const next = await pushDeviceClipboard(state, client, harness.io);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].command).toBe("setClipboard");
+    expect((sent[0].args as { imageBase64: string }).imageBase64).toBe("aW1hZ2UtcG5n");
+    expect(next.lastHash).toBe(`i:${clipboardHash("aW1hZ2UtcG5n")}`);
+  });
+
+  it("does not re-push the image the host just sent down (echo)", async () => {
+    const harness = fakeIo();
+    const image = "aG9zdC1pbWFnZQ==";
+    const client = fakeClient(() => {
+      throw new Error("setClipboard must not run for image echoes");
+    });
+    // 폴링이 호스트 이미지를 기기에 쓴 직후의 상태다.
+    harness.device.text = "";
+    harness.device.image = image;
+    const state: ClipboardSyncState = {
+      lastHash: imageClipboardHash(image),
+      localText: "",
+      localImageHash: imageClipboardHash(image),
+      gateRejections: 0,
+    };
+    const next = await pushDeviceClipboard(state, client, harness.io);
+    expect(next).toBe(state);
+  });
+
+  it("never pushes an empty device read (background access denial)", async () => {
+    // Android 10+ 백그라운드 클립보드 접근 거부는 expo-clipboard에서 빈
+    // 문자열로 나타난다 — 이를 밀면 호스트 클립보드가 지워진다.
+    const harness = fakeIo();
+    harness.device.text = "";
+    const client = fakeClient(() => {
+      throw new Error("setClipboard must not run for empty device reads");
+    });
+    const state = stateWith(clipboardHash("호스트 텍스트"), "호스트 텍스트");
+    const next = await pushDeviceClipboard(state, client, harness.io);
+    expect(next).toBe(state);
+  });
+
   it("does not re-upload when the device text is unchanged", async () => {
     const harness = fakeIo();
     harness.device.text = "같은 텍스트";
@@ -173,6 +259,61 @@ describe("pushDeviceClipboard", () => {
     const next = await pushDeviceClipboard(state, client, harness.io);
     // 해시가 호스트 해시와 같지 않아도 로컬 텍스트 그대로면 밀어 올리지 않는다.
     expect(next).toBe(state);
+  });
+
+  it("latches pushes after repeated host gate rejections", async () => {
+    const harness = fakeIo();
+    harness.device.text = "기기에서 복사";
+    let setCalls = 0;
+    const client = fakeClient(() => {
+      setCalls += 1;
+      throw new Error("clipboard share disabled");
+    });
+    let state = stateWith(clipboardHash("호스트"), "호스트");
+    // 임계치까지는 폴링마다 다시 시도한다(일시적 게이트 토글과의 경합을 줄
+    // 여유) — 거부마다 카운터가 올라가고, 푸시가 실패했으므로 localText는
+    // 그대로여서 다음 라운드도 같은 텍스트를 밀려고 한다.
+    for (let round = 0; round < CLIPBOARD_GATE_LATCH_LIMIT; round += 1) {
+      state = await pushDeviceClipboard(state, client, harness.io);
+    }
+    expect(setCalls).toBe(CLIPBOARD_GATE_LATCH_LIMIT);
+    expect(state.gateRejections).toBe(CLIPBOARD_GATE_LATCH_LIMIT);
+    // 래치 후에는 시도조차 하지 않는다(2.5초마다의 영원한 재시도를 끊는다).
+    const next = await pushDeviceClipboard(state, client, harness.io);
+    expect(setCalls).toBe(CLIPBOARD_GATE_LATCH_LIMIT);
+    expect(next).toBe(state);
+  });
+
+  it("keeps retrying pushes on errors that are not gate rejections", async () => {
+    const harness = fakeIo();
+    harness.device.text = "기기에서 복사";
+    let setCalls = 0;
+    const client = fakeClient(() => {
+      setCalls += 1;
+      throw new Error("control request timeout");
+    });
+    let state = stateWith(clipboardHash("호스트"), "호스트");
+    for (let round = 0; round < CLIPBOARD_GATE_LATCH_LIMIT * 2; round += 1) {
+      state = await pushDeviceClipboard(state, client, harness.io);
+    }
+    // 게이트 오류가 아닌 전송 실패는 래치하지 않는다.
+    expect(setCalls).toBe(CLIPBOARD_GATE_LATCH_LIMIT * 2);
+    expect(state.gateRejections).toBe(0);
+  });
+
+  it("re-arms the gate counter after a successful push", async () => {
+    const harness = fakeIo();
+    harness.device.text = "기기에서 복사";
+    const rejecting: ClipboardSyncClient = fakeClient(() => {
+      throw new Error("clipboard share disabled");
+    });
+    let state = stateWith(clipboardHash("호스트"), "호스트");
+    state = await pushDeviceClipboard(state, rejecting, harness.io);
+    expect(state.gateRejections).toBe(1);
+
+    const success = fakeClient(() => ({}));
+    const next = await pushDeviceClipboard(state, success, harness.io);
+    expect(next.gateRejections).toBe(0);
   });
 });
 
@@ -268,5 +409,206 @@ describe("startClipboardSync loop", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("stops pushing after gate rejections and re-arms on a settings change", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo();
+      harness.device.text = "기기에서 복사";
+      let setCalls = 0;
+      harness.io.getClient = () =>
+        fakeClient((command) => {
+          if (command === "setClipboard") {
+            setCalls += 1;
+            throw new Error("clipboard share disabled");
+          }
+          return { unchanged: true };
+        });
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      // 임계치 이후 틱에서는 setClipboard 시도가 없다.
+      await vi.advanceTimersByTimeAsync(
+        CLIPBOARD_SYNC_INTERVAL_MS * (CLIPBOARD_GATE_LATCH_LIMIT + 2),
+      );
+      expect(setCalls).toBe(CLIPBOARD_GATE_LATCH_LIMIT);
+
+      // 설정 토글(끄고 다시 켜기)은 래치를 재무장한다.
+      loop.setEnabled(false);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(setCalls).toBe(CLIPBOARD_GATE_LATCH_LIMIT + 1);
+      loop.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips a tick while the previous round is still in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo();
+      let polls = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      harness.io.getClient = () =>
+        fakeClient(async (command) => {
+          if (command === "getClipboard") {
+            polls += 1;
+            // 첫 라운드가 15초 제어 타임아웃에 붙잡혀 있는 상태를 흉내 낸다.
+            await gate;
+          }
+          return { unchanged: true };
+        });
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(polls).toBe(1);
+      // 진행 중 라운드가 끝나기 전까지 이후 틱은 건너뛴다.
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS * 3);
+      expect(polls).toBe(1);
+      release();
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(polls).toBe(2);
+      loop.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons the in-flight round when the toggle turns off — no write, read, or send", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo();
+      let releaseGet!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGet = resolve;
+      });
+      const sent: string[] = [];
+      harness.io.getClient = () =>
+        fakeClient(async (command) => {
+          sent.push(command);
+          if (command === "getClipboard") {
+            await gate;
+            return {
+              unchanged: false,
+              text: "늦게 도착한 텍스트",
+              hash: clipboardHash("늦게 도착한 텍스트"),
+            };
+          }
+          return {};
+        });
+      const deviceReads: number[] = [];
+      const realRead = harness.io.readDeviceClipboard;
+      harness.io.readDeviceClipboard = async () => {
+        deviceReads.push(deviceReads.length + 1);
+        return realRead();
+      };
+
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(sent).toEqual(["getClipboard"]);
+
+      // getClipboard 응답을 기다리는 동안 토글을 끈다 → 라운드는 취소된다.
+      loop.setEnabled(false);
+      releaseGet();
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+
+      expect(sent).toEqual(["getClipboard"]); // setClipboard 없음
+      expect(harness.writes).toEqual([]); // writeDeviceClipboard 없음
+      expect(deviceReads).toEqual([]); // 기기 읽기도 시작하지 않는다
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stop() cancels the in-flight round before the image write", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo();
+      let releaseGet!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGet = resolve;
+      });
+      const sent: string[] = [];
+      harness.io.getClient = () =>
+        fakeClient(async (command) => {
+          sent.push(command);
+          if (command === "getClipboard") {
+            await gate;
+            const image = "aG9zdC1pbWFnZQ==";
+            return { unchanged: false, imageBase64: image, hash: imageClipboardHash(image) };
+          }
+          return {};
+        });
+      let imageReads = 0;
+      const realReadImage = harness.io.readDeviceClipboardImage;
+      harness.io.readDeviceClipboardImage = async () => {
+        imageReads += 1;
+        return realReadImage();
+      };
+
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(sent).toEqual(["getClipboard"]);
+
+      loop.stop();
+      releaseGet();
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS * 2);
+
+      expect(sent).toEqual(["getClipboard"]);
+      expect(harness.imageWrites).toEqual([]); // writeDeviceClipboardImage 없음
+      expect(imageReads).toBe(0); // pushDeviceClipboard 자체가 시작하지 않는다
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("round cancellation signal", () => {
+  it("pollHostClipboard skips the device write when the signal aborted during the request", async () => {
+    const harness = fakeIo();
+    const client = fakeClient(() => ({
+      unchanged: false,
+      text: "늦은 텍스트",
+      hash: clipboardHash("늦은 텍스트"),
+    }));
+    const controller = new AbortController();
+    const pending = pollHostClipboard(
+      INITIAL_CLIPBOARD_SYNC_STATE,
+      client,
+      harness.io,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(harness.writes).toEqual([]);
+    expect(harness.imageWrites).toEqual([]);
+  });
+
+  it("pushDeviceClipboard never sends when aborted after the device read", async () => {
+    const harness = fakeIo();
+    harness.device.text = "기기에서 복사";
+    const sent: Array<{ command: string; args: unknown }> = [];
+    const client = fakeClient((command, args) => {
+      sent.push({ command, args });
+      return {};
+    });
+    const controller = new AbortController();
+    const pending = pushDeviceClipboard(
+      stateWith(clipboardHash("호스트"), "호스트"),
+      client,
+      harness.io,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(sent).toEqual([]);
   });
 });

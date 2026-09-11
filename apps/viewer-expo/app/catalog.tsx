@@ -284,7 +284,8 @@ function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: Viewer
     {STREAM_PROFILES.map((p) => {
       const selected = p.id === profileId;
       const copy = QUALITY_TAB_KEYS[p.id];
-      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
+      const a11yLabel = `${t.viewer[copy.label]}: ${t.viewer[copy.detail]}`;
+      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={a11yLabel}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
     })}
   </View></View>;
 }
@@ -509,16 +510,17 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
     return null;
   }
 
+  let transportLabel: string = t.viewer.usbDetected;
+  if (state.attached) {
+    transportLabel = t.viewer.usbAttached;
+  } else if (state.permissionPending) {
+    transportLabel = t.viewer.usbPending;
+  }
+
   return (
     <View style={styles.transportStrip}>
       <View style={[styles.transportDot, state.attached && styles.transportDotUsb]} />
-      <Text style={styles.transportText}>
-        {state.attached
-          ? t.viewer.usbAttached
-          : state.permissionPending
-            ? t.viewer.usbPending
-            : t.viewer.usbDetected}
-      </Text>
+      <Text style={styles.transportText}>{transportLabel}</Text>
       {canRequestPermission && !requesting ? (
         <Pressable
           onPress={handleGrantPermission}
@@ -652,7 +654,7 @@ function ActiveStreamItem({
         <View style={styles.streamNameRow}>
           <View style={styles.dotActive} />
           <Text style={styles.streamName} numberOfLines={1}>
-            #{stream.session} {stream.sourceName}
+            {stream.sourceName}
           </Text>
         </View>
         <View style={styles.streamSpecRow}>

@@ -13,7 +13,7 @@ export interface StreamTerminationSubscription {
 
 export interface RestartRequest {
   active: ActiveStream;
-  trigger: "hostStatus" | "nativeTermination";
+  trigger: "hostStatus" | "nativeTermination" | "transportSwitch";
 }
 
 export type HostTerminationDisposition =

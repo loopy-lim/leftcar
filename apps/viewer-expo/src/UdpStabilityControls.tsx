@@ -58,7 +58,7 @@ function Choice({
       accessibilityState={{ selected: active }}
       style={{
         borderRadius: 8,
-        borderWidth: active ? 1 : 1,
+        borderWidth: 1,
         borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
         backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
         paddingHorizontal: 12,

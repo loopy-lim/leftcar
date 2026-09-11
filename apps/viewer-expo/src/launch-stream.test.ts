@@ -935,4 +935,244 @@ describe("reconfigurePreparedStream", () => {
     expect(started.encoderExperiment).toBe("auto");
     expect(order).toEqual(["prepare:auto", "reconfigure:auto", "open"]);
   });
+
+  it("refuses a split promotion that would exceed the decoder budget", async () => {
+    // M4/R8: split(2) + two singles(2, one of them this stream) already fill
+    // the four-instance budget. The promotion releases this stream's single
+    // slot but would still need 3 + 2 = 5, so the viewer keeps the single
+    // path and never sends a split request.
+    const { order, control, launcher } = reconfigureHarness(["auto"]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream({ width: 2560, height: 1440, activeTarget: sub4KTarget }),
+      target: fourKTarget,
+      qualityState: nativeState,
+      reconfigureEncoderExperiment: true,
+      advertisedEncoderExperiments,
+      decoderBudget: {
+        currentStreams: [
+          { split: true },
+          { split: false },
+          { split: false },
+        ],
+      },
+    });
+    expect(started.encoderExperiment).toBe("auto");
+    expect(order).toEqual(["prepare:auto", "reconfigure:auto", "open"]);
+    const request = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls[0][1] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("encoderExperiment");
+  });
+
+  it("releases the promoted stream's own slot before checking the budget", async () => {
+    // split(2) + this single(1) = 3. The promotion releases this stream's
+    // single slot first, so the projected total is 2 + 2 = 4 — allowed.
+    const { order, control, launcher } = reconfigureHarness(["splitVertical"]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream({ width: 2560, height: 1440, activeTarget: sub4KTarget }),
+      target: fourKTarget,
+      qualityState: nativeState,
+      reconfigureEncoderExperiment: true,
+      advertisedEncoderExperiments,
+      decoderBudget: {
+        currentStreams: [
+          { split: true },
+          { split: false },
+        ],
+      },
+    });
+    expect(started.encoderExperiment).toBe("splitVertical");
+    expect(order).toEqual(["prepare:splitVertical", "reconfigure:splitVertical", "open"]);
+  });
+
+  it("switches the source on the existing prepared listener before reconfiguring", async () => {
+    // Cheap display switch (R7): the receiver must be bound BEFORE the
+    // reconfigure request so it captures the replacement backend's single
+    // LCH1 challenge, on the same port the open window already listens on.
+    const order: string[] = [];
+    const launcher: StreamLauncher = {
+      prepareStream: vi.fn(async () => {
+        order.push("prepare");
+      }),
+      openStream: vi.fn(async () => {
+        order.push("open");
+        return "src-5003";
+      }),
+      cancelPreparedStream: vi.fn(async () => {
+        order.push("cancel");
+      }),
+    };
+    const control: ControlClient = {
+      request: vi.fn(async (command: string) => {
+        if (command !== "reconfigureStream") throw new Error("unexpected");
+        order.push("reconfigure");
+        return {
+          session: 31,
+          width: 2560,
+          height: 1440,
+          fps: 60,
+          qualityState: "native",
+          sourceIndex: 2,
+          sourceName: "Side Display",
+        };
+      }) as ControlClient["request"],
+      close: vi.fn(),
+    };
+    const target = { width: 2560, height: 1440, fps: 60 };
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target,
+      qualityState: nativeState,
+      sourceIndex: 2,
+      reconfigureSource: true,
+    });
+    expect(order).toEqual(["prepare", "reconfigure", "open"]);
+    const request = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls[0][1] as Record<string, unknown>;
+    expect(request).toMatchObject({ session: 31, sourceIndex: 2 });
+    expect(request).not.toHaveProperty("encoderExperiment");
+    // The open window keeps its port and adopts the accepted source name.
+    expect(launcher.openStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      2560,
+      1440,
+      60,
+      "auto",
+      "Side Display",
+      false,
+      true,
+      "ko",
+      true,
+    );
+    expect(started.sourceIndex).toBe(2);
+    expect(started.sourceName).toBe("Side Display");
+    expect(launcher.cancelPreparedStream).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the requested index when a switch host omits the source echo", async () => {
+    const { control, launcher } = reconfigureHarness([undefined as unknown as string]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target: sub4KTarget,
+      qualityState: nativeState,
+      sourceIndex: 3,
+      reconfigureSource: true,
+    });
+    expect(started.sourceIndex).toBe(3);
+    expect(started.sourceName).toBeUndefined();
+    // The window name falls back to the stream's existing source; geometry
+    // comes from the Host response the harness returns (4K).
+    expect(launcher.openStream).toHaveBeenCalledWith(
+      5003,
+      "192.168.0.134",
+      3840,
+      2160,
+      60,
+      "auto",
+      "LG UltraFine (1)",
+      false,
+      true,
+      "ko",
+      true,
+    );
+  });
+
+  it("never sends sourceIndex without the reconfigureSource capability", async () => {
+    // Older hosts silently ignore unknown fields: sending sourceIndex to one
+    // would leave the stream on the old display while the viewer believes the
+    // switch happened. Without the capability the field must stay absent.
+    const { control, launcher } = reconfigureHarness([undefined as unknown as string]);
+    const started = await reconfigurePreparedStream({
+      control,
+      launcher,
+      host: "192.168.0.134",
+      active: activeStream(),
+      target: sub4KTarget,
+      qualityState: nativeState,
+      sourceIndex: 3,
+    });
+    const request = (control.request as unknown as {
+      mock: { calls: Array<[string, unknown?]> };
+    }).mock.calls[0][1] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("sourceIndex");
+    expect(started).not.toHaveProperty("sourceIndex");
+  });
+
+  it("cancels the prepared receiver and propagates when a source switch fails", async () => {
+    // The Host validates a switch before stopping the live stream, so a
+    // failure leaves the session untouched; the viewer must release its
+    // prepared listener and surface the error (same shape as the split
+    // promotion fallback's cancel path).
+    const order: string[] = [];
+    const launcher: StreamLauncher = {
+      prepareStream: vi.fn(async () => {
+        order.push("prepare");
+      }),
+      openStream: vi.fn(async () => {
+        order.push("open");
+        return "src-5003";
+      }),
+      cancelPreparedStream: vi.fn(async () => {
+        order.push("cancel");
+      }),
+    };
+    const control: ControlClient = {
+      request: vi.fn(async () => {
+        order.push("reconfigure");
+        throw new Error("no such display 5");
+      }) as ControlClient["request"],
+      close: vi.fn(),
+    };
+    await expect(
+      reconfigurePreparedStream({
+        control,
+        launcher,
+        host: "192.168.0.134",
+        active: activeStream(),
+        target: sub4KTarget,
+        qualityState: nativeState,
+        sourceIndex: 5,
+        reconfigureSource: true,
+      }),
+    ).rejects.toThrow("no such display 5");
+    expect(order).toEqual(["prepare", "reconfigure", "cancel"]);
+    expect(launcher.openStream).not.toHaveBeenCalled();
+  });
+});
+
+describe("isStreamPrepareError", () => {
+  it("recognizes the native prepare rejection by code and message", async () => {
+    const { isStreamPrepareError } = await import("./launch-stream");
+    const withCode = Object.assign(new Error("bind failed"), {
+      code: "ERR_STREAM_PREPARE",
+    });
+    expect(isStreamPrepareError(withCode)).toBe(true);
+    expect(isStreamPrepareError(new Error("[ERR_STREAM_PREPARE] boom"))).toBe(
+      true,
+    );
+  });
+
+  it("does not claim unrelated failures", async () => {
+    const { isStreamPrepareError } = await import("./launch-stream");
+    expect(isStreamPrepareError(new Error("network unreachable"))).toBe(false);
+    const capability = Object.assign(new Error("no codec"), {
+      code: "ERR_SPLIT_DECODER_CAPABILITY",
+    });
+    expect(isStreamPrepareError(capability)).toBe(false);
+    expect(isStreamPrepareError(undefined)).toBe(false);
+  });
 });

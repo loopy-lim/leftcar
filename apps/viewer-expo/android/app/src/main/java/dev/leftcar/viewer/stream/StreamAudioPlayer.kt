@@ -18,7 +18,16 @@ import dev.leftcar.viewer.shim.ViewerNative
  */
 internal class StreamAudioPlayer(private val instanceId: String) {
     companion object {
-        private const val POLL_IDLE_MS = 12L
+        /**
+         * Two-level poll backoff (Q9b): MAX_PRIORITY 스레드가 무음에서도
+         * 12ms마다 깨어나는 것을 줄인다. 데이터가 흐르다 막 끊긴 직후에는
+         * 기존의 12ms 폴로 재개 버스트를 빠르게 받고, 계속 비어 있으면 40ms로
+         * 늘려 유휴 웨이크를 줄인다. 네이티브 링은 16청크×300프레임
+         * (44.1kHz 기준 ~109ms)이라 40ms 지연이 과잉 실행되지 않고, 링이
+         * 넘치면 네이티브가 drop-oldest로 경계를 유지한다.
+         */
+        private const val POLL_ACTIVE_MS = 12L
+        private const val POLL_IDLE_MS = 40L
         private const val BLOB_HEADER_BYTES = 6
         private const val MAX_DRAIN_BYTES = 16 * 1024
     }
@@ -28,6 +37,8 @@ internal class StreamAudioPlayer(private val instanceId: String) {
     private var trackRate = 0
     private var trackChannels = 0
     private var thread: Thread? = null
+    /** 연속으로 빈 pollAudio 횟수 — 유휴 백오프 단계 판정에 쓴다. */
+    private var emptyPolls = 0
 
     @Volatile
     private var running = false
@@ -63,9 +74,15 @@ internal class StreamAudioPlayer(private val instanceId: String) {
         while (running) {
             val length = ViewerNative.pollAudio(instanceId, drainBuffer)
             if (length <= BLOB_HEADER_BYTES) {
-                Thread.sleep(POLL_IDLE_MS)
+                // First empty poll after live audio keeps the tight cadence
+                // so a resumed burst is picked up quickly; sustained silence
+                // stretches to the idle interval. While audio flows, the
+                // blocking AudioTrack write paces the loop and no sleep runs.
+                emptyPolls++
+                Thread.sleep(if (emptyPolls == 1) POLL_ACTIVE_MS else POLL_IDLE_MS)
                 continue
             }
+            emptyPolls = 0
             val rate = readU16(0)
             val channels = drainBuffer[2].toInt()
             if (rate <= 0 || channels !in 1..2) continue

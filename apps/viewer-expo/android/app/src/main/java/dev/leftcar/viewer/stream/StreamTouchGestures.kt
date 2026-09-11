@@ -35,6 +35,14 @@ internal sealed interface TouchGestureCommand {
      */
     data class Scroll(val horizontalLines: Float, val verticalLines: Float) :
         TouchGestureCommand
+
+    /**
+     * 핀치줌 한 스텝. `factor`는 이벤트 간 span 비율(>1 벌림), (fx, fy)는
+     * 현재 두 손가락 중심 — 포커스 고정 스케일이 중심을 따라가므로 별도
+     * 팬 없이 줌인 중 이동도 자연스럽게 따라온다.
+     */
+    data class Zoom(val factor: Float, val focusX: Float, val focusY: Float) :
+        TouchGestureCommand
 }
 
 internal class TouchGestureStateMachine(
@@ -45,6 +53,12 @@ internal class TouchGestureStateMachine(
         /** ~25 view pixels per wheel line: a full-height swipe scrolls a
          * screenful without making small gestures unusably coarse. */
         const val DEFAULT_LINES_PER_PIXEL = 1f / 25f
+
+        /**
+         * 스크롤과 줌의 구분선: 두 손가락 span이 이 비율(18%)보다 많이
+         * 변하면 줌으로 전환한다. 그 아래 요동은 재정렬·손떨림으로 본다.
+         */
+        const val ZOOM_ENTER_DRIFT = 0.18f
     }
 
     private enum class Phase {
@@ -53,6 +67,8 @@ internal class TouchGestureStateMachine(
         Tap,
         /** Two or more fingers, left button released, scrolling. */
         Scroll,
+        /** Pinch in progress: zoom/pan, no remote input. */
+        Zoom,
         /** Long-press fired: right button held until lift. */
         RightHold,
         /** Fingers lifted mid-scroll; remaining contact is inert. */
@@ -73,9 +89,16 @@ internal class TouchGestureStateMachine(
     private var centroidX = 0f
     private var centroidY = 0f
 
+    /** 두 손가락 span(거리) — 줌 제스처 판별과 배율 계산에 쓴다. */
+    private var spanPx = 0f
+
+    /** 줌 판정이 난 뒤의 기준 span(연속 배율 계산용). */
+    private var zoomAnchorSpan = 0f
+
     /**
-     * Feed one MotionEvent (with the centroid of all pointers precomputed).
-     * Returns the commands to forward, in order.
+     * Feed one MotionEvent (with the centroid of all pointers precomputed and
+     * the two-finger span, 0 when fewer than two pointers). Returns the
+     * commands to forward, in order.
      */
     fun onTouchEvent(
         actionMasked: Int,
@@ -84,6 +107,7 @@ internal class TouchGestureStateMachine(
         pointerY: Float,
         allCentroidX: Float,
         allCentroidY: Float,
+        twoFingerSpanPx: Float = 0f,
     ): List<TouchGestureCommand> {
         when (actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -99,13 +123,16 @@ internal class TouchGestureStateMachine(
                     phase = Phase.Scroll
                     centroidX = allCentroidX
                     centroidY = allCentroidY
+                    spanPx = twoFingerSpanPx
                     // The left press from the landing finger must end before
                     // scrolling, or the Mac would drag-select while wheeling.
                     return listOf(button(pointerX, pointerY, MotionEvent.BUTTON_PRIMARY, down = false))
                 }
-                if (phase == Phase.Scroll) {
+                if (phase == Phase.Scroll || phase == Phase.Zoom) {
                     centroidX = allCentroidX
                     centroidY = allCentroidY
+                    spanPx = twoFingerSpanPx
+                    if (phase == Phase.Zoom) zoomAnchorSpan = twoFingerSpanPx
                 }
                 return emptyList()
             }
@@ -119,6 +146,19 @@ internal class TouchGestureStateMachine(
                     return listOf(move(pointerX, pointerY, MotionEvent.BUTTON_PRIMARY))
                 }
                 Phase.Scroll -> {
+                    // 드리프트는 제스처 시작 span 기준으로 잰다 — 이벤트마다
+                    // 갱신하면 느린 핀치(이벤트당 5%)가 스크롤로 오인된다.
+                    if (twoFingerSpanPx > 0f && spanPx > 0f) {
+                        val drift = kotlin.math.abs(twoFingerSpanPx - spanPx) / spanPx
+                        if (drift > ZOOM_ENTER_DRIFT) {
+                            // 벌리기/오므리기로 판명 — 이 제스처는 스크롤이
+                            // 아니라 줌이다. 이후 손가락을 뗄 때까지 줌으로
+                            // 남는다(중간에 스크롤과 섞이지 않게).
+                            phase = Phase.Zoom
+                            zoomAnchorSpan = twoFingerSpanPx
+                            return emptyList()
+                        }
+                    }
                     val dx = allCentroidX - centroidX
                     val dy = allCentroidY - centroidY
                     centroidX = allCentroidX
@@ -132,13 +172,27 @@ internal class TouchGestureStateMachine(
                         )
                     )
                 }
+                Phase.Zoom -> {
+                    if (twoFingerSpanPx <= 0f || zoomAnchorSpan <= 0f) return emptyList()
+                    val factor = twoFingerSpanPx / zoomAnchorSpan
+                    zoomAnchorSpan = twoFingerSpanPx
+                    centroidX = allCentroidX
+                    centroidY = allCentroidY
+                    return listOf(
+                        TouchGestureCommand.Zoom(
+                            factor = factor.zeroAsPositive(),
+                            focusX = allCentroidX,
+                            focusY = allCentroidY,
+                        )
+                    )
+                }
                 Phase.RightHold ->
                     return listOf(move(pointerX, pointerY, MotionEvent.BUTTON_SECONDARY))
                 Phase.Idle, Phase.Remain -> return emptyList()
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 longPressPending = false
-                if (phase == Phase.Scroll && pointerCount - 1 < 2) {
+                if ((phase == Phase.Scroll || phase == Phase.Zoom) && pointerCount - 1 < 2) {
                     phase = Phase.Remain
                 }
                 return emptyList()

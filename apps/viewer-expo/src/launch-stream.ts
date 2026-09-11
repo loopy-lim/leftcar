@@ -30,6 +30,10 @@ import {
   resolveUdpStabilitySelection,
   type UdpStabilitySelection,
 } from "./udp-stability";
+import {
+  planAdmission,
+  type AdmissionStream,
+} from "./decoder-budget";
 
 export interface StreamLauncher {
   getLocalIpv4Addresses?(): Promise<string[]>;
@@ -108,6 +112,9 @@ export interface StartedStream {
   height?: number;
   fps?: number;
   qualityState?: AdaptiveQualityState;
+  /** 소스 전환 후 실제로 스트리밍 중인 캡처 소스(호스트 에코, 전환 요청 때만). */
+  sourceIndex?: number;
+  sourceName?: string;
   viewerIps: string[];
   mediaTransport: ResolvedTransport;
   encoderExperiment: EncoderExperimentId;
@@ -138,6 +145,21 @@ export function replaceRestartedStreamState<
 }
 
 export type StreamControlRequest = <T>(command: string, args?: unknown) => Promise<T>;
+
+/**
+ * Viewer-side prepare failures surface from the native `prepareStream` call
+ * as ERR_STREAM_PREPARE. The prepare bind happens BEFORE the Host startStream
+ * request exists, so when this error escapes startPreparedStream the Host has
+ * no session to clean up and the caller can safely retry the launch on a
+ * freshly allocated port (a stale port neighbor can still hold the old bind).
+ */
+export function isStreamPrepareError(cause: unknown): boolean {
+  const code = (cause as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && code.includes("ERR_STREAM_PREPARE")) {
+    return true;
+  }
+  return String(cause).includes("ERR_STREAM_PREPARE");
+}
 
 interface StartPreparedStreamInput {
   control: ControlClient;
@@ -373,8 +395,25 @@ interface ReconfigurePreparedStreamInput {
    * older hosts cannot honor one mid-session.
    */
   reconfigureEncoderExperiment?: boolean;
+  /**
+   * Target capture source for a cheap display switch (R7). Only sent when the
+   * catalog capability `reconfigureSource` is present; the Host restarts the
+   * capture backend on that display under the same session id while the
+   * viewer address, media port, and this prepared receiver stay untouched.
+   */
+  sourceIndex?: number;
+  /** Catalog capability `reconfigureSource`. Without it `sourceIndex` is ignored. */
+  reconfigureSource?: boolean;
   /** Catalog `encoderExperiments` advertisement, for availability checks. */
   advertisedEncoderExperiments?: unknown;
+  /**
+   * Live viewer streams for the decoder-instance budget (M4/R8), including
+   * `active` itself. Optional so legacy callers (tests, older hooks) keep the
+   * ungated promotion behavior; the catalog hook always supplies it.
+   */
+  decoderBudget?: {
+    currentStreams: readonly AdmissionStream[];
+  };
 }
 
 /**
@@ -419,12 +458,58 @@ export async function reconfigurePreparedStream({
   target,
   qualityState,
   reconfigureEncoderExperiment,
+  sourceIndex,
+  reconfigureSource,
   advertisedEncoderExperiments,
+  decoderBudget,
 }: ReconfigurePreparedStreamInput): Promise<StartedStream> {
-  const desiredExperiment = resolveReconfigureExperiment(active, target, {
+  // Cheap display switch (R7): a source change rides the exact same prepared
+  // listener as a resolution reconfigure. The receiver is bound BEFORE the
+  // reconfigure request so it captures the replacement backend's single LCH1
+  // challenge; the media port never changes, so the open window just sees a
+  // new IDR on the same socket. Without the host capability the field is
+  // never sent — an old host would silently ignore it and keep the old source.
+  const switchSource = reconfigureSource === true ? sourceIndex : undefined;
+  const reconfigureArgs = (
+    requestedExperiment: EncoderExperimentId | undefined,
+  ) => ({
+    session: active.session,
+    width: target.width,
+    height: target.height,
+    fps: target.fps,
+    qualityState,
+    ...(requestedExperiment ? { encoderExperiment: requestedExperiment } : {}),
+    ...(switchSource !== undefined ? { sourceIndex: switchSource } : {}),
+  });
+  const resolvedExperiment = resolveReconfigureExperiment(active, target, {
     reconfigureEncoderExperiment,
     advertisedEncoderExperiments,
   });
+  // Read before the branch below narrows active.encoderExperiment.
+  const activeIsSplit = active.encoderExperiment === "splitVertical";
+  // Decoder budget (M4/R8): a split promotion claims a second decoder
+  // instance (+1 net — the stream keeps its single-mode slot until the
+  // replacement). Projecting over capacity refuses the promotion and keeps
+  // the single path; staying single never projects over capacity because the
+  // replaced slot is released first. Admission control elsewhere guarantees
+  // the total never exceeds capacity without this request, so "block" is not
+  // reachable here — any non-allow plan keeps single. Without a budget the
+  // ungated legacy behavior is preserved.
+  let desiredExperiment = resolvedExperiment;
+  if (
+    resolvedExperiment === "splitVertical" &&
+    resolvedExperiment !== active.encoderExperiment &&
+    decoderBudget !== undefined
+  ) {
+    const budget = planAdmission(decoderBudget.currentStreams, {
+      target,
+      split: true,
+      replacing: { split: activeIsSplit },
+    });
+    if (budget.action !== "allow") {
+      desiredExperiment = "auto";
+    }
+  }
   // Only a capability-backed split promotion is requested explicitly; demotion
   // and same-mode retention keep the legacy omission wire shape so older
   // hosts never receive a field they do not know.
@@ -464,14 +549,7 @@ export async function reconfigurePreparedStream({
   try {
     const acceptedOnce = await control.request<ReconfigureStreamOutput>(
       "reconfigureStream",
-      {
-        session: active.session,
-        width: target.width,
-        height: target.height,
-        fps: target.fps,
-        qualityState,
-        ...(requestedExperiment ? { encoderExperiment: requestedExperiment } : {}),
-      },
+      reconfigureArgs(requestedExperiment),
     );
     // Open (and report) the mode the Host actually accepted — it may differ
     // from the request; capability-less hosts omit the field entirely.
@@ -506,14 +584,7 @@ export async function reconfigurePreparedStream({
       );
       accepted = await control.request<ReconfigureStreamOutput>(
         "reconfigureStream",
-        {
-          session: active.session,
-          width: target.width,
-          height: target.height,
-          fps: target.fps,
-          qualityState,
-          encoderExperiment: "splitVertical",
-        },
+        reconfigureArgs("splitVertical"),
       );
       if (
         accepted.encoderExperiment !== undefined &&
@@ -541,7 +612,9 @@ export async function reconfigurePreparedStream({
       accepted.height,
       accepted.fps,
       encoderExperiment,
-      active.sourceName,
+      // After a source switch the Host echo carries the new display name;
+      // plain reconfigures keep the window's existing name.
+      accepted.sourceName ?? active.sourceName,
       active.showFps ?? false,
       active.localCursor ?? true,
       currentLanguage(),
@@ -553,6 +626,15 @@ export async function reconfigurePreparedStream({
       height: accepted.height,
       fps: accepted.fps,
       qualityState: accepted.qualityState,
+      // A source switch reports the source the Host actually accepted, falling
+      // back to the requested index when an older capability host omits the
+      // echo. JSON drops undefined keys, so plain reconfigures stay unchanged.
+      ...(switchSource !== undefined
+        ? {
+            sourceIndex: accepted.sourceIndex ?? switchSource,
+            ...(accepted.sourceName ? { sourceName: accepted.sourceName } : {}),
+          }
+        : {}),
       viewerIps: active.viewerIps,
       mediaTransport: active.mediaTransport,
       encoderExperiment,

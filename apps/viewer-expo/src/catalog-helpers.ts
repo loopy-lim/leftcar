@@ -1,11 +1,6 @@
-import {
-  isControlTransportError,
-  type DisplayInfo,
-} from "./control";
+import { isControlTransportError } from "./control";
 import { LocalizedError } from "./localized-error";
 import { controlClient, reconnectHost } from "./session";
-import { resolveStreamResolution } from "./stream-resolution";
-import type { StreamProfile } from "./stream-profile";
 
 const HIDABLE_DISPLAY_LABELS = ["leftcar hub", "leftcarhub"];
 
@@ -16,13 +11,6 @@ export function isHubDisplay(name: string): boolean {
 
 export function catalogDisplayHost(catalogHost: string): string {
   return catalogHost.split(":")[0] ?? "";
-}
-
-export function fitProfileToDisplay(
-  display: DisplayInfo,
-  profile: StreamProfile,
-) {
-  return resolveStreamResolution(display, profile);
 }
 
 export function catalogErrorMessage(error: unknown): string {

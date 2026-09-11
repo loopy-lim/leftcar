@@ -61,11 +61,12 @@ export function updateRecentHostsList(
   // 핀이 있는 엔트리는 갱신 시에도 유지한다 — 키 없는 재연결이 핀을 지우고
   // 다음 연결을 TOFU로 강등시키지 않게 한다.
   const resolvedHostKey = hostKey !== undefined ? hostKey : previous?.hostKey;
+  const resolvedName = name?.trim() || previous?.name;
 
   const newItem: RecentHostItem = {
     host: host.trim(),
     port,
-    ...(name?.trim() ? { name: name.trim() } : previous?.name ? { name: previous.name } : {}),
+    ...(resolvedName ? { name: resolvedName } : {}),
     ...(resolvedHostKey ? { hostKey: resolvedHostKey } : {}),
     lastConnected: now,
   };

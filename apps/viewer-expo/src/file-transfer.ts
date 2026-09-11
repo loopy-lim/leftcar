@@ -16,8 +16,8 @@ import { LocalizedError } from "./localized-error";
 
 /** 청크 크기(디코딩 후). 768 KiB → 표준 base64로 정확히 1 MiB. */
 export const FILE_CHUNK_SIZE = 768 * 1024;
-/** 업로드 상한(호스트 MAX_FILE_SIZE와 동일). */
-export const MAX_FILE_SIZE = 20 * 1024 * 1024;
+/** 파일 상한(호스트 MAX_FILE_SIZE와 동일) — 스트리밍 전송의 v2 상한. */
+export const MAX_FILE_SIZE = 512 * 1024 * 1024;
 
 export interface FileTransferClient {
   request<T>(command: string, args?: unknown): Promise<T>;
@@ -39,18 +39,6 @@ export type TransferProgressListener = (progress: TransferProgress) => void;
 
 // -- 표준 base64 -------------------------------------------------------------
 
-/** 표준 base64 인코딩(패딩 포함). 호스트는 STANDARD 엔진으로만 디코딩한다. */
-export function bytesToBase64(bytes: Uint8Array): string {
-  // fromCharCode를 32K씩 묶어 호출한다 — 바이트 단위 문자열 연결은 큰 파일에서
-  // 수 초가 걸린다(Hermes).
-  let binary = "";
-  const step = 0x8000;
-  for (let i = 0; i < bytes.length; i += step) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + step));
-  }
-  return btoa(binary);
-}
-
 /** 표준 base64 디코딩(패딩 유무 모두 허용). */
 export function base64ToBytes(encoded: string): Uint8Array {
   const normalized = encoded.replace(/\s/g, "");
@@ -61,7 +49,7 @@ export function base64ToBytes(encoded: string): Uint8Array {
   return bytes;
 }
 
-// -- 이름 정리와 청크 분할 ----------------------------------------------------
+// -- 이름 정리 ---------------------------------------------------------------
 
 /**
  * 파일명을 호스트가 허용하는 단일 이름으로 만든다. 경로 구분자·`..`·선행
@@ -90,15 +78,6 @@ function truncateToBytes(value: string, limit: number): string {
   return new TextDecoder().decode(encoded.subarray(0, cut));
 }
 
-/** 파일 바이트를 전송 청크로 분할한다(마지막 청크는 남는 바이트). */
-export function chunkBytes(bytes: Uint8Array, chunkSize = FILE_CHUNK_SIZE): Uint8Array[] {
-  const chunks: Uint8Array[] = [];
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    chunks.push(bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
-  }
-  return chunks;
-}
-
 function progressOf(transferredBytes: number, totalBytes: number): TransferProgress {
   return {
     transferredBytes,
@@ -109,6 +88,22 @@ function progressOf(transferredBytes: number, totalBytes: number): TransferProgr
 
 // -- 업로드(뷰어 → 호스트) ----------------------------------------------------
 
+/** sendFile이 받는 업로드 원본 — 파일 전체가 아닌 범위 읽기로 스트리밍한다. */
+export interface SendFileSource {
+  name: string;
+  size: number;
+  readBase64(position: number, length: number): Promise<string>;
+}
+
+/** receiveFile이 쓰는 수신 싱크(file-io의 ReceivedFileSink와 같은 모양). */
+export interface ReceiveFileSink {
+  readonly path: string;
+  appendBase64(chunk: string): Promise<void>;
+  /** 완료 시 스테이징 `.part`를 최종 경로로 이름 바꾼다(호스트와 같은 규약). */
+  finalize(): Promise<void>;
+  discard(): Promise<void>;
+}
+
 export interface SendFileResult {
   name: string;
   /** 호스트가 알려 준 표시용 저장 위치(예: Downloads/leftcar/<기기>/<이름>). */
@@ -116,17 +111,18 @@ export interface SendFileResult {
 }
 
 /**
- * 파일 하나를 호스트로 보낸다. 게이트 꺼짐·이름 거부·크기 초과는
- * LocalizedError로, 전송 경로 오류는 그대로 전파한다(호스트 오류 문자열은
- * mapFileTransferError에서 번역 키로 바꿀 수 있다).
+ * 파일 하나를 호스트로 보낸다. 원본은 범위 읽기로 청크만 메모리에 올린다 —
+ * 게이트 꺼짐·이름 거부·크기 초과는 LocalizedError로, 전송 경로 오류는 그대로
+ * 전파한다(호스트 오류 문자열은 mapFileTransferError에서 번역 키로 바꿀 수
+ * 있다).
  */
 export async function sendFile(
   client: FileTransferClient,
-  file: { name: string; bytes: Uint8Array },
+  file: SendFileSource,
   onProgress?: TransferProgressListener,
 ): Promise<SendFileResult> {
-  const totalBytes = file.bytes.length;
-  if (totalBytes > MAX_FILE_SIZE) {
+  const totalBytes = file.size;
+  if (!Number.isSafeInteger(totalBytes) || totalBytes < 0 || totalBytes > MAX_FILE_SIZE) {
     throw new LocalizedError("fileTooLarge");
   }
   const name = sanitizeFileName(file.name);
@@ -143,26 +139,33 @@ export async function sendFile(
   });
   const fileToken = begin.fileToken;
   onProgress?.(progressOf(0, totalBytes));
-  let offset = 0;
-  while (offset < totalBytes) {
-    const end = Math.min(offset + FILE_CHUNK_SIZE, totalBytes);
-    const chunk = bytesToBase64(file.bytes.subarray(offset, end));
-    const response = await client.request<{ written: number }>("sendFileChunk", {
-      fileToken,
-      dataBase64: chunk,
-      offset,
-    });
-    // 호스트가 순차 오프셋을 강제하므로 written은 end와 일치해야 한다.
-    if (response.written !== end) {
-      throw new LocalizedError("fileTransferFailed", {
-        detail: `written ${response.written} != ${end}`,
+  try {
+    let offset = 0;
+    while (offset < totalBytes) {
+      const end = Math.min(offset + FILE_CHUNK_SIZE, totalBytes);
+      const chunk = await file.readBase64(offset, end - offset);
+      const response = await client.request<{ written: number }>("sendFileChunk", {
+        fileToken,
+        dataBase64: chunk,
+        offset,
       });
+      // 호스트가 순차 오프셋을 강제하므로 written은 end와 일치해야 한다.
+      if (response.written !== end) {
+        throw new LocalizedError("fileTransferFailed", {
+          detail: `written ${response.written} != ${end}`,
+        });
+      }
+      offset = end;
+      onProgress?.(progressOf(offset, totalBytes));
     }
-    offset = end;
-    onProgress?.(progressOf(offset, totalBytes));
+    const end = await client.request<{ path: string }>("sendFileEnd", { fileToken });
+    return { name, path: end.path };
+  } catch (cause) {
+    // 실패한 업로드는 즉시 취소 — 호스트의 .part 스테이징이 30분 만료
+    // 스윕을 기다리지 않게 한다(취소 실패는 만료가 치운다).
+    await client.request("sendFileCancel", { fileToken }).catch(() => undefined);
+    throw cause;
   }
-  const end = await client.request<{ path: string }>("sendFileEnd", { fileToken });
-  return { name, path: end.path };
 }
 
 // -- 다운로드(호스트 → 뷰어) --------------------------------------------------
@@ -174,42 +177,68 @@ export async function listShareQueue(client: FileTransferClient): Promise<ShareQ
 
 export interface ReceiveFileResult {
   name: string;
-  bytes: Uint8Array;
+  /** 기기에 저장된 최종 경로(싱크가 만든다). */
+  path: string;
 }
 
-/** 공유 대기열 항목 하나를 내려받아 바이트로 돌려준다(저장은 file-io 브리지). */
+export interface ReceiveFileOptions {
+  /** 호스트가 알려 준 이름으로 수신 파일 싱크를 만든다(file-io 제공). */
+  createSink(name: string): Promise<ReceiveFileSink>;
+  onProgress?: TransferProgressListener;
+}
+
+/**
+ * 공유 대기열 항목 하나를 디스크로 스트리밍해 받는다. 청크마다 싱크에
+ * append하므로 파일 크기와 무관하게 메모리 사용은 청크 하나에 묶인다.
+ */
 export async function receiveFile(
   client: FileTransferClient,
   entry: Pick<ShareQueueEntry, "queueId">,
-  onProgress?: TransferProgressListener,
+  options: ReceiveFileOptions,
 ): Promise<ReceiveFileResult> {
   const begin = await client.request<{ fileToken: string; name: string; size: number }>(
     "fetchFileBegin",
     { queueId: entry.queueId },
   );
   const totalBytes = begin.size;
-  const bytes = new Uint8Array(totalBytes);
-  onProgress?.(progressOf(0, totalBytes));
-  let offset = 0;
-  while (offset < totalBytes) {
-    const length = Math.min(FILE_CHUNK_SIZE, totalBytes - offset);
-    const response = await client.request<{ data: string; size: number }>("fetchFileChunk", {
-      fileToken: begin.fileToken,
-      offset,
-      length,
-    });
-    const chunk = base64ToBytes(response.data);
-    if (chunk.length !== length) {
-      throw new LocalizedError("fileTransferFailed", {
-        detail: `chunk ${chunk.length} != ${length}`,
-      });
-    }
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-    onProgress?.(progressOf(offset, totalBytes));
+  // 호스트가 이미 상한을 검사하지만, 오래된 호스트·위조 응답에 대비해
+  // 전송을 시작하기 전에 뷰어도 검사한다.
+  if (!Number.isSafeInteger(totalBytes) || totalBytes < 0 || totalBytes > MAX_FILE_SIZE) {
+    await client.request("fetchFileCancel", { fileToken: begin.fileToken }).catch(() => undefined);
+    throw new LocalizedError("fileTooLarge");
   }
-  await client.request("fetchFileEnd", { fileToken: begin.fileToken });
-  return { name: begin.name, bytes };
+  const sink = await options.createSink(begin.name);
+  try {
+    let offset = 0;
+    while (offset < totalBytes) {
+      const length = Math.min(FILE_CHUNK_SIZE, totalBytes - offset);
+      const response = await client.request<{ data: string; size: number }>("fetchFileChunk", {
+        fileToken: begin.fileToken,
+        offset,
+        length,
+      });
+      const chunk = base64ToBytes(response.data);
+      if (chunk.length !== length) {
+        throw new LocalizedError("fileTransferFailed", {
+          detail: `chunk ${chunk.length} != ${length}`,
+        });
+      }
+      await sink.appendBase64(response.data);
+      offset += chunk.length;
+      options.onProgress?.(progressOf(offset, totalBytes));
+    }
+    await client.request("fetchFileEnd", { fileToken: begin.fileToken });
+    // 호스트와 같은 .part 스테이징 규약 — 전송이 온전히 끝난 뒤 이름을
+    // 바꿔 완성한다. 실패하면 아래 catch가 .part를 치운다.
+    await sink.finalize();
+  } catch (cause) {
+    await sink.discard().catch(() => undefined);
+    await client
+      .request("fetchFileCancel", { fileToken: begin.fileToken })
+      .catch(() => undefined);
+    throw cause;
+  }
+  return { name: begin.name, path: sink.path };
 }
 
 // -- 오류 매핑 ---------------------------------------------------------------

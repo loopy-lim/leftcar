@@ -68,12 +68,16 @@ internal class StreamHudController(
     private var helpPopup: PopupWindow? = null
     private var keyboardPopup: PopupWindow? = null
     private var keyboardChip: TextView? = null
+    private var exitPopup: PopupWindow? = null
 
     /** 제스처 안내는 첫 창에서 1회만 자동 노출되므로, 이 칩이 유일한 재열람 경로다. */
     var onGestureHelpTapped: (() -> Unit)? = null
 
     /** "ABC" 칩 탭 → Activity가 IME를 토글한다. */
     var onKeyboardToggle: (() -> Unit)? = null
+
+    /** "✕" 칩 탭 → Activity가 스트림 창을 닫는다(전체화면의 눈에 보이는 출구). */
+    var onExitTapped: (() -> Unit)? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -122,6 +126,7 @@ internal class StreamHudController(
         showInput()
         showGestureHelpChip()
         showKeyboardChip()
+        showExitChip()
         // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
         // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
         if (showDiagnostics) {
@@ -234,11 +239,13 @@ internal class StreamHudController(
         rebindPopup?.dismiss()
         helpPopup?.dismiss()
         keyboardPopup?.dismiss()
+        exitPopup?.dismiss()
         inputPopup = null
         statsPopup = null
         rebindPopup = null
         helpPopup = null
         keyboardPopup = null
+        exitPopup = null
         keyboardChip = null
         inputView = null
         inputIcon = null
@@ -349,23 +356,30 @@ internal class StreamHudController(
         }
     }
 
-    /** 스트림 창 구석의 물음표 칩. 탭하면 [onGestureHelpTapped]로 제스처 안내를 다시 연다. */
-    private fun showGestureHelpChip() {
-        if (helpPopup != null) return
+    /** 구석 스택 칩 공통 빌더 — 텍스트·설명·세로 슬롯·탭 동작만 다르다. */
+    private fun showCornerChip(
+        text: String,
+        description: String,
+        slotY: Int,
+        assignPopup: (PopupWindow) -> Unit,
+        onTap: () -> Unit,
+    ): TextView {
         val chip = TextView(activity).apply {
-            text = "?"
+            this.text = text
             setTextColor(Color.argb(224, 255, 255, 255))
             textSize = 12f * panelScale
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(2), dp(8), dp(2))
+            // 전체화면에서 이 칩이 유일한 눈에 보이는 종료 경로다 — 최소 터치
+            // 크기(48dp)를 보장해 작은 글자 높이로 탭이 어려워지지 않게 한다.
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             background = badgeBackground(Color.argb(118, 15, 23, 42))
             alpha = 0.72f
-            contentDescription = ViewerStrings.gestureHelpDescription
+            contentDescription = description
         }
-        chip.setOnClickListener {
-            onGestureHelpTapped?.invoke()
-        }
+        chip.setOnClickListener { onTap() }
         val popup = PopupWindow(
             chip,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -377,17 +391,26 @@ internal class StreamHudController(
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(2).toFloat()
         }
-        helpPopup = popup
+        assignPopup(popup)
         activity.window.decorView.post {
             if (!activity.isFinishing && !activity.isDestroyed) {
                 popup.showAtLocation(
                     activity.window.decorView,
                     Gravity.TOP or Gravity.END,
                     dp(12),
-                    dp(52),
+                    dp(slotY),
                 )
             }
         }
+        return chip
+    }
+
+    /** 스트림 창 구석의 물음표 칩. 탭하면 [onGestureHelpTapped]로 제스처 안내를 다시 연다. */
+    private fun showGestureHelpChip() {
+        if (helpPopup != null) return
+        showCornerChip(
+            "?", ViewerStrings.gestureHelpDescription, 52, { helpPopup = it },
+        ) { onGestureHelpTapped?.invoke() }
     }
 
     /**
@@ -396,43 +419,20 @@ internal class StreamHudController(
      */
     private fun showKeyboardChip() {
         if (keyboardPopup != null) return
-        val chip = TextView(activity).apply {
-            text = "ABC"
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f * panelScale
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(2), dp(8), dp(2))
-            background = badgeBackground(Color.argb(118, 15, 23, 42))
-            alpha = 0.72f
-            contentDescription = ViewerStrings.keyboardToggleDescription
-        }
-        keyboardChip = chip
-        chip.setOnClickListener {
-            onKeyboardToggle?.invoke()
-        }
-        val popup = PopupWindow(
-            chip,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            false,
-        ).apply {
-            isFocusable = false
-            isOutsideTouchable = false
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = dp(2).toFloat()
-        }
-        keyboardPopup = popup
-        activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed) {
-                popup.showAtLocation(
-                    activity.window.decorView,
-                    Gravity.TOP or Gravity.END,
-                    dp(12),
-                    dp(92),
-                )
-            }
-        }
+        keyboardChip = showCornerChip(
+            "ABC", ViewerStrings.keyboardToggleDescription, 92, { keyboardPopup = it },
+        ) { onKeyboardToggle?.invoke() }
+    }
+
+    /**
+     * 스트림 창 구석의 "✕" 칩 — 시스템 바가 숨은 전체화면에서 유일하게 눈에
+     * 보이는 종료 경로다. "?"·"ABC" 아래 네 번째 슬롯에 쌓는다.
+     */
+    private fun showExitChip() {
+        if (exitPopup != null) return
+        showCornerChip(
+            "✕", ViewerStrings.exitStreamDescription, 132, { exitPopup = it },
+        ) { onExitTapped?.invoke() }
     }
 
     private fun updateStats(packed: Long, latency: Long, surfaceReleaseLatency: Int) {

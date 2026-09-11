@@ -3,8 +3,6 @@ import {
   FILE_CHUNK_SIZE,
   MAX_FILE_SIZE,
   base64ToBytes,
-  bytesToBase64,
-  chunkBytes,
   listShareQueue,
   mapFileTransferError,
   receiveFile,
@@ -19,6 +17,17 @@ import {
  * 실제 와이어 없이 명령 순서·오프셋 강제·게이트 오류를 검증한다.
  */
 
+/** 표준 base64 인코더(패딩 포함). v2 전송은 인코딩 없이 base64 범위 읽기를
+ *  그대로 실으므로 프로덕션에는 인코더가 없고, 페이크 호스트만 쓴다. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
+}
+
 interface RecordedRequest {
   command: string;
   args: Record<string, unknown>;
@@ -30,7 +39,7 @@ class FakeHost {
   bytes = new Uint8Array(0);
   private written = 0;
   private token = "token-1";
-  private queue: ShareQueueEntry[] = [
+  queue: ShareQueueEntry[] = [
     { queueId: "queue-1", name: "notes.txt", size: 5 },
   ];
 
@@ -55,6 +64,11 @@ class FakeHost {
   }
 
   private handle(command: string, args: Record<string, unknown>): unknown {
+    if (this.nextError) {
+      const error = this.nextError;
+      this.nextError = null;
+      this.fail(error);
+    }
     if (command === "sendFileBegin") {
       if (!this.gateEnabled) this.fail("file share disabled");
       const name = String(args.name);
@@ -101,11 +115,57 @@ class FakeHost {
     if (command === "fetchFileEnd") {
       return {};
     }
+    if (command === "sendFileCancel" || command === "fetchFileCancel") {
+      return {};
+    }
     this.fail(`unexpected command: ${command}`);
   }
 
   /** fetchFileChunk가 제공할 호스트 측 원본 바이트. */
   source = new Uint8Array(0);
+}
+
+
+/** 테스트용 업로드 원본 — Uint8Array를 readBase64 범위 읽기로 노출한다. */
+function sourceFromBytes(name: string, bytes: Uint8Array) {
+  return {
+    name,
+    size: bytes.length,
+    readBase64: async (position: number, length: number) =>
+      bytesToBase64(bytes.subarray(position, Math.min(position + length, bytes.length))),
+  };
+}
+
+/** 테스트용 수신 싱크 — append된 base64를 바이트로 모은다. */
+class MemorySink {
+  readonly path = "/test/received.bin";
+  readonly parts: Uint8Array[] = [];
+  discarded = false;
+  finalized = false;
+
+  async appendBase64(chunk: string): Promise<void> {
+    this.parts.push(base64ToBytes(chunk));
+  }
+
+  async finalize(): Promise<void> {
+    this.finalized = true;
+  }
+
+  async discard(): Promise<void> {
+    this.discarded = true;
+    this.parts.length = 0;
+  }
+
+  bytes(): Uint8Array {
+    const total = this.parts.reduce((sum, part) => sum + part.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of this.parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return out;
+  }
 }
 
 describe("sanitizeFileName", () => {
@@ -142,20 +202,7 @@ describe("sanitizeFileName", () => {
   });
 });
 
-describe("chunkBytes and base64", () => {
-  it("splits into 768 KiB chunks with a short tail", () => {
-    const bytes = new Uint8Array(FILE_CHUNK_SIZE * 2 + 10);
-    const chunks = chunkBytes(bytes);
-    expect(chunks).toHaveLength(3);
-    expect(chunks[0].length).toBe(FILE_CHUNK_SIZE);
-    expect(chunks[1].length).toBe(FILE_CHUNK_SIZE);
-    expect(chunks[2].length).toBe(10);
-  });
-
-  it("returns no chunks for an empty file", () => {
-    expect(chunkBytes(new Uint8Array(0))).toHaveLength(0);
-  });
-
+describe("base64", () => {
   it("round-trips bytes through standard base64", () => {
     const bytes = new Uint8Array([104, 101, 108, 108, 111]); // "hello"
     expect(bytesToBase64(bytes)).toBe("aGVsbG8=");
@@ -176,7 +223,7 @@ describe("sendFile", () => {
     for (let i = 0; i < fileBytes.length; i += 1) fileBytes[i] = i % 251;
 
     const progress: number[] = [];
-    const result = await sendFile(host.client, { name: "data.bin", bytes: fileBytes }, (p) =>
+    const result = await sendFile(host.client, sourceFromBytes("data.bin", fileBytes), (p) =>
       progress.push(p.transferredBytes),
     );
 
@@ -199,11 +246,11 @@ describe("sendFile", () => {
     expect(progress[progress.length - 1]).toBe(fileBytes.length);
   });
 
-  it("rejects files larger than 20 MiB before any command", async () => {
+  it("rejects files larger than the cap before any command", async () => {
     const host = new FakeHost();
-    const bytes = new Uint8Array(MAX_FILE_SIZE + 1);
+    const big = new Uint8Array(8);
     await expect(
-      sendFile(host.client, { name: "big.bin", bytes }),
+      sendFile(host.client, { name: "big.bin", size: MAX_FILE_SIZE + 1, readBase64: async () => bytesToBase64(big) }),
     ).rejects.toMatchObject({ key: "fileTooLarge" });
     expect(host.requests).toHaveLength(0);
   });
@@ -211,7 +258,7 @@ describe("sendFile", () => {
   it("rejects an empty source name", async () => {
     const host = new FakeHost();
     await expect(
-      sendFile(host.client, { name: "   ", bytes: new Uint8Array(1) }),
+      sendFile(host.client, sourceFromBytes("   ", new Uint8Array(1))),
     ).rejects.toMatchObject({ key: "fileNameError" });
     expect(host.requests).toHaveLength(0);
   });
@@ -220,8 +267,26 @@ describe("sendFile", () => {
     const host = new FakeHost();
     host.gateEnabled = false;
     await expect(
-      sendFile(host.client, { name: "a.txt", bytes: new Uint8Array(1) }),
+      sendFile(host.client, sourceFromBytes("a.txt", new Uint8Array(1))),
     ).rejects.toThrow("file share disabled");
+  });
+
+  it("cancels the upload token when a chunk fails mid-transfer", async () => {
+    const host = new FakeHost();
+    const source = sourceFromBytes("a.bin", new Uint8Array(FILE_CHUNK_SIZE + 4));
+    const client: FileTransferClient = {
+      request: async <T,>(command: string, args?: unknown): Promise<T> => {
+        const response = await host.client.request<T>(command, args);
+        // begin이 성공한 직후 다음 요청(첫 청크)이 실패하게 만든다.
+        if (command === "sendFileBegin") host.failNext("socket reset");
+        return response;
+      },
+    };
+    await expect(sendFile(client, source)).rejects.toThrow("socket reset");
+    const commands = host.requests.map((request) => request.command);
+    expect(commands).toContain("sendFileBegin");
+    expect(commands).toContain("sendFileCancel");
+    expect(commands).not.toContain("sendFileEnd");
   });
 });
 
@@ -235,11 +300,16 @@ describe("receiveFile", () => {
     expect(queue).toEqual([{ queueId: "queue-1", name: "notes.txt", size: 5 }]);
 
     const progress: number[] = [];
-    const received = await receiveFile(host.client, { queueId: "queue-1" }, (p) =>
-      progress.push(p.percent),
-    );
+    const sink = new MemorySink();
+    const received = await receiveFile(host.client, { queueId: "queue-1" }, {
+      createSink: async () => sink,
+      onProgress: (p) => progress.push(p.percent),
+    });
     expect(received.name).toBe("notes.txt");
-    expect(Array.from(received.bytes)).toEqual([1, 2, 3, 4, 5]);
+    expect(received.path).toBe(sink.path);
+    expect(Array.from(sink.bytes())).toEqual([1, 2, 3, 4, 5]);
+    // .part 스테이징 규약: 전송이 온전히 끝난 뒤에만 완성(finalize)한다.
+    expect(sink.finalized).toBe(true);
     const commands = host.requests.map((request) => request.command);
     expect(commands).toEqual([
       "listShareQueue",
@@ -249,6 +319,44 @@ describe("receiveFile", () => {
     ]);
     expect(host.requests[2].args).toMatchObject({ offset: 0, length: 5 });
     expect(progress[progress.length - 1]).toBe(100);
+  });
+
+  it("rejects an oversized fetch before allocating and cancels the token", async () => {
+    const host = new FakeHost();
+    host.queue = [{ queueId: "queue-big", name: "huge.iso", size: MAX_FILE_SIZE + 1 }];
+    await expect(
+      receiveFile(host.client, { queueId: "queue-big" }, { createSink: async () => new MemorySink() }),
+    ).rejects.toThrow();
+    const commands = host.requests.map((request) => request.command);
+    // 상한 초과 응답에는 청크를 요청하지 않는다(전체 할당 전에 거부).
+    expect(commands).not.toContain("fetchFileChunk");
+    expect(commands).toContain("fetchFileCancel");
+  });
+
+  it("cancels the fetch token when a chunk request fails mid-transfer", async () => {
+    const host = new FakeHost();
+    host.queue = [
+      { queueId: "queue-2", name: "video.bin", size: FILE_CHUNK_SIZE + 10 },
+    ];
+    host.source = new Uint8Array(FILE_CHUNK_SIZE + 10);
+    const client: FileTransferClient = {
+      request: async <T,>(command: string, args?: unknown): Promise<T> => {
+        const response = await host.client.request<T>(command, args);
+        // 첫 청크가 성공한 직후 다음 요청이 실패하게 만든다.
+        if (command === "fetchFileChunk") host.failNext("link died");
+        return response;
+      },
+    };
+    const sink = new MemorySink();
+    await expect(
+      receiveFile(client, { queueId: "queue-2" }, { createSink: async () => sink }),
+    ).rejects.toThrow("link died");
+    expect(sink.discarded, "failed receive must discard the partial file").toBe(true);
+    // 실패한 전송은 완성(finalize)되지 않는다 — .part만 치워진다.
+    expect(sink.finalized).toBe(false);
+    const commands = host.requests.map((request) => request.command);
+    expect(commands).toContain("fetchFileCancel");
+    expect(commands).not.toContain("fetchFileEnd");
   });
 
   it("propagates the disabled-gate error from listShareQueue", async () => {

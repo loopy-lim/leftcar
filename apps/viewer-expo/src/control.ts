@@ -20,17 +20,23 @@ import { DEFAULT_CONTROL_PORT } from "./defaults";
 
 /** 명령별 요청 타임아웃: 스트림 시작은 첫 프레임 대기까지, 카탈로그는
  * 나열 조회까지의 실측 여유를 담는다. 나머지는 짧은 기본값을 쓴다.
- * 파일 청크 1개는 최대 1 MiB(base64 ≈ 1.4 MB)라 느린 링크 대비 여유를 둔다. */
+ * 파일 청크 1개는 최대 1 MiB(base64 ≈ 1.4 MB)라 느린 링크 대비 여유를 둔다.
+ * 클립보드는 256 KiB 텍스트 왕복이 있어 기본 5초보다 여유를 둔다 — 실패 시
+ * 공용 제어 소켓이 파괴되므로 타임아웃이 오탐이면 안 된다. */
 const REQUEST_TIMEOUT_MS: Record<string, number> = {
   startStream: 25_000,
   getCatalog: 15_000,
+  setClipboard: 15_000,
+  getClipboard: 15_000,
   sendFileBegin: 15_000,
   sendFileChunk: 30_000,
   sendFileEnd: 15_000,
+  sendFileCancel: 10_000,
   listShareQueue: 15_000,
   fetchFileBegin: 15_000,
   fetchFileChunk: 30_000,
   fetchFileEnd: 15_000,
+  fetchFileCancel: 10_000,
 };
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
@@ -59,7 +65,13 @@ export interface CatalogView {
    * flag; viewers must never send a mode transition without it.
    */
   reconfigureEncoderExperiment?: boolean;
-}
+  /**
+   * Host accepts an optional `sourceIndex` on reconfigureStream to move the
+   * live session to another display (cheap display switch). Older hosts omit
+   * this flag; viewers must keep using stop+start to change sources.
+   */
+  reconfigureSource?: boolean;
+};
 
 export interface CaptureBackendInfo {
   id: string;
@@ -172,25 +184,18 @@ export interface SessionView {
   receiverPairedIdrEpisodes?: number;
   receiverSuppressedRecoveryRequests?: number;
   receiverFecDecodeFailures?: number;
+  /** Split recovery episodes where both tiles resumed from the same IDR generation. */
+  receiverPairedIdrResumes?: number;
+  /** Split clock-corrected send->decoder age in ms; null until clock sync converges. */
+  receiverSplitWireMs?: number | null;
+  /** Split clock-corrected capture->decoder age in ms; null until clock sync converges. */
+  receiverSplitCaptureAgeMs?: number | null;
+  /** Viewer-measured reliable-input send->ack RTT (EWMA, ms); null until the first ack. */
+  receiverInputRttMs?: number | null;
 }
 
 export interface StatusView {
   sessions: SessionView[];
-}
-
-export interface ReconfigureStreamInput {
-  session: number;
-  width: number;
-  height: number;
-  fps: number;
-  qualityState: AdaptiveQualityState;
-  /**
-   * Requested encoder mode transition (e.g. auto→splitVertical on a 4K
-   * upshift). Only sent when the catalog advertises
-   * `reconfigureEncoderExperiment`; omission preserves legacy retention and
-   * dimension-based demotion on older hosts.
-   */
-  encoderExperiment?: EncoderExperimentId;
 }
 
 export interface ReconfigureStreamOutput {
@@ -201,6 +206,13 @@ export interface ReconfigureStreamOutput {
   qualityState: AdaptiveQualityState;
   /** The mode actually accepted by the Host (capability-backed hosts). */
   encoderExperiment?: EncoderExperimentId;
+  /**
+   * Echo of the capture source the replacement stream runs on. Present only
+   * when the request carried a `sourceIndex` (capability-backed hosts).
+   */
+  sourceIndex?: number;
+  /** Host-side display name of the switched source; only present with a source echo. */
+  sourceName?: string;
 }
 
 export interface ControlClient {
@@ -272,12 +284,13 @@ export function formatErrorMessage(err: unknown): string {
     return t.errConnectFailed;
   }
   // 이 코드베이스의 안내 문구는 한국어로 작성되므로 한글이 섞인 메시지는
-  // 이미 큐레이된 것이다. 그 외(주로 매핑되지 않은 영어 원문)는 친절한
-  // 안내문 뒤에 원문을 괄호로 붙여 진단 가능성을 유지한다.
+  // 이미 큐레이된 것이다. 매핑되지 않은 영어 원문은 개발자 진단용 콘솔로만
+  // 남기고, UI는 친절한 안내문 하나만 보여 준다.
   if (/[가-힣]/.test(message)) {
     return message;
   }
-  return `${t.errGeneric} (${message})`;
+  console.warn("[leftcar] unmapped control error:", message);
+  return t.errGeneric;
 }
 
 export function isControlTransportError(error: unknown): boolean {

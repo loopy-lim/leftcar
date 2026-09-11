@@ -306,35 +306,33 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun setCursorStream(instanceId: String, enabled: Boolean, promise: Promise) {
-        val target = liveStreams[instanceId]
-        if (target == null) {
-            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
-            return
-        }
-        launchStreamIntent(instanceId, target) { intent ->
-            intent.putExtra("localCursor", enabled)
-        }
-        try {
-            promise.resolve(null)
-        } catch (t: Throwable) {
-            promise.reject("ERR_CURSOR_TOGGLE", t.message, t)
-        }
+        toggleStreamExtra(instanceId, enabled, "localCursor", "ERR_CURSOR_TOGGLE", promise)
     }
 
     @ReactMethod
     fun setAudioStream(instanceId: String, enabled: Boolean, promise: Promise) {
+        toggleStreamExtra(instanceId, enabled, "localAudio", "ERR_AUDIO_TOGGLE", promise)
+    }
+
+    private fun toggleStreamExtra(
+        instanceId: String,
+        enabled: Boolean,
+        extraKey: String,
+        errorTag: String,
+        promise: Promise,
+    ) {
         val target = liveStreams[instanceId]
         if (target == null) {
             promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
             return
         }
         launchStreamIntent(instanceId, target) { intent ->
-            intent.putExtra("localAudio", enabled)
+            intent.putExtra(extraKey, enabled)
         }
         try {
             promise.resolve(null)
         } catch (t: Throwable) {
-            promise.reject("ERR_AUDIO_TOGGLE", t.message, t)
+            promise.reject(errorTag, t.message, t)
         }
     }
 

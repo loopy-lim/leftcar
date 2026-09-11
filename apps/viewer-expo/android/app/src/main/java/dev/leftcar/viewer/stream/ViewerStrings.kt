@@ -56,6 +56,19 @@ object ViewerStrings {
     val statsDescription: String
         get() = if (en) "Stream details" else "화면 공유 상세 정보"
 
+    val exitStreamDescription: String
+        get() = if (en) "End screen sharing" else "화면 공유 종료"
+
+    /** 전체화면 종료 토스트 — 같은 창 재연결(4·5)은 인디케이터가 맡으므로 오지 않는다. */
+    fun terminationMessage(reason: Int): String = when (reason) {
+        1 -> if (en) "The connection to the computer was lost, so screen sharing ended."
+        else "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
+        2, 3 -> if (en) "Screen sharing was stopped on the computer."
+        else "컴퓨터에서 이 화면 공유를 종료했습니다."
+        else -> if (en) "Reconnecting screen sharing."
+        else "화면 공유를 다시 연결하고 있습니다."
+    }
+
     fun fpsDescription(fpsText: String): String =
         if (en) "Actual render rate $fpsText" else "실제 렌더링 속도 $fpsText"
 
@@ -89,6 +102,7 @@ object GestureHintRows {
             "Drag" to "Drag",
             "Two-finger swipe" to "Scroll",
             "Long press" to "Right-click",
+            "Pinch" to "Zoom",
         )
     } else {
         listOf(
@@ -96,6 +110,7 @@ object GestureHintRows {
             "끌기" to "드래그",
             "두 손가락으로 밀기" to "스크롤",
             "길게 누르기" to "오른쪽 클릭",
+            "두 손가락으로 벌리기·오므리기" to "확대·축소",
         )
     }
 }

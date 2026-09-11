@@ -199,11 +199,97 @@ dependencies {
     }
 }
 
-// The video native library remains a small explicit build input. Rustra's
-// generated module owns its staticlib build and Android CMake/autolinking.
+// The video native library is a cargo product of native/android-viewer in the
+// repo-root workspace. buildViewerNative wires the canonical build command
+// (docs/plans, .cargo/config.toml linker pin) into Gradle; copyViewerSo then
+// places the .so into the jniLibs source set. Rustra's generated module owns
+// its own staticlib build and Android CMake/autolinking.
+def viewerSo = rootProject.file("../../../target/aarch64-linux-android/release/libleftcar_viewer.so")
+def viewerCrateDir = rootProject.file("../../../native/android-viewer")
+def repoRootDir = rootProject.file("../../..")
+// Pinned by [target.aarch64-linux-android] linker in the repo-root .cargo/config.toml.
+def androidLinker = "aarch64-linux-android35-clang"
+
+static def findOnPath(String name, boolean isWindows) {
+    def suffixes = isWindows ? [".exe", ".cmd", ".bat", ""] : [""]
+    def pathDirs = (System.getenv("PATH") ?: "").split(File.pathSeparator)
+    for (dir in pathDirs) {
+        for (suffix in suffixes) {
+            def f = new File(dir, name + suffix)
+            if (f.isFile() && f.canExecute()) return f.absolutePath
+        }
+    }
+    return null
+}
+
+// SDK location for the NDK linker lookup: ANDROID_HOME/ANDROID_SDK_ROOT env
+// first, then the sdk.dir recorded in local.properties (standard local setup).
+def androidSdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+if (androidSdkRoot == null) {
+    def localProps = rootProject.file("local.properties")
+    if (localProps.exists()) {
+        def matcher = (localProps.text =~ /sdk\.dir\s*=\s*(.+)/)
+        if (matcher.find()) androidSdkRoot = matcher.group(1).trim().replace("\\:", ":")
+    }
+}
+
+tasks.register("buildViewerNative", Exec) {
+    group = "build"
+    description = "Builds libleftcar_viewer.so (arm64-v8a) with cargo: cargo build -p android-viewer --target aarch64-linux-android --release"
+    workingDir repoRootDir
+    commandLine "cargo", "build", "-p", "android-viewer", "--target", "aarch64-linux-android", "--release"
+    // Incremental: Gradle skips the cargo invocation entirely when the built
+    // .so is newer than the Rust sources (the manual cargo-ndk flow); when it
+    // is stale or missing, cargo itself rebuilds only what changed.
+    inputs.files fileTree(dir: viewerCrateDir, include: ["src/**"])
+    inputs.file new File(viewerCrateDir, "Cargo.toml")
+    inputs.file rootProject.file("../../../Cargo.lock")
+    outputs.file viewerSo
+
+    doFirst {
+        def isWindows = System.getProperty("os.name").toLowerCase().contains("windows")
+        def cargo = findOnPath("cargo", isWindows)
+        if (cargo == null) {
+            throw new GradleException(
+                "buildViewerNative: `cargo` was not found on PATH. Install Rust (https://rustup.rs), " +
+                "or build the viewer native library manually with: " +
+                "cargo build -p android-viewer --target aarch64-linux-android --release")
+        }
+        def linkerDirs = []
+        (System.getenv("PATH") ?: "").split(File.pathSeparator).each { dir ->
+            def f = new File(dir, androidLinker)
+            if (f.isFile() && f.canExecute()) linkerDirs.add(dir)
+        }
+        if (linkerDirs.isEmpty() && androidSdkRoot != null) {
+            def ndkDir = new File(androidSdkRoot, "ndk")
+            // Newest installed NDK first.
+            def ndks = ndkDir.listFiles()?.sort { it.name }?.reverse() ?: []
+            for (ndk in ndks) {
+                def prebuilt = new File(ndk, "toolchains/llvm/prebuilt")
+                def hosts = prebuilt.listFiles() ?: []
+                for (host in hosts) {
+                    def bin = new File(host, "bin")
+                    if (new File(bin, androidLinker).isFile()) linkerDirs.add(bin.absolutePath)
+                }
+            }
+        }
+        if (linkerDirs.isEmpty()) {
+            throw new GradleException(
+                "buildViewerNative: Android NDK linker `${androidLinker}` was not found on PATH " +
+                "or under \$ANDROID_HOME/ndk/*/toolchains/llvm/prebuilt/*/bin (ANDROID_HOME=${androidSdkRoot}). " +
+                "Install the NDK (27.1.12297006), or build the viewer native library manually with: " +
+                "cargo build -p android-viewer --target aarch64-linux-android --release " +
+                "with the NDK llvm toolchain bin on PATH (see .cargo/config.toml)")
+        }
+        executable = cargo
+        environment "PATH", linkerDirs.first() + File.pathSeparator + (System.getenv("PATH") ?: "")
+    }
+}
+
 task copyViewerSo(type: Copy) {
-    from rootProject.file("../../../target/aarch64-linux-android/release/libleftcar_viewer.so")
+    from viewerSo
     into "libs/arm64-v8a"
 }
 
+copyViewerSo.dependsOn buildViewerNative
 preBuild.dependsOn copyViewerSo

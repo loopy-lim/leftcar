@@ -85,6 +85,11 @@ function makePayload(): QrPayload {
 
 const TOKEN_64HEX = "a".repeat(64);
 
+/** pairing.ts의 v2 키 규칙(호스트는 SecureStore 허용 문자로만 구성된다). */
+function tokenKeyOf(host: string, port: number): string {
+  return `leftcar.token.v2.${host}.${port}`;
+}
+
 beforeEach(() => {
   store.clear();
   vi.clearAllMocks();
@@ -199,7 +204,8 @@ describe("pairWithHost", () => {
       deviceId: store.get("leftcar.deviceId"),
       deviceName: deviceName(),
     });
-    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe(TOKEN_64HEX);
+    expect(store.get("leftcar.token")).toBeUndefined(); // 구버전 전역 키는 치운다
     expect(closeMock).toHaveBeenCalledTimes(1); // no leaked connection
   });
 
@@ -224,14 +230,14 @@ describe("pairWithHost", () => {
       deviceId: expect.any(String),
       deviceName: "Android 뷰어 테스트",
     });
-    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe(TOKEN_64HEX);
     expect(closeMock).toHaveBeenCalledTimes(1);
   });
 
   it("failure: throws and stores nothing", async () => {
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
-    expect(store.get("leftcar.token")).toBeUndefined();
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
     expect(closeMock).toHaveBeenCalledTimes(1); // closed even on failure
   });
 
@@ -239,10 +245,10 @@ describe("pairWithHost", () => {
     // 토큰은 발급한 호스트의 것이다 — 다른 호스트에 대한 실패한 페어링
     // 시도(예: 옛 호스트 QR 폴백에서 코드 오타)가 그 토큰을 지우면
     // 이미 페어링된 기기가 잠긴다. 만료 토큰은 연결 시 401로 자정된다.
-    store.set("leftcar.token", "a".repeat(64));
+    store.set(tokenKeyOf("192.168.1.5", 7777), "a".repeat(64));
     requestMock.mockRejectedValueOnce(new Error("pairing failed"));
     await expect(pairWithHost(makePayload(), "000000")).rejects.toThrow("pairing failed");
-    expect(store.get("leftcar.token")).toBe("a".repeat(64));
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe("a".repeat(64));
   });
 
   it("rejects a malformed issued token instead of storing it", async () => {
@@ -250,8 +256,24 @@ describe("pairWithHost", () => {
     await expect(pairWithHost(makePayload(), "123456")).rejects.toThrow(
       "leftcar:errPairingResponseInvalid",
     );
-    expect(store.get("leftcar.token")).toBeUndefined();
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
     expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores one token per host endpoint so pairing A does not clobber pairing B", async () => {
+    const tokenA = "a".repeat(64);
+    const tokenB = "b".repeat(64);
+    requestMock.mockResolvedValueOnce({ token: tokenA }).mockResolvedValueOnce({ token: tokenB });
+
+    await pairWithHost(makePayload(), "123456"); // 192.168.1.5:7777
+    await pairWithHostByCode("192.168.1.9", 8888, "123456");
+
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe(tokenA);
+    expect(store.get(tokenKeyOf("192.168.1.9", 8888))).toBe(tokenB);
+    expect(await getStoredToken({ host: "192.168.1.5", port: 7777 })).toBe(tokenA);
+    expect(await getStoredToken({ host: "192.168.1.9", port: 8888 })).toBe(tokenB);
+    // 새 키로 옮겨 갔으므로 구버전 전역 키는 없다.
+    expect(store.get("leftcar.token")).toBeUndefined();
   });
 });
 
@@ -270,19 +292,32 @@ describe("pairing code readiness", () => {
 
 describe("token storage", () => {
   it("getStoredToken_none_returns_null", async () => {
-    expect(await getStoredToken()).toBeNull();
+    expect(await getStoredToken({ host: "192.168.1.5", port: 7777 })).toBeNull();
   });
 
   it("getStoredToken_returns_stored_value", async () => {
-    store.set("leftcar.token", TOKEN_64HEX);
-    expect(await getStoredToken()).toBe(TOKEN_64HEX);
+    store.set(tokenKeyOf("192.168.1.5", 7777), TOKEN_64HEX);
+    expect(await getStoredToken({ host: "192.168.1.5", port: 7777 })).toBe(TOKEN_64HEX);
+  });
+
+  it("getStoredToken is scoped to its endpoint — another host reads null", async () => {
+    store.set(tokenKeyOf("192.168.1.5", 7777), TOKEN_64HEX);
+    expect(await getStoredToken({ host: "192.168.1.9", port: 8888 })).toBeNull();
   });
 
   it("clearToken_removes", async () => {
-    store.set("leftcar.token", TOKEN_64HEX);
-    await clearToken();
-    expect(store.get("leftcar.token")).toBeUndefined();
-    expect(await getStoredToken()).toBeNull();
+    store.set(tokenKeyOf("192.168.1.5", 7777), TOKEN_64HEX);
+    await clearToken({ host: "192.168.1.5", port: 7777 });
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
+    expect(await getStoredToken({ host: "192.168.1.5", port: 7777 })).toBeNull();
+  });
+
+  it("clearToken removes only the given host's key", async () => {
+    store.set(tokenKeyOf("192.168.1.5", 7777), TOKEN_64HEX);
+    store.set(tokenKeyOf("192.168.1.9", 8888), "b".repeat(64));
+    await clearToken({ host: "192.168.1.5", port: 7777 });
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
+    expect(store.get(tokenKeyOf("192.168.1.9", 8888))).toBe("b".repeat(64));
   });
 });
 
@@ -305,7 +340,7 @@ describe("approval-based QR pairing", () => {
     const result = await pairWithHostApproval(makePayload(), { pollMs: 1, onPending });
 
     expect(result).toEqual({ kind: "approved", token: TOKEN_64HEX });
-    expect(store.get("leftcar.token")).toBe(TOKEN_64HEX);
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe(TOKEN_64HEX);
     expect(requestMock).toHaveBeenCalledTimes(3);
     expect(onPending).toHaveBeenCalledTimes(2);
     // 코드는 비워 보낸다 — 승인은 Mac 사용자의 몫이다.
@@ -391,6 +426,31 @@ describe("approval-based QR pairing", () => {
       pairWithHostApproval(makePayload(), { signal: controller.signal }),
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("does not store the token when the caller cancels during the approval wait", async () => {
+    // F18: 요청이 끝난 직후(store 전)에도 취소를 검사한다 — 취소가 늦게
+    // 도착한 토큰을 저장해 페어링을 되살리면 안 된다.
+    let release!: (value: { token: string }) => void;
+    requestMock.mockImplementationOnce(
+      () =>
+        new Promise<{ token: string }>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const pending = pairWithHostApproval(makePayload(), {
+      pollMs: 1,
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(requestMock).toHaveBeenCalledTimes(1));
+    controller.abort();
+    release({ token: TOKEN_64HEX });
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
+    expect(closeMock).toHaveBeenCalled();
   });
 
   it("classifies rejection errors for the caller", () => {

@@ -16,7 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
-import { connectHost, controlClient, disconnectHost } from "../src/session";
+import { connectHost, controlClient, controlTarget, disconnectHost } from "../src/session";
 import {
   formatErrorMessage,
   isUnauthorizedError,
@@ -79,6 +79,7 @@ function formatRelativeTime(timestamp: number, language: "ko" | "en"): string {
 interface DiscoveredHostsSectionProps {
   hosts: FoundHost[];
   busy: boolean;
+  connectingTarget: string | null;
   nsdAvailable: boolean;
   emptyHint?: ReactNode;
   t: TranslationSchema;
@@ -90,6 +91,7 @@ interface DiscoveredHostsSectionProps {
 function DiscoveredHostsSection({
   hosts,
   busy,
+  connectingTarget,
   nsdAvailable,
   emptyHint,
   t,
@@ -111,41 +113,53 @@ function DiscoveredHostsSection({
 
       {hosts.length > 0 ? (
         <View style={styles.hostList}>
-          {hosts.map((h) => (
-            <Pressable
-              key={h.host}
-              style={({ pressed }) => [
-                styles.hostItem,
-                pressed && styles.itemPressed,
-              ]}
-              onPress={() => onConnect(h.host, h.port)}
-              disabled={busy}
-            >
-              <View style={styles.hostIconBox}>
-                <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
-              </View>
-              <View style={styles.hostInfo}>
-                <Text style={styles.hostName} numberOfLines={1}>
-                  {h.name || t.common.myComputer}
-                </Text>
-                <Text style={styles.hostAddr} numberOfLines={1}>
-                  {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
-                </Text>
-              </View>
-              <View style={styles.connectChip}>
-                <Text style={styles.connectChipText}>{t.common.connect}</Text>
-              </View>
-            </Pressable>
-          ))}
+          {hosts.map((h) => {
+            const connecting = connectingTarget === h.host;
+            return (
+              <Pressable
+                key={h.host}
+                style={({ pressed }) => [
+                  styles.hostItem,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => onConnect(h.host, h.port)}
+                disabled={busy}
+              >
+                <View style={styles.hostIconBox}>
+                  <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
+                </View>
+                <View style={styles.hostInfo}>
+                  <Text style={styles.hostName} numberOfLines={1}>
+                    {h.name || t.common.myComputer}
+                  </Text>
+                  <Text style={styles.hostAddr} numberOfLines={1}>
+                    {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
+                  </Text>
+                </View>
+                {connecting ? (
+                  <View style={styles.connectChip}>
+                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
+                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
+                  </View>
+                ) : (
+                  <View style={styles.connectChip}>
+                    <Text style={styles.connectChipText}>{t.common.connect}</Text>
+                  </View>
+                )}
+              </Pressable>
+            );
+          })}
         </View>
       ) : (
         <>
           <View style={styles.emptyBox}>
             <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
             <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
-            <Text style={styles.emptyText}>
-              {t.viewer.emptyHostsDesc}
-            </Text>
+            {!emptyHint && (
+              <Text style={styles.emptyText}>
+                {t.viewer.emptyHostsDesc}
+              </Text>
+            )}
           </View>
           {emptyHint}
         </>
@@ -157,6 +171,9 @@ function DiscoveredHostsSection({
 interface RecentHostsSectionProps {
   recentHosts: RecentHostItem[];
   busy: boolean;
+  connectingTarget: string | null;
+  /** NSD로 지금 발견되는 호스트 키(host:port) — 최근 목록의 생존 상태 표시에 쓴다. */
+  discoveredKeys: Set<string>;
   language: "ko" | "en";
   t: TranslationSchema;
   styles: ReturnType<typeof createStyles>;
@@ -169,6 +186,8 @@ interface RecentHostsSectionProps {
 function RecentHostsSection({
   recentHosts,
   busy,
+  connectingTarget,
+  discoveredKeys,
   language,
   t,
   styles,
@@ -189,44 +208,58 @@ function RecentHostsSection({
       </View>
 
       <View style={styles.hostList}>
-        {recentHosts.map((item) => (
-          <View key={`${item.host}:${item.port}`} style={styles.recentItem}>
-            <Pressable
-              style={({ pressed }) => [
-                styles.recentItemClickable,
-                pressed && styles.itemPressed,
-              ]}
-              onPress={() => onConnect(item.host, item.port)}
-              disabled={busy}
-            >
-              <View style={styles.recentIconBox}>
-                <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
-              </View>
-              <View style={styles.hostInfo}>
-                <Text style={styles.hostName} numberOfLines={1}>
-                  {item.name || item.host}
-                </Text>
-                <Text style={styles.hostAddr} numberOfLines={1}>
-                  {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
-                  {interpolate(t.viewer.lastConnected, {
-                    time: formatRelativeTime(item.lastConnected, language),
-                  })}
-                </Text>
-              </View>
-              <View style={styles.connectChip}>
-                <Text style={styles.connectChipText}>{t.common.connect}</Text>
-              </View>
-            </Pressable>
-            <Pressable
-              onPress={() => onRemoveHost(item)}
-              style={styles.recentDeleteBtn}
-              accessibilityLabel={t.viewer.deleteHost}
-              hitSlop={8}
-            >
-              <Ionicons name="close" size={15} color={colors.textDim} />
-            </Pressable>
-          </View>
-        ))}
+        {recentHosts.map((item) => {
+          const key = `${item.host}:${item.port}`;
+          const connecting = connectingTarget === item.host;
+          const reachable = discoveredKeys.has(key);
+          return (
+            <View key={key} style={styles.recentItem}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.recentItemClickable,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => onConnect(item.host, item.port)}
+                disabled={busy}
+              >
+                <View style={styles.recentIconBox}>
+                  <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
+                </View>
+                <View style={styles.hostInfo}>
+                  <Text style={styles.hostName} numberOfLines={1}>
+                    {item.name || item.host}
+                  </Text>
+                  <Text style={styles.hostAddr} numberOfLines={1}>
+                    {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
+                    {interpolate(t.viewer.lastConnected, {
+                      time: formatRelativeTime(item.lastConnected, language),
+                    })}
+                  </Text>
+                </View>
+                {connecting ? (
+                  <View style={styles.connectChip}>
+                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
+                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
+                  </View>
+                ) : (
+                  <View style={[styles.connectChip, !reachable && styles.connectChipDim]}>
+                    <Text style={[styles.connectChipText, !reachable && styles.connectChipDimText]}>
+                      {t.common.connect}
+                    </Text>
+                  </View>
+                )}
+              </Pressable>
+              <Pressable
+                onPress={() => onRemoveHost(item)}
+                style={styles.recentDeleteBtn}
+                accessibilityLabel={t.viewer.deleteHost}
+                hitSlop={8}
+              >
+                <Ionicons name="close" size={15} color={colors.textDim} />
+              </Pressable>
+            </View>
+          );
+        })}
       </View>
     </View>
   );
@@ -500,6 +533,7 @@ export default function Host() {
 
   const [ip, setIp] = useState("");
   const [busy, setBusy] = useState(false);
+  const [connectingTarget, setConnectingTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundHost>>({});
   const [hasStoredToken, setHasStoredToken] = useState(false);
@@ -516,15 +550,29 @@ export default function Host() {
   }, []);
 
   useEffect(() => {
-    void getStoredToken().then((token) => setHasStoredToken(!!token));
+    // 토큰은 호스트 엔드포인트별로 저장된다 — 현재 제어 세션 대상의 키만 본다.
+    const target = controlTarget();
+    if (target) void getStoredToken(target).then((token) => setHasStoredToken(!!token));
     void getRecentHosts().then(setRecentHosts);
   }, []);
 
-  const handleClearToken = useCallback(async () => {
-    await clearToken();
-    disconnectHost();
-    setHasStoredToken(false);
-    Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc);
+  // 파괴적 동작은 실행 전에 한 번 확인한다 — 뒤늦은 "삭제했습니다" 알림은
+  // 되돌릴 수 없다. 지우기는 확인 다이얼로그의 [지우기]에서만 일어난다.
+  const handleClearToken = useCallback(() => {
+    Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc, [
+      { text: t.common.cancel, style: "cancel" },
+      {
+        text: t.viewer.deleteHost,
+        style: "destructive",
+        onPress: () => {
+          const target = controlTarget();
+          void (target ? clearToken(target) : Promise.resolve()).then(() => {
+            disconnectHost();
+            setHasStoredToken(false);
+          });
+        },
+      },
+    ]);
   }, [t]);
 
   const handleRemoveRecentHost = useCallback(async (hostItem: RecentHostItem) => {
@@ -565,6 +613,7 @@ export default function Host() {
 
   const doConnect = useCallback(async (target: string, port = DEFAULT_CONTROL_PORT) => {
     setBusy(true);
+    setConnectingTarget(target);
     setError(null);
     try {
       if (!isTrustedHost(target)) {
@@ -607,6 +656,7 @@ export default function Host() {
       setError(formatErrorMessage(e));
     } finally {
       setBusy(false);
+      setConnectingTarget(null);
     }
   }, [found, t]);
 
@@ -654,6 +704,7 @@ export default function Host() {
         <DiscoveredHostsSection
           hosts={hosts}
           busy={busy}
+          connectingTarget={connectingTarget}
           nsdAvailable={Boolean(nsd)}
           emptyHint={
             showDiscoveryHint ? (
@@ -675,6 +726,8 @@ export default function Host() {
         <RecentHostsSection
           recentHosts={recentHosts}
           busy={busy}
+          connectingTarget={connectingTarget}
+          discoveredKeys={new Set(hosts.map((h) => `${h.host}:${h.port}`))}
           language={language}
           t={t}
           styles={styles}
@@ -897,6 +950,17 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       paddingVertical: 6,
       borderRadius: 6,
       flexShrink: 0,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    connectChipDim: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+    },
+    connectChipDimText: {
+      color: colors.textMuted,
     },
     connectChipText: {
       color: colors.btnPrimaryText,

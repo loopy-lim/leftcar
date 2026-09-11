@@ -28,7 +28,19 @@ export interface HostEndpoint {
 }
 
 const DEVICE_ID_KEY = "leftcar.deviceId";
-const TOKEN_KEY = "leftcar.token";
+/** 구버전 전역 토큰 키 — 모든 호스트가 하나의 토큰을 공유하던 v1. 폐기 대상. */
+const LEGACY_TOKEN_KEY = "leftcar.token";
+
+/**
+ * 토큰은 발급한 호스트 엔드포인트별로 저장된다 — 한 호스트의 401·토큰 삭제가
+ * 다른 페어링된 호스트를 잠그지 않는다. SecureStore 키는 영숫자와 `.`, `-`,
+ * `_`만 허용하므로 그 외 문자(IPv6 등)는 치환한다. 포트는 항상 정수라 끝에
+ * 붙이면 모호하지 않다.
+ */
+function tokenKey(host: string, port: number): string {
+  const sanitizedHost = host.replace(/[^A-Za-z0-9._-]/g, "_");
+  return `leftcar.token.v2.${sanitizedHost}.${port}`;
+}
 
 interface RawQrPayload {
   v?: unknown;
@@ -161,12 +173,20 @@ export async function getDeviceId(): Promise<string> {
   return id;
 }
 
-export async function getStoredToken(): Promise<string | null> {
-  return SecureStore.getItemAsync(TOKEN_KEY);
+/** 이 대상 호스트에 발급된 토큰을 읽는다(없으면 null). */
+export async function getStoredToken(target: HostEndpoint): Promise<string | null> {
+  return SecureStore.getItemAsync(tokenKey(target.host, target.port));
 }
 
-export async function clearToken(): Promise<void> {
-  await SecureStore.deleteItemAsync(TOKEN_KEY);
+/** 이 대상 호스트의 토큰만 치운다 — 다른 호스트의 토큰은 그대로 둔다. */
+export async function clearToken(target: HostEndpoint): Promise<void> {
+  await SecureStore.deleteItemAsync(tokenKey(target.host, target.port));
+}
+
+/** 발급 토큰을 페어링 대상 엔드포인트 아래에 저장하고 구버전 전역 키를 치운다. */
+async function storeToken(host: string, port: number, token: string): Promise<void> {
+  await SecureStore.setItemAsync(tokenKey(host, port), token);
+  await SecureStore.deleteItemAsync(LEGACY_TOKEN_KEY).catch(() => undefined);
 }
 
 /** Human-readable label sent with the pair request (host UI display only). */
@@ -250,7 +270,7 @@ async function pairAndStore(
     if (!TOKEN_PATTERN.test(token)) {
       throw new LocalizedError("errPairingResponseInvalid");
     }
-    await SecureStore.setItemAsync(TOKEN_KEY, token);
+    await storeToken(host, port, token);
     if (client.hostKey) rememberPinnedHostKey(host, port, client.hostKey);
     return token;
   } finally {
@@ -322,11 +342,14 @@ export async function pairWithHostApproval(
         "pair",
         args,
       );
+      // 요청 대기 중 취소됐다면 토큰을 검증·저장하지 않는다 — 취소 후 저장은
+      // 사용자가 거부한 페어링을 뒤늦게 되살린다.
+      throwIfAborted(options.signal);
       if (typeof response.token === "string") {
         if (!TOKEN_PATTERN.test(response.token)) {
           throw new LocalizedError("errPairingResponseInvalid");
         }
-        await SecureStore.setItemAsync(TOKEN_KEY, response.token);
+        await storeToken(p.host, p.port, response.token);
         if (client.hostKey) rememberPinnedHostKey(p.host, p.port, client.hostKey);
         return { kind: "approved", token: response.token };
       }

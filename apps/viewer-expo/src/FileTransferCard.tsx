@@ -7,8 +7,6 @@ import { currentTranslation } from "./language-store";
 import { formatErrorMessage } from "./control";
 import { requestWithReconnect } from "./catalog-helpers";
 import {
-  base64ToBytes,
-  bytesToBase64,
   listShareQueue,
   mapFileTransferError,
   receiveFile,
@@ -66,11 +64,10 @@ export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
         setBusy(false);
         return;
       }
-      const bytes = base64ToBytes(picked.base64);
       setStatus(interpolate(t.viewer.fileProgress, { percent: 0 }));
       const sent = await sendFile(
         reconnectClient,
-        { name: picked.name, bytes },
+        picked,
         (progress) =>
           setStatus(interpolate(t.viewer.fileProgress, { percent: progress.percent })),
       );
@@ -86,15 +83,15 @@ export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
     beginAction();
     try {
       const entries = await listShareQueue(reconnectClient);
-      setBusy(false);
       if (entries.length === 0) {
-        setQueue([]);
+        setQueue(null);
         setStatus(t.viewer.fileShareEmpty);
         return;
       }
       setQueue(entries);
     } catch (cause) {
       setError(fileTransferErrorText(cause));
+    } finally {
       setBusy(false);
     }
   }, [beginAction, t]);
@@ -103,16 +100,11 @@ export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
     async (entry: ShareQueueEntry) => {
       beginAction();
       try {
-        const received = await receiveFile(
-          reconnectClient,
-          entry,
-          (progress) =>
+        const received = await receiveFile(reconnectClient, entry, {
+          createSink: (name) => getFileIo().createReceivedSink(name),
+          onProgress: (progress) =>
             setStatus(interpolate(t.viewer.fileProgress, { percent: progress.percent })),
-        );
-        await getFileIo().saveReceivedFile(
-          received.name,
-          bytesToBase64(received.bytes),
-        );
+        });
         setStatus(interpolate(t.viewer.fileReceiveDone, { name: received.name }));
         setQueue(null);
       } catch (cause) {

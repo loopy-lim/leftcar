@@ -27,15 +27,6 @@ internal data class StreamSurfaces(
     fun allValid(): Boolean = holders.all { it.surface.isValid }
 
     fun requestFocus() = left.requestFocus()
-
-    fun normalizedX(eventX: Float, source: View): Float {
-        val local = eventX / source.width.coerceAtLeast(1).toFloat()
-        return if (right == null) {
-            local.coerceIn(0f, 1f)
-        } else {
-            ((if (source === right) 0.5f else 0f) + local * 0.5f).coerceIn(0f, 1f)
-        }
-    }
 }
 
 internal fun createStreamSurfaces(
@@ -46,21 +37,8 @@ internal fun createStreamSurfaces(
     callback: SurfaceHolder.Callback,
     pointerHandler: (View, android.view.MotionEvent) -> Boolean,
 ): StreamSurfaces {
-    fun surface(): SurfaceView = SurfaceView(activity).apply {
-        setBackgroundColor(Color.BLACK)
-        isFocusable = true
-        isFocusableInTouchMode = true
-        setZOrderOnTop(true)
-        pointerIcon = PointerIcon.getSystemIcon(activity, PointerIcon.TYPE_NULL)
-        setOnGenericMotionListener(pointerHandler)
-        setOnTouchListener { view, event ->
-            if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) view.requestFocus()
-            pointerHandler(view, event)
-        }
-        holder.setSizeFromLayout()
-        holder.setFormat(PixelFormat.OPAQUE)
-        holder.addCallback(callback)
-        holder.setKeepScreenOn(true)
+    fun surface(): SurfaceView = SurfaceView(activity).also {
+        configureSurface(it, activity, callback, pointerHandler)
     }
 
     if (!splitVertical) {

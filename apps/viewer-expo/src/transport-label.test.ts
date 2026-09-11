@@ -14,8 +14,8 @@ describe("transportBadgeLabel", () => {
     expect(transportBadgeLabel("tcp")).toBe("Wi-Fi (TCP)");
   });
 
-  it("falls back to ADB for adbTcp and unknown values", () => {
-    expect(transportBadgeLabel("adbTcp")).toBe("ADB");
-    expect(transportBadgeLabel("anything-else")).toBe("ADB");
+  it("falls back to the generic Wi-Fi label for adbTcp and unknown values", () => {
+    expect(transportBadgeLabel("adbTcp")).toBe("Wi-Fi");
+    expect(transportBadgeLabel("anything-else")).toBe("Wi-Fi");
   });
 });

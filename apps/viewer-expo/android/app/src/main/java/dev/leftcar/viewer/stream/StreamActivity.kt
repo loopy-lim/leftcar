@@ -140,14 +140,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun handleTermination(reason: Int) {
         if (terminationHandled) return
         terminationHandled = true
-        val message = when (reason) {
-            1 -> "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
-            2 -> "컴퓨터에서 이 화면 공유를 종료했습니다."
-            3 -> "컴퓨터에서 화면 공유를 종료했습니다."
-            4 -> "화면 렌더러를 다시 연결하고 있습니다."
-            5 -> "화면 공유를 다시 연결하고 있습니다."
-            else -> "화면 공유를 다시 연결하고 있습니다."
-        }
+        val message = ViewerStrings.terminationMessage(reason)
         if (reason == 4) {
             StreamLauncherModule.emitTermination(port, reason)
         }
@@ -234,10 +227,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             "local render recovery attempt=${attempt.number} result=$result " +
                 "port=$port source=${sourceWidth}x$sourceHeight fps=$fps",
         )
-        if (result == 0) {
-            hud?.onRebindFinished(true)
-        } else {
-            hud?.onRebindFinished(false)
+        // HUD 통지는 rebindOnSameSurface가 이미 했다 — 여기서 또 부르면
+        // 재시도마다 종료 폴링 재무장과 인디케이터 갱신이 두 번 일어난다.
+        if (result != 0) {
             scheduleRenderRecovery()
         }
     }
@@ -399,7 +391,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun normalizedPoint(view: View, x: Float, y: Float): Pair<Float, Float> {
         val split = streamSurfaces?.right != null
         val videoWidth = if (split) sourceWidth / 2 else sourceWidth
-        val mapped = mapAspectFitPoint(x, y, view.width, view.height, videoWidth, sourceHeight)
+        // 핀치줌 역변환: 뷰 좌표를 줌 이전 내용 좌표로 되돌린 뒤 어스펙트
+        // 매핑을 적용한다(줌인 상태에서도 포인터가 정확한 원격 위치로 간다).
+        val (contentX, contentY) = if (streamZoom.isZoomed) {
+            streamZoom.toContent(x, y)
+        } else {
+            x to y
+        }
+        val mapped = mapAspectFitPoint(contentX, contentY, view.width, view.height, videoWidth, sourceHeight)
         val nx = when {
             !split -> mapped.first
             view === streamSurfaces?.right -> 0.5f + mapped.first * 0.5f
@@ -407,12 +406,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         return nx to mapped.second
     }
-
-    private fun normalizedX(event: MotionEvent, view: View): Float =
-        normalizedPoint(view, event.x, event.y).first
-
-    private fun normalizedY(event: MotionEvent, view: View): Float =
-        normalizedPoint(view, event.x, event.y).second
 
     /**
      * 호스트가 원격 입력을 잠근 동안(상태 0)은 터치·마우스·키보드 이벤트를
@@ -433,6 +426,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         actionButton: Int,
         horizontalScroll: Float,
         verticalScroll: Float,
+        pressure: Float = -1f,
     ): Boolean {
         if (remoteInputLocked()) return true
         return ViewerNative.sendPointer(
@@ -444,6 +438,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             actionButton,
             horizontalScroll,
             verticalScroll,
+            pressure,
         ) == 0
     }
 
@@ -604,14 +599,24 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
             else -> event.buttonState
         }
+        // 스타일러스만 압력을 싣는다 — 손가락·마우스의 pressure는
+        // 기기 의존적이라 의미가 없다(음수 = 압력 없음).
+        val stylusPressure =
+            if (event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
+                event.pressure.coerceIn(0f, 1f)
+            } else {
+                -1f
+            }
+        val (nx, ny) = normalizedPoint(view, event.x, event.y)
         return sendPointerUnlocked(
             action,
-            normalizedX(event, view),
-            normalizedY(event, view),
+            nx,
+            ny,
             buttons,
             actionButton,
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+            stylusPressure,
         )
     }
 
@@ -623,6 +628,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchSlopPx = ViewConfiguration.get(this).scaledTouchSlop.toFloat(),
         )
     }
+
+    /** 핀치줌 상태 — 좌·우 분할 타일 모두 같은 변환으로 확대한다. */
+    private val streamZoom = StreamZoomState()
     private var longPressRunnable: Runnable? = null
     private var gestureLastX = 0f
     private var gestureLastY = 0f
@@ -658,6 +666,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             centroidX /= event.pointerCount
             centroidY /= event.pointerCount
         }
+        val spanPx = if (event.pointerCount >= 2) {
+            val dx = event.getX(0) - event.getX(1)
+            val dy = event.getY(0) - event.getY(1)
+            kotlin.math.sqrt(dx * dx + dy * dy)
+        } else {
+            0f
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
             MotionEvent.ACTION_POINTER_DOWN,
@@ -674,6 +689,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.y,
             centroidX,
             centroidY,
+            spanPx,
         )
         commands.forEach { command -> runGestureCommand(command, view) }
         syncLongPressTimer(view)
@@ -722,16 +738,40 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 )
             }
             is TouchGestureCommand.Scroll -> {
+                val (nx, ny) = normalizedPoint(view, gestureLastX, gestureLastY)
                 sendPointerUnlocked(
                     4,
-                    normalizedPoint(view, gestureLastX, gestureLastY).first,
-                    normalizedPoint(view, gestureLastX, gestureLastY).second,
+                    nx,
+                    ny,
                     0,
                     0,
                     command.horizontalLines,
                     command.verticalLines,
                 )
             }
+            is TouchGestureCommand.Zoom -> {
+                streamZoom.applyScale(command.factor, command.focusX, command.focusY, view.width, view.height)
+                applyZoomToSurfaces()
+            }
+        }
+    }
+
+    /**
+     * 현재 줌 상태를 스트림 서피스에 반영하고, 줌인 중에는 로컬 커서
+     * 오버레이를 끈다 — 오버레이는 줌을 모르는 전역 좌표로 그려져 위치가
+     * 어긋나기 때문이다(스냅아웃하면 다시 켠다).
+     */
+    private fun applyZoomToSurfaces() {
+        val surfaces = streamSurfaces ?: return
+        val split = surfaces.right != null
+        surfaces.left?.let {
+            if (split) streamZoom.applyToTile(it, leftTile = true) else streamZoom.applyToView(it)
+        }
+        surfaces.right?.let { streamZoom.applyToTile(it, leftTile = false) }
+        if (streamZoom.isZoomed && localCursorEnabled) {
+            disableCursorOverlay()
+        } else if (!streamZoom.isZoomed && localCursorEnabled) {
+            enableCursorOverlay()
         }
     }
 
@@ -832,6 +872,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ).also { hud ->
             hud.onGestureHelpTapped = { showGestureHint(true) }
             hud.onKeyboardToggle = { toggleSoftKeyboard() }
+            // 전체화면에서도 눈에 보이는 종료 경로 — finish()의 onDestroy가
+            // 렌더러 release(BYE)와 창 정리를 맡는다.
+            hud.onExitTapped = { finish() }
         }
         hud?.show()
         attachTextLens()
@@ -1016,6 +1059,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             { view, event -> forwardPointer(event, view) },
         )
         streamSurfaces = next
+        // 새 서피스는 변환 없이 태어나므로 줌 상태도 원점으로 되돌린다 —
+        // 남은 줌으로 두면 toContent가 낡은 변환으로 탭을 역산해 원격 입력이
+        // 엉뚱한 곳에 찍힌다. 커서 오버레이는 attach 직후 다시 켜진다.
+        streamZoom.reset()
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
         cancelPendingSurfaceAttach()

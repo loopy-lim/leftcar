@@ -14,7 +14,7 @@ describe("LocalizedError", () => {
   it("표시 시점 언어로 포맷된다", () => {
     setCurrentLanguage("ko");
     expect(new LocalizedError("errPairingCodeInvalid").format()).toBe(
-      "6자리 인증 코드를 정확히 입력해 주세요.",
+      "6자리 연결 코드를 정확히 입력해 주세요.",
     );
     setCurrentLanguage("en");
     expect(new LocalizedError("errPairingCodeInvalid").format()).toBe(

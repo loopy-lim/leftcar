@@ -89,6 +89,8 @@ object ViewerNative {
         actionButton: Int,
         horizontalScroll: Float,
         verticalScroll: Float,
+        /** 스타일러스 압력(0.0-1.0). 음수는 압력 없음. */
+        pressure: Float,
     ): Int
     external fun sendKey(
         instanceId: String,
