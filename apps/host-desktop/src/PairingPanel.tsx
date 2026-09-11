@@ -14,6 +14,8 @@ import {
   Laptop,
 } from "lucide-react";
 import { bannerAlertVariants, buttonVariants } from "./lib/variants";
+import { formatHostAddress } from "./hostState";
+import RevokeConfirmDialog, { type RevokeConfirm } from "./RevokeConfirmDialog";
 import {
   getTranslation,
   type SupportedLanguage,
@@ -102,7 +104,7 @@ function PairingIpBanner({
           </span>
         ) : (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-            <Copy size={13} /> {t.common.myComputer} IP 복사
+            <Copy size={13} /> {t.host.copyAddress}
           </span>
         )}
       </button>
@@ -362,6 +364,8 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
+  // 삭제는 보안상 되돌릴 수 없다 — 실행 전 한 번 확인한다.
+  const [revokeConfirm, setRevokeConfirm] = useState<RevokeConfirm | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedIp, setCopiedIp] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
@@ -427,17 +431,26 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const copyCode = useCallback(() => {
     if (!session) return;
-    void navigator.clipboard.writeText(session.code);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
-  }, [session]);
+    // 복사 성공을 확인한 뒤 표시한다 — 실패를 "복사됨"으로 속이지 않는다.
+    navigator.clipboard.writeText(session.code).then(
+      () => {
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 2000);
+      },
+      () => setError(t.host.copyFailed),
+    );
+  }, [session, t]);
 
   const copyIp = useCallback(() => {
     if (!lanIp) return;
-    void navigator.clipboard.writeText(`${lanIp}:${controlPort}`);
-    setCopiedIp(true);
-    setTimeout(() => setCopiedIp(false), 2000);
-  }, [lanIp, controlPort]);
+    navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
+      () => {
+        setCopiedIp(true);
+        setTimeout(() => setCopiedIp(false), 2000);
+      },
+      () => setError(t.host.copyFailed),
+    );
+  }, [lanIp, controlPort, t]);
 
   const revoke = useCallback(
     async (deviceId: string) => {
@@ -476,29 +489,32 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     }
   }, []);
 
-  const approveRequest = useCallback(async (offerId: string) => {
-    setDecidingId(offerId);
-    try {
-      await invoke("approve_pending_pairing", { offerId });
-      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
-    } catch {
-      // 다음 폴링이 목록을 정리한다
-    } finally {
-      setDecidingId(null);
-    }
-  }, []);
+  const decideRequest = useCallback(
+    async (command: "approve_pending_pairing" | "reject_pending_pairing", offerId: string) => {
+      setDecidingId(offerId);
+      try {
+        await invoke(command, { offerId });
+        setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
+      } catch (e) {
+        // 승인/거절 실패를 조용히 넘기면 요청이 사라진 것처럼 보인다 — 행을
+        // 남겨 다시 누를 수 있게 하고 오류는 기존 배너로 알린다.
+        setError(connectionErrorMessage(e, t));
+      } finally {
+        setDecidingId(null);
+      }
+    },
+    [t],
+  );
 
-  const denyRequest = useCallback(async (offerId: string) => {
-    setDecidingId(offerId);
-    try {
-      await invoke("reject_pending_pairing", { offerId });
-      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
-    } catch {
-      // 다음 폴링이 목록을 정리한다
-    } finally {
-      setDecidingId(null);
-    }
-  }, []);
+  const approveRequest = useCallback(
+    (offerId: string) => decideRequest("approve_pending_pairing", offerId),
+    [decideRequest],
+  );
+
+  const denyRequest = useCallback(
+    (offerId: string) => decideRequest("reject_pending_pairing", offerId),
+    [decideRequest],
+  );
 
   useEffect(() => {
     refreshDevices();
@@ -563,6 +579,21 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         </div>
       )}
 
+      {revokeConfirm && (
+        <RevokeConfirmDialog
+          confirm={revokeConfirm}
+          revoking={revoking}
+          t={t}
+          onCancel={() => setRevokeConfirm(null)}
+          onConfirm={() => {
+            const deviceId = revokeConfirm.deviceId;
+            setRevokeConfirm(null);
+            if (deviceId) void revoke(deviceId);
+            else void revokeAll();
+          }}
+        />
+      )}
+
       <PendingApprovalCard
         requests={pendingRequests}
         busyId={decidingId}
@@ -589,8 +620,13 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         revoking={revoking}
         language={language}
         t={t}
-        onRevoke={revoke}
-        onRevokeAll={revokeAll}
+        onRevoke={(deviceId) =>
+          setRevokeConfirm({
+            deviceId,
+            name: devices.find((device) => device.device_id === deviceId)?.name ?? null,
+          })
+        }
+        onRevokeAll={() => setRevokeConfirm({ deviceId: null, name: null })}
       />
     </div>
   );

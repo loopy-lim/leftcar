@@ -19,3 +19,8 @@ export function trayStatus(snapshot: HostSnapshotView): string {
   if (snapshot.pairingState === "connected") return "Leftcar — 연결됨, 대기 중";
   return "Leftcar";
 }
+
+/** Host address shown in the footer/pairing UI. No IP yet means port-only. */
+export function formatHostAddress(lanIp: string | null, controlPort: number): string {
+  return lanIp ? `${lanIp}:${controlPort}` : `:${controlPort}`;
+}

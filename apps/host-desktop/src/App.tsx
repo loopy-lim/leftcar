@@ -17,6 +17,8 @@ import {
   Moon,
   QrCode,
   RefreshCw,
+  EyeOff,
+  Lock,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -24,6 +26,7 @@ import {
   Tv,
   Wifi,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import {
   getTranslation,
@@ -31,11 +34,13 @@ import {
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
-import { trayStatus, type HostSnapshotView } from "./hostState";
+import { formatHostAddress, trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
+import Modal from "./Modal";
 import PairingPanel from "./PairingPanel";
 import Indicator from "./Indicator";
+import { Curtain, useClipboardShare, usePrivacySettings } from "./Privacy";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -55,6 +60,33 @@ type HostErrorKind =
   | "network"
   | "service"
   | "generic";
+
+interface FooterToggleProps {
+  icon: LucideIcon;
+  label: string;
+  title: string;
+  active: boolean;
+  onToggle: () => void;
+  onText: string;
+  offText: string;
+}
+
+/** Footer gate toggle (clipboard share / lock-on-disconnect / curtain). */
+function FooterToggle(props: FooterToggleProps) {
+  const Icon = props.icon;
+  return (
+    <button
+      type="button"
+      className={controlToggleVariants({ active: props.active })}
+      onClick={props.onToggle}
+      title={props.title}
+      aria-pressed={props.active}
+    >
+      <Icon size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+      {props.label} <strong>{props.active ? props.onText : props.offText}</strong>
+    </button>
+  );
+}
 
 interface HostErrorView {
   message: string;
@@ -100,6 +132,12 @@ export default function App() {
   // "보고 있음" 배지 창(U4a) — 캡처되는 화면 위에 연결 중임을 드러낸다.
   if (window.location.hash.startsWith("#/indicator")) {
     return <Indicator />;
+  }
+
+  // 프라이버시 커튼 창 — 스트리밍 중 물리 화면을 검게 가린다(캡처에서는
+  // 제외되므로 원격 뷰어는 화면을 그대로 본다).
+  if (window.location.hash.startsWith("#/curtain")) {
+    return <Curtain />;
   }
 
   return <Dashboard />;
@@ -265,6 +303,7 @@ function DashboardHeader({
   onToggleLanguage,
   onRefresh,
 }: DashboardHeaderProps) {
+  const ThemeIcon = { light: Sun, dark: Moon, system: Laptop }[themeMode];
   return (
     <header className="host-header">
       <div className="host-header-left">
@@ -329,15 +368,8 @@ function DashboardHeader({
           title={`${t.common.theme}: ${themeLabel}`}
           aria-label={`${t.common.theme}: ${themeLabel}`}
         >
-          {themeMode === "light" ? (
-            <Sun size={15} />
-          ) : themeMode === "dark" ? (
-            <Moon size={15} />
-          ) : (
-            <Laptop size={15} />
-          )}
-        </button>
-        <button
+          <ThemeIcon size={15} />
+        </button>        <button
           className={buttonVariants({ variant: "icon" })}
           onClick={onRefresh}
           title={`${t.common.refresh} (${t.host.shortcutRefresh})`}
@@ -356,6 +388,8 @@ interface DashboardFooterProps {
   copiedToast: boolean;
   inputPermission: boolean;
   clipboardShare: boolean;
+  lockOnDisconnect: boolean;
+  privacyCurtain: boolean;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   language: SupportedLanguage;
@@ -363,20 +397,20 @@ interface DashboardFooterProps {
   onCopyAddress: () => void;
   onRequestPermission: () => void;
   onToggleClipboardShare: () => void;
+  onToggleLockOnDisconnect: () => void;
+  onTogglePrivacyCurtain: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
-  const { t, language } = props;
-  const platformLabel =
-    props.platform === "macos"
-      ? t.common.myMac
-      : props.platform === "windows"
-        ? t.common.windowsPc
-        : t.common.myComputer;
+  const { t } = props;
+  const platformLabels: Record<HostSnapshotView["platform"], string> = {
+    macos: t.common.myMac,
+    windows: t.common.windowsPc,
+    linux: t.common.myComputer,
+  };
+  const platformLabel = platformLabels[props.platform];
 
-  const addressText = props.lanIp
-    ? `${props.lanIp}:${props.controlPort}`
-    : `:${props.controlPort}`;
+  const addressText = formatHostAddress(props.lanIp, props.controlPort);
 
   return (
     <footer className="host-footer">
@@ -416,22 +450,39 @@ function DashboardFooter(props: DashboardFooterProps) {
           )}
         </button>
         {/* 클립보드 공유 호스트 게이트(U5) — 세션 입력 토글과 같은 스타일. */}
-        <button
-          type="button"
-          className={controlToggleVariants({ active: props.clipboardShare })}
-          onClick={props.onToggleClipboardShare}
+        <FooterToggle
+          icon={ClipboardCheck}
+          label={t.host.clipboardShareLabel}
           title={t.host.clipboardShareDesc}
-          aria-pressed={props.clipboardShare}
-        >
-          <ClipboardCheck size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
-          {t.host.clipboardShareLabel}{" "}
-          <strong>{props.clipboardShare ? t.host.clipboardShareOn : t.host.clipboardShareOff}</strong>
-        </button>
+          active={props.clipboardShare}
+          onToggle={props.onToggleClipboardShare}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
+        {/* 세션 종료 후 자동 잠금 — 마지막 스트림이 끝나면 화면을 잠근다. */}
+        <FooterToggle
+          icon={Lock}
+          label={t.host.lockOnDisconnectLabel}
+          title={t.host.lockOnDisconnectDesc}
+          active={props.lockOnDisconnect}
+          onToggle={props.onToggleLockOnDisconnect}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
+        {/* 프라이버시 커튼 — 스트리밍 중 물리 화면을 검게 가린다(macOS). */}
+        <FooterToggle
+          icon={EyeOff}
+          label={t.host.privacyCurtainLabel}
+          title={t.host.privacyCurtainDesc}
+          active={props.privacyCurtain}
+          onToggle={props.onTogglePrivacyCurtain}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span className="footer-timestamp">
-          {platformLabel} · {t.host.lastUpdated} {props.lastUpdated.toLocaleTimeString(language === "ko" ? "ko-KR" : "en-US")}
-        </span>
+        {/* 폴링 타임스탬프는 소음일 뿐이다 — 상태는 배너가 문제일 때만 말한다. */}
+        <span className="footer-timestamp">{platformLabel}</span>
       </div>
     </footer>
   );
@@ -445,7 +496,7 @@ function TroubleshootingModal({
   t: TranslationSchema;
 }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <Modal onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 480 }}>
         <div className="modal-title-bar">
           <h3>{t.host.troubleshootTitle}</h3>
@@ -454,58 +505,28 @@ function TroubleshootingModal({
           </button>
         </div>
         <div className="modal-scroll-area" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <Wifi size={16} />
-              <span>{t.host.troubleshootWifi}</span>
+          {(
+            [
+              { icon: Wifi, title: t.host.troubleshootWifi, desc: t.host.troubleshootWifiDesc },
+              { icon: AlertTriangle, title: t.host.troubleshootAp, desc: t.host.troubleshootApDesc },
+              { icon: ShieldCheck, title: t.host.troubleshootFirewall, desc: t.host.troubleshootFirewallDesc },
+              { icon: Monitor, title: t.host.troubleshootPerm, desc: t.host.troubleshootPermDesc },
+              { icon: AppWindow, title: t.host.troubleshootHiddenWindow, desc: t.host.troubleshootHiddenWindowDesc },
+            ] as const
+          ).map(({ icon: Icon, title, desc }) => (
+            <div className="troubleshoot-card" key={title}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Icon size={16} />
+                <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>{title}</span>
+              </div>
+              <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                {desc}
+              </p>
             </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootWifiDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <AlertTriangle size={16} />
-              <span>{t.host.troubleshootAp}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootApDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <ShieldCheck size={16} />
-              <span>{t.host.troubleshootFirewall}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootFirewallDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <Monitor size={16} />
-              <span>{t.host.troubleshootPerm}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootPermDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <AppWindow size={16} />
-              <span>{t.host.troubleshootHiddenWindow}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootHiddenWindowDesc}
-            </p>
-          </div>
+          ))}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -519,7 +540,7 @@ function PairingModal({
   t: TranslationSchema;
 }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <Modal onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
           <h3>{t.host.pairingModalTitle}</h3>
@@ -531,7 +552,7 @@ function PairingModal({
           <PairingPanel language={language} />
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -549,11 +570,11 @@ function StopStreamModal({
   onConfirm: () => void;
 }) {
   return (
-    <dialog
-      open
-      className="modal-overlay"
-      aria-labelledby="stop-stream-title"
-      onClose={onCancel}
+    <Modal
+      labelledBy="stop-stream-title"
+      onClose={() => {
+        if (!busy) onCancel();
+      }}
     >
       <div className="modal-window stop-stream-modal">
         <div className="modal-title-bar">
@@ -579,7 +600,7 @@ function StopStreamModal({
           </div>
         </div>
       </div>
-    </dialog>
+    </Modal>
   );
 }
 
@@ -617,7 +638,7 @@ function TerminationBanner({
         <span className="termination-notice-target">
           {notice.sourceName} · {interpolate(t.host.connectedDevice, { addr: notice.viewerAddr })}
         </span>
-        <p><b>{t.host.terminationReasonLabel}</b> {notice.detail}</p>
+        <p>{notice.detail}</p>
       </div>
       <button className={buttonVariants({ variant: "close" })} onClick={onDismiss} aria-label={t.common.close}>
         <X size={15} />
@@ -871,11 +892,6 @@ function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
           <p>{t.host.idleDesc}</p>
         </div>
 
-        <div className="idle-status-chip">
-          <span className="status-dot" />
-          <span>{t.host.idleStatusReady}</span>
-        </div>
-
         <button className={buttonVariants({ variant: "primary", size: "lg" })} onClick={onOpenPairing} title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})`}>
           <QrCode size={15} />
           <span>{t.host.btnCreatePairing}</span>
@@ -1005,28 +1021,18 @@ function Dashboard() {
   const isStreaming = sessions.length > 0;
   useIndicatorWindow(isStreaming);
 
-  // 클립보드 공유 호스트 게이트(U5): 0600 settings.json에서 시작하며 토글은
-  // 즉시 효력을 가진다. 기본값은 꺼짐이다.
-  const [clipboardShare, setClipboardShare] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    void invoke<boolean>("get_clipboard_share")
-      .then((enabled) => {
-        if (!cancelled) setClipboardShare(enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // 클립보드 공유 호스트 게이트(U5) — 상태·토글은 Privacy 모듈의 훅이
+  // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
+  const { clipboardShare, toggleClipboardShare } = useClipboardShare();
 
-  const toggleClipboardShare = useCallback(() => {
-    const next = !clipboardShare;
-    setClipboardShare(next);
-    void invoke("set_clipboard_share", { enabled: next }).catch(() =>
-      setClipboardShare(!next),
-    );
-  }, [clipboardShare]);
+  // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
+  // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
+  const {
+    lockOnDisconnect,
+    privacyCurtain,
+    toggleLockOnDisconnect,
+    togglePrivacyCurtain,
+  } = usePrivacySettings();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1040,11 +1046,9 @@ function Dashboard() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShowPairingModal(false);
-        setShowHelpModal(false);
-        if (inputBusy === null) setPendingStopSession(null);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+      // Esc는 각 모달(네이티브 dialog cancel)이 자기 닫기를 소유한다 — 전역
+      // 핸들러가 닫으면 중첩된 확인 다이얼로그까지 한 번에 걷어진다.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setShowPairingModal((prev) => !prev);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
@@ -1057,7 +1061,7 @@ function Dashboard() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [inputBusy, refresh]);
+  }, [refresh]);
 
   const openAccessibilitySettings = async () => {
     try {
@@ -1130,10 +1134,13 @@ function Dashboard() {
     );
 
   const copyAddressInfo = () => {
-    const textToCopy = lanIp ? `${lanIp}:${controlPort}` : `:${controlPort}`;
-    void navigator.clipboard.writeText(textToCopy);
-    setCopiedToast(true);
-    setTimeout(() => setCopiedToast(false), 2000);
+    navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
+      () => {
+        setCopiedToast(true);
+        setTimeout(() => setCopiedToast(false), 2000);
+      },
+      () => setInputActionError(t.host.copyFailed),
+    );
   };
 
   const toggleTheme = () => {
@@ -1217,6 +1224,8 @@ function Dashboard() {
         copiedToast={copiedToast}
         inputPermission={inputPermission}
         clipboardShare={clipboardShare}
+        lockOnDisconnect={lockOnDisconnect}
+        privacyCurtain={privacyCurtain}
         platform={platform}
         lastUpdated={lastUpdated}
         language={language}
@@ -1224,6 +1233,8 @@ function Dashboard() {
         onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
         onToggleClipboardShare={toggleClipboardShare}
+        onToggleLockOnDisconnect={toggleLockOnDisconnect}
+        onTogglePrivacyCurtain={togglePrivacyCurtain}
       />
 
       {showPairingModal && (
@@ -1291,7 +1302,6 @@ function SessionCard({
           <div className="stream-card-name-group">
             <div className="stream-name-badge-row">
               <h3>{session.sourceName}</h3>
-              <span className="session-tag">#{session.session}</span>
             </div>
             <span className="stream-card-target">
               {interpolate(t.host.connectedDevice, { addr: session.viewerAddr })}
@@ -1324,14 +1334,7 @@ function SessionCard({
       <div className="stream-card-metrics-grid">
         <div className="metric-card">
           <span className="metric-card-label">{t.host.encoderOutput}</span>
-          <span className="metric-card-value font-emerald">
-            <span className="signal-bars" aria-hidden="true">
-              <span className="bar bar-1 active" />
-              <span className="bar bar-2 active" />
-              <span className="bar bar-3 active" />
-            </span>
-            {encodeOutputFps} FPS
-          </span>
+          <span className="metric-card-value font-emerald">{encodeOutputFps} FPS</span>
         </div>
 
         <div className="metric-card">

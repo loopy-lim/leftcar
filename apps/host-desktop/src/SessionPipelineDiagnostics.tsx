@@ -4,11 +4,11 @@ import { encoderDiagnosticsView } from "./encoderDiagnostics";
 import { cn } from "@leftcar/ui-tokens";
 import type { SessionRow } from "./sessionTypes";
 
-function Metric({ label, children, tone = "default" }: { label: string; children: ReactNode; tone?: "default" | "warning" }) {
+function Metric({ label, children, tone }: { label: string; children: ReactNode; tone?: "default" | "warning" }) {
   return (
     <div className="inspector-item">
       <span className="inspector-item-label">{label}</span>
-      <span className={tone === "default" ? "inspector-item-value" : cn(diagnosticValueVariants({ tone }))}>{children}</span>
+      <span className={cn(diagnosticValueVariants({ tone }))}>{children}</span>
     </div>
   );
 }

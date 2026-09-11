@@ -55,6 +55,28 @@ function experimentLabel(value: string | undefined): string {
   return value === undefined ? "측정 중" : (experimentLabels[value] ?? value);
 }
 
+function encoderModeLabel(mode: SessionRow["encoderMode"]): string {
+  switch (mode) {
+    case "ave":
+      return "AVE";
+    case "rtvc":
+      return "RTVC";
+    default:
+      return "미확인";
+  }
+}
+
+function accelerationLabel(accelerated: SessionRow["encoderHardwareAccelerated"]): string {
+  switch (accelerated) {
+    case true:
+      return "하드웨어";
+    case false:
+      return "소프트웨어";
+    default:
+      return "가속 확인 중";
+  }
+}
+
 function qpDetail(session: SessionRow): string {
   if (session.baseFrameQp === null) {
     return "QP 적용 안 됨";
@@ -73,16 +95,8 @@ function qpDetail(session: SessionRow): string {
 
 export function encoderDiagnosticsView(session: SessionRow): EncoderDiagnosticsView {
   const experimentDiagnosticsAvailable = session.encoderExperimentDiagnosticsAvailable === true;
-  const mode = session.encoderMode === "ave"
-    ? "AVE"
-    : session.encoderMode === "rtvc"
-      ? "RTVC"
-      : "미확인";
-  const acceleration = session.encoderHardwareAccelerated === true
-    ? "하드웨어"
-    : session.encoderHardwareAccelerated === false
-      ? "소프트웨어"
-      : "가속 확인 중";
+  const mode = encoderModeLabel(session.encoderMode);
+  const acceleration = accelerationLabel(session.encoderHardwareAccelerated);
   const unavailable = [
     session.encoderUnsupportedProperties?.length
       ? `미지원 ${session.encoderUnsupportedProperties.join(", ")}`
