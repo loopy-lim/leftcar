@@ -65,14 +65,36 @@ pub(super) fn run(
         config_sent = true;
     }
     let mut last_frame = None;
-    let mut interval_started = Instant::now();
-    let mut interval_frames = 0u32;
-    let mut interval_bytes = 0u64;
+    let mut interval = FrameInterval::new();
+    let mut last_capture_to_encode_us = 0u64;
 
     while !session.stop.load(Ordering::Acquire) {
         let frame = match pool.TryGetNextFrame() {
             Ok(frame) => frame,
             Err(_) => {
+                // An METransformHaveOutput raised after the last encode()
+                // call sits unpumped until the next WGC frame; on a static
+                // screen WGC goes quiet and finished encoder output would be
+                // held indefinitely. Run the same nonblocking
+                // MF_EVENT_FLAG_NO_WAIT pump encode() uses and forward
+                // whatever it drained. The send updates stats.frames, which
+                // also keeps the no-frame timeout below from misattributing
+                // an encoder-held stall to capture.
+                let pump_started = Instant::now();
+                let drained = encoder.pump_pending()?;
+                let encode_us = pump_started.elapsed().as_micros() as u64;
+                send_encoded_outputs(
+                    &sender,
+                    &session,
+                    started,
+                    drained,
+                    last_capture_to_encode_us,
+                    encode_us,
+                    &mut config_sent,
+                    &mut au_id,
+                    &mut last_frame,
+                    &mut interval,
+                )?;
                 if started.elapsed() > Duration::from_secs(5)
                     && session.stats.lock().unwrap().frames == 0
                 {
@@ -104,6 +126,7 @@ pub(super) fn run(
         let texture: ID3D11Texture2D =
             unsafe { access.GetInterface() }.map_err(win("obtain D3D11 texture from WGC frame"))?;
         let capture_to_encode_us = capture_started.elapsed().as_micros() as u64;
+        last_capture_to_encode_us = capture_to_encode_us;
         if session.force_keyframe.swap(false, Ordering::AcqRel) {
             encoder.force_keyframe();
         }
@@ -111,73 +134,121 @@ pub(super) fn run(
         let outputs = encoder.encode(&texture)?;
         frame.Close().ok();
         let encode_us = encode_started.elapsed().as_micros() as u64;
-        if outputs.is_empty() {
-            continue;
-        }
-
-        if session.stats.lock().unwrap().first_capture_ms == 0 {
-            session.stats.lock().unwrap().first_capture_ms = started.elapsed().as_millis() as u64;
-        }
-        for encoded in outputs {
-            let Some(annex_b) = wire::normalize_h264(&encoded) else {
-                return Err("Media Foundation emitted malformed H.264".into());
-            };
-            let parameter_sets = wire::h264_parameter_sets(&annex_b);
-            let keyframe = contains_idr(&annex_b);
-            if (!config_sent || keyframe) && !parameter_sets.is_empty() {
-                if let Some(config) = wire::config_datagram(&parameter_sets) {
-                    send_packet(&sender, &config, &session, false)?;
-                    config_sent = true;
-                }
-            }
-            // Do not send an undecodable access unit before SPS/PPS are known.
-            if !config_sent {
-                session.force_keyframe.store(true, Ordering::Release);
-                continue;
-            }
-            au_id = au_id.wrapping_add(1);
-            let wall_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let datagrams = wire::media_datagrams(au_id, wall_ms, &annex_b);
-            if datagrams.is_empty() {
-                return Err("encoded H.264 access unit exceeds Leftcar fragment limit".into());
-            }
-            let parity_datagrams =
-                crate::fec::parity_datagrams_for_media(au_id, wall_ms, &datagrams);
-            let send_started = Instant::now();
-            let mut bytes = 0usize;
-            for datagram in datagrams.into_iter().chain(parity_datagrams) {
-                send_packet(&sender, &datagram, &session, true)?;
-                bytes += datagram.len();
-            }
-            let send_us = send_started.elapsed().as_micros() as u64;
-            interval_frames += 1;
-            interval_bytes += bytes as u64;
-            update_stats(
-                &session,
-                started,
-                last_frame.replace(Instant::now()),
-                capture_to_encode_us,
-                encode_us,
-                send_us,
-                bytes,
-            );
-        }
-        if interval_started.elapsed() >= Duration::from_secs(1) {
-            let elapsed = interval_started.elapsed().as_secs_f64();
-            let mut stats = session.stats.lock().unwrap();
-            stats.fps = (interval_frames as f64 / elapsed).round() as u32;
-            stats.kbps = (interval_bytes as f64 * 8.0 / 1_000.0 / elapsed).round() as u32;
-            interval_frames = 0;
-            interval_bytes = 0;
-            interval_started = Instant::now();
-        }
+        send_encoded_outputs(
+            &sender,
+            &session,
+            started,
+            outputs,
+            capture_to_encode_us,
+            encode_us,
+            &mut config_sent,
+            &mut au_id,
+            &mut last_frame,
+            &mut interval,
+        )?;
     }
     capture.Close().ok();
     pool.Close().ok();
     session.stats.lock().unwrap().state = "stopped".into();
+    Ok(())
+}
+
+/// Per-interval fps/kbps counters, shared by the capture-driven encode path
+/// and the idle encoder pump so drained output is accounted identically.
+struct FrameInterval {
+    started: Instant,
+    frames: u32,
+    bytes: u64,
+}
+
+impl FrameInterval {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            frames: 0,
+            bytes: 0,
+        }
+    }
+}
+
+/// Send one batch of encoded access units (config/SPS gating, fragmentation,
+/// parity, per-AU stats and the fps/kbps interval rollup). Used by the WGC
+/// frame path and by the idle encoder pump, which forwards output that
+/// finished after the last encode() call returned.
+#[allow(clippy::too_many_arguments)]
+fn send_encoded_outputs(
+    sender: &MediaSender,
+    session: &WindowsSession,
+    started: Instant,
+    outputs: Vec<Vec<u8>>,
+    capture_to_encode_us: u64,
+    encode_us: u64,
+    config_sent: &mut bool,
+    au_id: &mut u16,
+    last_frame: &mut Option<Instant>,
+    interval: &mut FrameInterval,
+) -> Result<(), String> {
+    if outputs.is_empty() {
+        return Ok(());
+    }
+    if session.stats.lock().unwrap().first_capture_ms == 0 {
+        session.stats.lock().unwrap().first_capture_ms = started.elapsed().as_millis() as u64;
+    }
+    for encoded in outputs {
+        let Some(annex_b) = wire::normalize_h264(&encoded) else {
+            return Err("Media Foundation emitted malformed H.264".into());
+        };
+        let parameter_sets = wire::h264_parameter_sets(&annex_b);
+        let keyframe = contains_idr(&annex_b);
+        if (!*config_sent || keyframe) && !parameter_sets.is_empty() {
+            if let Some(config) = wire::config_datagram(&parameter_sets) {
+                send_packet(sender, &config, session, false)?;
+                *config_sent = true;
+            }
+        }
+        // Do not send an undecodable access unit before SPS/PPS are known.
+        if !*config_sent {
+            session.force_keyframe.store(true, Ordering::Release);
+            continue;
+        }
+        *au_id = au_id.wrapping_add(1);
+        let wall_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let datagrams = wire::media_datagrams(*au_id, wall_ms, &annex_b);
+        if datagrams.is_empty() {
+            return Err("encoded H.264 access unit exceeds Leftcar fragment limit".into());
+        }
+        let parity_datagrams = crate::fec::parity_datagrams_for_media(*au_id, wall_ms, &datagrams);
+        let send_started = Instant::now();
+        let mut bytes = 0usize;
+        for datagram in datagrams.into_iter().chain(parity_datagrams) {
+            send_packet(sender, &datagram, session, true)?;
+            bytes += datagram.len();
+        }
+        let send_us = send_started.elapsed().as_micros() as u64;
+        interval.frames += 1;
+        interval.bytes += bytes as u64;
+        update_stats(
+            session,
+            started,
+            last_frame.replace(Instant::now()),
+            capture_to_encode_us,
+            encode_us,
+            send_us,
+            bytes,
+        );
+    }
+    if interval.started.elapsed() >= Duration::from_secs(1) {
+        let elapsed = interval.started.elapsed().as_secs_f64();
+        let mut stats = session.stats.lock().unwrap();
+        stats.fps = (interval.frames as f64 / elapsed).round() as u32;
+        stats.kbps = (interval.bytes as f64 * 8.0 / 1_000.0 / elapsed).round() as u32;
+        interval.frames = 0;
+        interval.bytes = 0;
+        interval.started = Instant::now();
+    }
     Ok(())
 }
 
@@ -400,6 +471,19 @@ impl HardwareH264Encoder {
                 _ => {}
             }
         }
+    }
+
+    /// Nonblocking pump for the capture-idle path: drains pending Media
+    /// Foundation events with the same MF_EVENT_FLAG_NO_WAIT loop `encode`
+    /// uses and returns the finished access units so the caller can send
+    /// them. Empty result when the encoder queue has nothing pending; never
+    /// blocks, so it is safe to call every loop iteration.
+    fn pump_pending(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        let mut output = Vec::new();
+        if self.event_generator.is_some() {
+            self.pump_events(&mut output)?;
+        }
+        Ok(output)
     }
 
     fn drain_output(&mut self, output: &mut Vec<Vec<u8>>) -> Result<(), String> {

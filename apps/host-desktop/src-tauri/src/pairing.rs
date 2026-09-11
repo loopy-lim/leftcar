@@ -140,16 +140,36 @@ impl PairingServer {
             .and_then(load_devices)
             .unwrap_or_default();
         // 구버전 파일에는 token_hex가 인라인으로 있었다 — 토큰 저장소로
-        // 이관하고 파일에서는 지운다(마이그레이션은 1회).
+        // 이관하고 파일에서는 지운다. 이관은 저장소 쓰기+재독기가 확인된
+        // 기기만 수행한다: 키체인이 잠겨 있거나 거부하는 동안에는 인라인
+        // 토큰을 파일에 그대로 두고 다음 기동에 다시 시도한다(실패해도
+        // 자격 증명을 파괴하지 않는다).
         let mut migrated = Vec::new();
         let mut needs_rewrite = false;
         for mut device in paired {
             if !device.token_hex.is_empty() {
-                token_store.set(&device.device_id, &device.token_hex);
-                device.token_hex = String::new();
-                needs_rewrite = true;
+                // 쓰기가 Err여도 뒤의 재독기 검증이 어긋나므로 인라인 토큰이
+                // 살아 남는다 — 이관 경로에서는 실패를 굳이 끊지 않는다.
+                let stored = token_store
+                    .set(&device.device_id, &device.token_hex)
+                    .ok()
+                    .and_then(|_| token_store.get(&device.device_id));
+                if stored.as_deref() == Some(device.token_hex.as_str()) {
+                    // 이관 성공: 메모리 토큰은 그대로 두고(이번 기동의
+                    // 인증에 쓴다) 파일에서만 인라인 토큰을 걷어 간다.
+                    needs_rewrite = true;
+                } else {
+                    eprintln!(
+                        "leftcar: token store round-trip failed for {}; keeping the inline token",
+                        device.device_id
+                    );
+                }
+            } else {
+                // 이미 이관된 기기 — 저장소에서만 읽는다. 읽기 실패 시
+                // token_hex는 빈 채로 남고 authorize가 그 기기를 건너뛴다
+                // (fail-closed).
+                device.token_hex = token_store.get(&device.device_id).unwrap_or_default();
             }
-            device.token_hex = token_store.get(&device.device_id).unwrap_or_default();
             migrated.push(device);
         }
         paired = migrated;
@@ -251,7 +271,13 @@ impl PairingServer {
         let mut inner = self.inner.lock().unwrap();
 
         if code.is_empty() {
-            return Self::pair_awaiting_approval(&mut inner, offer_id, secret_b64url, device_id, name);
+            return Self::pair_awaiting_approval(
+                &mut inner,
+                offer_id,
+                secret_b64url,
+                device_id,
+                name,
+            );
         }
 
         if !inner.live_offers.contains(offer_id) {
@@ -268,7 +294,7 @@ impl PairingServer {
         let device = domain::ids::DeviceId::from_raw(device_id)
             .map_err(|_| PairingServerError::PairingFailed)?;
         match inner.service.approve(offer_id, device, &secret_proof, code) {
-            Ok(_device) => Ok(self.complete_pairing(&mut inner, offer_id, device_id, name)),
+            Ok(_device) => self.complete_pairing(&mut inner, offer_id, device_id, name),
             Err(_) => {
                 Self::record_pair_failure(&mut inner, offer_id);
                 Err(PairingServerError::PairingFailed)
@@ -305,7 +331,7 @@ impl PairingServer {
             .map_err(|_| PairingServerError::PairingFailed)?;
 
         match inner.service.approve(&offer_id, device, &secret.0, code) {
-            Ok(_device) => Ok(self.complete_pairing(&mut inner, &offer_id, device_id, name)),
+            Ok(_device) => self.complete_pairing(&mut inner, &offer_id, device_id, name),
             Err(_) => {
                 Self::record_pair_failure(&mut inner, &offer_id);
                 Err(PairingServerError::PairingFailed)
@@ -314,18 +340,23 @@ impl PairingServer {
     }
 
     /// Mint the pairing token, register the device, consume the offer, and
-    /// persist. Shared success tail of every pairing flow.
+    /// persist. Shared success tail of every pairing flow. Fails with
+    /// [PairingServerError::PersistenceFailed] when the token cannot be
+    /// stored — publishing a pickup token for a device the host would not
+    /// recognize after a restart is worse than failing the pairing.
     fn complete_pairing(
         &self,
         inner: &mut Inner,
         offer_id: &str,
         device_id: &str,
         name: &str,
-    ) -> String {
+    ) -> Result<String, PairingServerError> {
         inner.fail_counts.remove(offer_id);
         let token = session::OfferSecret::from_random();
         let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
-        inner.token_store.set(device_id, &token_hex);
+        // 토큰 저장이 실패하면 여기서 끊는다 — 기기 등록·픽업 토큰 게시
+        // 어느 쪽도 일어나지 않는다(fail-closed).
+        inner.token_store.set(device_id, &token_hex)?;
         let paired = PairedDevice {
             device_id: device_id.to_owned(),
             name: name.to_owned(),
@@ -342,7 +373,7 @@ impl PairingServer {
             // surfaced so callers/tests can detect a broken store
             eprintln!("leftcar: paired-device persistence failed");
         }
-        token_hex
+        Ok(token_hex)
     }
 
     /// Count a failed attempt against `offer_id`; three failures burn the
@@ -380,8 +411,7 @@ impl PairingServer {
             return Err(PairingServerError::PairingFailed);
         };
         if let Some(record) = inner.completed.get(offer_id) {
-            if record.device_id == device_id
-                && session::constant_time_eq(&record.secret.0, &proof)
+            if record.device_id == device_id && session::constant_time_eq(&record.secret.0, &proof)
             {
                 return Ok(record.token.clone());
             }
@@ -434,7 +464,10 @@ impl PairingServer {
             Ok(_device) => {
                 let token = session::OfferSecret::from_random();
                 let token_hex: String = token.0.iter().map(|b| format!("{b:02x}")).collect();
-                inner.token_store.set(&request.device_id, &token_hex);
+                // 토큰 저장이 실패하면 완료 레코드(픽업 토큰)를 올리지 않고
+                // 승인 자체를 실패로 끝낸다 — 뷰어가 토큰을 받아도 재기동
+                // 후 인증에 실패할 것이다(fail-closed).
+                inner.token_store.set(&request.device_id, &token_hex)?;
                 let paired = PairedDevice {
                     device_id: request.device_id,
                     name: request.device_name,
@@ -495,18 +528,11 @@ impl PairingServer {
     }
 
     /// Constant-time token check against every stored token. False when no
-    /// devices are paired.
+    /// devices are paired. A device whose token failed to load from the
+    /// store (empty `token_hex`) is skipped — comparing the zeros fallback
+    /// would let `"0".repeat(64)` authenticate as that device (fail-open).
     pub fn authorize(&self, token_hex: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
-        if inner.paired.is_empty() {
-            return false;
-        }
-        let Ok(bytes) = hex_decode32(token_hex) else {
-            return false;
-        };
-        inner.paired.iter().any(|d| {
-            session::constant_time_eq(&hex_decode32(&d.token_hex).unwrap_or([0u8; 32]), &bytes)
-        })
+        self.authorize_device(token_hex).is_some()
     }
 
     /// Cancel every live offer (zeroizing each secret via the service) and
@@ -549,7 +575,9 @@ impl PairingServer {
     }
 
     /// 토큰으로 장치를 찾는다(상수 시간 비교). 세션을 장치에 귀속시켜
-    /// revoke 시 라이브 스트림을 즉시 끊기 위해 필요하다.
+    /// revoke 시 라이브 스트림을 즉시 끊기 위해 필요하다. 저장소에서
+    /// 토큰을 못 읽은 기기(빈 token_hex)는 건너뛴다 — 제로 폴백과 비교하면
+    /// `"0".repeat(64)`가 그 기기로 인증된다(fail-open).
     pub fn authorize_device(&self, token_hex: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         if inner.paired.is_empty() {
@@ -562,12 +590,23 @@ impl PairingServer {
             .paired
             .iter()
             .find(|d| {
-                session::constant_time_eq(
-                    &hex_decode32(&d.token_hex).unwrap_or([0u8; 32]),
-                    &bytes,
-                )
+                hex_decode32(&d.token_hex)
+                    .map(|stored| session::constant_time_eq(&stored, &bytes))
+                    .unwrap_or(false)
             })
             .map(|d| d.device_id.clone())
+    }
+
+    /// 장치가 지금도 페어링돼 있는지 검사한다. 연결 인증은 소켓 수명당 한
+    /// 번이므로, 명령 실행 직전에 이 재검사를 돌려야 revoke 이후 같은
+    /// 연결로 계속 명령을 보내는 유리시간이 남지 않는다.
+    pub fn is_device_paired(&self, device_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .paired
+            .iter()
+            .any(|d| d.device_id == device_id)
     }
 
     /// Remove all paired devices and tokens; persists the change.
@@ -617,7 +656,10 @@ impl PairingServer {
 }
 
 /// 장치 메타데이터(토큰 제외)를 0600 파일로 기록한다.
-fn persist_devices(path: &std::path::Path, devices: &[PairedDevice]) -> Result<(), PairingServerError> {
+fn persist_devices(
+    path: &std::path::Path,
+    devices: &[PairedDevice],
+) -> Result<(), PairingServerError> {
     let body = serde_json::to_string_pretty(devices).map_err(|e| {
         eprintln!("leftcar: serialize paired devices: {e}");
         PairingServerError::PersistenceFailed
@@ -718,15 +760,20 @@ fn load_devices(path: &std::path::Path) -> Option<Vec<PairedDevice>> {
 // -- 토큰 저장소 ---------------------------------------------------------------
 
 /// 페어링 토큰의 저장소. 운영에서는 OS 자격 증명 보관소(macOS Keychain /
-/// Windows Credential Manager)를 쓰고, 실패하거나 미지원 플랫폼에서는 0600
-/// 파일로 폴백한다. 파일에는 메타데이터만 두고 토큰은 저장소로 분리한다.
+/// Windows Credential Manager)를 쓴다. [TokenStore::set]이 실패하면 Err를
+/// 돌려 페어링 자체를 실패시킨다 — 토큰을 저장하지 못한 채 성공을 보고하면
+/// 재기동 후 그 기기의 인증이 깨진다. 파일에는 메타데이터만 두고 토큰은
+/// 저장소로 분리한다.
 pub trait TokenStore: Send + Sync {
-    fn set(&self, device_id: &str, token_hex: &str);
+    fn set(&self, device_id: &str, token_hex: &str) -> Result<(), PairingServerError>;
     fn get(&self, device_id: &str) -> Option<String>;
     fn delete(&self, device_id: &str);
 }
 
-/// 운영 플랫폼에 맞는 저장소를 고른다. OS 보관소가 1순위.
+/// 운영 플랫폼에 맞는 저장소를 고른다. macOS·Windows에서는 OS 보관소를
+/// 쓰고, 그 밖의 플랫폼에서만 0600 파일 저장소를 쓴다. OS 보관소 쪽에는
+/// 파일 폴백이 없다 — 저장 실패는 폴백으로 흡수하지 않고 페어링을
+/// 실패시킨다([PairingServerError::PersistenceFailed]).
 pub fn token_store(fallback_path: Option<PathBuf>) -> Box<dyn TokenStore> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -742,16 +789,20 @@ pub fn token_store(fallback_path: Option<PathBuf>) -> Box<dyn TokenStore> {
 }
 
 /// OS 자격 증명 보관소 (keyring 크레이트 → macOS Keychain / Windows Credential
-/// Manager). 생성 실패 시 호출부가 파일 폴백으로 내려간다.
+/// Manager). 생성·저장 실패는 Err로 올라가 페어링을 실패시킨다 — 실패한
+/// 저장을 무시하고 성공을 보고하지 않는다.
 pub struct KeychainTokenStore;
 
 impl TokenStore for KeychainTokenStore {
-    fn set(&self, device_id: &str, token_hex: &str) {
-        if let Ok(entry) = keyring::Entry::new("leftcar-host", device_id) {
-            if let Err(e) = entry.set_password(token_hex) {
-                eprintln!("leftcar: keychain set failed for {device_id}: {e}");
-            }
-        }
+    fn set(&self, device_id: &str, token_hex: &str) -> Result<(), PairingServerError> {
+        let entry = keyring::Entry::new("leftcar-host", device_id).map_err(|e| {
+            eprintln!("leftcar: keychain entry failed for {device_id}: {e}");
+            PairingServerError::PersistenceFailed
+        })?;
+        entry.set_password(token_hex).map_err(|e| {
+            eprintln!("leftcar: keychain set failed for {device_id}: {e}");
+            PairingServerError::PersistenceFailed
+        })
     }
 
     fn get(&self, device_id: &str) -> Option<String> {
@@ -784,30 +835,47 @@ impl FileTokenStore {
         Self { path }
     }
 
-    fn write(&self, tokens: &std::collections::BTreeMap<String, String>) {
-        let Some(path) = &self.path else { return };
+    fn write(
+        &self,
+        tokens: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), PairingServerError> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| {
+                eprintln!("leftcar: create token file dir: {e}");
+                PairingServerError::PersistenceFailed
+            })?;
         }
         let body = serde_json::to_string(tokens).unwrap_or_else(|_| "{}".into());
         #[cfg(unix)]
         {
             use std::io::Write as _;
             use std::os::unix::fs::OpenOptionsExt;
-            let _ = std::fs::OpenOptions::new()
+            std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
                 .open(path)
-                .and_then(|mut f| f.write_all(body.as_bytes()));
+                .and_then(|mut f| f.write_all(body.as_bytes()))
+                .map_err(|e| {
+                    eprintln!("leftcar: write token file: {e}");
+                    PairingServerError::PersistenceFailed
+                })
         }
         #[cfg(not(unix))]
-        let _ = std::fs::write(path, body);
+        std::fs::write(path, body).map_err(|e| {
+            eprintln!("leftcar: write token file: {e}");
+            PairingServerError::PersistenceFailed
+        })
     }
 
     fn read(&self) -> std::collections::BTreeMap<String, String> {
-        let Some(path) = &self.path else { return Default::default() };
+        let Some(path) = &self.path else {
+            return Default::default();
+        };
         std::fs::read_to_string(path)
             .ok()
             .and_then(|body| serde_json::from_str(&body).ok())
@@ -816,10 +884,10 @@ impl FileTokenStore {
 }
 
 impl TokenStore for FileTokenStore {
-    fn set(&self, device_id: &str, token_hex: &str) {
+    fn set(&self, device_id: &str, token_hex: &str) -> Result<(), PairingServerError> {
         let mut tokens = self.read();
         tokens.insert(device_id.to_owned(), token_hex.to_owned());
-        self.write(&tokens);
+        self.write(&tokens)
     }
 
     fn get(&self, device_id: &str) -> Option<String> {
@@ -829,7 +897,9 @@ impl TokenStore for FileTokenStore {
     fn delete(&self, device_id: &str) {
         let mut tokens = self.read();
         tokens.remove(device_id);
-        self.write(&tokens);
+        // 삭제 실패는 무시한다 — 메타데이터에서 기기가 지워졌다면 남은
+        // 토큰으로는 authorize가 불가능하다(토큰 파일에 접근하지 않는다).
+        let _ = self.write(&tokens);
     }
 }
 
@@ -845,6 +915,161 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// 모든 동작이 실패하는 저장소(잠긴 키체인 등) — 마이그레이션·페어링
+    /// 실패 경로 검증용.
+    struct FailingStore;
+
+    impl TokenStore for FailingStore {
+        fn set(&self, _: &str, _: &str) -> Result<(), PairingServerError> {
+            Err(PairingServerError::PersistenceFailed)
+        }
+        fn get(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn delete(&self, _: &str) {}
+    }
+
+    fn write_legacy_file(path: &std::path::Path, device_id: &str, token_hex: &str) {
+        let body = format!(
+            r#"[{{"device_id":"{device_id}","name":"Viewer","token_hex":"{token_hex}","paired_at":"2026-09-09T00:00:00Z"}}]"#
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn legacy_inline_token_survives_a_failing_token_store() {
+        let path = temp_store_path("legacy-keep");
+        let token = "11".repeat(32);
+        write_legacy_file(&path, "dev-1", &token);
+        let server = PairingServer::new([9u8; 32], Some(path.clone()), Box::new(FailingStore));
+        // 저장소가 전부 실패해도 인라인 토큰이 살아 있어 인증이 동작한다.
+        assert!(server.authorize(&token));
+        assert_eq!(server.authorize_device(&token).as_deref(), Some("dev-1"));
+        // 파일도 그대로 — 마이그레이션이 자격 증명을 파괴하지 않는다.
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains(&token),
+            "the inline token must stay until the store accepts it"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failing_token_store_fails_pairing_and_registers_nothing() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FailingStore));
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+        let e = server.pair(
+            payload["id"].as_str().unwrap(),
+            payload["s"].as_str().unwrap(),
+            &view.code,
+            "viewer-1",
+            "Quest 3",
+        );
+        // 토큰을 못 저장했으면 성공을 보고하지 않는다.
+        assert_eq!(e.unwrap_err(), PairingServerError::PersistenceFailed);
+        assert!(
+            server.list_devices().is_empty(),
+            "a failed token store must not register the device"
+        );
+    }
+
+    #[test]
+    fn failing_token_store_fails_pair_by_code() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FailingStore));
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let e = server.pair_by_code(&view.code, "viewer-1", "Quest 3");
+        assert_eq!(e.unwrap_err(), PairingServerError::PersistenceFailed);
+        assert!(server.list_devices().is_empty());
+    }
+
+    #[test]
+    fn failing_token_store_fails_approval_and_publishes_no_pickup_token() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FailingStore));
+        let (offer_id, secret_b64, _code) = begin_offer_parts(&server);
+        assert!(matches!(
+            server.pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR"),
+            Err(PairingServerError::Pending)
+        ));
+        // 승인은 토큰 저장에 실패해 끝난다 — 완료 레코드(픽업 토큰)도 없다.
+        assert_eq!(
+            server.approve_pending(&offer_id).unwrap_err(),
+            PairingServerError::PersistenceFailed
+        );
+        assert!(server
+            .pair(&offer_id, &secret_b64, "", "viewer-1", "Galaxy XR")
+            .is_err());
+        assert!(server.list_devices().is_empty());
+    }
+
+    #[test]
+    fn restart_after_a_failed_pairing_grants_no_auth() {
+        let path = temp_store_path("failed-pair-restart");
+        {
+            let server = PairingServer::new([7u8; 32], Some(path.clone()), Box::new(FailingStore));
+            let view = server.begin_pairing("192.168.0.10", 7777);
+            let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+            assert!(server
+                .pair(
+                    payload["id"].as_str().unwrap(),
+                    payload["s"].as_str().unwrap(),
+                    &view.code,
+                    "viewer-1",
+                    "Quest 3",
+                )
+                .is_err());
+        }
+        // 재기동 후 저장소가 정상이어도 실패한 페어링의 기기·토큰은 없다.
+        let restarted = PairingServer::new(
+            [7u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(path.with_extension("tokens")))),
+        );
+        assert!(restarted.list_devices().is_empty());
+        assert!(!restarted.authorize(&"ab".repeat(32)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn zeros_token_never_authenticates_an_unloaded_device() {
+        let path = temp_store_path("zeros-failclosed");
+        // 토큰이 저장소에서 사라진 기기: 파일에는 토큰이 없고 저장소도 실패.
+        std::fs::write(
+            &path,
+            r#"[{"device_id":"dev-2","name":"Viewer","paired_at":"2026-09-09T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        let server = PairingServer::new([9u8; 32], Some(path.clone()), Box::new(FailingStore));
+        // 빈 token_hex 기기는 제로 토큰("0"*64)으로 인증되지 않는다 — fail-closed.
+        assert!(!server.authorize(&"0".repeat(64)));
+        assert!(server.authorize_device(&"0".repeat(64)).is_none());
+        // 그 기기로 어떤 추측 토큰도 인증되지 않는다.
+        assert!(server.authorize_device(&"ab".repeat(32)).is_none());
+        assert!(!server.authorize(&"ab".repeat(32)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn migration_completes_when_the_store_round_trips() {
+        let path = temp_store_path("legacy-migrate-ok");
+        let token = "22".repeat(32);
+        write_legacy_file(&path, "dev-3", &token);
+        let mut tokens_path = temp_store_path("legacy-migrate-tokens");
+        tokens_path.set_extension("tokens");
+        let server = PairingServer::new(
+            [9u8; 32],
+            Some(path.clone()),
+            Box::new(FileTokenStore::new(Some(tokens_path))),
+        );
+        assert!(server.authorize(&token));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains(&token),
+            "a successful migration strips the inline token from the file"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1090,6 +1315,27 @@ mod tests {
         assert!(!restarted.authorize(&token));
         assert!(restarted.list_devices().is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn is_device_paired_tracks_revoke() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
+        let view = server.begin_pairing("192.168.0.10", 7777);
+        let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+        server
+            .pair(
+                payload["id"].as_str().unwrap(),
+                payload["s"].as_str().unwrap(),
+                &view.code,
+                "viewer-1",
+                "Quest 3",
+            )
+            .unwrap();
+        assert!(server.is_device_paired("viewer-1"));
+        assert!(!server.is_device_paired("viewer-2"));
+        // 철회 직후 명령 실행 직전 검사가 거짓이 되어야 한다(M1).
+        assert!(server.revoke("viewer-1"));
+        assert!(!server.is_device_paired("viewer-1"));
     }
 
     #[test]

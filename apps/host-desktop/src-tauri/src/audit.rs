@@ -5,6 +5,10 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+/// 감사 로그 회전 크기. 넘으면 현재 파일을 `.jsonl.1`으로 밀어내고 새로
+/// 시작한다(백업 한 세대만 유지 — 감사 로그는 운영 진단용이다).
+const ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
 pub struct SessionAudit {
     path: Option<PathBuf>,
 }
@@ -20,11 +24,24 @@ impl SessionAudit {
         Self { path }
     }
 
+    /// 상한 초과 시 한 세대 백업으로 회전한다. 실패는 무시한다 — 회전 실패가
+    /// 감사 기록 자체를 막아서는 안 된다.
+    fn rotate_if_large(path: &std::path::Path) {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return;
+        };
+        if metadata.len() <= ROTATE_BYTES {
+            return;
+        }
+        let _ = std::fs::rename(path, path.with_extension("jsonl.1"));
+    }
+
     pub fn log(&self, event: &str, fields: serde_json::Value) {
         let Some(path) = &self.path else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        Self::rotate_if_large(path);
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -48,12 +65,19 @@ impl SessionAudit {
                 }
             }
         }
+        // mode는 생성 시에만 적용된다 — 새 파일이 0644로 태어나 다음 log에서
+        // 고쳐지는 빈틈을 막는다. 기존 레거시 파일의 권한 수리는 위에서 그대로
+        // 한다.
         #[cfg(unix)]
-        let result = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| writeln!(f, "{line}"));
+        let result = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+                .and_then(|mut f| writeln!(f, "{line}"))
+        };
         #[cfg(not(unix))]
         let result = std::fs::OpenOptions::new()
             .create(true)
@@ -86,7 +110,10 @@ mod tests {
             "session_started",
             serde_json::json!({ "device": "viewer-1", "session": 3 }),
         );
-        audit.log("session_stopped", serde_json::json!({ "session": 3, "reason": "operator" }));
+        audit.log(
+            "session_stopped",
+            serde_json::json!({ "session": 3, "reason": "operator" }),
+        );
         let body = std::fs::read_to_string(&path).unwrap();
         let mut lines = body.lines();
         let first: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
@@ -102,6 +129,56 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn oversized_log_rotates_to_one_backup_generation() {
+        let path = temp_path("rotate");
+        std::fs::write(&path, vec![b'x'; 16]).unwrap();
+        // 크기 상한보다 큰 파일을 심는다.
+        std::fs::write(&path, vec![b'x'; (ROTATE_BYTES + 1) as usize]).unwrap();
+        let audit = SessionAudit::new(Some(path.clone()));
+        audit.log("session_started", serde_json::json!({ "device": "d" }));
+        let backup = path.with_extension("jsonl.1");
+        assert!(backup.exists(), "the old generation must move to .jsonl.1");
+        assert_eq!(std::fs::metadata(&backup).unwrap().len(), ROTATE_BYTES + 1);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("session_started"),
+            "the new file starts fresh"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "the post-rotation file must be owner-only, got {:o}",
+                mode
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_log_creates_the_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_path("first-perm");
+        let audit = SessionAudit::new(Some(path.clone()));
+        // 첫 호출에서 곧바로 권한을 단정한다 — 파일이 이미 있을 때만 권한을
+        // 고치던 구조에서는 이 경계가 0644로 태어났다.
+        audit.log("session_started", serde_json::json!({ "device": "d" }));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "a fresh audit file must not be group/world accessible, got {:o}",
+            mode
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

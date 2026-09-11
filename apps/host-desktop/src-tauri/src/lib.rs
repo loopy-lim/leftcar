@@ -10,10 +10,11 @@ pub mod backend;
 pub mod clipboard;
 pub mod control;
 pub mod fec;
-pub mod file_transfer;
 #[cfg(target_os = "macos")]
 pub mod ffi;
+pub mod file_transfer;
 pub mod identity;
+pub mod lock;
 pub mod pairing;
 pub mod settings;
 #[cfg(target_os = "windows")]
@@ -78,6 +79,9 @@ pub fn run() {
     // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
     server.set_clipboard_share(settings.clipboard_share());
     server.set_settings(settings.clone());
+    // 세션 종료 후 화면 잠금 실행부(설정 lock_on_disconnect가 켜져 있을 때
+    // 마지막 세션 teardown에서 호출된다).
+    server.set_lock_screen(std::sync::Arc::new(lock::lock_workstation));
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -118,6 +122,9 @@ pub fn run() {
             set_clipboard_share,
             get_file_share,
             set_file_share,
+            get_privacy_settings,
+            set_lock_on_disconnect,
+            set_privacy_curtain,
             add_share_files,
             list_share_queue,
             remove_share_file
@@ -128,6 +135,8 @@ pub fn run() {
             server.set_clipboard(Arc::new(clipboard::TauriClipboard::new(
                 app.handle().clone(),
             )));
+            let curtain_controller = make_curtain_controller(app.handle().clone());
+            server.set_curtain_controller(curtain_controller);
             app.manage(server);
             app.manage(pairing);
             app.manage(audit);
@@ -139,7 +148,7 @@ pub fn run() {
             let show_item =
                 MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
             let pairing_item =
-                MenuItem::with_id(app, "pairing", "기기 페어링…", true, None::<&str>)?;
+                MenuItem::with_id(app, "pairing", "연결 코드 만들기…", true, None::<&str>)?;
             let quit_item =
                 MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &pairing_item, &quit_item])?;
@@ -234,7 +243,7 @@ fn show_pairing_window(app: &tauri::AppHandle) {
         "pairing",
         WebviewUrl::App("index.html#/pairing".into()),
     )
-    .title("기기 페어링")
+    .title("연결 코드 만들기")
     .inner_size(420.0, 560.0)
     .resizable(false)
     .build()
@@ -279,6 +288,76 @@ fn create_indicator_window(app: &tauri::App) {
         let _ = window.set_ignore_cursor_events(true);
         let _ = window.set_visible_on_all_workspaces(true);
     }
+}
+
+/// 프라이버시 커튼: 모니터마다 검은 풀스크린 오버레이를 띄운다(커튼 창은
+/// macOS shim이 캡처에서 제외한다 — 제목 "leftcar-curtain"으로 식별).
+/// 적용 성공 여부를 돌려준다 — 실패한 토글은 상태로 커밋되지 않아 다음
+/// refresh 트리거에서 재시도된다(control.rs M3). WGC 모니터 캡처는 창
+/// 제외를 지원하지 않아 Windows v1은 no-op이다.
+#[cfg(target_os = "macos")]
+fn make_curtain_controller(
+    app_handle: tauri::AppHandle,
+) -> std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync> {
+    std::sync::Arc::new(move |show| refresh_curtain_windows(&app_handle, show))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn make_curtain_controller(
+    _app_handle: tauri::AppHandle,
+) -> std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync> {
+    std::sync::Arc::new(|_show| {
+        eprintln!("leftcar: privacy curtain is macOS-only in v1");
+        true
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_curtain_windows(app_handle: &tauri::AppHandle, show: bool) -> bool {
+    let monitors = app_handle.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        // 모니터를 못 읽으면 창을 놓을 자리가 없다 — show는 실패로 보고
+        // 다음 refresh에서 재시도하게 한다.
+        return !show;
+    }
+    let mut applied = true;
+    for (index, monitor) in monitors.iter().enumerate() {
+        let label = format!("curtain-{index}");
+        if !show {
+            if let Some(window) = app_handle.get_webview_window(&label) {
+                if window.close().is_err() {
+                    applied = false;
+                }
+            }
+            continue;
+        }
+        if app_handle.get_webview_window(&label).is_some() {
+            continue;
+        }
+        // 물리 좌표를 논리 좌표로 환산해 모니터 원점에 정확히 맞춘다.
+        let scale = monitor.scale_factor();
+        let position = monitor.position();
+        let size = monitor.size();
+        let built = tauri::WebviewWindowBuilder::new(
+            app_handle,
+            &label,
+            WebviewUrl::App("index.html#/curtain".into()),
+        )
+        .title("leftcar-curtain")
+        .decorations(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .resizable(false)
+        .maximizable(false)
+        .position(position.x as f64 / scale, position.y as f64 / scale)
+        .inner_size(size.width as f64 / scale, size.height as f64 / scale)
+        .build();
+        if let Err(error) = built {
+            eprintln!("failed to create curtain window {index}: {error}");
+            applied = false;
+        }
+    }
+    applied
 }
 
 /// Prime the display catalog before the first viewer opens it. On macOS this
@@ -474,9 +553,7 @@ fn approve_pending_pairing(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
     offer_id: String,
 ) -> Result<(), String> {
-    state
-        .approve_pending(&offer_id)
-        .map_err(|e| e.to_string())
+    state.approve_pending(&offer_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -529,9 +606,7 @@ fn revoke_all_devices(
 }
 
 #[tauri::command]
-fn get_clipboard_share(
-    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
-) -> bool {
+fn get_clipboard_share(state: tauri::State<'_, std::sync::Arc<control::ControlServer>>) -> bool {
     state.clipboard_share_enabled()
 }
 
@@ -548,10 +623,53 @@ fn set_clipboard_share(
 }
 
 #[tauri::command]
-fn get_file_share(
-    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-) -> bool {
+fn get_file_share(settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>) -> bool {
     settings.file_share()
+}
+
+#[tauri::command]
+fn get_privacy_settings(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+) -> (bool, bool) {
+    (settings.lock_on_disconnect(), settings.privacy_curtain())
+}
+
+#[tauri::command]
+fn set_lock_on_disconnect(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_lock_on_disconnect(enabled)?;
+    audit_state.log(
+        "lock_on_disconnect_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_privacy_curtain(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_privacy_curtain(enabled)?;
+    // 즉시 반영: 켜면 살아 있는 세션이 있을 때 오버레이를 띄우고, 끄면
+    // 치운다.
+    state.refresh_curtain();
+    if enabled {
+        // 이미 스트리밍 중인 세션의 SCK 필터는 시작 시점의 창 스냅샷으로
+        // 제외 목록을 만들었다 — 방금 띄운 커튼이 캡처에서 빠지게 같은
+        // 형태로 재시작해 필터를 다시 만든다(H1).
+        state.restart_sessions_for_curtain().await;
+    }
+    audit_state.log(
+        "privacy_curtain_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
 }
 
 #[tauri::command]

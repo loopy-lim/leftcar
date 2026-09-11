@@ -29,6 +29,35 @@ pub(super) struct Monitor {
 
 const MAX_TCP_MEDIA_FRAME: usize = 16 * 1024 * 1024;
 
+/// 스레드 생존 중 절전을 막는 SetThreadExecutionState 가드. 스트리밍 중
+/// 시스템·디스플레이가 유휴 절전에 들어가면 캡처가 끊긴다 — 세션 스레드
+/// 시작 시 잡고 끝나면 원복한다(SetThreadExecutionState는 스레드 단위).
+struct ExecutionGuard;
+
+impl ExecutionGuard {
+    fn acquire() -> ExecutionGuard {
+        use windows::Win32::System::Power::{
+            SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+            EXECUTION_STATE,
+        };
+        unsafe {
+            SetThreadExecutionState(EXECUTION_STATE(
+                ES_CONTINUOUS.0 | ES_SYSTEM_REQUIRED.0 | ES_DISPLAY_REQUIRED.0,
+            ));
+        }
+        ExecutionGuard
+    }
+}
+
+impl Drop for ExecutionGuard {
+    fn drop(&mut self) {
+        use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+        unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum MediaSocket {
     Udp(Arc<UdpSocket>),
@@ -42,18 +71,20 @@ pub(super) enum MediaSocket {
 #[derive(Clone)]
 pub(super) struct MediaSender {
     socket: MediaSocket,
-    /// s2c sealer. Both directions deliberately share the viewer-generated
-    /// 32-byte key: counters are independent per direction and the Poly1305
-    /// tag binds the content, so a cross-direction nonce collision is
-    /// impossible.
+    /// s2c sealer under the HKDF-derived directional key — the raw session
+    /// key is never used directly, so the two directions can never collide
+    /// on a (key, nonce) pair. Counters start at a random point per instance
+    /// (secure-channel), which also keeps the main sender and this notice
+    /// sender from sharing a counter range.
     tx: Arc<DatagramSealer>,
 }
 
 impl MediaSender {
     pub(super) fn new(socket: MediaSocket, media_key: &[u8; 32]) -> Self {
+        let keys = secure_channel::media_keys(media_key);
         Self {
             socket,
-            tx: Arc::new(DatagramSealer::new(*media_key)),
+            tx: Arc::new(DatagramSealer::new(keys.s2c)),
         }
     }
 
@@ -232,11 +263,12 @@ impl CaptureBackend for WindowsBackend {
             .cloned()
             .ok_or_else(|| format!("display index {source_index} no longer exists"))?;
         // Random LCH1 nonce: freshness for the reachability proof. The media
-        // key — possession of it — is the actual authentication.
+        // key — possession of it — is the actual authentication. The receive
+        // side opens viewer frames under the derived c2s key.
         let mut nonce = [0u8; 32];
         secure_channel::random_bytes(&mut nonce);
         let challenge = wire::challenge(&nonce);
-        let crypto_rx = DatagramSealer::new(*media_key);
+        let crypto_rx = DatagramSealer::new(secure_channel::media_keys(media_key).c2s);
         let (media_sender, media_receiver, notice_sender) = if media_transport == "usb" {
             let stream = TcpStream::connect(("127.0.0.1", port))
                 .map_err(|error| format!("connect USB media proxy {port}: {error}"))?;
@@ -312,6 +344,7 @@ impl CaptureBackend for WindowsBackend {
         let capture_thread = std::thread::Builder::new()
             .name(format!("leftcar-windows-capture-{handle}"))
             .spawn(move || {
+                let _execution = ExecutionGuard::acquire();
                 if let Err(error) = capture::run(
                     monitor,
                     width,
@@ -448,7 +481,10 @@ fn prove_tcp_reachability(
                 .map_err(|error| format!("clone USB challenge reader: {error}"))?,
         ) {
             Ok(Some(response)) => {
-                if crypto_rx.open(&response).is_ok_and(|opened| opened == challenge) {
+                if crypto_rx
+                    .open(&response)
+                    .is_ok_and(|opened| opened == challenge)
+                {
                     return Ok(());
                 }
             }
@@ -483,22 +519,15 @@ fn read_tcp_frame(stream: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(payload))
 }
 
-fn run_input(
-    receiver: MediaReceiver,
-    sender: MediaSender,
-    session: Arc<WindowsSession>,
-) {
+fn run_input(receiver: MediaReceiver, sender: MediaSender, session: Arc<WindowsSession>) {
+    let _execution = ExecutionGuard::acquire();
     match receiver {
         MediaReceiver::Udp(socket) => run_udp_input(socket, sender, session),
         MediaReceiver::Tcp(stream) => run_tcp_input(stream, sender, session),
     }
 }
 
-fn run_udp_input(
-    socket: UdpSocket,
-    sender: MediaSender,
-    session: Arc<WindowsSession>,
-) {
+fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSession>) {
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
     // Sealed input datagrams carry +24B AEAD overhead over the largest
@@ -565,11 +594,7 @@ fn run_udp_input(
     let _ = session.injector.lock().unwrap().release_all();
 }
 
-fn run_tcp_input(
-    mut stream: TcpStream,
-    sender: MediaSender,
-    session: Arc<WindowsSession>,
-) {
+fn run_tcp_input(mut stream: TcpStream, sender: MediaSender, session: Arc<WindowsSession>) {
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
     let started = std::time::Instant::now();

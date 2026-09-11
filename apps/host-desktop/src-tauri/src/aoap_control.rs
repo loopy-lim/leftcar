@@ -36,14 +36,20 @@ pub async fn dispatch_control_line(
         Ok(envelope) => envelope,
         Err(_) => return json!({"ok": false, "error": "bad request"}).to_string(),
     };
-    if envelope.command != "pair"
-        && !server.authorize_token(envelope.token.as_deref().unwrap_or(""))
-    {
-        return json!({"ok": false, "error": "unauthorized"}).to_string();
-    }
+    // 토큰을 bool로 버리지 않고 장치 ID까지 해석한다. dispatch에 장치를
+    // 전달해야 per-device revoke(stop_sessions_for_device)가 USB 세션을
+    // 잡고, 파일 전송 명령의 소유 검사도 USB에서 통과한다(F03).
+    let device = if envelope.command == "pair" {
+        None
+    } else {
+        match server.authorize_device_token(envelope.token.as_deref().unwrap_or("")) {
+            Some(device_id) => Some(device_id),
+            None => return json!({"ok": false, "error": "unauthorized"}).to_string(),
+        }
+    };
     serde_json::to_string(
         &server
-            .dispatch(&envelope.command, envelope.args, peer, None)
+            .dispatch(&envelope.command, envelope.args, peer, device.as_deref())
             .await,
     )
     .unwrap_or_else(|_| json!({"ok": false, "error": "serialization failed"}).to_string())
@@ -196,7 +202,12 @@ fn spawn_control_relay(server: Arc<ControlServer>, control_rx: std::sync::mpsc::
 
 #[cfg(test)]
 mod tests {
-    use super::should_start_accessory;
+    use super::{dispatch_control_line, should_start_accessory};
+    use crate::backend::FakeBackend;
+    use crate::control::ControlServer;
+    use crate::pairing::{FileTokenStore, PairingServer};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn passive_usb_attach_does_not_start_aoap() {
@@ -212,5 +223,73 @@ mod tests {
     fn accessory_or_existing_link_never_restarts_handshake() {
         assert!(!should_start_accessory(true, false, true));
         assert!(!should_start_accessory(true, true, false));
+    }
+
+    fn usb_test_server() -> (Arc<ControlServer>, Arc<PairingServer>) {
+        let pairing = Arc::new(PairingServer::new(
+            [7u8; 32],
+            None,
+            Box::new(FileTokenStore::new(None)),
+        ));
+        let backend = Arc::new(FakeBackend {
+            displays: vec![control_contract::host::DisplayInfo {
+                index: 0,
+                name: "Main".into(),
+                width: 1920,
+                height: 1080,
+            }],
+            encoder_experiment: Mutex::new(control_contract::host::EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: std::sync::atomic::AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
+        });
+        let identity = Arc::new(secure_channel::HostIdentity::from_seed([42u8; 32]));
+        (
+            Arc::new(ControlServer::new(backend, pairing.clone(), identity)),
+            pairing,
+        )
+    }
+
+    /// USB 제어 경로(F03): 토큰을 버리지 않고 장치 ID로 해석해 dispatch에
+    /// 전달한다 — 세션이 장치에 귀속되므로 철회가 USB 세션을 즉시 끊고,
+    /// 파일 전송 명령의 소유 검사도 USB에서 통과한다.
+    #[tokio::test]
+    async fn usb_control_line_carries_the_paired_device_identity() {
+        let (server, pairing) = usb_test_server();
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let token = pairing
+            .pair_by_code(&view.code, "usb-viewer", "USB Viewer")
+            .unwrap();
+
+        let line = json!({
+            "command": "startStream",
+            "args": {
+                "sourceIndex": 0,
+                "viewerPort": 5001,
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "mediaTransport": "udp",
+                "mediaKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+            },
+            "token": token
+        })
+        .to_string();
+        let resp = dispatch_control_line(&server, line, "192.168.0.9").await;
+        assert!(resp.contains("\"ok\":true"), "{resp}");
+        // 시작된 세션은 장치에 귀속된다 — 장치 철회가 USB 세션을 잡는다.
+        assert_eq!(server.snapshot().sessions.len(), 1);
+        assert_eq!(server.stop_sessions_for_device("usb-viewer"), 1);
+        assert!(server.snapshot().sessions.is_empty());
+
+        // 토큰이 맞지 않으면 이전과 같이 거부된다.
+        let bad = dispatch_control_line(
+            &server,
+            json!({ "command": "getCatalog", "args": {}, "token": "00" }).to_string(),
+            "192.168.0.9",
+        )
+        .await;
+        assert!(bad.contains("unauthorized"), "{bad}");
     }
 }

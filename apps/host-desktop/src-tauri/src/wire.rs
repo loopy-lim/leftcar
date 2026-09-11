@@ -21,6 +21,9 @@ pub enum InputEvent {
         x: u16,
         y: u16,
         buttons: u32,
+        /// 스타일러스 압력(0.0-1.0). 없으면 None — 와이어 길이로 구분한다
+        /// (18/22바이트 move, 20/24바이트 button).
+        pressure: Option<f32>,
     },
     PointerButton {
         x: u16,
@@ -28,6 +31,7 @@ pub enum InputEvent {
         button: u8,
         down: bool,
         buttons: u32,
+        pressure: Option<f32>,
     },
     Scroll {
         horizontal_milli: i32,
@@ -77,14 +81,21 @@ impl InputSequencer {
         let reliable = message[9] & 1 == 1;
 
         if !reliable {
-            if kind != 1 || message.len() != 18 || !is_newer(sequence, self.last_pointer) {
+            if kind != 1 || !is_newer(sequence, self.last_pointer) {
                 return InputDecision::Ignore;
             }
+            // 18바이트 = 압력 없음(구형 뷰어), 22바이트 = 스타일러스 압력.
+            let pressure = match message.len() {
+                18 => None,
+                22 => Some(read_f32(message, 18)),
+                _ => return InputDecision::Ignore,
+            };
             self.last_pointer = sequence;
             return InputDecision::Apply(InputEvent::PointerMove {
                 x: read_u16(message, 10),
                 y: read_u16(message, 12),
                 buttons: read_u32(message, 14),
+                pressure,
             });
         }
 
@@ -106,13 +117,22 @@ impl InputSequencer {
             return InputDecision::Ignore;
         }
         let event = match kind {
-            2 if message.len() == 20 => InputEvent::PointerButton {
-                x: read_u16(message, 10),
-                y: read_u16(message, 12),
-                button: message[14],
-                down: message[15] != 0,
-                buttons: read_u32(message, 16),
-            },
+            2 => {
+                // 20바이트 = 압력 없음(구형 뷰어), 24바이트 = 스타일러스 압력.
+                let pressure = match message.len() {
+                    20 => None,
+                    24 => Some(read_f32(message, 20)),
+                    _ => return InputDecision::Ignore,
+                };
+                InputEvent::PointerButton {
+                    x: read_u16(message, 10),
+                    y: read_u16(message, 12),
+                    button: message[14],
+                    down: message[15] != 0,
+                    buttons: read_u32(message, 16),
+                    pressure,
+                }
+            }
             3 if message.len() == 18 => InputEvent::Scroll {
                 horizontal_milli: read_i32(message, 10),
                 vertical_milli: read_i32(message, 14),
@@ -152,6 +172,10 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
 
 fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_f32(message: &[u8], at: usize) -> f32 {
+    f32::from_bits(read_u32(message, at))
 }
 
 fn read_i32(data: &[u8], offset: usize) -> i32 {
@@ -409,6 +433,61 @@ mod tests {
     }
 
     #[test]
+    fn stylus_pressure_decodes_by_wire_length() {
+        // move(kind 1, unreliable): 18바이트 = 압력 없음, 22바이트 = 압력.
+        let mut move_plain = Vec::from(b"LCI1".as_slice());
+        move_plain.extend_from_slice(&1u32.to_be_bytes());
+        move_plain.extend_from_slice(&[1, 0]);
+        move_plain.extend_from_slice(&10u16.to_be_bytes());
+        move_plain.extend_from_slice(&20u16.to_be_bytes());
+        move_plain.extend_from_slice(&1u32.to_be_bytes());
+        let mut move_stylus = move_plain.clone();
+        move_stylus.extend_from_slice(&0.5f32.to_be_bytes());
+
+        match InputSequencer::default().accept(&move_plain) {
+            InputDecision::Apply(InputEvent::PointerMove { pressure: None, .. }) => {}
+            other => panic!("plain move must decode without pressure: {other:?}"),
+        }
+        match InputSequencer::default().accept(&move_stylus) {
+            InputDecision::Apply(InputEvent::PointerMove {
+                pressure: Some(value),
+                ..
+            }) => assert_eq!(value, 0.5),
+            other => panic!("stylus move must carry pressure: {other:?}"),
+        }
+
+        // button(kind 2, reliable): 20바이트 = 압력 없음, 24바이트 = 압력.
+        let mut button_plain = Vec::from(b"LCI1".as_slice());
+        button_plain.extend_from_slice(&1u32.to_be_bytes());
+        button_plain.extend_from_slice(&[2, 1]);
+        button_plain.extend_from_slice(&10u16.to_be_bytes());
+        button_plain.extend_from_slice(&20u16.to_be_bytes());
+        button_plain.extend_from_slice(&[1, 1]);
+        button_plain.extend_from_slice(&1u32.to_be_bytes());
+        let mut button_stylus = button_plain.clone();
+        button_stylus.extend_from_slice(&0.75f32.to_be_bytes());
+
+        match InputSequencer::default().accept(&button_plain) {
+            InputDecision::ApplyAndAck {
+                event: InputEvent::PointerButton { pressure: None, .. },
+                ..
+            } => {}
+            other => panic!("plain button must decode without pressure: {other:?}"),
+        }
+        match InputSequencer::default().accept(&button_stylus) {
+            InputDecision::ApplyAndAck {
+                event:
+                    InputEvent::PointerButton {
+                        pressure: Some(value),
+                        ..
+                    },
+                ..
+            } => assert_eq!(value, 0.75),
+            other => panic!("stylus button must carry pressure: {other:?}"),
+        }
+    }
+
+    #[test]
     fn text_input_decodes_and_acks_like_other_reliable_events() {
         let mut sequencer = InputSequencer::default();
         let mut packet = Vec::from(b"LCI1".as_slice());
@@ -460,7 +539,7 @@ mod tests {
         // with the c2s opener, then run the plaintext through the sequencer.
         let key = [7u8; 32];
         let tx = secure_channel::DatagramSealer::new(key);
-        let mut rx = secure_channel::DatagramSealer::new(key);
+        let rx = secure_channel::DatagramSealer::new(key);
         let mut packet = Vec::from(b"LCI1".as_slice());
         packet.extend_from_slice(&1u32.to_be_bytes());
         packet.extend_from_slice(&[5, 1]);
@@ -494,7 +573,10 @@ mod tests {
         let viewer_rx = secure_channel::DatagramSealer::new(key);
         let plaintext = challenge(b"nonce-32-bytes-long-aaaaaaaaaaaa!");
         let wire_challenge = host_tx.seal(&plaintext).unwrap();
-        assert!(!wire_challenge.starts_with(b"LCH1"), "wire bytes are sealed");
+        assert!(
+            !wire_challenge.starts_with(b"LCH1"),
+            "wire bytes are sealed"
+        );
         let opened = viewer_rx.open(&wire_challenge).unwrap();
         assert_eq!(opened, plaintext);
         assert!(opened.starts_with(b"LCH1"));

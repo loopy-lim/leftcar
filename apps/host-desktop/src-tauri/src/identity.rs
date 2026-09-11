@@ -76,7 +76,10 @@ mod tests {
 
     fn temp_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("leftcar-identity-{tag}-{}.json", std::process::id()));
+        p.push(format!(
+            "leftcar-identity-{tag}-{}.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&p);
         p
     }

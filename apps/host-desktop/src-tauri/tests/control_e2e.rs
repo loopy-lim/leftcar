@@ -190,7 +190,11 @@ fn pairing() -> Arc<PairingServer> {
 
 async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>) {
     let p = pairing();
-    let server = Arc::new(ControlServer::new(fake_backend(), p.clone(), test_identity()));
+    let server = Arc::new(ControlServer::new(
+        fake_backend(),
+        p.clone(),
+        test_identity(),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -225,6 +229,8 @@ async fn pair_over_socket(
 ) -> String {
     let view = pairing.begin_pairing("127.0.0.1", 7777);
     let payload: serde_json::Value = serde_json::from_str(&view.qr_payload).unwrap();
+    // complete_pairing은 같은 이름의 기존 기기를 대체하므로 기기별 이름을 쓴다
+    // — 두 장치를 페어링하는 테스트에서 첫 장치가 지워지지 않게 한다.
     let resp = send_request(
         sock,
         "pair",
@@ -233,7 +239,7 @@ async fn pair_over_socket(
             "secret": payload["s"],
             "code": view.code,
             "deviceId": device_id,
-            "deviceName": "Quest 3",
+            "deviceName": device_id,
         })
         .to_string(),
         "",
@@ -279,7 +285,11 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
         started_ips: Mutex::new(Vec::new()),
         started_udp_stability: Mutex::new(Vec::new()),
     });
-    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone(), test_identity()));
+    let server = Arc::new(ControlServer::new(
+        recorder.clone(),
+        p.clone(),
+        test_identity(),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -579,7 +589,11 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
         started_ips: Mutex::new(Vec::new()),
         started_udp_stability: Mutex::new(Vec::new()),
     });
-    let server = Arc::new(ControlServer::new(recorder.clone(), p.clone(), test_identity()));
+    let server = Arc::new(ControlServer::new(
+        recorder.clone(),
+        p.clone(),
+        test_identity(),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -600,4 +614,94 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
 
     let started = recorder.started_ips.lock().unwrap().clone();
     assert_eq!(started, vec!["127.0.0.1".to_owned()], "peer IP must win");
+}
+
+/// 연결 인증은 소켓 수명당 한 번이지만, 명령 실행 직전의 재검사(M1)가 있으므로
+/// 같은 연결 위의 철회도 다음 명령부터는 거부되고 연결이 닫혀야 한다.
+#[tokio::test]
+async fn revoked_device_is_cut_off_mid_connection_before_the_next_command() {
+    let (addr, p) = spawn_test_server().await;
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+
+    let resp = send_request(&mut sock, "getCatalog", "{}", &token).await;
+    assert!(resp.contains("\"ok\":true"), "{resp}");
+
+    // 소켓이 살아 있는 가운데 장치를 철회한다.
+    assert!(p.revoke("viewer-1"));
+
+    let resp = send_request(&mut sock, "getCatalog", "{}", &token).await;
+    assert!(resp.contains("\"ok\":false"), "{resp}");
+    assert!(resp.contains("\"error\":\"unauthorized\""), "{resp}");
+    // 서버는 거부 후 연결을 닫는다 — 이후 읽기는 EOF로 끝난다.
+    let mut rest = Vec::new();
+    let _ = sock.read_to_end(&mut rest).await;
+}
+
+/// 세션 범위 명령의 장치 소유 검사(F04): 소유자만 세션을 다룰 수 있고,
+/// 남의 세션 시도는 존재 여부를 노출하지 않는 "no such session"으로 답하며,
+/// getStatus는 자기 세션만 돌려준다.
+#[tokio::test]
+async fn cross_device_session_commands_are_scoped_to_the_owner() {
+    let p = pairing();
+    let server = Arc::new(ControlServer::new(
+        fake_backend(),
+        p.clone(),
+        test_identity(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        server.run(listener).await;
+    });
+
+    // 두 장치를 각자의 소켓에서 페어링한다.
+    let mut sock_a = TcpStream::connect(addr).await.unwrap();
+    let token_a = pair_over_socket(&mut sock_a, &p, "viewer-a").await;
+    let mut sock_b = TcpStream::connect(addr).await.unwrap();
+    let token_b = pair_over_socket(&mut sock_b, &p, "viewer-b").await;
+
+    let start_a = send_request(
+        &mut sock_a,
+        "startStream",
+        r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60}"#,
+        &token_a,
+    )
+    .await;
+    assert!(start_a.contains("\"ok\":true"), "{start_a}");
+    let session_id = serde_json::from_str::<serde_json::Value>(&start_a).unwrap()["result"]
+        ["session"]
+        .as_u64()
+        .unwrap();
+
+    // viewer-b는 viewer-a의 세션을 종료하지 못한다.
+    let denied = send_request(
+        &mut sock_b,
+        "stopStream",
+        &format!(r#"{{"session":{session_id}}}"#),
+        &token_b,
+    )
+    .await;
+    assert!(denied.contains("\"ok\":false"), "{denied}");
+    assert!(denied.contains("no such session"), "{denied}");
+
+    // b의 getStatus에는 a의 세션이 보이지 않는다.
+    let status_b = send_request(&mut sock_b, "getStatus", "{}", &token_b).await;
+    assert!(status_b.contains("\"sessions\":[]"), "{status_b}");
+    // 소유자의 getStatus에는 보인다.
+    let status_a = send_request(&mut sock_a, "getStatus", "{}", &token_a).await;
+    assert!(
+        status_a.contains(&format!("\"session\":{session_id}")),
+        "{status_a}"
+    );
+
+    // 소유자는 정상 종료한다.
+    let stopped = send_request(
+        &mut sock_a,
+        "stopStream",
+        &format!(r#"{{"session":{session_id}}}"#),
+        &token_a,
+    )
+    .await;
+    assert!(stopped.contains("\"ok\":true"), "{stopped}");
 }

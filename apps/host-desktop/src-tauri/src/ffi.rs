@@ -421,6 +421,16 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
             "receiverSuppressedRecoveryRequests",
         ),
         receiver_fec_decode_failures: bounded_u32(&v, "receiverFecDecodeFailures"),
+        receiver_paired_idr_resumes: bounded_u32(&v, "receiverPairedIdrResumes"),
+        receiver_split_wire_ms: v["receiverSplitWireMs"]
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32),
+        receiver_split_capture_age_ms: v["receiverSplitCaptureAgeMs"]
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32),
+        receiver_input_rtt_ms: v["receiverInputRttMs"]
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32),
         split_direction: v["splitDirection"].as_str().map(str::to_owned),
         split_preparation_p50_us: v["splitPreparationP50Us"].as_u64().unwrap_or(0),
         split_preparation_p95_us: v["splitPreparationP95Us"].as_u64().unwrap_or(0),
@@ -697,8 +707,8 @@ impl CaptureBackend for FfiBackend {
         unsafe {
             // A shim built before this query cannot answer; stay quiet rather
             // than warn about a state we cannot observe.
-            let Ok(function) = lib
-                .get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_screen_permission_v1")
+            let Ok(function) =
+                lib.get::<unsafe extern "C" fn() -> i32>(b"leftcar_capture_screen_permission_v1")
             else {
                 return Ok(true);
             };
