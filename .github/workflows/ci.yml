@@ -21,14 +21,27 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/host-desktop/src-tauri
       - name: Format
         run: cargo fmt --all -- --check
       - name: Architecture tests (H01)
         run: cargo test -p architecture-check
       - name: Workspace tests
         run: cargo test --workspace
+      - name: Host desktop crate tests (standalone workspace)
+        run: cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked
       - name: Clippy
         run: cargo clippy --workspace --tests -- -D warnings
+      - name: Host desktop crate clippy
+        run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests --locked -- -D warnings
+      - name: Swift shim policy tests (build + run)
+        run: |
+          zsh tools/build-macos-capture-shim.zsh policy-test /tmp/leftcar-policy-test && /tmp/leftcar-policy-test
+          zsh tools/build-macos-capture-shim.zsh split-test /tmp/leftcar-split-test && /tmp/leftcar-split-test
+          zsh tools/build-macos-capture-shim.zsh retransmit-ring-test /tmp/leftcar-retransmit-ring-test && /tmp/leftcar-retransmit-ring-test
 
   ts:
     name: TypeScript (typecheck, tests, contract, architecture)
@@ -43,6 +56,10 @@ jobs:
         run: bun run test && bun run test:contract
       - name: Typecheck
         run: bun run typecheck
+      - name: Expo app typecheck (expo-router app/ screens)
+        run: bun run --cwd apps/viewer-expo typecheck
+      - name: React Doctor
+        run: npx -y react-doctor@latest . --verbose
       - name: TS/Kotlin architecture rules
         run: bun run test:architecture
       - name: Regeneration is clean (H26)
@@ -64,9 +81,17 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" >/dev/null
       - name: Put NDK toolchain on PATH
         run: echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
       - uses: Swatinem/rust-cache@v2
       - name: cargo check viewer native for Android
         run: cargo check -p android-viewer --target aarch64-linux-android
+      - name: Gradle JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+        working-directory: apps/viewer-expo/android
 
   windows-host:
     name: Windows Host (WGC, Media Foundation, NSIS)

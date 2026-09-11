@@ -18,10 +18,12 @@ bun install
 ```bash
 cargo test --workspace
 cargo clippy --workspace --tests -- -D warnings
-bun run typecheck
+bun run typecheck                # 루트 tsc -b + viewer-expo/host-desktop 앱 typecheck 포함
+bun run --cwd apps/viewer-expo typecheck  # Expo app/ 화면 포함(루트 typecheck에도 포함됨)
 bun run test
 bun run test:contract
 bun run test:architecture
+cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked  # Host crate(루트 워크스페이스 밖)
 ```
 
 - 빌드 산출이 필요할 때: `cargo check --workspace`, `cargo run -p control-contract --bin generate`
@@ -33,7 +35,7 @@ bun run test:architecture
 
 ```bash
 bun run rustra:generate                                   # packages/control-generated (+ 스키마)
-cd apps/viewer-expo && bunx --package @rustra/cli@0.8.0 rustra codegen --config rustra.json
+cd apps/viewer-expo && bunx --package @rustra/cli@0.9.0 rustra codegen --config rustra.json
 ```
 
 - CLI 버전은 Rust crate 핀(docs/10-references.md)과 같은 라인으로 맞춘다.

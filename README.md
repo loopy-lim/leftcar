@@ -12,7 +12,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 고정된 기본 범위
 
-- 원격 입력은 세션마다 Host에서 명시적으로 켜야 하며 기본값은 꺼짐이다. 포인터 전송률은 영상 FPS의 2배(60fps→120Hz, 90fps→180Hz)로 제한한다.
+- 원격 입력은 OS 입력 권한이 이미 있으면 세션 시작과 함께 자동으로 켜진다(페어링된 기기·세션 단위). 포인터 전송률은 영상 FPS의 2배(60fps→120Hz, 90fps→180Hz)로 제한한다.
 - 특정 기기 전용 기능 없이 일반 Android 앱의 다중 창 기능을 사용한다.
 - 원격 source 하나를 Android Activity/task 인스턴스 하나에 연결해 여러 독립 창으로 보여 준다.
 - 선택적인 Hub 창은 연결과 source 선택을 담당하고, 선택적인 Overview 창만 여러 타일을 한 화면에 모은다.
@@ -40,6 +40,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - [Windows 원격 Host 구현과 검증](docs/windows-remote-host.md)
 - [USB 물리 검증 절차](docs/usb-physical-validation.md)
 - [구현 증거 문서](docs/EVIDENCE.md)
+- [버전 문자열 현황](docs/versioning.md)
 - [구현 계획](docs/plans/2026-08-17-leftcar-v1-implementation.md)
 
 ## 현재 상태
@@ -57,7 +58,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - 페어링 토큰과 승인 흐름으로 제어 평면 접근을 제한한다.
 - 미디어 평면은 제어 peer와 같은 사설 LAN의 Viewer 후보만 허용하고, 예측 불가능한 난수의 UDP 왕복으로 실제 도달성을 증명한 주소에만 MTU 크기로 잘라 전송한다.
 - 입력 평면은 같은 UDP 세션 난수로 인증하고 Host 사용자가 세션별로 허용한 경우에만 macOS CGEvent 또는 Windows SendInput으로 주입한다. 포인터 이동은 최신값 우선, 키와 버튼은 ACK/재시도 방식이다. Windows UIPI 때문에 일반 권한 Host는 관리자 권한 앱을 제어할 수 없다.
-- **제어는 인증된 평문 TCP, 미디어는 평문 UDP**이므로 로컬 네트워크 또는 Tailscale 내에서 사용한다. 공개 인터넷 사용에는 TLS/PAKE 기반 상호 인증과 미디어 암호화가 필요하다.
+- 제어 채널은 QR로 핀된 호스트 Ed25519 정체 키 핸드셰이크 뒤 ChaCha20-Poly1305 AEAD로 봉인하고, 미디어 평면도 세션 키에서 HKDF로 도출한 방향별 키로 AEAD 봉인한다. 페어링 토큰은 macOS Keychain·Windows Credential Manager에 저장한다. 연결은 릴레이 없는 로컬 네트워크 직접 연결을 전제로 하며, 공개 인터넷 노출은 범위에 넣지 않는다.
 
 ## 빌드/실행
 
