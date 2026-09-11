@@ -90,6 +90,13 @@ pub(crate) struct RendererControl {
     // released it to the Surface. This is a compositor-handoff approximation,
     // not panel presentation or true glass-to-glass latency.
     pub(crate) capture_to_surface_release_ms: AtomicU64,
+    // Reliable-input round trip: the flush paths stamp the monotonic micro-
+    // second instant of the newest reliable (button/key/text) send, and the
+    // authenticated LCA1 ack consumes it into an EWMA. Measured entirely on
+    // the viewer, so no wire-format change is involved. `input_rtt_ms` keeps
+    // the LATENCY_UNKNOWN sentinel until the first ack lands.
+    pub(crate) input_rtt_ms: AtomicU64,
+    pub(crate) last_reliable_send_us: AtomicU64,
     // Repeated SurfaceView geometry updates during freeform resize can make
     // decoder/compositor stalls look like packet loss. Defer recovery IDRs
     // until the geometry has stayed stable, then emit at most one through the
@@ -158,6 +165,8 @@ impl RendererControl {
             encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
             wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
             capture_to_surface_release_ms: AtomicU64::new(LATENCY_UNKNOWN),
+            input_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
+            last_reliable_send_us: AtomicU64::new(0),
             resize_recovery_suppressed_until_us: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             suspend: AtomicBool::new(false),
@@ -200,6 +209,36 @@ impl RendererControl {
 
     pub(crate) fn is_split(&self) -> bool {
         self.split
+    }
+
+    /// The flush paths call this right after a reliable event's datagram was
+    /// accepted by the kernel. `now_us` must come from the same monotonic
+    /// clock base the ack consumer uses on this path.
+    pub(crate) fn record_reliable_input_send(&self, now_us: u64) {
+        self.last_reliable_send_us.store(now_us, Ordering::Relaxed);
+    }
+
+    /// Consumes an LCA1 ack: clears the pending reliable event and, when the
+    /// ack matches the newest send, folds the send->ack elapsed time into the
+    /// input-RTT EWMA. Returns true when the pending event was acknowledged.
+    pub(crate) fn acknowledge_input(&self, sequence: u32, now_us: u64) -> bool {
+        let sent_us = self.last_reliable_send_us.load(Ordering::Relaxed);
+        let acknowledged = self.input.lock().unwrap().acknowledge(sequence);
+        if acknowledged && sent_us != 0 {
+            let elapsed_ms = now_us.saturating_sub(sent_us) / 1_000;
+            // A LAN input round trip never takes ten seconds; larger values
+            // mean a retransmit raced a clock-base change and are not samples.
+            if elapsed_ms <= 10_000 {
+                let previous = self.input_rtt_ms.load(Ordering::Relaxed);
+                let next = if previous == LATENCY_UNKNOWN {
+                    elapsed_ms
+                } else {
+                    previous.saturating_mul(3).saturating_add(elapsed_ms) / 4
+                };
+                self.input_rtt_ms.store(next, Ordering::Relaxed);
+            }
+        }
+        acknowledged
     }
 }
 
@@ -371,13 +410,37 @@ pub(crate) static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpRecei
 pub(crate) static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> =
     Mutex::new(None);
 pub(crate) static PREPARED_USB_BRIDGE: Mutex<Option<UsbBridge>> = Mutex::new(None);
+
+fn remove_prepared(port: u16) -> Option<PreparedUdpReceiver> {
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+fn insert_prepared(port: u16, receiver: PreparedUdpReceiver) {
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, receiver);
+}
+
+fn remove_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
+    PREPARED_TCP_BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
 /// One shared media-crypto instance per prepared port. The prepared UDP
 /// listener, the TCP bridge, and the claiming renderer all seal/open through
 /// the same instance so the AEAD counters never fork mid-session. Split
 /// streams register one instance under both tile ports: both tiles' sends
 /// must stay inside the host's single replay window.
-pub(crate) static MEDIA_CRYPTO: Mutex<Option<HashMap<u16, SharedMediaCrypto>>> =
-    Mutex::new(None);
+pub(crate) static MEDIA_CRYPTO: Mutex<Option<HashMap<u16, SharedMediaCrypto>>> = Mutex::new(None);
 pub(crate) enum MediaBridge {
     Tcp(PreparedTcpBridge),
     Usb(UsbBridge),
@@ -481,11 +544,7 @@ pub(crate) fn reclaim_udp_port(port: u16) {
 }
 
 pub(crate) fn cancel_prepared_receiver(port: u16) -> bool {
-    let prepared = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let prepared = remove_prepared(port);
     take_media_crypto(port);
     prepared.is_some()
 }
@@ -507,9 +566,7 @@ fn prepare_tcp_bridge(
     };
     let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts, Arc::clone(crypto))
         .map_err(|error| {
-            format!(
-                "failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}"
-            )
+            format!("failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}")
         })?;
     PREPARED_TCP_BRIDGES
         .lock()
@@ -520,24 +577,11 @@ fn prepare_tcp_bridge(
 }
 
 pub(crate) fn cancel_tcp_bridge(port: u16) -> bool {
-    PREPARED_TCP_BRIDGES
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port)
-        .is_some()
-}
-
-fn take_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
-    PREPARED_TCP_BRIDGES
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port)
+    remove_tcp_bridge(port).is_some()
 }
 
 pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
-    take_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
+    remove_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
         PREPARED_USB_BRIDGE
             .lock()
             .unwrap()
@@ -550,10 +594,7 @@ pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
 /// the viewer-generated session key; a re-prepare with a different key
 /// replaces the instance, which is safe because the host cannot send any
 /// sealed frame before `startStream` completes.
-pub(crate) fn register_media_crypto(
-    port: u16,
-    key: &[u8; 32],
-) -> SharedMediaCrypto {
+pub(crate) fn register_media_crypto(port: u16, key: &[u8; 32]) -> SharedMediaCrypto {
     let crypto: SharedMediaCrypto = Arc::new(MediaSessionCrypto::new(*key));
     MEDIA_CRYPTO
         .lock()
@@ -589,19 +630,11 @@ pub(crate) fn prepare_split_receiver(
     expected_host: &str,
     crypto: &SharedMediaCrypto,
 ) -> Result<(), String> {
-    let stale = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let stale = remove_prepared(port);
     drop(stale);
     let prepared = PreparedUdpReceiver::bind(port, expected_host.to_owned(), Arc::clone(crypto))
         .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
-    PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(port, prepared);
+    insert_prepared(port, prepared);
     Ok(())
 }
 
@@ -647,11 +680,7 @@ pub(crate) fn prepare_udp_receiver(
 
     // A retry for the same not-yet-opened window replaces its old preflight.
     // Drop outside the map lock because the worker has a bounded join.
-    let stale = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let stale = remove_prepared(port);
     drop(stale);
 
     let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "usb" | "auto") {
@@ -661,11 +690,7 @@ pub(crate) fn prepare_udp_receiver(
     };
     let prepared = PreparedUdpReceiver::bind(port, prepared_hosts, Arc::clone(&crypto))
         .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
-    PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(port, prepared);
+    insert_prepared(port, prepared);
     if matches!(transport, "tcp" | "adbTcp" | "auto") {
         if let Err(error) = prepare_tcp_bridge(port, expected_host, transport, &crypto) {
             let _ = cancel_prepared_receiver(port);
@@ -680,11 +705,7 @@ pub(crate) fn take_prepared_receiver(
     port: u16,
     expected_host: &str,
 ) -> Option<PreparedUdpReceiver> {
-    let prepared = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let prepared = remove_prepared(port);
     match prepared {
         Some(prepared)
             if prepared
@@ -873,6 +894,13 @@ mod renderer_lifecycle_tests {
     }
 }
 
+/// PREPARED_RECEIVERS/MEDIA_CRYPTO는 프로세스 전역이다. 스토어 절대
+/// 상태를 검증하는 모든 테스트(jni_exports의 split prepare 테스트 포함)가
+/// 이 잠금으로 직렬화된다 — 서로 다른 테스트 모듈이 같은 전역을 만질 때
+/// 경합으로 포트·항목이 섞이는 것을 막는다.
+#[cfg(test)]
+pub(crate) static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod split_receiver_tests {
     use super::*;
@@ -880,9 +908,9 @@ mod split_receiver_tests {
 
     const HOST: &str = "127.0.0.1";
 
-    // PREPARED_RECEIVERS is process-global; these tests assert absolute store
-    // counts, so they serialize on this lock instead of racing each other.
-    static STORE_LOCK: Mutex<()> = Mutex::new(());
+    // 전역 스토어 테스트의 직렬화 잠금 — jni_exports의 split 테스트와
+    // 같은 잠금을 공유한다.
+    use super::TEST_STORE_LOCK as STORE_LOCK;
 
     fn bind_prepared() -> PreparedUdpReceiver {
         PreparedUdpReceiver::bind(

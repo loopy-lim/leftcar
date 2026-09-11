@@ -25,6 +25,24 @@ pub enum TileSide {
     Right,
 }
 
+impl TileSide {
+    /// Fixed array slot for per-side state (left = 0, right = 1).
+    pub const fn slot(self) -> usize {
+        match self {
+            TileSide::Left => 0,
+            TileSide::Right => 1,
+        }
+    }
+
+    /// The other tile.
+    pub const fn peer(self) -> TileSide {
+        match self {
+            TileSide::Left => TileSide::Right,
+            TileSide::Right => TileSide::Left,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyFrame {
     pub output: ReadyOutput,
@@ -164,6 +182,29 @@ impl PairPresentationCoordinator {
                         output: pending.frame.output,
                     }),
             )
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            SyncDecision::Wait
+        } else {
+            SyncDecision::Discard { commands }
+        }
+    }
+
+    /// Per-tile hard recovery: discard only ONE side's pending outputs. The
+    /// peer's pending frames and released metadata stay untouched so its
+    /// presentation loop keeps running through the other tile's recovery.
+    pub fn discard_pending_side(&mut self, side: TileSide) -> SyncDecision {
+        let (released_slot, pending_slot) = match side {
+            TileSide::Left => (&mut self.released_left, &mut self.left),
+            TileSide::Right => (&mut self.released_right, &mut self.right),
+        };
+        released_slot.clear();
+        let commands = std::mem::take(pending_slot)
+            .into_values()
+            .map(|pending| WorkerCommand::Discard {
+                side,
+                output: pending.frame.output,
+            })
             .collect::<Vec<_>>();
         if commands.is_empty() {
             SyncDecision::Wait
@@ -400,6 +441,44 @@ mod tests {
             }
         ));
         assert!(matches!(coordinator.discard_pending(), SyncDecision::Wait));
+    }
+
+    #[test]
+    fn per_tile_recovery_discards_only_the_failing_side() {
+        // Per-tile decoupled recovery: flushing the LEFT decoder must not
+        // drop the RIGHT tile's pending output — the peer keeps presenting
+        // through the recovery.
+        let mut coordinator = PairPresentationCoordinator::new(60);
+        assert!(matches!(
+            coordinator.push_ready(TileSide::Left, ready(9), 1_000),
+            SyncDecision::Wait
+        ));
+        assert!(matches!(
+            coordinator.push_ready(TileSide::Right, ready(10), 1_100),
+            SyncDecision::Wait
+        ));
+        let SyncDecision::Discard { commands } = coordinator.discard_pending_side(TileSide::Left)
+        else {
+            panic!("the failing side's pending output must be discarded");
+        };
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0],
+            WorkerCommand::Discard {
+                side: TileSide::Left,
+                ..
+            }
+        ));
+        // The peer's pending frame is still owned and pairs with the next
+        // matching frame from the recovering side.
+        assert_eq!(coordinator.pending_count(), 1);
+        let SyncDecision::Present { left, right, .. } =
+            coordinator.push_ready(TileSide::Left, ready(10), 1_200)
+        else {
+            panic!("peer pending output must still pair with a later frame");
+        };
+        assert_eq!(right.pts_us, 10);
+        assert_eq!(left.pts_us, 10);
     }
 
     #[test]

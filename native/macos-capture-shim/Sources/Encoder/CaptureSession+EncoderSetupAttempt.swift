@@ -256,7 +256,7 @@ extension CaptureSession {
             // DataRateLimits is expressed as [bytes, seconds], while
             // AverageBitRate is expressed in bits per second. Keep a small
             // 1-second headroom without allowing multi-second bursts.
-            let hardLimitBytes = max(1, Int(avgBitrate / 8.0 * 1.25))
+            let hardLimitBytes = vtHardLimitBytes(bitrate: Int(avgBitrate))
             let dataRateStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_DataRateLimits,

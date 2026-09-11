@@ -225,21 +225,29 @@ func nativePixelSize(
     return (selected.width, selected.height)
 }
 
- func coreGraphicsCatalogJSON() -> String? {
+/// 활성 디스플레이 ID를 메인 디스플레이 우선으로 정렬해 돌려준다.
+func sortedActiveDisplayIDs() -> [CGDirectDisplayID] {
     var count: UInt32 = 0
     guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
-        return nil
+        return []
     }
     var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
     var filled = count
     guard CGGetActiveDisplayList(count, &displayIDs, &filled) == .success else {
-        return nil
+        return []
     }
     let mainDisplayID = CGMainDisplayID()
-    let sortedIDs = displayIDs.prefix(Int(filled)).sorted { lhs, rhs in
+    return displayIDs.prefix(Int(filled)).sorted { lhs, rhs in
         if lhs == mainDisplayID { return true }
         if rhs == mainDisplayID { return false }
         return lhs < rhs
+    }
+}
+
+func coreGraphicsCatalogJSON() -> String? {
+    let sortedIDs = sortedActiveDisplayIDs()
+    guard !sortedIDs.isEmpty else {
+        return nil
     }
     let entries: [[String: Any]] = sortedIDs.enumerated().map { index, displayID in
         let pixelSize = nativePixelSize(for: displayID)
@@ -257,20 +265,6 @@ func nativePixelSize(
     return json
 }
 
- func activeDisplayIDs() -> [CGDirectDisplayID] {
-    var count: UInt32 = 0
-    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
-        return []
-    }
-    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
-    var filled = count
-    guard CGGetActiveDisplayList(count, &displayIDs, &filled) == .success else {
-        return []
-    }
-    let mainDisplayID = CGMainDisplayID()
-    return displayIDs.prefix(Int(filled)).sorted { lhs, rhs in
-        if lhs == mainDisplayID { return true }
-        if rhs == mainDisplayID { return false }
-        return lhs < rhs
-    }
+func activeDisplayIDs() -> [CGDirectDisplayID] {
+    sortedActiveDisplayIDs()
 }

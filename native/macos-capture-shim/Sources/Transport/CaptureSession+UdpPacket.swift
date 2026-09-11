@@ -152,105 +152,31 @@ extension CaptureSession {
         var worstDatagramSyscallUs: UInt64 = 0
         var ok = true
         if isFrame {
-            // Logical L2 header: marker + AU id LE + capture/encode clocks.
-            guard data.count > 21, data[0] == 0x47, data[3...4] == Data([0x4C, 0x32]) else {
+            // 논리 L2 헤더 검사부터 프래그먼트·FEC 조립까지는 split 전송 경로와
+            // 같은 prepareUdpAccessUnit 하나로 수행한다(바이트 동일). 이 함수는
+            // 메트릭·데드라인·페이싱·sendto만 담당한다.
+            guard let prepared = prepareUdpAccessUnit(data, isKeyframe: isKeyframe) else {
                 if isRecoveryKeyframe {
                     clearRecoveryEncodeGate()
                 }
                 requestRecoveryKeyframe()
                 return false
             }
-            let maxPayload = udpMediaFragmentPayloadBytes
-            let payloadCount = data.count - 21
-            let fragmentCount = max(1, (payloadCount + maxPayload - 1) / maxPayload)
-            guard fragmentCount <= Int(UInt16.max) else {
-                if isRecoveryKeyframe {
-                    clearRecoveryEncodeGate()
-                }
-                requestRecoveryKeyframe()
-                return false
-            }
-            var sendWallMsBE = UInt64(Date().timeIntervalSince1970 * 1_000.0).bigEndian
-            var primaryDatagrams = [Data]()
-            primaryDatagrams.reserveCapacity(fragmentCount)
-            for index in 0..<fragmentCount {
-                let start = 21 + index * maxPayload
-                let end = min(data.count, start + maxPayload)
-                var datagram = Data(capacity: 33 + end - start)
-                datagram.append(0x47)
-                var indexBE = UInt16(index).bigEndian
-                var countBE = UInt16(fragmentCount).bigEndian
-                withUnsafeBytes(of: &indexBE) { datagram.append(contentsOf: $0) }
-                withUnsafeBytes(of: &countBE) { datagram.append(contentsOf: $0) }
-                datagram.append(contentsOf: data[1...20])
-                withUnsafeBytes(of: &sendWallMsBE) { datagram.append(contentsOf: $0) }
-                datagram.append(contentsOf: data[start..<end])
-                primaryDatagrams.append(datagram)
-            }
-            let auID = UInt16(data[1]) | (UInt16(data[2]) << 8)
             if isRecoveryKeyframe {
                 observeUdpRecoveryBoundary()
             }
             let selectedParity = appliedUdpStability.profile == .legacy
                 ? nil
                 : currentUdpParityCount()
-            // Protect every multi-fragment UDP AU. A single lost fragment
-            // otherwise invalidates the whole H.264 access unit and starts an
-            // IDR recovery loop. The parity math uses a lookup table and
-            // precomputed row coefficients so this stays off the capture and
-            // encoder queues while remaining cheap enough for 60fps deltas.
-            let parityDatagrams = mediaTransport == .udp
-                && shouldProtectUdpAccessUnit(
-                    fragmentCount: fragmentCount,
-                    isKeyframe: isKeyframe
-                )
-                ? fecParityDatagrams(
-                    auID: auID,
-                    totalFragments: fragmentCount,
-                    wallMs: UInt64(Date().timeIntervalSince1970 * 1_000.0),
-                    payloads: primaryDatagrams.map { Data($0.dropFirst(33)) },
-                    reducedParity: contentMode == .video && !isKeyframe,
-                    recoveryParity: isKeyframe,
-                    parityOverride: selectedParity
-                )
-                : []
-            auBytes = UInt64(payloadCount)
-            auFragmentCount = UInt32(fragmentCount)
-            auParityCount = UInt32(parityDatagrams.count)
+            let fragmentCount = prepared.fragmentCount
+            auBytes = UInt64(prepared.payloadBytes)
+            auFragmentCount = UInt32(prepared.fragmentCount)
+            auParityCount = UInt32(prepared.parityCount)
             // Send each FEC group before its parity. This keeps parity close
             // to the fragments it protects and avoids losing an entire AU's
             // recovery budget to one large primary burst. The shared UDP
             // pacer spreads both ordinary frames and recovery IDRs.
-            var transmissions = [Data]()
-            transmissions.reserveCapacity(fragmentCount + parityDatagrams.count)
-            var parityOffset = 0
-            for base in stride(from: 0, to: fragmentCount, by: 8) {
-                let end = min(fragmentCount, base + 8)
-                transmissions.append(contentsOf: primaryDatagrams[base..<end])
-                let parityCount = selectedUdpParityCount(
-                    dataCount: end - base,
-                    reducedLegacyParity: contentMode == .video && !isKeyframe,
-                    recovery: isKeyframe,
-                    parityOverride: selectedParity
-                )
-                if !mediaTransport.usesTCP && parityCount > 0 {
-                    // A parity datagram may be omitted when it cannot fit the
-                    // MTU-safe envelope. Never let a malformed/oversized FEC
-                    // group abort the serial network queue with an array
-                    // bounds trap; the protected primary fragments are still
-                    // useful and the next IDR can recover the decoder.
-                    let available = max(0, parityDatagrams.count - parityOffset)
-                    let appendCount = min(parityCount, available)
-                    if appendCount > 0 {
-                        transmissions.append(contentsOf: parityDatagrams[parityOffset..<(parityOffset + appendCount)])
-                        parityOffset += appendCount
-                    }
-                }
-            }
-            transmissions = addSingletonFecTailUdpRedundancy(
-                primary: primaryDatagrams,
-                assembled: transmissions
-            )
+            var transmissions = prepared.datagrams
             expectedDatagramCount = transmissions.count
             if isKeyframe {
                 NSLog(
@@ -258,7 +184,7 @@ extension CaptureSession {
                     targetLabel,
                     data.count,
                     fragmentCount,
-                    parityDatagrams.count,
+                    prepared.parityCount,
                     transmissions.count
                 )
             }

@@ -244,10 +244,23 @@ fn run(launch: SingleRendererLaunch) {
     let mut last_frame_id: Option<u16> = None;
     let mut renderer_stats = RendererStats::default();
     let mut latency_probe_sequence = 0u32;
+    // Selective retransmission (NACK/RTX) state: one request slot for the
+    // blocked resequencer hole, plus the last counters echoed in the 1Hz log.
+    let mut nack_requester = crate::media_datagram::NackRequester::default();
+    let mut logged_nacks_sent = 0u64;
+    let mut logged_nacks_healed = 0u64;
     let mut render_health = RenderHealthState::default();
     let mut control_health = ControlHealthState::default();
     let mut last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
     let mut last_feedback_rendered_frames = 0u64;
+    // First-loss fast feedback: presentation.rs increments frame_gaps for
+    // every NEW network-loss event; the socket loop consumes that as a
+    // one-shot "feedback needed soon" flag at the top of each iteration,
+    // min-interval gated against loss-burst storms. The 1s probe-cycle tick
+    // continues unchanged.
+    let mut feedback_soon = false;
+    let mut last_seen_frame_gaps = renderer_stats.frame_gaps;
+    let mut immediate_feedback_last: Option<std::time::Instant> = None;
     // Host media arrived since the previous latency probe. Liveness evidence
     // for the control health gate: while media flows, probe loss is just
     // loss, not an unreachable peer.
@@ -352,13 +365,76 @@ fn run(launch: SingleRendererLaunch) {
         }
 
         if let Some(peer) = host_peer {
+            // Selective retransmit (NACK/RTX): when the resequencer is
+            // blocked on an AU whose missing fragments are known, ask the
+            // host once to re-send them and hold the reorder window open for
+            // the bounded grace. Completion inside the grace avoids the
+            // freeze entirely; expiry falls through to the unchanged gap
+            // classification in present_completed_frames (which also means
+            // the gated IDR request only fires after the grace).
+            let network_rtt = control_clone.network_rtt_ms.load(Ordering::Relaxed);
+            let nack_outcome = crate::media_datagram::tick_nack_requester(
+                &mut nack_requester,
+                &mut frame_sequencer,
+                &reassembler,
+                awaiting_keyframe,
+                (network_rtt != LATENCY_UNKNOWN).then_some(network_rtt),
+                std::time::Instant::now(),
+                |body| {
+                    send_viewer_command(&control_socket, peer, body, &crypto);
+                },
+            );
+            if nack_outcome.sent_messages > 0 {
+                renderer_stats.nacks_sent = renderer_stats
+                    .nacks_sent
+                    .saturating_add(nack_outcome.sent_messages);
+            }
+            if nack_outcome.healed {
+                renderer_stats.nacks_healed = renderer_stats.nacks_healed.saturating_add(1);
+                log_info!(
+                    "nack healed access unit id={:?}: retransmit completed inside the grace, no freeze",
+                    nack_outcome.au_id
+                );
+            }
+            // First-loss immediate receiver feedback (same socket as the 1s
+            // tick; no new socket). Sent before the probe cycle so the Host
+            // sees the loss signal without waiting out the tick.
+            if renderer_stats.frame_gaps != last_seen_frame_gaps {
+                last_seen_frame_gaps = renderer_stats.frame_gaps;
+                feedback_soon = true;
+            }
+            if feedback_soon
+                && crypto.is_established()
+                && immediate_feedback_last.map_or(true, |sent| {
+                    sent.elapsed() >= IMMEDIATE_FEEDBACK_MIN_INTERVAL
+                })
+            {
+                feedback_soon = false;
+                immediate_feedback_last = Some(std::time::Instant::now());
+                let rendered_frames = control_clone.rendered_frames.load(Ordering::Relaxed);
+                let elapsed_ms = last_latency_probe.elapsed().as_millis().max(1) as u64;
+                let rendered_fps = rendered_fps_from_feedback(
+                    rendered_frames,
+                    last_feedback_rendered_frames,
+                    elapsed_ms,
+                );
+                send_receiver_feedback(
+                    &control_socket,
+                    peer,
+                    &crypto,
+                    &renderer_stats,
+                    reassembler.incomplete_evictions(),
+                    &control_clone,
+                    rendered_fps,
+                );
+            }
             // Pointer samples run at 2x stream FPS (180Hz for 90fps) and
             // never wait behind the media socket's fragment queue.
             if input_worker.is_none() {
                 flush_input(&control_socket, peer, &crypto, &control_clone);
             }
-            let probe_due = crypto.is_established()
-                && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL;
+            let probe_due =
+                crypto.is_established() && last_latency_probe.elapsed() >= LATENCY_PROBE_INTERVAL;
             let next_probe_sequence = probe_due.then(|| latency_probe_sequence.wrapping_add(1));
             let media_since_previous_probe = if next_probe_sequence.is_some() {
                 std::mem::take(&mut media_since_probe)
@@ -417,6 +493,17 @@ fn run(launch: SingleRendererLaunch) {
                     feedback_elapsed_ms,
                 );
                 last_feedback_rendered_frames = rendered_frames;
+                if renderer_stats.nacks_sent != logged_nacks_sent
+                    || renderer_stats.nacks_healed != logged_nacks_healed
+                {
+                    logged_nacks_sent = renderer_stats.nacks_sent;
+                    logged_nacks_healed = renderer_stats.nacks_healed;
+                    log_info!(
+                        "nacks sent={} healed={} (selective retransmit, 1s tick)",
+                        renderer_stats.nacks_sent,
+                        renderer_stats.nacks_healed
+                    );
+                }
                 send_receiver_feedback(
                     &control_socket,
                     peer,
@@ -571,7 +658,7 @@ fn run(launch: SingleRendererLaunch) {
         let mut completed_frames: [Option<(std::net::SocketAddr, FramePacket)>; MEDIA_BATCH_SIZE] =
             std::array::from_fn(|_| None);
         let mut completed_count = 0usize;
-        for (batch_index, media_buffer) in media_buffers.iter().enumerate().take(batch.count) {
+        for (batch_index, media_buffer) in media_buffers.iter_mut().enumerate().take(batch.count) {
             let received = batch.lengths[batch_index];
             let Some(peer) = ipv4_socket_addr(&batch.peers[batch_index]) else {
                 continue;
@@ -628,13 +715,15 @@ fn run(launch: SingleRendererLaunch) {
                 }
             }
 
-            let packet = &media_buffer[..received];
+            let packet_slot = &mut media_buffer[..received];
             // Open before parsing: a datagram that fails to open under the
-            // session media key is dropped without any parsing.
-            let Some(opened) = crypto.open(packet) else {
+            // session media key is dropped without any parsing. The in-place
+            // variant decrypts inside the recvmmsg buffer — no per-datagram
+            // Vec on the RX hot path.
+            let Some(opened) = crypto.open_into(packet_slot) else {
                 continue;
             };
-            let packet = opened.as_slice();
+            let packet: &[u8] = opened;
             if let Some(challenge) = crate::prepared_udp::is_challenge_packet(packet) {
                 crypto.establish();
                 control_health = ControlHealthState::default();

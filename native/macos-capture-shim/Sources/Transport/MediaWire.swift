@@ -4,22 +4,9 @@ struct PendingEncodedFrame {
     let data: Data
     let isKeyframe: Bool
     let isRecoveryKeyframe: Bool
-    let tileSide: TileSide?
-    let queuedNs: UInt64
-
-    init(
-        data: Data,
-        isKeyframe: Bool,
-        isRecoveryKeyframe: Bool,
-        tileSide: TileSide? = nil,
-        queuedNs: UInt64 = DispatchTime.now().uptimeNanoseconds
-    ) {
-        self.data = data
-        self.isKeyframe = isKeyframe
-        self.isRecoveryKeyframe = isRecoveryKeyframe
-        self.tileSide = tileSide
-        self.queuedNs = queuedNs
-    }
+    // var 옵셔널은 멤버와이즈 이니셜라이저에서 nil 기본 인자를 받는다.
+    var tileSide: TileSide?
+    var queuedNs: UInt64 = DispatchTime.now().uptimeNanoseconds
 }
 
 struct NetworkQueueSnapshot {

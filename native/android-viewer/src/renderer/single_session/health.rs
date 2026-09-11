@@ -192,11 +192,7 @@ where
         return ControlHealthAction::None;
     };
     let sent = send_probe(sequence);
-    control_health.probe_send_completed(
-        sequence,
-        sent,
-        media_since_previous_probe,
-    )
+    control_health.probe_send_completed(sequence, sent, media_since_previous_probe)
 }
 
 #[cfg(test)]

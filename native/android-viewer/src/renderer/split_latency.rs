@@ -1,17 +1,12 @@
 //! Bounded split-path latency telemetry, measured with the local
 //! CLOCK_MONOTONIC clock only.
 //!
-//! The split renderer has no latency-probe exchange with the Host. The
-//! established clock-offset pipeline (LCP1/LCP2 probes producing
-//! `host_clock_offset_ms`) lives entirely in the single-session path and its
-//! control socket; the split media sockets only carry ACK / input-status /
-//! termination control packets, and no viewer-side session in split mode ever
-//! establishes a host clock offset. Without an established offset,
-//! `capture_wall_ms` carried by media datagrams cannot be converted into a
-//! capture age here, so this module deliberately does not touch wall-clock
-//! host timestamps. End-to-end capture age therefore remains unknown in
-//! split mode; what this module does measure is every *local* monotonic
-//! segment of the playback pipeline:
+//! The split transport now runs the same LCP1/LCP2 probe exchange as the
+//! single-session path (left tile media socket, offset stored in the shared
+//! `RuntimeStats`), so clock-corrected end-to-end capture ages exist in the
+//! tile worker. This module deliberately stays out of that: it tracks every
+//! *local* monotonic segment of the playback pipeline, which needs no clock
+//! sync and stays valid even while probes are unconverged:
 //!
 //! `datagram receive -> decoder queue ("feed") -> decoder output ready ->
 //! timed surface release submitted`, plus per-episode

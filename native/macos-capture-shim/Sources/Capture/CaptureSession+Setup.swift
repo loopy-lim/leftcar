@@ -10,6 +10,112 @@ import Security
 import Darwin
 import OSLog
 
+/// Bounded retransmit ring for viewer-requested selective retransmission
+/// (NAK/RTX). Stores the plaintext pre-seal envelope of every DATA (`G`)
+/// fragment datagram, keyed by (tile side, au id, fragment index).
+///
+/// Bounds: the most recent 8 au ids per side (the viewer reassembles at most
+/// 4 AUs in flight, so 8 gives reordering headroom) and at most 512 stored
+/// envelopes per side with oldest-AU FIFO eviction. 512 covers an observed
+/// worst case (317-fragment 4K recovery IDR plus ordinary deltas); a
+/// pathological keyframe storm evicts whole oldest AUs, which only narrows
+/// the healable window — a NACK for an evicted fragment is counted as a miss
+/// and the existing IDR recovery runs. Memory ceiling ≈ 8×512×1.4KB ≈ 5.8MB
+/// per side, reached only while the queue holds fragments of many large AUs;
+/// observed steady state is two orders below it. Storing a `Data` is a
+/// copy-on-write retain: the ring adds no per-datagram heap copy on the send
+/// path beyond what already exists.
+final class MediaRetransmitRing {
+    static let maxAccessUnitsPerSide = 8
+    static let maxEntriesPerSide = 512
+
+    /// Reference type so per-fragment stores mutate the AU entry in place;
+    /// a value-type dictionary would be copied out of and back into the
+    /// side ring on every stored fragment (quadratic in the AU fragment
+    /// count on the hot send path).
+    private final class AccessUnitEnvelopes {
+        var fragments: [UInt16: Data] = [:]
+    }
+
+    private struct SideRing {
+        var envelopes: [UInt16: AccessUnitEnvelopes] = [:]
+        var order: [UInt16] = []
+        var count = 0
+    }
+
+    private var sides: [Int: SideRing] = [:]
+    private let lock = NSLock()
+
+    /// Single-session sends carry nil side; a session is either single or
+    /// split, so nil and .left can never collide within one ring lifetime.
+    private static func sideKey(_ side: TileSide?) -> Int {
+        side == .right ? 1 : 0
+    }
+
+    func store(_ envelope: Data, side: TileSide?) {
+        // G | fragment_index u16 BE | fragment_count u16 BE | au_id u16 LE …
+        // DATA fragments only: parity (`P`), config (`CF*`), audio, and
+        // control datagrams must never enter the ring.
+        let start = envelope.startIndex
+        guard envelope.count > 7, envelope[start] == 0x47 else { return }
+        let fragmentIndex = (UInt16(envelope[start + 1]) << 8)
+            | UInt16(envelope[start + 2])
+        let auID = UInt16(envelope[start + 5])
+            | (UInt16(envelope[start + 6]) << 8)
+        let key = Self.sideKey(side)
+        lock.lock()
+        defer { lock.unlock() }
+        var ring = sides[key] ?? SideRing()
+        if ring.envelopes[auID] == nil {
+            while ring.order.count >= Self.maxAccessUnitsPerSide {
+                let oldest = ring.order.removeFirst()
+                ring.count -= ring.envelopes[oldest]?.fragments.count ?? 0
+                ring.envelopes[oldest] = nil
+            }
+            ring.order.append(auID)
+            ring.envelopes[auID] = AccessUnitEnvelopes()
+        }
+        if ring.envelopes[auID]?.fragments[fragmentIndex] == nil {
+            ring.count += 1
+        }
+        // Entry-cap eviction stops at the AU currently being stored: one AU
+        // larger than the whole cap is retained whole (the observed maximum
+        // is 317 fragments, well under 512).
+        while ring.count > Self.maxEntriesPerSide,
+              let oldest = ring.order.first,
+              oldest != auID {
+            ring.count -= ring.envelopes[oldest]?.fragments.count ?? 0
+            ring.order.removeFirst()
+            ring.envelopes[oldest] = nil
+        }
+        ring.envelopes[auID]?.fragments[fragmentIndex] = envelope
+        sides[key] = ring
+    }
+
+    func lookup(
+        auID: UInt16,
+        fragmentIndex: UInt16,
+        side: TileSide?
+    ) -> Data? {
+        let key = Self.sideKey(side)
+        lock.lock()
+        defer { lock.unlock() }
+        return sides[key]?.envelopes[auID]?.fragments[fragmentIndex]
+    }
+}
+
+/// Send-result contract shared with the TCP path (`sendTCPFrame`): a full
+/// send of the sealed wire bytes is reported as the plaintext length so
+/// callers can compare against the data they handed in; any other result
+/// passes through unchanged.
+func normalizedSendResult(
+    _ result: Int,
+    sealedCount: Int,
+    plaintextCount: Int
+) -> Int {
+    result == sealedCount ? plaintextCount : result
+}
+
 extension CaptureSession {
     // MARK: Setup
 
@@ -64,10 +170,12 @@ extension CaptureSession {
 
     /// Lowest-level UDP sender. Sealing happens exactly here so every
     /// datagram this session emits (video, audio, cursor, acks, notices,
-    /// reachability challenge) shares one AEAD boundary.
+    /// reachability challenge) shares one AEAD boundary. Sealing adds 24
+    /// wire bytes (8B counter + 16B tag), so the raw sendto count is
+    /// normalized through `normalizedSendResult` before returning.
      func send(_ data: Data, fd: Int32, to addr: inout sockaddr_in) -> Int {
         guard let sealed = mediaCrypto.seal(data) else { return -1 }
-        return sealed.withUnsafeBytes { raw in
+        let result = sealed.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return -1 }
             return withUnsafePointer(to: &addr) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
@@ -82,6 +190,11 @@ extension CaptureSession {
                 }
             }
         }
+        return normalizedSendResult(
+            result,
+            sealedCount: sealed.count,
+            plaintextCount: data.count
+        )
     }
 
     /// A non-blocking UDP socket can transiently report EAGAIN/ENOBUFS during
@@ -94,6 +207,12 @@ extension CaptureSession {
         fd: Int32,
         tileSide: TileSide? = nil
     ) -> Int {
+        // Record the plaintext envelope before sealing: the viewer may ask
+        // for this exact datagram again via NAK. Only DATA (`G`) fragments
+        // pass the ring's marker filter — parity, config, audio, and control
+        // never retransmit. On the TCP transport the ring is harmless (TCP
+        // does not lose datagrams) and the NAK reply re-seals over TCP.
+        retransmitRing.store(data, side: tileSide)
         if mediaTransport.usesTCP {
             let sent = sendTCPFrame(data, fd: fd)
             if sent == data.count { return sent }
@@ -236,9 +355,7 @@ extension CaptureSession {
         // key. Only a viewer holding the key can open it and echo the same
         // plaintext sealed in its own direction — the nonce itself is not a
         // secret and the token-suffix scheme it replaced is gone.
-        let nonce = Data(UUID().uuidString.utf8)
-        var challenge = Data("LCH1".utf8)
-        challenge.append(nonce)
+        let challenge = sealedChallenge()
         guard sendTCPFrame(challenge, fd: sock) == challenge.count,
               let response = receiveTCPFrame(fd: sock, timeoutMs: 2_000),
               let opened = mediaCrypto.open(response),
@@ -257,17 +374,23 @@ extension CaptureSession {
         if originalFlags >= 0 {
             _ = fcntl(sock, F_SETFL, originalFlags | O_NONBLOCK)
         }
+        return finishMediaSocketHandshake(fd: sock)
+    }
+
+    /// 미디어 소켓이 인증을 통과한 뒤의 공통 마무리: 입력 시퀀스 리셋, 입력
+    /// 수신기 시작, 입력 상태 전송, 중지 검사, 라이프사이클 전환.
+    func finishMediaSocketHandshake(fd: Int32) -> Bool {
         inputLock.lock()
         lastReliableInputSequence = 0
         lastPointerInputSequence = 0
         inputLock.unlock()
-        startInputReceiver(fd: sock)
-        sendInputStatus(fd: sock)
+        startInputReceiver(fd: fd)
+        sendInputStatus(fd: fd)
 
         stateLock.lock()
         if stopRequested {
             stateLock.unlock()
-            close(sock)
+            close(fd)
             sock = -1
             return false
         }
@@ -276,6 +399,14 @@ extension CaptureSession {
         return true
     }
 
+    /// LCH1 도전 본문: 세션 미디어 키로 봉인하는 랜덤 논스. 논스 자체는
+    /// 비밀이 아니고, 열어서 같은 평문을 역방향으로 봉인해 돌려보낼 수
+    /// 있다는 AEAD 보유가 인증이다.
+    func sealedChallenge() -> Data {
+        var challenge = Data("LCH1".utf8)
+        challenge.append(Data(UUID().uuidString.utf8))
+        return challenge
+    }
     func connectSocket(stopOnFailure: Bool = true) -> Bool {
         stopInputReceiver()
         stateLock.lock()
@@ -315,9 +446,7 @@ extension CaptureSession {
         // are captured or sent. The challenge is sealed under the session
         // media key and the echo must open to the identical plaintext; AEAD
         // possession authenticates every later reverse message.
-        let nonce = Data(UUID().uuidString.utf8)
-        var challenge = Data("LCH1".utf8)
-        challenge.append(nonce)
+        let challenge = sealedChallenge()
         var challengeVerified = false
         let requiresSplitPair = requestedEncoderExperiment == .splitVertical
         var verifiedTilePorts = Set<UInt16>()
@@ -385,23 +514,7 @@ extension CaptureSession {
             }
             return false
         }
-        inputLock.lock()
-        lastReliableInputSequence = 0
-        lastPointerInputSequence = 0
-        inputLock.unlock()
-        startInputReceiver(fd: sock)
-        sendInputStatus(fd: sock)
-
-        stateLock.lock()
-        if stopRequested {
-            stateLock.unlock()
-            close(sock)
-            sock = -1
-            return false
-        }
-        lifecycleState = firstSendNs == nil ? "starting_capture" : "running"
-        stateLock.unlock()
-        return true
+        return finishMediaSocketHandshake(fd: sock)
     }
 
     /// Remote input is opt-in per stream. Reliable packets continue to be

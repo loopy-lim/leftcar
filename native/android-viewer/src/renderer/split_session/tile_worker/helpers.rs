@@ -18,6 +18,75 @@ pub(super) fn wait_for_socket(socket: &UdpSocket, timeout_ms: i32) -> bool {
     result > 0 && descriptor.revents & libc::POLLIN != 0
 }
 
+/// Per-wake receive cap, shared with the gap-policy tests. One recvmmsg call
+/// receives up to this many datagrams in a single syscall — the same
+/// processing cap the previous per-wake recv_from loop enforced.
+pub(super) const SPLIT_MEDIA_BATCH: usize =
+    crate::renderer::split_gap_policy::split_receive_batch_limit();
+
+pub(super) struct SplitMediaBatch {
+    pub(super) count: usize,
+    pub(super) lengths: [usize; SPLIT_MEDIA_BATCH],
+    pub(super) sources: [Option<SocketAddr>; SPLIT_MEDIA_BATCH],
+}
+
+/// One recvmmsg (MSG_WAITFORONE) draining a Wi-Fi microburst in a single
+/// syscall, mirroring the single-session media batch. The caller still
+/// processes at most [SPLIT_MEDIA_BATCH] datagrams per wake.
+pub(super) fn recv_split_batch(
+    socket: &UdpSocket,
+    buffers: &mut [[u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; SPLIT_MEDIA_BATCH],
+) -> std::io::Result<SplitMediaBatch> {
+    let mut peers: [libc::sockaddr_in; SPLIT_MEDIA_BATCH] = unsafe { std::mem::zeroed() };
+    let mut iovecs: [libc::iovec; SPLIT_MEDIA_BATCH] = std::array::from_fn(|index| libc::iovec {
+        iov_base: buffers[index].as_mut_ptr().cast(),
+        iov_len: crate::media_datagram::MEDIA_BUFFER_BYTES,
+    });
+    let mut messages: [libc::mmsghdr; SPLIT_MEDIA_BATCH] =
+        std::array::from_fn(|_| unsafe { std::mem::zeroed() });
+    for index in 0..SPLIT_MEDIA_BATCH {
+        messages[index].msg_hdr.msg_name = (&mut peers[index] as *mut libc::sockaddr_in).cast();
+        messages[index].msg_hdr.msg_namelen =
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        messages[index].msg_hdr.msg_iov = &mut iovecs[index];
+        messages[index].msg_hdr.msg_iovlen = 1;
+    }
+    let count = unsafe {
+        libc::recvmmsg(
+            socket.as_raw_fd(),
+            messages.as_mut_ptr(),
+            SPLIT_MEDIA_BATCH as u32,
+            libc::MSG_WAITFORONE,
+            std::ptr::null_mut(),
+        )
+    };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut lengths = [0usize; SPLIT_MEDIA_BATCH];
+    let mut sources: [Option<SocketAddr>; SPLIT_MEDIA_BATCH] = std::array::from_fn(|_| None);
+    for index in 0..count as usize {
+        lengths[index] = messages[index].msg_len as usize;
+        sources[index] = split_ipv4_socket_addr(&peers[index]);
+    }
+    Ok(SplitMediaBatch {
+        count: count as usize,
+        lengths,
+        sources,
+    })
+}
+
+fn split_ipv4_socket_addr(raw: &libc::sockaddr_in) -> Option<SocketAddr> {
+    if i32::from(raw.sin_family) != libc::AF_INET {
+        return None;
+    }
+    let octets = raw.sin_addr.s_addr.to_ne_bytes();
+    Some(SocketAddr::V4(std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::from(octets),
+        u16::from_be(raw.sin_port),
+    )))
+}
+
 pub(super) fn ensure_fec_group(
     groups: &mut HashMap<(u16, u16), FecGroup>,
     order: &mut VecDeque<(u16, u16)>,
@@ -62,6 +131,7 @@ pub(super) fn process_restored(
     frame_gaps: &mut u32,
     input_drops: &mut u32,
     input_pressure_started_ns: &mut Option<u64>,
+    feedback_soon: &mut bool,
     decoder_name: &str,
     events: &mpsc::Sender<CoordinatorEvent>,
     stats: &RuntimeStats,
@@ -96,6 +166,7 @@ pub(super) fn process_restored(
                 frame_gaps,
                 input_drops,
                 input_pressure_started_ns,
+                feedback_soon,
                 decoder_name,
                 events,
                 stats,
@@ -124,6 +195,12 @@ pub(super) fn flush_input(
         let Some(outbound) = outbound else {
             break;
         };
+        // Stamp before the send so the ack consumer measures the full
+        // send->ack round trip (retransmit attempts overwrite the stamp, so
+        // the EWMA measures the final successful attempt).
+        if outbound.event.is_reliable() {
+            control.record_reliable_input_send((monotonic_ns().max(0) as u64) / 1_000);
+        }
         let Some(packet) = crypto.seal(&encode_input(&outbound)) else {
             break;
         };
@@ -148,14 +225,14 @@ pub(super) fn process_frame(
     frame_gaps: &mut u32,
     input_drops: &mut u32,
     input_pressure_started_ns: &mut Option<u64>,
+    feedback_soon: &mut bool,
     decoder_name: &str,
     events: &mpsc::Sender<CoordinatorEvent>,
     stats: &RuntimeStats,
     control: &RendererControl,
     telemetry: &mut TileLatencyTelemetry,
 ) {
-    let keyframe =
-        crate::media_datagram::is_keyframe(&frame.au, viewer_decoder::VideoCodec::H264);
+    let keyframe = crate::media_datagram::is_keyframe(&frame.au, viewer_decoder::VideoCodec::H264);
     let gap = decide_split_frame_gap(*last_id, frame.id, keyframe, *awaiting_keyframe);
     if gap.missing > 0 {
         stats.fec(side).record_gap_event(gap.missing);
@@ -168,6 +245,12 @@ pub(super) fn process_frame(
     *awaiting_keyframe = gap.awaiting_keyframe_after;
     if gap.signal == SplitGapSignal::Loss {
         stats.delta_gap_recoveries.fetch_add(1, Ordering::Relaxed);
+        // Mark the fast-path feedback NOW: the worker loop sends the LCF1
+        // (with this tile's loss increase) at the top of the next iteration
+        // — ahead of the command drain — so the loss report is on the wire
+        // before the coordinator's IDR request for the same gap. The Host's
+        // side-aware per-tile decision needs that ordering.
+        *feedback_soon = true;
         telemetry.note_gap_started(monotonic_ns());
         let _ = events.send(CoordinatorEvent::NetworkGap(side));
     } else if gap.signal == SplitGapSignal::Idr && gap.missing > 0 {
@@ -255,6 +338,25 @@ pub(super) fn process_frame(
             *input_pressure_started_ns = None;
             let queued_ns = monotonic_ns();
             telemetry.note_queued(frame.id, pts_us, queued_ns);
+            // Clock-corrected end-to-end ages, mirroring the single-session
+            // feed math: capture->decoder-feed and host-send->decoder-feed,
+            // EWMA'd into the shared RendererControl the HUD and the LCF1
+            // suffix read. Telemetry only — nothing here gates feeding,
+            // scheduling, or presentation.
+            let host_clock_offset_ms = stats
+                .host_clock_offset()
+                .unwrap_or(crate::renderer::HOST_CLOCK_OFFSET_UNKNOWN_MS);
+            if let Some(age) =
+                crate::renderer::clock_corrected_age_ms(frame.capture_wall_ms, host_clock_offset_ms)
+            {
+                crate::renderer::store_smoothed_latency(&control.capture_to_decoder_ms, age);
+            }
+            if let Some(age) = crate::renderer::clock_corrected_age_ms(
+                Some(frame.send_wall_ms),
+                host_clock_offset_ms,
+            ) {
+                crate::renderer::store_smoothed_latency(&control.wire_to_decoder_ms, age);
+            }
             if gap.signal == SplitGapSignal::Idr {
                 if let Some(gap_to_idr_us) = telemetry.note_idr(pts_us, queued_ns) {
                     log_info!(

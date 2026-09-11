@@ -4,12 +4,12 @@ use super::presentation_sync::{
     drain_available_events, PairPresentationCoordinator, PairReleaseAcknowledgements, ReadyFrame,
     SyncDecision, TileSide, WorkerCommand,
 };
-use super::recovery::{PairedRecoveryGate, RecoveryAction};
+use super::recovery::{RecoveryAction, SplitRecoveryGate};
 use crate::jni::{remove_renderer_if_current, RendererControl};
 use crate::log_info;
 use crate::prepared_udp::PreparedUdpReceiver;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +30,9 @@ pub(crate) struct SplitRendererLaunch {
     pub control: Arc<RendererControl>,
 }
 
-#[derive(Default)]
+// Manual Default (not derive): the clock offset must start at the "unknown"
+// sentinel — a derived zero would fabricate capture ages before the first
+// probe response.
 struct RuntimeStats {
     left_fec: FecRuntimeStats,
     right_fec: FecRuntimeStats,
@@ -48,6 +50,15 @@ struct RuntimeStats {
     // tile stay unpaired and are retried by the recovery cooldown; the gap
     // between paired_idr_episodes and this counter exposes that stall.
     paired_idr_resumes: AtomicU32,
+    // Per-tile gap recovery (R2): count of per-tile episodes that resumed
+    // when THEIR tile's decoder saw the new keyframe (peer never waited
+    // for). Surfaced in the 1Hz stats log and the LCF1 v3 suffix.
+    per_tile_idr_resumes: AtomicU32,
+    // Split-path host clock offset (host wall clock minus Android wall clock,
+    // milliseconds), estimated from LCP1/LCP2 probes on the left tile media
+    // socket. Sentinel until the first probe response converges so capture
+    // ages are never fabricated from an assumed zero offset.
+    host_clock_offset_ms: AtomicI64,
     // V2 dispatch truthfulness counters. idr_transmit_attempts counts UDP
     // send_to calls that the kernel accepted — transmit attempts, never
     // confirmed deliveries. idr_requests_unsent counts requests a worker
@@ -62,6 +73,13 @@ struct RuntimeStats {
     // so an old queued wire copy of a superseded same-episode command is
     // cancelled instead of riding a newer tick.
     recovery_request: AtomicU64,
+    // Per-tile scope ownership registers ([left, right]): the open tile
+    // episode id and the ONE outstanding stamped per-tile request id for
+    // that side. Workers check THESE for TileCommand::RequestTileIdr (the
+    // paired registers above are never touched by per-tile requests, and
+    // vice versa).
+    tile_recovery_episode: [AtomicU64; 2],
+    tile_recovery_request: [AtomicU64; 2],
     idr_transmit_attempts: AtomicU32,
     idr_requests_unsent: AtomicU32,
     idr_requests_cancelled_stale: AtomicU32,
@@ -77,9 +95,67 @@ impl RuntimeStats {
         }
     }
 
+    /// Current host clock offset, or None while the probe exchange has not
+    /// converged. Every tile worker reads the same shared estimate.
+    fn host_clock_offset(&self) -> Option<i64> {
+        let offset = self.host_clock_offset_ms.load(Ordering::Relaxed);
+        (offset != super::HOST_CLOCK_OFFSET_UNKNOWN_MS).then_some(offset)
+    }
+
+    fn record_host_clock_offset(&self, offset_ms: i128) {
+        let clamped = offset_ms.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+        self.host_clock_offset_ms.store(clamped, Ordering::Relaxed);
+    }
+}
+
+impl Default for RuntimeStats {
+    fn default() -> Self {
+        Self {
+            left_fec: FecRuntimeStats::default(),
+            right_fec: FecRuntimeStats::default(),
+            left_rendered: AtomicU64::new(0),
+            right_rendered: AtomicU64::new(0),
+            joined_rendered: AtomicU64::new(0),
+            frame_gaps: AtomicU64::new(0),
+            input_drops: AtomicU64::new(0),
+            keyframe_gap_recoveries: AtomicU32::new(0),
+            delta_gap_recoveries: AtomicU32::new(0),
+            pair_sync_timeouts: AtomicU32::new(0),
+            unmatched_output_drops: AtomicU32::new(0),
+            paired_idr_resumes: AtomicU32::new(0),
+            per_tile_idr_resumes: AtomicU32::new(0),
+            host_clock_offset_ms: AtomicI64::new(super::HOST_CLOCK_OFFSET_UNKNOWN_MS),
+            recovery_episode: AtomicU64::new(0),
+            recovery_request: AtomicU64::new(0),
+            tile_recovery_episode: [AtomicU64::new(0), AtomicU64::new(0)],
+            tile_recovery_request: [AtomicU64::new(0), AtomicU64::new(0)],
+            idr_transmit_attempts: AtomicU32::new(0),
+            idr_requests_unsent: AtomicU32::new(0),
+            idr_requests_cancelled_stale: AtomicU32::new(0),
+            ready_delta_max_us: AtomicU32::new(0),
+            ready_delta_samples_us: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl RuntimeStats {
     fn record_paired_idr_episode(&self) {
         self.left_fec.record_paired_idr_episode();
         self.right_fec.record_paired_idr_episode();
+    }
+
+    /// The per-scope ownership registers for one side's tile requests.
+    fn tile_scope(&self, side: TileSide) -> (&AtomicU64, &AtomicU64) {
+        match side {
+            TileSide::Left => (
+                &self.tile_recovery_episode[0],
+                &self.tile_recovery_request[0],
+            ),
+            TileSide::Right => (
+                &self.tile_recovery_episode[1],
+                &self.tile_recovery_request[1],
+            ),
+        }
     }
 
     fn record_suppressed_recovery_request(&self) {
@@ -155,6 +231,14 @@ enum TileCommand {
         episode: u64,
         request: u64,
     },
+    /// Per-tile IDR request (R2): same sealed "IDR" wire command, same
+    /// episode+request ownership checks — but against THIS side's per-tile
+    /// scope registers, and always sent through this tile's own socket so
+    /// the Host identifies the requesting side by source port.
+    RequestTileIdr {
+        episode: u64,
+        request: u64,
+    },
     Stop {
         send_bye: bool,
     },
@@ -210,13 +294,13 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
             let mut coordinator = PairPresentationCoordinator::new(fps);
             let mut release_acknowledgements = PairReleaseAcknowledgements::default();
             let mut presentation_generation = 0u64;
-            let mut recovery = PairedRecoveryGate::default();
+            let mut recovery = SplitRecoveryGate::default();
             let mut dispatch_ledger = DispatchLedger::new();
             let mut ready_at: HashMap<(TileSide, i64), i64> = HashMap::new();
             let initial = recovery.start_initial(monotonic_ns().max(0) as u64);
             issue_paired_idr_request(
                 initial,
-                &mut recovery,
+                &recovery,
                 &mut dispatch_ledger,
                 &stats,
                 &left_tx,
@@ -248,22 +332,19 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                         stats.frame_gaps.load(Ordering::Relaxed),
                                         stats.input_drops.load(Ordering::Relaxed),
                                     );
-                                    // Accurate current gating (unchanged): the
-                                    // gap-freeze itself is per-tile — only the
-                                    // lossy tile stopped feeding deltas
-                                    // (awaiting_keyframe in its process_frame);
-                                    // the peer tile keeps decoding and
-                                    // presenting. Recovery requests one paired
-                                    // IDR through exactly ONE selected tile
-                                    // socket (request-origin first, with a
-                                    // bounded single alternate-path retry if
-                                    // that path reports itself unready) and
-                                    // never flushes either decoder (flush
-                                    // happens only on DecoderFailure). Whether
-                                    // both tiles resume depends on the Host
-                                    // refreshing both streams; the paired gate
-                                    // below completes only when both tiles
-                                    // report the same IDR generation.
+                                    // The gap-freeze itself is per-tile —
+                                    // only the lossy tile stopped feeding
+                                    // deltas (awaiting_keyframe in its
+                                    // process_frame); the peer tile keeps
+                                    // decoding and presenting. R2 per-tile
+                                    // decoupling: a single-tile gap now also
+                                    // REQUESTS per-tile (its own socket, its
+                                    // own episode) and resumes alone when
+                                    // its decoder sees the new keyframe. A
+                                    // second gap inside the paired-loss
+                                    // window converts to the paired
+                                    // episode; no decoder is ever flushed
+                                    // for a network gap.
                                     match recovery.on_loss(side, monotonic_ns() as u64) {
                                         RecoveryAction::RequestPair => {
                                             stats.record_paired_idr_episode();
@@ -273,12 +354,26 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                             );
                                             issue_paired_idr_request(
                                                 RecoveryAction::RequestPair,
-                                                &mut recovery,
+                                                &recovery,
                                                 &mut dispatch_ledger,
                                                 &stats,
                                                 &left_tx,
                                                 &right_tx,
                                                 Some(side),
+                                            );
+                                        }
+                                        RecoveryAction::RequestTile(tile_side) => {
+                                            log_info!(
+                                                "split {:?} network gap requested PER-TILE IDR without decoder flush (peer keeps streaming)",
+                                                tile_side
+                                            );
+                                            issue_tile_idr_request(
+                                                tile_side,
+                                                &recovery,
+                                                &mut dispatch_ledger,
+                                                &stats,
+                                                &left_tx,
+                                                &right_tx,
                                             );
                                         }
                                         RecoveryAction::Suppress => {
@@ -314,12 +409,44 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                             let _ = right_tx.send(TileCommand::EnterRecovery);
                                             issue_paired_idr_request(
                                                 RecoveryAction::RequestPair,
-                                                &mut recovery,
+                                                &recovery,
                                                 &mut dispatch_ledger,
                                                 &stats,
                                                 &left_tx,
                                                 &right_tx,
                                                 Some(side),
+                                            );
+                                        }
+                                        RecoveryAction::RequestTile(tile_side) => {
+                                            // Hard recovery for ONE tile only:
+                                            // flush the failing tile's decoder
+                                            // and drop only its pending
+                                            // outputs; the peer's decoder and
+                                            // presentation state stay live.
+                                            log_info!(
+                                                "split {:?} decoder failure entered per-tile recovery",
+                                                tile_side
+                                            );
+                                            dispatch_decision(
+                                                coordinator.discard_pending_side(tile_side),
+                                                &left_tx,
+                                                &right_tx,
+                                                &stats,
+                                                &mut ready_at,
+                                                presentation_generation,
+                                            );
+                                            let target = match tile_side {
+                                                TileSide::Left => &left_tx,
+                                                TileSide::Right => &right_tx,
+                                            };
+                                            let _ = target.send(TileCommand::EnterRecovery);
+                                            issue_tile_idr_request(
+                                                tile_side,
+                                                &recovery,
+                                                &mut dispatch_ledger,
+                                                &stats,
+                                                &left_tx,
+                                                &right_tx,
                                             );
                                         }
                                         RecoveryAction::Suppress => {
@@ -330,27 +457,37 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                 }
                                 CoordinatorEvent::Idr { side, generation } => {
                                     let action = recovery.on_idr(side, generation);
-                                    // A ResumePair or partial restart bumped the
-                                    // episode id: publish it immediately so any
-                                    // queued request stamped with the retired id
-                                    // is cancelled by its worker before the wire
-                                    // (no late pending PLI after the pair resumes).
+                                    // A ResumePair/ResumeTile or partial
+                                    // restart bumped an episode id: publish
+                                    // it immediately so any queued request
+                                    // stamped with the retired id is
+                                    // cancelled by its worker before the wire
+                                    // (no late pending PLI after a resume).
                                     sync_dispatch(
                                         &recovery,
                                         &mut dispatch_ledger,
                                         &stats,
                                     );
-                                    if action == RecoveryAction::ResumePair {
-                                        stats
-                                            .paired_idr_resumes
-                                            .fetch_add(1, Ordering::Relaxed);
+                                    match action {
+                                        RecoveryAction::ResumePair => {
+                                            stats
+                                                .paired_idr_resumes
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        RecoveryAction::ResumeTile(_) => {
+                                            stats
+                                                .per_tile_idr_resumes
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        _ => {}
                                     }
                                     log_info!(
-                                        "split {:?} IDR generation={} recovery={:?} episode={}",
+                                        "split {:?} IDR generation={} recovery={:?} pairedEpisode={} tileEpisode={}",
                                         side,
                                         generation,
                                         action,
-                                        recovery.episode()
+                                        recovery.paired_episode(),
+                                        recovery.tile_episode(side)
                                     );
                                 }
                                 CoordinatorEvent::IdrRequestOutcome {
@@ -360,6 +497,60 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                     outcome,
                                 } => {
                                     sync_dispatch(&recovery, &mut dispatch_ledger, &stats);
+                                    // Per-tile scope first: request ids are
+                                    // minted from one shared counter, so a
+                                    // stamp matches at most one slot. The
+                                    // tile path owns NO alternate failover —
+                                    // its wire path is fixed to this side's
+                                    // socket, and an unsent report is
+                                    // retained for the unchanged 750ms
+                                    // cadence.
+                                    let tile_consumed = dispatch_ledger.on_tile_outcome_stamped(
+                                        side, episode, request, outcome,
+                                    );
+                                    if tile_consumed {
+                                        match outcome {
+                                            IdrRequestOutcome::Transmitted => {
+                                                log_info!(
+                                                    "split {:?} per-tile IDR request transmitted (episode={}; request={}; UDP send accepted, delivery not guaranteed)",
+                                                    side,
+                                                    episode,
+                                                    request
+                                                );
+                                            }
+                                            IdrRequestOutcome::CancelledStale => {
+                                                stats
+                                                    .idr_requests_cancelled_stale
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                log_info!(
+                                                    "split {:?} per-tile IDR request cancelled before wire: episode={} stale (current={}) or request={} superseded (current={})",
+                                                    side,
+                                                    episode,
+                                                    recovery.tile_episode(side),
+                                                    request,
+                                                    stats
+                                                        .tile_scope(side)
+                                                        .1
+                                                        .load(Ordering::Relaxed)
+                                                );
+                                            }
+                                            unsent @ (IdrRequestOutcome::UnsentNoPeer
+                                            | IdrRequestOutcome::UnsentNoToken
+                                            | IdrRequestOutcome::SendFailed) => {
+                                                stats
+                                                    .idr_requests_unsent
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                log_info!(
+                                                    "split {:?} per-tile IDR request NOT sent (episode={}, request={}, reason={:?}); retained for the 750ms cadence",
+                                                    side,
+                                                    episode,
+                                                    request,
+                                                    unsent
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     match outcome {
                                         IdrRequestOutcome::Transmitted => {
                                             // Truthful semantics: one UDP send_to
@@ -380,7 +571,7 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                                 "split {:?} paired IDR request cancelled before wire: episode={} stale (current={}) or request={} superseded (current={}) (late pending PLI prevented)",
                                                 side,
                                                 episode,
-                                                recovery.episode(),
+                                                recovery.paired_episode(),
                                                 request,
                                                 stats.recovery_request.load(Ordering::Relaxed)
                                             );
@@ -408,7 +599,7 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                     if let Some(alternate) = dispatch_ledger
                                         .on_outcome_stamped(request, side, episode, outcome)
                                     {
-                                        let stamped = recovery.episode();
+                                        let stamped = recovery.paired_episode();
                                         let stamped_request = dispatch_ledger.current_request();
                                         stats
                                             .recovery_request
@@ -465,27 +656,58 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                     &mut ready_at,
                     presentation_generation,
                 );
-                if recovery.retry_due(monotonic_ns().max(0) as u64) == RecoveryAction::RequestPair {
-                    if dispatch_ledger.retained_request() {
-                        log_info!(
-                            "split paired recovery IDR retry re-dispatches retained request (paths were unready)"
-                        );
-                    } else if dispatch_ledger.in_flight() {
-                        log_info!(
-                            "split paired recovery IDR retry skipped: the stamped request is still in flight (exactly one outstanding command until its outcome)"
-                        );
-                    } else {
-                        log_info!("split paired recovery IDR retry");
+                // Cadence tick across all open episodes (paired + per side).
+                // Each scope keeps the unchanged 750ms cooldown; every action
+                // still dispatches exactly one stamped command per scope.
+                for retry_action in recovery.retry_due(monotonic_ns().max(0) as u64) {
+                    match retry_action {
+                        RecoveryAction::RequestPair => {
+                            if dispatch_ledger.retained_request() {
+                                log_info!(
+                                    "split paired recovery IDR retry re-dispatches retained request (paths were unready)"
+                                );
+                            } else if dispatch_ledger.in_flight() {
+                                log_info!(
+                                    "split paired recovery IDR retry skipped: the stamped request is still in flight (exactly one outstanding command until its outcome)"
+                                );
+                            } else {
+                                log_info!("split paired recovery IDR retry");
+                            }
+                            issue_paired_idr_request(
+                                RecoveryAction::RequestPair,
+                                &recovery,
+                                &mut dispatch_ledger,
+                                &stats,
+                                &left_tx,
+                                &right_tx,
+                                None,
+                            );
+                        }
+                        RecoveryAction::RequestTile(tile_side) => {
+                            if dispatch_ledger.tile_retained(tile_side) {
+                                log_info!(
+                                    "split {:?} per-tile recovery IDR retry re-dispatches retained request (socket was unready)",
+                                    tile_side
+                                );
+                            } else if dispatch_ledger.tile_in_flight(tile_side) {
+                                log_info!(
+                                    "split {:?} per-tile recovery IDR retry skipped: the stamped request is still in flight",
+                                    tile_side
+                                );
+                            } else {
+                                log_info!("split {:?} per-tile recovery IDR retry", tile_side);
+                            }
+                            issue_tile_idr_request(
+                                tile_side,
+                                &recovery,
+                                &mut dispatch_ledger,
+                                &stats,
+                                &left_tx,
+                                &right_tx,
+                            );
+                        }
+                        _ => {}
                     }
-                    issue_paired_idr_request(
-                        RecoveryAction::RequestPair,
-                        &mut recovery,
-                        &mut dispatch_ledger,
-                        &stats,
-                        &left_tx,
-                        &right_tx,
-                        None,
-                    );
                 }
             }
             dispatch_decision(
@@ -519,13 +741,22 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
         .map_err(|error| format!("failed to spawn split coordinator: {error}"))
 }
 
-/// Publish the gate's episode id to the dispatch ledger and to the shared
-/// worker-visible counter. Workers compare this id against the stamp on their
-/// queued request immediately before any wire access.
-fn sync_dispatch(recovery: &PairedRecoveryGate, ledger: &mut DispatchLedger, stats: &RuntimeStats) {
-    let episode = recovery.episode();
+/// Publish the gate's episode ids (paired scope + per-side tile scopes) to
+/// the dispatch ledger and to the shared worker-visible registers. Workers
+/// compare these ids against the stamps on their queued requests immediately
+/// before any wire access; a retired episode id (pair resumed, tile resumed,
+/// burst conversion, partial restart) makes the queued copy stale so it is
+/// cancelled instead of transmitted.
+fn sync_dispatch(recovery: &SplitRecoveryGate, ledger: &mut DispatchLedger, stats: &RuntimeStats) {
+    let episode = recovery.paired_episode();
     ledger.sync_episode(episode);
     stats.recovery_episode.store(episode, Ordering::Relaxed);
+    for side in [TileSide::Left, TileSide::Right] {
+        let tile_episode = recovery.tile_episode(side);
+        ledger.sync_tile_episode(side, tile_episode);
+        let (tile_episode_register, _) = stats.tile_scope(side);
+        tile_episode_register.store(tile_episode, Ordering::Relaxed);
+    }
 }
 
 /// Issue the paired IDR request for one recovery action through exactly ONE
@@ -540,7 +771,7 @@ fn sync_dispatch(recovery: &PairedRecoveryGate, ledger: &mut DispatchLedger, sta
 /// same-episode retry can never queue a second wire copy alongside the first.
 fn issue_paired_idr_request(
     action: RecoveryAction,
-    recovery: &mut PairedRecoveryGate,
+    recovery: &SplitRecoveryGate,
     ledger: &mut DispatchLedger,
     stats: &RuntimeStats,
     left_tx: &mpsc::Sender<TileCommand>,
@@ -554,7 +785,7 @@ fn issue_paired_idr_request(
     let Some(path) = ledger.select_path(action) else {
         return;
     };
-    let episode = recovery.episode();
+    let episode = recovery.paired_episode();
     let request = ledger.current_request();
     stats.recovery_request.store(request, Ordering::Relaxed);
     let target = match path {
@@ -562,6 +793,38 @@ fn issue_paired_idr_request(
         TileSide::Right => right_tx,
     };
     let _ = target.send(TileCommand::RequestIdr { episode, request });
+}
+
+/// Issue ONE per-tile IDR request through the gapped tile's OWN socket: the
+/// Host identifies the requesting side by source port, so the path is fixed
+/// — no origin preference, no alternate failover. Ownership mirrors the
+/// paired scope: one outstanding stamped command per side until its outcome;
+/// an unready socket retains the request for the unchanged 750ms cadence.
+fn issue_tile_idr_request(
+    side: TileSide,
+    recovery: &SplitRecoveryGate,
+    ledger: &mut DispatchLedger,
+    stats: &RuntimeStats,
+    left_tx: &mpsc::Sender<TileCommand>,
+    right_tx: &mpsc::Sender<TileCommand>,
+) {
+    sync_dispatch(recovery, ledger, stats);
+    let episode = recovery.tile_episode(side);
+    if episode == 0 {
+        return;
+    }
+    ledger.sync_tile_episode(side, episode);
+    let Some(request) = ledger.select_tile_path(side, episode) else {
+        return;
+    };
+    let (episode_register, request_register) = stats.tile_scope(side);
+    episode_register.store(episode, Ordering::Relaxed);
+    request_register.store(request, Ordering::Relaxed);
+    let target = match side {
+        TileSide::Left => left_tx,
+        TileSide::Right => right_tx,
+    };
+    let _ = target.send(TileCommand::RequestTileIdr { episode, request });
 }
 
 fn dispatch_decision(

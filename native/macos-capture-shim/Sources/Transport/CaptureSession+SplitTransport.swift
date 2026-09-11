@@ -265,15 +265,43 @@ extension CaptureSession {
         var sentParity = 0
         var sendSyscallUs: UInt64 = 0
         var succeeded = true
+        var deadlineExceeded = false
         let burstLimit = splitPacingBurstLimit(
             configured: currentUdpBurstLimit(),
             leftFragmentCount: leftUnit.fragmentCount,
             rightFragmentCount: rightUnit?.fragmentCount
         )
+        // Slow-but-successful sends during link collapse must not hold newer
+        // pairs hostage: abort the pair once it overruns its size-aware
+        // budget (see udpAccessUnitSendDeadlineUs). The aggregate data
+        // fragment count keeps the budget proportional to both tiles, and
+        // the check runs per pacing range — the first iteration covers the
+        // already-exceeded case before a single datagram of this pair is
+        // sent — so pacing sleeps and sendto time are covered together,
+        // mirroring the single-stream path in writePacket.
+        let sendDeadlineBudgetUs = udpAccessUnitSendDeadlineUs(
+            isKeyframe: keyframe,
+            fps: fps,
+            dataFragmentCount: aggregateFragments,
+            burstDatagrams: burstLimit
+        )
         sendLoop: for range in udpPacingBurstRanges(
             datagramCount: transmissions.count,
             maxDatagrams: burstLimit
         ) {
+            let elapsedUs = (DispatchTime.now().uptimeNanoseconds &- startedNs) / 1_000
+            if elapsedUs > sendDeadlineBudgetUs {
+                NSLog(
+                    "Leftcar split pair send deadline exceeded %@: elapsed=%lluus fragments=%d isKeyframe=%@",
+                    targetLabel,
+                    elapsedUs,
+                    aggregateFragments,
+                    keyframe ? "true" : "false"
+                )
+                deadlineExceeded = true
+                succeeded = false
+                break sendLoop
+            }
             let burstBytes = range.reduce(into: 0) { total, index in
                 total += transmissions[index].datagram.count
             }
@@ -328,7 +356,16 @@ extension CaptureSession {
         guard succeeded else {
             stateLock.lock()
             framesDropped &+= 1
-            splitWirePairSendFailures &+= 1
+            // A deadline abort is not a sendto failure: it is counted
+            // separately and recovers through the same split transport
+            // recovery the drain loop runs for send failures (the unsent
+            // remainder keeps succeeded=false, so the lease is released by
+            // the recovery instead of completed).
+            if deadlineExceeded {
+                splitPairDeadlineExceeds &+= 1
+            } else {
+                splitWirePairSendFailures &+= 1
+            }
             stateLock.unlock()
             return .init(
                 auID: auID,

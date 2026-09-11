@@ -14,18 +14,45 @@ fn active_input_control(instance_c: *const c_char) -> Result<Arc<RendererControl
     active_renderer(instance).ok_or(LEFTCAR_ERR_STATE)
 }
 
+/// Shared shell for stream-scoped JNI exports: panic guard plus the
+/// active-renderer lookup, yielding `fallback` when either fails.
+fn with_active_control<T>(
+    instance_c: *const c_char,
+    fallback: T,
+    body: impl FnOnce(&RendererControl) -> T,
+) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || match active_input_control(instance_c) {
+            Ok(control) => Some(body(&control)),
+            Err(_) => None,
+        },
+    ))
+    .unwrap_or(None)
+    .unwrap_or(fallback)
+}
+
+/// Same shell for exports whose body returns LEFTCAR error codes: the
+/// lookup error propagates verbatim and a panic maps to LEFTCAR_ERR_PANIC.
+fn with_active_control_err(
+    instance_c: *const c_char,
+    body: impl FnOnce(&RendererControl) -> i32,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || match active_input_control(instance_c) {
+            Ok(control) => body(&control),
+            Err(code) => code,
+        },
+    ))
+    .unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
 /// Return the authenticated Host input state for the in-stream lock badge.
 /// -1 means the status packet has not arrived yet; 0/1 are locked/enabled.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_status(instance_c: *const c_char) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return -1,
-        };
+    with_active_control(instance_c, -1, |control| {
         i32::from(control.input_enabled.load(Ordering::SeqCst))
-    });
-    guard.unwrap_or(-1)
+    })
 }
 
 fn pack_stream_stats(control: &RendererControl) -> i64 {
@@ -54,14 +81,7 @@ fn pack_stream_stats(control: &RendererControl) -> i64 {
 /// 48..55 frame gaps, 56..63 latest decoder feed milliseconds.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_stats(instance_c: *const c_char) -> i64 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return -1,
-        };
-        pack_stream_stats(&control)
-    });
-    guard.unwrap_or(-1)
+    with_active_control(instance_c, -1, pack_stream_stats)
 }
 
 /// Pack separated stale-input and decoder-burst discard counters for the
@@ -69,11 +89,7 @@ pub extern "C" fn leftcar_jni_stream_stats(instance_c: *const c_char) -> i64 {
 /// low 32 bits are decoder output-burst discards.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_skip_breakdown(instance_c: *const c_char) -> i64 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return -1,
-        };
+    with_active_control(instance_c, -1, |control| {
         let input = control
             .stale_input_drops
             .load(Ordering::Relaxed)
@@ -83,8 +99,7 @@ pub extern "C" fn leftcar_jni_skip_breakdown(instance_c: *const c_char) -> i64 {
             .load(Ordering::Relaxed)
             .min(u64::from(u32::MAX));
         ((input << 32) | burst) as i64
-    });
-    guard.unwrap_or(-1)
+    })
 }
 
 /// Authenticated stage latency for the HUD, packed as four unsigned 16-bit
@@ -92,25 +107,14 @@ pub extern "C" fn leftcar_jni_skip_breakdown(instance_c: *const c_char) -> i64 {
 /// `0xffff` means the NTP-style probe or L2 timestamp has not converged yet.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_latency(instance_c: *const c_char) -> i64 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return -1,
-        };
-        let encode = |value: u64| {
-            if value == LATENCY_UNKNOWN {
-                0xffff
-            } else {
-                value.min(0xfffe)
-            }
-        };
+    with_active_control(instance_c, -1, |control| {
+        let encode = |value: u64| i64::from(crate::surface_release_latency_value(value));
         let network = encode(control.network_rtt_ms.load(Ordering::Relaxed));
         let capture = encode(control.capture_to_decoder_ms.load(Ordering::Relaxed));
         let encoded = encode(control.encode_to_decoder_ms.load(Ordering::Relaxed));
         let wire = encode(control.wire_to_decoder_ms.load(Ordering::Relaxed));
-        (network | (capture << 16) | (encoded << 32) | (wire << 48)) as i64
-    });
-    guard.unwrap_or(-1)
+        network | (capture << 16) | (encoded << 32) | (wire << 48)
+    })
 }
 
 /// Drain pending host audio (LCAU plane) into the caller's buffer.
@@ -124,19 +128,14 @@ pub extern "C" fn leftcar_jni_poll_audio(
     out: *mut u8,
     capacity: usize,
 ) -> i32 {
-    let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return 0,
-        };
+    with_active_control(instance_c, 0, |control| {
         if out.is_null() || capacity < crate::audio_protocol::AUDIO_BLOB_HEADER_LEN {
             return 0;
         }
         let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
         let mut audio = control.audio.lock().unwrap();
         audio.drain_into(buffer) as i32
-    }));
-    guard.unwrap_or(0)
+    })
 }
 
 /// Host or local termination reason for this stream, or -1 while active.
@@ -166,15 +165,13 @@ pub extern "C" fn leftcar_jni_termination_reason(instance_c: *const c_char) -> i
 /// release is not compositor presentation or panel photon output.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_surface_release_latency(instance_c: *const c_char) -> i32 {
-    let guard = std::panic::catch_unwind(|| match active_input_control(instance_c) {
-        Ok(control) => crate::surface_release_latency_value(
+    with_active_control(instance_c, 0xffff, |control| {
+        crate::surface_release_latency_value(
             control
                 .capture_to_surface_release_ms
                 .load(Ordering::Relaxed),
-        ),
-        Err(_) => 0xffff,
-    });
-    guard.unwrap_or(0xffff)
+        )
+    })
 }
 
 /// Backward-compatible C ABI alias for older Kotlin shims.
@@ -185,7 +182,8 @@ pub extern "C" fn leftcar_jni_render_latency(instance_c: *const c_char) -> i32 {
 
 /// Queue a native Android pointer event. `x` and `y` are normalized to the
 /// actual video Surface before crossing JNI; Rust clamps once more at the
-/// fixed-point wire boundary.
+/// fixed-point wire boundary. `pressure`는 스타일러스 압력(0.0-1.0)이고
+/// 음수는 "압력 없음"(손가락·마우스)이다.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_pointer(
     instance_c: *const c_char,
@@ -196,17 +194,16 @@ pub extern "C" fn leftcar_jni_input_pointer(
     action_button: u32,
     horizontal_scroll: f32,
     vertical_scroll: f32,
+    pressure: f32,
 ) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
+    with_active_control_err(instance_c, |control| {
+        let pressure = (pressure >= 0.0).then(|| pressure.clamp(0.0, 1.0));
         let event = match action {
             1 => InputEvent::PointerMove {
                 x: normalized_axis(x),
                 y: normalized_axis(y),
                 buttons,
+                pressure,
             },
             2 | 3 => InputEvent::PointerButton {
                 x: normalized_axis(x),
@@ -214,6 +211,7 @@ pub extern "C" fn leftcar_jni_input_pointer(
                 button: u8::try_from(action_button).unwrap_or(0),
                 down: action == 2,
                 buttons,
+                pressure,
             },
             4 => InputEvent::Scroll {
                 horizontal_milli_lines: (horizontal_scroll.clamp(-1000.0, 1000.0) * 1_000.0).round()
@@ -225,8 +223,7 @@ pub extern "C" fn leftcar_jni_input_pointer(
         };
         control.input.lock().unwrap().push(event);
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
 
 #[no_mangle]
@@ -238,11 +235,7 @@ pub extern "C" fn leftcar_jni_input_key(
     down: bool,
     repeat: u32,
 ) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
+    with_active_control_err(instance_c, |control| {
         let (Ok(key_code), Ok(scan_code), Ok(repeat)) = (
             u16::try_from(key_code),
             u16::try_from(scan_code),
@@ -258,8 +251,7 @@ pub extern "C" fn leftcar_jni_input_key(
             repeat,
         });
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
 
 /// Queue committed IME text as a reliable wire event. `data` holds UTF-8
@@ -274,31 +266,23 @@ pub extern "C" fn leftcar_jni_input_text(
     data: *const u8,
     len: usize,
 ) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
+    with_active_control_err(instance_c, |control| {
         if data.is_null() || len == 0 {
             return LEFTCAR_OK;
         }
         if len > 400 {
             return LEFTCAR_ERR_INVALID;
         }
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
         let Ok(text) = std::str::from_utf8(bytes) else {
             return LEFTCAR_ERR_INVALID;
         };
-        control
-            .input
-            .lock()
-            .unwrap()
-            .push(InputEvent::Text { text: text.to_string() });
+        control.input.lock().unwrap().push(InputEvent::Text {
+            text: text.to_string(),
+        });
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
-
 /// Pack the newest LCD1 cursor sample for frame-rate polling.
 /// bits 0..15 x, 16..31 y, 32..61 sequence (low 30 bits), 63 visible.
 /// Returns -1 while the host has not opted in or no sample arrived yet.
@@ -307,11 +291,7 @@ pub extern "C" fn leftcar_jni_input_text(
 /// distinguishable from the sentinel.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_cursor_state(instance_c: *const c_char) -> i64 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(_) => return -1,
-        };
+    with_active_control(instance_c, -1, |control| {
         if control.cursor_active.load(Ordering::SeqCst) <= 0 {
             return -1;
         }
@@ -320,23 +300,17 @@ pub extern "C" fn leftcar_jni_cursor_state(instance_c: *const c_char) -> i64 {
         let sequence = u64::from(control.cursor_sequence.load(Ordering::SeqCst)) & 0x3fff_ffff;
         let visible = i64::from(control.cursor_visible.load(Ordering::SeqCst));
         x | (y << 16) | ((sequence as i64) << 32) | (visible << 63)
-    });
-    guard.unwrap_or(-1)
+    })
 }
 
 /// Record the viewer-side cursor stream opt-in. Applied at the next control
 /// token establishment (attach or same-window rebind).
 #[no_mangle]
 pub extern "C" fn leftcar_jni_set_cursor_stream(instance_c: *const c_char, enabled: bool) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
+    with_active_control_err(instance_c, |control| {
         control.cursor_requested.store(enabled, Ordering::SeqCst);
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
 
 /// Record the viewer-side system-audio opt-in (SNDON/SNDOFF). Picked up by
@@ -345,28 +319,18 @@ pub extern "C" fn leftcar_jni_set_cursor_stream(instance_c: *const c_char, enabl
 /// without a reconfigure.
 #[no_mangle]
 pub extern "C" fn leftcar_jni_set_audio_stream(instance_c: *const c_char, enabled: bool) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
+    with_active_control_err(instance_c, |control| {
         control.audio_requested.store(enabled, Ordering::SeqCst);
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i32 {
-    let guard = std::panic::catch_unwind(|| {
-        let control = match active_input_control(instance_c) {
-            Ok(control) => control,
-            Err(code) => return code,
-        };
+    with_active_control_err(instance_c, |control| {
         control.input.lock().unwrap().push(InputEvent::ReleaseAll);
         LEFTCAR_OK
-    });
-    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+    })
 }
 
 #[cfg(test)]
@@ -463,11 +427,7 @@ mod cursor_export_tests {
         let (instance, control) = installed_control(KEY);
         let text = "안녕abc";
         assert_eq!(
-            leftcar_jni_input_text(
-                instance.as_ptr(),
-                text.as_ptr(),
-                text.len(),
-            ),
+            leftcar_jni_input_text(instance.as_ptr(), text.as_ptr(), text.len(),),
             LEFTCAR_OK
         );
         let queued = control.input.lock().unwrap().next_ready(1).unwrap();
@@ -488,7 +448,10 @@ mod cursor_export_tests {
             leftcar_jni_input_text(instance.as_ptr(), b"\xff\xfe".as_ptr(), 2),
             LEFTCAR_ERR_INVALID
         );
-        assert_eq!(leftcar_jni_input_text(instance.as_ptr(), b"a".as_ptr(), 0), LEFTCAR_OK);
+        assert_eq!(
+            leftcar_jni_input_text(instance.as_ptr(), b"a".as_ptr(), 0),
+            LEFTCAR_OK
+        );
         assert!(control.input.lock().unwrap().next_ready(1).is_none());
         drop_control(KEY, &control);
     }

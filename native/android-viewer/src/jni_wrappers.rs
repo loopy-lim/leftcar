@@ -153,6 +153,7 @@ extern "C" {
         action_button: u32,
         horizontal_scroll: f32,
         vertical_scroll: f32,
+        pressure: f32,
     ) -> i32;
     fn leftcar_jni_input_key(
         instance: *const c_char,
@@ -185,7 +186,7 @@ extern "C" {
 //   surfaceChanged(long, String, int, int): int
 //   detachSurface(long, String): int
 //   updateWindowEvent(long, String, int, long): int
-//   sendPointer(String, int, float, float, int, int, float, float): int
+//   sendPointer(String, int, float, float, int, int, float, float, float): int
 //   sendKey(String, int, int, int, boolean, int): int
 //   releaseInput(String): int
 //   inputStatus(String): int

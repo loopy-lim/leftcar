@@ -4,10 +4,6 @@ use crate::ids::{SourceId, StreamInstanceId};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-#[derive(Debug, thiserror::Error)]
-#[error("lease not found for release")]
-pub struct LeaseNotFoundError;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseEvent {
     SourceStarted(SourceId),
@@ -51,23 +47,22 @@ impl LeaseTable {
     }
 
     /// Release a lease. Returns SourceStopped's pending record when the last
-    /// lease was released (debounce not yet elapsed).
+    /// lease was released (debounce not yet elapsed). Release of an unknown
+    /// source or a double release is a documented no-op (docs/05 §5.2).
     pub fn release(
         &mut self,
         source: &SourceId,
         instance: &StreamInstanceId,
         now: Duration,
         debounce: Duration,
-    ) -> Result<Option<PendingStop>, LeaseNotFoundError> {
-        let Some(set) = self.leases.get_mut(source) else {
-            return Ok(None); // release of unknown source is a no-op (docs/05 §5.2)
-        };
+    ) -> Option<PendingStop> {
+        let set = self.leases.get_mut(source)?;
         if !set.remove(instance) {
             // double release is a no-op
             if set.is_empty() {
                 self.leases.remove(source);
             }
-            return Ok(None);
+            return None;
         }
         if set.is_empty() {
             self.leases.remove(source);
@@ -77,9 +72,9 @@ impl LeaseTable {
                 deadline: now + debounce,
             };
             self.pending_stops.insert(source.clone(), pending.clone());
-            return Ok(Some(pending));
+            return Some(pending);
         }
-        Ok(None)
+        None
     }
 
     /// Whether a pending stop has elapsed its debounce at `now`.
@@ -131,7 +126,6 @@ mod tests {
                 Duration::from_secs(0),
                 Duration::from_secs(5),
             )
-            .unwrap()
             .expect("pending stop");
         assert_eq!(pending.deadline, Duration::from_secs(5));
         assert_eq!(t.stop_elapsed(&sid("s1"), Duration::from_secs(4)), None);
@@ -150,8 +144,7 @@ mod tests {
             &iid("i1"),
             Duration::ZERO,
             Duration::from_secs(5),
-        )
-        .unwrap();
+        );
         assert!(t
             .release(
                 &sid("s1"),
@@ -159,7 +152,7 @@ mod tests {
                 Duration::ZERO,
                 Duration::from_secs(5)
             )
-            .is_ok());
+            .is_none());
         assert_eq!(t.lease_count(&sid("s1")), 0);
     }
 
@@ -168,7 +161,7 @@ mod tests {
         let mut t = LeaseTable::new();
         assert!(t
             .release(&sid("nope"), &iid("i1"), Duration::ZERO, Duration::ZERO)
-            .is_ok());
+            .is_none());
         assert_eq!(t.total_leases(), 0);
     }
 
@@ -181,8 +174,7 @@ mod tests {
             &iid("i1"),
             Duration::ZERO,
             Duration::from_secs(5),
-        )
-        .unwrap();
+        );
         t.acquire(sid("s1"), iid("i2"));
         assert_eq!(t.stop_elapsed(&sid("s1"), Duration::from_secs(60)), None);
     }

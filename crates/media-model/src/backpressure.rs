@@ -3,37 +3,6 @@
 use crate::frame::{EncodedFrame, FrameKind};
 use std::collections::VecDeque;
 
-/// capture -> encoder boundary: hold only the newest un-encoded frame.
-#[derive(Debug, Default)]
-pub struct LatestFrameSlot {
-    pending: Option<EncodedFrame>,
-}
-
-impl LatestFrameSlot {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Offer a new frame; a not-yet-consumed older frame is returned to the
-    /// caller (deltas are simply dropped upstream; keys are handed back so the
-    /// caller can keep them for recovery, docs/03 §6.3).
-    pub fn offer(&mut self, frame: EncodedFrame) -> Option<EncodedFrame> {
-        self.pending.replace(frame)
-    }
-
-    pub fn take(&mut self) -> Option<EncodedFrame> {
-        self.pending.take()
-    }
-
-    pub fn len(&self) -> usize {
-        usize::from(self.pending.is_some())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_none()
-    }
-}
-
 /// encoder -> packetizer boundary: at most 2 access units; when full, evict the
 /// oldest delta and keep keys.
 #[derive(Debug)]
@@ -105,28 +74,6 @@ mod tests {
             height: 1080,
             payload: Bytes::new(),
         }
-    }
-
-    #[test]
-    fn latest_frame_slot_drops_stale() {
-        let mut slot = LatestFrameSlot::new();
-        let dropped = slot.offer(frame(1, FrameKind::Delta));
-        assert!(dropped.is_none());
-        let dropped = slot.offer(frame(2, FrameKind::Delta));
-        assert!(
-            matches!(dropped, Some(f) if f.kind == FrameKind::Delta),
-            "older unconsumed delta is dropped"
-        );
-        assert_eq!(slot.take().unwrap().frame_id, 2, "newest survives");
-    }
-
-    #[test]
-    fn latest_frame_slot_keeps_key_when_displaced() {
-        let mut slot = LatestFrameSlot::new();
-        slot.offer(frame(1, FrameKind::Key));
-        // displacing a key returns it (caller may need it for recovery)
-        let dropped = slot.offer(frame(2, FrameKind::Delta));
-        assert!(matches!(dropped, Some(f) if f.kind == FrameKind::Key));
     }
 
     #[test]

@@ -95,12 +95,9 @@ impl AudioRing {
         if !newer {
             return false;
         }
-        if self
-            .chunks
-            .front()
-            .is_some_and(|(oldest, _)| oldest.sample_rate != chunk.sample_rate
-                || oldest.channels != chunk.channels)
-        {
+        if self.chunks.front().is_some_and(|(oldest, _)| {
+            oldest.sample_rate != chunk.sample_rate || oldest.channels != chunk.channels
+        }) {
             // A format change invalidates everything buffered before it.
             self.chunks.clear();
         }
@@ -270,19 +267,9 @@ mod tests {
     #[test]
     fn ring_drops_stale_and_keeps_newest_under_backlog() {
         let mut ring = AudioRing::default();
-        assert!(ring.push(&encode_audio_packet(
-            10,
-            48_000,
-            2,
-            &stereo_pcm(4)
-        )));
+        assert!(ring.push(&encode_audio_packet(10, 48_000, 2, &stereo_pcm(4))));
         // Reordered duplicate must not displace newer state.
-        assert!(!ring.push(&encode_audio_packet(
-            9,
-            48_000,
-            2,
-            &stereo_pcm(4)
-        )));
+        assert!(!ring.push(&encode_audio_packet(9, 48_000, 2, &stereo_pcm(4))));
         for sequence in 11..10 + AUDIO_RING_CAPACITY + 4 {
             ring.push(&encode_audio_packet(
                 sequence as u16,
@@ -342,9 +329,6 @@ mod tests {
         let mut exact = [0u8; AUDIO_BLOB_HEADER_LEN + 300 * 2 * 2];
         let len = ring.drain_into(&mut exact);
         assert_eq!(len, exact.len());
-        assert_eq!(
-            u16::from_be_bytes([exact[4], exact[5]]) as usize,
-            300
-        );
+        assert_eq!(u16::from_be_bytes([exact[4], exact[5]]) as usize, 300);
     }
 }

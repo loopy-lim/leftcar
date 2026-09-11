@@ -19,6 +19,24 @@ extension CaptureSession {
             hasSplitPipeline: activeSplitPipeline != nil
         )
         guard applicationRoute != .unavailable else { return }
+        // R4: read the shared-link congestion signal BEFORE taking stateLock.
+        // The registry lock is never taken while stateLock is held here (other
+        // paths run withRegistry and then call into sessions), so every
+        // registry touch in this function stays outside the stateLock
+        // critical sections and no lock-order dependency is created.
+        let peerSampleNs = DispatchTime.now().uptimeNanoseconds
+        let (activeCountSnapshot, peerCongested) = withRegistry { registry in
+            let count = max(1, registry.count)
+            let peerFresh = count > 1
+                && registry.values.contains { session in
+                    session !== self
+                        && sharedCongestionMarkFresh(
+                            markNs: session.sharedCongestionMarkNs,
+                            nowNs: peerSampleNs
+                        )
+                }
+            return (count, peerFresh)
+        }
         stateLock.lock()
         guard appliedEncoderExperimentValue != .adaptiveQp else {
             stateLock.unlock()
@@ -78,25 +96,49 @@ extension CaptureSession {
         // link congestion; letting them vote cut the bitrate after every app
         // access even though RTT and loss were clean.
         let viewerRenderStalled = feedbackFresh && receiverRenderedFps == nil
-        let congested = !viewerRenderStalled
+        let ownCongested = !viewerRenderStalled
             && (newDrops > 0
                 || (!recoveryBurstGrace && lastSendBlockUs > 8_000)
                 || (!recoveryBurstGrace && newReceiverLoss > 0)
                 || latencyWorsening)
+        // R4: a congestion mark broadcast by another session on the shared
+        // link contributes exactly ONE vote, weighted like any local detector
+        // and governed by the same two-consecutive-windows rule, so a single
+        // transient elsewhere can only confirm the second window — it can
+        // never cut on its own.
+        let congested = ownCongested || peerCongested
         let current = currentAverageBitrate
         let qualityHintForBitrate = manualQualityHint ?? currentQualityHint
         let highMotion = adaptiveMotionState.mode(at: nowNs) == .video
+        // R5: ramp eligibility is snapshotted before this window mutates the
+        // ramp state; an eligible window spends one of the at-most-three
+        // accelerated raises.
+        let rampRaiseEligible = recoveryRamp.raiseEligible
         if congested {
             stableBitrateWindows = 0
             consecutiveCongestedWindows += 1
             consecutiveRaiseSteps = 0
             adaptiveCeilingCleanStreak = 0
+            // R5: any congestion vote — including one shared from a peer —
+            // cancels the ramp and re-arms the normal ladder logic.
+            recoveryRamp = recoveryRamp.cancelled()
+            if peerCongested {
+                crossSessionCongestionPeerVotes &+= 1
+            }
         } else {
             stableBitrateWindows += 1
             adaptiveCeilingCleanStreak += 1
             if stableBitrateWindows >= 8 {
                 consecutiveCongestedWindows = 0
             }
+            let advanced = recoveryRamp.advancedAfterCleanWindow()
+            recoveryRamp = advanced.state
+            if advanced.restartLadderClock {
+                stableBitrateWindows = 0
+            }
+        }
+        if ownCongested {
+            crossSessionCongestionMarks &+= 1
         }
         let raiseCeilingSnapshot = adaptiveRaiseCeilingBitrate
         let ceilingCleanStreakSnapshot = adaptiveCeilingCleanStreak
@@ -104,12 +146,21 @@ extension CaptureSession {
         // A single lost datagram or one RTT spike is normal Wi-Fi behavior
         // and must not cut the bitrate.
         let congestionConfirmed = consecutiveCongestedWindows >= 2
-        let canRaise = !congested && stableBitrateWindows >= 8
+        // R5: while the recovery ramp has an accelerated raise pending it
+        // takes precedence over the normal ladder for this window.
+        let canRaise = !congested && stableBitrateWindows >= 8 && !rampRaiseEligible
         if canRaise {
             stableBitrateWindows = 0
             consecutiveRaiseSteps += 1
         }
         stateLock.unlock()
+
+        // R4: broadcast own-detector congestion to the other sessions on the
+        // shared link. Peer-echoed votes (ownCongested == false) deliberately
+        // do not refresh the mark — see CaptureSession.sharedCongestionMarkNs.
+        if ownCongested {
+            withRegistry { _ in sharedCongestionMarkNs = nowNs }
+        }
 
         if let singleSession {
             adaptQualityIfNeeded(
@@ -119,7 +170,9 @@ extension CaptureSession {
         }
 
         guard current > 0 else { return }
-        let activeCount = max(1, withRegistry { $0.count })
+        // R4: the active session count was snapshotted together with the peer
+        // congestion flag before stateLock was taken (same withRegistry pass).
+        let activeCount = activeCountSnapshot
         let streamFactor = activeCount > 1 ? (1.0 / Double(activeCount) * 1.3) : 1.0
         let pixelsPerSecond = Double(outWidth) * Double(outHeight) * Double(fps) * streamFactor
         // A hard 8Mbps single-stream floor prevented the controller from
@@ -191,6 +244,11 @@ extension CaptureSession {
                 failingBitrate: current
             )
             adaptiveCeilingCleanStreak = 0
+            // R5: the cut arms the bounded recovery ramp. The pre-cut level is
+            // already remembered by the congestion-cut memory ceiling above
+            // (90% of the failing bitrate), so the ramp reuses that value as
+            // its cap instead of keeping a separate lastCutFromValue.
+            recoveryRamp = recoveryRamp.rearmedAfterCut()
             stateLock.unlock()
             // The congestion floor has consumed the 4K bitrate budget: the
             // rate controller cannot restore the frame rate on its own.
@@ -231,6 +289,19 @@ extension CaptureSession {
                 ceiling: effectiveCeiling,
                 motionFloor: min(motionFloor, effectiveCeiling)
             )
+        } else if rampRaiseEligible {
+            // R5 bounded recovery ramp: two clean windows after the cut armed
+            // at most three accelerated raises of +30% per clean window. The
+            // congestion-cut memory ceiling (90% of the pre-cut bitrate)
+            // still bounds every step, so the ramp can never climb back into
+            // the level that just collapsed the link; once the ramp is spent
+            // the normal eight-clean-window ladder resumes.
+            let capped = recoveryRampRaiseTarget(
+                current: current,
+                ceiling: effectiveCeiling
+            )
+            guard capped > current else { return }
+            target = capped
         } else if canRaise {
             // Accelerating recovery: 4% → 8% → 16% per stable window so a
             // ratchet-down to the floor recovers in a few seconds while an
@@ -255,7 +326,7 @@ extension CaptureSession {
                 value: target as CFNumber
             )
             if status == noErr {
-                let hardLimitBytes = max(1, Int(Double(target) / 8.0 * 1.25))
+                let hardLimitBytes = vtHardLimitBytes(bitrate: target)
                 _ = VTSessionSetProperty(
                     singleSession,
                     key: kVTCompressionPropertyKey_DataRateLimits,

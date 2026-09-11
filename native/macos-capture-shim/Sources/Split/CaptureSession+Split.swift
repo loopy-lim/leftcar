@@ -142,6 +142,16 @@ extension CaptureSession {
         }
     }
 
+    /// Per-tile gap recovery (R2): force the NEXT admission to keyframe on
+    /// exactly one encoder. Unlike the paired path this never bumps the flow
+    /// recovery generation, discards queued pairs, or establishes a recovery
+    /// boundary — the peer tile streams through untouched.
+    func requestSplitTileKeyframe(side: TileSide, reason: String) {
+        encodeQueue.async { [weak self] in
+            self?.splitPipeline?.requestTileKeyframe(side: side, reason: reason)
+        }
+    }
+
     func invalidateSplitPipeline() {
         let invalidate = { [weak self] in
             self?.splitPipeline?.invalidate()
@@ -224,6 +234,36 @@ extension CaptureSession {
             packetizationQueue.async { [weak self] in
                 self?.packetizeSplitPair(lease: lease, left: left, right: right)
             }
+        case let .pairExpired(consecutiveExpiries, releasedPairs, releasedLeases):
+            // Soft rendezvous expiry: the expired frame's samples are
+            // discarded on both tiles, but generations, other in-flight
+            // pairs, and the encoder reference chains stay intact, and no
+            // transport recovery is started here. A discarded pair never
+            // reached the wire, so wire au ids (allocated only at send
+            // time) leave no gap for the viewer's repair path to notice;
+            // the paired keyframe request below forces the next admission
+            // to keyframes, otherwise the next delta would reference a
+            // frame the viewer never received.
+            stateLock.lock()
+            splitPairTimeouts &+= 1
+            splitPairConsecutiveTimeouts = Int64(consecutiveExpiries)
+            splitPairDrops &+= Int64(max(1, releasedPairs))
+            framesDropped &+= Int64(max(1, releasedPairs))
+            splitLastPairDropReason = "encoded pair callback timeout (soft discard)"
+            stateLock.unlock()
+            if releasedPairs > 0 {
+                completeEncodeSlots(releasedPairs)
+            }
+            for lease in releasedLeases {
+                _ = finishSplitFlowLease(lease)
+            }
+            requestSplitPairedKeyframe(reason: "encoded pair expiry")
+            NSLog(
+                "Leftcar split pair expired %@: consecutive=%d released=%d",
+                targetLabel,
+                consecutiveExpiries,
+                releasedPairs
+            )
         case let .injectedRightDrop(lease, left):
             stateLock.lock()
             splitInjectedRightDrops &+= 1
@@ -259,7 +299,11 @@ extension CaptureSession {
             framesDropped &+= Int64(max(1, releasedPairs))
             splitLastPairDropReason = reason
             if reason.contains("timeout") {
+                // Only the consecutive-expiry safety valve reaches .dropped
+                // with a timeout reason; the hard reset addressed the
+                // pathology, so the streak starts fresh.
                 splitPairTimeouts &+= 1
+                splitPairConsecutiveTimeouts = 0
             }
             stateLock.unlock()
             if releasedPairs > 0 {
@@ -288,6 +332,17 @@ extension CaptureSession {
         splitLeftOutputs &+= 1
         splitRightOutputs &+= 1
         framesEncoded &+= 1
+        // Per-tile recovery keyframes (R2): exactly one tile was requested to
+        // keyframe and delivered — the asymmetric-requested pattern can only
+        // come from requestSplitTileKeyframe, never from a paired force
+        // (which requests both) or a recovery boundary lease (also both).
+        if left.requestedKeyframe != right.requestedKeyframe,
+           (left.requestedKeyframe && left.isKeyframe)
+            || (right.requestedKeyframe && right.isKeyframe) {
+            splitPerTileKeyframes &+= 1
+        }
+        // A successful pair emit ends any run of soft rendezvous expiries.
+        splitPairConsecutiveTimeouts = 0
         encodeOutputCallbacks &+= 1
         rateWindowFrames &+= 1
         rateWindowEncodeOutputCallbacks &+= 1
@@ -339,6 +394,12 @@ extension CaptureSession {
             )
             return
         }
+        // AU-level keyframe treatment (recovery parity, send-deadline class)
+        // applies when EITHER tile carries an IDR: a per-tile recovery pair
+        // (one IDR + peer delta) must not send its keyframe side with
+        // delta-grade FEC protection. The paired recovery boundary itself
+        // stays both-keyframes by definition.
+        let anyKeyframe = left.isKeyframe || right.isKeyframe
         let bothKeyframes = left.isKeyframe && right.isKeyframe
         enqueueSplitAccessUnit(
             PendingSplitAccessUnit(
@@ -347,7 +408,7 @@ extension CaptureSession {
                 lease: lease,
                 left: leftPayload,
                 right: rightPayload,
-                isKeyframe: bothKeyframes,
+                isKeyframe: anyKeyframe,
                 isRecoveryKeyframe: lease.isRecoveryBoundary && bothKeyframes,
                 queuedNs: DispatchTime.now().uptimeNanoseconds
             )
@@ -462,22 +523,31 @@ extension CaptureSession {
         networkLock.lock()
         pendingSplitAccessUnits.append(accessUnit)
         pendingSplitAccessUnits.sort { $0.sequence < $1.sequence }
-        let invariantFailed = pendingSplitAccessUnits.count > capacity
-        if invariantFailed {
-            pendingSplitAccessUnits.removeAll(keepingCapacity: true)
-        }
-        let schedule = !networkDrainScheduled && !invariantFailed
+        // Flow capacity is a soft bound, not a session killer. Once it is
+        // exceeded every queued delta is stale: dropping the oldest pair
+        // breaks AU continuity, so the deltas behind it are undecodable for
+        // the viewer no matter what. The transport recovery below releases
+        // the leases of the whole stale queue (the same path a pair send
+        // failure uses), wipes them, and requests a paired keyframe so the
+        // viewer's repair is deterministic instead of waiting for its gap
+        // detector.
+        let capacityExceeded = pendingSplitAccessUnits.count > capacity
+        let schedule = !networkDrainScheduled && !capacityExceeded
         if schedule { networkDrainScheduled = true }
         networkLock.unlock()
 
-        if invariantFailed {
+        if capacityExceeded {
             stateLock.lock()
+            splitPairQueueOverflowDrops &+= 1
             splitPostEncodeDeltaDrops &+= 1
-            framesDropped &+= 1
             stateLock.unlock()
-            let reason = "split encoded queue exceeded flow capacity"
-            setLastError(reason)
-            markStopped(reason)
+            // The discarded AUs themselves are already counted by the
+            // recovery's splitRecoveryBoundaryDiscards/framesDropped
+            // accounting; do not double-count them here.
+            beginSplitTransportRecovery(
+                reason: "split encoded queue exceeded flow capacity",
+                invalidatePendingBoundary: true
+            )
             return
         }
         if schedule {

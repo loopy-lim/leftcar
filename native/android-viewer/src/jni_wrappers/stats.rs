@@ -177,13 +177,8 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_pollAudio(
         return 0;
     }
     let fns = env_functions(env);
-    let set_region: unsafe extern "C" fn(
-        *mut JNIEnv,
-        *mut jobject,
-        i32,
-        i32,
-        *const u8,
-    ) = std::mem::transmute(*fns.add(JNI_SET_BYTE_ARRAY_REGION));
+    let set_region: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, i32, i32, *const u8) =
+        std::mem::transmute(*fns.add(JNI_SET_BYTE_ARRAY_REGION));
     set_region(env, out, 0, written, staged.as_ptr());
     if unsafe { exception_pending(env) } {
         return 0;

@@ -234,6 +234,12 @@ pub struct CatalogView {
     /// field, so viewers only send the mode when the capability is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconfigure_encoder_experiment: Option<bool>,
+    /// Whether this host accepts an optional `sourceIndex` on reconfigureStream
+    /// to move a live session to another display without a stop+start round
+    /// trip. Newer hosts advertise `true`; older hosts omit the field, so
+    /// viewers must keep using stop+start to change sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconfigure_source: Option<bool>,
     /// Host-supported UDP pacing/FEC choices. Older hosts omit this field, so
     /// viewers must preserve the legacy 8-datagram/2-parity behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +491,22 @@ pub struct StatsInfo {
     pub receiver_suppressed_recovery_requests: u32,
     #[serde(default)]
     pub receiver_fec_decode_failures: u32,
+    /// Split-path coordinator counter for paired recovery episodes where both
+    /// tiles observed the same IDR generation. Carried as a length-tolerant
+    /// suffix on the split LCF1 body, so it stays 0 for older viewers.
+    #[serde(default)]
+    pub receiver_paired_idr_resumes: u32,
+    /// Smoothed clock-corrected send->decoder and capture->decoder ages from
+    /// the split path in milliseconds. `None` while the split clock sync has
+    /// not converged (or on paths that never measure it).
+    #[serde(default)]
+    pub receiver_split_wire_ms: Option<u32>,
+    #[serde(default)]
+    pub receiver_split_capture_age_ms: Option<u32>,
+    /// Viewer-measured reliable-input send->ack round trip (EWMA, ms) from
+    /// the split LCF1 suffix. `None` until the first ack lands.
+    #[serde(default)]
+    pub receiver_input_rtt_ms: Option<u32>,
     #[serde(default)]
     pub split_direction: Option<String>,
     #[serde(default)]
@@ -569,29 +591,6 @@ pub struct StatsInfo {
 }
 
 #[cfg(test)]
-mod receiver_stats_contract_tests {
-    use super::StatsInfo;
-
-    #[test]
-    fn stats_expose_receiver_pipeline_metrics() {
-        let read = |stats: &StatsInfo| {
-            (
-                stats.receiver_frame_gaps,
-                stats.receiver_input_drops,
-                stats.receiver_incomplete_aus,
-                stats.receiver_stale_frames,
-                stats.receiver_stale_input_drops,
-                stats.receiver_output_burst_discards,
-                stats.receiver_rtt_ms,
-                stats.receiver_wire_ms,
-                stats.receiver_feedback_age_ms,
-            )
-        };
-        let _ = read;
-    }
-}
-
-#[cfg(test)]
 mod split_flow_contract_tests {
     use super::{SessionView, StatsInfo};
 
@@ -660,23 +659,13 @@ mod split_flow_contract_tests {
         assert_eq!(stats.split_wire_pairs_attempted, 600);
 
         let status = SessionView {
-            split_flow_active_leases: stats.split_flow_active_leases,
-            split_flow_capacity: stats.split_flow_capacity,
-            split_pre_encode_admission_drops: stats.split_pre_encode_admission_drops,
-            split_encoded_queue_depth: stats.split_encoded_queue_depth,
-            split_encoded_queue_oldest_us: stats.split_encoded_queue_oldest_us,
-            split_recovery_boundary_discards: stats.split_recovery_boundary_discards,
-            split_post_encode_delta_drops: stats.split_post_encode_delta_drops,
-            split_wire_pairs_attempted: stats.split_wire_pairs_attempted,
-            split_wire_pair_send_failures: stats.split_wire_pair_send_failures,
-            split_keyframe_gap_recoveries: stats.split_keyframe_gap_recoveries,
-            split_delta_gap_recoveries: stats.split_delta_gap_recoveries,
+            stats: stats.clone(),
             ..SessionView::default()
         };
-        assert_eq!(status.split_flow_capacity, 5);
-        assert_eq!(status.split_recovery_boundary_discards, 4);
-        assert_eq!(status.split_wire_pair_send_failures, 2);
-        assert_eq!(status.split_delta_gap_recoveries, 2);
+        assert_eq!(status.stats.split_flow_capacity, 5);
+        assert_eq!(status.stats.split_recovery_boundary_discards, 4);
+        assert_eq!(status.stats.split_wire_pair_send_failures, 2);
+        assert_eq!(status.stats.split_delta_gap_recoveries, 2);
     }
 
     #[test]
@@ -697,7 +686,7 @@ mod split_flow_contract_tests {
 
         // status 계약도 그 값을 전달하며, None일 때는 와이어에서 생략된다.
         let status = SessionView {
-            split_capture_queue_oldest_us: stats.split_capture_queue_oldest_us,
+            stats: stats.clone(),
             ..SessionView::default()
         };
         let encoded = serde_json::to_string(&status).unwrap();
@@ -709,7 +698,7 @@ mod split_flow_contract_tests {
         assert!(!default_encoded.contains("splitCaptureQueueOldestUs"));
         let legacy_status: SessionView =
             serde_json::from_value(serde_json::to_value(SessionView::default()).unwrap()).unwrap();
-        assert_eq!(legacy_status.split_capture_queue_oldest_us, None);
+        assert_eq!(legacy_status.stats.split_capture_queue_oldest_us, None);
     }
 }
 
@@ -833,7 +822,7 @@ pub fn decode_media_key(value: &str) -> std::result::Result<[u8; 32], String> {
     }
     let mut normalized = value.to_owned();
     // Accept, but do not require, canonical unpadded input.
-    while normalized.len() % 4 != 0 {
+    while !normalized.len().is_multiple_of(4) {
         normalized.push('=');
     }
     let decoded = base64::engine::general_purpose::URL_SAFE
@@ -888,6 +877,13 @@ pub struct ReconfigureStreamInput {
     /// advertises `reconfigureEncoderExperiment`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_experiment: Option<EncoderExperiment>,
+    /// Optional capture source for the replacement stream. Absent keeps the
+    /// session's current display (legacy wire shape). A different index moves
+    /// the live session to that display under the same session id — viewer
+    /// address, media ports, and the prepared receiver stay untouched — and is
+    /// only sent when the catalog advertises `reconfigureSource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -902,6 +898,14 @@ pub struct ReconfigureStreamOutput {
     /// Older hosts omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_experiment: Option<EncoderExperiment>,
+    /// Capture source the replacement stream actually runs on, echoed when the
+    /// request carried a `sourceIndex`. Older hosts omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_index: Option<u32>,
+    /// Host-side display name of the switched source; only present with a
+    /// `sourceIndex` echo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
 }
 
 fn default_quality_state() -> String {
@@ -931,306 +935,16 @@ pub struct SessionView {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
-    pub state: String,
-    pub fps: u32,
-    pub kbps: u32,
-    pub fps_target: u32,
     #[serde(default = "default_quality_state")]
     pub quality_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability: Option<AppliedUdpStability>,
-    #[serde(default)]
-    pub encoder_experiment_diagnostics_available: bool,
-    #[serde(default)]
-    pub encoder_experiment_requested: String,
-    #[serde(default)]
-    pub encoder_experiment_applied: String,
-    #[serde(default)]
-    pub encoder_experiment_fallback_reason: Option<String>,
-    #[serde(default)]
-    pub encoder_frame_drops: i64,
-    #[serde(default)]
-    pub encoder_frame_drop_fps: u32,
-    #[serde(default)]
-    pub valid_encode_output_fps: u32,
-    #[serde(default)]
-    pub encode_submit_call_p50_us: u64,
-    #[serde(default)]
-    pub encode_submit_call_p95_us: u64,
-    #[serde(default)]
-    pub encoder_callback_p50_us: u64,
-    #[serde(default)]
-    pub encoder_callback_p95_us: u64,
-    #[serde(default)]
-    pub packetization_in_flight: u32,
-    #[serde(default)]
-    pub base_frame_qp: Option<i32>,
-    #[serde(default)]
-    pub base_frame_qp_changes: i64,
-    #[serde(default)]
-    pub capture_fps: u32,
-    #[serde(default)]
-    pub encode_submit_fps: u32,
-    #[serde(default)]
-    pub encode_output_fps: u32,
-    #[serde(default)]
-    pub rendered_fps: Option<u32>,
-    #[serde(default)]
-    pub capture_callbacks: i64,
-    #[serde(default)]
-    pub encode_output_callbacks: i64,
-    #[serde(default)]
-    pub encode_submit_failures: i64,
-    #[serde(default)]
-    pub encode_in_flight: u32,
     /// Remote input is always host-approved per live stream and starts off.
     pub input_enabled: bool,
     /// Pointer sampling target. Discrete key/button events are immediate.
     pub input_rate_hz: u32,
-    pub dropped: i64,
-    pub network_dropped: i64,
-    #[serde(default)]
-    pub network_queue_dropped: i64,
-    #[serde(default)]
-    pub recovery_frames_dropped: i64,
-    #[serde(default)]
-    pub udp_send_failures: i64,
-    #[serde(default)]
-    pub udp_send_retries: i64,
-    #[serde(default)]
-    pub recovery_keyframes: i64,
-    #[serde(default)]
-    pub recovery_requests_suppressed: i64,
-    pub capture_queue_dropped: i64,
-    pub capture_to_encode_us: u64,
-    pub max_capture_to_encode_us: u64,
-    pub capture_queue_wait_us: u64,
-    pub max_capture_queue_wait_us: u64,
-    pub encode_output_us: u64,
-    pub max_encode_output_us: u64,
-    #[serde(default)]
-    pub packetization_us: u64,
-    #[serde(default)]
-    pub max_packetization_us: u64,
-    pub send_block_us: u64,
-    pub max_send_block_us: u64,
-    #[serde(default)]
-    pub send_pace_us: u64,
-    #[serde(default)]
-    pub max_send_pace_us: u64,
-    pub pending_frame: u32,
-    #[serde(default)]
-    pub pending_frame_bytes: u64,
-    #[serde(default)]
-    pub pending_frame_oldest_age_us: u64,
-    pub frames: i64,
-    pub bytes: i64,
-    pub capture_backend: String,
-    pub media_transport: String,
-    pub first_capture_ms: u64,
-    pub first_encode_ms: u64,
-    pub first_send_ms: u64,
-    pub current_bitrate: u32,
-    #[serde(default)]
-    pub bitrate_floor_collapse_count: i64,
-    #[serde(default)]
-    pub bitrate_floor_collapse_last_reason: String,
-    #[serde(default)]
-    pub encoder_mode: String,
-    #[serde(default, rename = "encoderID")]
-    pub encoder_id: String,
-    #[serde(default)]
-    pub encoder_hardware_accelerated: Option<bool>,
-    #[serde(default)]
-    pub encoder_preset: String,
-    #[serde(default)]
-    pub encoder_profile: String,
-    #[serde(default)]
-    pub encoder_applied_properties: Vec<String>,
-    #[serde(default)]
-    pub encoder_unsupported_properties: Vec<String>,
-    #[serde(default)]
-    pub encoder_rejected_properties: Vec<String>,
-    #[serde(default)]
-    pub encoder_fallback_reason: Option<String>,
-    #[serde(default)]
-    pub quality_hint: Option<f32>,
-    #[serde(default)]
-    pub quality_override: Option<f32>,
-    #[serde(default)]
-    pub quality_adaptation_checks: i64,
-    #[serde(default)]
-    pub quality_adaptation_changes: i64,
-    #[serde(default)]
-    pub quality_adaptation_rejections: i64,
-    #[serde(default)]
-    pub quality_adaptation_last_status: String,
-    pub capture_interval_p95_us: u64,
-    pub capture_to_encode_p95_us: u64,
-    pub capture_queue_wait_p95_us: u64,
-    pub encode_output_p95_us: u64,
-    #[serde(default)]
-    pub packetization_p95_us: u64,
-    #[serde(default)]
-    pub encode_output_interval_p95_us: u64,
-    pub send_block_p95_us: u64,
-    #[serde(default)]
-    pub send_pace_p95_us: u64,
-    #[serde(default)]
-    pub last_au_bytes: u64,
-    #[serde(default)]
-    pub last_au_fragments: u32,
-    #[serde(default)]
-    pub last_au_parity: u32,
-    #[serde(default)]
-    pub last_au_datagrams: u32,
-    #[serde(default)]
-    pub last_au_expected_datagrams: u32,
-    #[serde(default)]
-    pub last_au_send_us: u64,
-    #[serde(default)]
-    pub last_au_is_keyframe: bool,
-    #[serde(default)]
-    pub max_au_bytes: u64,
-    #[serde(default)]
-    pub max_au_fragments: u32,
-    #[serde(default)]
-    pub sent_datagrams: i64,
-    #[serde(default)]
-    pub sent_parity_datagrams: i64,
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub receiver_frame_gaps: i64,
-    #[serde(default)]
-    pub receiver_input_drops: i64,
-    #[serde(default)]
-    pub receiver_incomplete_aus: i64,
-    #[serde(default)]
-    pub receiver_stale_frames: i64,
-    #[serde(default)]
-    pub receiver_stale_input_drops: Option<i64>,
-    #[serde(default)]
-    pub receiver_output_burst_discards: i64,
-    #[serde(default)]
-    pub receiver_rtt_ms: Option<u32>,
-    #[serde(default)]
-    pub receiver_wire_ms: Option<u32>,
-    #[serde(default)]
-    pub receiver_feedback_age_ms: Option<u64>,
-    #[serde(default)]
-    pub udp_stability_profile: String,
-    #[serde(default)]
-    pub udp_burst_datagrams: u32,
-    #[serde(default)]
-    pub udp_pacing_rate_multiplier: u32,
-    #[serde(default)]
-    pub udp_fec_parity_shards: u32,
-    #[serde(default)]
-    pub udp_adaptive_pacing: bool,
-    #[serde(default)]
-    pub udp_burst_reason: String,
-    #[serde(default)]
-    pub receiver_media_datagrams: u64,
-    #[serde(default)]
-    pub receiver_data_datagrams: u64,
-    #[serde(default)]
-    pub receiver_parity_datagrams: u64,
-    #[serde(default)]
-    pub receiver_fec_restored_fragments: u64,
-    #[serde(default)]
-    pub receiver_unrecoverable_fec_groups: u32,
-    #[serde(default)]
-    pub receiver_max_missing_data_fragments: u32,
-    #[serde(default)]
-    pub receiver_one_frame_gap_events: u32,
-    #[serde(default)]
-    pub receiver_multi_frame_gap_events: u32,
-    #[serde(default)]
-    pub receiver_paired_idr_episodes: u32,
-    #[serde(default)]
-    pub receiver_suppressed_recovery_requests: u32,
-    #[serde(default)]
-    pub receiver_fec_decode_failures: u32,
-    #[serde(default)]
-    pub split_direction: Option<String>,
-    #[serde(default)]
-    pub split_preparation_p50_us: u64,
-    #[serde(default)]
-    pub split_preparation_p95_us: u64,
-    #[serde(default)]
-    pub split_pair_admission_drops: i64,
-    #[serde(default)]
-    pub encoded_pair_callback_p50_us: u64,
-    #[serde(default)]
-    pub encoded_pair_callback_p95_us: u64,
-    #[serde(default)]
-    pub encoded_pair_timeouts: i64,
-    #[serde(default)]
-    pub encoded_pair_drops: i64,
-    #[serde(default)]
-    pub left_valid_encode_output_fps: u32,
-    #[serde(default)]
-    pub right_valid_encode_output_fps: u32,
-    #[serde(default)]
-    pub left_encoder_frame_drops: i64,
-    #[serde(default)]
-    pub right_encoder_frame_drops: i64,
-    #[serde(default)]
-    pub left_bitrate_bps: u64,
-    #[serde(default)]
-    pub right_bitrate_bps: u64,
-    #[serde(default)]
-    pub aggregate_bitrate_bps: u64,
-    #[serde(default)]
-    pub left_receiver_loss: u64,
-    #[serde(default)]
-    pub right_receiver_loss: u64,
-    #[serde(default)]
-    pub left_rendered_fps: u32,
-    #[serde(default)]
-    pub right_rendered_fps: u32,
-    #[serde(default)]
-    pub joined_rendered_fps: u32,
-    #[serde(default)]
-    pub pair_ready_delta_p95_us: u64,
-    #[serde(default)]
-    pub pair_ready_delta_max_us: u64,
-    #[serde(default)]
-    pub pair_sync_timeouts: i64,
-    #[serde(default)]
-    pub unmatched_output_drops: i64,
-    #[serde(default)]
-    pub paired_recovery_requests: i64,
-    #[serde(default)]
-    pub paired_recovery_keyframes: i64,
-    #[serde(default)]
-    pub split_test_injected_drops: i64,
-    #[serde(default)]
-    pub split_flow_active_leases: u32,
-    #[serde(default)]
-    pub split_flow_capacity: u32,
-    #[serde(default)]
-    pub split_pre_encode_admission_drops: i64,
-    #[serde(default)]
-    pub split_encoded_queue_depth: u32,
-    #[serde(default)]
-    pub split_encoded_queue_oldest_us: u64,
-    /// Optional split capture-side queue age (see `StatsInfo`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split_capture_queue_oldest_us: Option<u64>,
-    #[serde(default)]
-    pub split_recovery_boundary_discards: i64,
-    #[serde(default)]
-    pub split_post_encode_delta_drops: i64,
-    #[serde(default)]
-    pub split_wire_pairs_attempted: i64,
-    #[serde(default)]
-    pub split_wire_pair_send_failures: i64,
-    #[serde(default)]
-    pub split_keyframe_gap_recoveries: i64,
-    #[serde(default)]
-    pub split_delta_gap_recoveries: i64,
+    #[serde(flatten)]
+    pub stats: StatsInfo,
 }
 
 /// Events (docs/04 §7) — low-frequency only, never per-frame.
@@ -1352,6 +1066,7 @@ mod stream_control_tests {
             displays: Vec::new(),
             encoder_experiments: Vec::new(),
             reconfigure_encoder_experiment: None,
+            reconfigure_source: None,
             udp_stability_capabilities: None,
         };
         let json = serde_json::to_string(&catalog).unwrap();
@@ -1373,6 +1088,7 @@ mod stream_control_tests {
             displays: Vec::new(),
             encoder_experiments: phase_a_encoder_experiments(),
             reconfigure_encoder_experiment: None,
+            reconfigure_source: None,
             udp_stability_capabilities: None,
         };
         assert!(catalog
@@ -1389,111 +1105,50 @@ mod stream_control_tests {
                 source_index: 0,
                 source_name: "Main Display".into(),
                 viewer_addr: "192.168.0.18:5001".into(),
-                state: "running".into(),
-                fps: 90,
-                kbps: 12000,
-                fps_target: 60,
-                encoder_experiment_diagnostics_available: true,
-                encoder_experiment_requested: "auto".into(),
-                encoder_experiment_applied: "rateControl".into(),
-                encoder_experiment_fallback_reason: None,
-                encoder_frame_drops: 0,
-                encoder_frame_drop_fps: 0,
-                valid_encode_output_fps: 90,
-                encode_submit_call_p50_us: 0,
-                encode_submit_call_p95_us: 0,
-                encoder_callback_p50_us: 0,
-                encoder_callback_p95_us: 0,
-                packetization_in_flight: 0,
-                base_frame_qp: None,
-                base_frame_qp_changes: 0,
-                capture_fps: 90,
-                encode_submit_fps: 90,
-                encode_output_fps: 90,
-                rendered_fps: Some(90),
-                capture_callbacks: 100,
-                encode_output_callbacks: 100,
-                encode_submit_failures: 0,
-                encode_in_flight: 0,
                 input_enabled: false,
                 input_rate_hz: 120,
-                dropped: 0,
-                network_dropped: 0,
-                network_queue_dropped: 0,
-                recovery_frames_dropped: 0,
-                udp_send_failures: 0,
-                udp_send_retries: 0,
-                recovery_keyframes: 0,
-                recovery_requests_suppressed: 0,
-                capture_queue_dropped: 0,
-                capture_to_encode_us: 0,
-                max_capture_to_encode_us: 0,
-                capture_queue_wait_us: 0,
-                max_capture_queue_wait_us: 0,
-                encode_output_us: 0,
-                max_encode_output_us: 0,
-                packetization_us: 0,
-                max_packetization_us: 0,
-                send_block_us: 0,
-                max_send_block_us: 0,
-                send_pace_us: 0,
-                max_send_pace_us: 0,
-                pending_frame: 0,
-                pending_frame_bytes: 0,
-                pending_frame_oldest_age_us: 0,
-                frames: 100,
-                bytes: 1_000_000,
-                capture_backend: "screenCaptureKit".into(),
-                media_transport: "udp".into(),
-                first_capture_ms: 20,
-                first_encode_ms: 25,
-                first_send_ms: 26,
-                current_bitrate: 12_000_000,
-                encoder_mode: "ave".into(),
-                encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
-                encoder_hardware_accelerated: Some(true),
-                encoder_preset: "high-speed".into(),
-                encoder_profile: "main".into(),
-                encoder_applied_properties: vec!["HighSpeed".into(), "Quality".into()],
-                encoder_unsupported_properties: vec!["SuggestedLookAheadFrameCount".into()],
-                encoder_rejected_properties: vec![],
-                encoder_fallback_reason: None,
-                quality_hint: None,
-                quality_override: None,
-                quality_adaptation_checks: 0,
-                quality_adaptation_changes: 0,
-                quality_adaptation_rejections: 0,
-                quality_adaptation_last_status: "not_checked".into(),
-                capture_interval_p95_us: 16_667,
-                capture_to_encode_p95_us: 8_000,
-                capture_queue_wait_p95_us: 1_000,
-                encode_output_p95_us: 7_000,
-                packetization_p95_us: 0,
-                encode_output_interval_p95_us: 11_111,
-                send_block_p95_us: 1_000,
-                send_pace_p95_us: 0,
-                last_au_bytes: 0,
-                last_au_fragments: 0,
-                last_au_parity: 0,
-                last_au_datagrams: 0,
-                last_au_expected_datagrams: 0,
-                last_au_send_us: 0,
-                last_au_is_keyframe: false,
-                max_au_bytes: 0,
-                max_au_fragments: 0,
-                sent_datagrams: 0,
-                sent_parity_datagrams: 0,
-                error: None,
-                receiver_frame_gaps: 0,
-                receiver_input_drops: 0,
-                receiver_incomplete_aus: 0,
-                receiver_stale_frames: 0,
-                receiver_stale_input_drops: None,
-                receiver_output_burst_discards: 0,
-                receiver_rtt_ms: None,
-                receiver_wire_ms: None,
-                receiver_feedback_age_ms: None,
-                ..SessionView::default()
+                width: 0,
+                height: 0,
+                quality_state: "adaptive".into(),
+                udp_stability: None,
+                stats: StatsInfo {
+                    state: "running".into(),
+                    fps: 90,
+                    kbps: 12000,
+                    capture_fps: 90,
+                    encode_submit_fps: 90,
+                    encode_output_fps: 90,
+                    rendered_fps: Some(90),
+                    valid_encode_output_fps: 90,
+                    capture_callbacks: 100,
+                    encode_output_callbacks: 100,
+                    frames: 100,
+                    bytes: 1_000_000,
+                    capture_backend: "screenCaptureKit".into(),
+                    media_transport: "udp".into(),
+                    first_capture_ms: 20,
+                    first_encode_ms: 25,
+                    first_send_ms: 26,
+                    current_bitrate: 12_000_000,
+                    encoder_experiment_diagnostics_available: true,
+                    encoder_experiment_requested: "auto".into(),
+                    encoder_experiment_applied: "rateControl".into(),
+                    encoder_mode: "ave".into(),
+                    encoder_id: "com.apple.videotoolbox.videoencoder.ave.avc".into(),
+                    encoder_hardware_accelerated: Some(true),
+                    encoder_preset: "high-speed".into(),
+                    encoder_profile: "main".into(),
+                    encoder_applied_properties: vec!["HighSpeed".into(), "Quality".into()],
+                    encoder_unsupported_properties: vec!["SuggestedLookAheadFrameCount".into()],
+                    quality_adaptation_last_status: "not_checked".into(),
+                    capture_interval_p95_us: 16_667,
+                    capture_to_encode_p95_us: 8_000,
+                    capture_queue_wait_p95_us: 1_000,
+                    encode_output_p95_us: 7_000,
+                    encode_output_interval_p95_us: 11_111,
+                    send_block_p95_us: 1_000,
+                    ..Default::default()
+                },
             }],
         };
         let s = serde_json::to_string(&v).unwrap();

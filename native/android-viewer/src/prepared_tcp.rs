@@ -28,27 +28,7 @@ const MEDIA_CHANNEL_CAPACITY: usize = 2;
 
 #[cfg(target_os = "android")]
 fn bridge_log(message: &str) {
-    let Ok(message) = std::ffi::CString::new(message) else {
-        return;
-    };
-    unsafe {
-        extern "C" {
-            fn __android_log_print(
-                priority: i32,
-                tag: *const std::ffi::c_char,
-                format: *const std::ffi::c_char,
-                ...
-            ) -> i32;
-        }
-        let tag = b"LeftcarNative\0";
-        let format = b"%s\0";
-        __android_log_print(
-            4,
-            tag.as_ptr().cast(),
-            format.as_ptr().cast(),
-            message.as_ptr(),
-        );
-    }
+    crate::jni::android_log_info(message.to_owned());
 }
 
 #[cfg(not(target_os = "android"))]

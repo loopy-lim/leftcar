@@ -77,11 +77,8 @@ pub fn parse_cursor_sample(packet: &[u8]) -> Option<CursorSample> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::test_media_key as key;
     use crate::media_crypto::MediaSessionCrypto;
-
-    fn key(bytes: u8) -> [u8; 32] {
-        (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()
-    }
 
     fn encode(sequence: u32, x: u16, y: u16, visible: bool) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(CURSOR_SAMPLE_LEN);
@@ -100,8 +97,11 @@ mod tests {
         let packet = encode(7, 0x1234, 0xabcd, true);
         assert_eq!(packet.len(), CURSOR_SAMPLE_LEN);
         let sealed = crypto.seal(&packet).unwrap();
+        // 호스트는 도출된 c2s 키로 뷰어 프레임을 연다.
+        let host_keys = secure_channel::media_keys(&key(1));
+        let host_rx = secure_channel::DatagramSealer::new(host_keys.c2s);
         assert_eq!(
-            parse_cursor_sample(&crypto.open(&sealed).unwrap()),
+            parse_cursor_sample(&host_rx.open(&sealed).unwrap()),
             Some(CursorSample {
                 sequence: 7,
                 x: 0x1234,

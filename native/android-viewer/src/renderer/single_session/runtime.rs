@@ -73,6 +73,8 @@ pub(crate) fn spawn_live_stream_renderer(
         encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         capture_to_surface_release_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        input_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        last_reliable_send_us: AtomicU64::new(0),
         resize_recovery_suppressed_until_us: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),

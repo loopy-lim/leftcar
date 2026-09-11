@@ -11,9 +11,10 @@
 //!
 //! 와이어 레이아웃(봉인 프레임): `counter u64 BE ‖ poly1305 tag 16B ‖ ct`.
 //! nonce는 `00 00 00 00 ‖ counter u64 BE`(12B) — 방향은 아예 다른 키로 분리되므로
-//! 접두어가 필요 없다.
+//! 접두어가 필요 없다. 미디어 키는 재구성에서 재사용될 수 있으므로
+//! [DatagramSealer]는 인스턴스마다 카운터를 무작위 지점에서 시작한다.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use hkdf::Hkdf;
@@ -87,7 +88,8 @@ pub fn verify_host_signature(
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(host_public_key) else {
         return false;
     };
-    key.verify(message, &Signature::from_bytes(signature)).is_ok()
+    key.verify(message, &Signature::from_bytes(signature))
+        .is_ok()
 }
 
 /// 서명이 덮는 전사 바이트. TS 구현(apps/viewer-expo/src/secure-channel.ts)과
@@ -220,9 +222,7 @@ impl Drop for SessionKeys {
 }
 
 fn x25519_shared(secret: &XStaticSecret, peer: &[u8; 32]) -> [u8; 32] {
-    secret
-        .diffie_hellman(&XPublicKey::from(*peer))
-        .to_bytes()
+    secret.diffie_hellman(&XPublicKey::from(*peer)).to_bytes()
 }
 
 /// HKDF-SHA256: ikm = X25519 공유비밀, salt = nc‖ns, info = HANDSHAKE_INFO.
@@ -233,6 +233,27 @@ pub fn derive_keys(shared: &[u8; 32], nc: &[u8; 32], ns: &[u8; 32]) -> SessionKe
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
     let mut okm = [0u8; 64];
     hk.expand(HANDSHAKE_INFO, &mut okm).expect("64B okm");
+    let mut c2s = [0u8; 32];
+    let mut s2c = [0u8; 32];
+    c2s.copy_from_slice(&okm[..32]);
+    s2c.copy_from_slice(&okm[32..]);
+    okm.zeroize();
+    SessionKeys { c2s, s2c }
+}
+
+/// 미디어 경로 HKDF info 라벨.
+pub const MEDIA_INFO: &[u8] = b"leftcar/media/v1";
+
+/// 미디어 세션 키에서 방향별 키를 도출한다. ikm = 뷰어 생성 32B 세션 키,
+/// salt 없음(RFC 5869 — 해시 길이 0바이트), info = MEDIA_INFO, okm 64B =
+/// c2s ‖ s2c. 양방향이 원본 키를 그대로 쓰면 두 송신 카운터가 1, 2, 3…
+/// 으로 겹치는 매 프레임 (key, nonce) 재사용이 생긴다 — 도출로 방향을
+/// 분리해 막는다. Swift 구현(macos-capture-shim MediaSealer.swift)과
+/// 바이트가 같아야 한다.
+pub fn media_keys(media_key: &[u8; 32]) -> SessionKeys {
+    let hk = Hkdf::<Sha256>::new(None, media_key);
+    let mut okm = [0u8; 64];
+    hk.expand(MEDIA_INFO, &mut okm).expect("64B okm");
     let mut c2s = [0u8; 32];
     let mut s2c = [0u8; 32];
     c2s.copy_from_slice(&okm[..32]);
@@ -338,13 +359,65 @@ pub struct DatagramSealer {
     rx: Mutex<ReplayWindow>,
 }
 
+/// 카운터 시작값: 62비트 난수(1 이상). 미디어 세션 키는 reconfigure에서
+/// 그대로 재사용되는 반면 인스턴스(및 카운터)는 재시작마다 새로 만들어지므로,
+/// 시작점을 고정(1)하면 같은 키의 이전 구간과 같은 방향 논스가 겹친다.
+/// 시작값을 무작위로 뽑아 재시작 간 (key, nonce) 충돌을 확률적으로 없앤다
+/// (인스턴스 쌍당 2^-62).
+fn random_counter_start() -> u64 {
+    let mut bytes = [0u8; 8];
+    random_bytes(&mut bytes);
+    (u64::from_be_bytes(bytes) >> 2).max(1)
+}
+
 impl DatagramSealer {
     pub fn new(key: [u8; 32]) -> Self {
         Self {
             key,
-            next: AtomicU64::new(1),
+            next: AtomicU64::new(random_counter_start()),
             rx: Mutex::new(ReplayWindow::new()),
         }
+    }
+
+    /// 테스트용: 시작 카운터를 지정해 만든다.
+    #[cfg(test)]
+    pub(crate) fn with_counter_start(key: [u8; 32], start: u64) -> Self {
+        Self {
+            key,
+            next: AtomicU64::new(start),
+            rx: Mutex::new(ReplayWindow::new()),
+        }
+    }
+
+    /// 수신 재생 윈도우를 초기 상태로 되돌린다. 같은 키로 재시작한 송신자의
+    /// 무작위 시작 카운터가 기존 워터마크 아래로 떨어지는 경우(호스트
+    /// backend.start 재시도)에만 쓴다 — 유효하게 봉인된 LCH1 챌린지가 재시작의
+    /// 증거가 되는 뷰어 챌린지 경로 전용이고, 일반 수신 경로에서 호출하면
+    /// 재생 방지가 무력화된다.
+    pub fn reset_receive_window(&self) {
+        *self.rx.lock().unwrap() = ReplayWindow::new();
+    }
+
+    /// 재생 윈도우 검사·갱신 없이 인증·복호만 한다. `open`이 [OpenError::Replay]
+    /// 로 거부한 프레임이 정말 같은 키의 소유자가 새로 봉인한 것인지 판정하는
+    /// 재시작 감지 챌린지 경로 전용 — 일반 수신에 쓰면 재생 방지가 깨진다.
+    /// 윈도우를 건드리지 않으므로 이 경로로 열린 프레임은 전달하면 안 된다.
+    pub fn authenticate(&self, frame: &[u8]) -> Result<Vec<u8>, OpenError> {
+        if frame.len() < COUNTER_LEN + TAG_LEN {
+            return Err(OpenError::TooShort);
+        }
+        if frame.len() - COUNTER_LEN > MAX_DATAGRAM + TAG_LEN {
+            return Err(OpenError::TooLarge);
+        }
+        let Some(counter) = frame_counter(frame) else {
+            return Err(OpenError::TooShort);
+        };
+        if counter == 0 {
+            return Err(OpenError::Replay);
+        }
+        cipher(&self.key)
+            .decrypt(&nonce_for(counter), Payload::from(&frame[COUNTER_LEN..]))
+            .map_err(|_| OpenError::Auth)
     }
 
     pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, OpenError> {
@@ -374,17 +447,69 @@ impl DatagramSealer {
         if counter == 0 {
             return Err(OpenError::Replay);
         }
-        {
-            let rx = self.rx.lock().unwrap();
+        // 잠금을 check→decrypt→accept 구간 전체에 건다 — 놓고 하면 두 스레드가
+        // 같은 카운터를 동시에 통과시켜 중복 전달이 생길 수 있다.
+        let pt = {
+            let mut rx = self.rx.lock().unwrap();
             if !rx.check(counter) {
                 return Err(OpenError::Replay);
             }
-        }
-        let pt = cipher(&self.key)
-            .decrypt(&nonce_for(counter), Payload::from(&frame[COUNTER_LEN..]))
-            .map_err(|_| OpenError::Auth)?;
-        self.rx.lock().unwrap().accept(counter);
+            let pt = cipher(&self.key)
+                .decrypt(&nonce_for(counter), Payload::from(&frame[COUNTER_LEN..]))
+                .map_err(|_| OpenError::Auth)?;
+            rx.accept(counter);
+            pt
+        };
         Ok(pt)
+    }
+
+    /// 수신 버퍼를 그대로 제자리 복호하는 [DatagramSealer::open] 변형.
+    ///
+    /// `frame`은 `open`과 같은 와이어 레이아웃(`counter ‖ ct ‖ tag`)의 가변
+    /// 버퍼이고, 성공 시 암호문이 평문으로 덮어 쓰인 뒤 평문 구간만 잘라
+    /// 반환된다. RX 핫 루프의 데이터그램마다 `Vec` 할당·복사를 없앤다(4K
+    /// split에서 초당 수천 회). 실패 시 버퍼 내용은 바뀔 수 있으니 폐기하면
+    /// 된다. 재생 윈도우의 check→decrypt→accept 잠금 규율은 `open`과
+    /// 동일하다.
+    pub fn open_into<'a>(&self, frame: &'a mut [u8]) -> Result<&'a mut [u8], OpenError> {
+        if frame.len() < COUNTER_LEN + TAG_LEN {
+            return Err(OpenError::TooShort);
+        }
+        if frame.len() - COUNTER_LEN > MAX_DATAGRAM + TAG_LEN {
+            return Err(OpenError::TooLarge);
+        }
+        let mut counter_bytes = [0u8; COUNTER_LEN];
+        counter_bytes.copy_from_slice(&frame[..COUNTER_LEN]);
+        let counter = u64::from_be_bytes(counter_bytes);
+        if counter == 0 {
+            return Err(OpenError::Replay);
+        }
+        let mut rx = self.rx.lock().unwrap();
+        if !rx.check(counter) {
+            return Err(OpenError::Replay);
+        }
+        let ct_end = frame.len() - TAG_LEN;
+        let (head, tag_region) = frame.split_at_mut(ct_end);
+        let mut tag = [0u8; TAG_LEN];
+        tag.copy_from_slice(tag_region);
+        let ciphertext = &mut head[COUNTER_LEN..];
+        cipher(&self.key)
+            .decrypt_in_place_detached(&nonce_for(counter), &b""[..], ciphertext, &tag.into())
+            .map_err(|_| OpenError::Auth)?;
+        rx.accept(counter);
+        Ok(ciphertext)
+    }
+}
+
+impl Drop for DatagramSealer {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+impl Drop for StreamSealer {
+    fn drop(&mut self) {
+        self.key.zeroize();
     }
 }
 
@@ -435,7 +560,7 @@ impl ReplayWindow {
             return;
         }
         let age = self.highest - counter;
-        if age >= 1 && age < REPLAY_WINDOW {
+        if (1..REPLAY_WINDOW).contains(&age) {
             let word = (age / 64) as usize;
             let bit = (age % 64) as u32;
             self.bits[word] |= 1u64 << bit;
@@ -452,11 +577,11 @@ impl ReplayWindow {
             return;
         }
         let mut next = vec![0u64; words];
-        for i in word_shift..words {
+        for (i, dst) in next.iter_mut().enumerate().skip(word_shift) {
             let src = i - word_shift;
-            next[i] = self.bits[src] << bit_shift;
+            *dst = self.bits[src] << bit_shift;
             if bit_shift > 0 && src >= 1 {
-                next[i] |= self.bits[src - 1] >> (64 - bit_shift);
+                *dst |= self.bits[src - 1] >> (64 - bit_shift);
             }
         }
         self.bits = next;
@@ -487,22 +612,72 @@ mod tests {
             xk: XPublicKey::from(&c_secret).to_bytes(),
         };
         let hello = server_hello(&identity, &client, ns, &s_secret);
-        let (keys, spk) = client_finish(&c_secret, &client, &hello, Some(&identity.public_key()))
-            .unwrap();
+        let (keys, spk) =
+            client_finish(&c_secret, &client, &hello, Some(&identity.public_key())).unwrap();
         println!("spk        = {}", hex::encode(spk));
         println!("sig        = {}", hex::encode(hello.sig));
         println!("client_xk  = {}", hex::encode(client.xk));
         println!("server_xk  = {}", hex::encode(hello.xk));
         println!("k_c2s      = {}", hex::encode(keys.c2s));
         println!("k_s2c      = {}", hex::encode(keys.s2c));
-        let mut c2s_sealer = StreamSealer::new(keys.c2s.clone());
+        let mut c2s_sealer = StreamSealer::new(keys.c2s);
         let frame = c2s_sealer
             .seal(br#"{"command":"pair","args":{},"token":"a"}"#)
             .unwrap();
         println!("c2s_frame1 = {}", hex::encode(&frame));
-        let mut s2c_sealer = StreamSealer::new(keys.s2c.clone());
-        let frame2 = s2c_sealer.seal(br#"{"ok":true,"result":{"token":"b"}}"#).unwrap();
+        let mut s2c_sealer = StreamSealer::new(keys.s2c);
+        let frame2 = s2c_sealer
+            .seal(br#"{"ok":true,"result":{"token":"b"}}"#)
+            .unwrap();
         println!("s2c_frame1 = {}", hex::encode(&frame2));
+        let media = media_keys(&fixed(0));
+        println!("m_c2s      = {}", hex::encode(media.c2s));
+        println!("m_s2c      = {}", hex::encode(media.s2c));
+    }
+
+    /// Swift MediaSealer.swift가 같은 HKDF 도출을 하는지 잠그는 고정 벡터.
+    #[test]
+    fn media_keys_match_the_swift_vector() {
+        let keys = media_keys(&fixed(0));
+        assert_eq!(
+            hex::encode(keys.c2s),
+            "5608c4ec91f01a93afdd876da3419cafd5fc6862faaa6c15a008b16dab6ac72f"
+        );
+        assert_eq!(
+            hex::encode(keys.s2c),
+            "2c100b32a507ab3af07ec3d39a61df7072d1d97e22d0e43da19d44fabedaf182"
+        );
+        // 도출은 결정적이고 방향 키는 서로 다르다.
+        let again = media_keys(&fixed(0));
+        assert_eq!(again.c2s, keys.c2s);
+        assert_ne!(keys.c2s, keys.s2c);
+    }
+
+    /// 재시작 간 논스 재사용 방지: 같은 키로 새 인스턴스를 만들면 카운터
+    /// 시작점이 달라 (key, nonce) 쌍이 겹치지 않는다.
+    #[test]
+    fn datagram_restart_draws_fresh_counter_ranges() {
+        let first = DatagramSealer::new([6u8; 32]);
+        let f1 = first.seal(b"segment-one").unwrap();
+        let second = DatagramSealer::new([6u8; 32]);
+        let f2 = second.seal(b"segment-two").unwrap();
+        assert_ne!(
+            frame_counter(&f1).unwrap(),
+            frame_counter(&f2).unwrap(),
+            "two instances under one key must not share a start counter"
+        );
+    }
+
+    #[test]
+    fn datagram_counter_start_is_never_zero_and_never_wraps_early() {
+        for _ in 0..64 {
+            let start = random_counter_start();
+            assert!((1..(1u64 << 62)).contains(&start));
+        }
+        let tx = DatagramSealer::with_counter_start([7u8; 32], (1 << 62) - 1);
+        let rx = DatagramSealer::with_counter_start([7u8; 32], 1);
+        let frame = tx.seal(b"near the ceiling").unwrap();
+        assert_eq!(rx.open(&frame).unwrap(), b"near the ceiling");
     }
 
     #[test]
@@ -581,6 +756,39 @@ mod tests {
         assert_eq!(rx.open(&f1), Err(OpenError::Replay));
     }
 
+    /// 제자리 복호 경로가 `open`과 바이트 단위로 동일함을 잠근다. 같은 프레임을
+    /// 두 방식으로 열어 결과를 대조하고, 재생·인증 거부도 동일하게 동작한다.
+    #[test]
+    fn open_into_decrypts_in_place_like_open() {
+        let tx = DatagramSealer::with_counter_start([8u8; 32], 100);
+        let rx = DatagramSealer::with_counter_start([8u8; 32], 1);
+        let plaintext = b"hot-path datagram payload".to_vec();
+        let frame = tx.seal(&plaintext).unwrap();
+
+        // 동일 키의 두 독립 수신기: 하나는 open, 하나는 open_into.
+        let rx_vec = DatagramSealer::with_counter_start([8u8; 32], 1);
+        assert_eq!(rx_vec.open(&frame).unwrap(), plaintext);
+
+        let mut scratch = frame.clone();
+        let opened = rx.open_into(&mut scratch).unwrap();
+        assert_eq!(opened, plaintext.as_slice());
+        // 반환 슬라이스는 스크래치 버퍼의 프레임 헤더(counter) 바로 다음,
+        // 즉 평문 구간과 정확히 같은 오프셋이다.
+        assert_eq!(
+            &scratch[COUNTER_LEN..COUNTER_LEN + plaintext.len()],
+            plaintext.as_slice()
+        );
+        // 같은 프레임 재생은 open과 동일하게 거부된다.
+        assert_eq!(rx.open_into(&mut scratch), Err(OpenError::Replay));
+        // 인증 실패(다른 키)도 동일하다.
+        let mut scratch = frame.clone();
+        let other = DatagramSealer::with_counter_start([9u8; 32], 1);
+        assert_eq!(other.open_into(&mut scratch), Err(OpenError::Auth));
+        // 잘린 프레임은 open과 동일하게 TooShort다.
+        let mut short = frame[..COUNTER_LEN + TAG_LEN - 1].to_vec();
+        assert_eq!(rx.open_into(&mut short), Err(OpenError::TooShort));
+    }
+
     #[test]
     fn datagram_window_slides() {
         let tx = DatagramSealer::new([4u8; 32]);
@@ -600,19 +808,49 @@ mod tests {
         for shift in 1u64..96 {
             let mut w = ReplayWindow::new();
             w.accept(1);
-            assert!(!w.check(1), "accepted counter is not a replay, shift={shift}");
+            assert!(
+                !w.check(1),
+                "accepted counter is not a replay, shift={shift}"
+            );
             w.accept(1 + shift);
             assert!(!w.check(1 + shift), "shift={shift}");
             if shift > 1 {
                 // 사이의 미접수 카운터는 여전히 수용 가능해야 한다.
                 assert!(
-                    w.check(1 + (shift + 1) / 2),
+                    w.check(1 + shift.div_ceil(2)),
                     "unseen counter inside window must be acceptable, shift={shift}"
                 );
             }
             // 옛 접수 기록은 이동 후에도 유지된다.
             assert!(!w.check(1), "accepted bit must persist, shift={shift}");
         }
+    }
+
+    #[test]
+    fn receive_window_reset_lets_a_restarted_sender_flow() {
+        // 호스트가 같은 키로 TX 봉인기를 다시 만들면(백엔드 재시작 재시도)
+        // 무작위 시작 카운터가 뷰어의 기존 워터마크 아래로 뽑힐 수 있다.
+        let rx = DatagramSealer::with_counter_start([7u8; 32], 1);
+        // 첫 세션: 수신 워터마크를 윈도우 절반 지점까지 올린다.
+        let first = DatagramSealer::with_counter_start([7u8; 32], 1);
+        for _ in 0..(REPLAY_WINDOW / 2) {
+            rx.open(&first.seal(b"first session").unwrap()).unwrap();
+        }
+        // 재시작한 송신자가 그 아래 카운터에서 시작하면 창 경로는 거부한다.
+        let restarted = DatagramSealer::with_counter_start([7u8; 32], 1);
+        let frame = restarted.seal(b"restarted").unwrap();
+        assert_eq!(rx.open(&frame), Err(OpenError::Replay));
+        // authenticate는 인증만 보고 창은 건드리지 않는다.
+        assert_eq!(rx.authenticate(&frame).unwrap(), b"restarted");
+        assert_eq!(
+            rx.open(&frame),
+            Err(OpenError::Replay),
+            "authenticate must not accept the frame"
+        );
+        // 창 초기화 후 재시작 스트림이 흐른다.
+        rx.reset_receive_window();
+        assert_eq!(rx.open(&frame).unwrap(), b"restarted");
+        assert_eq!(rx.open(&restarted.seal(b"next").unwrap()).unwrap(), b"next");
     }
 
     #[test]

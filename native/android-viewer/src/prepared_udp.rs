@@ -9,7 +9,7 @@
 //! its Surface exists. Sharing one `MediaSessionCrypto` instance keeps the
 //! AEAD counters continuous across the handoff.
 
-use crate::media_crypto::{CHALLENGE_PREFIX, SharedMediaCrypto};
+use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX};
 use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -17,6 +17,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// 증명 경로 진단 로그. jni::log_info! 매크로는 jni 모듈이
+/// `cfg(any(android, test))`로 게이트되어 있어 이 상시 컴파일 모듈에서는
+/// 못 쓴다 — prepared_tcp::bridge_log와 같은 지역 분할을 쓴다.
+#[cfg(target_os = "android")]
+fn prepared_log(message: &str) {
+    crate::jni::android_log_info(message.to_owned());
+}
+
+#[cfg(not(target_os = "android"))]
+fn prepared_log(_message: &str) {}
 
 /// Sealed challenge + AEAD overhead; genuine host challenges fit easily.
 const MAX_CHALLENGE_BYTES: usize = 192;
@@ -51,11 +62,7 @@ pub struct PreparedUdpReceiver {
 }
 
 impl PreparedUdpReceiver {
-    pub fn bind(
-        port: u16,
-        expected_host: String,
-        crypto: SharedMediaCrypto,
-    ) -> io::Result<Self> {
+    pub fn bind(port: u16, expected_host: String, crypto: SharedMediaCrypto) -> io::Result<Self> {
         if !hosts_are_valid(&expected_host) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -78,9 +85,9 @@ impl PreparedUdpReceiver {
             .name(format!("leftcar-prepared-udp-{port}"))
             .spawn(move || {
                 let mut packet = [0u8; 256];
-                log_info!(
+                prepared_log(&format!(
                     "prepared[{worker_port}]: listener armed, waiting for sealed challenge"
-                );
+                ));
                 while !worker_stop.load(Ordering::SeqCst) {
                     match worker_socket.recv_from(&mut packet) {
                         Ok((size, peer))
@@ -93,17 +100,17 @@ impl PreparedUdpReceiver {
                             if let Some(plaintext) =
                                 worker_crypto.open_challenge(&packet[..size])
                             {
-                                log_info!(
+                                prepared_log(&format!(
                                     "prepared[{worker_port}]: challenge {size}B opened, echoing"
-                                );
+                                ));
                                 *worker_peer.lock().unwrap() = Some(peer);
                                 if let Some(reply) = worker_crypto.seal(&plaintext) {
                                     let _ = worker_socket.send_to(&reply, peer);
                                 }
                             } else {
-                                log_info!(
+                                prepared_log(&format!(
                                     "prepared[{worker_port}]: sealed frame {size}B FAILED to open (key mismatch?)"
-                                );
+                                ));
                             }
                         }
                         Ok(_) => {
@@ -136,10 +143,6 @@ impl PreparedUdpReceiver {
 
     pub fn expected_host(&self) -> &str {
         &self.expected_host
-    }
-
-    pub fn shared_crypto(&self) -> SharedMediaCrypto {
-        Arc::clone(&self.crypto)
     }
 
     pub fn into_socket_and_media_crypto(
@@ -183,8 +186,7 @@ mod tests {
 
     #[test]
     fn echoes_sealed_challenge_then_hands_socket_and_crypto_to_renderer() {
-        let crypto: SharedMediaCrypto =
-            Arc::new(MediaSessionCrypto::new(test_key(1)));
+        let crypto: SharedMediaCrypto = Arc::new(MediaSessionCrypto::new(test_key(1)));
         let prepared =
             PreparedUdpReceiver::bind(0, "127.0.0.1".into(), Arc::clone(&crypto)).unwrap();
         let port = prepared.port().unwrap();
@@ -193,8 +195,9 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
 
-        // Host side: seal the LCH1 challenge with the shared key.
-        let host_tx = secure_channel::DatagramSealer::new(test_key(1));
+        // Host side: seal the LCH1 challenge with the derived s2c key.
+        let host_keys = secure_channel::media_keys(&test_key(1));
+        let host_tx = secure_channel::DatagramSealer::new(host_keys.s2c);
         let challenge = [CHALLENGE_PREFIX, b"race-free-nonce".as_slice()].concat();
         sender
             .send_to(&host_tx.seal(&challenge).unwrap(), ("127.0.0.1", port))
@@ -203,7 +206,7 @@ mod tests {
         let (size, _) = sender.recv_from(&mut response).unwrap();
         // The echo is sealed under the viewer's own direction; the host
         // opens it with its own receiving window.
-        let mut host_rx = secure_channel::DatagramSealer::new(test_key(1));
+        let host_rx = secure_channel::DatagramSealer::new(host_keys.c2s);
         assert_eq!(host_rx.open(&response[..size]).unwrap(), challenge);
 
         // Unauthenticated datagrams are never echoed.
@@ -211,9 +214,7 @@ mod tests {
             .send_to(b"LCH1plaintext-forgery", ("127.0.0.1", port))
             .unwrap();
         let mut noise = [0u8; 4];
-        sender
-            .send_to(b"keep-alive", ("127.0.0.1", port))
-            .unwrap();
+        sender.send_to(b"keep-alive", ("127.0.0.1", port)).unwrap();
         assert!(sender.recv_from(&mut noise).is_err());
 
         let (socket, handed_crypto, peer) = prepared.into_socket_and_media_crypto().unwrap();
@@ -232,8 +233,7 @@ mod tests {
 
     #[test]
     fn rejects_non_ip_host_before_binding() {
-        let crypto: SharedMediaCrypto =
-            Arc::new(MediaSessionCrypto::new(test_key(2)));
+        let crypto: SharedMediaCrypto = Arc::new(MediaSessionCrypto::new(test_key(2)));
         let error = match PreparedUdpReceiver::bind(0, "leftcar.local".into(), crypto) {
             Ok(_) => panic!("hostname must be rejected"),
             Err(error) => error,

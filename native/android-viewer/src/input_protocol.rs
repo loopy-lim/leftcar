@@ -35,6 +35,10 @@ pub enum InputEvent {
         x: u16,
         y: u16,
         buttons: u32,
+        /// 스타일러스 압력(0.0-1.0). 손가락·마우스는 None — 페이로드에
+        /// 4바이트 f32 BE가追加되고, 없으면 예전 길이 그대로다(호스트는
+        /// 길이로 구분한다).
+        pressure: Option<f32>,
     },
     PointerButton {
         x: u16,
@@ -42,6 +46,7 @@ pub enum InputEvent {
         button: u8,
         down: bool,
         buttons: u32,
+        pressure: Option<f32>,
     },
     Scroll {
         horizontal_milli_lines: i32,
@@ -82,10 +87,16 @@ impl InputEvent {
 
     fn encode_payload(&self, out: &mut Vec<u8>) {
         match self {
-            Self::PointerMove { x, y, buttons } => {
+            Self::PointerMove {
+                x,
+                y,
+                buttons,
+                pressure,
+            } => {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
                 out.extend_from_slice(&buttons.to_be_bytes());
+                push_pressure(out, pressure);
             }
             Self::PointerButton {
                 x,
@@ -93,12 +104,14 @@ impl InputEvent {
                 button,
                 down,
                 buttons,
+                pressure,
             } => {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
                 out.push(*button);
                 out.push(u8::from(*down));
                 out.extend_from_slice(&buttons.to_be_bytes());
+                push_pressure(out, pressure);
             }
             Self::Scroll {
                 horizontal_milli_lines,
@@ -306,6 +319,14 @@ pub fn estimate_latency(
     })
 }
 
+/// Stylus pressure rides as an optional f32 suffix; its presence extends the
+/// wire payload, which is how the host discriminates pressure frames.
+fn push_pressure(out: &mut Vec<u8>, pressure: &Option<f32>) {
+    if let Some(pressure) = pressure {
+        out.extend_from_slice(&pressure.to_be_bytes());
+    }
+}
+
 pub fn normalized_axis(value: f32) -> u16 {
     if !value.is_finite() {
         return 0;
@@ -335,7 +356,6 @@ pub struct InputScheduler {
     reliable: VecDeque<InputEvent>,
     pending: Option<PendingReliable>,
     next_reliable_sequence: u32,
-    dropped: u64,
 }
 
 impl InputScheduler {
@@ -350,16 +370,7 @@ impl InputScheduler {
             reliable: VecDeque::new(),
             pending: None,
             next_reliable_sequence: 1,
-            dropped: 0,
         }
-    }
-
-    pub fn polling_rate_hz(&self) -> u32 {
-        (1_000_000 / self.polling_interval_us.max(1)) as u32
-    }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped
     }
 
     /// A reconnect establishes a new authenticated nonce and therefore a new
@@ -376,6 +387,10 @@ impl InputScheduler {
     }
 
     pub fn push(&mut self, event: InputEvent) {
+        // 모든 포인터 이동(스타일러스 압력 포함)은 newest-wins 손실 경로다.
+        // 이동은 고빈도·자기 대체 이벤트라 신뢰 전송이 불필요하고, 두 호스트 모두
+        // kind-1 무신뢰 프레임을 ack 없이 적용한다. 압력 이동을 신뢰 큐에 넣으면
+        // ack가 영원히 오지 않아 재전송 후 ReleaseAll이 터진다.
         if matches!(event, InputEvent::PointerMove { .. }) {
             self.latest_pointer = Some(event);
             self.pointer_dirty = true;
@@ -388,7 +403,6 @@ impl InputScheduler {
             self.pointer_dirty = false;
         }
         if self.reliable.len() >= MAX_RELIABLE_QUEUE {
-            self.dropped = self.dropped.saturating_add(self.reliable.len() as u64 + 1);
             self.reliable.clear();
             self.pending = None;
             self.reliable.push_back(InputEvent::ReleaseAll);
@@ -408,7 +422,6 @@ impl InputScheduler {
                 MAX_RELIABLE_ATTEMPTS
             };
             if pending.attempts >= attempt_limit {
-                self.dropped = self.dropped.saturating_add(1);
                 self.pending = None;
                 self.reliable.clear();
                 self.reliable.push_back(InputEvent::ReleaseAll);
@@ -464,12 +477,9 @@ impl InputScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::test_media_key as key;
     use crate::media_crypto::{MediaSessionCrypto, CHALLENGE_PREFIX};
     use secure_channel::DatagramSealer;
-
-    fn key(bytes: u8) -> [u8; 32] {
-        (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()
-    }
 
     #[test]
     fn pointer_rate_is_twice_stream_fps() {
@@ -560,11 +570,13 @@ mod tests {
             x: 1,
             y: 2,
             buttons: 0,
+            pressure: None,
         });
         scheduler.push(InputEvent::PointerMove {
             x: 3,
             y: 4,
             buttons: 0,
+            pressure: None,
         });
         let first = scheduler.next_ready(1).unwrap();
         assert_eq!(
@@ -572,16 +584,62 @@ mod tests {
             InputEvent::PointerMove {
                 x: 3,
                 y: 4,
-                buttons: 0
+                buttons: 0,
+                pressure: None
             }
         );
         scheduler.push(InputEvent::PointerMove {
             x: 5,
             y: 6,
             buttons: 0,
+            pressure: None,
         });
         assert!(scheduler.next_ready(8_000).is_none());
         assert!(scheduler.next_ready(8_400).is_some());
+    }
+
+    #[test]
+    fn stylus_pressure_moves_stay_on_the_lossy_pointer_path() {
+        // 압력 이동도 일반 이동과 같은 newest-wins 경로를 쓴다: 두 호스트 모두
+        // kind-1 무신뢰 프레임은 ack하지 않으므로, 압력 이동이 신뢰 큐에 들어가면
+        // 재전송 12번 뒤 ReleaseAll이 강제됐다(회귀 방지 잠금).
+        let mut scheduler = InputScheduler::new(60);
+        scheduler.push(InputEvent::PointerMove {
+            x: 1,
+            y: 2,
+            buttons: 1,
+            pressure: Some(0.5),
+        });
+        scheduler.push(InputEvent::PointerMove {
+            x: 3,
+            y: 4,
+            buttons: 1,
+            pressure: Some(0.75),
+        });
+        let first = scheduler.next_ready(1).unwrap();
+        assert!(!first.event.is_reliable());
+        assert_eq!(
+            first.event,
+            InputEvent::PointerMove {
+                x: 3,
+                y: 4,
+                buttons: 1,
+                pressure: Some(0.75)
+            }
+        );
+        // 신뢰 카운터를 소모하지 않는다 — 다음 신뢰 이벤트가 시퀀스 1을 받는다.
+        scheduler.push(InputEvent::Key {
+            key_code: 29,
+            scan_code: 30,
+            meta_state: 0,
+            down: true,
+            repeat: 0,
+        });
+        let key = scheduler.next_ready(20_000).unwrap();
+        assert!(key.event.is_reliable());
+        assert_eq!(key.sequence, 1);
+        assert!(scheduler.acknowledge(key.sequence));
+        assert!(scheduler.next_ready(20_001).is_none());
     }
 
     #[test]
@@ -621,6 +679,7 @@ mod tests {
             x: 10,
             y: 20,
             buttons: 1,
+            pressure: None,
         });
         scheduler.push(InputEvent::ReleaseAll);
         let release = scheduler.next_ready(2).unwrap();
@@ -651,11 +710,13 @@ mod tests {
     #[test]
     fn sealed_ack_and_status_round_trip_like_the_host_wire() {
         // The host builds these plaintext frames and seals them at the socket
-        // boundary; the viewer opens them before parsing.
+        // boundary with the s2c key; the viewer opens them before parsing.
         let crypto = MediaSessionCrypto::new(key(7));
+        let host_keys = secure_channel::media_keys(&key(7));
+        let host = DatagramSealer::new(host_keys.s2c);
         let mut ack = ACK_MAGIC.to_vec();
         ack.extend_from_slice(&7u32.to_be_bytes());
-        let sealed_ack = crypto.seal(&ack).unwrap();
+        let sealed_ack = host.seal(&ack).unwrap();
         assert_eq!(
             parse_ack(&crypto.open(&sealed_ack).unwrap()),
             Some(InputAck {
@@ -668,7 +729,7 @@ mod tests {
         stateful_ack.extend_from_slice(&7u32.to_be_bytes());
         stateful_ack.push(1);
         assert_eq!(
-            parse_ack(&crypto.open(&crypto.seal(&stateful_ack).unwrap()).unwrap()),
+            parse_ack(&crypto.open(&host.seal(&stateful_ack).unwrap()).unwrap()),
             Some(InputAck {
                 sequence: 7,
                 enabled: Some(true),
@@ -678,18 +739,74 @@ mod tests {
         let mut status = STATUS_MAGIC.to_vec();
         status.push(0);
         assert_eq!(
-            parse_input_status(&crypto.open(&crypto.seal(&status).unwrap()).unwrap()),
+            parse_input_status(&crypto.open(&host.seal(&status).unwrap()).unwrap()),
             Some(false)
         );
         status[4] = 1;
         assert_eq!(
-            parse_input_status(&crypto.open(&crypto.seal(&status).unwrap()).unwrap()),
+            parse_input_status(&crypto.open(&host.seal(&status).unwrap()).unwrap()),
             Some(true)
         );
         // A frame sealed under a different key never opens, so it can never
         // reach these parsers.
         let impostor = DatagramSealer::new(key(8));
         assert!(crypto.open(&impostor.seal(&status).unwrap()).is_none());
+    }
+
+    #[test]
+    fn stylus_pressure_extends_the_wire_by_four_bytes() {
+        // 압력 없음(손가락·마우스)은 예전 길이 그대로, 스타일러스 압력은
+        // f32 BE 4바이트를 뒤에 붙인다 — 호스트는 길이로 구분한다.
+        let plain = encode_input(&OutboundInput {
+            sequence: 7,
+            event: InputEvent::PointerMove {
+                x: 1,
+                y: 2,
+                buttons: 0,
+                pressure: None,
+            },
+        });
+        assert_eq!(plain.len(), 18);
+        let stylus = encode_input(&OutboundInput {
+            sequence: 7,
+            event: InputEvent::PointerMove {
+                x: 1,
+                y: 2,
+                buttons: 1,
+                pressure: Some(0.75),
+            },
+        });
+        assert_eq!(stylus.len(), 22);
+        assert_eq!(f32::from_be_bytes(stylus[18..22].try_into().unwrap()), 0.75);
+
+        let plain_button = encode_input(&OutboundInput {
+            sequence: 8,
+            event: InputEvent::PointerButton {
+                x: 1,
+                y: 2,
+                button: 1,
+                down: true,
+                buttons: 1,
+                pressure: None,
+            },
+        });
+        assert_eq!(plain_button.len(), 20);
+        let stylus_button = encode_input(&OutboundInput {
+            sequence: 8,
+            event: InputEvent::PointerButton {
+                x: 1,
+                y: 2,
+                button: 1,
+                down: true,
+                buttons: 1,
+                pressure: Some(0.5),
+            },
+        });
+        assert_eq!(stylus_button.len(), 24);
+        assert_eq!(
+            f32::from_be_bytes(stylus_button[20..24].try_into().unwrap()),
+            0.5
+        );
     }
 
     #[test]
@@ -700,6 +817,7 @@ mod tests {
                     x: 1,
                     y: 2,
                     buttons: 3,
+                    pressure: None,
                 },
                 1,
                 false,
@@ -712,6 +830,7 @@ mod tests {
                     button: 1,
                     down: true,
                     buttons: 1,
+                    pressure: None,
                 },
                 2,
                 true,
@@ -796,17 +915,19 @@ mod tests {
 
     #[test]
     fn sealed_challenge_and_input_survive_one_crypto_instance() {
-        // The session key seals every direction: challenge echo, input, and
-        // the host's acks all flow through the same MediaSessionCrypto.
+        // One session key seals every direction through derived directional
+        // keys: challenge echo, input, and the host's acks all flow through
+        // the same MediaSessionCrypto on the viewer side.
         let crypto = MediaSessionCrypto::new(key(9));
-        let host_tx = DatagramSealer::new(key(9));
+        let host_keys = secure_channel::media_keys(&key(9));
+        let host_tx = DatagramSealer::new(host_keys.s2c);
         let challenge = [CHALLENGE_PREFIX, b"nonce"].concat();
         let opened = crypto
             .open_challenge(&host_tx.seal(&challenge).unwrap())
             .unwrap();
         crypto.establish();
         let echo = crypto.seal(&opened).unwrap();
-        let mut host_rx = DatagramSealer::new(key(9));
+        let host_rx = DatagramSealer::new(host_keys.c2s);
         assert_eq!(host_rx.open(&echo).unwrap(), challenge);
 
         let input = encode_input(&OutboundInput {

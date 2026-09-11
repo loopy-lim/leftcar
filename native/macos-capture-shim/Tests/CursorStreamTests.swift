@@ -124,28 +124,55 @@ struct CursorStreamTests {
 
         // MediaSealer interop self-test: the wire layout must match
         // crates/secure-channel exactly — counter u64 BE ‖ tag 16B ‖ ct with
-        // nonce 00{4} ‖ counter u64 BE. Round trip through two directions
-        // sharing one key, then verify the replay window rejects reuse.
+        // nonce 00{4} ‖ counter u64 BE — and the directional key derivation
+        // must match secure_channel::media_keys byte for byte.
         let key = Data((0..<32).map { UInt8($0) })
-        var hostToViewer = MediaSealer(mediaKey: key)!
-        var viewerToHost = MediaSealer(mediaKey: key)!
+        let derived = MediaKeyDerivation.directionalKeys(mediaKey: key)!
+        precondition(derived.c2s.map { String(format: "%02x", $0) }.joined()
+                        == "5608c4ec91f01a93afdd876da3419cafd5fc6862faaa6c15a008b16dab6ac72f",
+                     "c2s derivation must match the Rust vector")
+        precondition(derived.s2c.map { String(format: "%02x", $0) }.joined()
+                        == "2c100b32a507ab3af07ec3d39a61df7072d1d97e22d0e43da19d44fabedaf182",
+                     "s2c derivation must match the Rust vector")
+
+        // The session pair models the host: seal() uses the derived s2c key
+        // and open() the derived c2s key. A frame sealed under the raw
+        // session key is rejected in both windows, and the session's own s2c
+        // output is not openable by its c2s window.
+        let sessionCrypto = MediaSessionCrypto(mediaKey: key)!
         let plaintext = Data("LCH1challenge-plaintext".utf8)
-        guard let sealed = hostToViewer.seal(plaintext) else {
+        guard let sealed = sessionCrypto.seal(plaintext) else {
             fatalError("seal of a small challenge must succeed")
         }
         precondition(sealed.count == plaintext.count + 24,
                      "sealed frame adds exactly counter + tag bytes")
         precondition(sealed.prefix(4) != Data("LCH1".utf8),
                      "wire bytes must not leak the plaintext prefix")
-        precondition(hostToViewer.seal(plaintext)! != sealed,
-                     "a fresh counter must produce a different frame")
-        precondition(viewerToHost.open(sealed)! == plaintext,
-                     "the peer direction must open the same-key frame")
-        precondition(viewerToHost.open(sealed) == nil,
+        var viewerRx = MediaSealer(mediaKey: derived.s2c)!
+        precondition(viewerRx.open(sealed)! == plaintext,
+                     "the viewer s2c sealer must open the session's frame")
+        precondition(viewerRx.open(sealed) == nil,
                      "replaying the same frame must be rejected")
+        precondition(sessionCrypto.seal(plaintext)! != sealed,
+                     "a fresh counter must produce a different frame")
+        var viewerTx = MediaSealer(mediaKey: derived.c2s)!
+        guard let echoed = viewerTx.seal(plaintext) else {
+            fatalError("viewer-side seal must succeed")
+        }
+        precondition(sessionCrypto.open(echoed)! == plaintext,
+                     "the session must open the viewer's c2s echo")
+        precondition(sessionCrypto.open(echoed) == nil,
+                     "replaying the echo must be rejected")
+        precondition(sessionCrypto.open(sealed) == nil,
+                     "the session's own s2c frame is not openable by its c2s window")
+        var rawKeySealer = MediaSealer(mediaKey: key)!
+        precondition(sessionCrypto.open(rawKeySealer.seal(plaintext)!) == nil,
+                     "a raw-key frame must not open under derived keys")
+        precondition(viewerRx.open(rawKeySealer.seal(plaintext)!) == nil,
+                     "a raw-key frame must not open under a derived window")
         var tampered = sealed
         tampered[8] ^= 0xff
-        precondition(viewerToHost.open(tampered) == nil,
+        precondition(viewerRx.open(tampered) == nil,
                      "a forged frame must fail authentication")
 
 

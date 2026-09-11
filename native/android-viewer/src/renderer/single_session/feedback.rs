@@ -153,7 +153,15 @@ pub(super) fn flush_input(
     for _ in 0..2 {
         let outbound = control.input.lock().unwrap().next_ready(monotonic_us());
         let Some(outbound) = outbound else { break };
-        let Some(packet) = crypto.seal(&encode_input(&outbound)) else { break };
+        // Stamp before the send so the ack consumer measures the full
+        // send->ack round trip (retransmit attempts overwrite the stamp, so
+        // the EWMA measures the final successful attempt).
+        if outbound.event.is_reliable() {
+            control.record_reliable_input_send(monotonic_us());
+        }
+        let Some(packet) = crypto.seal(&encode_input(&outbound)) else {
+            break;
+        };
         if let Err(error) = socket.send_to(&packet, peer) {
             log_info!("failed to send input datagram: {error}");
             break;

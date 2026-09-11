@@ -136,7 +136,7 @@ pub(super) fn consume_viewer_response(
         return true;
     }
     if let Some(ack) = parse_ack(packet) {
-        control.input.lock().unwrap().acknowledge(ack.sequence);
+        control.acknowledge_input(ack.sequence, monotonic_us());
         if let Some(enabled) = ack.enabled {
             control
                 .input_enabled
@@ -184,7 +184,10 @@ pub(super) fn configure_single_session_sockets(
     // separate non-blocking socket and receive queue.
     let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(2)));
     let _ = control_socket.set_nonblocking(true);
-    let receive_buffer: libc::c_int = 512 * 1024;
+    // The single path shares the split's 4 MiB budget: 512 KiB held under
+    // 50ms of a 4K recovery burst, so kernel drops manufactured gap episodes
+    // that cost far more than the buffer bytes.
+    let receive_buffer: libc::c_int = crate::socket_tuning::MEDIA_RECEIVE_BUFFER_BYTES;
     let media_tos: libc::c_int = crate::socket_tuning::MEDIA_TOS;
     let control_tos: libc::c_int = crate::socket_tuning::CONTROL_TOS;
     unsafe {

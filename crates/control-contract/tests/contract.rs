@@ -266,6 +266,7 @@ fn catalog_advertises_phase_a_encoder_experiments() {
         displays: Vec::new(),
         encoder_experiments: phase_a_encoder_experiments(),
         reconfigure_encoder_experiment: None,
+        reconfigure_source: None,
         udp_stability_capabilities: Some(udp_capabilities()),
     };
     let advertised: Vec<_> = catalog
@@ -295,6 +296,7 @@ fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
         encoder_experiments: Vec::new(),
         udp_stability_capabilities: None,
         reconfigure_encoder_experiment: Some(true),
+        reconfigure_source: Some(true),
     };
     let encoded = serde_json::to_string(&new_catalog).unwrap();
     assert!(
@@ -334,6 +336,8 @@ fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
         fps: 60,
         quality_state: "native".into(),
         encoder_experiment: Some(EncoderExperiment::SplitVertical),
+        source_index: None,
+        source_name: None,
     };
     let encoded = serde_json::to_string(&output).unwrap();
     assert!(
@@ -347,6 +351,75 @@ fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
     )
     .unwrap();
     assert!(old_output.encoder_experiment.is_none());
+}
+
+#[test]
+fn reconfigure_source_contract_keeps_old_peers_compatible() {
+    // New host advertises the source-switch capability as an optional boolean.
+    let new_catalog = CatalogView {
+        platform: "macos".into(),
+        capture_backends: Vec::new(),
+        media_host: None,
+        displays: Vec::new(),
+        encoder_experiments: Vec::new(),
+        udp_stability_capabilities: None,
+        reconfigure_encoder_experiment: None,
+        reconfigure_source: Some(true),
+    };
+    let encoded = serde_json::to_string(&new_catalog).unwrap();
+    assert!(encoded.contains("\"reconfigureSource\":true"), "{encoded}");
+
+    // Old catalog JSON without the field deserializes with the capability off.
+    let old_catalog: CatalogView = serde_json::from_str(
+        r#"{"platform":"macos","captureBackends":[],"displays":[],"encoderExperiments":[]}"#,
+    )
+    .unwrap();
+    assert!(old_catalog.reconfigure_source.is_none());
+
+    // Legacy reconfigure request JSON without a source keeps the session's
+    // current display.
+    let legacy: ReconfigureStreamInput = serde_json::from_str(
+        r#"{"session":42,"width":2560,"height":1440,"fps":60,"qualityState":"native"}"#,
+    )
+    .unwrap();
+    assert!(legacy.source_index.is_none());
+    // Legacy payloads must not gain the optional key on re-serialization.
+    let back = serde_json::to_string(&legacy).unwrap();
+    assert!(!back.contains("sourceIndex"), "{back}");
+
+    // A switching viewer names the requested display explicitly.
+    let explicit: ReconfigureStreamInput = serde_json::from_str(
+        r#"{"session":42,"width":2560,"height":1440,"fps":60,"qualityState":"native","sourceIndex":2}"#,
+    )
+    .unwrap();
+    assert_eq!(explicit.source_index, Some(2));
+
+    // New host echoes the accepted source on the output only when asked.
+    let switched = ReconfigureStreamOutput {
+        session: 42,
+        width: 2560,
+        height: 1440,
+        fps: 60,
+        quality_state: "native".into(),
+        encoder_experiment: None,
+        source_index: Some(2),
+        source_name: Some("Side Display".into()),
+    };
+    let encoded = serde_json::to_string(&switched).unwrap();
+    assert!(encoded.contains("\"sourceIndex\":2"), "{encoded}");
+    assert!(
+        encoded.contains("\"sourceName\":\"Side Display\""),
+        "{encoded}"
+    );
+
+    // Unswitched output (and old host output) JSON without the source still
+    // deserializes and does not grow the optional keys.
+    let plain: ReconfigureStreamOutput = serde_json::from_str(
+        r#"{"session":9,"width":2560,"height":1440,"fps":60,"qualityState":"native"}"#,
+    )
+    .unwrap();
+    assert!(plain.source_index.is_none());
+    assert!(plain.source_name.is_none());
 }
 
 #[test]

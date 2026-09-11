@@ -15,4 +15,5 @@ domain = { path = "../../crates/domain" }
 fec-core = { path = "../../crates/fec-core" }
 usb-mux = { path = "../../crates/usb-mux" }
 secure-channel = { path = "../../crates/secure-channel" }
+zeroize = { workspace = true }
 libc = "0.2"

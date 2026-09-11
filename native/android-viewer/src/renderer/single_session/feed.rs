@@ -72,8 +72,9 @@ pub(super) fn feed_and_render(
     }
 
     if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
+        let input_rtt = control.input_rtt_ms.load(Ordering::Relaxed);
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?} inputRttMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
@@ -96,7 +97,8 @@ pub(super) fn feed_and_render(
             stats.max_feed_us,
             capture_age_ms,
             encode_age_ms,
-            wire_age_ms
+            wire_age_ms,
+            (input_rtt != LATENCY_UNKNOWN).then_some(input_rtt)
         );
     }
     let rendered_delta = dec.frames_rendered.saturating_sub(rendered_before);

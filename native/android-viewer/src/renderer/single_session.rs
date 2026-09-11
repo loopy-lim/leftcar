@@ -10,7 +10,7 @@ use crate::log_info;
 use crate::media_datagram::{
     classify_frame_gap, parse_fragment, parse_parity, recovery_request_suppressed,
     rendered_fps_from_feedback, select_live_edge_frames, should_feed_frame,
-    should_resync_after_network_loss, stale_frame_budget_ms, stale_streak_advance,
+    should_freeze_after_network_loss, stale_frame_budget_ms, stale_streak_advance,
     CompletedFecGroups, CompletedFrameSequencer, FecGroup, FrameFragment, FrameGapReason,
     FrameReassembler, ReassembledFrame, ReceiverPressure, RecoveryRequestGate, RestoredFragment,
     PARITY_MARKER,

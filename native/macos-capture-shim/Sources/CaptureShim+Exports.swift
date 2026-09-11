@@ -107,13 +107,23 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         return h
     }
 
+    // 공통 실패 정리: 등록 해제 + 세션 정지 후 0 반환. 메시지가 있으면 먼저
+    // 마지막 오류로 남긴다.
+    func abort(_ message: String?) -> UInt32 {
+        if let message = message {
+            setLastError(message)
+        }
+        removeFromRegistry(handle)
+        session.stop()
+        return 0
+    }
+
     // Establish the media socket first. Capture callbacks can then be accepted
     // immediately without losing the initial CFG/IDR while the viewer listener
     // is still racing to bind its port.
     let connected = session.connectSocket()
     guard connected else {
-        removeFromRegistry(handle)
-        return 0
+        return abort(nil)
     }
 
     let started: Bool
@@ -124,19 +134,11 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         // the same SCK path — including its system-audio plane. Only a Mac
         // with neither consent falls through to the error below.
         guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
-            setLastError(
-                "screen-recording permission is not granted to Leftcar Host"
-            )
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort("screen-recording permission is not granted to Leftcar Host")
         }
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
-            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
         }
         // Approved VNC-style builds reconnect directly to the requested
         // display after Screen Recording permission has been granted. Builds
@@ -147,26 +149,18 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
             timeout: 15
         )
         guard let filter = selection.filter else {
-            setLastError(selection.error ?? "screen capture returned no display")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort(selection.error ?? "screen capture returned no display")
         }
         started = session.setupScreenCaptureKit(filter: filter)
     case .cgDisplayStream:
         let displayIDs = activeDisplayIDs()
         guard Int(displayIndex) < displayIDs.count else {
-            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
         }
         started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
     }
     guard started else {
-        removeFromRegistry(handle)
-        session.stop()
-        return 0
+        return abort(nil)
     }
 
     session.startPerformanceLogging()

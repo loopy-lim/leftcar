@@ -17,7 +17,7 @@ fn media_key_from_parts(key: *const u8, key_len: usize) -> Option<[u8; 32]> {
         return None;
     }
     let bytes = unsafe { std::slice::from_raw_parts(key, key_len) };
-    Some(bytes.try_into().ok()?)
+    bytes.try_into().ok()
 }
 
 // The renderer session modules are Android-gated in renderer/mod.rs (they
@@ -60,6 +60,50 @@ use session_stubs::{
 };
 
 mod session_io;
+
+/// Shared preamble for the state-taking exports: resolve the process state
+/// pointer and the stream instance id, or yield LEFTCAR_ERR_NULL.
+///
+/// # Safety
+/// `state` must be a valid `StatePtr` and `instance_c` a valid C string.
+unsafe fn state_and_instance<'a>(
+    state: StatePtr,
+    instance_c: *const c_char,
+) -> Result<
+    (
+        &'a mut viewer_core::ProcessState,
+        viewer_core::StreamInstanceId,
+    ),
+    i32,
+> {
+    let Some(state) = (unsafe { state.as_mut() }) else {
+        return Err(LEFTCAR_ERR_NULL);
+    };
+    let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
+        return Err(LEFTCAR_ERR_NULL);
+    };
+    Ok((state, instance))
+}
+
+fn host_from_cstr(host_c: *const c_char) -> String {
+    if host_c.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(host_c) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn transport_from_cstr(transport_c: *const c_char) -> String {
+    if transport_c.is_null() {
+        "udp".to_owned()
+    } else {
+        unsafe { CStr::from_ptr(transport_c) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 #[cfg(test)]
 use session_io::leftcar_jni_termination_reason;
@@ -109,16 +153,8 @@ pub extern "C" fn leftcar_jni_prepare_port(
         if host_c.is_null() {
             return LEFTCAR_ERR_NULL;
         }
-        let host = unsafe { CStr::from_ptr(host_c) }
-            .to_string_lossy()
-            .into_owned();
-        let transport = if transport_c.is_null() {
-            "udp".to_owned()
-        } else {
-            unsafe { CStr::from_ptr(transport_c) }
-                .to_string_lossy()
-                .into_owned()
-        };
+        let host = host_from_cstr(host_c);
+        let transport = transport_from_cstr(transport_c);
         if !matches!(
             transport.as_str(),
             "udp" | "tcp" | "adbTcp" | "usb" | "auto"
@@ -160,16 +196,8 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
         if host_c.is_null() {
             return LEFTCAR_ERR_NULL;
         }
-        let host = unsafe { CStr::from_ptr(host_c) }
-            .to_string_lossy()
-            .into_owned();
-        let transport = if transport_c.is_null() {
-            "udp".to_owned()
-        } else {
-            unsafe { CStr::from_ptr(transport_c) }
-                .to_string_lossy()
-                .into_owned()
-        };
+        let host = host_from_cstr(host_c);
+        let transport = transport_from_cstr(transport_c);
         if transport != "udp" || !host_is_valid(&host) {
             return LEFTCAR_ERR_INVALID;
         }
@@ -179,9 +207,8 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
         // Both tiles share ONE media-crypto instance: their sends must stay
         // inside the host's single c2s replay window, so the counter sequence
         // must not fork between the left and right sockets.
-        let shared: SharedMediaCrypto = Arc::new(crate::media_crypto::MediaSessionCrypto::new(
-            media_key,
-        ));
+        let shared: SharedMediaCrypto =
+            Arc::new(crate::media_crypto::MediaSessionCrypto::new(media_key));
         {
             let mut guard = crate::jni::MEDIA_CRYPTO.lock().unwrap();
             let map = guard.get_or_insert_with(Default::default);
@@ -207,11 +234,7 @@ pub extern "C" fn leftcar_jni_prepare_split_port(
 /// calls this before `prepare_port`; the bridge's loopback control port is
 /// then used by the JS control client.
 #[no_mangle]
-pub extern "C" fn leftcar_jni_prepare_usb(
-    fd: i32,
-    key: *const u8,
-    key_len: usize,
-) -> i32 {
+pub extern "C" fn leftcar_jni_prepare_usb(fd: i32, key: *const u8, key_len: usize) -> i32 {
     let guard = std::panic::catch_unwind(|| {
         let Some(media_key) = media_key_from_parts(key, key_len) else {
             return LEFTCAR_ERR_INVALID;
@@ -308,22 +331,14 @@ pub extern "C" fn leftcar_jni_attach_port(
     fps: u32,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         // No paired host = no stream. Validate BEFORE attaching the surface:
         // on this error path the wrapper releases its ANativeWindow ref and
         // the core must not still hold a registered handle (double release).
-        let host = if host_c.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(host_c) }
-                .to_string_lossy()
-                .into_owned()
-        };
+        let host = host_from_cstr(host_c);
         if !host_is_valid(&host) {
             log_info!("leftcar_jni_attach_port: invalid paired host {host:?} — refusing");
             return LEFTCAR_ERR_INVALID;
@@ -371,22 +386,14 @@ pub extern "C" fn leftcar_jni_rebind_port(
     fps: u32,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         if surface.is_null() || port == 0 {
             return LEFTCAR_ERR_INVALID;
         }
-        let host = if host_c.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(host_c) }
-                .to_string_lossy()
-                .into_owned()
-        };
+        let host = host_from_cstr(host_c);
         if !host_is_valid(&host) {
             return LEFTCAR_ERR_INVALID;
         }
@@ -446,11 +453,9 @@ pub extern "C" fn leftcar_jni_attach_split_port(
     decoder_name_c: *const c_char,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         if left_surface.is_null() || right_surface.is_null() {
             return LEFTCAR_ERR_NULL;
@@ -466,13 +471,7 @@ pub extern "C" fn leftcar_jni_attach_split_port(
                 _ => return LEFTCAR_ERR_INVALID,
             }
         };
-        let host = if host_c.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(host_c) }
-                .to_string_lossy()
-                .into_owned()
-        };
+        let host = host_from_cstr(host_c);
         let Ok((left_port, right_port)) = split_ports(base_port) else {
             return LEFTCAR_ERR_INVALID;
         };
@@ -534,18 +533,21 @@ pub extern "C" fn leftcar_jni_attach_split_port(
             // `spawn` already consumed both receivers into the coordinator
             // thread, so they cannot be put back. Best-effort fresh binds
             // keep a retried attach from hitting an empty store forever.
-            // 같은 세션 키로 수신기를 되살린다. 재시도 attach는 호스트 쪽
-            // 세션 재시작과 세트라서 카운터 초기화도 서로 일치한다. 크립토가
-            // 이미 소모됐다면 바인드를 건너뛴다 — 키 없는 평문 수신기는
-            // 만들지 않는다.
+            // 같은 세션 키로 수신기를 되살린다 — 좌우 타일이 하나의 크립토
+            // 인스턴스를 공유하는 규칙(prepare_split_stream과 동일)도 지킨다.
+            // 포트마다 인스턴스를 새로 만들면 c2s 카운터가 갈라져 호스트의
+            // 단일 재생 창이 두 번째 타일의 도전 에코를 재생으로 거부한다.
+            // 크립토가 이미 소모됐다면 바인드를 건너뛴다 — 키 없는 평문
+            // 수신기는 만들지 않는다.
             if let (Some(left_crypto), Some(right_crypto)) = (
                 crate::jni::media_crypto_for(left_port),
                 crate::jni::media_crypto_for(right_port),
             ) {
                 debug_assert_eq!(left_crypto.session_key(), right_crypto.session_key());
-                let key = left_crypto.session_key();
-                let _ = prepare_udp_receiver(left_port, &host, "udp", &key);
-                let _ = prepare_udp_receiver(right_port, &host, "udp", &key);
+                reclaim_udp_port(left_port);
+                reclaim_udp_port(right_port);
+                let _ = crate::jni::prepare_split_receiver(left_port, &host, &left_crypto);
+                let _ = crate::jni::prepare_split_receiver(right_port, &host, &left_crypto);
             }
             log_info!("failed to start split renderer: {error}");
             return LEFTCAR_ERR_STATE;
@@ -563,11 +565,9 @@ pub extern "C" fn leftcar_jni_surface_changed(
     h: u32,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         let instance_str = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy();
         suppress_resize_recovery(&instance_str);
@@ -580,11 +580,9 @@ pub extern "C" fn leftcar_jni_surface_changed(
 #[no_mangle]
 pub extern "C" fn leftcar_jni_detach(state: StatePtr, instance_c: *const c_char) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
@@ -617,13 +615,11 @@ pub extern "C" fn leftcar_jni_update_window(
     monotonic_ms: u64,
 ) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Some(event) = map_event(event_code) else {
+        let Some(event) = crate::map_lifecycle(event_code) else {
             return LEFTCAR_ERR_INVALID;
         };
         viewer_core::c_abi::stream_update_window_state(
@@ -640,11 +636,9 @@ pub extern "C" fn leftcar_jni_update_window(
 #[no_mangle]
 pub extern "C" fn leftcar_jni_release(state: StatePtr, instance_c: *const c_char) -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return LEFTCAR_ERR_NULL;
-        };
-        let Ok(instance) = (unsafe { cstr_instance(instance_c) }) else {
-            return LEFTCAR_ERR_NULL;
+        let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
+            Ok(resolved) => resolved,
+            Err(code) => return code,
         };
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
@@ -666,26 +660,6 @@ unsafe fn cstr_instance(c: *const c_char) -> Result<viewer_core::StreamInstanceI
     }
     let s = CStr::from_ptr(c).to_string_lossy();
     viewer_core::StreamInstanceId::from_raw(s).map_err(|_| ())
-}
-
-fn map_event(code: u32) -> Option<viewer_core::LifecycleEvent> {
-    use viewer_core::LifecycleEvent as L;
-    Some(match code {
-        1 => L::ActivityCreate,
-        2 => L::ActivityStart,
-        3 => L::ActivityResume,
-        4 => L::FocusGain,
-        5 => L::FocusLoss,
-        6 => L::SurfaceCreate,
-        7 => L::SurfaceChange,
-        8 => L::SurfaceDestroy,
-        9 => L::ActivityPause,
-        10 => L::ActivityStop,
-        11 => L::ConfigurationChange,
-        12 => L::TaskRemove,
-        13 => L::ProcessDeath,
-        _ => return None,
-    })
 }
 
 /// Balance helper used by the JNI wrapper: acquire on attach, release on
@@ -737,5 +711,59 @@ mod termination_tests {
             clear_cached_termination(instance);
             assert_eq!(leftcar_jni_termination_reason(instance_c.as_ptr()), -1);
         }
+    }
+}
+
+#[cfg(test)]
+mod split_prepare_tests {
+    use super::*;
+    use crate::jni::{media_crypto_for, take_media_crypto};
+    use std::ffi::CString;
+
+    fn free_split_base_port() -> u16 {
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let base = probe.local_addr().unwrap().port();
+        drop(probe);
+        if std::net::UdpSocket::bind(("127.0.0.1", base.saturating_add(1))).is_ok() {
+            base
+        } else {
+            free_split_base_port()
+        }
+    }
+
+    /// 좌우 타일은 하나의 크립토 인스턴스를 공유해야 한다 — 인스턴스가 포트마다
+    /// 갈라지면 c2s 카운터가 두 벌이 되어 호스트의 단일 재생 창이 두 번째
+    /// 타일의 도전 에코를 재생으로 거부한다(0c4cee0 폴백이 저질렀던 실패).
+    #[test]
+    fn split_prepare_registers_one_shared_crypto_instance() {
+        // 전역 PREPARED_RECEIVERS/MEDIA_CRYPTO를 건드린다 — 절대 상태를
+        // 검증하는 다른 스토어 테스트와 직렬화한다.
+        let _serial = crate::jni::TEST_STORE_LOCK.lock().unwrap();
+        let base = free_split_base_port();
+        let Ok((left, right)) = split_ports(base) else {
+            panic!("no split port pair around {base}");
+        };
+        let host = CString::new("127.0.0.1").unwrap();
+        let key: [u8; 32] = core::array::from_fn(|i| (i + 1) as u8);
+        let rc = leftcar_jni_prepare_split_port(
+            base,
+            host.as_ptr(),
+            std::ptr::null(),
+            key.as_ptr(),
+            key.len(),
+        );
+        assert_eq!(rc, LEFTCAR_OK);
+        let left_crypto = media_crypto_for(left).expect("left crypto registered");
+        let right_crypto = media_crypto_for(right).expect("right crypto registered");
+        assert!(
+            Arc::ptr_eq(&left_crypto, &right_crypto),
+            "both tiles must share one crypto instance"
+        );
+        assert_eq!(left_crypto.session_key(), key);
+
+        take_media_crypto(left);
+        take_media_crypto(right);
+        let _ = crate::jni::cancel_prepared_receiver(left);
+        let _ = crate::jni::cancel_prepared_receiver(right);
     }
 }

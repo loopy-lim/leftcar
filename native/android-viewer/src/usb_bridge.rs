@@ -100,10 +100,9 @@ impl UsbBridge {
         let control_port = listener.local_addr()?.port();
         let (media_tx, media_rx) = mpsc::sync_channel(MEDIA_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(64);
-        let media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>> =
-            Arc::new(Mutex::new(Some(Arc::new(
-                crate::media_crypto::MediaSessionCrypto::new(media_key),
-            ))));
+        let media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>> = Arc::new(Mutex::new(Some(
+            Arc::new(crate::media_crypto::MediaSessionCrypto::new(media_key)),
+        )));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let reader_crypto = Arc::clone(&media_crypto);
@@ -224,8 +223,7 @@ fn read_accessory(
                 if let Some(crypto) = crypto {
                     if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
                         if let Some(reply) = crypto.seal(&plaintext) {
-                            let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply)
-                            else {
+                            let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply) else {
                                 break;
                             };
                             let Ok(mut output) = writer.lock() else { break };

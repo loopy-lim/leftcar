@@ -90,21 +90,25 @@ pub(super) fn present_completed_frames(
                     control
                         .frame_gaps
                         .store(renderer_stats.frame_gaps, Ordering::Relaxed);
-                    let hard_recovery = should_resync_after_network_loss(missing, keyframe);
+                    let freeze = should_freeze_after_network_loss(missing, keyframe);
                     log_info!(
-                                "UDP access-unit gap detected at id={} reason=networkLoss missing={} hardRecovery={}",
-                                frame.id,
-                                missing,
-                                hard_recovery
-                            );
+                        "UDP access-unit gap detected at id={} reason=networkLoss missing={} freeze={}",
+                        frame.id,
+                        missing,
+                        freeze
+                    );
                     if keyframe {
                         *awaiting_keyframe = false;
-                    } else if hard_recovery {
-                        // Any missing delta invalidates the low-latency
-                        // reference chain. Keep the last good Surface
-                        // image while a fresh IDR is requested.
-                        *last_frame_id = None;
-                        resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
+                    } else if freeze {
+                        // Split-style no-flush freeze (Q8/T9): any missing
+                        // delta invalidates the low-latency reference chain,
+                        // so hold the last good Surface image while the
+                        // recovery IDR is requested through the 250ms gate.
+                        // awaiting_keyframe drives the feed gate below, so
+                        // dependent deltas are discarded WITHOUT a MediaCodec
+                        // flush — the recovery keyframe resumes feeding and
+                        // only a fatal decoder error still flushes.
+                        *awaiting_keyframe = true;
                         request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                 }
@@ -119,13 +123,12 @@ pub(super) fn present_completed_frames(
                     if keyframe {
                         *awaiting_keyframe = false;
                     } else if !*awaiting_keyframe {
-                        // The selected delta may depend on one of the
-                        // AUs intentionally discarded by the
-                        // live-edge policy. Start one coalesced
-                        // recovery boundary; the outer gate prevents
-                        // another IDR request for this same episode.
-                        *last_frame_id = None;
-                        resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
+                        // The selected delta may depend on one of the AUs
+                        // intentionally discarded by the live-edge policy.
+                        // Same no-flush freeze as a network loss: start one
+                        // coalesced recovery boundary; the outer gate
+                        // prevents another IDR request for this episode.
+                        *awaiting_keyframe = true;
                         request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                 }

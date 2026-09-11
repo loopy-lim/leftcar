@@ -365,15 +365,6 @@ mod tests {
         assert!(!svc.is_approved(&b));
     }
 
-
-
-
-
-
-
-
-
-
     // -- A1 security-defect regression tests ---------------------------------
 
     #[test]
@@ -446,8 +437,6 @@ mod tests {
         assert!(!digest.contains(&raw_hex[..8]));
         assert_eq!(digest.len(), 16);
     }
-
-
 
     #[test]
     fn human_code_uses_full_six_digit_range() {
