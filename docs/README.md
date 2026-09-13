@@ -123,3 +123,5 @@ Android 시스템 창보다 더 자유로운 깊이 배치, 곡면 배치, 3D �
 - [x] 실제 Galaxy XR에서 같은 앱 창 4개를 동시에 열 수 있는지 Phase 1에서 검증한다는 점
 
 - [마무리 후속 작업 검증](2026-09-13-completion-followup-validation.md)
+
+- [2026-09-14 추가 마무리와 30분 검사 준비](2026-09-14-completion-followup-validation.md): 새 후보·CI·전달 파일과 아직 시작하지 않은 물리 검사의 경계.
