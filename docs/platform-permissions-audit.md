@@ -20,7 +20,7 @@
 
 백업은 앱 전체를 끄지 않고 `SecureStore` 및 레거시 `ReactNativePreferences.xml` shared preferences를 제외한다. full backup, cloud backup, device transfer의 세 경로를 모두 설정한다. 자체 XML을 사용하므로 `app.config.ts`의 `expo-secure-store.configureAndroidBackup`은 false다. Expo는 복원 뒤 키를 잃어 해독할 수 없는 SecureStore 항목을 이렇게 제외하도록 안내한다. [Expo 공식 문서](https://docs.expo.dev/versions/latest/sdk/securestore/#android-auto-backup), [Android 백업 규칙](https://developer.android.com/identity/data/autobackup)
 
-2026-09-13 로컬 Gradle의 `processReleaseMainManifest`/`processDebugMainManifest`가 성공했고, release에서 위 세 권한 부재와 양쪽 variant의 소유 XML 참조를 검사했다. 이는 manifest 증거다. 최종 APK 리소스 검사와 실제 backup/restore·앱 업데이트는 각각 다른 검증이다.
+2026-09-13 로컬 Gradle의 `processReleaseMainManifest`/`processDebugMainManifest`가 성공했고, release에서 위 세 권한 부재와 양쪽 variant의 소유 XML 참조를 검사했다. 이후 최종 내부 APK의 manifest/resource table/compiled XML에서도 세 권한 부재와 세 백업 경로의 제외 규칙을 확인했다. 정확한 파일과 해시는 [후속 검증 기록](2026-09-13-completion-followup-validation.md)을 따른다. 실제 backup/restore·앱 업데이트는 별도 미실행이다.
 
 현재 StreamActivity는 recent task에 표시되며 `FLAG_SECURE`를 쓰지 않는다. screenshot/preview 차단을 보장하지 않는다. 해당 flag는 screenshot과 비보안 display 표시를 제한하므로, Galaxy XR Home Space/Surface 호환성 확인 없이 켜지 않는다. 태블릿과 XR에서 스트림 표시, task 전환, 복귀, screenshot/preview를 따로 검증한 후 결정한다. [Android secure activity 안내](https://developer.android.com/security/fraud-prevention/activities)
 

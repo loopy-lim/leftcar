@@ -10,10 +10,12 @@
 
 | 단계 | 닫아야 할 조건 | 현재 증거 해석 |
 | --- | --- | --- |
-| 코드 통합 | 정확한 소스에서 회귀·타입·구조·React Doctor·플랫폼 CI 확인 | 검사·커밋별 결과가 필요 |
-| 내부 패키지 | 같은 source snapshot의 Host/APK, 내장 shim·JS·native·ABI·서명 검사 | 설치·화면 캡처·실제 성능을 뜻하지 않음 |
+| 코드 통합 | 정확한 소스에서 회귀·타입·구조·React Doctor·플랫폼 CI 확인 | 후속 로컬 전체 검사·독립 검토 통과; 후속 원격 CI는 대기 |
+| 내부 패키지 | 같은 source snapshot의 Host/APK, 내장 shim·JS·native·ABI·서명 검사 | 같은 소스의 내부 Host/APK 생성·직접 검사 완료. 설치·실제 성능은 별도 |
 | 실사용 수용 | 그 패키지의 제어·미디어·입력·복구·장시간 시험 | 사용자가 추후 직접 검사하기로 한 범위 |
 | 공개 릴리스 | 검증한 지원 조합, 배포용 서명·업데이트·복구·문서 | 내부 debug/ad-hoc 패키지와 구분 |
+
+최종 로컬 산출물과 해시는 [후속 검증 기록](2026-09-13-completion-followup-validation.md)을 따른다.
 
 실행 배경과 기준 소스는 [마무리 조사](research/2026-09-13-completion-readiness.md), 앞선 구현·실기기 시도의 상세는 [감사 개선 검증](2026-09-13-audit-remediation-validation.md)에 보관한다. 이전 패키지의 성공/실패를 새 소스에 소급하지 않는다.
 

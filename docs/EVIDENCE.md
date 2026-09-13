@@ -4,6 +4,8 @@
 
 [지원 범위와 완료 기준](completion-and-support.md)은 최신 후보의 수용 경계를, [감사 개선 검증](2026-09-13-audit-remediation-validation.md)은 앞선 코드·패키지·실기기 시도를 기록한다. 이 문서 아래의 날짜별 기록은 **그때의 소스와 패키지에 대한 역사 기록**이다. 일부 crate·테스트·capture API·Activity 설정·버전은 이후 제거 또는 변경됐으며 현재 테스트 inventory로 사용하지 않는다.
 
+[2026-09-13 후속 검증과 내부 후보](2026-09-13-completion-followup-validation.md)에 최종 소스·검토·전체 검사·Host/APK 해시를 기록했다. 새 후보의 실기기 영상과 10/30분은 아직 실행하지 않았다.
+
 현재 검사 범위의 소스 진입점:
 
 | 경계 | 현재 진입점 | 증거 한계 |
@@ -15,7 +17,7 @@
 | Host 승인·감사 | `apps/host-desktop/src-tauri/src/source_grants.rs`, `audit.rs`, `control.rs` | 파일/권한 정책과 실제 OS 권한 수용은 별개 |
 | 전체 검사·패키지 | `tools/verify.mjs`, `tools/build.mjs`, `tools/release-manifest.mjs` | 정확한 소스·target·artifact·서명을 함께 기록 |
 
-과거 표의 `crates/network-protocol`, `crates/diagnostics`, `crates/transport-api` 경로는 현재 독립 crate가 아니다. 당시 테스트 이름이나 아래 누적 개수를 지금 실행한 검사 결과로 옮기지 않는다. 현재 후보의 LAN 미디어 실패 및 10·30분 미실행은 이후 과거 성공 기록으로 덮지 않는다.
+과거 표의 `crates/network-protocol`, `crates/diagnostics`, `crates/transport-api` 경로는 현재 독립 crate가 아니다. 당시 테스트 이름이나 아래 누적 개수를 지금 실행한 검사 결과로 옮기지 않는다. 앞선 감사 후보의 LAN 미디어 실패와 새 후보의 실기기·10/30분 미실행을 과거 성공 기록으로 덮지 않는다.
 
 ## 과거 snapshot과 날짜별 관측
 
