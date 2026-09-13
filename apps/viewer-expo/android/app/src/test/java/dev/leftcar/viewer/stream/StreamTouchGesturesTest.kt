@@ -132,4 +132,72 @@ class StreamTouchGesturesTest {
         val rightCancel = machine.onTouchEvent(MotionEvent.ACTION_CANCEL, 1, 50f, 60f, 50f, 60f)
         assertEquals(listOf(button(50f, 60f, MotionEvent.BUTTON_SECONDARY, down = false)), rightCancel)
     }
+
+    // -- 핀치줌 ---------------------------------------------------------------
+
+    @Test
+    fun `pinch beyond drift becomes zoom and stops scrolling`() {
+        machine.onTouchEvent(MotionEvent.ACTION_DOWN, 1, 100f, 200f, 100f, 200f)
+        val secondFinger = machine.onTouchEvent(
+            MotionEvent.ACTION_POINTER_DOWN, 2, 300f, 200f, 200f, 200f, twoFingerSpanPx = 200f,
+        )
+        // 두 번째 손가락 착지: 좌클릭 해제만 나온다.
+        assertEquals(1, secondFinger.size)
+
+        // span이 18% 이상 벌어지면(200→260) 줌으로 전환하고 첫 줌 이벤트는
+        // 배율 1로 시작한다(점프 없음).
+        val enter = machine.onTouchEvent(
+            MotionEvent.ACTION_MOVE, 2, 330f, 200f, 215f, 200f, twoFingerSpanPx = 260f,
+        )
+        assertEquals(emptyList<TouchGestureCommand>(), enter)
+
+        // 이후 span 변화는 초점과 함께 Zoom 커맨드로 나온다.
+        val zoomStep = machine.onTouchEvent(
+            MotionEvent.ACTION_MOVE, 2, 340f, 200f, 220f, 200f, twoFingerSpanPx = 312f,
+        )
+        assertEquals(
+            listOf(TouchGestureCommand.Zoom(factor = 312f / 260f, focusX = 220f, focusY = 200f)),
+            zoomStep,
+        )
+
+        // 줌 중에는 스크롤 커맨드가 나오지 않는다(중심이 움직여도).
+        machine.onTouchEvent(
+            MotionEvent.ACTION_MOVE, 2, 340f, 210f, 220f, 205f, twoFingerSpanPx = 312f,
+        ).forEach { command ->
+            assertFalse(command is TouchGestureCommand.Scroll)
+        }
+    }
+
+    @Test
+    fun `slow pinch accumulates against the gesture-start span`() {
+        machine.onTouchEvent(MotionEvent.ACTION_DOWN, 1, 100f, 200f, 100f, 200f)
+        machine.onTouchEvent(
+            MotionEvent.ACTION_POINTER_DOWN, 2, 300f, 200f, 200f, 200f, twoFingerSpanPx = 200f,
+        )
+        // 이벤트당 6%씩 5번 = 시작 대비 30% — 이벤트 간 비교로는 못 잡는
+        // 느린 핀치도 제스처 시작 span 기준으로 줌이 된다.
+        var sawZoom = false
+        var span = 200f
+        for (step in 0 until 5) {
+            span *= 0.94f
+            val commands = machine.onTouchEvent(
+                MotionEvent.ACTION_MOVE, 2, 100f + span, 200f, 200f, 200f, twoFingerSpanPx = span,
+            )
+            if (commands.any { it is TouchGestureCommand.Zoom }) sawZoom = true
+        }
+        assertTrue(sawZoom)
+    }
+
+    @Test
+    fun `two-finger drag without span change stays scroll`() {
+        machine.onTouchEvent(MotionEvent.ACTION_DOWN, 1, 100f, 200f, 100f, 200f)
+        machine.onTouchEvent(
+            MotionEvent.ACTION_POINTER_DOWN, 2, 300f, 200f, 200f, 200f, twoFingerSpanPx = 200f,
+        )
+        val commands = machine.onTouchEvent(
+            MotionEvent.ACTION_MOVE, 2, 330f, 240f, 215f, 220f, twoFingerSpanPx = 202f,
+        )
+        assertEquals(1, commands.size)
+        assertTrue(commands[0] is TouchGestureCommand.Scroll)
+    }
 }

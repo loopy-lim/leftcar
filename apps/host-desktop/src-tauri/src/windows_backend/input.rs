@@ -29,6 +29,9 @@ impl InputInjector {
 
     pub fn apply(&mut self, event: InputEvent) -> Result<(), String> {
         match event {
+            // 스타일러스 압력은 디코딩되지만 v1 Windows 주입 경로(SendInput
+            // 마우스)에는 압력 필드가 없어 무시된다 — macOS shim만
+            // 태블릿 서브타입으로 반영한다.
             InputEvent::PointerMove { x, y, .. } => self.move_pointer(x, y),
             InputEvent::PointerButton {
                 x, y, button, down, ..

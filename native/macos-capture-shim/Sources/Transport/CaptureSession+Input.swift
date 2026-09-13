@@ -16,7 +16,6 @@ extension CaptureSession {
         inputLock.unlock()
         var status = Data("LCS1".utf8)
         status.append(enabled ? 1 : 0)
-        status.append(viewerControlToken)
         _ = sendControlPayload(status, fd: fd)
     }
 
@@ -25,6 +24,8 @@ extension CaptureSession {
         fd: Int32,
         destination: sockaddr_in?
     ) {
+        guard sourceAuthorization?.begin() ?? true else { return }
+        defer { sourceAuthorization?.end() }
         guard message.count >= 10,
               message.prefix(4) == Data("LCI1".utf8) else {
             return
@@ -34,7 +35,8 @@ extension CaptureSession {
         let reliable = message[9] & 1 == 1
 
         if !reliable {
-            guard kind == 1, message.count == 18 else { return }
+            // 18바이트 = 압력 없음(구형 뷰어), 22바이트 = 스타일러스 압력.
+            guard kind == 1, message.count == 18 || message.count == 22 else { return }
             inputLock.lock()
             let newer = Int32(bitPattern: sequence &- lastPointerInputSequence) > 0
             if newer {
@@ -88,7 +90,8 @@ extension CaptureSession {
     ) -> Bool {
         switch kind {
         case 2:
-            guard message.count == 20 else { return false }
+            // 20바이트 = 압력 없음, 24바이트 = 스타일러스 압력.
+            guard message.count == 20 || message.count == 24 else { return false }
             if enabled { injectPointerButton(message) }
         case 3:
             guard message.count == 18 else { return false }
@@ -141,12 +144,43 @@ extension CaptureSession {
             button = .left
         }
         lastPointerPosition = point
-        CGEvent(
+        let pressure = stylusPressure(message, at: 18)
+        let event = CGEvent(
             mouseEventSource: nil,
             mouseType: type,
             mouseCursorPosition: point,
             mouseButton: button
-        )?.post(tap: .cgSessionEventTap)
+        )
+        applyStylusPressure(event, pressure: pressure)
+        event?.post(tap: .cgSessionEventTap)
+    }
+
+    /// 스타일러스 압력: 태블릿 포인트 서브타입 + 압력 필드를 마우스
+    /// 이벤트에 실으면 macOS가 이를 태블릿 입력처럼 전달한다(펜 압력을
+    /// 받는 그리기 앱이 그대로 반응한다).
+    private func applyStylusPressure(_ event: CGEvent?, pressure: CGFloat?) {
+        guard let event, let pressure else { return }
+        // kCGEventMouseSubtypeTabletPoint(=1) — Swift 오버레이에 enum이
+        // 노출되지 않아 원시값을 쓴다.
+        event.setIntegerValueField(
+            CGEventField.mouseEventSubtype,
+            value: 1
+        )
+        event.setDoubleValueField(
+            CGEventField.mouseEventPressure,
+            value: pressure
+        )
+    }
+
+    /// 와이어에 압력 필드가 있으면(확장 길이) 0.0-1.0로 읽는다.
+    private func stylusPressure(_ message: Data, at: Int) -> CGFloat? {
+        guard message.count >= at + 4 else { return nil }
+        let bits = (UInt32(message[at]) << 24)
+            | (UInt32(message[at + 1]) << 16)
+            | (UInt32(message[at + 2]) << 8)
+            | UInt32(message[at + 3])
+        let value = CGFloat(Float(bitPattern: bits))
+        return min(max(value, 0.0), 1.0)
     }
 
      func mouseButton(mask: UInt8) -> CGMouseButton? {
@@ -180,12 +214,15 @@ extension CaptureSession {
         } else {
             pressedButtons.remove(button)
         }
-        CGEvent(
+        let pressure = stylusPressure(message, at: 20)
+        let event = CGEvent(
             mouseEventSource: nil,
             mouseType: type,
             mouseCursorPosition: point,
             mouseButton: button
-        )?.post(tap: .cgSessionEventTap)
+        )
+        applyStylusPressure(event, pressure: pressure)
+        event?.post(tap: .cgSessionEventTap)
     }
 
      func injectScroll(_ message: Data) {

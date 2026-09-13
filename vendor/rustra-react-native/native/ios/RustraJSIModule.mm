@@ -5,6 +5,7 @@
 #import <ReactCommon/RCTTurboModule.h>
 #import <jsi/jsi.h>
 
+#include <cstdlib>
 #include <exception>
 
 #import "RustraJSIBridge.hpp"
@@ -59,6 +60,17 @@ RCT_REMAP_METHOD(install,
          resolveCopy,
          rejectCopy](facebook::jsi::Runtime &runtime) {
           try {
+            // dev 핫코어(iOS 시뮬레이터 스코프) — RUSTRA_HOT_CORE_DIR 이 가리키는
+            // 디렉터의 `*-hot-live.*` 를 폴링해 dylib 를 스왑한다. 이름 구분 계약:
+            // Tauri 계열의 RUSTRA_HOT_CORE 는 파일 경로, RN 은 디렉터(DIR 접미)다.
+            // live 아티팩트가 이미 게이트를 통과해 놓여 있으면 설치 전 1회 폴링으로
+            // 즉시 스왑해(≤300ms 대신) 첫 호출부터 신 코어로 향하게 한다.
+            const char *hotCoreDir = std::getenv("RUSTRA_HOT_CORE_DIR");
+            if (hotCoreDir != nullptr && hotCoreDir[0] != '\0') {
+              rustra::core::configureHotCore(hotCoreDir);
+              rustra::core::pollHotCoreOnce();
+              rustra::core::startHotCorePolling();
+            }
             rustra::installRustraJSIWithInvoker(runtime, typeErasedCallInvoker);
             resolveCopy(@(YES));
           } catch (const std::exception &error) {

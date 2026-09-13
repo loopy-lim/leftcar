@@ -50,7 +50,9 @@ Host user approval
   └─ Viewer pairing approval
 
 Untrusted LAN
-  └─ authenticated control channel with explicit remaining plaintext transport risk
+  └─ control channel: secure-channel 핸드셰이크(QR 핀 + X25519/Ed25519 +
+     ChaCha20-Poly1305) 필수. 루프백 진단 경로만 평문 허용.
+     미디어 경로는 별도 세션 키 AEAD로 암호화한다(§20).
 
 Viewer app
   ├─ TypeScript UI: untrusted for secrets and media bytes
@@ -80,7 +82,7 @@ Platform codec
 | T-13 | malicious update/dependency | lockfile, checksum, signed release, SBOM/audit |
 | T-14 | protected content 우회 | blank/protected error를 정상 처리, bypass 시도 금지 |
 
-v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용한다. 미디어는 제어 peer와 같은 사설 LAN 후보 중 난수 UDP 왕복을 증명한 주소에만 전송하지만 내용 자체는 평문이다.
+v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용했다. 2026-09-09 강화(§20)로 제어 평면은 QR로 핀한 호스트 Ed25519 키에 묶인 암호 채널이 되었고, 미디어는 세션 키 AEAD로 암호화한다.
 공개 인터넷 노출이 필요한 경우 TLS + PAKE + certificate/pinning 기반의 추가 상호인증/암호화가 요구된다.
 
 ## 6. 장치 identity
@@ -372,7 +374,7 @@ stream_task_restore_requires_reauthentication
 - [ ] threat model review 완료
 - [ ] paired/unpaired negative test 완료
 - [ ] source capability test 완료
-- [ ] transport 암호화와 identity binding 확인
+- [ ] transport 암호화와 identity binding 확인 (제어·미디어 평면 구현 완료 — 실기기 스트리밍 검증만 남음, §20)
 - [ ] protocol/packet fuzz 결과 보관
 - [ ] JNI/unsafe review 완료
 - [ ] diagnostics redaction test 완료
@@ -381,3 +383,92 @@ stream_task_restore_requires_reauthentication
 - [ ] debug secret/frame dump 제거
 - [ ] revoke/stop all 실기기 확인
 - [ ] protected content 비우회 확인
+
+## 20. 2026-09-09 보안 강화 구현
+
+외부 원격 제품(RustDesk·AnyDesk·TeamViewer·CRD·Parsec·Moonlight) 대비 격차 분석의 후속 구현.
+
+### 구현 완료
+
+- **제어 평면 세션 암호화** (`crates/secure-channel`): 호스트 장기 Ed25519
+  정체키(QR v2 `k` 필드로 뷰어에 핀) + 뷰어 임시 X25519로 PFS 세션 키 합의,
+  ServerHello 전사 서명으로 MITM·재생 차단, 이후 모든 줄을
+  ChaCha20-Poly1305 봉인 프레임으로 교환. 루프백 진단 경로(tools, 테스트)만
+  평문 유지. Rust↔TS 상호 운용은 고정 벡터로 잠김.
+- **호스트 정체키 영속**: `data_dir/leftcar-host/host_identity.json`(0600).
+- **:7777 무차별 백오프**: 60초 창 5회 토큰 실패 시 60초 차단(루프백 제외).
+- **철회 즉시 효력**: 세션을 장치에 귀속(`authorize_device`)해 revoke 시
+  라이브 스트림을 강제 종료 — §18 `revocation_closes_existing_streams` 충족.
+- **토큰 저장소 분리**: macOS Keychain / Windows Credential Manager 우선,
+  0600 파일 폴백. 구버전 인라인 토큰은 기동 시 자동 이관 후 메타데이터
+  파일에서 삭제.
+- **세션 감사 로그**: 시작/종료·철회를 `sessions.jsonl`(0600)에 JSONL 기록
+  (장치·IP·사유만, 토큰·키 금지).
+- **권한 게이트 클립보드 텍스트 동기화(기본 꺼짐 — 호스트 토글이 닫혀 있으면
+  모든 클립보드 명령 거부, 256KiB 상한, 접근 기록은 감사 로그에 메타만)**
+- 파일 전송 v2(호스트 게이트 기본 꺼짐, 512MiB 상한, 1MiB 청크, 암호화된 제어 채널 경유, 전송 기록은 감사 로그에 메타만). v2부터 양쪽
+  모두 디스크로 스트리밍한다 — 뷰어는 범위 읽기로 청크를 올리고 받은
+  청크를 append하므로 파일 크기와 무관하게 메모리는 청크 하나에 묶인다.
+  실패한 전송은 sendFileCancel/fetchFileCancel로 즉시 정리하고(뷰어가
+  finally에서 보낸다), 버려진 전송은 30분 만료 스윕이 지운다.
+- 클립보드 동기화는 텍스트와 이미지(PNG, ≈6MiB 상한)를 지원한다 — 텍스트
+  우선, 이미지 해시는 "i:"+sha256(base64)로 구분한다. 읽기·쓰기 모두
+  감사 로그에 메타(바이트 수·종류)만 남는다.
+
+### 진행·잔여
+
+- **미디어 경로 AEAD(구현 완료, 실기기 검증 대기)**: 뷰어가 CSPRNG로 세션
+  키 32B를 생성해 네이티브 prepare와 (암호화된 제어 채널의) startStream
+  args로 전달한다. 방향마다 HKDF-SHA256(info `leftcar/media/v1`)로 c2s/s2c
+  키를 따로 도출한다 — 원본 세션 키를 양방향에 그대로 쓰면 두 송신
+  카운터가 1, 2, 3…으로 겹치는 매 프레임 (key, nonce) 재사용이 생긴다.
+  카운터는 인스턴스마다 무작위 지점에서 시작해, reconfigure가 세션 키를
+  재사용하며 봉인기를 재생성해도 논스가 반복되지 않는다. 호스트 셸
+  macOS shim은 CryptoKit ChaChaPoly, Windows·뷰어 네이티브는
+  DatagramSealer로 같은 와이어 레이아웃(`counter‖tag‖ct`)을 쓴다(방향 키
+  도출 고정 벡터로 상호 잠금). LCH1 도달성 증명도 봉인 프레임으로 대체됐고
+  토큰 접미사 인증은 제거됐다(평문 미디어 경로 부재 — 구식 shim/뷰어는
+  시작 거부). 키 없는 startStream은 실패한다. 세션 내 카운터는 전송 전환과
+  무관하게 유지되며, split 4K 타일이 하나의 암호 인스턴스를 공유한다.
+- 당시 구현의 T-05 격차: 페어링 토큰 보유자가 모든 디스플레이를 열 수 있고 OS 입력 권한이 있으면 입력이 자동 활성화됐다. 이 항목은 2026-09-09 시점의 기록이다. 개발 브랜치에서 수정한 화면·입력 승인 정책은 §21을 따른다.
+- **프라이버시 세션 옵션(2026-09-10 구현, 실기기 검증 대기)**: 두 개의
+  호스트 토글(기본 꺼짐, 0600 settings.json)을 추가했다.
+  - *프라이버시 커튼* — 스트리밍 중 모니터마다 검은 풀스크린 오버레이를
+    띄운다. macOS shim이 캡처 필터에서 자기 프로세스의 "leftcar-curtain"
+    창을 제외하므로 원격 뷰어는 화면을 그대로 본다(WGC 모니터 캡처는 창
+    제외를 지원하지 않아 Windows v1은 no-op). 세션 시작·종료·토글에
+    맞춰 자동으로 띄우고 내린다.
+  - *종료 시 잠금* — 마지막 라이브 세션이 끝나면(재구성 제외, 전이 기준)
+    CGSession -suspend(macOS)/LockWorkStation(Windows)으로 화면을 잠근다.
+- **세션 절전 방지(2026-09-10)**: 캡처 세션이 살아 있는 동안 macOS는
+  IOPMAssertion(시스템+디스플레이), Windows는 스레드별
+  SetThreadExecutionState로 절전을 막는다.
+- 유휴 타임아웃, 토큰 만료/로테이션, dylib/APK 서명(§17·§19) 미구현.
+- USB AOAP 제어 채널은 물리 접근 전제로 평문 유지(v1).
+
+
+## 21. 2026-09-13 개발 브랜치의 화면·입력 승인
+
+이 절은 개선 브랜치의 실제 Host·네이티브 코드와 독립 회귀 검토를 설명한다. 기존 배포 파일의 동작이나 실기기 장시간 통과를 의미하지 않는다. 현재 제품의 승인 대상은 디스플레이이며, `host-core`의 가상 모델에 있는 앱 창 예제를 실제 창 캡처 지원으로 취급하지 않는다.
+
+새로 페어링한 기기와 기존 승인 정보가 없는 기기는 Host에서 화면 접근을 검토해야 한다. Viewer의 카탈로그·시작·화면 변경은 인증된 기기의 승인만 사용한다. `sourceId`는 목록 순번과 구분하며 실제 캡처 생성 직전에 macOS 디스플레이 UUID 또는 Windows 모니터 경로로 다시 확인한다. 화면이 사라지거나 식별자가 모호하면 다른 화면으로 대체하지 않고 실패한다. 현재 Host는 승인 수명을 전달하는 v9 네이티브 시작 API가 필요하며, 예전 shim을 발견하면 시작을 거부한다.
+
+화면 보기와 원격 조작은 별도 승인이다. 새 세션의 입력은 기본 꺼짐이며 OS 입력 권한이 있어도 Host가 그 세션을 켜야 한다. 같은 화면을 재구성할 때는 최신 Host 선택을 따르고, 다른 화면으로 변경하면 입력 승인을 다시 받는다. 재구성 중 입력을 끄면 교체 또는 복구된 세션도 그 차단을 따른다. 살아 있는 네이티브 세션의 입력 차단이 실패하면 승인 수명을 무효화하고 세션을 종료하며 오류를 표시한다.
+
+화면 승인을 변경하면 해당 기기의 진행 중·대기 중 세션을 무효화하고 정리한다. 현재 정책은 승인 추가나 재검토 때도 해당 기기의 세션을 다시 열도록 하므로 잠시 연결이 끊길 수 있다. 오래된 시작·재구성 완료는 취소된 승인이나 재페어링 전 자격을 다시 사용할 수 없다. 오디오 소유권도 IP 주소 대신 Host가 인증한 자격 수명에 묶는다.
+
+| 저장·재시작 상황 | 동작 |
+| --- | --- |
+| 정상 종료 후 같은 자격으로 재시작 | 안전하게 기록된 승인 유지 |
+| 최초 실행, 손상·알 수 없는 저장 형식, 비정상 종료 | 저장된 선택이 있어도 자동 승인하지 않고 검토 요청 |
+| 실행 중 상태를 안전하게 기록하지 못함 | 승인이나 제어 서버를 활성화하기 전에 시작 실패를 알림 |
+| 승인 제거 저장 실패 | 접근 차단을 유지하고 저장 오류 표시; 이전 승인을 복구하지 않음 |
+| 같은 Host 상태 폴더로 중복 실행 | 두 번째 프로세스의 프로필 소유 거부 |
+
+프로필의 `.source-grants.lock`은 프로세스 수명 동안 유지하고 파일 자체를 삭제하지 않는다. `source_grants.json`은 승인을 활성화하기 전에 `dirty=true`로 기록한다. 정상 종료는 새 작업을 막고 이미 허용된 작업과 네이티브 정리를 마친 뒤 현재 선택을 `dirty=false`로 기록한다. 대시보드를 닫아 숨기는 것은 정상 종료가 아니다. 정리가 실패하거나 종료 기록이 불확실하면 이를 성공으로 처리하지 않는다. 이 계약은 프로세스 종료와 파일시스템 작업 결과의 범위이며 실제 하드웨어 전원 장애·임의 저장장치 되돌림을 입증하지 않는다.
+
+권한 저장의 성공 응답은 목록 새로고침 실패와 무관하게 확인된 상태로 반영한다. 실패한 변경은 해당 기기의 오류로 유지하며, 실패를 확인한 뒤 시작한 재시도가 성공해야 다시 확인된 승인으로 표시한다. 다른 기기의 활동이나 단순 새로고침은 그 실패를 해소하지 않는다. 기기를 삭제할 때 저장 오류가 생겨도 접근은 차단하고, 해당 행이 사라진 뒤에도 오류를 표시한다. 재페어링은 새 자격으로 다루므로 늦게 도착한 이전 응답이 승인을 되살리지 못한다.
+
+Host 내부 UI 계약의 `credentialId`·`stateRevision`은 비밀이 아닌 자격 수명과 상태 순서를 나타낸다. 기기 삭제 결과는 삭제된 기기와 저장 오류를 함께 반환한다. 이 상태를 원격 토큰이나 네이티브 승인 대신 사용하지 않는다. 실제 권한은 Rust의 인증·승인 수명과 네이티브 생성·송신·입력 경계에서 검사한다.
+
+실제 GUI 종료와 지연된 OS 콜백, 디스플레이 연결 변경, Windows 파일시스템·입력, USB 및 장시간 스트리밍은 각각 별도 실행 증거가 필요하다. 단위·브라우저 회귀 검사와 교차 컴파일은 이 실행 검증을 대신하지 않는다.

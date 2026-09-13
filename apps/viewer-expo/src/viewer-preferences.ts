@@ -21,6 +21,8 @@ export interface ViewerPreferences {
   showFps: boolean;
   localCursor: boolean;
   localAudio: boolean;
+  opusAudio?: boolean;
+  balancedPresentation: boolean;
 }
 
 export type ViewerProfileSelection = StreamProfileId | "auto";
@@ -36,6 +38,8 @@ export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   localCursor: true,
   // 시스템 소리는 스트리밍과 함께 기본 전달한다. 토글 전 기본 동작과 같다.
   localAudio: true,
+  opusAudio: false,
+  balancedPresentation: false,
 };
 
 export interface ViewerPreferencesStore {
@@ -109,6 +113,8 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
     return {
       profileId,
       streamingPriority,
+      balancedPresentation: parsed.balancedPresentation === true,
+      opusAudio: parsed.opusAudio === true,
       showFps: typeof parsed.showFps === "boolean"
         ? parsed.showFps
         : DEFAULT_VIEWER_PREFERENCES.showFps,
@@ -146,6 +152,8 @@ export async function writeViewerPreferences(
       showFps: preferences.showFps,
       localCursor: preferences.localCursor,
       localAudio: preferences.localAudio,
+      opusAudio: preferences.opusAudio === true,
+      balancedPresentation: preferences.balancedPresentation,
     }),
   );
 }

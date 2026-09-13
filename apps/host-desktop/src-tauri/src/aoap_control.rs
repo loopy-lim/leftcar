@@ -32,21 +32,52 @@ pub async fn dispatch_control_line(
     line: String,
     peer: &str,
 ) -> String {
-    let envelope: Envelope = match serde_json::from_str(&line) {
-        Ok(envelope) => envelope,
-        Err(_) => return json!({"ok": false, "error": "bad request"}).to_string(),
+    let request = match AuthenticatedControlRequest::authenticate(server, &line) {
+        Ok(request) => request,
+        Err(error) => return json!({"ok": false, "error": error}).to_string(),
     };
-    if envelope.command != "pair"
-        && !server.authorize_token(envelope.token.as_deref().unwrap_or(""))
-    {
-        return json!({"ok": false, "error": "unauthorized"}).to_string();
+    request.dispatch(server, peer).await
+}
+
+/// Authentication and execution are separate stages, but the request must keep
+/// the exact credential proof between them, including if scheduling is delayed.
+struct AuthenticatedControlRequest {
+    envelope: Envelope,
+    authorization: Option<crate::pairing::Authorization>,
+}
+
+impl AuthenticatedControlRequest {
+    fn authenticate(server: &ControlServer, line: &str) -> Result<Self, &'static str> {
+        let envelope: Envelope = serde_json::from_str(line).map_err(|_| "bad request")?;
+        let authorization = if envelope.command == "pair" {
+            None
+        } else {
+            Some(
+                server
+                    .authorize_device_token(envelope.token.as_deref().unwrap_or(""))
+                    .ok_or("unauthorized")?,
+            )
+        };
+        Ok(Self {
+            envelope,
+            authorization,
+        })
     }
-    serde_json::to_string(
-        &server
-            .dispatch(&envelope.command, envelope.args, peer)
-            .await,
-    )
-    .unwrap_or_else(|_| json!({"ok": false, "error": "serialization failed"}).to_string())
+
+    async fn dispatch(self, server: &ControlServer, peer: &str) -> String {
+        serde_json::to_string(
+            &server
+                .dispatch_with_authorization(
+                    &self.envelope.command,
+                    self.envelope.args,
+                    peer,
+                    self.authorization.as_ref().map(|auth| auth.device_id()),
+                    self.authorization.as_ref(),
+                )
+                .await,
+        )
+        .unwrap_or_else(|_| json!({"ok": false, "error": "serialization failed"}).to_string())
+    }
 }
 
 /// Start passive nusb discovery. Normal USB devices are left untouched;
@@ -196,7 +227,12 @@ fn spawn_control_relay(server: Arc<ControlServer>, control_rx: std::sync::mpsc::
 
 #[cfg(test)]
 mod tests {
-    use super::should_start_accessory;
+    use super::{dispatch_control_line, should_start_accessory};
+    use crate::backend::FakeBackend;
+    use crate::control::ControlServer;
+    use crate::pairing::{FileTokenStore, PairingServer};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn passive_usb_attach_does_not_start_aoap() {
@@ -212,5 +248,117 @@ mod tests {
     fn accessory_or_existing_link_never_restarts_handshake() {
         assert!(!should_start_accessory(true, false, true));
         assert!(!should_start_accessory(true, true, false));
+    }
+
+    fn usb_test_server() -> (Arc<ControlServer>, Arc<PairingServer>) {
+        let pairing = Arc::new(PairingServer::new(
+            [7u8; 32],
+            None,
+            Box::new(FileTokenStore::new(None)),
+        ));
+        let backend = Arc::new(FakeBackend {
+            displays: vec![control_contract::host::DisplayInfo {
+                source_id: Some("test:display:0".into()),
+                index: 0,
+                name: "Main".into(),
+                width: 1920,
+                height: 1080,
+            }],
+            encoder_experiment: Mutex::new(control_contract::host::EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: std::sync::atomic::AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
+        });
+        let identity = Arc::new(secure_channel::HostIdentity::from_seed([42u8; 32]));
+        (
+            Arc::new(ControlServer::new(backend, pairing.clone(), identity)),
+            pairing,
+        )
+    }
+
+    /// USB 제어 경로(F03): 토큰을 버리지 않고 장치 ID로 해석해 dispatch에
+    /// 전달한다 — 세션이 장치에 귀속되므로 철회가 USB 세션을 즉시 끊고,
+    /// 파일 전송 명령의 소유 검사도 USB에서 통과한다.
+    #[tokio::test]
+    async fn usb_control_line_carries_the_paired_device_identity() {
+        let (server, pairing) = usb_test_server();
+        let view = pairing.begin_pairing("127.0.0.1", 7777);
+        let token = pairing
+            .pair_by_code(&view.code, "usb-viewer", "USB Viewer")
+            .unwrap();
+        server
+            .set_source_grants("usb-viewer", vec!["test:display:0".into()])
+            .unwrap();
+
+        let line = json!({
+            "command": "startStream",
+            "args": {
+                "sourceId": "test:display:0",
+                "sourceIndex": 0,
+                "viewerPort": 5001,
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "mediaTransport": "udp",
+                "mediaKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+            },
+            "token": token
+        })
+        .to_string();
+        let resp = dispatch_control_line(&server, line, "192.168.0.9").await;
+        assert!(resp.contains("\"ok\":true"), "{resp}");
+        // 시작된 세션은 장치에 귀속된다 — 장치 철회가 USB 세션을 잡는다.
+        assert_eq!(server.snapshot().sessions.len(), 1);
+        assert_eq!(server.stop_sessions_for_device("usb-viewer"), 1);
+        assert!(server.snapshot().sessions.is_empty());
+
+        // 토큰이 맞지 않으면 이전과 같이 거부된다.
+        let bad = dispatch_control_line(
+            &server,
+            json!({ "command": "getCatalog", "args": {}, "token": "00" }).to_string(),
+            "192.168.0.9",
+        )
+        .await;
+        assert!(bad.contains("unauthorized"), "{bad}");
+    }
+    #[tokio::test]
+    async fn fix1_usb_authenticated_request_cannot_adopt_rotated_credentials_before_dispatch() {
+        let (server, pairing) = usb_test_server();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        let token_a = pairing
+            .pair_by_code(&offer.code, "usb-viewer", "USB Viewer")
+            .unwrap();
+        let args = json!({"sourceId":"test:display:0","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"});
+        let request = super::AuthenticatedControlRequest::authenticate(
+            &server,
+            &json!({"command":"startStream","args":args,"token":token_a}).to_string(),
+        )
+        .unwrap();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        let token_b = pairing
+            .pair_by_code(&offer.code, "usb-viewer", "USB Viewer")
+            .unwrap();
+        server
+            .set_source_grants("usb-viewer", vec!["test:display:0".into()])
+            .unwrap();
+        assert!(!pairing.authorize(&token_a));
+        let response = request.dispatch(&server, "192.168.0.9").await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()["ok"],
+            false,
+            "staged USB request adopted the new token generation: {response}"
+        );
+        let fresh = dispatch_control_line(
+            &server,
+            json!({"command":"startStream","args":args,"token":token_b}).to_string(),
+            "192.168.0.9",
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fresh).unwrap()["ok"],
+            true,
+            "fresh USB request must accept token B: {fresh}"
+        );
     }
 }

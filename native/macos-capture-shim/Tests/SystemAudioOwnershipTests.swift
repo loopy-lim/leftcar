@@ -3,8 +3,8 @@ import Foundation
 @main
 struct SystemAudioOwnershipTests {
     static func main() {
-        let headset: UInt32 = 0x249_a8c0 // 192.168.0.249
-        let tablet: UInt32 = 0x213_a8c0 // 192.168.0.19
+        let headset = "host-device:headset" // 192.168.0.249
+        let tablet = "host-device:tablet" // 192.168.0.19
 
         // A lone session owns its viewer's audio plane.
         precondition(

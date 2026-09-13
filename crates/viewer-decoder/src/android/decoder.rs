@@ -23,13 +23,13 @@ pub fn decoder_candidate_plan(
 }
 
 // Qualcomm's decode-order extension is a candidate for streams without B-frames.
-// Restrict it to our H.264 QTI path; a rejected extension gets a fresh standard
-// configuration of the same codec before any permitted MIME fallback.
+// Restrict it to our H.264 QTI path. Every rejected attempt is deleted before
+// retrying low-latency-only, then standard configuration, then optional MIME.
 fn decoder_configuration_plan(
     codec: VideoCodec,
     codec_name: Option<&str>,
     allow_mime_fallback: bool,
-) -> Vec<(DecoderCandidate<'_>, bool)> {
+) -> Vec<(DecoderCandidate<'_>, u8)> {
     decoder_candidate_plan(codec_name, allow_mime_fallback)
         .into_iter()
         .flat_map(|candidate| {
@@ -37,9 +37,9 @@ fn decoder_configuration_plan(
                 && matches!(candidate, DecoderCandidate::Named(name)
                     if name.starts_with("c2.qti.") || name.starts_with("OMX.qcom."));
             if qti {
-                vec![(candidate, true), (candidate, false)]
+                vec![(candidate, 2), (candidate, 1), (candidate, 0)]
             } else {
-                vec![(candidate, false)]
+                vec![(candidate, 0)]
             }
         })
         .collect()
@@ -48,7 +48,7 @@ fn decoder_configuration_plan(
 // Vendor key spelling follows Qualcomm's extensions, also used by upstream
 // Moonlight MediaCodecHelper. Standard low-latency alone was accepted on the
 // tablet, so effectiveness of these additional hints must be measured live.
-fn low_latency_format_entries(fps: u32, qti_extensions: bool) -> Vec<(&'static str, i32)> {
+fn low_latency_format_entries(fps: u32, qti_extensions: u8) -> Vec<(&'static str, i32)> {
     let fps_val = fps.clamp(1, 90) as i32;
     let mut entries = vec![
         ("frame-rate", fps_val),
@@ -56,11 +56,11 @@ fn low_latency_format_entries(fps: u32, qti_extensions: bool) -> Vec<(&'static s
         ("priority", 0),
         ("low-latency", 1),
     ];
-    if qti_extensions {
-        entries.extend([
-            ("vendor.qti-ext-dec-low-latency.enable", 1),
-            ("vendor.qti-ext-dec-picture-order.enable", 1),
-        ]);
+    if qti_extensions >= 1 {
+        entries.push(("vendor.qti-ext-dec-low-latency.enable", 1));
+    }
+    if qti_extensions >= 2 {
+        entries.push(("vendor.qti-ext-dec-picture-order.enable", 1));
     }
     entries
 }
@@ -71,7 +71,7 @@ mod low_latency_tests {
 
     #[test]
     fn low_latency_setup_requests_standard_and_qti_vendor_mode() {
-        let entries = low_latency_format_entries(60, true);
+        let entries = low_latency_format_entries(60, 2);
         assert!(entries.contains(&("low-latency", 1)));
         assert!(entries.contains(&("vendor.qti-ext-dec-low-latency.enable", 1)));
         assert!(entries.contains(&("vendor.qti-ext-dec-picture-order.enable", 1)));
@@ -85,17 +85,18 @@ mod low_latency_tests {
         let candidate = DecoderCandidate::Named(name);
         assert_eq!(
             decoder_configuration_plan(VideoCodec::H264, Some(name), false),
-            vec![(candidate, true), (candidate, false)]
+            vec![(candidate, 2), (candidate, 1), (candidate, 0)]
         );
         assert_eq!(
             decoder_configuration_plan(VideoCodec::H264, Some(name), true),
             vec![
-                (candidate, true),
-                (candidate, false),
-                (DecoderCandidate::MimeType, false)
+                (candidate, 2),
+                (candidate, 1),
+                (candidate, 0),
+                (DecoderCandidate::MimeType, 0)
             ]
         );
-        assert!(low_latency_format_entries(60, false)
+        assert!(low_latency_format_entries(60, 0)
             .iter()
             .all(|(key, _)| !key.starts_with("vendor.")));
     }
@@ -109,9 +110,9 @@ mod low_latency_tests {
         ] {
             assert!(decoder_configuration_plan(codec, name, true)
                 .iter()
-                .all(|(_, vendor)| !vendor));
+                .all(|(_, vendor)| *vendor == 0));
         }
-        assert!(low_latency_format_entries(240, false).contains(&("operating-rate", 90)));
+        assert!(low_latency_format_entries(240, 0).contains(&("operating-rate", 90)));
     }
 }
 
@@ -156,6 +157,9 @@ pub struct AndroidDecoder {
     height: i32,
     pub frames_rendered: u64,
     pub frames_discarded: u64,
+    /// Actual last released output PTS; not the currently submitted input.
+    pub last_released_pts_us: Option<i64>,
+    output_target_ns: Option<i64>,
 }
 
 unsafe impl Send for AndroidDecoder {}
@@ -363,6 +367,8 @@ impl AndroidDecoder {
                 height: sh as i32,
                 frames_rendered: 0,
                 frames_discarded: 0,
+                last_released_pts_us: None,
+                output_target_ns: None,
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -482,8 +488,12 @@ impl AndroidDecoder {
     /// image for an interactive desktop Surface. Older decoded images are no
     /// longer useful for pointer-following latency, but compressed reference
     /// inputs were still submitted in order so decoder correctness is kept.
+    pub fn set_output_target(&mut self, target_ns: Option<i64>) {
+        self.output_target_ns = target_ns;
+    }
+
     pub fn pump_latest_output(&mut self, timeout_us: i64) -> Result<bool, DecoderError> {
-        let mut ready = [0usize; 64];
+        let mut ready = [(0usize, 0i64); 64];
         let mut ready_count = 0usize;
         let mut next_timeout = timeout_us;
         let mut attempts = 0usize;
@@ -504,7 +514,7 @@ impl AndroidDecoder {
                 | AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED => continue,
                 i if i >= 0 => {
                     if ready_count < ready.len() {
-                        ready[ready_count] = i as usize;
+                        ready[ready_count] = (i as usize, info.presentation_time_us);
                         ready_count += 1;
                     }
                 }
@@ -516,19 +526,25 @@ impl AndroidDecoder {
         }
 
         let discard_count = ready_count.saturating_sub(MAX_RENDERABLE_OUTPUTS);
-        for &idx in &ready[..discard_count] {
+        for &(idx, _) in &ready[..discard_count] {
             let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, idx, false) };
             if r != AMEDIA_OK {
                 return Err(DecoderError::OpFailed { status: r });
             }
             self.frames_discarded += 1;
         }
-        for &idx in &ready[discard_count..ready_count] {
-            let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, idx, true) };
+        for &(idx, pts_us) in &ready[discard_count..ready_count] {
+            let r = unsafe {
+                match self.output_target_ns {
+                    Some(target) => AMediaCodec_releaseOutputBufferAtTime(self.codec, idx, target),
+                    None => AMediaCodec_releaseOutputBuffer(self.codec, idx, true),
+                }
+            };
             if r != AMEDIA_OK {
                 return Err(DecoderError::OpFailed { status: r });
             }
             self.frames_rendered += 1;
+            self.last_released_pts_us = Some(pts_us);
         }
         Ok(true)
     }

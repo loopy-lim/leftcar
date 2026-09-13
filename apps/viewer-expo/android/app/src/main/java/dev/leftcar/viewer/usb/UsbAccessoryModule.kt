@@ -32,6 +32,10 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
         fun handleIntent(intent: Intent) {
             active?.onAccessoryAttached(intent)
         }
+    // Viewer-generated media key for the sealed media path. Set from JS
+    // (setSessionMediaKey) before startStream and reused by the next
+    // accessory attach so AOAP media is always sealed.
+    private var sessionMediaKey: ByteArray? = null
     }
 
     private var descriptor: android.os.ParcelFileDescriptor? = null
@@ -162,7 +166,12 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
             return false
         }
         val opened = manager.openAccessory(accessory) ?: return false
-        val code = ViewerNative.prepareUsb(opened.fd)
+        val key = sessionMediaKey
+        if (key == null) {
+            opened.close()
+            return false
+        }
+        val code = ViewerNative.prepareUsb(opened.fd, key)
         if (code != 0) {
             opened.close()
             return false
@@ -185,6 +194,32 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
             attached = false
             emitState(false, 0, present = false, pending = false)
         }
+    }
+
+    /**
+     * Register the viewer-generated session media key (base64url, 32 bytes)
+     * before startStream. The accessory may already be attached; the key is
+     * applied to the live bridge immediately and reused when a later
+     * accessory attach calls prepareUsb.
+     */
+    @ReactMethod
+    fun setSessionMediaKey(mediaKey: String, promise: Promise) {
+        val decoded = try {
+            val bytes = android.util.Base64.decode(
+                mediaKey,
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP,
+            )
+            if (bytes.size == 32) bytes else null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (decoded == null) {
+            promise.reject("ERR_MEDIA_KEY", "media key must be 32 bytes of base64url")
+            return
+        }
+        sessionMediaKey = decoded
+        val code = ViewerNative.setSessionMediaKey(decoded)
+        if (code == 0) promise.resolve(null) else promise.reject("ERR_MEDIA_KEY", "bridge rejected media key (code=$code)")
     }
 
     @ReactMethod

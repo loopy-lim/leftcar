@@ -13,10 +13,16 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import {
+  beginHostSelection,
+  captureRequestContext,
   connectHost,
   controlClient,
   controlHost,
   disconnectHost,
+  isHostSelectionCurrent,
+  isRequestContextCurrent,
+  type HostSelection,
+  type SessionRequestContext,
 } from "../src/session";
 import {
   markPairingStale,
@@ -77,13 +83,19 @@ function RecentHostQuickConnect({
     if (connecting) return;
     setConnecting(true);
     setError(null);
+    const selection = beginHostSelection();
+    let context: SessionRequestContext | null = null;
     try {
-      await connectHost(item.host, item.port);
+      await connectHost(item.host, item.port, { selection });
+      if (!isHostSelectionCurrent(selection)) return;
+      context = captureRequestContext();
+      if (!context || !isRequestContextCurrent(context)) return;
       try {
-        await controlClient()?.request<CatalogView>("getCatalog");
+        await context.client.request<CatalogView>("getCatalog");
       } catch (e) {
         if (isUnauthorizedError(e)) {
           await handleUnauthorized({
+            context,
             markStale: true,
             navigate: { endpoint: formatHostEndpoint(item.host, item.port) },
           });
@@ -91,9 +103,12 @@ function RecentHostQuickConnect({
         }
         throw e;
       }
+      if (!isRequestContextCurrent(context)) return;
       void saveRecentHost(item.host, item.port, item.name);
       router.push("/catalog");
     } catch (e) {
+      if (!isHostSelectionCurrent(selection)) return;
+      if (context) disconnectHost(context);
       setError(formatErrorMessage(e));
     } finally {
       setConnecting(false);
@@ -166,7 +181,7 @@ export default function Hub() {
    * 자동 시도 중 승인 만료(401)를 만났다면(pairingStale) 더 시도하지 않는다.
    */
   const attemptAutoReconnect = useCallback(
-    async (target: RecentHostItem | null) => {
+    async (target: RecentHostItem | null, selection: HostSelection) => {
       const now = Date.now();
       if (
         target === null ||
@@ -176,20 +191,26 @@ export default function Hub() {
       }
       noteAutoReconnectAttempt(now);
       setAutoConnecting(true);
+      let context: SessionRequestContext | null = null;
       try {
-        await connectHost(target.host, target.port);
+        await connectHost(target.host, target.port, { selection });
+        if (!isHostSelectionCurrent(selection)) return;
+        context = captureRequestContext();
+        if (!context || !isRequestContextCurrent(context)) return;
         try {
-          await controlClient()?.request<CatalogView>("getCatalog");
+          await context.client.request<CatalogView>("getCatalog");
         } catch (e) {
           if (isUnauthorizedError(e)) {
-            await handleUnauthorized({ markStale: true });
+            await handleUnauthorized({ context, markStale: true, beforeNavigate: checkConnection });
             return;
           }
           throw e;
         }
+        if (!isRequestContextCurrent(context)) return;
         void saveRecentHost(target.host, target.port, target.name);
         checkConnection();
       } catch {
+        if (context && disconnectHost(context)) checkConnection();
         // 네트워크 실패는 조용히 넘긴다. 대기 화면의 원탭 띠가 재시도 경로.
       } finally {
         setAutoConnecting(false);
@@ -208,18 +229,23 @@ export default function Hub() {
     useCallback(() => {
       checkConnection();
       const client = controlClient();
+      const automaticSelection = client ? null : beginHostSelection();
       void getRecentHosts().then((hosts) => {
         const target = hosts[0] ?? null;
         setLastHost(target);
-        if (!client) void attemptAutoReconnect(target);
+        if (automaticSelection) void attemptAutoReconnect(target, automaticSelection);
       });
       if (client) {
-        client.request<CatalogView>("getCatalog").catch((e) => {
+        const context = captureRequestContext();
+        context?.client.request<CatalogView>("getCatalog").catch((e) => {
           if (isUnauthorizedError(e)) {
             void handleUnauthorized({
+              context,
               beforeNavigate: checkConnection,
               navigate: { endpoint: controlHost() },
             });
+          } else if (disconnectHost(context)) {
+            checkConnection();
           }
         });
       }

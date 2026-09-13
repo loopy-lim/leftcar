@@ -1,4 +1,5 @@
 export interface SessionRow {
+  deviceName?: string;
   session: number;
   sourceIndex: number;
   sourceName: string;

@@ -24,7 +24,8 @@ pub(crate) fn spawn_live_stream_renderer(
     height: u32,
     fps: u32,
     tcp_bridge: Option<MediaBridge>,
-) {
+    balanced: bool,
+) -> Option<Arc<RendererControl>> {
     let paired_host = expected_host.clone();
     let tcp_control_addr = tcp_bridge.as_ref().map(MediaBridge::control_addr);
     let expected_host = if tcp_bridge.is_some() {
@@ -51,15 +52,20 @@ pub(crate) fn spawn_live_stream_renderer(
 
     // A replacement Surface owns the same logical instance. Stop its suspended
     // renderer as EOF (not BYE), then evict any other renderer on the port.
-    stop_live_stream_renderer(&instance_str, false);
-    reclaim_udp_port(port);
+    if !stop_live_stream_renderer(&instance_str, false) || !reclaim_udp_port(port) {
+        return None;
+    }
     let prepared_receiver = take_prepared_receiver(port, &paired_host);
 
     let control = Arc::new(RendererControl {
+        metric_incarnation: crate::renderer::metric_identity(),
+        output_metadata: Mutex::new(Default::default()),
+        presentation: Mutex::new(crate::renderer::DisplayTimeline::new(balanced)),
         port,
         split: false,
         input: Mutex::new(InputScheduler::new(fps)),
         audio: Mutex::new(crate::audio_protocol::AudioRing::default()),
+        audio_available: std::sync::Condvar::new(),
         input_enabled: AtomicI8::new(-1),
         rendered_frames: AtomicU64::new(0),
         stale_outputs: AtomicU64::new(0),
@@ -73,6 +79,8 @@ pub(crate) fn spawn_live_stream_renderer(
         encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
         capture_to_surface_release_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        input_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
+        last_reliable_send_us: AtomicU64::new(0),
         resize_recovery_suppressed_until_us: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         suspend: AtomicBool::new(false),
@@ -87,13 +95,14 @@ pub(crate) fn spawn_live_stream_renderer(
         cursor_sequence: AtomicU32::new(0),
         cursor_requested: AtomicBool::new(false),
         audio_requested: AtomicBool::new(true),
+        audio_opus_requested: AtomicBool::new(false),
     });
     let control_clone = Arc::clone(&control);
 
     // Publishing a replacement renderer and clearing an old retained reason
     // are one lifecycle transition, so an old worker cannot cache after this
     // generation is visible to termination polling.
-    install_renderer(&instance_str, control);
+    install_renderer(&instance_str, Arc::clone(&control));
 
     let window_handle = surface_window as usize;
     worker::spawn(SingleRendererLaunch {
@@ -109,4 +118,5 @@ pub(crate) fn spawn_live_stream_renderer(
         prepared_receiver,
         control_clone,
     });
+    Some(control)
 }

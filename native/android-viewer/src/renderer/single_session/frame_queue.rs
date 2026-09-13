@@ -15,8 +15,9 @@ pub(super) fn queue_reassembled_frame(
     completed_count: &mut usize,
     peer: std::net::SocketAddr,
     reassembled: ReassembledFrame,
+    reassembler: &FrameReassembler,
 ) {
-    for completed in frame_sequencer.push(reassembled) {
+    for completed in frame_sequencer.push_reassembled(reassembled, reassembler) {
         let frame = FramePacket {
             id: completed.id,
             au: completed.au,
@@ -80,6 +81,7 @@ pub(super) fn queue_restored_fragments(
                 completed_count,
                 peer,
                 reassembled,
+                reassembler,
             );
         }
     }
@@ -99,6 +101,11 @@ pub(super) struct RendererStats {
     pub(super) max_completed_batch: usize,
     pub(super) pressure: ReceiverPressure,
     pub(super) consecutive_stale: u32,
+    // Selective retransmission (NACK/RTX): sealed request datagrams sent for
+    // blocked resequencer holes, and AUs that completed inside the retransmit
+    // grace (the freeze + IDR the loss would have cost was avoided).
+    pub(super) nacks_sent: u64,
+    pub(super) nacks_healed: u64,
     // NTP-style authenticated probes estimate Host clock minus Android clock.
     // Do not infer this from the first video frame: that would erase the very
     // one-way delivery latency the HUD is intended to show.
@@ -110,6 +117,11 @@ pub(super) struct RendererStats {
 }
 
 pub(super) const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Minimum spacing between first-loss immediate LCF1 sends. The 1s tick
+/// continues unchanged; this only rate-limits the extra sends to <10Hz so a
+/// loss burst cannot storm the control socket.
+pub(super) const IMMEDIATE_FEEDBACK_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
 pub(super) const RESIZE_RECOVERY_SUPPRESSION_US: u64 = 350_000;
 /// Probe responses arriving after this silence window leave the smoothed
 /// latency estimates stale; decay them toward "unknown" instead of freezing.
@@ -247,5 +259,6 @@ pub(super) fn queue_fragment_packet(
         completed_count,
         peer,
         reassembled,
+        reassembler,
     );
 }

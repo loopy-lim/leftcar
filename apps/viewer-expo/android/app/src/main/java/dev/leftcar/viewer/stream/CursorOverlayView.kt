@@ -34,6 +34,17 @@ internal class CursorOverlayView(
     companion object {
         private const val CURSOR_WIDTH_DP = 18
         private const val CURSOR_HEIGHT_DP = 22
+
+        /**
+         * JNI 폴링 절전(Q9a): cursorState 하나가 전역 라이프사이클 뮤텍스와
+         * Arc 클론을 태우므로 매 디스플레이 프레임 호출은 서멀/전력 낭비다.
+         * 커서가 보이는 동안에는 ~30Hz(60Hz 패널에서 프레임 2개당 1회)로
+         * 폴링해 움직임을 따라가고, 비활성/숨김 상태에서는 ~2Hz(프레임 30개당
+         * 1회)로 낮춘다. inactive→active 전이는 낮은 주기 틱 한 번 안에
+         * 반영된다.
+         */
+        private const val ACTIVE_POLL_EVERY_N_FRAMES = 2
+        private const val IDLE_POLL_EVERY_N_FRAMES = 30
     }
 
     private val choreographer = Choreographer.getInstance()
@@ -46,6 +57,9 @@ internal class CursorOverlayView(
     private var lastVisible = false
     private var sourceWidth = 0
     private var sourceHeight = 0
+    private var framesUntilPoll = 0
+    /** 마지막으로 관측한 커서 활성 상태 — 폴링 주기(30Hz/2Hz)를 정한다. */
+    private var cursorActive = false
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xF0FFFFFF.toInt()
@@ -80,7 +94,15 @@ internal class CursorOverlayView(
                 stop()
                 return
             }
-            applyState(ViewerNative.cursorState(instanceId))
+            // The overlay itself keeps its last position every frame; only
+            // the JNI sample poll is frame-skipped (see Q9a constants).
+            if (framesUntilPoll-- <= 0) {
+                framesUntilPoll =
+                    if (cursorActive) ACTIVE_POLL_EVERY_N_FRAMES else IDLE_POLL_EVERY_N_FRAMES
+                val packed = ViewerNative.cursorState(instanceId)
+                cursorActive = packed != -1L && packed < 0
+                applyState(packed)
+            }
             choreographer.postFrameCallback(this)
         }
     }
@@ -89,6 +111,9 @@ internal class CursorOverlayView(
         showHostWindow()
         if (running) return
         running = true
+        // Poll immediately on (re)start so a cursor that was already live is
+        // not held back by a full idle skip window.
+        framesUntilPoll = 0
         choreographer.postFrameCallback(frameCallback)
     }
 

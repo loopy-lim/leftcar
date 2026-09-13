@@ -85,6 +85,21 @@ pub fn decide_idr_send(
     }
 }
 
+/// Per-tile request slot (per-tile gap recovery, R2). Unlike the paired
+/// scope, the wire path is semantically FIXED: a per-tile "IDR" must leave
+/// through the gapped tile's OWN media socket so the Host can identify the
+/// requesting side by source port. There is therefore no alternate-path
+/// failover — an unready path retains the request for the unchanged 750ms
+/// cadence. Each side owns one slot; both sides can carry requests at the
+/// same time (independent episodes), and the request-id mint is shared with
+/// the paired scope so every stamped command in the session is unique.
+#[derive(Debug, Default)]
+struct TileRequestSlot {
+    episode: u64,
+    outstanding: Option<u64>,
+    retained: bool,
+}
+
 /// Coordinator-side routing ledger for paired IDR requests. Owns, per
 /// episode: the sticky wire path (first path whose transmit attempt was
 /// accepted), the per-action bounded alternate failover, retention of
@@ -110,8 +125,12 @@ pub struct DispatchLedger {
     /// from in-flight, where a stamped command is still owned by a worker.
     retained: bool,
     /// Last minted request id; ids are unique per dispatched command for
-    /// the lifetime of the ledger and never reused.
+    /// the lifetime of the ledger and never reused (shared with the
+    /// per-tile slots, so a (side, episode, request) stamp can only ever
+    /// match one slot).
     next_request: u64,
+    /// One slot per tile side for per-tile recovery requests.
+    tile_slots: [TileRequestSlot; 2],
 }
 
 fn alternate_path(side: TileSide) -> TileSide {
@@ -305,6 +324,83 @@ impl DispatchLedger {
     fn mint_request(&mut self) -> u64 {
         self.next_request = self.next_request.wrapping_add(1);
         self.next_request
+    }
+
+    /// Adopt the per-tile episode id for one side. A change closes the
+    /// slot: a stamped command from the dead episode is dead (workers
+    /// cancel it pre-wire) and retention clears. `0` (no open episode)
+    /// closes an existing slot. Paired-scope `sync_episode` calls never
+    /// touch tile slots and vice versa.
+    pub fn sync_tile_episode(&mut self, side: TileSide, episode: u64) {
+        let slot = &mut self.tile_slots[side.slot()];
+        if slot.episode != episode {
+            *slot = TileRequestSlot {
+                episode,
+                outstanding: None,
+                retained: false,
+            };
+        }
+    }
+
+    /// Mint one per-tile request through the side's OWN socket (the fixed
+    /// path). Returns the stamped request id, or `None` while this side's
+    /// stamped command is still outstanding — exactly one per side until
+    /// its outcome, so a cadence retry can never queue a second copy.
+    pub fn select_tile_path(&mut self, side: TileSide, episode: u64) -> Option<u64> {
+        if self.tile_slots[side.slot()].outstanding.is_some() {
+            return None;
+        }
+        let request = self.mint_request();
+        let slot = &mut self.tile_slots[side.slot()];
+        debug_assert_eq!(
+            slot.episode, episode,
+            "caller must sync_tile_episode before selecting"
+        );
+        slot.outstanding = Some(request);
+        slot.retained = false;
+        Some(request)
+    }
+
+    /// True while the side's stamped per-tile command is owned by its
+    /// worker: queued, awaiting its pre-wire decision or its outcome.
+    pub fn tile_in_flight(&self, side: TileSide) -> bool {
+        self.tile_slots[side.slot()].outstanding.is_some()
+    }
+
+    /// True while the side's per-tile request was reported unsent: nothing
+    /// is on the wire; only the unchanged 750ms cadence re-dispatches it.
+    pub fn tile_retained(&self, side: TileSide) -> bool {
+        self.tile_slots[side.slot()].retained
+    }
+
+    /// Report one per-tile stamped outcome. Returns true when THIS side's
+    /// slot owned the (episode, request) stamp and consumed the report —
+    /// anything else is inert. No failover: the per-tile path is fixed, so
+    /// an unsent report retains the request for the 750ms cadence.
+    pub fn on_tile_outcome_stamped(
+        &mut self,
+        side: TileSide,
+        episode: u64,
+        request: u64,
+        outcome: IdrRequestOutcome,
+    ) -> bool {
+        let slot = &mut self.tile_slots[side.slot()];
+        if slot.episode != episode || slot.outstanding != Some(request) {
+            return false;
+        }
+        match outcome {
+            IdrRequestOutcome::Transmitted | IdrRequestOutcome::CancelledStale => {
+                slot.outstanding = None;
+                slot.retained = false;
+            }
+            IdrRequestOutcome::UnsentNoPeer
+            | IdrRequestOutcome::UnsentNoToken
+            | IdrRequestOutcome::SendFailed => {
+                slot.outstanding = None;
+                slot.retained = true;
+            }
+        }
+        true
     }
 }
 
@@ -511,11 +607,21 @@ mod tests {
         // with the exact request id the dead episode dispatched.
         let dead_request = ledger.current_request();
         assert_eq!(
-            ledger.on_outcome_stamped(dead_request, TileSide::Left, 1, IdrRequestOutcome::Transmitted),
+            ledger.on_outcome_stamped(
+                dead_request,
+                TileSide::Left,
+                1,
+                IdrRequestOutcome::Transmitted
+            ),
             None
         );
         assert_eq!(
-            ledger.on_outcome_stamped(dead_request, TileSide::Left, 1, IdrRequestOutcome::UnsentNoPeer),
+            ledger.on_outcome_stamped(
+                dead_request,
+                TileSide::Left,
+                1,
+                IdrRequestOutcome::UnsentNoPeer
+            ),
             None
         );
         assert!(!ledger.has_pending_request());
@@ -543,7 +649,10 @@ mod tests {
         assert!(!ledger.retained_request());
         let first_request = ledger.current_request();
         let retry = ledger.select_path(RecoveryAction::RequestPair);
-        assert_eq!(retry, None, "same-episode retry while outstanding mints nothing");
+        assert_eq!(
+            retry, None,
+            "same-episode retry while outstanding mints nothing"
+        );
         assert_eq!(
             ledger.current_request(),
             first_request,
@@ -587,9 +696,17 @@ mod tests {
             Some(TileSide::Right)
         );
         let alternate = ledger.current_request();
-        assert_ne!(alternate, first, "the bounded alternate is a new stamped command");
+        assert_ne!(
+            alternate, first,
+            "the bounded alternate is a new stamped command"
+        );
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::UnsentNoToken),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::UnsentNoToken
+            ),
             None
         );
         assert!(ledger.retained_request());
@@ -607,21 +724,38 @@ mod tests {
             None,
             "old success must not complete the newer attempt"
         );
-        assert!(ledger.in_flight(), "old success must not clear the outstanding slot");
+        assert!(
+            ledger.in_flight(),
+            "old success must not clear the outstanding slot"
+        );
         assert_eq!(
             ledger.on_outcome_stamped(first, TileSide::Left, 1, IdrRequestOutcome::UnsentNoPeer),
             None,
             "old unsent must not dispatch a second alternate"
         );
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::Transmitted),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::Transmitted
+            ),
             None
         );
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::UnsentNoToken),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::UnsentNoToken
+            ),
             None
         );
-        assert_eq!(ledger.current_request(), newer, "slot still owned by the newer attempt");
+        assert_eq!(
+            ledger.current_request(),
+            newer,
+            "slot still owned by the newer attempt"
+        );
         assert!(ledger.has_pending_request());
         // The newer attempt completes normally with its own report.
         assert_eq!(
@@ -665,7 +799,12 @@ mod tests {
         assert!(ledger.in_flight());
         // The owned alternate still completes its action.
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::Transmitted),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::Transmitted
+            ),
             None
         );
         assert!(!ledger.has_pending_request());
@@ -698,21 +837,35 @@ mod tests {
         assert!(!ledger.retained_request());
         let alternate = ledger.current_request();
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::UnsentNoToken),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::UnsentNoToken
+            ),
             None
         );
         // Retained-unready: no outstanding command, nothing on the wire.
         assert!(ledger.retained_request());
         assert!(!ledger.in_flight());
         assert!(ledger.has_pending_request());
-        assert_eq!(ledger.current_request(), 0, "retention owns no outstanding request");
+        assert_eq!(
+            ledger.current_request(),
+            0,
+            "retention owns no outstanding request"
+        );
         // Reports while retained are inert.
         assert_eq!(
             ledger.on_outcome_stamped(selected, TileSide::Left, 1, IdrRequestOutcome::UnsentNoPeer),
             None
         );
         assert_eq!(
-            ledger.on_outcome_stamped(alternate, TileSide::Right, 1, IdrRequestOutcome::Transmitted),
+            ledger.on_outcome_stamped(
+                alternate,
+                TileSide::Right,
+                1,
+                IdrRequestOutcome::Transmitted
+            ),
             None
         );
         assert!(ledger.retained_request());
@@ -748,11 +901,21 @@ mod tests {
         // Even if something slipped through, the late outcome is stale and
         // must not dispatch or retain anything.
         assert_eq!(
-            ledger.on_outcome_stamped(stamped_request, path.unwrap(), stamped, IdrRequestOutcome::Transmitted),
+            ledger.on_outcome_stamped(
+                stamped_request,
+                path.unwrap(),
+                stamped,
+                IdrRequestOutcome::Transmitted
+            ),
             None
         );
         assert_eq!(
-            ledger.on_outcome_stamped(stamped_request, path.unwrap(), stamped, IdrRequestOutcome::UnsentNoPeer),
+            ledger.on_outcome_stamped(
+                stamped_request,
+                path.unwrap(),
+                stamped,
+                IdrRequestOutcome::UnsentNoPeer
+            ),
             None
         );
         assert!(!ledger.has_pending_request());
@@ -800,5 +963,111 @@ mod tests {
             None
         );
         assert!(!ledger.has_pending_request());
+    }
+
+    #[test]
+    fn per_tile_request_leaves_through_its_own_fixed_socket_only() {
+        let mut ledger = DispatchLedger::new();
+        ledger.sync_tile_episode(TileSide::Right, 1);
+        let request = ledger.select_tile_path(TileSide::Right, 1);
+        assert!(request.is_some());
+        assert!(ledger.tile_in_flight(TileSide::Right));
+        assert!(!ledger.tile_in_flight(TileSide::Left));
+        // One outstanding command per side: a cadence retry mints nothing.
+        assert_eq!(ledger.select_tile_path(TileSide::Right, 1), None);
+        // Transmit attempt (not a delivery) consumes the command.
+        assert!(ledger.on_tile_outcome_stamped(
+            TileSide::Right,
+            1,
+            request.unwrap(),
+            IdrRequestOutcome::Transmitted
+        ));
+        assert!(!ledger.tile_in_flight(TileSide::Right));
+        assert!(!ledger.tile_retained(TileSide::Right));
+    }
+
+    #[test]
+    fn per_tile_unsent_is_retained_never_failed_over() {
+        // The per-tile path is fixed to the gapped side's own socket: an
+        // unsent report must retain the request for the 750ms cadence, never
+        // dispatch a copy through the peer socket (the Host would refresh
+        // the wrong tile).
+        let mut ledger = DispatchLedger::new();
+        ledger.sync_tile_episode(TileSide::Left, 1);
+        let request = ledger.select_tile_path(TileSide::Left, 1).unwrap();
+        assert!(ledger.on_tile_outcome_stamped(
+            TileSide::Left,
+            1,
+            request,
+            IdrRequestOutcome::UnsentNoToken
+        ));
+        assert!(ledger.tile_retained(TileSide::Left));
+        assert!(!ledger.tile_in_flight(TileSide::Left));
+        // Reports while retained are inert (nothing outstanding).
+        assert!(!ledger.on_tile_outcome_stamped(
+            TileSide::Left,
+            1,
+            request,
+            IdrRequestOutcome::Transmitted
+        ));
+        // The cadence re-dispatch mints a fresh stamped command.
+        let retried = ledger.select_tile_path(TileSide::Left, 1).unwrap();
+        assert_ne!(retried, request, "retries own a fresh unique id");
+    }
+
+    #[test]
+    fn per_tile_outcome_with_a_stale_stamp_is_inert() {
+        let mut ledger = DispatchLedger::new();
+        ledger.sync_tile_episode(TileSide::Left, 1);
+        let request = ledger.select_tile_path(TileSide::Left, 1).unwrap();
+        // Episode closed before the worker drained the command: the
+        // coordinator published tile episode 0, the worker cancels pre-wire,
+        // and the slot it belonged to is already closed.
+        ledger.sync_tile_episode(TileSide::Left, 0);
+        assert!(!ledger.on_tile_outcome_stamped(
+            TileSide::Left,
+            1,
+            request,
+            IdrRequestOutcome::CancelledStale
+        ));
+        assert!(!ledger.tile_in_flight(TileSide::Left));
+        assert!(!ledger.tile_retained(TileSide::Left));
+    }
+
+    #[test]
+    fn paired_and_per_tile_slots_are_independent_and_ids_globally_unique() {
+        // A paired episode and a per-tile episode can route at the same
+        // time; each stamp matches exactly one slot because request ids are
+        // minted from one shared counter.
+        let mut ledger = DispatchLedger::new();
+        ledger.sync_episode(10);
+        ledger.note_origin(TileSide::Left);
+        ledger.sync_tile_episode(TileSide::Right, 20);
+        let paired_request = ledger
+            .select_path(RecoveryAction::RequestPair)
+            .map(|_| ledger.current_request())
+            .unwrap();
+        let tile_request = ledger.select_tile_path(TileSide::Right, 20).unwrap();
+        assert_ne!(paired_request, tile_request);
+        // The tile report must not touch the paired slot...
+        assert!(ledger.on_tile_outcome_stamped(
+            TileSide::Right,
+            20,
+            tile_request,
+            IdrRequestOutcome::Transmitted
+        ));
+        assert!(ledger.in_flight(), "paired command still outstanding");
+        // ...and the paired report must not touch the tile slot.
+        assert_eq!(
+            ledger.on_outcome_stamped(
+                paired_request,
+                TileSide::Left,
+                10,
+                IdrRequestOutcome::Transmitted
+            ),
+            None
+        );
+        assert!(!ledger.in_flight());
+        assert!(!ledger.tile_in_flight(TileSide::Right));
     }
 }

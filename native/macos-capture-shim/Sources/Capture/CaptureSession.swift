@@ -8,6 +8,8 @@ import CoreGraphics
 import Darwin
 
 final class CaptureSession {
+    static let metricProcessIncarnation = UUID().uuidString
+    let metricIncarnation = UUID().uuidString
      let queue = DispatchQueue(label: "leftcar.capture", qos: .userInteractive)
     // Capture callbacks only publish the newest sample here. Encoding runs on
     // its own serial queue, so a slow VideoToolbox callback cannot make
@@ -52,12 +54,26 @@ final class CaptureSession {
      var sock: Int32 = -1
      let tcpWriteLock = NSLock()
      var tcpControlBuffer = Data()
-     var viewerControlToken = Data()
+    // Viewer-generated media key material. Every datagram crosses the socket
+    // AEAD-sealed: `s2c` (send) covers everything this session emits, `c2s`
+    // (receive) opens everything the viewer sends. Possession of the key
+    // replaces the legacy plaintext challenge-token suffix authentication.
+     let mediaCrypto: MediaSessionCrypto
+    /// 세션 생존 중 절전 방지(시스템+디스플레이). 잡기 실패는 치명적이지
+    /// 않다 — nil이면 절전 정책을 그대로 둔다.
+    let sleepAssertion: SleepAssertion?
     // Audio plane (LCAU). PCM chunks are converted and sent on this serial
     // queue; the datagram sequence is single-owner here, so it needs no
     // separate lock.
+     let audioQueueKey = DispatchSpecificKey<Void>()
      let audioQueue = DispatchQueue(label: "leftcar.audio", qos: .userInteractive)
      var audioSequence: UInt16 = 0
+    let audioMetricsLock = NSLock()
+    var audioMetrics: [String: Any] = [:]
+    var audioPCMStorage = AudioPCMStorage()
+    var opusAudioEncoder: OpusAudioEncoder?
+    var audioOpusRequested = false
+    var audioOpusFailed = false
     // Set once, under the registry lock, at insertion — before setup can ask
     // the registry who owns the system-audio plane. Never mutated after.
     var sessionHandle: UInt32 = 0
@@ -94,6 +110,8 @@ final class CaptureSession {
      var cgStreamAPI: LegacyCGDisplayStreamAPI?
      var session: VTCompressionSession?
      var splitPipeline: DualEncoderPipeline?
+     let sourceAuthorization: SourceAuthorization?
+     let authenticatedOwner: String?
      let targetAddr: sockaddr_in
      let targetPort: UInt16
      let targetLabel: String
@@ -204,6 +222,13 @@ final class CaptureSession {
      var recoveryFramesDropped: Int64 = 0
      var udpSendFailures: Int64 = 0
      var udpSendRetries: Int64 = 0
+    // Selective retransmission (NAK/RTX). The ring holds pre-seal DATA
+    // fragment envelopes for viewer-requested re-send; the counters (stateLock)
+    // count fragments served from the ring vs. already evicted, and are
+    // surfaced in statsJSON.
+     let retransmitRing = MediaRetransmitRing()
+     var nacksServed: Int64 = 0
+     var nacksMissed: Int64 = 0
      var recoveryKeyframes: Int64 = 0
      var recoveryRequestsSuppressed: Int64 = 0
      var captureQueueDropped: Int64 = 0
@@ -344,6 +369,23 @@ final class CaptureSession {
     // status can distinguish `resolution_changed` from `bitrate_changed`.
      var bitrateFloorCollapseCount: Int64 = 0
      var bitrateFloorCollapseLastReason = "none"
+    // R4 cross-session congestion sharing: sessions on one shared Wi-Fi link
+    // cannot see each other's receiver feedback, so a session whose OWN
+    // congestion detectors fired stamps this mark (under the registry lock,
+    // inside withRegistry) and peers count a still-fresh mark (3s window,
+    // see sharedCongestionMarkFresh) as one ordinary congestion vote. Only
+    // own-detector votes refresh the mark: a peer-echoed vote must not, or
+    // two sessions could keep each other's flag alive indefinitely after the
+    // link recovered.
+     var sharedCongestionMarkNs: UInt64 = 0
+    // R4 telemetry: own congestion votes broadcast to peers, and windows in
+    // which a peer's fresh mark contributed to this session's vote. Guarded
+    // by stateLock; surfaced in statsJSON.
+     var crossSessionCongestionMarks: Int64 = 0
+     var crossSessionCongestionPeerVotes: Int64 = 0
+    // R5 bounded recovery ramp after a congestion cut; all transitions are
+    // pure (RecoveryRampState in EncoderPolicy.swift). Guarded by stateLock.
+     var recoveryRamp = RecoveryRampState()
      var healthCheckScheduled = false
     // Single-session VideoToolbox submissions stay owned by this ledger until
     // callback, synchronous submit failure, or watchdog reclaim wins the slot.
@@ -365,13 +407,16 @@ final class CaptureSession {
      var splitPairAdmissionDrops: Int64 = 0
      var splitPairDrops: Int64 = 0
      var splitPairTimeouts: Int64 = 0
+     var splitPairConsecutiveTimeouts: Int64 = 0
      var splitLastPairDropReason = "none"
      var splitInjectedRightDrops: Int64 = 0
      var splitPreEncodeAdmissionDrops: Int64 = 0
      var splitRecoveryBoundaryDiscards: Int64 = 0
      var splitPostEncodeDeltaDrops: Int64 = 0
+     var splitPairQueueOverflowDrops: Int64 = 0
      var splitWirePairsAttempted: Int64 = 0
      var splitWirePairSendFailures: Int64 = 0
+     var splitPairDeadlineExceeds: Int64 = 0
      var splitPairsEncoded: Int64 = 0
      var splitLeftOutputs: Int64 = 0
      var splitRightOutputs: Int64 = 0
@@ -383,6 +428,15 @@ final class CaptureSession {
      var splitFlowState: SplitFlowControlState
      var splitLeftReceiverLoss: UInt64 = 0
      var splitRightReceiverLoss: UInt64 = 0
+    // Per-tile gap recovery (R2, side-aware viewer IDR). The marks timestamp
+    // the last INCREASE of each tile's cumulative receiver-loss counter, the
+    // monotonic capability bit is set by the per-tile-aware LCF1 body length,
+    // and the counter tracks per-tile keyframes actually encoded into a pair.
+    // All stateLock-protected.
+     var splitLeftReceiverLossMarkNs: UInt64 = 0
+     var splitRightReceiverLossMarkNs: UInt64 = 0
+     var splitPerTileKeyframeCapable = false
+     var splitPerTileKeyframes: Int64 = 0
      var splitLeftRenderedFps: UInt32 = 0
      var splitRightRenderedFps: UInt32 = 0
      var splitJoinedRenderedFps: UInt32 = 0
@@ -403,6 +457,17 @@ final class CaptureSession {
      var receiverPairedIdrEpisodes: UInt32 = 0
      var receiverSuppressedRecoveryRequests: UInt32 = 0
      var receiverFecDecodeFailures: UInt32 = 0
+    // Split LCF1 v3 suffix telemetry. `pairedIdrResumes` is a cumulative
+    // coordinator counter merged monotonically; the ages are smoothed
+    // milliseconds where `u16::MAX` means "not measured" (no host clock
+    // offset converged yet).
+     var receiverPairedIdrResumes: UInt32 = 0
+    // v3 suffix (bytes 130..134): per-tile IDR resumes from the split
+    // coordinator — cumulative, merged monotonically like the paired counter.
+     var receiverPerTileIdrResumes: UInt32 = 0
+     var receiverSplitWireMs: UInt16 = .max
+     var receiverSplitCaptureAgeMs: UInt16 = .max
+     var receiverInputRttMs: UInt16 = .max
 
     var isRunning: Bool {
         stateLock.lock()
@@ -412,6 +477,8 @@ final class CaptureSession {
 
      init(
         targetAddr: sockaddr_in,
+        authenticatedOwner: String? = nil,
+        authorization: SourceAuthorization? = nil,
         targetPort: UInt16,
         targetLabel: String,
         width: UInt32,
@@ -421,8 +488,11 @@ final class CaptureSession {
         mediaTransport: MediaTransportKind = .udp,
         contentMode: StreamContentMode = .interactive,
         requestedEncoderExperiment: EncoderExperiment = .auto,
-        udpStability: AppliedUdpStability = .legacy
+        udpStability: AppliedUdpStability = .legacy,
+        mediaKey: Data
     ) {
+        self.sourceAuthorization = authorization
+        self.authenticatedOwner = authenticatedOwner
         self.targetAddr = targetAddr
         self.targetPort = targetPort
         self.targetLabel = targetLabel
@@ -433,6 +503,11 @@ final class CaptureSession {
         self.mediaTransport = mediaTransport
         self.contentMode = contentMode
         self.appliedUdpStability = udpStability
+        guard let mediaCrypto = MediaSessionCrypto(mediaKey: mediaKey) else {
+            fatalError("capture session requires a 32-byte media key")
+        }
+        self.mediaCrypto = mediaCrypto
+        self.sleepAssertion = SleepAssertion.streamingSession()
         self.udpBurstPolicyState = UdpBurstPolicyState(applied: udpStability)
         self.activeUdpBurstDatagrams = udpStability.burstDatagrams
         self.activeUdpFecParityShards = udpStability.fecParityShards
@@ -445,6 +520,7 @@ final class CaptureSession {
             limit: packetizationInFlightLimit(width: width, height: height)
         )
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
+        audioQueue.setSpecific(key: audioQueueKey, value: ())
         performanceLogTicker = PerformanceLogTicker(
             interval: .seconds(1),
             queue: DispatchQueue(label: "leftcar.performance", qos: .utility)
@@ -459,6 +535,7 @@ final class CaptureSession {
         // this guard covers abnormal teardown paths that skip stop().
         teardownCursorStream()
         performanceLogTicker?.stop()
+        sleepAssertion?.release()
     }
 
 }

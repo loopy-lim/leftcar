@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import QRCode from "qrcode";
+import { confirmSourceGrants, getPairedDeviceState, markSourceGrantsUncertain, receivePairedDeviceState, receiveRevokeOutcome, subscribePairedDeviceState, sourceGrantUncertaintyEpoch, type PairedDevice, type PairedDeviceState, type RevokeOutcome } from "./paired-device-state";
+import SourceGrantEditor, { type SourceGrantView } from "./SourceGrantEditor";
 import {
   AlertTriangle,
   Check,
@@ -14,6 +16,8 @@ import {
   Laptop,
 } from "lucide-react";
 import { bannerAlertVariants, buttonVariants } from "./lib/variants";
+import { formatHostAddress } from "./hostState";
+import RevokeConfirmDialog, { type RevokeConfirm } from "./RevokeConfirmDialog";
 import {
   getTranslation,
   type SupportedLanguage,
@@ -30,11 +34,7 @@ interface PendingPairingView {
   device_name: string;
   requested_at: string;
 }
-interface PairedDevice {
-  device_id: string;
-  name: string;
-  paired_at: string;
-}
+
 
 interface ActiveSession {
   qrDataUrl: string;
@@ -102,7 +102,7 @@ function PairingIpBanner({
           </span>
         ) : (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-            <Copy size={13} /> {t.common.myComputer} IP 복사
+            <Copy size={13} /> {t.host.copyAddress}
           </span>
         )}
       </button>
@@ -283,6 +283,7 @@ function PendingApprovalCard({
 }
 
 function PairedDevicesSection({
+  onGrantsSaved,
   devices,
   revoking,
   language,
@@ -290,6 +291,7 @@ function PairedDevicesSection({
   onRevoke,
   onRevokeAll,
 }: {
+  onGrantsSaved: (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => Promise<void>;
   devices: PairedDevice[];
   revoking: string | null;
   language: SupportedLanguage;
@@ -319,7 +321,7 @@ function PairedDevicesSection({
       {devices.length > 0 ? (
         <div className="device-rows-container">
           {devices.map((device) => (
-            <div key={device.device_id} className="device-row-item">
+            <div key={device.source_grants.credentialId} className="device-row-item">
               <div className="device-row-main">
                 <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                   {device.name.toLowerCase().includes("pc") || device.name.toLowerCase().includes("mac") ? (
@@ -330,6 +332,7 @@ function PairedDevicesSection({
                   {device.name}
                 </span>
                 <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
+                <SourceGrantEditor deviceId={device.device_id} grants={device.source_grants} language={language} onSaved={onGrantsSaved} onFailure={markSourceGrantsUncertain} onSaving={sourceGrantUncertaintyEpoch} />
               </div>
               <button
                 onClick={() => onRevoke(device.device_id)}
@@ -357,11 +360,14 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [starting, setStarting] = useState(false);
-  const [devices, setDevices] = useState<PairedDevice[]>([]);
+  const pairedState = useSyncExternalStore(subscribePairedDeviceState, getPairedDeviceState);
+  const devices = pairedState.devices;
   const [pendingRequests, setPendingRequests] = useState<PendingPairingView[]>([]);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
+  // 삭제는 보안상 되돌릴 수 없다 — 실행 전 한 번 확인한다.
+  const [revokeConfirm, setRevokeConfirm] = useState<RevokeConfirm | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedIp, setCopiedIp] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
@@ -380,15 +386,20 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const refreshDevices = useCallback(async () => {
     try {
-      const list = await invoke<PairedDevice[]>("list_paired_devices");
-      if (list.length > deviceCountRef.current) {
+      const snapshot = await invoke<PairedDeviceState>("list_paired_device_state");
+      if (snapshot.devices.length > deviceCountRef.current) {
         setSession(null);
       }
-      setDevices(list);
+      receivePairedDeviceState(snapshot);
     } catch {
       // best effort
     }
   }, []);
+
+  const sourceGrantsSaved = useCallback(async (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => {
+    confirmSourceGrants(deviceId, grants, startedAtEpoch);
+    await refreshDevices();
+  }, [refreshDevices]);
 
   const startPairing = useCallback(async () => {
     setStarting(true);
@@ -427,24 +438,33 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const copyCode = useCallback(() => {
     if (!session) return;
-    void navigator.clipboard.writeText(session.code);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
-  }, [session]);
+    // 복사 성공을 확인한 뒤 표시한다 — 실패를 "복사됨"으로 속이지 않는다.
+    navigator.clipboard.writeText(session.code).then(
+      () => {
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 2000);
+      },
+      () => setError(t.host.copyFailed),
+    );
+  }, [session, t]);
 
   const copyIp = useCallback(() => {
     if (!lanIp) return;
-    void navigator.clipboard.writeText(`${lanIp}:${controlPort}`);
-    setCopiedIp(true);
-    setTimeout(() => setCopiedIp(false), 2000);
-  }, [lanIp, controlPort]);
+    navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
+      () => {
+        setCopiedIp(true);
+        setTimeout(() => setCopiedIp(false), 2000);
+      },
+      () => setError(t.host.copyFailed),
+    );
+  }, [lanIp, controlPort, t]);
 
   const revoke = useCallback(
     async (deviceId: string) => {
       setRevoking(deviceId);
       setError(null);
       try {
-        await invoke("revoke_paired_device", { deviceId });
+        receiveRevokeOutcome(await invoke<RevokeOutcome>("revoke_paired_device", { deviceId }));
         await refreshDevices();
       } catch (e) {
         setError(connectionErrorMessage(e, t));
@@ -459,7 +479,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     setRevoking("all");
     setError(null);
     try {
-      await invoke("revoke_all_devices");
+      receiveRevokeOutcome(await invoke<RevokeOutcome>("revoke_all_devices"));
       await refreshDevices();
     } catch (e) {
       setError(connectionErrorMessage(e, t));
@@ -476,29 +496,32 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     }
   }, []);
 
-  const approveRequest = useCallback(async (offerId: string) => {
-    setDecidingId(offerId);
-    try {
-      await invoke("approve_pending_pairing", { offerId });
-      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
-    } catch {
-      // 다음 폴링이 목록을 정리한다
-    } finally {
-      setDecidingId(null);
-    }
-  }, []);
+  const decideRequest = useCallback(
+    async (command: "approve_pending_pairing" | "reject_pending_pairing", offerId: string) => {
+      setDecidingId(offerId);
+      try {
+        await invoke(command, { offerId });
+        setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
+      } catch (e) {
+        // 승인/거절 실패를 조용히 넘기면 요청이 사라진 것처럼 보인다 — 행을
+        // 남겨 다시 누를 수 있게 하고 오류는 기존 배너로 알린다.
+        setError(connectionErrorMessage(e, t));
+      } finally {
+        setDecidingId(null);
+      }
+    },
+    [t],
+  );
 
-  const denyRequest = useCallback(async (offerId: string) => {
-    setDecidingId(offerId);
-    try {
-      await invoke("reject_pending_pairing", { offerId });
-      setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
-    } catch {
-      // 다음 폴링이 목록을 정리한다
-    } finally {
-      setDecidingId(null);
-    }
-  }, []);
+  const approveRequest = useCallback(
+    (offerId: string) => decideRequest("approve_pending_pairing", offerId),
+    [decideRequest],
+  );
+
+  const denyRequest = useCallback(
+    (offerId: string) => decideRequest("reject_pending_pairing", offerId),
+    [decideRequest],
+  );
 
   useEffect(() => {
     refreshDevices();
@@ -555,12 +578,27 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         />
       )}
 
-      {error && (
-        <div className={bannerAlertVariants({ tone: "danger" })}>
+      {(error || pairedState.administrativeError) && (
+        <div role="alert" className={bannerAlertVariants({ tone: "danger" })}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <AlertTriangle size={15} /> {error}
+            <AlertTriangle size={15} /> {[error, pairedState.administrativeError].filter(Boolean).join(" · ")}
           </span>
         </div>
+      )}
+
+      {revokeConfirm && (
+        <RevokeConfirmDialog
+          confirm={revokeConfirm}
+          revoking={revoking}
+          t={t}
+          onCancel={() => setRevokeConfirm(null)}
+          onConfirm={() => {
+            const deviceId = revokeConfirm.deviceId;
+            setRevokeConfirm(null);
+            if (deviceId) void revoke(deviceId);
+            else void revokeAll();
+          }}
+        />
       )}
 
       <PendingApprovalCard
@@ -585,12 +623,18 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       />
 
       <PairedDevicesSection
+        onGrantsSaved={sourceGrantsSaved}
         devices={devices}
         revoking={revoking}
         language={language}
         t={t}
-        onRevoke={revoke}
-        onRevokeAll={revokeAll}
+        onRevoke={(deviceId) =>
+          setRevokeConfirm({
+            deviceId,
+            name: devices.find((device) => device.device_id === deviceId)?.name ?? null,
+          })
+        }
+        onRevokeAll={() => setRevokeConfirm({ deviceId: null, name: null })}
       />
     </div>
   );

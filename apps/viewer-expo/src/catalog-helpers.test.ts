@@ -7,11 +7,13 @@ vi.mock("react-native-tcp-socket", () => ({
 }));
 
 vi.mock("./session", () => ({
-  controlClient: vi.fn(() => null),
+  bindRequestContext: vi.fn(),
+  captureRequestContext: vi.fn(() => null),
   reconnectHost: vi.fn(),
 }));
 
 import { catalogErrorMessage, requestWithReconnect } from "./catalog-helpers";
+import { bindRequestContext, captureRequestContext } from "./session";
 import { setCurrentLanguage } from "./language-store";
 
 describe("catalogErrorMessage 언어 전환", () => {
@@ -55,4 +57,27 @@ describe("requestWithReconnect 미연결 오류", () => {
     setCurrentLanguage("ko");
     expect(catalogErrorMessage(error)).toBe("컴퓨터에 연결되어 있지 않습니다");
   });
+
+  it("binds an unauthorized response to the client and target that issued it", async () => {
+    const unauthorized = new Error("unauthorized");
+    const context = {
+      client: { request: vi.fn(async () => { throw unauthorized; }), close: vi.fn(), hostKey: null },
+      target: { host: "10.0.0.1", port: 7777 },
+      selectionGeneration: 7,
+      identity: null,
+      credential: null,
+    };
+    vi.mocked(captureRequestContext).mockReturnValue(context);
+
+    await expect(requestWithReconnect("getCatalog")).rejects.toBe(unauthorized);
+
+    expect(bindRequestContext).toHaveBeenCalledWith(unauthorized, context);
+  });
+});
+
+it("source permission denial gives an actionable Host review and retry message", () => {
+  setCurrentLanguage("ko");
+  expect(catalogErrorMessage(new Error("source_access_denied"))).toBe("Host에서 이 기기의 화면 접근을 허용한 뒤 목록을 새로 고치세요.");
+  setCurrentLanguage("en");
+  expect(catalogErrorMessage(new Error("source_refresh_required"))).toContain("refresh the list");
 });

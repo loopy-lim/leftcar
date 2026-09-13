@@ -1,5 +1,7 @@
 #include "RustraJSIBridge.hpp"
+#include "RustraTurboInterop.hpp"
 #include "rustra-generated-codecs.hpp"
+#include <folly/dynamic.h>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -9,6 +11,15 @@
 #include <memory>
 #include <optional>
 #include <vector>
+
+// 핫코어 폴링/dlopen — POSIX 계열(iOS 시뮬레이터/Android/macOS) 전용.
+// 그 외 호스트는 정적 모드 고정(파일 말미 stub 참고).
+#if defined(__APPLE__) || defined(__ANDROID__)
+#include <dirent.h>
+#include <dlfcn.h>
+#include <chrono>
+#include <thread>
+#endif
 
 // CallInvoker 는 순수 C++ 헤더(ReactCommon/callinvoker)다 — iOS/Android 모두
 // 동일 경로로 제공된다. 플랫폼 글루(.mm / jni.cpp) 가 invoker 를 얻어
@@ -24,6 +35,62 @@ namespace rustra {
 using namespace facebook::jsi;
 namespace gen = rustra::generated;
 namespace rc = rustra::codec;
+
+// ── 코어 함수 포인터 테이블 (dylib 핫스왑 dev 코어, Phase 3) ─────────────
+// 모든 FFI 호출부는 링크 심볼 직접 호출 대신 호출 시점 테이블을 로드한다.
+// 정적 모드의 테이블은 링크된 심볼 주소라 기존 직접 호출과 동일 대상이며,
+// 핫 스왑 시 atomic publish 로 테이블만 교체된다 — JS 재바인딩은 없다.
+//
+// 같은 논리 연산(동기 호출 1건, async dispatch 1건)은 진입 시 로드한 테이블
+// 하나로만 수행한다 — 응답/버퍼의 free 짝이 반드시 생산 코어와 같은 모듈의
+// allocator/debug free_guard 를 쓰게 한다(free_guard 의 live-allocation
+// 집합은 모듈별 정적 상태라 교차 free 는 misuse abort 로 이어진다).
+using CoreTable = core::CoreTable;
+
+namespace core {
+namespace {
+
+// 정적 모드 테이블 — 링크된 심볼 주소(테이블 도입 전 직접 호출과 동일 대상).
+const CoreTable kStaticCoreTable = {
+    rustra_ffi_invoke,
+    rustra_ffi_invoke_json,
+    rustra_ffi_invoke_postcard,
+    rustra_ffi_invoke_rkyv_v2,
+    rustra_ffi_free,
+    rustra_ffi_invoke_buffer,
+    rustra_ffi_has_buffer,
+    rustra_ffi_free_owned_bytes,
+    rustra_ffi_event_sink_register,
+    rustra_ffi_event_sink_unregister,
+    rustra_ffi_channel_create,
+    rustra_ffi_channel_send,
+    rustra_ffi_channel_create_bytes,
+    rustra_ffi_channel_send_bytes,
+    rustra_ffi_channel_drop,
+    rustra_mobile_init,
+    rustra_ffi_invoke_cancel,
+    rustra_ffi_invoke_rkyv_v2_async_into,
+    rustra_ffi_invoke_rkyv_v2_into,
+    rustra_ffi_invoke_raw,
+    rustra_ffi_has_raw,
+    rustra_ffi_get_schema,
+    rustra_ffi_contract_hash,
+};
+
+// C++17 호환 홀더 — `std::atomic<std::shared_ptr<const CoreTable>>` 는
+// C++20 라이브러리 기능이라 RN 툴체인(Xcode/NDK c++17)에서 쓸 수 없으므로
+// atomic 포인터(release store / acquire load)로 동일 의미를 달성한다.
+// 발행된 테이블은 불변·무폐기(구 dylib 비-unload 계약과 동일 수명)라
+// 포인터 수명 걱정이 없다.
+std::atomic<const CoreTable*> g_coreTable{&kStaticCoreTable};
+
+} // namespace
+
+const CoreTable* currentCoreTable() {
+  return g_coreTable.load(std::memory_order_acquire);
+}
+
+} // namespace core
 
 static double requireInteger(Runtime& rt, const Value& value, double max,
                              const char* label) {
@@ -84,12 +151,15 @@ Value generated::make_array_buffer(Runtime& rt, const uint8_t* data, size_t size
 /// Hermes keeps the shared MutableBuffer alive for the lifetime of the JS
 /// ArrayBuffer, so the Rust allocation is exposed without another bulk copy.
 /// The finalizer stores no Runtime/JSI handles and is safe to run after reload.
+/// free 짝은 버퍼를 만든 코어(소유 테이블)가 담당한다 — GC 로 소멸이 스왑
+/// 뒤로 밀려도 다른 코어의 allocator/free_guard 에 건네지지 않는다.
 class RustOwnedMutableBuffer final : public MutableBuffer {
 public:
-  RustOwnedMutableBuffer(uint8_t* data, size_t size) : data_(data), size_(size) {}
+  RustOwnedMutableBuffer(uint8_t* data, size_t size, const CoreTable* owner)
+    : data_(data), size_(size), owner_(owner) {}
 
   ~RustOwnedMutableBuffer() override {
-    if (data_ != nullptr) rustra_ffi_free_owned_bytes(data_, size_);
+    if (data_ != nullptr) owner_->free_owned_bytes(data_, size_);
   }
 
   size_t size() const override { return size_; }
@@ -98,18 +168,21 @@ public:
 private:
   uint8_t* data_;
   size_t size_;
+  /// 생성 시점 코어 테이블 — 불변·무폐기라 소멸 시점에도 유효하다.
+  const CoreTable* owner_;
 };
 
-static Value createOwnedArrayBuffer(Runtime& rt, uint8_t* data, size_t size) {
-  std::shared_ptr<RustOwnedMutableBuffer> owner;
+static Value createOwnedArrayBuffer(Runtime& rt, uint8_t* data, size_t size,
+                                    const CoreTable* owner) {
+  std::shared_ptr<RustOwnedMutableBuffer> buffer;
   try {
-    owner = std::make_shared<RustOwnedMutableBuffer>(data, size);
+    buffer = std::make_shared<RustOwnedMutableBuffer>(data, size, owner);
   } catch (...) {
-    rustra_ffi_free_owned_bytes(data, size);
+    owner->free_owned_bytes(data, size);
     throw;
   }
-  ArrayBuffer buffer(rt, std::move(owner));
-  return Value(rt, buffer);
+  ArrayBuffer bufferHandle(rt, std::move(buffer));
+  return Value(rt, bufferHandle);
 }
 
 static std::pair<const uint8_t*, size_t> extractBytes(Runtime& rt, const Value& value) {
@@ -194,16 +267,17 @@ static std::string parseRkyvV2ErrorBody(const uint8_t* resp, size_t out_len) {
 //   - batchItemName: 이름 기반 배치 루프의 항목 이름. FFI null 접미
 //     " (batch item <name>)" 조립에만 쓴다(에러 시 1회 조립 — hot path 비용 0).
 //     nullptr 면 null 접미로 tailSuffix 를 쓴다(단건/byId 배치).
-// free 짝 계약: (Tier 1) typedInvokeTail 은 caller-buffer 변형
-// (rustra_ffi_invoke_rkyv_v2_into) 을 쓴다 — Rust 가 응답을 할당하지 않고
-// caller 소유 버퍼에 직접 기록하므로 free 짝이 필요 없다. 먼저 512B 스택
-// 버퍼로 바로 dispatch+write하고, 부족한 경우에만 코어가 캐시한 같은 응답을
-// 정확한 크기의 vector로 재시도한다. 작은 응답은 FFI 1회, 큰 응답도 핸들러는
-// 정확히 1회만 실행된다.
+// free 짝 계약: (Tier 1) typedInvokeTail 은 caller-buffer 변형을 쓴다 —
+// Rust 가 응답을 할당하지 않고 caller 소유 버퍼에 직접 기록하므로 free 짝이
+// 필요 없다. 먼저 512B 스택 버퍼로 바로 dispatch+write하고, 부족한 경우에만
+// 코어가 캐시한 같은 응답을 정확한 크기의 vector로 재시도한다. 작은 응답은
+// FFI 1회, 큰 응답도 핸들러는 정확히 1회만 실행된다. 테이블은 진입 시 1회
+// 로드해 probe/재시도를 같은 코어로 묶는다(스왑은 호출 경계에서만 반영).
 template <typename Decode>
 static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize,
                              const char* tailSuffix, Decode decode,
                              const std::string* batchItemName = nullptr) {
+  const CoreTable* core = core::currentCoreTable();
   // (Tier 1) 고정 스택 버퍼 — 대부분의 응답(숫자/작은 객체)이 여기에 들어온다.
   // 부족하면 아래 폴백 경로가 처리하므로 안전하다.
   constexpr size_t kStackCap = 512;
@@ -214,7 +288,7 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
 
   // 1단계: 스택 버퍼로 바로 dispatch+write. 대부분의 응답은 여기서 끝나
   // size-probe를 위한 두 번째 FFI 횡단과 thread_local 캐시 왕복이 없다.
-  size_t n = rustra_ffi_invoke_rkyv_v2_into(
+  size_t n = core->invoke_rkyv_v2_into(
     reqData, reqSize, stackBuf, kStackCap, &out_len);
   if (n != SIZE_MAX && n > 0) {
     resp = stackBuf;
@@ -224,7 +298,7 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
   // 정확한 크기로 한 번만 재시도하므로 비멱등 핸들러는 재실행되지 않는다.
   if (!resp && n == SIZE_MAX && out_len > kStackCap) {
     largeBuf.resize(out_len);
-    n = rustra_ffi_invoke_rkyv_v2_into(
+    n = core->invoke_rkyv_v2_into(
       reqData, reqSize, largeBuf.data(), largeBuf.size(), &out_len);
     if (n != SIZE_MAX && n > 0) {
       resp = largeBuf.data();
@@ -254,6 +328,78 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
   rc::Reader r(resp + 8, out_len - 8);
   Value result = decode(r);
   return result;
+}
+
+// ── C++ TurboModule 상호운용 — 공개 typed invoke 진입점 ──────────────────
+// 헤더 선언 참고(TypedInvokeStatus 계약). HostFunction(invokeTyped/invokeTypedById)
+// 도 같은 경로를 쓴다 — 이 구현이 단일 소스다. 예외 기반 tail(typedInvokeTail)을
+// 감싸 status 로 변환한다: Rust 명령 에러 와이어는 "code: message" 문자열로
+// 조립되므로(parseRkyvV2ErrorBody) 첫 ':' 기준으로 구조를 복원한다. code 에는
+// ':' 가 올 수 없으므로(에러 코드 문자집합 계약) 첫 콜론 분리는 비모호하다.
+namespace {
+
+TypedInvokeResult toCommandErrorResult(
+  facebook::jsi::Runtime& rt, const std::string& codeAndMessage) {
+  size_t sep = codeAndMessage.find(": ");
+  std::string code = sep == std::string::npos ? codeAndMessage : codeAndMessage.substr(0, sep);
+  std::string detail =
+    sep == std::string::npos ? std::string() : codeAndMessage.substr(sep + 2);
+  facebook::jsi::Object errorObject(rt);
+  errorObject.setProperty(rt, "code", facebook::jsi::String::createFromUtf8(rt, code));
+  errorObject.setProperty(rt, "message", facebook::jsi::String::createFromUtf8(rt, detail));
+  return TypedInvokeResult{
+    TypedInvokeStatus::CommandError,
+    facebook::jsi::Value(rt, errorObject),
+    codeAndMessage,
+  };
+}
+
+} // namespace
+
+TypedInvokeResult invokeTypedByName(
+  facebook::jsi::Runtime& rt, const std::string& commandName,
+  const facebook::jsi::Value& args) {
+  rc::Writer w;
+  if (!gen::encode_by_name(rt, commandName, args, w)) {
+    return TypedInvokeResult{
+      TypedInvokeStatus::NoStaticCodec, facebook::jsi::Value(), std::string()};
+  }
+  try {
+    facebook::jsi::Value out = typedInvokeTail(rt, w.data(), w.size(), "",
+      [&rt, &commandName](rc::Reader& r) { return gen::decode_by_name(rt, commandName, r); });
+    return TypedInvokeResult{
+      TypedInvokeStatus::Ok, std::move(out), std::string()};
+  } catch (const facebook::jsi::JSError& err) {
+    std::string text = err.what();
+    if (text.rfind("RustraJSI: ", 0) == 0) {
+      return TypedInvokeResult{
+        TypedInvokeStatus::MalformedResponse, facebook::jsi::Value(), text};
+    }
+    return toCommandErrorResult(rt, text);
+  }
+}
+
+TypedInvokeResult invokeTypedById(
+  facebook::jsi::Runtime& rt, uint16_t commandId,
+  const facebook::jsi::Value& args) {
+  rc::Writer w;
+  if (!gen::encode_by_id(rt, commandId, args, w)) {
+    return TypedInvokeResult{
+      TypedInvokeStatus::NoStaticCodec, facebook::jsi::Value(), std::string()};
+  }
+  try {
+    facebook::jsi::Value out = typedInvokeTail(rt, w.data(), w.size(), "",
+      [&rt, commandId](rc::Reader& r) { return gen::decode_by_id(rt, commandId, r); });
+    return TypedInvokeResult{
+      TypedInvokeStatus::Ok, std::move(out), std::string()};
+  } catch (const facebook::jsi::JSError& err) {
+    std::string text = err.what();
+    if (text.rfind("RustraJSI: ", 0) == 0) {
+      return TypedInvokeResult{
+        TypedInvokeStatus::MalformedResponse, facebook::jsi::Value(), text};
+    }
+    return toCommandErrorResult(rt, text);
+  }
 }
 
 // ── EventDispatcher: Rust → JS push delivery ───────────────
@@ -295,6 +441,7 @@ void EventDispatcher::setCallInvoker(std::shared_ptr<void> invoker) {
     callInvoker_ = std::move(invoker);
     hadListeners = !listeners_.empty();
     listeners_.clear();
+    hasListeners_.store(false, std::memory_order_release);
     queue_.clear();
     drainScheduled_ = false;
   }
@@ -303,7 +450,7 @@ void EventDispatcher::setCallInvoker(std::shared_ptr<void> invoker) {
   if (hadListeners) {
     // 리스너가 있던 상태로 리로드된 경우 싱크를 해제해 둔다 — 새 번들이
     // setListener 로 다시 등록하면 그때 재설치된다.
-    rustra_ffi_event_sink_unregister();
+    core::currentCoreTable()->event_sink_unregister();
   }
 }
 
@@ -315,18 +462,29 @@ void EventDispatcher::setListener(facebook::jsi::Runtime& rt,
   // (operator[] 는 기본 생성을 요구한다).
   bool wasEmpty = listeners_.empty();
   listeners_.insert_or_assign(name, std::move(callback));
+  // 핫코어 스왑 재등록(rebindEventSink)이 읽는 원자 플래그 — 맵과 함께 유지.
+  hasListeners_.store(true, std::memory_order_release);
   // 첫 리스너 등록 시 FFI 싱크를 설치한다(폴링 경로 → 푸시 전환).
   if (wasEmpty) {
-    rustra_ffi_event_sink_register(&EventDispatcher::onRustEvent, this);
+    core::currentCoreTable()->event_sink_register(&EventDispatcher::onRustEvent, this);
   }
 }
 
 void EventDispatcher::removeListener(const std::string& name) {
   listeners_.erase(name);
+  hasListeners_.store(!listeners_.empty(), std::memory_order_release);
   // 마지막 리스너 제거 시 FFI 싱크 해제(푸시 → 폴링 복귀).
   if (listeners_.empty()) {
-    rustra_ffi_event_sink_unregister();
+    core::currentCoreTable()->event_sink_unregister();
   }
+}
+
+void EventDispatcher::rebindEventSink() {
+  // 핫코어 스왑 직후(폴링 스레드) 호출 — 리스너 맵은 JS 스레드 전용이라
+  // 읽지 않고 원자 플래그만 본다. 현재(신) 코어의 싱크 슬롯에 C++ 정적
+  // 콜백을 재등록한다(콜백 재사용 안전 — 함수 포인터는 모듈 무관).
+  if (!hasListeners_.load(std::memory_order_acquire)) return;
+  core::currentCoreTable()->event_sink_register(&EventDispatcher::onRustEvent, this);
 }
 
 void EventDispatcher::onRustEvent(void* user_data, const char* name,
@@ -419,18 +577,23 @@ static std::shared_ptr<ChannelDispatcher> getChannelDispatcher() {
 void ChannelDispatcher::setCallInvoker(std::shared_ptr<void> invoker) {
   // mutex_ 없이 콜백 맵 정리(레지스트리는 JS 스레드 전용) 후 락 내부에서
   // invoker 교체·채널 drop. drop 이 FFI 를 호출하므로 reset() 은 락 밖 실행.
-  std::vector<uint32_t> toDrop;
+  std::vector<std::pair<uint32_t, const core::CoreTable*>> toDrop;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     callInvoker_ = std::move(invoker);
-    for (auto& [h, _cb] : callbacks_) toDrop.push_back(h);
+    for (auto& [handle, owner] : channelCores_) toDrop.emplace_back(handle, owner);
     callbacks_.clear();
+    channelCores_.clear();
     queue_.clear();
+    bytesQueue_.clear();
+    bytesHandles_.clear();
     drainScheduled_ = false;
   }
-  // 리로드 대응: 귀속 채널 전부를 Rust 쪽에서도 drop(락 밖 — FFI 재진입 방지).
-  for (uint32_t h : toDrop) {
-    rustra_ffi_channel_drop(h);
+  // 리로드 대응: 귀속 채널 전부를 발급 코어에서 drop(락 밖 — FFI 재진입 방지).
+  // 소유 코어로 라우팅한다 — 핸들은 코어 귀속이라 스왑 뒤 현재 코어에 같은
+  // 번호가 새로 발급돼 있어도 그것을 오해제하는 일이 없다.
+  for (auto& [handle, owner] : toDrop) {
+    owner->channel_drop(handle);
   }
 }
 
@@ -438,18 +601,50 @@ uint32_t ChannelDispatcher::create(facebook::jsi::Runtime& rt,
                                     facebook::jsi::Function callback) {
   // JS 스레드에서만 호출됨(HostFunction 경유). FFI 가 핸들을 선발급하고
   // 콜백이 그 핸들을 캡처해 회신하므로, 여기선 JS 콜백만 핸들 키로 등록.
+  // 발급 코어를 기록한다 — drop/폐기 라우팅의 소유권 원천.
   (void)rt;
-  uint32_t handle = rustra_ffi_channel_create(&ChannelDispatcher::onChannelPayload, this);
+  const core::CoreTable* owner = core::currentCoreTable();
+  uint32_t handle =
+    owner->channel_create(&ChannelDispatcher::onChannelPayload, this);
   if (handle == 0) return 0; // 발급 실패 sentinel — 사실상 도달하지 않는다.
   callbacks_.insert_or_assign(handle, std::move(callback));
+  channelCores_.insert_or_assign(handle, owner);
+  return handle;
+}
+
+uint32_t ChannelDispatcher::createBytes(facebook::jsi::Runtime& rt,
+                                         facebook::jsi::Function callback) {
+  // JSON 경로와 동일한 등록 + 바이너리 경로 FFI 발급. bytesHandles_ 표시로
+  // drain 이 ArrayBuffer 로 전달한다.
+  (void)rt;
+  const core::CoreTable* owner = core::currentCoreTable();
+  uint32_t handle =
+    owner->channel_create_bytes(&ChannelDispatcher::onChannelPayloadBytes, this);
+  if (handle == 0) return 0;
+  callbacks_.insert_or_assign(handle, std::move(callback));
+  channelCores_.insert_or_assign(handle, owner);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bytesHandles_.insert(handle);
+  }
   return handle;
 }
 
 bool ChannelDispatcher::drop(uint32_t handle) {
-  // JS 스레드 호출. Rust 채널 해제 후 콜백 제거. 해제 후 drain 에 이미
-  // 적재된 해당 핸들 페이로드는 콜백 부재로 무시된다(유니캐스트 만료).
-  int dropped = rustra_ffi_channel_drop(handle);
+  // JS 스레드 호출. 발급 코어에서 Rust 채널 해제 후 콜백 제거. 해제 후 drain 에
+  // 이미 적재된 해당 핸들 페이로드는 콜백 부재로 무시된다(유니캐스트 만료).
+  // 발급 코어로 라우팅한다 — 스왑 뒤 새 코어에 같은 번호가 재발급돼 있어도
+  // 발급 주체를 해제한다(코어 귀속 계약).
+  auto ownerIt = channelCores_.find(handle);
+  const core::CoreTable* owner =
+    ownerIt != channelCores_.end() ? ownerIt->second : core::currentCoreTable();
+  int dropped = owner->channel_drop(handle);
   callbacks_.erase(handle);
+  channelCores_.erase(handle);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bytesHandles_.erase(handle);
+  }
   return dropped == 1;
 }
 
@@ -469,13 +664,45 @@ void ChannelDispatcher::onChannelPayload(void* user_data, uint32_t handle,
   self->scheduleDrainLocked();
 }
 
+void ChannelDispatcher::onChannelPayloadBytes(
+  void* user_data, uint32_t handle, const uint8_t* payload, size_t payload_len) {
+  // send 스레드 — JSON 경로와 동일하게 큐 적재 + drain 예약만(복사 소유).
+  auto* self = static_cast<ChannelDispatcher*>(user_data);
+  if (!self) return;
+
+  std::lock_guard<std::mutex> lock(self->mutex_);
+  if (self->bytesQueue_.size() >= self->capacity_) {
+    self->bytesQueue_.pop_front(); // drop-oldest — JSON 경로와 동일 정책
+  }
+  const uint8_t* src = payload ? payload : reinterpret_cast<const uint8_t*>("");
+  self->bytesQueue_.emplace_back(
+    handle, std::vector<uint8_t>(src, src + payload_len));
+  self->scheduleDrainLocked();
+}
+
 void ChannelDispatcher::drain(facebook::jsi::Runtime& rt) {
-  // JS 런타임 스레드에서만 호출(CallInvoker 콜백 또는 폴링).
+  // JS 런타임 스레드에서만 호출(CallInvoker 콜백 또는 폴링). 스왑 리셋
+  // 요청이 쌓여 있으면 먼저 소비한다 — 레지스트리 폐기는 이 스레드에서만.
+  if (resetQueued_.exchange(false, std::memory_order_acq_rel)) {
+    dropStaleChannelsAfterSwap();
+  }
   std::deque<std::pair<uint32_t, std::string>> items;
+  std::deque<std::pair<uint32_t, std::vector<uint8_t>>> byteItems;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     drainScheduled_ = false;
     items.swap(queue_);
+    byteItems.swap(bytesQueue_);
+  }
+  for (auto& [handle, payload] : byteItems) {
+    auto it = callbacks_.find(handle);
+    if (it == callbacks_.end()) continue; // 만료 채널 — 조용히 무시
+    try {
+      // 바이너리 페이로드는 복사본 ArrayBuffer 로 — 소유권 이전 없이 안전.
+      it->second.call(rt, createArrayBuffer(rt, payload.data(), payload.size()));
+    } catch (const std::exception&) {
+      // JSON 경로와 동일 정책 — 콜백 예외 무시, 나머지 프레임 계속 전달.
+    }
   }
   for (auto& [handle, payload] : items) {
     auto it = callbacks_.find(handle);
@@ -487,6 +714,11 @@ void ChannelDispatcher::drain(facebook::jsi::Runtime& rt) {
       // JS 콜백 예외는 무시 — 이벤트 drain 과 동일 정책(호출자 보호).
     }
   }
+}
+
+size_t ChannelDispatcher::pendingCount() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return queue_.size() + bytesQueue_.size();
 }
 
 void ChannelDispatcher::scheduleDrainLocked() {
@@ -507,17 +739,58 @@ void ChannelDispatcher::scheduleDrainLocked() {
 }
 
 void ChannelDispatcher::reset() {
-  // 리로드 대응 전체 폐기 — JS 콜백 맵·큐 클리어 후 Rust 채널 drop(락 밖).
-  std::vector<uint32_t> toDrop;
+  // 리로드 대응 전체 폐기 — JS 콜백 맵·큐 클리어 후 발급 코어에서 채널
+  // drop(락 밖). 전체 폐기이므로 바이너리 큐/핸들 표시도 함께 비운다.
+  std::vector<std::pair<uint32_t, const core::CoreTable*>> toDrop;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& [h, _cb] : callbacks_) toDrop.push_back(h);
+    for (auto& [handle, owner] : channelCores_) toDrop.emplace_back(handle, owner);
     callbacks_.clear();
+    channelCores_.clear();
     queue_.clear();
+    bytesQueue_.clear();
+    bytesHandles_.clear();
     drainScheduled_ = false;
   }
-  for (uint32_t h : toDrop) {
-    rustra_ffi_channel_drop(h);
+  for (auto& [handle, owner] : toDrop) {
+    owner->channel_drop(handle);
+  }
+}
+
+void ChannelDispatcher::requestResetAfterSwap() {
+  // 폴링 스레드 — 레지스트리(callbacks_/channelCores_)는 JS 스레드 전용이므로
+  // 플래그 + drain 예약만 한다. 실제 폐기는 drain 안의
+  // dropStaleChannelsAfterSwap(JS 스레드)이 수행한다.
+  std::lock_guard<std::mutex> lock(mutex_);
+  resetQueued_.store(true, std::memory_order_release);
+  scheduleDrainLocked();
+}
+
+void ChannelDispatcher::dropStaleChannelsAfterSwap() {
+  // drain(JS 스레드) 안에서만 호출 — 레지스트리 수정은 이 스레드로 국한.
+  // 발급 코어가 현재 코어가 아닌(스왑으로 은퇴한) 채널만 폐기한다: 스왑
+  // 발행 뒤 새 코어로 새로 만든 채널은 유지한다(발행→drain 사이 창의
+  // 신규 생성 보호). 채널은 "스왑 시 코어 내 상태 소실" 설계 정책에 따라
+  // 구 코어 발급분은 만료다 — 새 코어의 같은 번호 채널 오해제 창을 닫는다.
+  const core::CoreTable* current = core::currentCoreTable();
+  std::vector<std::pair<uint32_t, const core::CoreTable*>> toDrop;
+  for (auto it = channelCores_.begin(); it != channelCores_.end();) {
+    if (it->second != current) {
+      toDrop.emplace_back(it->first, it->second);
+      callbacks_.erase(it->first);
+      it = channelCores_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (toDrop.empty()) return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [handle, _owner] : toDrop) bytesHandles_.erase(handle);
+  }
+  // FFI 는 락 밖 — owner 테이블은 불변·무폐기라 맵에서 지운 뒤에도 안전하다.
+  for (auto& [handle, owner] : toDrop) {
+    owner->channel_drop(handle);
   }
 }
 
@@ -543,8 +816,12 @@ struct AsyncCallContext {
   /// (F3) caller-buffer async 응답 버퍼 — Rust 워커가 응답을 여기에 직접
   /// 기록한다(owned=0). context(shared_ptr)가 완료 콜백과 JS 스레드 전달
   /// 람다까지 수명을 보장하므로 복사 없이 제자리 읽는다. 버퍼에 안 들어가는
-  /// 응답만 Rust heap 프레임으로 돌아온다(owned=1 → rustra_ffi_free 짝).
+  /// 응답만 Rust heap 프레임으로 돌아온다(owned=1 → free 짝).
   std::vector<uint8_t> frameBuffer = std::vector<uint8_t>(512);
+  /// dispatch 시점 코어 테이블 — owned=1 프레임의 free 짝은 생산 코어가
+  /// 담당한다(스왑이 콜백보다 먼저 일어나도 교차 코어 해제가 없다).
+  /// registerAsyncContext 전에 설정되므로 콜백에서 절대 null 이 아니다.
+  const CoreTable* dispatchCore = nullptr;
 };
 
 static std::atomic<uint64_t> g_runtimeGeneration{0};
@@ -582,71 +859,56 @@ void invalidateRustraJSI() {
     g_asyncContexts.clear();
   }
   for (uint64_t id : pendingIds) {
-    rustra_ffi_invoke_cancel(id);
+    // 스왑을 지난 id 는 새 코어에 없어 false(무해 no-op)다 — 협력적 취소 계약.
+    core::currentCoreTable()->invoke_cancel(id);
   }
 }
 
 // ── HostObject with cached functions ───────────────────────
 
+// generic FFI invoke 시그니처 — makeInvoke 가 CoreTable 멤버 선택에 쓴다.
 using InvokeFn = uint8_t*(*)(const uint8_t*, size_t, size_t*);
 
-// free 짝 계약: generic FFI response buffers use rustra_ffi_free. The optional
-// calculator benchmark surface is compiled only in the repository fixture and
-// retains its legacy allocator-specific pairs.
-using FreeFn = void(*)(uint8_t*, size_t);
-
-// live schema FFI (from rustra crate)
-extern "C" uint8_t* rustra_ffi_get_schema(size_t* out_len);
-extern "C" uint8_t* rustra_ffi_contract_hash(size_t* out_len);
+// live schema FFI (from rustra crate) — 선언은 RustraJSIBridge.hpp extern "C"
+// 블록으로 옮겨졌다(정적 테이블 초기화와 23심볼 바인딩의 단일 선언 지점).
 
 RustraHostObject::RustraHostObject(Runtime& rt) {
-  auto makeInvoke = [&](const char* name, InvokeFn fn, FreeFn freeFn, const char* err) {
+  // makeInvoke — fn/free 를 람다 캡처하지 않고 호출 시점 테이블에서 읽는다.
+  // 핫코어 스왑 뒤 다음 호출부터 새 코어로 향한다. fn/free 를 같은 테이블
+  // 로드에서 꺼내므로 free 짝이 같은 코어의 allocator 를 쓴다.
+  auto makeInvoke = [&](const char* name, InvokeFn CoreTable::* fnMember, const char* err) {
     auto propNameId = PropNameID::forAscii(rt, name);
     auto hostFn = Function::createFromHostFunction(
       rt, propNameId, 1,
-      [fn, freeFn, err](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+      [fnMember, err](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
         if (count < 1) {
           throw JSError(rt, std::string("RustraJSI: requires 1 argument — ") + err);
         }
         auto [data, size] = extractBytes(rt, args[0]);
+        const CoreTable* core = core::currentCoreTable();
         size_t out_len = 0;
-        uint8_t* result = fn(data, size, &out_len);
+        uint8_t* result = (core->*fnMember)(data, size, &out_len);
         if (!result) {
           throw JSError(rt, std::string("RustraJSI: ") + err);
         }
         auto returnValue = createArrayBuffer(rt, result, out_len);
-        freeFn(result, out_len);
+        core->free(result, out_len);
         return returnValue;
       });
     cache_[name] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   };
 
-  // ── Generic FFI paths (default, json, postcard) — magic 헤더 레이아웃이므로
-  //    rustra_ffi_free 로 해제 짝. ─────────────────────────────
-  makeInvoke("invoke",        rustra_ffi_invoke,              rustra_ffi_free, "Rust returned null");
-  makeInvoke("invokeJson",    rustra_ffi_invoke_json,         rustra_ffi_free, "Rust json returned null");
-  makeInvoke("invokePostcardFFI", rustra_ffi_invoke_postcard, rustra_ffi_free, "Rust postcard FFI returned null");
-
-#if defined(RUSTRA_ENABLE_LEGACY_BENCHMARKS)
-  // ── Per-example benchmark paths (legacy) — calculator 응답(magic 헤더 없는
-  //    Box<[u8]>)이므로 rustra_calculator_free_buffer 로 해제 짝. ──
-  makeInvoke("invokeBytes",   rustra_calculator_invoke_bytes,  rustra_calculator_free_buffer, "Rust bytes returned null");
-  makeInvoke("invokeMsgpack",  rustra_calculator_invoke_msgpack, rustra_calculator_free_buffer, "Rust msgpack returned null");
-  makeInvoke("invokeBincode",  rustra_calculator_invoke_bincode, rustra_calculator_free_buffer, "Rust bincode returned null");
-  // Keep the public JS adapter name aligned with RustraNative. This is the
-  // calculator's legacy postcard envelope (command + a + b), while
-  // invokePostcardFFI above is the generic framework envelope.
-  makeInvoke("invokePostcard", rustra_calculator_invoke_postcard, rustra_calculator_free_buffer, "Rust postcard returned null");
-  makeInvoke("invokeLegacyPostcard", rustra_calculator_invoke_postcard, rustra_calculator_free_buffer, "Rust postcard returned null");
-  makeInvoke("invokeRkyv",     rustra_calculator_invoke_rkyv,    rustra_calculator_free_buffer, "Rust rkyv returned null");
-  makeInvoke("invokeHybrid",   rustra_calculator_invoke_hybrid,  rustra_calculator_free_buffer, "Rust hybrid returned null");
-  // rkyv V2 는 코어 rustra_ffi_invoke_rkyv_v2 로 위임된 뒤라 응답이 코어 FFI
-  // 레이아웃(8B magic 헤더)이다 — 전용 free 짝 필수(Phase 2 위임 시 누락돼
-  // ArrayBuffer 경로에서 double-free/unallocated-free 크래시를 일으켰다).
-  makeInvoke("invokeRkyvV2",   rustra_calculator_invoke_rkyv_v2, rustra_calculator_free_rkyv_v2_buffer, "Rust rkyv v2 returned null");
-  makeInvoke("invokeRaw",      rustra_calculator_invoke_raw,     rustra_calculator_free_buffer, "Rust invoke_raw returned null");
-#endif
+  // ── Generic FFI paths (default, json, postcard, rkyv V2) — magic 헤더
+  //    레이아웃이므로 free 로 해제 짝. ─────────────────────
+  makeInvoke("invoke",            &CoreTable::invoke,          "Rust returned null");
+  makeInvoke("invokeJson",        &CoreTable::invoke_json,     "Rust json returned null");
+  makeInvoke("invokePostcardFFI", &CoreTable::invoke_postcard, "Rust postcard FFI returned null");
+  // rkyv V2 는 코어 제네릭 심볼 직결이며 legacy ifdef 밖에 둔다 — 엔진 tier2/3
+  // 폴백이 모든 빌드(legacy-OFF 포함)에서 이 함수를 요구한다(RustraNative
+  // non-optional). 응답은 코어 FFI 레이아웃(8B magic 헤더)이므로 free 짝은
+  // rustra_ffi_free (과거 double-free 크래시의 free-짝 계약 유지).
+  makeInvoke("invokeRkyvV2",      &CoreTable::invoke_rkyv_v2,  "Rust rkyv v2 returned null");
 
   // noop: returns input bytes unchanged
   {
@@ -664,26 +926,28 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
 
-  // getSchema: live schema query → rustra_ffi_get_schema (정적 + 동적 명령)
+  // getSchema: live schema query → get_schema (정적 + 동적 명령)
   {
     auto propNameId = PropNameID::forAscii(rt, "getSchema");
     auto hostFn = Function::createFromHostFunction(
       rt, propNameId, 0,
       [](Runtime& rt, const Value&, const Value*, size_t) -> Value {
+        // 같은 테이블 로드에서 호출+free 짝 — 교차 코어 해제를 원천 차단.
+        const CoreTable* core = core::currentCoreTable();
         size_t out_len = 0;
-        uint8_t* data = rustra_ffi_get_schema(&out_len);
+        uint8_t* data = core->get_schema(&out_len);
         if (!data) {
           throw JSError(rt, "RustraJSI: getSchema returned null");
         }
         auto returnValue = createArrayBuffer(rt, data, out_len);
-        rustra_ffi_free(data, out_len);
+        core->free(data, out_len);
         return returnValue;
       });
     cache_["getSchema"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
 
-  // getContractHash: (F5) native 빌드 계약 해시 → rustra_ffi_contract_hash.
+  // getContractHash: (F5) native 빌드 계약 해시 → contract_hash.
   // 엔진 옵션 contractHash 설정 시 JS 가 생성된 GENERATED_CONTRACT_HASH 와
   // 비교해 스키마 드리프트(contract.mismatch)를 검증한다.
   {
@@ -691,13 +955,14 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
     auto hostFn = Function::createFromHostFunction(
       rt, propNameId, 0,
       [](Runtime& rt, const Value&, const Value*, size_t) -> Value {
+        const CoreTable* core = core::currentCoreTable();
         size_t out_len = 0;
-        uint8_t* data = rustra_ffi_contract_hash(&out_len);
+        uint8_t* data = core->contract_hash(&out_len);
         if (!data) {
           throw JSError(rt, "RustraJSI: getContractHash returned null");
         }
         auto returnValue = createArrayBuffer(rt, data, out_len);
-        rustra_ffi_free(data, out_len);
+        core->free(data, out_len);
         return returnValue;
       });
     cache_["getContractHash"] = std::make_unique<CachedFunction>(
@@ -744,16 +1009,19 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
     cache_["offEvent"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
-  // drainEvents(): CallInvoker 없는 호스트의 JS 폴링 drain. 반환값 = 처리된
-  // 이벤트 수. CallInvoker 경로가 켜져 있으면 보통 비어 있다(자동 drain 됨).
+  // drainEvents(): CallInvoker 없는 호스트의 JS 폴링 drain. 이벤트 큐와 채널
+  // 큐(JSON+바이너리)를 모두 소비한다 — 반환값 = 처리한 프레임 수(이벤트 +
+  // 채널 합산). CallInvoker 경로가 켜져 있으면 보통 비어 있다(자동 drain 됨).
   {
     auto dispatcher = getEventDispatcher();
+    auto channels = getChannelDispatcher();
     auto propNameId = PropNameID::forAscii(rt, "drainEvents");
     auto hostFn = Function::createFromHostFunction(
       rt, propNameId, 0,
-      [dispatcher](Runtime& rt, const Value&, const Value*, size_t) -> Value {
-        size_t before = dispatcher->pendingCount();
+      [dispatcher, channels](Runtime& rt, const Value&, const Value*, size_t) -> Value {
+        size_t before = dispatcher->pendingCount() + channels->pendingCount();
         dispatcher->drain(rt);
+        channels->drain(rt);
         return Value(static_cast<double>(before));
       });
     cache_["drainEvents"] = std::make_unique<CachedFunction>(
@@ -779,6 +1047,24 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         return Value(static_cast<double>(handle));
       });
     cache_["createChannel"] = std::make_unique<CachedFunction>(
+      CachedFunction{std::move(propNameId), std::move(hostFn)});
+  }
+  {
+    // 바이너리 채널 — 콜백이 ArrayBuffer(복사본)를 받는다. rkyv V2 프레임 등
+    // 임의 바이트를 JSON 직렬화 없이 흘리는 TurboModule 상호운용 경로.
+    auto dispatcher = getChannelDispatcher();
+    auto propNameId = PropNameID::forAscii(rt, "createChannelBytes");
+    auto hostFn = Function::createFromHostFunction(
+      rt, propNameId, 1,
+      [dispatcher](Runtime& rt, const Value&, const Value* args, size_t count) -> Value {
+        if (count < 1 || !args[0].isObject() || !args[0].asObject(rt).isFunction(rt)) {
+          throw JSError(rt, "RustraJSI: createChannelBytes requires (callback)");
+        }
+        Function cb = args[0].asObject(rt).getFunction(rt);
+        uint32_t handle = dispatcher->createBytes(rt, std::move(cb));
+        return Value(static_cast<double>(handle));
+      });
+    cache_["createChannelBytes"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
   {
@@ -830,11 +1116,14 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
           throw JSError(rt, "RustraJSI: getCodecCapabilities requires (cmdId)");
         }
         uint16_t cmdId = requireU16(rt, args[0], "command id");
+        // 라우팅 마스크 조회도 현재 코어 기준 — 스왑 뒤 신 코어의 실제
+        // handler 보유를 따라간다(오래된 코어를 광고하지 않는다).
+        const CoreTable* core = core::currentCoreTable();
         uint32_t capabilities = 0;
         if (gen::has_static_codec_id(cmdId)) capabilities |= 1u;
         if (gen::has_pos_codec(cmdId)) capabilities |= 2u;
-        if (gen::has_raw_codec(cmdId) && rustra_ffi_has_raw(cmdId) != 0) capabilities |= 4u;
-        if (gen::has_buffer_codec(cmdId) && rustra_ffi_has_buffer(cmdId) != 0) capabilities |= 8u;
+        if (gen::has_raw_codec(cmdId) && core->has_raw(cmdId) != 0) capabilities |= 4u;
+        if (gen::has_buffer_codec(cmdId) && core->has_buffer(cmdId) != 0) capabilities |= 8u;
         return Value(static_cast<double>(capabilities));
       });
     cache_["getCodecCapabilities"] = std::make_unique<CachedFunction>(
@@ -856,19 +1145,22 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         }
         uint16_t cmdId = requireU16(rt, args[0], "command id");
         auto [data, size] = extractByteBuffer(rt, args[1]);
+        // 진입 시 테이블 1회 로드 — invoke/free_owned_bytes 짝과 결과
+        // ArrayBuffer 의 소유 테이블이 모두 같은 코어에 묶인다.
+        const CoreTable* core = core::currentCoreTable();
         uint8_t* output = nullptr;
         size_t outputSize = 0;
-        uint32_t status = rustra_ffi_invoke_buffer(
+        uint32_t status = core->invoke_buffer(
           cmdId, data, size, &output, &outputSize);
         if (status == UINT32_MAX || output == nullptr) {
           throw JSError(rt, "RustraJSI: direct buffer ABI failed");
         }
         if (status != 0) {
           std::string error(reinterpret_cast<const char*>(output), outputSize);
-          rustra_ffi_free_owned_bytes(output, outputSize);
+          core->free_owned_bytes(output, outputSize);
           throw JSError(rt, error.empty() ? "buffer invoke failed" : error);
         }
-        Value buffer = createOwnedArrayBuffer(rt, output, outputSize);
+        Value buffer = createOwnedArrayBuffer(rt, output, outputSize, core);
         return gen::decode_buffer_result_by_id(rt, cmdId, std::move(buffer));
       });
     cache_["invokeTypedBuffer"] = std::make_unique<CachedFunction>(
@@ -888,17 +1180,17 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         }
         std::string name = args[0].asString(rt).utf8(rt);
 
-        // 1) JS 객체 → postcard 요청 바이트 ([cmd_id u16 LE][postcard(I)])
-        rc::Writer w;
-        if (!gen::encode_by_name(rt, name, args[1], w)) {
-          throw JSError(rt, "RustraJSI: no C++ codec for '" + name + "'");
+        // 공개 C++ 진입점(invokeTypedByName)과 동일 경로 — HostFunction 은
+        // status 를 기존 예외 메시지로 그대로 옮긴다(호환 보존).
+        TypedInvokeResult result = invokeTypedByName(rt, name, args[1]);
+        switch (result.status) {
+          case TypedInvokeStatus::Ok:
+            return std::move(result.value);
+          case TypedInvokeStatus::NoStaticCodec:
+            throw JSError(rt, "RustraJSI: no C++ codec for '" + name + "'");
+          default:
+            throw JSError(rt, result.message);
         }
-        // 2) Rust FFI (rkyv V2 단일 엔진) + 응답 tail — 공통 헬퍼로
-        //    (typedInvokeTail 주석의 free 짝 계약: rustra_calculator_free_buffer).
-        //    decoder 만 이름 기반 decode_by_name.
-        return typedInvokeTail(rt, w.data(), w.size(), "", [&rt, &name](rc::Reader& r) {
-          return gen::decode_by_name(rt, name, r);
-        });
       });
     cache_["invokeTyped"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
@@ -920,16 +1212,17 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         }
         uint16_t cmdId = requireU16(rt, args[0], "command id");
 
-        // 1) JS 객체 → postcard 요청 바이트 ([cmd_id u16 LE][postcard(I)])
-        rc::Writer w;
-        if (!gen::encode_by_id(rt, cmdId, args[1], w)) {
-          throw JSError(rt, "RustraJSI: no C++ codec for cmd_id " + std::to_string(cmdId));
+        // 공개 C++ 진입점(invokeTypedById)과 동일 경로 — status 를 기존 예외
+        // 메시지로 옮긴다(호환 보존).
+        TypedInvokeResult result = invokeTypedById(rt, cmdId, args[1]);
+        switch (result.status) {
+          case TypedInvokeStatus::Ok:
+            return std::move(result.value);
+          case TypedInvokeStatus::NoStaticCodec:
+            throw JSError(rt, "RustraJSI: no C++ codec for cmd_id " + std::to_string(cmdId));
+          default:
+            throw JSError(rt, result.message);
         }
-        // 2) Rust FFI + 응답 tail — invokeTyped 와 동일하지만 decoder 만
-        //    u16 디스패치 decode_by_id (free 짝: rustra_calculator_free_buffer).
-        return typedInvokeTail(rt, w.data(), w.size(), "", [&rt, cmdId](rc::Reader& r) {
-          return gen::decode_by_id(rt, cmdId, r);
-        });
       });
     cache_["invokeTypedById"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
@@ -962,7 +1255,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         uint64_t outSlot = 0;
         uint8_t errBuf[256];
         size_t errLen = 0;
-        uint32_t code = rustra_ffi_invoke_raw(
+        uint32_t code = core::currentCoreTable()->invoke_raw(
           cmdId, slots, slotCount, &outSlot, errBuf, sizeof(errBuf), &errLen);
         if (code == UINT32_MAX) {
           // 폴백 신호 — 특수 NaN 페이로드. JS 엔진은 Number.isNaN 으로 감별해
@@ -1159,9 +1452,12 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         // holder/shared_ptr 체인이 수명을 보장하므로 Rust 워커가 안전히 쓴다.
         auto* holder = new std::shared_ptr<AsyncCallContext>(ctx);
 
-        // 2) 비동기 FFI — id 를 동기 반환한다 (취소 핸들).
+        // 2) 비동기 FFI — id 를 동기 반환한다 (취소 핸들). 테이블은 이
+        // dispatch 의 생산 코어로 고정된다(콜백 free 짝이 같은 코어).
+        const CoreTable* dispatchCore = core::currentCoreTable();
+        ctx->dispatchCore = dispatchCore;
         uint64_t invocationId = 0;
-        rustra_ffi_invoke_rkyv_v2_async_into(
+        dispatchCore->invoke_rkyv_v2_async_into(
           req.data(), req.size(),
           ctx->frameBuffer.data(), ctx->frameBuffer.size(),
           holder,
@@ -1182,11 +1478,15 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
             //             보장한다(구형 std::vector 경로의 누수 없음 특성 유지).
             //             deleter 는 정확한 (ptr, resp_len) 짝으로 free 한다 —
             //             debug free_guard 가 len 불일치 free 에 abort 하므로
-            //             길이를 버리는 deleter 는 쓸 수 없다.
+            //             길이를 버리는 deleter 는 쓸 수 없다. free 대상 코어는
+            //             dispatch 시점 테이블(dispatchCore)로 고정 — 스왑이
+            //             콜백을 추월해도 다른 코어의 free_guard/allocator 에
+            //             건네지지 않는다.
+            const CoreTable* dispatchCore = ctx->dispatchCore;
             std::shared_ptr<uint8_t> ownedFrame;
             if (owned == 1) {
               ownedFrame = std::shared_ptr<uint8_t>(
-                resp, [resp_len](uint8_t* p) { rustra_ffi_free(p, resp_len); });
+                resp, [resp_len, dispatchCore](uint8_t* p) { dispatchCore->free(p, resp_len); });
             }
             std::shared_ptr<void> invoker;
             bool valid = false;
@@ -1325,8 +1625,11 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         auto* holder = new std::shared_ptr<AsyncCallContext>(ctx);
 
         // 2) 비동기 FFI — invokeTypedAsync 와 동일한 엔트리, 동일한 응답 규약.
+        // dispatch 시점 테이블로 생산 코어를 고정한다(owned 프레임 free 짝).
+        const CoreTable* dispatchCore = core::currentCoreTable();
+        ctx->dispatchCore = dispatchCore;
         uint64_t invocationId = 0;
-        rustra_ffi_invoke_rkyv_v2_async_into(
+        dispatchCore->invoke_rkyv_v2_async_into(
           req.data(), req.size(),
           ctx->frameBuffer.data(), ctx->frameBuffer.size(),
           holder,
@@ -1334,10 +1637,11 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
             std::unique_ptr<std::shared_ptr<AsyncCallContext>> holder(
               static_cast<std::shared_ptr<AsyncCallContext>*>(user_data));
             std::shared_ptr<AsyncCallContext> ctx = *holder;
+            const CoreTable* dispatchCore = ctx->dispatchCore;
             std::shared_ptr<uint8_t> ownedFrame;
             if (owned == 1) {
               ownedFrame = std::shared_ptr<uint8_t>(
-                resp, [resp_len](uint8_t* p) { rustra_ffi_free(p, resp_len); });
+                resp, [resp_len, dispatchCore](uint8_t* p) { dispatchCore->free(p, resp_len); });
             }
             std::shared_ptr<void> invoker;
             bool valid = false;
@@ -1424,9 +1728,37 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
           throw JSError(rt, "RustraJSI: invokeCancel requires (invocationId)");
         }
         uint64_t id = requireSafeU64(rt, args[0], "invocation id");
-        return Value(rustra_ffi_invoke_cancel(id));
+        return Value(core::currentCoreTable()->invoke_cancel(id));
       });
     cache_["invokeCancel"] = std::make_unique<CachedFunction>(
+      CachedFunction{std::move(propNameId), std::move(hostFn)});
+  }
+
+  // ── hotCoreStatus(): dev 핫코어 상태 관측 ───────────────────
+  // 정적 모드(비활성)는 null. 핫 모드는 마지막 스왑의 구/신 계약 해시와
+  // 오류를 실는다 — stderr 스왑 로그의 JS 콘솔 관측 표면.
+  {
+    auto propNameId = PropNameID::forAscii(rt, "hotCoreStatus");
+    auto hostFn = Function::createFromHostFunction(
+      rt, propNameId, 0,
+      [](Runtime& rt, const Value&, const Value*, size_t) -> Value {
+        core::HotCoreStatus status = core::hotCoreStatusSnapshot();
+        if (!status.enabled) {
+          return Value::null();
+        }
+        Object result(rt);
+        result.setProperty(rt, "enabled", Value(true));
+        result.setProperty(rt, "swapped", Value(status.swapped));
+        auto setString = [&rt, &result](const char* key, const std::string& value) {
+          result.setProperty(rt, key, String::createFromUtf8(
+            rt, reinterpret_cast<const uint8_t*>(value.data()), value.size()));
+        };
+        setString("oldHash", status.oldHash);
+        setString("newHash", status.newHash);
+        setString("error", status.error);
+        return result;
+      });
+    cache_["hotCoreStatus"] = std::make_unique<CachedFunction>(
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
 }
@@ -1479,7 +1811,9 @@ void installRustraJSIWithInvoker(Runtime& rt,
   // callback을 먼저 무효화한다. 플랫폼 invalidate가 호출되지 않은 호스트도
   // 다음 install을 안전망으로 사용한다.
   invalidateRustraJSI();
-  rustra_mobile_init();
+  // 현재(정적 또는 핫스왑된) 코어의 패키지 등록 — 핫 모드에서 신 코어는
+  // 자체 mobile_init 을 스왑 경로에서 이미 호출했다(모듈별 컨텍스트).
+  core::currentCoreTable()->mobile_init();
   auto dispatcher = getEventDispatcher();
   dispatcher->setCallInvoker(typeErasedCallInvoker);
   // 채널 디스패처도 동일 CallInvoker 공유(2단계) — reset 내부에서 이전
@@ -1508,6 +1842,576 @@ void installRustraJSI(Runtime& rt) {
   // CallInvoker 없는 설치(레거시 경로) — 이벤트 푸시는 JS 가 drainEvents() 로
   // 폴링해야 한다. 프로덕션 플랫폼 글루는 installRustraJSIWithInvoker 사용.
   installRustraJSIWithInvoker(rt, nullptr);
+}
+
+// ── dylib 핫스왑 dev 코어 (Phase 3) — 폴링/스왑 구현 ─────────────────
+// 설계: docs/plans/2026-09-09-native-hot-core-design.md. CLI 발행 계약은
+// `<stem>-hot-live<ext>`(게이트 통과 빌드만 temp+rename 원자 발행)이고, 폴링은
+// 그 파일의 sha256 변화만 본다(notify 같은 감시 의존 없음 — Rust watch 와
+// 동일 정책). 안전 규약:
+// - 구 핸들은 절대 dlclose 하지 않고 leak 한다 — macOS/iOS 는 std TLS 때문에
+//   언로드 자체가 불가능하고(libloading #59, dyld man 3), 구 심볼의
+//   use-after-unload 를 원천 차단한다. 발행된 테이블 객체도 같은 수명으로
+//   leak 한다(스왑별 소량 누수는 dev 감수).
+// - 실패한 스왑은 lastHash 를 갱신하지 않는다(Rust watch 와 동일 — 빌드 중
+//   반쯤 쓰인 아티팩트가 다음 폴링에서 재시도되고, 게이트 reject 로 라이브
+//   파일이 구 바이트로 남으면 구 코어가 유지된다: fail-closed). 단 같은
+//   바이트의 연속 실패가 상한(kMaxSwapFailuresPerBytes)에 도달하면 그
+//   바이트를 포이즌해 바이트가 바뀔 때까지 재시도하지 않는다 — 매 폴링마다
+//   카피+dlopen 이 반복되는 실패 폭주 방지(Rust watch 와 동일 정책).
+// - 오류 표면: 아래 함수들은 어떤 입력/실패에서도 예외를 밖으로 던지지 않고
+//   프로세스를 죽이지 않는다 — 폴링 스레드의 모든 실패는 음수 반환/stderr
+//   로그/상태 스냅샷의 error 필드로 흡수된다.
+#if defined(__APPLE__) || defined(__ANDROID__)
+
+namespace core {
+namespace {
+
+/// 상태 — pollMutex 는 스왑 시도(dlopen 포함 수백 ms)를 직렬화하고,
+/// statusMutex 는 JS 가 읽는 스냅샷 필드만 짧게 보호한다(스왑 중 상태 조회가
+/// 다른 스레드를 오래 막지 않게 둘로 분리).
+struct HotCoreState {
+  std::mutex pollMutex;
+  std::mutex statusMutex;
+  std::string dir;       // 빈 문자열 = 정적 모드(기본)
+  std::string lastHash;  // 성공 기준선(라이브 파일 바이트 sha256 hex)
+  uint64_t counter = 0;  // 버전 카피 카운터(단조) — pollMutex 배타 구간 전용
+  bool swapped = false;
+  std::string oldHash;
+  std::string newHash;
+  std::string error;
+  // 실패 재시도 상한(폭주 방지) — streak 는 바이트(해시) 단위로 집계된다.
+  std::string streakHash;    // 실패 streak 집계 중인 바이트 상태
+  uint32_t failureStreak = 0; // streakHash 바이트의 연속 실패 횟수
+  std::string poisonHash;    // 상한 실패로 재시도 중단된 바이트 — 변화까지 대기
+};
+
+HotCoreState& hotState() {
+  static HotCoreState state;
+  return state;
+}
+
+std::atomic<bool> g_hotCorePollingStarted{false};
+
+void recordHotCoreError(const std::string& message) {
+  std::lock_guard<std::mutex> lock(hotState().statusMutex);
+  hotState().error = message;
+  fprintf(stderr, "[rustra] hot-core: %s\n", message.c_str());
+}
+
+/// 같은 바이트 연속 스왑 실패 허용치 — Rust watch(FailureTracker)와 동일 값·정책.
+constexpr uint32_t kMaxSwapFailuresPerBytes = 5;
+
+std::string hashToShort8(const std::string& hash) {
+  return hash.size() > 8 ? hash.substr(0, 8) : hash;
+}
+
+/// 스왑 실패 기록 — 같은 바이트의 연속 실패를 세고 상한 도달 시 그 바이트를
+/// 포이즌해 바이트가 바뀔 때까지 재시도를 멈춘다. 열리지 않는 아티팩트가
+/// 폴링 주기(300ms)마다 카피+dlopen 재시도와 오류 로그를 무한 반복하는
+/// 폭주를 끊는다. 바이트가 바뀌면 streak 은 새 바이트 기준으로 다시 센다.
+void noteSwapFailure(const std::string& hash) {
+  if (hash.empty()) return;
+  bool poisoned = false;
+  {
+    auto& state = hotState();
+    std::lock_guard<std::mutex> lock(state.statusMutex);
+    if (state.streakHash != hash) {
+      state.streakHash = hash;
+      state.failureStreak = 0;
+    }
+    ++state.failureStreak;
+    if (state.failureStreak >= kMaxSwapFailuresPerBytes) {
+      state.failureStreak = 0;
+      state.poisonHash = hash;
+      poisoned = true;
+    }
+  }
+  if (poisoned) {
+    recordHotCoreError("giving up on artifact bytes " + hashToShort8(hash) +
+                       " after " + std::to_string(kMaxSwapFailuresPerBytes) +
+                       " failed swaps — retrying when new bytes are published");
+  }
+}
+
+std::string joinHotPath(const std::string& dir, const std::string& name) {
+  if (!dir.empty() && dir.back() == '/') return dir + name;
+  return dir + "/" + name;
+}
+
+/// CLI 발행 계약(`<stem>-hot-live<ext>`) 단일 라이브 파일 스캔. 없으면 빈
+/// 문자열(게이트 reject 또는 미빌드 — 구 코어 유지 신호).
+std::string findLiveArtifact(const std::string& dir) {
+  DIR* dirStream = opendir(dir.c_str());
+  if (dirStream == nullptr) return std::string();
+  std::string found;
+  while (dirent* entry = readdir(dirStream)) {
+    const std::string name = entry->d_name;
+    if (name.find("-hot-live.") == std::string::npos) continue;
+    found = name;
+    break; // 발행 계약상 단일 파일 — 첫 매치면 충분하다.
+  }
+  closedir(dirStream);
+  return found;
+}
+
+/// sha256 (FIPS 180-4) — 의존 추가 금지 계약에 따른 자체 구현(파일 바이트
+/// 해시 하나가 목적이라 최소만 만든다).
+class Sha256 {
+public:
+  void update(const uint8_t* data, size_t len) {
+    bitLen_ += static_cast<uint64_t>(len) * 8;
+    absorb(data, len);
+  }
+
+  std::string finishHex() {
+    // 패딩은 비트 길이 추적 없이(absorb) 처리 — update 의 bitLen_ 오염 방지.
+    const uint64_t messageBits = bitLen_;
+    const uint8_t padByte = 0x80;
+    const uint8_t zero = 0;
+    absorb(&padByte, 1);
+    while (bufferLen_ != 56) absorb(&zero, 1);
+    uint8_t lengthBytes[8];
+    for (int i = 0; i < 8; ++i) {
+      lengthBytes[i] = static_cast<uint8_t>(messageBits >> (56 - 8 * i));
+    }
+    absorb(lengthBytes, sizeof(lengthBytes));
+    static const char kHex[] = "0123456789abcdef";
+    char out[2 * 32];
+    // digest_ 는 8개 u32 워드 — 워드당 빅엔디안 8 hex 문자, 기점 8*i.
+    for (int i = 0; i < 8; ++i) {
+      out[8 * i] = kHex[(digest_[i] >> 28) & 0xf];
+      out[8 * i + 1] = kHex[(digest_[i] >> 24) & 0xf];
+      out[8 * i + 2] = kHex[(digest_[i] >> 20) & 0xf];
+      out[8 * i + 3] = kHex[(digest_[i] >> 16) & 0xf];
+      out[8 * i + 4] = kHex[(digest_[i] >> 12) & 0xf];
+      out[8 * i + 5] = kHex[(digest_[i] >> 8) & 0xf];
+      out[8 * i + 6] = kHex[(digest_[i] >> 4) & 0xf];
+      out[8 * i + 7] = kHex[digest_[i] & 0xf];
+    }
+    return std::string(out, sizeof(out));
+  }
+
+private:
+  void absorb(const uint8_t* data, size_t len) {
+    while (len > 0) {
+      size_t take = 64 - bufferLen_;
+      if (take > len) take = len;
+      std::memcpy(buffer_ + bufferLen_, data, take);
+      bufferLen_ += take;
+      data += take;
+      len -= take;
+      if (bufferLen_ == 64) {
+        processBlock(buffer_);
+        bufferLen_ = 0;
+      }
+    }
+  }
+
+  static uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+  void processBlock(const uint8_t* block) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i) {
+      w[i] = (static_cast<uint32_t>(block[4 * i]) << 24) |
+             (static_cast<uint32_t>(block[4 * i + 1]) << 16) |
+             (static_cast<uint32_t>(block[4 * i + 2]) << 8) |
+             static_cast<uint32_t>(block[4 * i + 3]);
+    }
+    for (int i = 16; i < 64; ++i) {
+      uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = digest_[0], b = digest_[1], c = digest_[2], d = digest_[3];
+    uint32_t e = digest_[4], f = digest_[5], g = digest_[6], h = digest_[7];
+    for (int i = 0; i < 64; ++i) {
+      uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      uint32_t ch = (e & f) ^ (~e & g);
+      uint32_t t1 = h + s1 + ch + k[i] + w[i];
+      uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t t2 = s0 + maj;
+      h = g; g = f; f = e; e = d + t1;
+      d = c; c = b; b = a; a = t1 + t2;
+    }
+    digest_[0] += a; digest_[1] += b; digest_[2] += c; digest_[3] += d;
+    digest_[4] += e; digest_[5] += f; digest_[6] += g; digest_[7] += h;
+  }
+
+  uint32_t digest_[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  uint8_t buffer_[64];
+  size_t bufferLen_ = 0;
+  uint64_t bitLen_ = 0;
+};
+
+/// 파일 바이트 sha256 hex — 읽기 실패는 빈 문자열(다음 폴링 재시도 신호).
+std::string sha256FileHex(const std::string& path) {
+  FILE* file = fopen(path.c_str(), "rb");
+  if (file == nullptr) return std::string();
+  Sha256 sha;
+  uint8_t buf[65536];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), file)) > 0) {
+    sha.update(buf, n);
+  }
+  const bool ok = ferror(file) == 0;
+  fclose(file);
+  if (!ok) return std::string();
+  return sha.finishHex();
+}
+
+/// 버전 카피 생성(고유 경로가 목적이라 직접 기록 — 부분 파일은 dlopen 실패로
+/// 걸러지고 다음 시도는 새 카운터의 새 경로를 쓴다). 실패 시 부분 파일 제거.
+bool copyFileContents(const std::string& from, const std::string& to) {
+  FILE* in = fopen(from.c_str(), "rb");
+  if (in == nullptr) return false;
+  FILE* out = fopen(to.c_str(), "wb");
+  if (out == nullptr) {
+    fclose(in);
+    return false;
+  }
+  char buf[65536];
+  size_t n;
+  bool ok = true;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+    if (fwrite(buf, 1, n, out) != n) {
+      ok = false;
+      break;
+    }
+  }
+  if (ferror(in) != 0) ok = false;
+  fclose(in);
+  if (fclose(out) != 0) ok = false;
+  if (!ok) remove(to.c_str());
+  return ok;
+}
+
+/// 계약 해시 응답(ASCII 텍스트)을 같은 테이블의 free 로 짝지어 읽는다.
+std::string readContractHash(const CoreTable* table) {
+  size_t len = 0;
+  uint8_t* data = table->contract_hash(&len);
+  if (data == nullptr) return std::string();
+  std::string hash(reinterpret_cast<const char*>(data), len);
+  table->free(data, len);
+  return hash;
+}
+
+} // namespace
+
+void configureHotCore(const char* hotDirPath) {
+  auto& state = hotState();
+  std::lock_guard<std::mutex> lock(state.statusMutex);
+  // 설치 경로에서 1회 호출이 계약 — 마지막 호출이 이긴다. 빈/null 문자열은
+  // 정적 모드(기본, 폴링 스레드 없음).
+  state.dir = (hotDirPath != nullptr) ? std::string(hotDirPath) : std::string();
+  state.lastHash.clear();
+  state.swapped = false;
+  state.oldHash.clear();
+  state.newHash.clear();
+  state.error.clear();
+  state.streakHash.clear();
+  state.failureStreak = 0;
+  state.poisonHash.clear();
+}
+
+int pollHotCoreOnce() {
+  // 스왑 시도 대상 바이트 상태 — catch 경로의 실패 집계가 접근한다(try 안
+  // 변수는 catch 에서 보이지 않으므로 try 밖에서 선언).
+  std::string attemptedHash;
+  try {
+    std::string dir;
+    {
+      auto& state = hotState();
+      std::lock_guard<std::mutex> lock(state.statusMutex);
+      dir = state.dir;
+    }
+    if (dir.empty()) return 0; // 정적 모드 — 스왑 대상 없음(변화 없음).
+
+    // 스왑 시도 직렬화 — 수동 poll(설치 경로)과 폴링 스레드가 같은 카피를
+    // 두 번 열지 않게 한다. JS 스레드와 무관한 락이다(status 와 분리).
+    std::lock_guard<std::mutex> pollLock(hotState().pollMutex);
+
+    const std::string liveName = findLiveArtifact(dir);
+    if (liveName.empty()) return 0; // 게이트 reject/미빌드 — 구 코어 유지.
+    const std::string livePath = joinHotPath(dir, liveName);
+    const std::string hash = sha256FileHex(livePath);
+    if (hash.empty()) return 0; // 빌드 중/일시 부재 — 다음 폴링 재시도.
+    {
+      auto& state = hotState();
+      std::lock_guard<std::mutex> lock(state.statusMutex);
+      if (hash == state.lastHash) return 0; // 변화 없음.
+      // 상한 실패로 포이즌된 바이트 — 새 바이트가 발행될 때까지 재시도 없음.
+      if (hash == state.poisonHash) return 0;
+    }
+    attemptedHash = hash;
+
+    // ── 스왑 시퀀스(설계 문서) ──
+    // 1) 버전 카피 `<stem>-hot-<counter><ext>` — 같은 경로 재 dlopen 은 캐시
+    //    히트로 구 매핑을 돌려주므로 반드시 신규 경로다. 카운터는 pollMutex
+    //    배타 구간에서 단조 증가한다.
+    auto& state = hotState();
+    const uint64_t counter = ++state.counter;
+    const size_t marker = liveName.find("-hot-live");
+    const std::string stem = liveName.substr(0, marker);
+    const std::string ext = liveName.substr(marker + std::strlen("-hot-live"));
+    const std::string copyPath =
+        joinHotPath(dir, stem + "-hot-" + std::to_string(counter) + ext);
+    if (!copyFileContents(livePath, copyPath)) {
+      recordHotCoreError("version copy failed: " + copyPath);
+      noteSwapFailure(hash);
+      return -1;
+    }
+
+    // 2) dlopen(RTLD_LOCAL) + 23심볼 바인딩 — 하나라도 없으면 카피 삭제+포기.
+    //    실패 바인딩의 핸들도 leak 한다(dlclose 금지 계약 — dlopen 이 실행한
+    //    초기화를 되돌릴 수 없다). 파일 삭제는 디렉터 엔트리만 지운다 —
+    //    로드된 매핑은 inode 로 살아 있어 안전하다.
+    void* handle = dlopen(copyPath.c_str(), RTLD_LOCAL);
+    if (handle == nullptr) {
+      const char* dlError = dlerror();
+      recordHotCoreError(std::string("dlopen failed: ") +
+                         (dlError != nullptr ? dlError : "unknown"));
+      remove(copyPath.c_str());
+      noteSwapFailure(hash);
+      return -1;
+    }
+    auto* table = new CoreTable(); // value-init — 모든 fn 포인터 0
+    bool bound = true;
+    const char* missing = nullptr;
+#define RUSTRA_BIND(field, symbolName)                                        \
+  do {                                                                        \
+    table->field = reinterpret_cast<decltype(table->field)>(                  \
+      dlsym(handle, symbolName));                                             \
+    if (table->field == nullptr) {                                            \
+      bound = false;                                                          \
+      missing = symbolName;                                                   \
+    }                                                                         \
+  } while (0)
+    RUSTRA_BIND(invoke, "rustra_ffi_invoke");
+    RUSTRA_BIND(invoke_json, "rustra_ffi_invoke_json");
+    RUSTRA_BIND(invoke_postcard, "rustra_ffi_invoke_postcard");
+    RUSTRA_BIND(invoke_rkyv_v2, "rustra_ffi_invoke_rkyv_v2");
+    RUSTRA_BIND(free, "rustra_ffi_free");
+    RUSTRA_BIND(invoke_buffer, "rustra_ffi_invoke_buffer");
+    RUSTRA_BIND(has_buffer, "rustra_ffi_has_buffer");
+    RUSTRA_BIND(free_owned_bytes, "rustra_ffi_free_owned_bytes");
+    RUSTRA_BIND(event_sink_register, "rustra_ffi_event_sink_register");
+    RUSTRA_BIND(event_sink_unregister, "rustra_ffi_event_sink_unregister");
+    RUSTRA_BIND(channel_create, "rustra_ffi_channel_create");
+    RUSTRA_BIND(channel_send, "rustra_ffi_channel_send");
+    RUSTRA_BIND(channel_create_bytes, "rustra_ffi_channel_create_bytes");
+    RUSTRA_BIND(channel_send_bytes, "rustra_ffi_channel_send_bytes");
+    RUSTRA_BIND(channel_drop, "rustra_ffi_channel_drop");
+    RUSTRA_BIND(mobile_init, "rustra_mobile_init");
+    RUSTRA_BIND(invoke_cancel, "rustra_ffi_invoke_cancel");
+    RUSTRA_BIND(invoke_rkyv_v2_async_into, "rustra_ffi_invoke_rkyv_v2_async_into");
+    RUSTRA_BIND(invoke_rkyv_v2_into, "rustra_ffi_invoke_rkyv_v2_into");
+    RUSTRA_BIND(invoke_raw, "rustra_ffi_invoke_raw");
+    RUSTRA_BIND(has_raw, "rustra_ffi_has_raw");
+    RUSTRA_BIND(get_schema, "rustra_ffi_get_schema");
+    RUSTRA_BIND(contract_hash, "rustra_ffi_contract_hash");
+#undef RUSTRA_BIND
+    if (!bound) {
+      recordHotCoreError(std::string("symbol missing in hot dylib: ") +
+                         (missing != nullptr ? missing : "?"));
+      remove(copyPath.c_str());
+      delete table;
+      noteSwapFailure(hash);
+      return -1;
+    }
+
+    // 3) 새 코어 초기화 + 계약 해시 조회 — 미발행 테이블 대상이라 JS 스레드
+    //    호출과 경합하지 않는다(발행은 5번). 모듈별 FFI_CONTEXT 이므로 신
+    //    dylib 의 mobile_init 은 자기 컨텍스트를 새로 등록한다(Rust 무수정).
+    //    contract_hash 부재 코어는 발행하지 않는다(Rust watch 가 open 을
+    //    실패 처리하는 것과 동일한 fail-closed — 핸들/테이블은 leak 계약대로
+    //    폐기하지 않고 카피 엔트리만 지운다).
+    table->mobile_init();
+    const std::string newHash = readContractHash(table);
+    if (newHash.empty()) {
+      recordHotCoreError("hot dylib did not report a contract hash — not swapped");
+      remove(copyPath.c_str());
+      delete table;
+      noteSwapFailure(hash);
+      return -1;
+    }
+
+    // 4) 구 코어 계약 해시(로그/상태용) — 읽기 전용 조회라 호출 중 JS 스레드와
+    //    무해하게 병행된다(Tauri watch 가 live handle 에서 읽는 것과 동일).
+    const std::string oldHash = readContractHash(currentCoreTable());
+
+    // 5) atomic publish — release store 이후 모든 호출부의 acquire load 가
+    //    초기화가 끝난 신 코어의 메모리 가시성을 보장한다. 구 핸들/테이블은
+    //    의도적으로 leak — 절대 dlclose 하지 않는다.
+    g_coreTable.store(table, std::memory_order_release);
+
+    // 6) 리스너 보유 시 신 코어에 이벤트 싱크 재등록(콜백은 C++ 정적 함수라
+    //    재사용 안전). 발행→재등록 사이 미세 창의 신 코어 이벤트 유실은
+    //    dev 감수(설계 "상태 소실" 정책).
+    getEventDispatcher()->rebindEventSink();
+
+    // 6b) 구 코어 발급 채널 폐기 요청 — 채널 핸들은 발급 코어에 귀속되고
+    //     새 dylib 의 핸들 발급기는 번호를 처음부터 재사용하므로, 스왑 뒤
+    //     레지스트리를 비우지 않으면 같은 번호의 신규 채널을 오해제하는
+    //     창이 있다. 폐기는 drain(JS 스레드)에서 수행 — 이벤트 재등록과
+    //     같은 마샬링 규약("상태 소실" 정책의 채널 대응).
+    getChannelDispatcher()->requestResetAfterSwap();
+
+    {
+      std::lock_guard<std::mutex> lock(state.statusMutex);
+      state.lastHash = hash;
+      state.swapped = true;
+      state.oldHash = oldHash;
+      state.newHash = newHash;
+      state.error.clear();
+      state.streakHash.clear();
+      state.failureStreak = 0;
+      state.poisonHash.clear();
+    }
+    fprintf(stderr, "[rustra] hot-core: swapped %s -> %s\n",
+            hashToShort8(oldHash).c_str(), hashToShort8(newHash).c_str());
+    return 1;
+  } catch (const std::exception& error) {
+    // 어떤 실패도 폴링 스레드(나아가 앱 프로세스)를 죽이지 않는다 — lastHash
+    // 는 갱신되지 않아 같은 바이트 상태를 다음 폴링이 재시도한다(단 같은
+    // 바이트의 연속 실패는 noteSwapFailure 의 상한이 포이즌한다).
+    recordHotCoreError(std::string("swap failed: ") + error.what());
+    noteSwapFailure(attemptedHash);
+    return -1;
+  } catch (...) {
+    recordHotCoreError("swap failed: unknown error");
+    noteSwapFailure(attemptedHash);
+    return -1;
+  }
+}
+
+void startHotCorePolling() {
+  // 이중 기동 방지 — 스레드는 프로세스 종료까지 산다(dev 전용 표면).
+  if (g_hotCorePollingStarted.exchange(true, std::memory_order_acq_rel)) return;
+  bool enabled = false;
+  {
+    std::lock_guard<std::mutex> lock(hotState().statusMutex);
+    enabled = !hotState().dir.empty();
+  }
+  if (!enabled) {
+    // 정적 모드 — 계약대로 폴링 스레드를 만들지 않고 재호출을 허용한다.
+    g_hotCorePollingStarted.store(false, std::memory_order_release);
+    return;
+  }
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      pollHotCoreOnce(); // 절대 던지지 않고 프로세스를 죽이지 않는다(위 계약).
+    }
+  }).detach();
+}
+
+HotCoreStatus hotCoreStatusSnapshot() {
+  auto& state = hotState();
+  std::lock_guard<std::mutex> lock(state.statusMutex);
+  HotCoreStatus status;
+  status.enabled = !state.dir.empty();
+  status.swapped = state.swapped;
+  status.oldHash = state.oldHash;
+  status.newHash = state.newHash;
+  status.error = state.error;
+  return status;
+}
+
+} // namespace core
+
+#else // !__APPLE__ && !__ANDROID__ — 핫스왑 미지원 호스트: 정적 모드 고정.
+
+namespace rustra::core {
+
+void configureHotCore(const char* /*hotDirPath*/) {
+  // 미지원 플랫폼 — 호출을 받아도 정적 모드로 무시한다.
+}
+
+int pollHotCoreOnce() {
+  return -1; // 핫스왑 미지원 — 폴링 자체를 오류로 보고한다.
+}
+
+void startHotCorePolling() {
+  // 스레드 없음.
+}
+
+HotCoreStatus hotCoreStatusSnapshot() {
+  return HotCoreStatus{}; // enabled=false — JS 표면은 null.
+}
+
+} // namespace rustra::core
+
+#endif
+
+// ── folly::dynamic 진입점 — jsi::Value 오버로드의 dynamic 변환 wrapper ──
+// 변환 규칙: null/bool/int/double/string/array/object. int64 는 jsi 표면에
+// BigInt 생성이 없어 double 로 간다(2^53 초과 손실 — 헤더 계약에 명시).
+namespace {
+facebook::jsi::Value dynamicToValue(
+  facebook::jsi::Runtime& rt, const folly::dynamic& value) {
+  using facebook::jsi::Value;
+  switch (value.type()) {
+    case folly::dynamic::NULLT:
+      return Value::null();
+    case folly::dynamic::BOOL:
+      return Value(static_cast<bool>(value.asBool()));
+    case folly::dynamic::INT64:
+      return Value(static_cast<double>(value.asInt()));
+    case folly::dynamic::DOUBLE:
+      return Value(value.asDouble());
+    case folly::dynamic::STRING: {
+      const std::string& str = value.asString();
+      return facebook::jsi::String::createFromUtf8(
+        rt, reinterpret_cast<const uint8_t*>(str.data()), str.size());
+    }
+    case folly::dynamic::ARRAY: {
+      facebook::jsi::Array array(rt, value.size());
+      size_t index = 0;
+      for (const auto& item : value) {
+        array.setValueAtIndex(rt, index++, dynamicToValue(rt, item));
+      }
+      return Value(rt, array);
+    }
+    case folly::dynamic::OBJECT: {
+      facebook::jsi::Object object(rt);
+      for (const auto& [key, item] : value.items()) {
+        object.setProperty(
+          rt, facebook::jsi::String::createFromUtf8(rt, key.getString()), dynamicToValue(rt, item));
+      }
+      return Value(rt, object);
+    }
+  }
+  return facebook::jsi::Value::undefined();
+}
+} // namespace
+
+TypedInvokeResult invokeTypedByNameDynamic(
+  facebook::jsi::Runtime& rt, const std::string& commandName,
+  const folly::dynamic& args) {
+  facebook::jsi::Value value = dynamicToValue(rt, args);
+  return invokeTypedByName(rt, commandName, value);
+}
+
+TypedInvokeResult invokeTypedByIdDynamic(
+  facebook::jsi::Runtime& rt, uint16_t commandId,
+  const folly::dynamic& args) {
+  facebook::jsi::Value value = dynamicToValue(rt, args);
+  return invokeTypedById(rt, commandId, value);
 }
 
 } // namespace rustra

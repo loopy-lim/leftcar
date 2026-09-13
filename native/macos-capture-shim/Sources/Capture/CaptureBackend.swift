@@ -2,56 +2,6 @@ import Foundation
 import AppKit
 import CoreGraphics
 
- enum CaptureBackendKind: String {
-    case screenCaptureKit
-    case cgDisplayStream
-
-    static func parse(_ value: String?) -> CaptureBackendKind? {
-        guard let value else { return .screenCaptureKit }
-        switch value.lowercased() {
-        case "sck", "screencapturekit": return .screenCaptureKit
-        case "cg", "cgdisplaystream": return .cgDisplayStream
-        default: return nil
-        }
-    }
-}
-
- enum MediaTransportKind: String {
-    case udp
-    case tcp
-    case usb
-    case adbTcp
-
-    var usesTCP: Bool {
-        self == .tcp || self == .usb || self == .adbTcp
-    }
-
-    static func parse(_ value: String?) -> MediaTransportKind? {
-        guard let value else { return .udp }
-        switch value.lowercased() {
-        case "udp": return .udp
-        case "tcp", "wifitcp", "wifi-tcp": return .tcp
-        case "usb", "aoap": return .usb
-        case "adbtcp", "adb-tcp": return .adbTcp
-        default: return nil
-        }
-    }
-}
-
- enum StreamContentMode: String {
-    case interactive
-    case video
-
-    static func parse(_ value: String?) -> StreamContentMode? {
-        guard let value else { return .interactive }
-        switch value.lowercased() {
-        case "interactive", "latency": return .interactive
-        case "video", "movie": return .video
-        default: return nil
-        }
-    }
-}
-
 struct NativePixelSize: Equatable {
     let width: Int
     let height: Int
@@ -225,39 +175,8 @@ func nativePixelSize(
     return (selected.width, selected.height)
 }
 
- func coreGraphicsCatalogJSON() -> String? {
-    var count: UInt32 = 0
-    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
-        return nil
-    }
-    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
-    var filled = count
-    guard CGGetActiveDisplayList(count, &displayIDs, &filled) == .success else {
-        return nil
-    }
-    let mainDisplayID = CGMainDisplayID()
-    let sortedIDs = displayIDs.prefix(Int(filled)).sorted { lhs, rhs in
-        if lhs == mainDisplayID { return true }
-        if rhs == mainDisplayID { return false }
-        return lhs < rhs
-    }
-    let entries: [[String: Any]] = sortedIDs.enumerated().map { index, displayID in
-        let pixelSize = nativePixelSize(for: displayID)
-        return [
-            "index": index,
-            "name": "Display \(index)",
-            "width": pixelSize.width,
-            "height": pixelSize.height,
-        ]
-    }
-    guard let data = try? JSONSerialization.data(withJSONObject: entries),
-          let json = String(data: data, encoding: .utf8) else {
-        return nil
-    }
-    return json
-}
-
- func activeDisplayIDs() -> [CGDirectDisplayID] {
+/// 활성 디스플레이 ID를 메인 디스플레이 우선으로 정렬해 돌려준다.
+func sortedActiveDisplayIDs() -> [CGDirectDisplayID] {
     var count: UInt32 = 0
     guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
         return []
@@ -273,4 +192,36 @@ func nativePixelSize(
         if rhs == mainDisplayID { return false }
         return lhs < rhs
     }
+}
+
+func stableDisplaySourceID(_ displayID: CGDirectDisplayID) -> String? {
+    guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
+          let value = CFUUIDCreateString(nil, uuid) else { return nil }
+    return "macos:display:\(value)".lowercased()
+}
+
+func coreGraphicsCatalogJSON() -> String? {
+    let sortedIDs = sortedActiveDisplayIDs()
+    guard !sortedIDs.isEmpty else {
+        return nil
+    }
+    let entries: [[String: Any]] = sortedIDs.enumerated().map { index, displayID in
+        let pixelSize = nativePixelSize(for: displayID)
+        return [
+            "index": index,
+            "sourceId": stableDisplaySourceID(displayID) as Any? ?? NSNull(),
+            "name": "Display \(index)",
+            "width": pixelSize.width,
+            "height": pixelSize.height,
+        ]
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: entries),
+          let json = String(data: data, encoding: .utf8) else {
+        return nil
+    }
+    return json
+}
+
+func activeDisplayIDs() -> [CGDirectDisplayID] {
+    sortedActiveDisplayIDs()
 }

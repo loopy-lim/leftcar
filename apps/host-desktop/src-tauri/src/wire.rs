@@ -15,12 +15,49 @@ const MEDIA_HEADER: usize = FRAME_HEADER_V1_LEN;
 pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - FRAME_HEADER_V2_LEN;
 pub const PARITY_HEADER: usize = 19;
 
+/// Seal exactly one existing media packet; TCP prefixes the sealed length.
+pub fn seal_media_packet(
+    tx: &secure_channel::DatagramSealer,
+    packet: &[u8],
+    tcp: bool,
+) -> std::io::Result<Vec<u8>> {
+    if packet.is_empty() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let sealed = tx
+        .seal(packet)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if tcp {
+        Ok([&(sealed.len() as u32).to_be_bytes()[..], &sealed].concat())
+    } else {
+        Ok(sealed)
+    }
+}
+/// Preserve callers' plaintext completeness contract without hiding short
+/// encrypted submissions. A local success is not delivery acknowledgement.
+pub fn complete_plaintext_send(
+    plaintext: usize,
+    wire: usize,
+    submitted: usize,
+) -> std::io::Result<usize> {
+    if submitted != wire {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("partial sealed media submission: {submitted}/{wire}"),
+        ));
+    }
+    Ok(plaintext)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     PointerMove {
         x: u16,
         y: u16,
         buttons: u32,
+        /// 스타일러스 압력(0.0-1.0). 없으면 None — 와이어 길이로 구분한다
+        /// (18/22바이트 move, 20/24바이트 button).
+        pressure: Option<f32>,
     },
     PointerButton {
         x: u16,
@@ -28,6 +65,7 @@ pub enum InputEvent {
         button: u8,
         down: bool,
         buttons: u32,
+        pressure: Option<f32>,
     },
     Scroll {
         horizontal_milli: i32,
@@ -77,14 +115,21 @@ impl InputSequencer {
         let reliable = message[9] & 1 == 1;
 
         if !reliable {
-            if kind != 1 || message.len() != 18 || !is_newer(sequence, self.last_pointer) {
+            if kind != 1 || !is_newer(sequence, self.last_pointer) {
                 return InputDecision::Ignore;
             }
+            // 18바이트 = 압력 없음(구형 뷰어), 22바이트 = 스타일러스 압력.
+            let pressure = match message.len() {
+                18 => None,
+                22 => Some(read_f32(message, 18)),
+                _ => return InputDecision::Ignore,
+            };
             self.last_pointer = sequence;
             return InputDecision::Apply(InputEvent::PointerMove {
                 x: read_u16(message, 10),
                 y: read_u16(message, 12),
                 buttons: read_u32(message, 14),
+                pressure,
             });
         }
 
@@ -106,13 +151,22 @@ impl InputSequencer {
             return InputDecision::Ignore;
         }
         let event = match kind {
-            2 if message.len() == 20 => InputEvent::PointerButton {
-                x: read_u16(message, 10),
-                y: read_u16(message, 12),
-                button: message[14],
-                down: message[15] != 0,
-                buttons: read_u32(message, 16),
-            },
+            2 => {
+                // 20바이트 = 압력 없음(구형 뷰어), 24바이트 = 스타일러스 압력.
+                let pressure = match message.len() {
+                    20 => None,
+                    24 => Some(read_f32(message, 20)),
+                    _ => return InputDecision::Ignore,
+                };
+                InputEvent::PointerButton {
+                    x: read_u16(message, 10),
+                    y: read_u16(message, 12),
+                    button: message[14],
+                    down: message[15] != 0,
+                    buttons: read_u32(message, 16),
+                    pressure,
+                }
+            }
             3 if message.len() == 18 => InputEvent::Scroll {
                 horizontal_milli: read_i32(message, 10),
                 vertical_milli: read_i32(message, 14),
@@ -154,26 +208,28 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
+fn read_f32(message: &[u8], at: usize) -> f32 {
+    f32::from_bits(read_u32(message, at))
+}
+
 fn read_i32(data: &[u8], offset: usize) -> i32 {
     i32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
-pub fn authenticated<'a>(datagram: &'a [u8], token: &[u8]) -> Option<&'a [u8]> {
-    datagram
-        .strip_suffix(token)
-        .filter(|message| !message.is_empty())
+/// `LCH1 ‖ nonce` challenge body. It is sent AEAD-sealed (media-path key);
+/// the random nonce gives the reachability proof freshness, and possession of
+/// the key — not the nonce — is what authenticates every later datagram.
+pub fn challenge(nonce: &[u8]) -> Vec<u8> {
+    [b"LCH1".as_slice(), nonce].concat()
 }
 
-pub fn challenge(token: &[u8]) -> Vec<u8> {
-    [b"LCH1".as_slice(), token].concat()
-}
-
-pub fn input_ack(sequence: u32, enabled: bool, token: &[u8]) -> Vec<u8> {
-    let mut ack = Vec::with_capacity(9 + token.len());
+/// Reliable-input acknowledgement. The sealed frame authenticates it; there
+/// is no plaintext token suffix.
+pub fn input_ack(sequence: u32, enabled: bool) -> Vec<u8> {
+    let mut ack = Vec::with_capacity(9);
     ack.extend_from_slice(b"LCA1");
     ack.extend_from_slice(&sequence.to_be_bytes());
     ack.push(u8::from(enabled));
-    ack.extend_from_slice(token);
     ack
 }
 
@@ -186,11 +242,10 @@ pub const TERMINATION_STOPPED: u8 = 3;
 
 /// Authenticated session-termination notice. The viewer stops rendering and
 /// closes its window when it receives one instead of timing out on its own.
-pub fn termination(reason: u8, token: &[u8]) -> Vec<u8> {
-    let mut notice = Vec::with_capacity(5 + token.len());
+pub fn termination(reason: u8) -> Vec<u8> {
+    let mut notice = Vec::with_capacity(5);
     notice.extend_from_slice(b"LCT1");
     notice.push(reason);
-    notice.extend_from_slice(token);
     notice
 }
 
@@ -356,6 +411,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sealed_packet_preserves_plaintext_contract_and_rejects_short_submission() {
+        let tx = secure_channel::DatagramSealer::new([3; 32]);
+        for tcp in [false, true] {
+            let envelope = seal_media_packet(&tx, &[7; 1384], tcp).unwrap();
+            assert_eq!(envelope.len(), if tcp { 1412 } else { 1408 });
+            if tcp {
+                assert_eq!(&envelope[..4], &1408u32.to_be_bytes());
+            }
+            assert_eq!(
+                complete_plaintext_send(1384, envelope.len(), envelope.len()).unwrap(),
+                1384
+            );
+            assert!(complete_plaintext_send(1384, envelope.len(), envelope.len() - 1).is_err());
+        }
+        assert!(seal_media_packet(&tx, &[], false).is_err());
+        assert!(seal_media_packet(&tx, &vec![0; 65_537], true).is_err());
+    }
+
+    #[test]
     fn lan_media_datagram_budget_stays_below_ethernet_mtu() {
         assert_eq!(MAX_DATAGRAM, 1_400);
         assert_eq!(MAX_MEDIA_PAYLOAD, 1_367);
@@ -412,6 +486,61 @@ mod tests {
     }
 
     #[test]
+    fn stylus_pressure_decodes_by_wire_length() {
+        // move(kind 1, unreliable): 18바이트 = 압력 없음, 22바이트 = 압력.
+        let mut move_plain = Vec::from(b"LCI1".as_slice());
+        move_plain.extend_from_slice(&1u32.to_be_bytes());
+        move_plain.extend_from_slice(&[1, 0]);
+        move_plain.extend_from_slice(&10u16.to_be_bytes());
+        move_plain.extend_from_slice(&20u16.to_be_bytes());
+        move_plain.extend_from_slice(&1u32.to_be_bytes());
+        let mut move_stylus = move_plain.clone();
+        move_stylus.extend_from_slice(&0.5f32.to_be_bytes());
+
+        match InputSequencer::default().accept(&move_plain) {
+            InputDecision::Apply(InputEvent::PointerMove { pressure: None, .. }) => {}
+            other => panic!("plain move must decode without pressure: {other:?}"),
+        }
+        match InputSequencer::default().accept(&move_stylus) {
+            InputDecision::Apply(InputEvent::PointerMove {
+                pressure: Some(value),
+                ..
+            }) => assert_eq!(value, 0.5),
+            other => panic!("stylus move must carry pressure: {other:?}"),
+        }
+
+        // button(kind 2, reliable): 20바이트 = 압력 없음, 24바이트 = 압력.
+        let mut button_plain = Vec::from(b"LCI1".as_slice());
+        button_plain.extend_from_slice(&1u32.to_be_bytes());
+        button_plain.extend_from_slice(&[2, 1]);
+        button_plain.extend_from_slice(&10u16.to_be_bytes());
+        button_plain.extend_from_slice(&20u16.to_be_bytes());
+        button_plain.extend_from_slice(&[1, 1]);
+        button_plain.extend_from_slice(&1u32.to_be_bytes());
+        let mut button_stylus = button_plain.clone();
+        button_stylus.extend_from_slice(&0.75f32.to_be_bytes());
+
+        match InputSequencer::default().accept(&button_plain) {
+            InputDecision::ApplyAndAck {
+                event: InputEvent::PointerButton { pressure: None, .. },
+                ..
+            } => {}
+            other => panic!("plain button must decode without pressure: {other:?}"),
+        }
+        match InputSequencer::default().accept(&button_stylus) {
+            InputDecision::ApplyAndAck {
+                event:
+                    InputEvent::PointerButton {
+                        pressure: Some(value),
+                        ..
+                    },
+                ..
+            } => assert_eq!(value, 0.75),
+            other => panic!("stylus button must carry pressure: {other:?}"),
+        }
+    }
+
+    #[test]
     fn text_input_decodes_and_acks_like_other_reliable_events() {
         let mut sequencer = InputSequencer::default();
         let mut packet = Vec::from(b"LCI1".as_slice());
@@ -447,15 +576,75 @@ mod tests {
 
     #[test]
     fn input_ack_carries_the_current_host_permission_state() {
-        let enabled = input_ack(7, true, b"nonce");
+        let enabled = input_ack(7, true);
         assert_eq!(&enabled[..4], b"LCA1");
         assert_eq!(&enabled[4..8], &7u32.to_be_bytes());
         assert_eq!(enabled[8], 1);
-        assert_eq!(&enabled[9..], b"nonce");
 
-        let disabled = input_ack(8, false, b"nonce");
+        let disabled = input_ack(8, false);
         assert_eq!(disabled[8], 0);
-        assert_eq!(&disabled[9..], b"nonce");
+        assert_eq!(disabled.len(), 9);
+    }
+
+    #[test]
+    fn sealed_viewer_input_round_trips_through_host_parse() {
+        // Media-path sealing wraps the whole input datagram. Host side: open
+        // with the c2s opener, then run the plaintext through the sequencer.
+        let key = [7u8; 32];
+        let tx = secure_channel::DatagramSealer::new(key);
+        let rx = secure_channel::DatagramSealer::new(key);
+        let mut packet = Vec::from(b"LCI1".as_slice());
+        packet.extend_from_slice(&1u32.to_be_bytes());
+        packet.extend_from_slice(&[5, 1]);
+        let sealed = tx.seal(&packet).unwrap();
+        // Sealed frames add exactly counter + tag bytes over the plaintext.
+        assert_eq!(sealed.len(), packet.len() + 24);
+        let opened = rx.open(&sealed).unwrap();
+        assert_eq!(opened, packet);
+        assert!(matches!(
+            InputSequencer::default().accept(&opened),
+            InputDecision::ApplyAndAck { sequence: 1, .. }
+        ));
+        // A tampered or replayed datagram never reaches the wire parsers.
+        assert_eq!(rx.open(&sealed), Err(secure_channel::OpenError::Replay));
+        // A fresh (unseen) counter with a flipped Poly1305 tag byte must fail
+        // authentication, not merely look like a replay.
+        let fresh = tx.seal(&packet).unwrap();
+        let mut tampered = fresh;
+        tampered[9] ^= 1;
+        assert_eq!(rx.open(&tampered), Err(secure_channel::OpenError::Auth));
+    }
+
+    #[test]
+    fn sealed_reachability_challenge_round_trips() {
+        // The host seals `LCH1+nonce`; the authenticated viewer echoes the
+        // same plaintext under its own direction; the host compares plaintext.
+        let key = [9u8; 32];
+        let host_tx = secure_channel::DatagramSealer::new(key);
+        let host_rx = secure_channel::DatagramSealer::new(key);
+        let viewer_tx = secure_channel::DatagramSealer::new(key);
+        let viewer_rx = secure_channel::DatagramSealer::new(key);
+        let plaintext = challenge(b"nonce-32-bytes-long-aaaaaaaaaaaa!");
+        let wire_challenge = host_tx.seal(&plaintext).unwrap();
+        assert!(
+            !wire_challenge.starts_with(b"LCH1"),
+            "wire bytes are sealed"
+        );
+        let opened = viewer_rx.open(&wire_challenge).unwrap();
+        assert_eq!(opened, plaintext);
+        assert!(opened.starts_with(b"LCH1"));
+        let echo = viewer_tx.seal(&opened).unwrap();
+        assert_eq!(host_rx.open(&echo).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn termination_notice_matches_viewer_wire_format() {
+        let notice = termination(TERMINATION_HEALTH);
+        assert_eq!(&notice[..4], b"LCT1");
+        assert_eq!(notice[4], TERMINATION_HEALTH);
+        // The Android parser accepts exactly 5 bytes; a length drift would
+        // silently drop every notice during a rolling upgrade.
+        assert_eq!(notice.len(), 5);
     }
 
     #[test]
@@ -466,18 +655,6 @@ mod tests {
             h264_parameter_sets(&annex_b),
             vec![vec![0x67, 1], vec![0x68, 2]]
         );
-    }
-
-    #[test]
-    fn termination_notice_matches_viewer_wire_format() {
-        let token = b"nonce";
-        let notice = termination(TERMINATION_HEALTH, token);
-        assert_eq!(&notice[..4], b"LCT1");
-        assert_eq!(notice[4], TERMINATION_HEALTH);
-        assert_eq!(&notice[5..], token);
-        // The Android parser accepts exactly 5 + token bytes; a length drift
-        // would silently drop every notice during a rolling upgrade.
-        assert_eq!(notice.len(), 5 + token.len());
     }
 
     #[test]

@@ -4,6 +4,8 @@
 조사 기준일: 2026-08-17  
 구현 상태: v0.1.0 구현, QR 페어링 인증 포함
 
+현재 개발 브랜치의 변경·검증 경계는 [2026-09 감사 개선 검증 현황](2026-09-13-audit-remediation-validation.md)을 함께 확인한다. 아래 제안 문서의 과거 목표와 현재 실기기 증거는 구분한다.
+
 ## 먼저 읽을 결론
 
 Leftcar의 첫 버전은 XR 애플리케이션이 아니다. Galaxy XR에서 실행되는 **멀티 인스턴스 일반 Android 앱**이다. Android XR의 Home Space가 같은 앱의 여러 task/Activity 인스턴스를 각각 독립적인 2D 창으로 보여 준다. 기본 매핑은 `원격 source 하나 = StreamActivity 창 하나`다.

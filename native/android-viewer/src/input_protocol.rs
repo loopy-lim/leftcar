@@ -35,6 +35,10 @@ pub enum InputEvent {
         x: u16,
         y: u16,
         buttons: u32,
+        /// 스타일러스 압력(0.0-1.0). 손가락·마우스는 None — 페이로드에
+        /// 4바이트 f32 BE가追加되고, 없으면 예전 길이 그대로다(호스트는
+        /// 길이로 구분한다).
+        pressure: Option<f32>,
     },
     PointerButton {
         x: u16,
@@ -42,6 +46,7 @@ pub enum InputEvent {
         button: u8,
         down: bool,
         buttons: u32,
+        pressure: Option<f32>,
     },
     Scroll {
         horizontal_milli_lines: i32,
@@ -82,10 +87,16 @@ impl InputEvent {
 
     fn encode_payload(&self, out: &mut Vec<u8>) {
         match self {
-            Self::PointerMove { x, y, buttons } => {
+            Self::PointerMove {
+                x,
+                y,
+                buttons,
+                pressure,
+            } => {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
                 out.extend_from_slice(&buttons.to_be_bytes());
+                push_pressure(out, pressure);
             }
             Self::PointerButton {
                 x,
@@ -93,12 +104,14 @@ impl InputEvent {
                 button,
                 down,
                 buttons,
+                pressure,
             } => {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
                 out.push(*button);
                 out.push(u8::from(*down));
                 out.extend_from_slice(&buttons.to_be_bytes());
+                push_pressure(out, pressure);
             }
             Self::Scroll {
                 horizontal_milli_lines,
@@ -134,8 +147,10 @@ pub struct OutboundInput {
     pub event: InputEvent,
 }
 
-pub fn encode_input(outbound: &OutboundInput, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(INPUT_HEADER_LEN + 16 + token.len());
+/// One input datagram. The frame is AEAD-sealed with the session media key
+/// before it leaves the socket boundary; there is no inline session token.
+pub fn encode_input(outbound: &OutboundInput) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(INPUT_HEADER_LEN + 16);
     bytes.extend_from_slice(INPUT_MAGIC);
     bytes.extend_from_slice(&outbound.sequence.to_be_bytes());
     bytes.push(outbound.event.kind());
@@ -145,7 +160,6 @@ pub fn encode_input(outbound: &OutboundInput, token: &[u8]) -> Vec<u8> {
         0
     });
     outbound.event.encode_payload(&mut bytes);
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -155,30 +169,23 @@ pub struct InputAck {
     pub enabled: Option<bool>,
 }
 
-pub fn parse_ack(packet: &[u8], token: &[u8]) -> Option<InputAck> {
-    if token.is_empty() || packet.get(..4)? != ACK_MAGIC {
+pub fn parse_ack(packet: &[u8]) -> Option<InputAck> {
+    if packet.get(..4)? != ACK_MAGIC {
         return None;
     }
-    let (token_offset, enabled) = match packet.len().checked_sub(token.len())? {
-        8 => (8, None),
-        9 => (9, Some(*packet.get(8)? != 0)),
+    let enabled = match packet.len() {
+        8 => None,
+        9 => Some(*packet.get(8)? != 0),
         _ => return None,
     };
-    if packet[token_offset..] != *token {
-        return None;
-    }
     Some(InputAck {
         sequence: u32::from_be_bytes(packet[4..8].try_into().ok()?),
         enabled,
     })
 }
 
-pub fn parse_input_status(packet: &[u8], token: &[u8]) -> Option<bool> {
-    if token.is_empty()
-        || packet.len() != 5 + token.len()
-        || &packet[..4] != STATUS_MAGIC
-        || packet[5..] != *token
-    {
+pub fn parse_input_status(packet: &[u8]) -> Option<bool> {
+    if packet.len() != 5 || &packet[..4] != STATUS_MAGIC {
         return None;
     }
     match packet[4] {
@@ -188,12 +195,11 @@ pub fn parse_input_status(packet: &[u8], token: &[u8]) -> Option<bool> {
     }
 }
 
-pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(16 + token.len());
+pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(LATENCY_PROBE_MAGIC);
     bytes.extend_from_slice(&sequence.to_be_bytes());
     bytes.extend_from_slice(&viewer_send_ms.to_be_bytes());
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -218,21 +224,16 @@ impl TerminationReason {
     }
 }
 
-pub fn encode_termination(reason: TerminationReason, token: &[u8]) -> Vec<u8> {
+pub fn encode_termination(reason: TerminationReason) -> Vec<u8> {
     let code = reason.code();
-    let mut bytes = Vec::with_capacity(5 + token.len());
+    let mut bytes = Vec::with_capacity(5);
     bytes.extend_from_slice(TERMINATION_MAGIC);
     bytes.push(code);
-    bytes.extend_from_slice(token);
     bytes
 }
 
-pub fn parse_termination(packet: &[u8], token: &[u8]) -> Option<TerminationReason> {
-    if token.is_empty()
-        || packet.len() != 5 + token.len()
-        || &packet[..4] != TERMINATION_MAGIC
-        || packet[5..] != *token
-    {
+pub fn parse_termination(packet: &[u8]) -> Option<TerminationReason> {
+    if packet.len() != 5 || &packet[..4] != TERMINATION_MAGIC {
         return None;
     }
     match packet[4] {
@@ -258,8 +259,8 @@ pub struct ReceiverFeedback {
     pub rendered_fps: u16,
 }
 
-pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(34 + token.len());
+pub fn encode_receiver_feedback(feedback: ReceiverFeedback) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(34);
     bytes.extend_from_slice(RECEIVER_FEEDBACK_MAGIC);
     bytes.extend_from_slice(&feedback.frame_gaps.to_be_bytes());
     bytes.extend_from_slice(&feedback.input_drops.to_be_bytes());
@@ -270,7 +271,6 @@ pub fn encode_receiver_feedback(feedback: ReceiverFeedback, token: &[u8]) -> Vec
     bytes.extend_from_slice(&feedback.stale_input_drops.to_be_bytes());
     bytes.extend_from_slice(&feedback.output_burst_discards.to_be_bytes());
     bytes.extend_from_slice(&feedback.rendered_fps.to_be_bytes());
-    bytes.extend_from_slice(token);
     bytes
 }
 
@@ -282,12 +282,8 @@ pub struct LatencyProbeResponse {
     pub host_send_ms: u64,
 }
 
-pub fn parse_latency_probe_response(packet: &[u8], token: &[u8]) -> Option<LatencyProbeResponse> {
-    if token.is_empty()
-        || packet.len() != 32 + token.len()
-        || &packet[..4] != LATENCY_RESPONSE_MAGIC
-        || packet[32..] != *token
-    {
+pub fn parse_latency_probe_response(packet: &[u8]) -> Option<LatencyProbeResponse> {
+    if packet.len() != 32 || &packet[..4] != LATENCY_RESPONSE_MAGIC {
         return None;
     }
     Some(LatencyProbeResponse {
@@ -323,6 +319,14 @@ pub fn estimate_latency(
     })
 }
 
+/// Stylus pressure rides as an optional f32 suffix; its presence extends the
+/// wire payload, which is how the host discriminates pressure frames.
+fn push_pressure(out: &mut Vec<u8>, pressure: &Option<f32>) {
+    if let Some(pressure) = pressure {
+        out.extend_from_slice(&pressure.to_be_bytes());
+    }
+}
+
 pub fn normalized_axis(value: f32) -> u16 {
     if !value.is_finite() {
         return 0;
@@ -352,7 +356,6 @@ pub struct InputScheduler {
     reliable: VecDeque<InputEvent>,
     pending: Option<PendingReliable>,
     next_reliable_sequence: u32,
-    dropped: u64,
 }
 
 impl InputScheduler {
@@ -367,16 +370,7 @@ impl InputScheduler {
             reliable: VecDeque::new(),
             pending: None,
             next_reliable_sequence: 1,
-            dropped: 0,
         }
-    }
-
-    pub fn polling_rate_hz(&self) -> u32 {
-        (1_000_000 / self.polling_interval_us.max(1)) as u32
-    }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped
     }
 
     /// A reconnect establishes a new authenticated nonce and therefore a new
@@ -393,6 +387,10 @@ impl InputScheduler {
     }
 
     pub fn push(&mut self, event: InputEvent) {
+        // 모든 포인터 이동(스타일러스 압력 포함)은 newest-wins 손실 경로다.
+        // 이동은 고빈도·자기 대체 이벤트라 신뢰 전송이 불필요하고, 두 호스트 모두
+        // kind-1 무신뢰 프레임을 ack 없이 적용한다. 압력 이동을 신뢰 큐에 넣으면
+        // ack가 영원히 오지 않아 재전송 후 ReleaseAll이 터진다.
         if matches!(event, InputEvent::PointerMove { .. }) {
             self.latest_pointer = Some(event);
             self.pointer_dirty = true;
@@ -405,7 +403,6 @@ impl InputScheduler {
             self.pointer_dirty = false;
         }
         if self.reliable.len() >= MAX_RELIABLE_QUEUE {
-            self.dropped = self.dropped.saturating_add(self.reliable.len() as u64 + 1);
             self.reliable.clear();
             self.pending = None;
             self.reliable.push_back(InputEvent::ReleaseAll);
@@ -425,7 +422,6 @@ impl InputScheduler {
                 MAX_RELIABLE_ATTEMPTS
             };
             if pending.attempts >= attempt_limit {
-                self.dropped = self.dropped.saturating_add(1);
                 self.pending = None;
                 self.reliable.clear();
                 self.reliable.push_back(InputEvent::ReleaseAll);
@@ -481,6 +477,9 @@ impl InputScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_crypto::test_media_key as key;
+    use crate::media_crypto::{MediaSessionCrypto, CHALLENGE_PREFIX};
+    use secure_channel::DatagramSealer;
 
     #[test]
     fn pointer_rate_is_twice_stream_fps() {
@@ -493,13 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_latency_probe_separates_rtt_and_clock_offset() {
-        let token = b"session-token";
-        let request = encode_latency_probe(7, 1_000, token);
+    fn latency_probe_separates_rtt_and_clock_offset() {
+        let request = encode_latency_probe(7, 1_000);
         assert_eq!(&request[..4], LATENCY_PROBE_MAGIC);
         assert_eq!(&request[4..8], &7u32.to_be_bytes());
         assert_eq!(&request[8..16], &1_000u64.to_be_bytes());
-        assert_eq!(&request[16..], token);
 
         // Android clock t0=1000/t3=1010, Host clock is +100 ms. The LAN adds
         // 5 ms each way and Host spends 1 ms constructing the response.
@@ -508,8 +505,7 @@ mod tests {
         packet.extend_from_slice(&1_000u64.to_be_bytes());
         packet.extend_from_slice(&1_105u64.to_be_bytes());
         packet.extend_from_slice(&1_106u64.to_be_bytes());
-        packet.extend_from_slice(token);
-        let response = parse_latency_probe_response(&packet, token).unwrap();
+        let response = parse_latency_probe_response(&packet).unwrap();
         assert_eq!(
             estimate_latency(response, 1_011),
             Some(LatencyEstimate {
@@ -517,44 +513,43 @@ mod tests {
                 host_clock_offset_ms: 100,
             })
         );
-        assert!(parse_latency_probe_response(&packet, b"wrong-token").is_none());
+        // A host response can only arrive opened from the media key; a
+        // truncated frame is not a probe response.
+        assert!(parse_latency_probe_response(&packet[..31]).is_none());
     }
 
     #[test]
-    fn termination_notice_round_trips_and_rejects_wrong_token() {
-        let token = b"session-token";
+    fn termination_notice_round_trips() {
         for reason in [
             TerminationReason::HealthCheck,
             TerminationReason::HostForced,
             TerminationReason::HostStopped,
         ] {
-            let packet = encode_termination(reason, token);
+            let packet = encode_termination(reason);
             assert_eq!(&packet[..4], TERMINATION_MAGIC);
-            assert_eq!(packet.len(), 5 + token.len());
-            assert_eq!(parse_termination(&packet, token), Some(reason));
+            assert_eq!(packet.len(), 5);
+            assert_eq!(parse_termination(&packet), Some(reason));
         }
-        let packet = encode_termination(TerminationReason::HostForced, token);
-        assert_eq!(parse_termination(&packet, b"wrong-token"), None);
-        assert_eq!(parse_termination(&packet[..4], token), None);
+        let packet = encode_termination(TerminationReason::HostForced);
+        assert_eq!(parse_termination(&packet[..4]), None);
+        let mut foreign = packet.clone();
+        foreign[0] = b'X';
+        assert_eq!(parse_termination(&foreign), None);
     }
 
     #[test]
-    fn receiver_feedback_is_fixed_width_and_nonce_authenticated() {
-        let token = b"session-token";
-        let packet = encode_receiver_feedback(
-            ReceiverFeedback {
-                frame_gaps: 1,
-                input_drops: 2,
-                incomplete_aus: 3,
-                stale_frames: 4,
-                network_rtt_ms: 5,
-                wire_to_decoder_ms: 6,
-                stale_input_drops: 7,
-                output_burst_discards: 8,
-                rendered_fps: 60,
-            },
-            token,
-        );
+    fn receiver_feedback_is_fixed_width() {
+        let packet = encode_receiver_feedback(ReceiverFeedback {
+            frame_gaps: 1,
+            input_drops: 2,
+            incomplete_aus: 3,
+            stale_frames: 4,
+            network_rtt_ms: 5,
+            wire_to_decoder_ms: 6,
+            stale_input_drops: 7,
+            output_burst_discards: 8,
+            rendered_fps: 60,
+        });
         assert_eq!(&packet[..4], RECEIVER_FEEDBACK_MAGIC);
         assert_eq!(&packet[4..8], &1u32.to_be_bytes());
         assert_eq!(&packet[8..12], &2u32.to_be_bytes());
@@ -565,8 +560,7 @@ mod tests {
         assert_eq!(&packet[24..28], &7u32.to_be_bytes());
         assert_eq!(&packet[28..32], &8u32.to_be_bytes());
         assert_eq!(&packet[32..34], &60u16.to_be_bytes());
-        assert_eq!(packet.len(), 34 + token.len());
-        assert_eq!(&packet[34..], token);
+        assert_eq!(packet.len(), 34);
     }
 
     #[test]
@@ -576,11 +570,13 @@ mod tests {
             x: 1,
             y: 2,
             buttons: 0,
+            pressure: None,
         });
         scheduler.push(InputEvent::PointerMove {
             x: 3,
             y: 4,
             buttons: 0,
+            pressure: None,
         });
         let first = scheduler.next_ready(1).unwrap();
         assert_eq!(
@@ -588,16 +584,62 @@ mod tests {
             InputEvent::PointerMove {
                 x: 3,
                 y: 4,
-                buttons: 0
+                buttons: 0,
+                pressure: None
             }
         );
         scheduler.push(InputEvent::PointerMove {
             x: 5,
             y: 6,
             buttons: 0,
+            pressure: None,
         });
         assert!(scheduler.next_ready(8_000).is_none());
         assert!(scheduler.next_ready(8_400).is_some());
+    }
+
+    #[test]
+    fn stylus_pressure_moves_stay_on_the_lossy_pointer_path() {
+        // 압력 이동도 일반 이동과 같은 newest-wins 경로를 쓴다: 두 호스트 모두
+        // kind-1 무신뢰 프레임은 ack하지 않으므로, 압력 이동이 신뢰 큐에 들어가면
+        // 재전송 12번 뒤 ReleaseAll이 강제됐다(회귀 방지 잠금).
+        let mut scheduler = InputScheduler::new(60);
+        scheduler.push(InputEvent::PointerMove {
+            x: 1,
+            y: 2,
+            buttons: 1,
+            pressure: Some(0.5),
+        });
+        scheduler.push(InputEvent::PointerMove {
+            x: 3,
+            y: 4,
+            buttons: 1,
+            pressure: Some(0.75),
+        });
+        let first = scheduler.next_ready(1).unwrap();
+        assert!(!first.event.is_reliable());
+        assert_eq!(
+            first.event,
+            InputEvent::PointerMove {
+                x: 3,
+                y: 4,
+                buttons: 1,
+                pressure: Some(0.75)
+            }
+        );
+        // 신뢰 카운터를 소모하지 않는다 — 다음 신뢰 이벤트가 시퀀스 1을 받는다.
+        scheduler.push(InputEvent::Key {
+            key_code: 29,
+            scan_code: 30,
+            meta_state: 0,
+            down: true,
+            repeat: 0,
+        });
+        let key = scheduler.next_ready(20_000).unwrap();
+        assert!(key.event.is_reliable());
+        assert_eq!(key.sequence, 1);
+        assert!(scheduler.acknowledge(key.sequence));
+        assert!(scheduler.next_ready(20_001).is_none());
     }
 
     #[test]
@@ -637,6 +679,7 @@ mod tests {
             x: 10,
             y: 20,
             buttons: 1,
+            pressure: None,
         });
         scheduler.push(InputEvent::ReleaseAll);
         let release = scheduler.next_ready(2).unwrap();
@@ -665,35 +708,28 @@ mod tests {
     }
 
     #[test]
-    fn wire_format_binds_ack_to_session_token() {
-        let token = b"session-token";
-        let outbound = OutboundInput {
-            sequence: 7,
-            event: InputEvent::ReleaseAll,
-        };
-        let packet = encode_input(&outbound, token);
-        assert_eq!(&packet[..4], INPUT_MAGIC);
-        assert_eq!(&packet[4..8], &7u32.to_be_bytes());
-        assert_eq!(*packet.last().unwrap(), *token.last().unwrap());
-
+    fn sealed_ack_and_status_round_trip_like_the_host_wire() {
+        // The host builds these plaintext frames and seals them at the socket
+        // boundary with the s2c key; the viewer opens them before parsing.
+        let crypto = MediaSessionCrypto::new(key(7));
+        let host_keys = secure_channel::media_keys(&key(7));
+        let host = DatagramSealer::new(host_keys.s2c);
         let mut ack = ACK_MAGIC.to_vec();
         ack.extend_from_slice(&7u32.to_be_bytes());
-        ack.extend_from_slice(token);
+        let sealed_ack = host.seal(&ack).unwrap();
         assert_eq!(
-            parse_ack(&ack, token),
+            parse_ack(&crypto.open(&sealed_ack).unwrap()),
             Some(InputAck {
                 sequence: 7,
                 enabled: None,
             })
         );
-        assert_eq!(parse_ack(&ack, b"other-token"), None);
 
         let mut stateful_ack = ACK_MAGIC.to_vec();
         stateful_ack.extend_from_slice(&7u32.to_be_bytes());
         stateful_ack.push(1);
-        stateful_ack.extend_from_slice(token);
         assert_eq!(
-            parse_ack(&stateful_ack, token),
+            parse_ack(&crypto.open(&host.seal(&stateful_ack).unwrap()).unwrap()),
             Some(InputAck {
                 sequence: 7,
                 enabled: Some(true),
@@ -702,21 +738,86 @@ mod tests {
 
         let mut status = STATUS_MAGIC.to_vec();
         status.push(0);
-        status.extend_from_slice(token);
-        assert_eq!(parse_input_status(&status, token), Some(false));
+        assert_eq!(
+            parse_input_status(&crypto.open(&host.seal(&status).unwrap()).unwrap()),
+            Some(false)
+        );
         status[4] = 1;
-        assert_eq!(parse_input_status(&status, token), Some(true));
+        assert_eq!(
+            parse_input_status(&crypto.open(&host.seal(&status).unwrap()).unwrap()),
+            Some(true)
+        );
+        // A frame sealed under a different key never opens, so it can never
+        // reach these parsers.
+        let impostor = DatagramSealer::new(key(8));
+        assert!(crypto.open(&impostor.seal(&status).unwrap()).is_none());
+    }
+
+    #[test]
+    fn stylus_pressure_extends_the_wire_by_four_bytes() {
+        // 압력 없음(손가락·마우스)은 예전 길이 그대로, 스타일러스 압력은
+        // f32 BE 4바이트를 뒤에 붙인다 — 호스트는 길이로 구분한다.
+        let plain = encode_input(&OutboundInput {
+            sequence: 7,
+            event: InputEvent::PointerMove {
+                x: 1,
+                y: 2,
+                buttons: 0,
+                pressure: None,
+            },
+        });
+        assert_eq!(plain.len(), 18);
+        let stylus = encode_input(&OutboundInput {
+            sequence: 7,
+            event: InputEvent::PointerMove {
+                x: 1,
+                y: 2,
+                buttons: 1,
+                pressure: Some(0.75),
+            },
+        });
+        assert_eq!(stylus.len(), 22);
+        assert_eq!(f32::from_be_bytes(stylus[18..22].try_into().unwrap()), 0.75);
+
+        let plain_button = encode_input(&OutboundInput {
+            sequence: 8,
+            event: InputEvent::PointerButton {
+                x: 1,
+                y: 2,
+                button: 1,
+                down: true,
+                buttons: 1,
+                pressure: None,
+            },
+        });
+        assert_eq!(plain_button.len(), 20);
+        let stylus_button = encode_input(&OutboundInput {
+            sequence: 8,
+            event: InputEvent::PointerButton {
+                x: 1,
+                y: 2,
+                button: 1,
+                down: true,
+                buttons: 1,
+                pressure: Some(0.5),
+            },
+        });
+        assert_eq!(stylus_button.len(), 24);
+        assert_eq!(
+            f32::from_be_bytes(stylus_button[20..24].try_into().unwrap()),
+            0.5
+        );
     }
 
     #[test]
     fn every_event_matches_the_host_wire_layout() {
-        let token = b"nonce";
         let cases = [
             (
                 InputEvent::PointerMove {
                     x: 1,
                     y: 2,
                     buttons: 3,
+                    pressure: None,
                 },
                 1,
                 false,
@@ -729,6 +830,7 @@ mod tests {
                     button: 1,
                     down: true,
                     buttons: 1,
+                    pressure: None,
                 },
                 2,
                 true,
@@ -767,11 +869,10 @@ mod tests {
         ];
 
         for (event, kind, reliable, message_len) in cases {
-            let packet = encode_input(&OutboundInput { sequence: 7, event }, token);
-            assert_eq!(packet.len(), message_len + token.len());
+            let packet = encode_input(&OutboundInput { sequence: 7, event });
+            assert_eq!(packet.len(), message_len);
             assert_eq!(packet[8], kind);
             assert_eq!(packet[9] & INPUT_FLAG_RELIABLE != 0, reliable);
-            assert_eq!(&packet[message_len..], token);
         }
     }
 
@@ -784,15 +885,16 @@ mod tests {
 
     #[test]
     fn text_payload_round_trips_utf8_bytes_and_requeues_until_ack() {
-        let token = b"nonce";
         let event = InputEvent::Text {
             text: "안녕하세요 world".to_string(),
         };
         assert!(event.is_reliable());
-        let packet = encode_input(&OutboundInput { sequence: 3, event }, token);
+        let packet = encode_input(&OutboundInput { sequence: 3, event });
         assert_eq!(packet[8], 6);
-        let payload = &packet[10..packet.len() - token.len()];
-        assert_eq!(std::str::from_utf8(payload).unwrap(), "안녕하세요 world");
+        assert_eq!(
+            std::str::from_utf8(&packet[10..]).unwrap(),
+            "안녕하세요 world"
+        );
 
         // Reliable semantics: the scheduler retransmits until acknowledged so
         // a lost datagram can never silently swallow committed IME text.
@@ -809,5 +911,30 @@ mod tests {
         );
         assert!(scheduler.acknowledge(first.sequence));
         assert!(scheduler.next_ready(20_002).is_none());
+    }
+
+    #[test]
+    fn sealed_challenge_and_input_survive_one_crypto_instance() {
+        // One session key seals every direction through derived directional
+        // keys: challenge echo, input, and the host's acks all flow through
+        // the same MediaSessionCrypto on the viewer side.
+        let crypto = MediaSessionCrypto::new(key(9));
+        let host_keys = secure_channel::media_keys(&key(9));
+        let host_tx = DatagramSealer::new(host_keys.s2c);
+        let challenge = [CHALLENGE_PREFIX, b"nonce"].concat();
+        let opened = crypto
+            .open_challenge(&host_tx.seal(&challenge).unwrap())
+            .unwrap();
+        crypto.establish();
+        let echo = crypto.seal(&opened).unwrap();
+        let host_rx = DatagramSealer::new(host_keys.c2s);
+        assert_eq!(host_rx.open(&echo).unwrap(), challenge);
+
+        let input = encode_input(&OutboundInput {
+            sequence: 1,
+            event: InputEvent::ReleaseAll,
+        });
+        let sealed_input = crypto.seal(&input).unwrap();
+        assert_eq!(host_rx.open(&sealed_input).unwrap(), input);
     }
 }

@@ -35,6 +35,11 @@ enum DualEncoderPipelineEvent {
         right: TileEncodedSample
     )
     case injectedRightDrop(lease: SplitFlowLease?, left: TileEncodedSample)
+    case pairExpired(
+        consecutiveExpiries: Int,
+        releasedPairs: Int,
+        releasedLeases: [SplitFlowLease]
+    )
     case dropped(
         reason: String,
         releasedPairs: Int,
@@ -55,6 +60,9 @@ final class DualEncoderPipeline {
     private var barrier: EncodedPairAssembler<TileEncodedSample>
     private var pairLifecycle = SplitPairLifecycleState()
     private var faultInjection = SplitFaultInjection()
+    // Expiry fences the whole admitted generation. Three consecutive failures
+    // retain the existing hard-recovery safety valve and reset its streak.
+    private var consecutivePairExpiries = 0
     private var stopped = false
 
     init(
@@ -157,7 +165,6 @@ final class DualEncoderPipeline {
         }
         let frameSequence = admission.sequence
         let generation = admission.generation
-        let requestKeyframe = admission.requestKeyframe
 
         splitter.prepare(source: captured.pixelBuffer) { [weak self] result in
             guard let self else { return }
@@ -176,7 +183,8 @@ final class DualEncoderPipeline {
                         captured: captured,
                         frameSequence: frameSequence,
                         generation: generation,
-                        requestKeyframe: requestKeyframe
+                        requestKeyframeLeft: admission.requestKeyframeLeft,
+                        requestKeyframeRight: admission.requestKeyframeRight
                     )
                 }
             }
@@ -187,6 +195,17 @@ final class DualEncoderPipeline {
     func requestPairedKeyframe(reason _: String) {
         guard !stopped else { return }
         pairLifecycle.requestPairedKeyframe()
+    }
+
+    /// Per-tile gap recovery (R2): force a keyframe on ONE encoder only.
+    /// VideoToolboxTileEncoder already takes forceKeyframe per encode
+    /// request, so the peer tile keeps producing deltas with zero
+    /// interruption. No recovery generation is bumped and no in-flight pair
+    /// is discarded — the emitted asymmetric pair (one IDR, one delta) is a
+    /// normal emit, not a recovery.
+    func requestTileKeyframe(side: TileSide, reason _: String) {
+        guard !stopped else { return }
+        pairLifecycle.requestTileKeyframe(side)
     }
 
     func updateAggregateBitrate(_ bitrate: Int) -> Bool {
@@ -210,7 +229,8 @@ final class DualEncoderPipeline {
         captured: PendingCaptureFrame,
         frameSequence: UInt64,
         generation: UInt64,
-        requestKeyframe: Bool
+        requestKeyframeLeft: Bool,
+        requestKeyframeRight: Bool
     ) {
         let leftRequest = TileEncodeRequest(
             side: .left,
@@ -220,7 +240,7 @@ final class DualEncoderPipeline {
             captureNs: captured.callbackNs,
             captureWallMs: captured.captureWallMs,
             recoveryGeneration: generation,
-            forceKeyframe: requestKeyframe,
+            forceKeyframe: requestKeyframeLeft,
             pixelBuffer: pair.left
         )
         if strategy == .mirrorLeft {
@@ -245,7 +265,7 @@ final class DualEncoderPipeline {
             captureNs: captured.callbackNs,
             captureWallMs: captured.captureWallMs,
             recoveryGeneration: generation,
-            forceKeyframe: requestKeyframe,
+            forceKeyframe: requestKeyframeRight,
             pixelBuffer: pair.right
         )
         leftEncoder.submit(leftRequest) { [weak self] result in
@@ -271,8 +291,13 @@ final class DualEncoderPipeline {
                     reason: "mirror-left encoder callback failed: \(error)"
                 )
             case let .success(left):
-                let lease = self.pairLifecycle.completePair(sequence: sequence)
-                guard !left.requestedKeyframe || left.isKeyframe else {
+                guard case let .emit(lease) = self.pairLifecycle.completeEncodedPair(
+                    sequence: sequence,
+                    leftRequested: left.requestedKeyframe,
+                    rightRequested: left.requestedKeyframe,
+                    leftKeyframe: left.isKeyframe,
+                    rightKeyframe: left.isKeyframe
+                ) else {
                     self.beginPairedRecovery(reason: "mirror-left keyframe mismatch")
                     return
                 }
@@ -325,10 +350,16 @@ final class DualEncoderPipeline {
                 case .wait:
                     self.schedulePairExpiry(generation: generation)
                 case let .emit(left, right):
-                    let lease = self.pairLifecycle.completePair(sequence: sequence)
-                    guard left.isKeyframe == right.isKeyframe,
-                          !left.requestedKeyframe || left.isKeyframe,
-                          !right.requestedKeyframe || right.isKeyframe else {
+                    self.consecutivePairExpiries = 0
+                    // Validate both encoder outputs before releasing this slot;
+                    // a rejected IDR belongs to the recovery's retirement set.
+                    guard case let .emit(lease) = self.pairLifecycle.completeEncodedPair(
+                        sequence: sequence,
+                        leftRequested: left.requestedKeyframe,
+                        rightRequested: right.requestedKeyframe,
+                        leftKeyframe: left.isKeyframe,
+                        rightKeyframe: right.isKeyframe
+                    ) else {
                         self.beginPairedRecovery(reason: "paired keyframe mismatch")
                         return
                     }
@@ -358,17 +389,44 @@ final class DualEncoderPipeline {
             guard let self,
                   !self.stopped,
                   generation == self.pairLifecycle.recoveryGeneration else { return }
-            if case .drop(requestPairedKeyframe: true) = self.barrier.expire(
+            let expiredSequences = self.barrier.takeExpiredSequences(
                 nowNs: DispatchTime.now().uptimeNanoseconds
-            ) {
-                self.beginPairedRecovery(reason: "encoded pair callback timeout")
-            }
+            )
+            guard !expiredSequences.isEmpty else { return }
+            self.handlePairCallbackExpiry(
+                expiredSequences: expiredSequences,
+                generation: generation
+            )
         }
+    }
+
+    /// Discard the unsent reference and every admitted dependent pair without
+    /// recreating encoders. A paired IDR in the new lifecycle/flow generation
+    /// reestablishes the reference chain; stale callbacks release nothing twice.
+    private func handlePairCallbackExpiry(
+        expiredSequences: [UInt64],
+        generation: UInt64
+    ) {
+        guard generation == pairLifecycle.recoveryGeneration else { return }
+        if consecutivePairExpiries >= 2 {
+            beginPairedRecovery(reason: "encoded pair callback timeout")
+            return
+        }
+        guard let recovery = pairLifecycle.expirePairs(
+            sequences: expiredSequences, generation: generation, barrier: &barrier
+        ) else { return }
+        consecutivePairExpiries += 1
+        event(.pairExpired(
+            consecutiveExpiries: consecutivePairExpiries,
+            releasedPairs: recovery.releasedPairCount,
+            releasedLeases: recovery.releasedLeases
+        ))
     }
 
     private func beginPairedRecovery(reason: String) {
         let recovery = pairLifecycle.beginPairedRecovery()
         barrier.reset()
+        consecutivePairExpiries = 0
         event(
             .dropped(
                 reason: reason,

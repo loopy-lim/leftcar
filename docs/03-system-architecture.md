@@ -574,3 +574,14 @@ mark session closing
 | Host shell | Tauri | source picker, permission, Rustra real-adapter proof (H15 `addNumbers -> 42`), package proof |
 | network wire | spike JSON, 제품 schema 미정 | version/fuzz/size tests |
 | Windows capture | Windows.Graphics.Capture | physical Windows E6 |
+
+## 15. 2026-09 감사 개선의 현재 구현 경계
+
+앞의 초기 설계와 기술 선택 게이트는 당시 제안이다. 현재 변경의 검증 상태는 [감사 개선 검증 현황](2026-09-13-audit-remediation-validation.md)에 기록한다.
+
+- Rust가 인증, 네트워크 패킷 수용·재정렬, 오디오 세대 검증, 영상 디코더 정책과 자원 예약을 담당한다. 압축 영상과 고빈도 입력은 JavaScript를 통과하지 않는다.
+- Kotlin의 `SplitDecoderCapability`는 기기가 광고하는 능력을 조회하며 디코더를 생성하지 않는다. `OpusAudioDecoder`는 Android `MediaCodec`의 단일 Opus 오디오·CSD·버퍼 변환 어댑터다. 이 두 경계와 대응 JVM 테스트만 구조 검사에서 좁게 허용하며, 허용 파일 내부의 네트워크·영상 디코더 생성도 검사한다.
+- macOS의 현재 Host와 shim은 source 승인과 인증된 오디오 소유자를 전달하는 v9 시작 경계를 함께 사용한다. 카탈로그의 안정된 `sourceId`를 시작·화면 변경·재시작·실제 네이티브 선택까지 확인한다. 승인 및 저장 실패 정책은 [보안 문서 §21](07-security-privacy.md)을 따른다.
+- 디코더 광고 능력은 동시 실행 성공 증거가 아니다. 모르면 한 슬롯, 알려진 값도 최대 네 슬롯으로 제한하고, 실제 종료가 확인될 때 예약을 반환한다. 표시 모드의 기본은 `immediate`, 실험적 `balanced`와 Opus 사용은 선택 사항이다.
+- 각 캡처·렌더러 소유 객체가 측정 식별자를 가진다. 렌더러는 실제로 마지막 해제된 출력 PTS에 입력 메타데이터를 연결하고, 거부·초기화·퇴거 등으로 연결할 수 없으면 지연을 미확인으로 표시한다. Surface 해제는 물리 화면 표시 시각이 아니다.
+- RTX의 전체 6 MiB 예산은 프로세스 공통이다. 스트림마다 같은 값을 더하지 않으며, 논리 보관 바이트와 프로세스 RSS를 구분한다.

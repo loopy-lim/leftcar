@@ -10,9 +10,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 domain = { workspace = true }
+base64 = "0.22"
 schemars = "0.8"
 # Rustra pin (H02): vetted public main commit. Do not track branches.
-rustra = { git = "https://github.com/loopy-lim/rustra", rev = "a9e3ee6b12c031f328e2b6ed93bd667f0085119c" }
+rustra = { git = "https://github.com/loopy-lim/rustra", rev = "643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0" }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -1,0 +1,28 @@
+// Shared production policy, executed by both Android app configuration and
+// an isolated Gradle fixture. No Android plugin or signing secret is needed.
+ext.leftcarProfile = { String slug ->
+    if (slug == null) return [suffix: '', scheme: 'leftcar', expoScheme: 'exp+leftcar-viewer', accessory: 'android.hardware.usb.action.USB_ACCESSORY_ATTACHED']
+    if (!(slug ==~ /[a-z][a-z0-9-]{0,31}/)) throw new GradleException('Invalid LEFTCAR_BENCHMARK_PROFILE')
+    def suffix = '.benchmark.' + slug.replace('-', '_')
+    return [suffix: suffix, scheme: 'leftcar-benchmark-' + slug, expoScheme: 'exp+leftcar-benchmark-' + slug, accessory: 'dev.leftcar.benchmark.' + slug + '.USB_DISABLED']
+}
+ext.leftcarCargoTarget = { File repo, String override ->
+    if (override != null && override.trim().isEmpty()) throw new GradleException('CARGO_TARGET_DIR must not be empty')
+    def path = override == null ? new File(repo, 'target') : new File(override)
+    return path.isAbsolute() ? path : new File(repo, override)
+}
+ext.leftcarReleaseSigning = { boolean internal, Map credentials ->
+    if (internal) return 'internal-debug-key'
+    if (!['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].every { credentials[it] }) {
+        throw new GradleException('Public release requires LEFTCAR_RELEASE_STORE_FILE, LEFTCAR_RELEASE_STORE_PASSWORD, LEFTCAR_RELEASE_KEY_ALIAS and LEFTCAR_RELEASE_KEY_PASSWORD. Internal builds must explicitly use -PleftcarInternalBuild=true.')
+    }
+    def store = new File(credentials.storeFile)
+    if (!store.isFile() || store.name == 'debug.keystore' || credentials.keyAlias == 'androiddebugkey') throw new GradleException('Public release must use a configured non-debug signing identity')
+    return 'configured-release-key'
+}
+ext.leftcarDebugKeystore = { File appDirectory, String override ->
+    if (override == null) return new File(appDirectory, 'debug.keystore')
+    def key = new File(override)
+    if (!key.isAbsolute() || !key.isFile()) throw new GradleException('LEFTCAR_INTERNAL_DEBUG_KEYSTORE must name an existing absolute debug-keystore file; no key will be created')
+    return key
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,9 +14,18 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
-import { connectHost, controlClient, disconnectHost } from "../src/session";
+import {
+  beginHostSelection,
+  isHostSelectionCurrent,
+  isRequestContextCurrent,
+  type SessionRequestContext,
+  captureRequestContext,
+  connectHost,
+  controlTarget,
+  disconnectHost,
+} from "../src/session";
 import {
   formatErrorMessage,
   isUnauthorizedError,
@@ -25,6 +34,7 @@ import {
 import { DEFAULT_CONTROL_PORT } from "../src/defaults";
 import { handleUnauthorized } from "../src/connect-flow";
 import {
+  clearStoredCredential,
   clearToken,
   formatHostEndpoint,
   getStoredToken,
@@ -35,7 +45,7 @@ import {
   clearRecentHosts,
   getRecentHosts,
   removeRecentHost,
-  saveRecentHost,
+  saveRecentHostStrict,
   type RecentHostItem,
 } from "../src/recent-hosts";
 import {
@@ -45,6 +55,12 @@ import {
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
+
+interface HostConnectionAction {
+  controller: AbortController;
+  context: SessionRequestContext | null;
+  completed: boolean;
+}
 
 type NsdNative = {
   startDiscovery(): void;
@@ -79,6 +95,7 @@ function formatRelativeTime(timestamp: number, language: "ko" | "en"): string {
 interface DiscoveredHostsSectionProps {
   hosts: FoundHost[];
   busy: boolean;
+  connectingTarget: string | null;
   nsdAvailable: boolean;
   emptyHint?: ReactNode;
   t: TranslationSchema;
@@ -90,6 +107,7 @@ interface DiscoveredHostsSectionProps {
 function DiscoveredHostsSection({
   hosts,
   busy,
+  connectingTarget,
   nsdAvailable,
   emptyHint,
   t,
@@ -111,41 +129,53 @@ function DiscoveredHostsSection({
 
       {hosts.length > 0 ? (
         <View style={styles.hostList}>
-          {hosts.map((h) => (
-            <Pressable
-              key={h.host}
-              style={({ pressed }) => [
-                styles.hostItem,
-                pressed && styles.itemPressed,
-              ]}
-              onPress={() => onConnect(h.host, h.port)}
-              disabled={busy}
-            >
-              <View style={styles.hostIconBox}>
-                <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
-              </View>
-              <View style={styles.hostInfo}>
-                <Text style={styles.hostName} numberOfLines={1}>
-                  {h.name || t.common.myComputer}
-                </Text>
-                <Text style={styles.hostAddr} numberOfLines={1}>
-                  {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
-                </Text>
-              </View>
-              <View style={styles.connectChip}>
-                <Text style={styles.connectChipText}>{t.common.connect}</Text>
-              </View>
-            </Pressable>
-          ))}
+          {hosts.map((h) => {
+            const connecting = connectingTarget === h.host;
+            return (
+              <Pressable
+                key={h.host}
+                style={({ pressed }) => [
+                  styles.hostItem,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => onConnect(h.host, h.port)}
+                disabled={busy}
+              >
+                <View style={styles.hostIconBox}>
+                  <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
+                </View>
+                <View style={styles.hostInfo}>
+                  <Text style={styles.hostName} numberOfLines={1}>
+                    {h.name || t.common.myComputer}
+                  </Text>
+                  <Text style={styles.hostAddr} numberOfLines={1}>
+                    {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
+                  </Text>
+                </View>
+                {connecting ? (
+                  <View style={styles.connectChip}>
+                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
+                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
+                  </View>
+                ) : (
+                  <View style={styles.connectChip}>
+                    <Text style={styles.connectChipText}>{t.common.connect}</Text>
+                  </View>
+                )}
+              </Pressable>
+            );
+          })}
         </View>
       ) : (
         <>
           <View style={styles.emptyBox}>
             <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
             <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
-            <Text style={styles.emptyText}>
-              {t.viewer.emptyHostsDesc}
-            </Text>
+            {!emptyHint && (
+              <Text style={styles.emptyText}>
+                {t.viewer.emptyHostsDesc}
+              </Text>
+            )}
           </View>
           {emptyHint}
         </>
@@ -157,6 +187,9 @@ function DiscoveredHostsSection({
 interface RecentHostsSectionProps {
   recentHosts: RecentHostItem[];
   busy: boolean;
+  connectingTarget: string | null;
+  /** NSD로 지금 발견되는 호스트 키(host:port) — 최근 목록의 생존 상태 표시에 쓴다. */
+  discoveredKeys: Set<string>;
   language: "ko" | "en";
   t: TranslationSchema;
   styles: ReturnType<typeof createStyles>;
@@ -169,6 +202,8 @@ interface RecentHostsSectionProps {
 function RecentHostsSection({
   recentHosts,
   busy,
+  connectingTarget,
+  discoveredKeys,
   language,
   t,
   styles,
@@ -189,44 +224,58 @@ function RecentHostsSection({
       </View>
 
       <View style={styles.hostList}>
-        {recentHosts.map((item) => (
-          <View key={`${item.host}:${item.port}`} style={styles.recentItem}>
-            <Pressable
-              style={({ pressed }) => [
-                styles.recentItemClickable,
-                pressed && styles.itemPressed,
-              ]}
-              onPress={() => onConnect(item.host, item.port)}
-              disabled={busy}
-            >
-              <View style={styles.recentIconBox}>
-                <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
-              </View>
-              <View style={styles.hostInfo}>
-                <Text style={styles.hostName} numberOfLines={1}>
-                  {item.name || item.host}
-                </Text>
-                <Text style={styles.hostAddr} numberOfLines={1}>
-                  {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
-                  {interpolate(t.viewer.lastConnected, {
-                    time: formatRelativeTime(item.lastConnected, language),
-                  })}
-                </Text>
-              </View>
-              <View style={styles.connectChip}>
-                <Text style={styles.connectChipText}>{t.common.connect}</Text>
-              </View>
-            </Pressable>
-            <Pressable
-              onPress={() => onRemoveHost(item)}
-              style={styles.recentDeleteBtn}
-              accessibilityLabel={t.viewer.deleteHost}
-              hitSlop={8}
-            >
-              <Ionicons name="close" size={15} color={colors.textDim} />
-            </Pressable>
-          </View>
-        ))}
+        {recentHosts.map((item) => {
+          const key = `${item.host}:${item.port}`;
+          const connecting = connectingTarget === item.host;
+          const reachable = discoveredKeys.has(key);
+          return (
+            <View key={key} style={styles.recentItem}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.recentItemClickable,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => onConnect(item.host, item.port)}
+                disabled={busy}
+              >
+                <View style={styles.recentIconBox}>
+                  <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
+                </View>
+                <View style={styles.hostInfo}>
+                  <Text style={styles.hostName} numberOfLines={1}>
+                    {item.name || item.host}
+                  </Text>
+                  <Text style={styles.hostAddr} numberOfLines={1}>
+                    {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
+                    {interpolate(t.viewer.lastConnected, {
+                      time: formatRelativeTime(item.lastConnected, language),
+                    })}
+                  </Text>
+                </View>
+                {connecting ? (
+                  <View style={styles.connectChip}>
+                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
+                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
+                  </View>
+                ) : (
+                  <View style={[styles.connectChip, !reachable && styles.connectChipDim]}>
+                    <Text style={[styles.connectChipText, !reachable && styles.connectChipDimText]}>
+                      {t.common.connect}
+                    </Text>
+                  </View>
+                )}
+              </Pressable>
+              <Pressable
+                onPress={() => onRemoveHost(item)}
+                style={styles.recentDeleteBtn}
+                accessibilityLabel={t.viewer.deleteHost}
+                hitSlop={8}
+              >
+                <Ionicons name="close" size={15} color={colors.textDim} />
+              </Pressable>
+            </View>
+          );
+        })}
       </View>
     </View>
   );
@@ -499,13 +548,25 @@ export default function Host() {
   );
 
   const [ip, setIp] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [connectingTarget, setConnectingTarget] = useState<string | null>(null);
+  const busy = connectingTarget !== null;
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundHost>>({});
   const [hasStoredToken, setHasStoredToken] = useState(false);
   const [recentHosts, setRecentHosts] = useState<RecentHostItem[]>([]);
   const [showTroubleshoot, setShowTroubleshoot] = useState(false);
   const [discoverySettled, setDiscoverySettled] = useState(false);
+
+  const connectionAction = useRef<HostConnectionAction | null>(null);
+  useFocusEffect(useCallback(() => {
+    setConnectingTarget(null);
+    return () => {
+      const action = connectionAction.current;
+      connectionAction.current = null;
+      action?.controller.abort();
+      if (action?.context && !action.completed) disconnectHost(action.context);
+    };
+  }, []));
 
   useEffect(() => {
     const timer = setTimeout(
@@ -516,15 +577,38 @@ export default function Host() {
   }, []);
 
   useEffect(() => {
-    void getStoredToken().then((token) => setHasStoredToken(!!token));
+    // 검증된 세션은 stable identity 자격 증명을 우선 본다. USB/레거시처럼
+    // identity가 없을 때만 엔드포인트 저장소를 조회한다.
+    const context = captureRequestContext();
+    const target = controlTarget();
+    if (context?.credential) setHasStoredToken(true);
+    else if (target) void getStoredToken(target).then((token) => setHasStoredToken(!!token));
     void getRecentHosts().then(setRecentHosts);
   }, []);
 
-  const handleClearToken = useCallback(async () => {
-    await clearToken();
-    disconnectHost();
-    setHasStoredToken(false);
-    Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc);
+  // 파괴적 동작은 실행 전에 한 번 확인한다 — 뒤늦은 "삭제했습니다" 알림은
+  // 되돌릴 수 없다. 지우기는 확인 다이얼로그의 [지우기]에서만 일어난다.
+  const handleClearToken = useCallback(() => {
+    Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc, [
+      { text: t.common.cancel, style: "cancel" },
+      {
+        text: t.viewer.deleteHost,
+        style: "destructive",
+        onPress: () => {
+          const context = captureRequestContext();
+          const target = controlTarget();
+          const clear = context?.credential
+            ? clearStoredCredential(context.credential)
+            : target
+              ? clearToken(target)
+              : Promise.resolve();
+          void clear.then(() => {
+            disconnectHost(context ?? undefined);
+            setHasStoredToken(false);
+          });
+        },
+      },
+    ]);
   }, [t]);
 
   const handleRemoveRecentHost = useCallback(async (hostItem: RecentHostItem) => {
@@ -564,37 +648,41 @@ export default function Host() {
   }, [ip]);
 
   const doConnect = useCallback(async (target: string, port = DEFAULT_CONTROL_PORT) => {
-    setBusy(true);
+    connectionAction.current?.controller.abort();
+    const action: HostConnectionAction = { controller: new AbortController(), context: null, completed: false };
+    connectionAction.current = action;
+    const selection = beginHostSelection();
+    const cancelSelection = () => action.controller.abort();
+    selection.signal.addEventListener("abort", cancelSelection, { once: true });
+    const isCurrent = () => connectionAction.current === action &&
+      !action.controller.signal.aborted && isHostSelectionCurrent(selection);
+    setConnectingTarget(target);
     setError(null);
     try {
-      if (!isTrustedHost(target)) {
-        throw new Error(t.viewer.trustedHostError);
-      }
-      let lastError: unknown = null;
+      if (!isTrustedHost(target)) throw new Error(t.viewer.trustedHostError);
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (!isCurrent()) return;
         try {
-          await connectHost(target, port);
-          lastError = null;
+          await connectHost(target, port, { selection, signal: action.controller.signal });
           break;
         } catch (e) {
-          lastError = e;
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-          }
+          if (!isCurrent() || (e instanceof Error && e.name === "AbortError")) return;
+          if (attempt === 2) throw e;
+          await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
         }
       }
-      if (lastError) throw lastError;
-
-      // Save to recent hosts on successful network connection
-      const matched = Object.values(found).find((h) => h.host === target);
-      void saveRecentHost(target, port, matched?.name).then(setRecentHosts);
-
+      if (!isCurrent()) return;
+      const context = captureRequestContext();
+      if (!context || !isRequestContextCurrent(context)) return;
+      action.context = context;
       try {
-        await controlClient()?.request<CatalogView>("getCatalog");
-        setHasStoredToken(true);
+        await context.client.request<CatalogView>("getCatalog");
       } catch (e) {
+        if (!isCurrent() || !isRequestContextCurrent(context)) return;
         if (isUnauthorizedError(e)) {
           await handleUnauthorized({
+            context,
+            signal: action.controller.signal,
             beforeNavigate: () => setHasStoredToken(false),
             navigate: { endpoint: formatHostEndpoint(target, port) },
           });
@@ -602,11 +690,26 @@ export default function Host() {
         }
         throw e;
       }
+      if (!isCurrent() || !isRequestContextCurrent(context)) return;
+      const matched = Object.values(found).find((h) => h.host === target);
+      // Recent-host persistence is best effort, but its late UI publication and
+      // navigation still belong to this exact action and authenticated context.
+      const recent = await saveRecentHostStrict(target, port, matched?.name, undefined, action.controller.signal)
+        .catch(() => null);
+      if (!isCurrent() || !isRequestContextCurrent(context)) return;
+      if (recent) setRecentHosts(recent);
+      setHasStoredToken(true);
+      action.completed = true;
       router.push("/catalog");
     } catch (e) {
-      setError(formatErrorMessage(e));
+      if (isCurrent()) setError(formatErrorMessage(e));
     } finally {
-      setBusy(false);
+      selection.signal.removeEventListener("abort", cancelSelection);
+      if (action.context && !action.completed) disconnectHost(action.context);
+      if (connectionAction.current === action) {
+        connectionAction.current = null;
+        setConnectingTarget(null);
+      }
     }
   }, [found, t]);
 
@@ -634,6 +737,7 @@ export default function Host() {
         style={styles.root}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         {error && (
           <View style={styles.errorBlock}>
@@ -654,6 +758,7 @@ export default function Host() {
         <DiscoveredHostsSection
           hosts={hosts}
           busy={busy}
+          connectingTarget={connectingTarget}
           nsdAvailable={Boolean(nsd)}
           emptyHint={
             showDiscoveryHint ? (
@@ -675,6 +780,8 @@ export default function Host() {
         <RecentHostsSection
           recentHosts={recentHosts}
           busy={busy}
+          connectingTarget={connectingTarget}
+          discoveredKeys={new Set(hosts.map((h) => `${h.host}:${h.port}`))}
           language={language}
           t={t}
           styles={styles}
@@ -897,6 +1004,17 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       paddingVertical: 6,
       borderRadius: 6,
       flexShrink: 0,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    connectChipDim: {
+      backgroundColor: colors.bgSurface,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+    },
+    connectChipDimText: {
+      color: colors.textMuted,
     },
     connectChipText: {
       color: colors.btnPrimaryText,

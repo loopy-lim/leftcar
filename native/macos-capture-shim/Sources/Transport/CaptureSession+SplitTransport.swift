@@ -16,6 +16,7 @@ struct SplitPairSendResult {
     let auID: UInt16
     let succeeded: Bool
     let attemptedDatagrams: Int
+    var cancelled: Bool = false
 }
 
 func interleaveSplitTransmissions(
@@ -170,6 +171,9 @@ extension CaptureSession {
     func writeSplitPacketPair(
         _ accessUnit: PendingSplitAccessUnit
     ) -> SplitPairSendResult {
+        guard splitFlowAccepts(accessUnit.lease) else {
+            return .init(auID: 0, succeeded: false, attemptedDatagrams: 0, cancelled: true)
+        }
         let auID = splitWireSequence.allocate()
         stateLock.lock()
         splitWirePairsAttempted &+= 1
@@ -265,15 +269,44 @@ extension CaptureSession {
         var sentParity = 0
         var sendSyscallUs: UInt64 = 0
         var succeeded = true
+        var deadlineExceeded = false
+        var cancelled = false
         let burstLimit = splitPacingBurstLimit(
             configured: currentUdpBurstLimit(),
             leftFragmentCount: leftUnit.fragmentCount,
             rightFragmentCount: rightUnit?.fragmentCount
         )
+        // Slow-but-successful sends during link collapse must not hold newer
+        // pairs hostage: abort the pair once it overruns its size-aware
+        // budget (see udpAccessUnitSendDeadlineUs). The aggregate data
+        // fragment count keeps the budget proportional to both tiles, and
+        // the check runs per pacing range — the first iteration covers the
+        // already-exceeded case before a single datagram of this pair is
+        // sent — so pacing sleeps and sendto time are covered together,
+        // mirroring the single-stream path in writePacket.
+        let sendDeadlineBudgetUs = udpAccessUnitSendDeadlineUs(
+            isKeyframe: keyframe,
+            fps: fps,
+            dataFragmentCount: aggregateFragments,
+            burstDatagrams: burstLimit
+        )
         sendLoop: for range in udpPacingBurstRanges(
             datagramCount: transmissions.count,
             maxDatagrams: burstLimit
         ) {
+            let elapsedUs = (DispatchTime.now().uptimeNanoseconds &- startedNs) / 1_000
+            if elapsedUs > sendDeadlineBudgetUs {
+                NSLog(
+                    "Leftcar split pair send deadline exceeded %@: elapsed=%lluus fragments=%d isKeyframe=%@",
+                    targetLabel,
+                    elapsedUs,
+                    aggregateFragments,
+                    keyframe ? "true" : "false"
+                )
+                deadlineExceeded = true
+                succeeded = false
+                break sendLoop
+            }
             let burstBytes = range.reduce(into: 0) { total, index in
                 total += transmissions[index].datagram.count
             }
@@ -285,6 +318,13 @@ extension CaptureSession {
                 selectedParity: selectedParity
             )
             for index in range {
+                // Pacing can yield while expiry advances the flow generation.
+                // Stop old work before the next datagram, including after a wait.
+                guard splitFlowAccepts(accessUnit.lease) else {
+                    cancelled = true
+                    succeeded = false
+                    break sendLoop
+                }
                 let transmission = transmissions[index]
                 let syscallStart = DispatchTime.now().uptimeNanoseconds
                 let sent = sendMediaDatagram(
@@ -325,10 +365,22 @@ extension CaptureSession {
             sendUs: sendUs
         )
 
+        if cancelled || !splitFlowAccepts(accessUnit.lease) {
+            return .init(auID: auID, succeeded: false, attemptedDatagrams: sentDatagrams, cancelled: true)
+        }
         guard succeeded else {
             stateLock.lock()
             framesDropped &+= 1
-            splitWirePairSendFailures &+= 1
+            // A deadline abort is not a sendto failure: it is counted
+            // separately and recovers through the same split transport
+            // recovery the drain loop runs for send failures (the unsent
+            // remainder keeps succeeded=false, so the lease is released by
+            // the recovery instead of completed).
+            if deadlineExceeded {
+                splitPairDeadlineExceeds &+= 1
+            } else {
+                splitWirePairSendFailures &+= 1
+            }
             stateLock.unlock()
             return .init(
                 auID: auID,

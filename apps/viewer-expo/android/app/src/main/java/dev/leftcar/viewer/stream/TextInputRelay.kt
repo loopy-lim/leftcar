@@ -90,7 +90,16 @@ internal class TextInputRelay(
                     segment = StringBuilder()
                     sendEnter()
                 }
-                '\r'.code -> {}
+                '\r'.code -> {
+                    // CR 단독 커밋도 개행이다 — 무시하면 사라진다. CRLF는
+                    // 한 번의 개행으로 센다(다음 문자가 LF면 건너뛴다).
+                    val next = index + charCount
+                    if (next >= text.length || text.codePointAt(next) != '\n'.code) {
+                        flushSegment(segment)
+                        segment = StringBuilder()
+                        sendEnter()
+                    }
+                }
                 else -> {
                     val byteLength = utf8Length(codePoint)
                     if (segment.utf8Bytes() + byteLength > MAX_CHUNK_BYTES) {

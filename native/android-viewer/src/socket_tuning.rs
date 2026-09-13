@@ -6,6 +6,9 @@
 pub(crate) const MEDIA_TOS: libc::c_int = 0x88;
 /// IP_TOS for the control socket (DSCP EF).
 #[cfg(any(target_os = "android", test))]
+/// AF41 DSCP ECN-capable TOS for the control socket. Only the android-gated
+/// renderer wires it up; host test builds keep the constant for parity.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const CONTROL_TOS: libc::c_int = 0xb8;
 
 #[cfg(any(target_os = "android", test))]
@@ -15,8 +18,15 @@ use std::net::UdpSocket;
 #[cfg(any(target_os = "android", test))]
 use std::os::fd::AsRawFd;
 
+/// Receive-buffer budget shared by the single-session and split media
+/// sockets. 512 KiB held less than 50ms of a 4K recovery burst before kernel
+/// drops turned it into gap episodes; 4 MiB covers one large recovery
+/// boundary for both transports.
 #[cfg(any(target_os = "android", test))]
-const SPLIT_MEDIA_RECEIVE_BUFFER_BYTES: libc::c_int = 4 * 1024 * 1024;
+pub(crate) const MEDIA_RECEIVE_BUFFER_BYTES: libc::c_int = 4 * 1024 * 1024;
+
+#[cfg(any(target_os = "android", test))]
+const SPLIT_MEDIA_RECEIVE_BUFFER_BYTES: libc::c_int = MEDIA_RECEIVE_BUFFER_BYTES;
 
 #[cfg(any(target_os = "android", test))]
 pub(crate) fn split_media_receive_buffer_bytes() -> usize {

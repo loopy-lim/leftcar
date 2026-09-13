@@ -36,6 +36,7 @@ pub trait CaptureBackend: Send + Sync {
     }
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, String>;
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     fn start(
         &self,
         source_index: u32,
@@ -49,6 +50,11 @@ pub trait CaptureBackend: Send + Sync {
         content_mode: &str,
         encoder_experiment: EncoderExperiment,
         udp_stability: &AppliedUdpStability,
+        // Viewer-generated 32-byte media key for the AEAD-sealed media path.
+        // The control plane rejects keyless starts, so implementations may
+        // treat a wrong length as an internal contract violation.
+        media_key: &[u8; 32],
+        _access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
     /// Stop while telling a still-live viewer why (LCT1 wire code). The
@@ -137,6 +143,8 @@ impl CaptureBackend for FakeBackend {
         _content_mode: &str,
         encoder_experiment: EncoderExperiment,
         _udp_stability: &AppliedUdpStability,
+        _media_key: &[u8; 32],
+        _access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
         *self.encoder_experiment.lock().unwrap() = encoder_experiment;
         Ok(7)

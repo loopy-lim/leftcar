@@ -20,6 +20,7 @@ function stream(overrides: Partial<ActiveStream> = {}): ActiveStream {
     encoderExperiment: "auto",
     mediaTransport: "udp",
     viewerIps: ["192.168.0.42"],
+    mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
     startedAt: 1,
     ...overrides,
   };

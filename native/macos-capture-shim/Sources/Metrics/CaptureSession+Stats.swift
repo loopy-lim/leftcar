@@ -90,6 +90,8 @@ extension CaptureSession {
         let maxAuFragments = maxAuFragments
         let udpSendFailures = udpSendFailures
         let udpSendRetries = udpSendRetries
+        let nacksServed = nacksServed
+        let nacksMissed = nacksMissed
         let recoveryKeyframes = recoveryKeyframes
         let recoveryRequestsSuppressed = recoveryRequestsSuppressed
         let captureQueueDropped = captureQueueDropped
@@ -227,6 +229,17 @@ extension CaptureSession {
         let reportedReceiverPairedIdrEpisodes = receiverPairedIdrEpisodes
         let reportedReceiverSuppressedRecoveryRequests = receiverSuppressedRecoveryRequests
         let reportedReceiverFecDecodeFailures = receiverFecDecodeFailures
+        let reportedReceiverPairedIdrResumes = receiverPairedIdrResumes
+        let reportedReceiverPerTileIdrResumes = receiverPerTileIdrResumes
+        let receiverSplitWireMsValue: Any = receiverSplitWireMs == .max
+            ? NSNull()
+            : NSNumber(value: receiverSplitWireMs)
+        let receiverSplitCaptureAgeMsValue: Any = receiverSplitCaptureAgeMs == .max
+            ? NSNull()
+            : NSNumber(value: receiverSplitCaptureAgeMs)
+        let receiverInputRttMsValue: Any = receiverInputRttMs == .max
+            ? NSNull()
+            : NSNumber(value: receiverInputRttMs)
         let receiverRenderedFpsValue: Any = receiverRenderedFps
             .map { NSNumber(value: $0) } ?? NSNull()
         let splitPreparationP50Us = percentile(
@@ -242,6 +255,7 @@ extension CaptureSession {
         let reportedSplitPairAdmissionDrops = splitPairAdmissionDrops
         let reportedSplitPairDrops = splitPairDrops
         let reportedSplitPairTimeouts = splitPairTimeouts
+        let reportedSplitPairConsecutiveTimeouts = splitPairConsecutiveTimeouts
         let reportedSplitLastPairDropReason = splitLastPairDropReason
         let reportedSplitInjectedRightDrops = splitInjectedRightDrops
         let reportedSplitPairsEncoded = splitPairsEncoded
@@ -263,10 +277,13 @@ extension CaptureSession {
         let reportedSplitPreEncodeAdmissionDrops = splitPreEncodeAdmissionDrops
         let reportedSplitRecoveryBoundaryDiscards = splitRecoveryBoundaryDiscards
         let reportedSplitPostEncodeDeltaDrops = splitPostEncodeDeltaDrops
+        let reportedSplitPairQueueOverflowDrops = splitPairQueueOverflowDrops
         let reportedSplitWirePairsAttempted = splitWirePairsAttempted
         let reportedSplitWirePairSendFailures = splitWirePairSendFailures
+        let reportedSplitPairDeadlineExceeds = splitPairDeadlineExceeds
         let reportedSplitKeyframeGapRecoveries = splitKeyframeGapRecoveries
         let reportedSplitDeltaGapRecoveries = splitDeltaGapRecoveries
+        let reportedSplitPerTileKeyframes = splitPerTileKeyframes
         stateLock.unlock()
 
         networkLock.lock()
@@ -289,6 +306,7 @@ extension CaptureSession {
         stateLock.unlock()
 
         if shouldLogPerf {
+            let rtx = MediaRetransmitBudget.shared.statistics()
             let perfLogLine = leftcarPerfLogLine(
                 captureCallbacks: captureCallbacks,
                 encodeOutputCallbacks: encodeOutputCallbacks,
@@ -305,16 +323,21 @@ extension CaptureSession {
                 encoderWatchdogOldestUs: reportedEncoderWatchdogOldestUs,
                 encoderMode: reportedEncoderMode,
                 encoderID: reportedEncoderID
-            )
+            ) + " schema=2 process=\(Self.metricProcessIncarnation) stream=\(metricIncarnation) incarnation=\(metricIncarnation) transport=\(mediaTransport.rawValue) rtxScope=process-budget rtxOwner=\(Self.metricProcessIncarnation) rtxRetainedEnvelopeBytes=\(rtx.retainedEnvelopeBytes) rtxRetainedAccessUnits=\(rtx.retainedAccessUnits) rtxServedEnvelopeBytes=\(rtx.servedEnvelopeBytes) rtxEvictedEnvelopeBytes=\(rtx.evictedEnvelopeBytes) rtxRejectedEnvelopeBytes=\(rtx.rejectedEnvelopeBytes) splitPairs=\(reportedSplitPairsEncoded) latencyBasis=host-monotonic outputStage=encoder-callback"
             leftcarPerformanceLogger.notice("\(perfLogLine, privacy: .public)")
             if reportedEncoderMode == "splitVertical" {
                 leftcarPerformanceLogger.notice(
-                    "LeftcarSplit pairs=\(reportedSplitPairsEncoded) captureQueueDrops=\(captureQueueDropped) admissionDrops=\(reportedSplitPairAdmissionDrops) pairDrops=\(reportedSplitPairDrops) pairTimeouts=\(reportedSplitPairTimeouts) lastPairDropReason=\(reportedSplitLastPairDropReason, privacy: .public) inFlight=\(currentEncodeInFlight)/\(currentMaxEncodeInFlight) preparationP95Us=\(splitPreparationP95Us) callbackP95Us=\(splitPairCallbackP95Us) captureQueueDepth=\(splitCaptureQueueDepth) captureQueueOldestUs=\(reportedSplitCaptureQueueOldestUs) recoveryGatePending=\(reportedSplitRecoveryBoundaryPending) recoveryGatePendingUs=\(reportedSplitRecoveryGatePendingUs) preEncodeAdmissionDrops=\(reportedSplitPreEncodeAdmissionDrops)"
+                    "LeftcarSplit pairs=\(reportedSplitPairsEncoded) captureQueueDrops=\(captureQueueDropped) admissionDrops=\(reportedSplitPairAdmissionDrops) pairDrops=\(reportedSplitPairDrops) pairTimeouts=\(reportedSplitPairTimeouts) consecutiveTimeouts=\(reportedSplitPairConsecutiveTimeouts) lastPairDropReason=\(reportedSplitLastPairDropReason, privacy: .public) inFlight=\(currentEncodeInFlight)/\(currentMaxEncodeInFlight) preparationP95Us=\(splitPreparationP95Us) callbackP95Us=\(splitPairCallbackP95Us) captureQueueDepth=\(splitCaptureQueueDepth) captureQueueOldestUs=\(reportedSplitCaptureQueueOldestUs) recoveryGatePending=\(reportedSplitRecoveryBoundaryPending) recoveryGatePendingUs=\(reportedSplitRecoveryGatePendingUs) preEncodeAdmissionDrops=\(reportedSplitPreEncodeAdmissionDrops) queueOverflowDrops=\(reportedSplitPairQueueOverflowDrops) pairDeadlineExceeds=\(reportedSplitPairDeadlineExceeds)"
                 )
             }
         }
 
         var obj: [String: Any] = [
+            "metricSchema": 2,
+            "metricProcess": Self.metricProcessIncarnation,
+            "metricStream": metricIncarnation,
+            "metricIncarnation": metricIncarnation,
+            "metricTransport": mediaTransport.rawValue,
             "frames": framesEncoded,
             "dropped": framesDropped,
             "networkDropped": networkDropped,
@@ -322,6 +345,8 @@ extension CaptureSession {
             "recoveryFramesDropped": recoveryFramesDropped,
             "udpSendFailures": udpSendFailures,
             "udpSendRetries": udpSendRetries,
+            "nacksServed": nacksServed,
+            "nacksMissed": nacksMissed,
             "recoveryKeyframes": recoveryKeyframes,
             "recoveryRequestsSuppressed": recoveryRequestsSuppressed,
             "captureQueueDropped": captureQueueDropped,
@@ -372,6 +397,8 @@ extension CaptureSession {
             "currentBitrate": currentBitrate,
             "bitrateFloorCollapseCount": bitrateFloorCollapseCount,
             "bitrateFloorCollapseLastReason": bitrateFloorCollapseLastReason,
+            "crossSessionCongestionMarks": crossSessionCongestionMarks,
+            "crossSessionCongestionPeerVotes": crossSessionCongestionPeerVotes,
             "qualityHint": qualityHintValue,
             "qualityOverride": qualityOverrideValue,
             "qualityAdaptationChecks": qualityChecks,
@@ -444,6 +471,11 @@ extension CaptureSession {
             "receiverPairedIdrEpisodes": reportedReceiverPairedIdrEpisodes,
             "receiverSuppressedRecoveryRequests": reportedReceiverSuppressedRecoveryRequests,
             "receiverFecDecodeFailures": reportedReceiverFecDecodeFailures,
+            "receiverPairedIdrResumes": reportedReceiverPairedIdrResumes,
+            "receiverPerTileIdrResumes": reportedReceiverPerTileIdrResumes,
+            "receiverSplitWireMs": receiverSplitWireMsValue,
+            "receiverSplitCaptureAgeMs": receiverSplitCaptureAgeMsValue,
+            "receiverInputRttMs": receiverInputRttMsValue,
             "pendingFrame": queueSnapshot.count,
             "pendingFrameBytes": queueSnapshot.bytes,
             "pendingFrameOldestAgeUs": queueSnapshot.oldestAgeUs,
@@ -454,6 +486,7 @@ extension CaptureSession {
             "splitPairAdmissionDrops": reportedSplitPairAdmissionDrops,
             "splitPairDrops": reportedSplitPairDrops,
             "splitPairTimeouts": reportedSplitPairTimeouts,
+            "splitPairConsecutiveTimeouts": reportedSplitPairConsecutiveTimeouts,
             "splitLastPairDropReason": reportedSplitLastPairDropReason,
             "splitInjectedRightDrops": reportedSplitInjectedRightDrops,
             "splitPairsEncoded": reportedSplitPairsEncoded,
@@ -505,13 +538,19 @@ extension CaptureSession {
             "splitEncodedQueueOldestUs": reportedSplitEncodedQueueOldestUs,
             "splitRecoveryBoundaryDiscards": reportedSplitRecoveryBoundaryDiscards,
             "splitPostEncodeDeltaDrops": reportedSplitPostEncodeDeltaDrops,
+            "splitPairQueueOverflowDrops": reportedSplitPairQueueOverflowDrops,
             "splitWirePairsAttempted": reportedSplitWirePairsAttempted,
             "splitWirePairSendFailures": reportedSplitWirePairSendFailures,
+            "splitPairDeadlineExceeds": reportedSplitPairDeadlineExceeds,
             "splitKeyframeGapRecoveries": reportedSplitKeyframeGapRecoveries,
             "splitDeltaGapRecoveries": reportedSplitDeltaGapRecoveries,
+            "splitPerTileKeyframes": reportedSplitPerTileKeyframes,
             "error": error,
         ]
         obj.merge(experimentStatsFields) { _, testedValue in testedValue }
+        audioMetricsLock.lock()
+        obj.merge(audioMetrics) { _, audio in audio }
+        audioMetricsLock.unlock()
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let s = String(data: data, encoding: .utf8) {
             return s

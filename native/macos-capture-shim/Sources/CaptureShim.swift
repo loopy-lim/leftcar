@@ -82,6 +82,18 @@ import OSLog
         && CFBooleanGetValue((value as! CFBoolean))
 }
 
+/// 프라이버시 커튼(#/curtain 오버레이)은 캡처에 보여서는 안 된다 — 커튼을
+/// 띄운 채 스트리밍하면 뷰어에게 검은 화면만 간다. 커튼 창은 이 프로세스가
+/// 소유한 제목 "leftcar-curtain" 창으로 식별한다. 인디케이터 배지는
+/// 스트림에 보이는 채로 둔다(노스텔스 규범 — 원격 중임을 양쪽이 본다).
+ func curtainExclusionWindows(_ content: SCShareableContent) -> [SCWindow] {
+    let ownPid = ProcessInfo.processInfo.processIdentifier
+    return content.windows.filter { window in
+        window.owningApplication?.processID == ownPid
+            && window.title == "leftcar-curtain"
+    }
+}
+
  final class PersistentDisplayFilterRequest: @unchecked Sendable {
      let lock = NSLock()
      let completed = DispatchSemaphore(value: 0)
@@ -120,7 +132,10 @@ import OSLog
             )
             if let display = content.displays.first(where: { $0.displayID == displayID }) {
                 request.finish(
-                    filter: SCContentFilter(display: display, excludingWindows: [])
+                    filter: SCContentFilter(
+                        display: display,
+                        excludingWindows: curtainExclusionWindows(content)
+                    )
                 )
             } else {
                 request.finish(error: "persistent display lookup returned no matching display")

@@ -41,6 +41,8 @@ describe("viewer preferences", () => {
       showFps: false,
       localCursor: true,
       localAudio: true,
+      balancedPresentation: false,
+      opusAudio: false,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({
       profileId: "auto",
@@ -48,6 +50,8 @@ describe("viewer preferences", () => {
       showFps: false,
       localCursor: true,
       localAudio: true,
+      balancedPresentation: false,
+      opusAudio: false,
     });
   });
 
@@ -62,6 +66,8 @@ describe("viewer preferences", () => {
       showFps: false,
       localCursor: true,
       localAudio: true,
+      balancedPresentation: false,
+      opusAudio: false,
     });
     expect(parseViewerPreferences('{"profileId":"latency"}').streamingPriority).toBe(
       "responsive",
@@ -100,6 +106,8 @@ describe("viewer preferences", () => {
       showFps: false,
       localCursor: true,
       localAudio: false,
+      balancedPresentation: false,
+      opusAudio: false,
     };
 
     await writeViewerPreferences(store, preferences);
@@ -239,4 +247,18 @@ describe("resolveStreamMaximum", () => {
       fps: 60,
     });
   });
+});
+
+it("persists optional balanced presentation and keeps missing invalid values immediate", async () => {
+  for(const raw of [null, '{}', '{"balancedPresentation":"true"}']) expect(parseViewerPreferences(raw).balancedPresentation).toBe(false);
+  const store=memoryStore();
+  await writeViewerPreferences(store, {...DEFAULT_VIEWER_PREFERENCES,balancedPresentation:true});
+  expect((await readViewerPreferences(store)).balancedPresentation).toBe(true);
+});
+
+it("keeps PCM default and persists explicit experimental Opus selection", async () => {
+  expect(parseViewerPreferences(null).opusAudio).toBe(false);
+  const store = memoryStore();
+  await writeViewerPreferences(store, { ...DEFAULT_VIEWER_PREFERENCES, opusAudio: true });
+  expect((await readViewerPreferences(store)).opusAudio).toBe(true);
 });

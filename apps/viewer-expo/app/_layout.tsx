@@ -5,8 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useAppTheme } from "../src/theme";
 import { LanguageProvider, useAppLanguage } from "../src/i18n";
 import { initializeRustra } from "../src/rustra";
+import { restorePinnedHostKeys } from "../src/session";
 
 initializeRustra();
+void restorePinnedHostKeys();
 
 const queryClient = new QueryClient({
   defaultOptions: {

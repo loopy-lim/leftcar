@@ -4,12 +4,15 @@ control plane.
 
 Polls `getStatus` once per second and prints one live line per session:
 
-    time  session  WxH@fps  mode  kbps  cap  enc  rend  drop  recvGaps  recov
+    time  session  WxH@fps  mode  kbps  cap  enc  rend  gaps  recov  idrRes  wire  age
 
 `rend` is the receiver-side rendered FPS reported through feedback — the same
-number the adaptive controller sees. Transitions (resolution or encoder mode
-changes) are detected and summarized with their recovery duration: time from
-the accepted change until rendered FPS is back at/above half the target.
+number the adaptive controller sees. `idrRes` counts paired-IDR split recovery
+resumes; `wire`/`age` are the split clock-corrected send/capture-to-decoder
+ages in ms and `inRtt` the viewer-measured input send->ack RTT (all None until
+they converge). Transitions (resolution or encoder mode changes) are detected and summarized with their recovery
+duration: time from the accepted change until rendered FPS is back at/above
+half the target.
 
 Also appends every sample to a JSONL log so a run can be summarized offline.
 
@@ -121,6 +124,9 @@ def main():
             for event in tracker.observe(view, now):
                 print(f"  ** {event}")
             rendered = view.get("renderedFps")
+            split_wire = view.get("receiverSplitWireMs")
+            capture_age = view.get("receiverSplitCaptureAgeMs")
+            input_rtt = view.get("receiverInputRttMs")
             line += (
                 f" | s{sid} {view.get('width')}x{view.get('height')}@{view.get('fps')}"
                 f" {view.get('encoderExperimentApplied') or '-'}"
@@ -129,6 +135,10 @@ def main():
                 f" rend={rendered if rendered is not None else '-'}"
                 f" gaps={view.get('receiverFrameGaps', 0)}"
                 f" recov={view.get('recoveryKeyframes', 0)}"
+                f" idrRes={view.get('receiverPairedIdrResumes', 0)}"
+                f" wire={split_wire if split_wire is not None else '-'}"
+                f" age={capture_age if capture_age is not None else '-'}"
+                f" inRtt={input_rtt if input_rtt is not None else '-'}"
                 f" {view.get('state', '')}"
             )
         print(line)

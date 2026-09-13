@@ -19,6 +19,7 @@ incremental = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+libc = "0.2"
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,15 +29,25 @@ futures-lite = "2"
 libloading = "0.8"
 mdns-sd = "0.11"
 control-contract = { path = "../../../crates/control-contract" }
+secure-channel = { path = "../../../crates/secure-channel" }
+
 session = { path = "../../../crates/session" }
 domain = { path = "../../../crates/domain" }
 fec-core = { path = "../../../crates/fec-core" }
 usb-mux = { path = "../../../crates/usb-mux" }
 base64 = "0.22"
+png = "0.17"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 dirs = "5"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 rfd = "0.15"
+sha2 = "0.10"
+tauri-plugin-clipboard-manager = "2"
+# tauri-plugin-clipboard-manager가 오류를 문자열로 바꿔버려서(arboard::Error
+# → Error::Clipboard(String)) "내용 없음"만 구분하려면 같은 버전의 arboard가
+# 필요하다 — 플러그인과 동일한 "3" 범위라 잠금 버전도 같다.
+arboard = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = [
@@ -46,15 +57,18 @@ windows = { version = "0.61.3", features = [
   "Graphics_DirectX",
   "Graphics_DirectX_Direct3D11",
   "Win32_Foundation",
+  "Win32_Devices_Display",
   "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
   "Win32_System_Ole",
+  "Win32_System_Power",
   "Win32_System_Variant",
   "Win32_System_WinRT",
   "Win32_System_WinRT_Direct3D11",
@@ -65,3 +79,4 @@ windows = { version = "0.61.3", features = [
 
 [dev-dependencies]
 tokio-test = "0.4"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

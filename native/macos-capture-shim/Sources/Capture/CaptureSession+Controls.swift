@@ -12,6 +12,10 @@ import OSLog
 
 extension CaptureSession {
     func setInputEnabled(_ enabled: Bool) -> Bool {
+        if enabled {
+            guard sourceAuthorization?.begin() ?? true else { return false }
+        }
+        defer { if enabled { sourceAuthorization?.end() } }
         if enabled && !CGPreflightPostEventAccess() {
             return false
         }
@@ -126,7 +130,7 @@ extension CaptureSession {
                     value: targetBitrate as CFNumber
                 )
                 if bitrateStatus == noErr {
-                    let hardLimitBytes = max(1, Int(Double(targetBitrate) / 8.0 * 1.25))
+                    let hardLimitBytes = vtHardLimitBytes(bitrate: targetBitrate)
                     _ = VTSessionSetProperty(
                         compressionSession,
                         key: kVTCompressionPropertyKey_DataRateLimits,
@@ -167,20 +171,6 @@ extension CaptureSession {
             }
             inputReadSource = source
             source.resume()
-        }
-        // Defensive token rebinding, not a live reconnect path: sessions own
-        // one socket for their whole lifetime and startInputReceiver runs
-        // once. The LCD1 coordinator stays silent until a token is installed
-        // and embeds it in every packet, so if a future reconnect ever
-        // replaces the session token, a live cursor stream rebinds here
-        // instead of streaming packets the viewer would reject.
-        cursorLock.lock()
-        let hadCoordinator = cursorCoordinator != nil
-        cursorLock.unlock()
-        if hadCoordinator {
-            cursorLock.lock()
-            cursorCoordinator?.setToken(viewerControlToken)
-            cursorLock.unlock()
         }
     }
 

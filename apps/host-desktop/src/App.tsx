@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   AlertTriangle,
   AppWindow,
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Copy,
   Globe,
   HelpCircle,
@@ -15,6 +17,8 @@ import {
   Moon,
   QrCode,
   RefreshCw,
+  EyeOff,
+  Lock,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -22,6 +26,7 @@ import {
   Tv,
   Wifi,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import {
   getTranslation,
@@ -29,10 +34,13 @@ import {
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
-import { trayStatus, type HostSnapshotView } from "./hostState";
+import { formatHostAddress, trayStatus, type HostSnapshotView } from "./hostState";
 import SessionInspector from "./SessionInspector";
 import type { SessionRow } from "./sessionTypes";
+import Modal from "./Modal";
 import PairingPanel from "./PairingPanel";
+import Indicator from "./Indicator";
+import { Curtain, useClipboardShare, usePrivacySettings } from "./Privacy";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -52,6 +60,43 @@ type HostErrorKind =
   | "network"
   | "service"
   | "generic";
+
+interface FooterToggleProps {
+  icon: LucideIcon;
+  label: string;
+  title: string;
+  active: boolean;
+  onToggle: () => void;
+  pending: boolean;
+  error: string | null;
+  onRetry: () => void;
+  retryText: string;
+  onText: string;
+  offText: string;
+}
+
+/** Footer gate toggle (clipboard share / lock-on-disconnect / curtain). */
+function FooterToggle(props: FooterToggleProps) {
+  const Icon = props.icon;
+  return (
+    <span>
+    <button
+      type="button"
+      disabled={props.pending}
+      aria-busy={props.pending}
+      className={controlToggleVariants({ active: props.active })}
+      onClick={props.onToggle}
+      title={props.title}
+      aria-pressed={props.active}
+    >
+      <Icon size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+      {props.label} <strong>{props.active ? props.onText : props.offText}</strong>
+      {props.pending && " …"}
+    </button>
+    {props.error && <span role="alert">{props.label}: {props.error} <button type="button" disabled={props.pending} onClick={props.onRetry}>{props.retryText}</button></span>}
+    </span>
+  );
+}
 
 interface HostErrorView {
   message: string;
@@ -92,6 +137,17 @@ export default function App() {
         <PairingPanel />
       </div>
     );
+  }
+
+  // "보고 있음" 배지 창(U4a) — 캡처되는 화면 위에 연결 중임을 드러낸다.
+  if (window.location.hash.startsWith("#/indicator")) {
+    return <Indicator />;
+  }
+
+  // 프라이버시 커튼 창 — 스트리밍 중 물리 화면을 검게 가린다(캡처에서는
+  // 제외되므로 원격 뷰어는 화면을 그대로 본다).
+  if (window.location.hash.startsWith("#/curtain")) {
+    return <Curtain />;
   }
 
   return <Dashboard />;
@@ -211,6 +267,25 @@ function useHostStatus(t: TranslationSchema) {
   };
 }
 
+/**
+ * 대시보드 쪽 보조 표시 경로(U4a): 자신의 상태 폴링 결과로 배지 창을
+ * show/hide 한다. 배지 라우트(#/indicator)가 숨겨진 대시보드 없이도 스스로
+ * 관리하는 주 경로를 갖고 있으므로, 두 경로는 같은 상태로 수렴한다.
+ */
+function useIndicatorWindow(isStreaming: boolean) {
+  useEffect(() => {
+    let cancelled = false;
+    void WebviewWindow.getByLabel("indicator").then((indicator) => {
+      if (!indicator || cancelled) return;
+      if (isStreaming) void indicator.show();
+      else void indicator.hide();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStreaming]);
+}
+
 interface DashboardHeaderProps {
   isStreaming: boolean;
   sessionCount: number;
@@ -238,6 +313,7 @@ function DashboardHeader({
   onToggleLanguage,
   onRefresh,
 }: DashboardHeaderProps) {
+  const ThemeIcon = { light: Sun, dark: Moon, system: Laptop }[themeMode];
   return (
     <header className="host-header">
       <div className="host-header-left">
@@ -302,15 +378,8 @@ function DashboardHeader({
           title={`${t.common.theme}: ${themeLabel}`}
           aria-label={`${t.common.theme}: ${themeLabel}`}
         >
-          {themeMode === "light" ? (
-            <Sun size={15} />
-          ) : themeMode === "dark" ? (
-            <Moon size={15} />
-          ) : (
-            <Laptop size={15} />
-          )}
-        </button>
-        <button
+          <ThemeIcon size={15} />
+        </button>        <button
           className={buttonVariants({ variant: "icon" })}
           onClick={onRefresh}
           title={`${t.common.refresh} (${t.host.shortcutRefresh})`}
@@ -328,26 +397,39 @@ interface DashboardFooterProps {
   lanIp: string | null;
   copiedToast: boolean;
   inputPermission: boolean;
+  clipboardShare: boolean;
+  lockOnDisconnect: boolean;
+  privacyCurtain: boolean;
+  clipboardPending: boolean;
+  lockPending: boolean;
+  curtainPending: boolean;
+  clipboardError: string | null;
+  lockError: string | null;
+  curtainError: string | null;
+  retryClipboard: () => void;
+  retryLock: () => void;
+  retryCurtain: () => void;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   language: SupportedLanguage;
   t: TranslationSchema;
   onCopyAddress: () => void;
   onRequestPermission: () => void;
+  onToggleClipboardShare: () => void;
+  onToggleLockOnDisconnect: () => void;
+  onTogglePrivacyCurtain: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
-  const { t, language } = props;
-  const platformLabel =
-    props.platform === "macos"
-      ? t.common.myMac
-      : props.platform === "windows"
-        ? t.common.windowsPc
-        : t.common.myComputer;
+  const { t } = props;
+  const platformLabels: Record<HostSnapshotView["platform"], string> = {
+    macos: t.common.myMac,
+    windows: t.common.windowsPc,
+    linux: t.common.myComputer,
+  };
+  const platformLabel = platformLabels[props.platform];
 
-  const addressText = props.lanIp
-    ? `${props.lanIp}:${props.controlPort}`
-    : `:${props.controlPort}`;
+  const addressText = formatHostAddress(props.lanIp, props.controlPort);
 
   return (
     <footer className="host-footer">
@@ -386,11 +468,52 @@ function DashboardFooter(props: DashboardFooterProps) {
             </strong>
           )}
         </button>
+        {/* 클립보드 공유 호스트 게이트(U5) — 세션 입력 토글과 같은 스타일. */}
+        <FooterToggle
+          icon={ClipboardCheck}
+          label={t.host.clipboardShareLabel}
+          title={t.host.clipboardShareDesc}
+          active={props.clipboardShare}
+          pending={props.clipboardPending}
+          error={props.clipboardError}
+          onRetry={props.retryClipboard}
+          retryText={t.common.retry}
+          onToggle={props.onToggleClipboardShare}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
+        {/* 세션 종료 후 자동 잠금 — 마지막 스트림이 끝나면 화면을 잠근다. */}
+        <FooterToggle
+          icon={Lock}
+          label={t.host.lockOnDisconnectLabel}
+          title={t.host.lockOnDisconnectDesc}
+          active={props.lockOnDisconnect}
+          pending={props.lockPending}
+          error={props.lockError}
+          onRetry={props.retryLock}
+          retryText={t.common.retry}
+          onToggle={props.onToggleLockOnDisconnect}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
+        {/* 프라이버시 커튼 — 스트리밍 중 물리 화면을 검게 가린다(macOS). */}
+        <FooterToggle
+          icon={EyeOff}
+          label={t.host.privacyCurtainLabel}
+          title={t.host.privacyCurtainDesc}
+          active={props.privacyCurtain}
+          pending={props.curtainPending}
+          error={props.curtainError}
+          onRetry={props.retryCurtain}
+          retryText={t.common.retry}
+          onToggle={props.onTogglePrivacyCurtain}
+          onText={t.host.clipboardShareOn}
+          offText={t.host.clipboardShareOff}
+        />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span className="footer-timestamp">
-          {platformLabel} · {t.host.lastUpdated} {props.lastUpdated.toLocaleTimeString(language === "ko" ? "ko-KR" : "en-US")}
-        </span>
+        {/* 폴링 타임스탬프는 소음일 뿐이다 — 상태는 배너가 문제일 때만 말한다. */}
+        <span className="footer-timestamp">{platformLabel}</span>
       </div>
     </footer>
   );
@@ -404,7 +527,7 @@ function TroubleshootingModal({
   t: TranslationSchema;
 }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <Modal ariaLabel={t.host.troubleshootTitle} onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 480 }}>
         <div className="modal-title-bar">
           <h3>{t.host.troubleshootTitle}</h3>
@@ -413,58 +536,28 @@ function TroubleshootingModal({
           </button>
         </div>
         <div className="modal-scroll-area" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <Wifi size={16} />
-              <span>{t.host.troubleshootWifi}</span>
+          {(
+            [
+              { icon: Wifi, title: t.host.troubleshootWifi, desc: t.host.troubleshootWifiDesc },
+              { icon: AlertTriangle, title: t.host.troubleshootAp, desc: t.host.troubleshootApDesc },
+              { icon: ShieldCheck, title: t.host.troubleshootFirewall, desc: t.host.troubleshootFirewallDesc },
+              { icon: Monitor, title: t.host.troubleshootPerm, desc: t.host.troubleshootPermDesc },
+              { icon: AppWindow, title: t.host.troubleshootHiddenWindow, desc: t.host.troubleshootHiddenWindowDesc },
+            ] as const
+          ).map(({ icon: Icon, title, desc }) => (
+            <div className="troubleshoot-card" key={title}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Icon size={16} />
+                <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>{title}</span>
+              </div>
+              <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                {desc}
+              </p>
             </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootWifiDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <AlertTriangle size={16} />
-              <span>{t.host.troubleshootAp}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootApDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <ShieldCheck size={16} />
-              <span>{t.host.troubleshootFirewall}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootFirewallDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <Monitor size={16} />
-              <span>{t.host.troubleshootPerm}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootPermDesc}
-            </p>
-          </div>
-
-          <div className="troubleshoot-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>
-              <AppWindow size={16} />
-              <span>{t.host.troubleshootHiddenWindow}</span>
-            </div>
-            <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
-              {t.host.troubleshootHiddenWindowDesc}
-            </p>
-          </div>
+          ))}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -478,7 +571,7 @@ function PairingModal({
   t: TranslationSchema;
 }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <Modal ariaLabel={t.host.pairingModalTitle} onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
           <h3>{t.host.pairingModalTitle}</h3>
@@ -490,7 +583,7 @@ function PairingModal({
           <PairingPanel language={language} />
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -508,11 +601,11 @@ function StopStreamModal({
   onConfirm: () => void;
 }) {
   return (
-    <dialog
-      open
-      className="modal-overlay"
-      aria-labelledby="stop-stream-title"
-      onClose={onCancel}
+    <Modal
+      labelledBy="stop-stream-title"
+      onClose={() => {
+        if (!busy) onCancel();
+      }}
     >
       <div className="modal-window stop-stream-modal">
         <div className="modal-title-bar">
@@ -538,7 +631,7 @@ function StopStreamModal({
           </div>
         </div>
       </div>
-    </dialog>
+    </Modal>
   );
 }
 
@@ -576,7 +669,7 @@ function TerminationBanner({
         <span className="termination-notice-target">
           {notice.sourceName} · {interpolate(t.host.connectedDevice, { addr: notice.viewerAddr })}
         </span>
-        <p><b>{t.host.terminationReasonLabel}</b> {notice.detail}</p>
+        <p>{notice.detail}</p>
       </div>
       <button className={buttonVariants({ variant: "close" })} onClick={onDismiss} aria-label={t.common.close}>
         <X size={15} />
@@ -703,6 +796,121 @@ interface IdleStudioViewProps {
   onOpenPairing: () => void;
 }
 
+/**
+ * 파일 공유 카드: 승인 토글(fileShare)과 호스트가 고른 공유 대기열을
+ * 보여 준다. 게이트가 꺼져 있어도 대기열 관리는 가능하다 — 뷰어 쪽 명령만
+ * 게이트로 막힌다.
+ */
+interface ShareQueueEntryView {
+  queueId: string;
+  name: string;
+  size: number;
+}
+
+function formatShareFileSize(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${size} B`;
+}
+
+function FileShareCard({ t }: { t: TranslationSchema }) {
+  const [enabled, setEnabled] = useState(false);
+  const [entries, setEntries] = useState<ShareQueueEntryView[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [shareEnabled, queue] = await Promise.all([
+        invoke<boolean>("get_file_share"),
+        invoke<ShareQueueEntryView[]>("list_share_queue"),
+      ]);
+      setEnabled(shareEnabled);
+      setEntries(queue);
+    } catch {
+      // 대시보드 상단 배너가 이미 서비스 오류를 표시한다 — 카드는 조용히 유지.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const runShareAction = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      setActionError(null);
+      await refresh();
+    } catch {
+      setActionError(t.host.fileShareError);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      className="file-share-card"
+      aria-label={t.host.fileShareSection}
+      style={{
+        border: "1px solid var(--border-subtle, rgba(128,128,128,0.3))",
+        borderRadius: 12,
+        padding: "12px 16px",
+        marginBottom: 16,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <button
+          className={controlToggleVariants({ active: enabled })}
+          disabled={busy}
+          onClick={() => void runShareAction(() => invoke("set_file_share", { enabled: !enabled }))}
+          aria-pressed={enabled}
+        >
+          {enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}
+        </button>
+        <button
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          disabled={busy}
+          onClick={() => void runShareAction(() => invoke("add_share_files"))}
+        >
+          {t.host.fileShareAdd}
+        </button>
+      </div>
+      <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{t.host.fileShareHint}</span>
+      {actionError && (
+        <span style={{ fontSize: 11, color: "var(--danger, #e5484d)" }} role="alert">{actionError}</span>
+      )}
+      {entries.length === 0 ? (
+        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t.host.fileShareEmpty}</span>
+      ) : (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+          {entries.map((entry) => (
+            <li
+              key={entry.queueId}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12 }}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {entry.name} <span style={{ color: "var(--text-dim)" }}>({formatShareFileSize(entry.size)})</span>
+              </span>
+              <button
+                className={buttonVariants({ variant: "close" })}
+                onClick={() => void runShareAction(() => invoke("remove_share_file", { queueId: entry.queueId }))}
+                aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
   return (
     <div className="idle-center-container">
@@ -713,11 +921,6 @@ function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
         <div className="idle-center-text">
           <h2>{t.host.idleTitle}</h2>
           <p>{t.host.idleDesc}</p>
-        </div>
-
-        <div className="idle-status-chip">
-          <span className="status-dot" />
-          <span>{t.host.idleStatusReady}</span>
         </div>
 
         <button className={buttonVariants({ variant: "primary", size: "lg" })} onClick={onOpenPairing} title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})`}>
@@ -847,6 +1050,21 @@ function Dashboard() {
   });
 
   const isStreaming = sessions.length > 0;
+  useIndicatorWindow(isStreaming);
+
+  // 클립보드 공유 호스트 게이트(U5) — 상태·토글은 Privacy 모듈의 훅이
+  // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
+  const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
+
+  // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
+  // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
+  const {
+    lockOnDisconnect,
+    privacyCurtain,
+    toggleLockOnDisconnect,
+    togglePrivacyCurtain,
+    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
+  } = usePrivacySettings();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -860,11 +1078,9 @@ function Dashboard() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShowPairingModal(false);
-        setShowHelpModal(false);
-        if (inputBusy === null) setPendingStopSession(null);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+      // Esc는 각 모달(네이티브 dialog cancel)이 자기 닫기를 소유한다 — 전역
+      // 핸들러가 닫으면 중첩된 확인 다이얼로그까지 한 번에 걷어진다.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setShowPairingModal((prev) => !prev);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
@@ -877,7 +1093,7 @@ function Dashboard() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [inputBusy, refresh]);
+  }, [refresh]);
 
   const openAccessibilitySettings = async () => {
     try {
@@ -950,10 +1166,13 @@ function Dashboard() {
     );
 
   const copyAddressInfo = () => {
-    const textToCopy = lanIp ? `${lanIp}:${controlPort}` : `:${controlPort}`;
-    void navigator.clipboard.writeText(textToCopy);
-    setCopiedToast(true);
-    setTimeout(() => setCopiedToast(false), 2000);
+    navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
+      () => {
+        setCopiedToast(true);
+        setTimeout(() => setCopiedToast(false), 2000);
+      },
+      () => setInputActionError(t.host.copyFailed),
+    );
   };
 
   const toggleTheme = () => {
@@ -1008,6 +1227,8 @@ function Dashboard() {
           onOpenAccessibility={openAccessibilitySettings}
         />
 
+        <FileShareCard t={t} />
+
         {isStreaming ? (
           <StreamsListView
             sessions={sessions}
@@ -1034,12 +1255,27 @@ function Dashboard() {
         lanIp={lanIp}
         copiedToast={copiedToast}
         inputPermission={inputPermission}
+        clipboardShare={clipboardShare}
+        retryClipboard={retryClipboard}
+        retryLock={retryLock}
+        retryCurtain={retryCurtain}
+        clipboardPending={clipboardPending}
+        clipboardError={clipboardError}
+        lockPending={lockPending}
+        lockError={lockError}
+        curtainPending={curtainPending}
+        curtainError={curtainError}
+        lockOnDisconnect={lockOnDisconnect}
+        privacyCurtain={privacyCurtain}
         platform={platform}
         lastUpdated={lastUpdated}
         language={language}
         t={t}
         onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
+        onToggleClipboardShare={toggleClipboardShare}
+        onToggleLockOnDisconnect={toggleLockOnDisconnect}
+        onTogglePrivacyCurtain={togglePrivacyCurtain}
       />
 
       {showPairingModal && (
@@ -1107,7 +1343,7 @@ function SessionCard({
           <div className="stream-card-name-group">
             <div className="stream-name-badge-row">
               <h3>{session.sourceName}</h3>
-              <span className="session-tag">#{session.session}</span>
+              {session.deviceName && <p>{session.deviceName}</p>}
             </div>
             <span className="stream-card-target">
               {interpolate(t.host.connectedDevice, { addr: session.viewerAddr })}
@@ -1140,14 +1376,7 @@ function SessionCard({
       <div className="stream-card-metrics-grid">
         <div className="metric-card">
           <span className="metric-card-label">{t.host.encoderOutput}</span>
-          <span className="metric-card-value font-emerald">
-            <span className="signal-bars" aria-hidden="true">
-              <span className="bar bar-1 active" />
-              <span className="bar bar-2 active" />
-              <span className="bar bar-3 active" />
-            </span>
-            {encodeOutputFps} FPS
-          </span>
+          <span className="metric-card-value font-emerald">{encodeOutputFps} FPS</span>
         </div>
 
         <div className="metric-card">

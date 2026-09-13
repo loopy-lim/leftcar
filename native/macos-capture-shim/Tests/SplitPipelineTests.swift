@@ -624,8 +624,8 @@ struct SplitPipelineTests {
             )
         }
 
-        // Live VideoToolbox probe (skipped when no hardware tile encoder is
-        // available): replayed carrier PTS and a following lower/equal source
+        // Explicit hardware probe (unavailable hardware is a failing/unverified
+        // receipt, never a skipped passing assertion): replayed carrier PTS and a following lower/equal source
         // PTS must all encode successfully with strictly increasing submission
         // PTS, and a fresh encoder session must restart the clock.
         do {
@@ -638,7 +638,7 @@ struct SplitPipelineTests {
                 backend: .rtvc
             ) {
                 func submitProbe(_ pts: CMTime, encoder: VideoToolboxTileEncoder) -> TileEncodedSample {
-                guard let pixelBuffer = makeProbePixelBuffer(width: 320, height: 240) else {
+                guard let pixelBuffer = makeProbePixelBuffer(width: 320, height: 240, metalCompatible: true) else {
                     preconditionFailure("split probe pixel buffer")
                 }
                 let semaphore = DispatchSemaphore(value: 0)
@@ -694,9 +694,11 @@ struct SplitPipelineTests {
                     let freshSample = submitProbe(CMTime(value: 9_000, timescale: 1_000), encoder: freshEncoder)
                     precondition(freshSample.pts.value == 9_000)
                     freshEncoder.invalidate()
+                } else {
+                    preconditionFailure("UNVERIFIED: fresh hardware tile encoder unavailable")
                 }
             } else {
-                print("split probe: hardware tile encoder unavailable; skipping live PTS probe")
+                preconditionFailure("UNVERIFIED: hardware tile encoder unavailable; use split-policy-test for pure verification")
             }
         }
 
@@ -715,7 +717,8 @@ struct SplitPipelineTests {
                 fps: 60,
                 backend: .screenCaptureKit,
                 mediaTransport: .udp,
-                requestedEncoderExperiment: .splitVertical
+                requestedEncoderExperiment: .splitVertical,
+                mediaKey: Data((0..<32).map { UInt8($0) })
             )
             guard let carrierBuffer = makeProbePixelBuffer(width: 4, height: 4) else {
                 preconditionFailure("carrier pixel buffer")
@@ -794,7 +797,8 @@ struct SplitPipelineTests {
                 fps: 60,
                 backend: .screenCaptureKit,
                 mediaTransport: .udp,
-                requestedEncoderExperiment: .splitVertical
+                requestedEncoderExperiment: .splitVertical,
+                mediaKey: Data((0..<32).map { UInt8($0) })
             )
             fputs("split genuine-PLI: session built\n", stderr)
             // Complete the startup pair so the session is in steady state.
@@ -868,14 +872,14 @@ struct SplitPipelineTests {
     }
 }
 
-private func makeProbePixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+private func makeProbePixelBuffer(width: Int, height: Int, metalCompatible: Bool = false) -> CVPixelBuffer? {
     var buffer: CVPixelBuffer?
     guard CVPixelBufferCreate(
         kCFAllocatorDefault,
         width,
         height,
         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-        [kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary,
+        (metalCompatible ? [kCVPixelBufferMetalCompatibilityKey: true] : [:]) as CFDictionary,
         &buffer
     ) == kCVReturnSuccess, let buffer else {
         return nil

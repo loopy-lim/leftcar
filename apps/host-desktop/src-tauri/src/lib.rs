@@ -5,12 +5,21 @@
 pub mod aoap;
 pub mod aoap_control;
 pub mod aoap_proxy;
+pub mod audit;
 pub mod backend;
+pub mod clipboard;
 pub mod control;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
+pub mod file_transfer;
+pub mod identity;
+pub mod lock;
+pub mod media_pacing;
 pub mod pairing;
+pub mod settings;
+pub mod source_grants;
+mod state_profile;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -46,13 +55,76 @@ fn fatal_startup_error(message: String) -> ! {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let normal_data = dirs::data_dir();
+    let profile = state_profile::StateProfile::from_environment(normal_data.as_deref())
+        .unwrap_or_else(|message| fatal_startup_error(message));
+    if profile.is_benchmark() {
+        eprintln!("Leftcar Host: isolated internal benchmark profile");
+    }
+    let _profile_owner = source_grants::lock_profile(
+        &profile
+            .file(".source-grants.lock")
+            .unwrap_or_else(|| fatal_startup_error("Host state directory unavailable".into())),
+    )
+    .unwrap_or_else(|message| fatal_startup_error(message));
     let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = backend.clone();
-    let pairing = Arc::new(pairing::PairingServer::new(
-        "leftcar-host".into(),
-        pairing::PairingServer::default_store_path(),
+    // 호스트 정체 키: QR과 핸드셰이크 서명의 뿌리. 최초 기동에서 생성·영속된다.
+    let identity = Arc::new(identity::load_or_create(
+        (if profile.is_benchmark() {
+            profile.file("host_identity.json")
+        } else {
+            identity::default_identity_path()
+        })
+        .as_deref(),
     ));
-    let server = Arc::new(control::ControlServer::new(backend.clone(), pairing.clone()));
+    let pairing_store_path = if profile.is_benchmark() {
+        profile.file("paired_devices.json")
+    } else {
+        pairing::PairingServer::default_store_path()
+    };
+    let pairing = Arc::new(pairing::PairingServer::new(
+        identity.public_key(),
+        pairing_store_path.clone(),
+        if profile.is_benchmark() {
+            pairing::token_store_with_service(pairing_store_path, profile.credential_service())
+        } else {
+            pairing::token_store(pairing_store_path)
+        },
+    ));
+    pairing
+        .initialize_source_grants(
+            profile
+                .file("source_grants.json")
+                .unwrap_or_else(|| fatal_startup_error("Host state directory unavailable".into())),
+        )
+        .unwrap_or_else(|message| fatal_startup_error(message));
+    let audit = Arc::new(audit::SessionAudit::new(if profile.is_benchmark() {
+        profile.file("sessions.jsonl")
+    } else {
+        audit::SessionAudit::default_path()
+    }));
+    // 파일 공유 게이트: 기본 꺼짐, 승인 토글처럼 영속된다(0600 settings.json).
+    let settings = Arc::new(settings::SharedSettings::load_or_default(
+        if profile.is_benchmark() {
+            profile.file("settings.json")
+        } else {
+            settings::default_settings_path()
+        },
+    ));
+    let server = Arc::new(control::ControlServer::new(
+        backend.clone(),
+        pairing.clone(),
+        identity.clone(),
+    ));
+    server.set_audit(audit.clone());
+    // 클립보드 동기화 호스트 게이트(U5): 같은 0600 settings.json에서 읽고,
+    // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
+    server.set_clipboard_share(settings.clipboard_share());
+    server.set_settings(settings.clone());
+    // 세션 종료 후 화면 잠금 실행부(설정 lock_on_disconnect가 켜져 있을 때
+    // 마지막 세션 teardown에서 호출된다).
+    server.set_lock_screen(std::sync::Arc::new(lock::lock_workstation));
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -68,6 +140,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_host_platform,
@@ -86,19 +159,42 @@ pub fn run() {
             approve_pending_pairing,
             reject_pending_pairing,
             list_paired_devices,
+            list_paired_device_state,
+            list_host_sources,
+            set_source_grants,
             revoke_paired_device,
-            revoke_all_devices
+            revoke_all_devices,
+            get_clipboard_share,
+            set_clipboard_share,
+            get_file_share,
+            set_file_share,
+            get_privacy_settings,
+            set_lock_on_disconnect,
+            set_privacy_curtain,
+            add_share_files,
+            list_share_queue,
+            remove_share_file
         ])
         .setup(move |app| {
+            // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
+            // 이 주입이 없는 환경의 폴백일 뿐이다.
+            server.set_clipboard(Arc::new(clipboard::TauriClipboard::new(
+                app.handle().clone(),
+            )));
+            let curtain_controller = make_curtain_controller(app.handle().clone());
+            server.set_curtain_controller(curtain_controller);
             app.manage(server);
             app.manage(pairing);
+            app.manage(audit);
+            app.manage(settings);
             app.manage(ControlEndpoint { port: control_port });
             warm_display_catalog(warmup_backend);
+            create_indicator_window(app);
 
             let show_item =
                 MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
             let pairing_item =
-                MenuItem::with_id(app, "pairing", "기기 페어링…", true, None::<&str>)?;
+                MenuItem::with_id(app, "pairing", "연결 코드 만들기…", true, None::<&str>)?;
             let quit_item =
                 MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &pairing_item, &quit_item])?;
@@ -158,7 +254,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("tauri build")
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Err(error) = app
+                    .state::<Arc<control::ControlServer>>()
+                    .shutdown_source_access()
+                {
+                    eprintln!("Host grant shutdown uncertain: {error}");
+                }
+            }
+        });
 }
 
 #[cfg(target_os = "macos")]
@@ -193,13 +298,121 @@ fn show_pairing_window(app: &tauri::AppHandle) {
         "pairing",
         WebviewUrl::App("index.html#/pairing".into()),
     )
-    .title("기기 페어링")
+    .title("연결 코드 만들기")
     .inner_size(420.0, 560.0)
     .resizable(false)
     .build()
     {
         eprintln!("failed to open pairing window: {e}");
     }
+}
+
+/// Create the "보고 있음" indicator window (U4a). A streaming host must be
+/// visible on the captured desktop (TeamViewer-style no-stealth norm) — the
+/// tray alone is not enough. The borderless always-on-top badge starts
+/// hidden; the `#/indicator` route polls get_status and shows/hides itself.
+fn create_indicator_window(app: &tauri::App) {
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        "indicator",
+        WebviewUrl::App("index.html#/indicator".into()),
+    )
+    .title("Leftcar")
+    .decorations(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .resizable(false)
+    .inner_size(220.0, 30.0)
+    .visible(false);
+
+    // 주 디스플레이 우상단 — 물리 픽셀을 논리 좌표로 환산해 여백 12px에 띄운다.
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let margin = 12.0;
+        let x = monitor.size().width as f64 / scale - 220.0 - margin;
+        let y = margin;
+        builder = builder.position(x, y);
+    }
+
+    if let Err(error) = builder.build() {
+        eprintln!("failed to create indicator window: {error}");
+        return;
+    }
+    if let Some(window) = app.get_webview_window("indicator") {
+        // 배지가 클릭이나 포커스를 훔치지 않게 한다(가능한 버전에서만).
+        let _ = window.set_ignore_cursor_events(true);
+        let _ = window.set_visible_on_all_workspaces(true);
+    }
+}
+
+/// 프라이버시 커튼: 모니터마다 검은 풀스크린 오버레이를 띄운다(커튼 창은
+/// macOS shim이 캡처에서 제외한다 — 제목 "leftcar-curtain"으로 식별).
+/// 적용 성공 여부를 돌려준다 — 실패한 토글은 상태로 커밋되지 않아 다음
+/// refresh 트리거에서 재시도된다(control.rs M3). WGC 모니터 캡처는 창
+/// 제외를 지원하지 않아 Windows v1은 no-op이다.
+#[cfg(target_os = "macos")]
+fn make_curtain_controller(
+    app_handle: tauri::AppHandle,
+) -> std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync> {
+    std::sync::Arc::new(move |show| refresh_curtain_windows(&app_handle, show))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn make_curtain_controller(
+    _app_handle: tauri::AppHandle,
+) -> std::sync::Arc<dyn Fn(bool) -> bool + Send + Sync> {
+    std::sync::Arc::new(|_show| {
+        eprintln!("leftcar: privacy curtain is macOS-only in v1");
+        true
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_curtain_windows(app_handle: &tauri::AppHandle, show: bool) -> bool {
+    let monitors = app_handle.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        // 모니터를 못 읽으면 창을 놓을 자리가 없다 — show는 실패로 보고
+        // 다음 refresh에서 재시도하게 한다.
+        return !show;
+    }
+    let mut applied = true;
+    for (index, monitor) in monitors.iter().enumerate() {
+        let label = format!("curtain-{index}");
+        if !show {
+            if let Some(window) = app_handle.get_webview_window(&label) {
+                if window.close().is_err() {
+                    applied = false;
+                }
+            }
+            continue;
+        }
+        if app_handle.get_webview_window(&label).is_some() {
+            continue;
+        }
+        // 물리 좌표를 논리 좌표로 환산해 모니터 원점에 정확히 맞춘다.
+        let scale = monitor.scale_factor();
+        let position = monitor.position();
+        let size = monitor.size();
+        let built = tauri::WebviewWindowBuilder::new(
+            app_handle,
+            &label,
+            WebviewUrl::App("index.html#/curtain".into()),
+        )
+        .title("leftcar-curtain")
+        .decorations(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .resizable(false)
+        .maximizable(false)
+        .position(position.x as f64 / scale, position.y as f64 / scale)
+        .inner_size(size.width as f64 / scale, size.height as f64 / scale)
+        .build();
+        if let Err(error) = built {
+            eprintln!("failed to create curtain window {index}: {error}");
+            applied = false;
+        }
+    }
+    applied
 }
 
 /// Prime the display catalog before the first viewer opens it. On macOS this
@@ -395,9 +608,7 @@ fn approve_pending_pairing(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
     offer_id: String,
 ) -> Result<(), String> {
-    state
-        .approve_pending(&offer_id)
-        .map_err(|e| e.to_string())
+    state.approve_pending(&offer_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -409,6 +620,22 @@ fn reject_pending_pairing(
 }
 
 #[tauri::command]
+fn list_host_sources(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+) -> Result<Vec<control_contract::host::DisplayInfo>, String> {
+    server.host_sources()
+}
+#[tauri::command]
+fn set_source_grants(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    device_id: String,
+    source_ids: Vec<String>,
+    credential_id: String,
+) -> Result<source_grants::GrantView, String> {
+    server.set_source_grants_for_credential(&device_id, source_ids, Some(&credential_id))
+}
+
+#[tauri::command]
 fn list_paired_devices(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
 ) -> Vec<pairing::PairedDeviceView> {
@@ -416,16 +643,147 @@ fn list_paired_devices(
 }
 
 #[tauri::command]
-fn revoke_paired_device(
-    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-    device_id: String,
-) -> bool {
-    state.revoke(&device_id)
+fn list_paired_device_state(
+    state: tauri::State<'_, Arc<pairing::PairingServer>>,
+) -> pairing::PairedDeviceState {
+    state.list_device_state()
 }
 
 #[tauri::command]
-fn revoke_all_devices(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) -> usize {
-    state.revoke_all()
+fn revoke_paired_device(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    device_id: String,
+) -> pairing::RevokeOutcome {
+    server.revoke_device(&device_id)
+}
+#[tauri::command]
+fn revoke_all_devices(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+) -> pairing::RevokeOutcome {
+    server.revoke_all_devices()
+}
+
+#[tauri::command]
+fn get_clipboard_share(state: tauri::State<'_, std::sync::Arc<control::ControlServer>>) -> bool {
+    state.clipboard_share_enabled()
+}
+
+#[tauri::command]
+fn set_clipboard_share(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    // 토글은 즉시 효력을 가지고 file_share와 함께 0600 settings.json에 남는다.
+    settings.set_clipboard_share(enabled)?;
+    state.set_clipboard_share(enabled);
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn get_file_share(settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>) -> bool {
+    settings.file_share()
+}
+
+#[tauri::command]
+fn get_privacy_settings(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+) -> (bool, bool) {
+    (settings.lock_on_disconnect(), settings.privacy_curtain())
+}
+
+#[tauri::command]
+fn set_lock_on_disconnect(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_lock_on_disconnect(enabled)?;
+    audit_state.log(
+        "lock_on_disconnect_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_privacy_curtain(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_privacy_curtain(enabled)?;
+    // 즉시 반영: 켜면 살아 있는 세션이 있을 때 오버레이를 띄우고, 끄면
+    // 치운다.
+    state.refresh_curtain();
+    if enabled {
+        // 이미 스트리밍 중인 세션의 SCK 필터는 시작 시점의 창 스냅샷으로
+        // 제외 목록을 만들었다 — 방금 띄운 커튼이 캡처에서 빠지게 같은
+        // 형태로 재시작해 필터를 다시 만든다(H1).
+        state.restart_sessions_for_curtain().await;
+    }
+    audit_state.log(
+        "privacy_curtain_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn set_file_share(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings.set_file_share(enabled)?;
+    audit_state.log(
+        "file_share_changed",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
+}
+
+/// 파일 공유 대기열에 파일을 올린다. 다이얼로그 취소는 no-op(빈 목록)이다.
+/// rfd의 동기 패널은 메인 스레드에서 호출하면 막히므로 블로킹 스레드에서
+/// 띄운다(Tauri 명령은 기본적으로 메인 스레드에서 실행된다).
+#[tauri::command]
+async fn add_share_files(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Result<Vec<file_transfer::ShareQueueEntry>, String> {
+    let server = server.inner().clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("Leftcar — 파일 공유")
+            .pick_files()
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|error| format!("file dialog failed: {error:?}"))?;
+    let transfers = server.file_transfer_state();
+    let mut entries = Vec::new();
+    for path in picked {
+        match transfers.add_share_file(path) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => eprintln!("leftcar: shared file rejected: {error}"),
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+fn list_share_queue(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Vec<file_transfer::ShareQueueEntry> {
+    server.file_transfer_state().queue_entries()
+}
+
+#[tauri::command]
+fn remove_share_file(
+    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    queue_id: String,
+) -> bool {
+    server.file_transfer_state().remove_share_file(&queue_id)
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

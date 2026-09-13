@@ -15,30 +15,8 @@ struct PendingSplitAccessUnit {
     let right: SplitEncodedPayload
     let isKeyframe: Bool
     let isRecoveryKeyframe: Bool
-    let queuedNs: UInt64
-    let dropRightForTest: Bool
-
-    init(
-        sequence: UInt64,
-        generation: UInt64,
-        lease: SplitFlowLease,
-        left: SplitEncodedPayload,
-        right: SplitEncodedPayload,
-        isKeyframe: Bool,
-        isRecoveryKeyframe: Bool,
-        queuedNs: UInt64,
-        dropRightForTest: Bool = false
-    ) {
-        self.sequence = sequence
-        self.generation = generation
-        self.lease = lease
-        self.left = left
-        self.right = right
-        self.isKeyframe = isKeyframe
-        self.isRecoveryKeyframe = isRecoveryKeyframe
-        self.queuedNs = queuedNs
-        self.dropRightForTest = dropRightForTest
-    }
+    var queuedNs: UInt64 = DispatchTime.now().uptimeNanoseconds
+    var dropRightForTest: Bool = false
 
     var bytes: Int {
         left.annexB.count + right.annexB.count

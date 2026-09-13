@@ -16,12 +16,24 @@ object ViewerNative {
 
     /** Returns the opaque process-state handle. */
     external fun start(): Long
-    /** Bind the UDP media port before Host reachability proof starts. */
-    external fun prepareStream(port: Int, host: String, mediaTransport: String): Int
+    /**
+     * Bind the UDP media port before Host reachability proof starts.
+     * [mediaKey] is the viewer-generated 32-byte session key that seals every
+     * media datagram; the prepared listener answers the host's sealed LCH1
+     * challenge through it.
+     */
+    external fun prepareStream(port: Int, host: String, mediaTransport: String, mediaKey: ByteArray): Int
     /** Bind both consecutive UDP ports for the exact 4K vertical split. */
-    external fun prepareSplitStream(port: Int, host: String, mediaTransport: String): Int
+    external fun prepareSplitStream(port: Int, host: String, mediaTransport: String, mediaKey: ByteArray): Int
     /** Claim an Android UsbAccessory fd and start the native mux bridge. */
-    external fun prepareUsb(fd: Int): Int
+    external fun prepareUsb(fd: Int, mediaKey: ByteArray): Int
+    /**
+     * Register the session media key for the USB bridge. The accessory can
+     * attach before JS generates a stream key, so the key is re-pointed at
+     * the live bridge before startStream (same key the JS side sends to the
+     * host over the encrypted control plane).
+     */
+    external fun setSessionMediaKey(mediaKey: ByteArray): Int
     /** Loopback TCP port used by the JS control client for USB sessions. */
     external fun usbControlPort(): Int
     /** Roll back a prepared port when Host start or Activity launch fails. */
@@ -43,6 +55,17 @@ object ViewerNative {
         height: Int,
         fps: Int,
     ): Int
+    external fun attachSurfacePortWithPresentation(
+        state: Long,
+        instanceId: String,
+        surface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        balanced: Boolean,
+    ): Int
     /** Replace the renderer while retaining the Activity-owned Surface. */
     external fun rebindSurfacePort(
         state: Long,
@@ -53,6 +76,17 @@ object ViewerNative {
         width: Int,
         height: Int,
         fps: Int,
+    ): Int
+    external fun rebindSurfacePortWithPresentation(
+        state: Long,
+        instanceId: String,
+        surface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        balanced: Boolean,
     ): Int
     external fun attachSplitSurfaces(
         state: Long,
@@ -66,6 +100,20 @@ object ViewerNative {
         fps: Int,
         decoderName: String,
     ): Int
+    external fun attachSplitSurfacesWithPresentation(
+        state: Long,
+        instanceId: String,
+        leftSurface: Surface,
+        rightSurface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        decoderName: String,
+        balanced: Boolean,
+    ): Int
+    external fun displayFrame(state: Long, instanceId: String, balanced: Boolean, displayId: Int, frameNs: Long, periodNs: Long): Int
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
     external fun sendPointer(
@@ -77,6 +125,8 @@ object ViewerNative {
         actionButton: Int,
         horizontalScroll: Float,
         verticalScroll: Float,
+        /** 스타일러스 압력(0.0-1.0). 음수는 압력 없음. */
+        pressure: Float,
     ): Int
     external fun sendKey(
         instanceId: String,
@@ -114,6 +164,9 @@ object ViewerNative {
      * renderer's idempotent command refresh, so a mid-stream toggle applies
      * without a reconfigure.
      */
+    external fun pollAudioOwned(state: Long, instanceId: String, out: ByteArray): Int
+    external fun setAudioOwned(state: Long, instanceId: String, enabled: Boolean, opus: Boolean): Int
+    external fun setAudioCodec(instanceId: String, opus: Boolean): Int
     external fun setAudioStream(instanceId: String, enabled: Boolean): Int
     /** Compact native renderer diagnostics; -1 when the stream is unavailable. */
     external fun streamStats(instanceId: String): Long

@@ -38,6 +38,15 @@ class TextInputRelayTest {
     }
 
     @Test
+    fun `CR은 개행이고 CRLF는 한 번의 개행이다`() {
+        val recorder = Recorder()
+        val relay = relayWith(recorder)
+        relay.commitText("a\rb\r\nc")
+        assertEquals(listOf("a", "b", "c"), recorder.texts)
+        assertEquals(2, recorder.enters)
+    }
+
+    @Test
     fun `commitText의 개행만 있는 입력은 Enter가 된다`() {
         val recorder = Recorder()
         val relay = relayWith(recorder)

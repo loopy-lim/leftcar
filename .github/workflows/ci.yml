@@ -17,37 +17,81 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/host-desktop/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.1
+      - run: bun install --frozen-lockfile
+      - name: macOS Host updater plan integration (no build or app operations)
+        run: bun tools/build.host-macos.integration.mjs
+      - name: Build macOS capture resource before Host crate tests
+        run: zsh tools/build-macos-capture-shim.zsh library native/macos-capture-shim/libleftcar_capture.dylib
       - name: Format
         run: cargo fmt --all -- --check
       - name: Architecture tests (H01)
-        run: cargo test -p architecture-check
+        run: cargo test -p architecture-check --locked
       - name: Workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: Host desktop crate tests (standalone workspace)
+        run: cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked
       - name: Clippy
-        run: cargo clippy --workspace --tests -- -D warnings
+        run: cargo clippy --workspace --tests --locked -- -D warnings
+      - name: Host desktop crate clippy
+        run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests --locked -- -D warnings
+      - name: Swift shim policy tests (build + run)
+        run: |
+          zsh tools/build-macos-capture-shim.zsh split-policy-test /tmp/leftcar-split-policy-test
+          /tmp/leftcar-split-policy-test
+          echo "Full shim compile; Foundation split policies executed; hardware/capture UNVERIFIED" >> "$GITHUB_STEP_SUMMARY"
+      - name: Existing Swift adapter tests (CI only, full shim linkage)
+        run: |
+          zsh tools/build-macos-capture-shim.zsh policy-test /tmp/leftcar-policy-test
+          /tmp/leftcar-policy-test
+          zsh tools/build-macos-capture-shim.zsh retransmit-ring-test /tmp/leftcar-retransmit-ring-test
+          /tmp/leftcar-retransmit-ring-test
 
   ts:
     name: TypeScript (typecheck, tests, contract, architecture)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.1
+      - uses: dtolnay/rust-toolchain@1.95.0
       - run: bun install --frozen-lockfile
       - name: Unit + contract tests
         run: bun run test && bun run test:contract
       - name: Typecheck
         run: bun run typecheck
+      - name: Expo app typecheck (expo-router app/ screens)
+        run: bun run --cwd apps/viewer-expo typecheck
+      - name: React Doctor (require actual 100 score)
+        shell: bash
+        run: |
+          set -o pipefail
+          npx -y react-doctor@latest . --verbose | tee /tmp/react-doctor.log
+          bun -e 'import {requirePerfectReactDoctor} from "./tools/verify.mjs"; requirePerfectReactDoctor(await Bun.file("/tmp/react-doctor.log").text())'
+      - name: Portable browser regression
+        run: bunx playwright-core install --with-deps chromium && bun run test:ui
       - name: TS/Kotlin architecture rules
         run: bun run test:architecture
       - name: Regeneration is clean (H26)
         run: |
-          cargo run -p control-contract --bin generate
+          cargo run -p control-contract --bin generate --locked
           git diff --exit-code -- packages/control-generated
 
   android-compile:
@@ -55,18 +99,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android,x86_64-linux-android
       - name: Ensure Android Rust target is installed
-        run: rustup target add aarch64-linux-android
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+      - name: Install pinned cargo-ndk for the generated Rustra bridge
+        run: cargo install cargo-ndk --version 4.1.2 --locked
       - name: Install Android NDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" >/dev/null
       - name: Put NDK toolchain on PATH
-        run: echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+        run: |
+          echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
       - uses: Swatinem/rust-cache@v2
       - name: cargo check viewer native for Android
-        run: cargo check -p android-viewer --target aarch64-linux-android
+        run: cargo check -p android-viewer --target aarch64-linux-android --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.1
+      - name: Frozen JS dependencies before Gradle settings resolution
+        run: bun install --frozen-lockfile
+      - name: Gradle JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+        working-directory: apps/viewer-expo/android
 
   windows-host:
     name: Windows Host (WGC, Media Foundation, NSIS)
@@ -76,12 +140,15 @@ jobs:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
       - name: Enable long paths for Git dependencies
         run: git config --global core.longpaths true
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
-      - uses: dtolnay/rust-toolchain@stable
+          bun-version: 1.4.1
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -89,11 +156,11 @@ jobs:
           workspaces: apps/host-desktop/src-tauri
       - run: bun install --frozen-lockfile
       - name: Windows host unit and control tests
-        run: cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml
+        run: cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked
       - name: Windows host clippy
-        run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests -- -D warnings
+        run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests --locked -- -D warnings
       - name: Build unsigned current-user NSIS installer
-        run: bun run --cwd apps/host-desktop tauri build
+        run: bun run --cwd apps/host-desktop tauri build -- --locked
       - uses: actions/upload-artifact@v4
         with:
           name: leftcar-host-windows-x64-unsigned

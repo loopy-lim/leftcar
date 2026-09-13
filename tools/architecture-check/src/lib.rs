@@ -1,76 +1,85 @@
-//! Workspace architecture rule engine (H01).
-//!
-//! Enforces the ADR-0002 dependency rules from docs/03 §4.1 by parsing
-//! `cargo metadata --no-deps` and the crate Cargo.toml manifests.
+//! Resolved Cargo dependency rules for the root workspace and standalone Host.
+use std::collections::{BTreeMap, BTreeSet};
 
-use std::collections::BTreeMap;
-use std::path::Path;
-
-/// A workspace crate: name and its declared workspace-internal dependencies.
 #[derive(Debug, Clone)]
 pub struct CrateInfo {
     pub name: String,
-    /// workspace-internal deps (crate names, not paths)
     pub internal_deps: Vec<String>,
-    /// external (non-workspace) deps
     pub external_deps: Vec<String>,
 }
-
 pub type Workspace = BTreeMap<String, CrateInfo>;
 
-/// Parse `cargo metadata --no-deps --format-version 1` output.
+/// Requires full, unfiltered, locked Cargo metadata. Package IDs resolve aliases,
+/// inherited dependencies and target edges. Normal AND build edges are checked;
+/// dev-only edges are excluded from production layering. Every local package is
+/// checked, including path dependencies outside a standalone app's membership.
+/// Invalid/incomplete metadata is fatal rather than an empty successful graph.
 pub fn parse_metadata(json: &str) -> Workspace {
     let v: serde_json::Value = serde_json::from_str(json).expect("valid cargo metadata json");
+    let packages = v["packages"].as_array().expect("packages array");
+    let nodes = v["resolve"]["nodes"]
+        .as_array()
+        .expect("resolved nodes required (omit --no-deps)");
+    let by_id: BTreeMap<_, _> = packages
+        .iter()
+        .map(|p| (p["id"].as_str().expect("package ID"), p))
+        .collect();
     let mut ws = Workspace::new();
-    for pkg in v["packages"].as_array().expect("packages array") {
-        let name = pkg["name"].as_str().expect("name").to_string();
-        let mut internal_deps = Vec::new();
-        let mut external_deps = Vec::new();
-        // dependencies from manifest fields; cargo metadata "dependencies" includes
-        // resolved names for path deps in a workspace only with --deps, so read
-        // the manifest tables directly instead.
-        let manifest_path = pkg["manifest_path"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if let Some(info) = read_manifest_deps(&manifest_path) {
-            internal_deps = info.0;
-            external_deps = info.1;
-        }
-        ws.insert(
-            name.clone(),
-            CrateInfo {
-                name,
-                internal_deps,
-                external_deps,
-            },
+    for pkg in packages
+        .iter()
+        .filter(|p| p.get("source").expect("package source").is_null())
+    {
+        let id = pkg["id"].as_str().expect("package ID");
+        let name = pkg["name"].as_str().expect("package name").to_string();
+        assert!(
+            std::path::Path::new(pkg["manifest_path"].as_str().expect("manifest path"))
+                .is_absolute(),
+            "absolute manifest path required"
         );
-    }
-    ws
-}
-
-type Deps = (Vec<String>, Vec<String>);
-
-fn read_manifest_deps(manifest_path: &str) -> Option<Deps> {
-    let text = std::fs::read_to_string(Path::new(manifest_path)).ok()?;
-    let v: toml::Value = toml::from_str(&text).ok()?;
-    let deps = v.get("dependencies")?;
-    let mut internal = Vec::new();
-    let mut external = Vec::new();
-    if let Some(obj) = deps.as_table() {
-        for (dep_name, spec) in obj {
-            let is_path = spec
-                .as_table()
-                .map(|t| t.contains_key("path"))
-                .unwrap_or(false);
-            if is_path {
-                internal.push(dep_name.clone());
-            } else if spec.as_str().is_some() || spec.as_table().is_some() {
-                external.push(dep_name.clone());
+        let node = nodes
+            .iter()
+            .find(|n| n["id"] == id)
+            .expect("local package resolve node");
+        let mut internal = BTreeSet::new();
+        let mut external = BTreeSet::new();
+        for edge in node["deps"].as_array().expect("resolved deps") {
+            let kinds = edge["dep_kinds"].as_array().expect("dependency kinds");
+            assert!(!kinds.is_empty(), "dependency kinds must not be empty");
+            for kind in kinds {
+                assert!(
+                    kind["kind"].is_null()
+                        || matches!(kind["kind"].as_str(), Some("build" | "dev")),
+                    "unknown dependency kind"
+                );
+            }
+            if kinds.iter().all(|k| k["kind"] == "dev") {
+                continue;
+            }
+            let dep = by_id
+                .get(edge["pkg"].as_str().expect("resolved dependency ID"))
+                .expect("resolved dependency package");
+            let dep_name = dep["name"].as_str().expect("dependency name").to_string();
+            if dep.get("source").expect("dependency source").is_null() {
+                internal.insert(dep_name);
+            } else {
+                external.insert(dep_name);
             }
         }
+        assert!(
+            ws.insert(
+                name.clone(),
+                CrateInfo {
+                    name,
+                    internal_deps: internal.into_iter().collect(),
+                    external_deps: external.into_iter().collect()
+                }
+            )
+            .is_none(),
+            "ambiguous duplicate local package name"
+        );
     }
-    Some((internal, external))
+    assert!(!ws.is_empty(), "no local packages in metadata");
+    ws
 }
 
 #[derive(Debug)]
@@ -123,6 +132,8 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         // desktop and Android facades can use the same bounded hot path.
         ("fec-core", &[]),
         ("usb-mux", &[]),
+        // 세션 암호 프리미티브 — fec-core와 같은 무의존 하위 계층.
+        ("secure-channel", &[]),
         ("media-model", &["domain"]),
         ("control-contract", &["domain", "media-model"]),
         ("session", &["domain"]),
@@ -136,11 +147,23 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "viewer-decoder",
                 "fec-core",
                 "usb-mux",
-                "libc",
+                // 미디어 경로 AEAD 봉인 — fec-core와 같은 무의존 하위 계층.
+                "secure-channel",
             ],
         ),
         ("leftcar-rustra", &["control-contract"]),
-        ("viewer-decoder", &["libc"]),
+        ("viewer-decoder", &[]),
+        (
+            "leftcar-host-desktop",
+            &[
+                "control-contract",
+                "domain",
+                "fec-core",
+                "secure-channel",
+                "session",
+                "usb-mux",
+            ],
+        ),
         ("architecture-check", &[]),
     ];
 
@@ -172,8 +195,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         }
         // Video hot path: crates in the video plane must not depend on the
         // control contract, and the contract must not appear in media-model.
-        if crate_name == "media-model"
-            && info.internal_deps.iter().any(|d| d == "control-contract")
+        if crate_name == "media-model" && info.internal_deps.iter().any(|d| d == "control-contract")
         {
             out.push(Violation {
                 rule: "video-plane-has-no-control-contract".into(),
@@ -181,7 +203,14 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
             });
         }
         // No crate except platform facades and apps may touch platform SDKs.
-        if crate_name != "control-contract" {
+        if ![
+            "control-contract",
+            "android-viewer",
+            "viewer-decoder",
+            "leftcar-host-desktop",
+        ]
+        .contains(&crate_name.as_str())
+        {
             for dep in &info.external_deps {
                 if FORBIDDEN_PLATFORM_DEPS.contains(&dep.as_str()) {
                     out.push(Violation {

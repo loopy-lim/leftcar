@@ -92,6 +92,25 @@ struct EncodedPairAssembler<Value> {
         return .drop(requestPairedKeyframe: true)
     }
 
+    /// Sequences whose rendezvous budget elapsed, removing exactly those
+    /// pairs. Unlike `expire`, half pairs still inside their own budget are
+    /// kept: the soft expiry path in DualEncoderPipeline discards only the
+    /// late frame and must not cascade-wipe healthy pairs that are still
+    /// waiting for their peer.
+    mutating func takeExpiredSequences(nowNs: UInt64) -> [UInt64] {
+        var expired = [UInt64]()
+        for (sequence, pair) in pending
+        where nowNs >= pair.firstReadyNs
+            && nowNs - pair.firstReadyNs >= frameBudgetNs {
+            expired.append(sequence)
+        }
+        guard !expired.isEmpty else { return [] }
+        for sequence in expired {
+            pending.removeValue(forKey: sequence)
+        }
+        return expired.sorted()
+    }
+
     mutating func reset() {
         pending.removeAll(keepingCapacity: true)
     }

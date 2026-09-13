@@ -11,6 +11,7 @@ use std::ffi::c_char;
 
 use crate::audio_protocol::AudioRing;
 use crate::input_protocol::InputScheduler;
+use crate::media_crypto::{MediaSessionCrypto, SharedMediaCrypto};
 use crate::net_guard::host_is_valid;
 use crate::prepared_tcp::PreparedTcpBridge;
 use crate::prepared_udp::PreparedUdpReceiver;
@@ -66,12 +67,16 @@ use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, O
 use std::sync::{Arc, LazyLock, Mutex};
 
 pub(crate) struct RendererControl {
+    pub(crate) metric_incarnation: String,
+    pub(crate) output_metadata: Mutex<crate::renderer::output_metadata::OutputMetadata>,
+    pub(crate) presentation: Mutex<crate::renderer::DisplayTimeline>,
     pub(crate) port: u16,
     pub(crate) split: bool,
     pub(crate) input: Mutex<InputScheduler>,
     // Host audio plane (LCAU): newest chunks only, drained by the Kotlin
     // playback thread through leftcar_jni_poll_audio.
     pub(crate) audio: Mutex<AudioRing>,
+    pub(crate) audio_available: std::sync::Condvar,
     // -1 = waiting for authenticated Host state, 0 = locked, 1 = enabled.
     pub(crate) input_enabled: AtomicI8,
     pub(crate) rendered_frames: AtomicU64,
@@ -89,6 +94,13 @@ pub(crate) struct RendererControl {
     // released it to the Surface. This is a compositor-handoff approximation,
     // not panel presentation or true glass-to-glass latency.
     pub(crate) capture_to_surface_release_ms: AtomicU64,
+    // Reliable-input round trip: the flush paths stamp the monotonic micro-
+    // second instant of the newest reliable (button/key/text) send, and the
+    // authenticated LCA1 ack consumes it into an EWMA. Measured entirely on
+    // the viewer, so no wire-format change is involved. `input_rtt_ms` keeps
+    // the LATENCY_UNKNOWN sentinel until the first ack lands.
+    pub(crate) input_rtt_ms: AtomicU64,
+    pub(crate) last_reliable_send_us: AtomicU64,
     // Repeated SurfaceView geometry updates during freeform resize can make
     // decoder/compositor stalls look like packet loss. Defer recovery IDRs
     // until the geometry has stayed stable, then emit at most one through the
@@ -127,6 +139,7 @@ pub(crate) struct RendererControl {
     // 1s refresh as LCDON. Audio plays by default, matching the pre-toggle
     // behavior, so the flag starts true.
     pub(crate) audio_requested: AtomicBool,
+    pub(crate) audio_opus_requested: AtomicBool,
 }
 
 impl RendererControl {
@@ -140,10 +153,14 @@ impl RendererControl {
 
     pub(crate) fn new_split(port: u16, fps: u32) -> Self {
         Self {
+            metric_incarnation: crate::renderer::metric_identity(),
+            output_metadata: Mutex::new(Default::default()),
+            presentation: Mutex::new(crate::renderer::DisplayTimeline::default()),
             port,
             split: true,
             input: Mutex::new(InputScheduler::new(fps)),
             audio: Mutex::new(AudioRing::default()),
+            audio_available: std::sync::Condvar::new(),
             input_enabled: AtomicI8::new(-1),
             rendered_frames: AtomicU64::new(0),
             stale_outputs: AtomicU64::new(0),
@@ -157,6 +174,8 @@ impl RendererControl {
             encode_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
             wire_to_decoder_ms: AtomicU64::new(LATENCY_UNKNOWN),
             capture_to_surface_release_ms: AtomicU64::new(LATENCY_UNKNOWN),
+            input_rtt_ms: AtomicU64::new(LATENCY_UNKNOWN),
+            last_reliable_send_us: AtomicU64::new(0),
             resize_recovery_suppressed_until_us: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             suspend: AtomicBool::new(false),
@@ -171,6 +190,7 @@ impl RendererControl {
             cursor_sequence: AtomicU32::new(0),
             cursor_requested: AtomicBool::new(false),
             audio_requested: AtomicBool::new(true),
+            audio_opus_requested: AtomicBool::new(false),
         }
     }
 
@@ -180,7 +200,14 @@ impl RendererControl {
 
     pub(crate) fn request_stop(&self, send_bye: bool) {
         self.send_bye.store(send_bye, Ordering::SeqCst);
+        self.signal_stop();
+    }
+
+    fn signal_stop(&self) {
+        // Serialize with the condvar predicate to avoid a lost stop wakeup.
+        let _audio = self.audio.lock().unwrap();
         self.stop.store(true, Ordering::SeqCst);
+        self.audio_available.notify_all();
     }
 
     pub(crate) fn mark_finished(&self) {
@@ -200,6 +227,36 @@ impl RendererControl {
     pub(crate) fn is_split(&self) -> bool {
         self.split
     }
+
+    /// The flush paths call this right after a reliable event's datagram was
+    /// accepted by the kernel. `now_us` must come from the same monotonic
+    /// clock base the ack consumer uses on this path.
+    pub(crate) fn record_reliable_input_send(&self, now_us: u64) {
+        self.last_reliable_send_us.store(now_us, Ordering::Relaxed);
+    }
+
+    /// Consumes an LCA1 ack: clears the pending reliable event and, when the
+    /// ack matches the newest send, folds the send->ack elapsed time into the
+    /// input-RTT EWMA. Returns true when the pending event was acknowledged.
+    pub(crate) fn acknowledge_input(&self, sequence: u32, now_us: u64) -> bool {
+        let sent_us = self.last_reliable_send_us.load(Ordering::Relaxed);
+        let acknowledged = self.input.lock().unwrap().acknowledge(sequence);
+        if acknowledged && sent_us != 0 {
+            let elapsed_ms = now_us.saturating_sub(sent_us) / 1_000;
+            // A LAN input round trip never takes ten seconds; larger values
+            // mean a retransmit raced a clock-base change and are not samples.
+            if elapsed_ms <= 10_000 {
+                let previous = self.input_rtt_ms.load(Ordering::Relaxed);
+                let next = if previous == LATENCY_UNKNOWN {
+                    elapsed_ms
+                } else {
+                    previous.saturating_mul(3).saturating_add(elapsed_ms) / 4
+                };
+                self.input_rtt_ms.store(next, Ordering::Relaxed);
+            }
+        }
+        acknowledged
+    }
 }
 
 /// The one ownership boundary for a logical renderer instance. Active controls
@@ -216,7 +273,7 @@ impl RendererLifecycle {
     pub(crate) fn install_renderer(&mut self, instance: &str, control: Arc<RendererControl>) {
         self.termination_reasons.remove(instance);
         if let Some(old_control) = self.active_renderers.insert(instance.to_owned(), control) {
-            old_control.stop.store(true, Ordering::SeqCst);
+            old_control.signal_stop();
         }
     }
 
@@ -370,6 +427,37 @@ pub(crate) static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpRecei
 pub(crate) static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> =
     Mutex::new(None);
 pub(crate) static PREPARED_USB_BRIDGE: Mutex<Option<UsbBridge>> = Mutex::new(None);
+
+fn remove_prepared(port: u16) -> Option<PreparedUdpReceiver> {
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+fn insert_prepared(port: u16, receiver: PreparedUdpReceiver) {
+    PREPARED_RECEIVERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, receiver);
+}
+
+fn remove_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
+    PREPARED_TCP_BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+/// One shared media-crypto instance per prepared port. The prepared UDP
+/// listener, the TCP bridge, and the claiming renderer all seal/open through
+/// the same instance so the AEAD counters never fork mid-session. Split
+/// streams register one instance under both tile ports: both tiles' sends
+/// must stay inside the host's single replay window.
+pub(crate) static MEDIA_CRYPTO: Mutex<Option<HashMap<u16, SharedMediaCrypto>>> = Mutex::new(None);
 pub(crate) enum MediaBridge {
     Tcp(PreparedTcpBridge),
     Usb(UsbBridge),
@@ -440,40 +528,119 @@ pub(crate) fn renderer_termination_reason(instance: &str) -> Option<i8> {
         .termination_reason(instance)
 }
 
-pub(crate) fn wait_for_renderer(control: &RendererControl) {
+// Activity core state and renderer identity have different lifetimes. Retain
+// the exact installed control until that state's own Surface is released.
+type RendererOwnerKey = (usize, String);
+type OwnedRendererMap = HashMap<RendererOwnerKey, Arc<RendererControl>>;
+static OWNED_RENDERERS: std::sync::LazyLock<Mutex<OwnedRendererMap>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn bind_owned_renderer(state: usize, instance: &str, control: Arc<RendererControl>) {
+    OWNED_RENDERERS
+        .lock()
+        .unwrap()
+        .insert((state, instance.to_owned()), control);
+}
+
+pub(crate) fn owned_renderer(state: usize, instance: &str) -> Option<Arc<RendererControl>> {
+    OWNED_RENDERERS
+        .lock()
+        .unwrap()
+        .get(&(state, instance.to_owned()))
+        .cloned()
+}
+
+pub(crate) fn forget_owned_renderer(state: usize, instance: &str, expected: &Arc<RendererControl>) {
+    let mut owners = OWNED_RENDERERS.lock().unwrap();
+    let key = (state, instance.to_owned());
+    if owners
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+    {
+        owners.remove(&key);
+    }
+}
+
+pub(crate) fn stop_renderer(control: &RendererControl, send_bye: bool) -> bool {
+    let should_send_bye = send_bye && control.termination_reason() < 0;
+    control.send_bye.store(should_send_bye, Ordering::SeqCst);
+    control.suspend.store(false, Ordering::SeqCst);
+    control.signal_stop();
+    wait_for_renderer(control)
+}
+
+pub(crate) fn detach_owned_renderer(state: usize, instance: &str) -> bool {
+    let Some(control) = owned_renderer(state, instance) else {
+        return true;
+    };
+    if control.is_split() {
+        return stop_renderer(&control, false);
+    }
+    control.suspend.store(true, Ordering::SeqCst);
+    // A native window cannot be freed while MediaCodec still owns it.
+    for _ in 0..40 {
+        if control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst)
+}
+
+pub(crate) fn finished_owned_renderer(
+    state: usize,
+    instance: &str,
+) -> Result<Option<Arc<RendererControl>>, ()> {
+    let control = owned_renderer(state, instance);
+    if control
+        .as_ref()
+        .is_some_and(|control| !stop_renderer(control, true))
+    {
+        return Err(());
+    }
+    Ok(control)
+}
+
+pub(crate) fn wait_for_renderer(control: &RendererControl) -> bool {
     // Accepted socket reads are bounded to 300 ms. Leave additional margin
     // for MediaCodec_stop/delete without hanging the Android UI indefinitely.
     for _ in 0..40 {
         if control.finished.load(Ordering::SeqCst) {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    control.finished.load(Ordering::SeqCst)
 }
 
 /// Stop any renderer still holding the UDP port and wait (bounded) for its
 /// thread to release the socket. Without this, a re-attached surface races
 /// the old thread and `bind` fails with Address-in-use.
-pub(crate) fn reclaim_udp_port(port: u16) {
+pub(crate) fn reclaim_udp_port(port: u16) -> bool {
     let running = RENDERER_LIFECYCLE.lock().unwrap().renderers_for_port(port);
     for control in running {
         control.send_bye.store(false, Ordering::SeqCst);
         control.suspend.store(false, Ordering::SeqCst);
-        control.stop.store(true, Ordering::SeqCst);
-        wait_for_renderer(&control);
+        control.signal_stop();
+        if !wait_for_renderer(&control) {
+            return false;
+        }
     }
+    true
 }
 
 pub(crate) fn cancel_prepared_receiver(port: u16) -> bool {
-    let prepared = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let prepared = remove_prepared(port);
+    take_media_crypto(port);
     prepared.is_some()
 }
 
-fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result<(), String> {
+fn prepare_tcp_bridge(
+    port: u16,
+    expected_host: &str,
+    transport: &str,
+    crypto: &SharedMediaCrypto,
+) -> Result<(), String> {
     let (bind_host, allowed_hosts) = if matches!(transport, "tcp" | "auto") {
         // Auto must be able to accept the direct Wi-Fi attempt first and the
         // loopback ADB fallback later. Admission is still restricted to the
@@ -483,9 +650,10 @@ fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result
     } else {
         ("127.0.0.1", "127.0.0.1".to_owned())
     };
-    let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts).map_err(|error| {
-        format!("failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}")
-    })?;
+    let bridge = PreparedTcpBridge::bind(port, bind_host, &allowed_hosts, Arc::clone(crypto))
+        .map_err(|error| {
+            format!("failed to prepare {transport} TCP media bridge on {bind_host}:{port}: {error}")
+        })?;
     PREPARED_TCP_BRIDGES
         .lock()
         .unwrap()
@@ -495,24 +663,11 @@ fn prepare_tcp_bridge(port: u16, expected_host: &str, transport: &str) -> Result
 }
 
 pub(crate) fn cancel_tcp_bridge(port: u16) -> bool {
-    PREPARED_TCP_BRIDGES
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port)
-        .is_some()
-}
-
-fn take_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
-    PREPARED_TCP_BRIDGES
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port)
+    remove_tcp_bridge(port).is_some()
 }
 
 pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
-    take_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
+    remove_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
         PREPARED_USB_BRIDGE
             .lock()
             .unwrap()
@@ -521,13 +676,72 @@ pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
     })
 }
 
+/// Build (or reuse) the one media-crypto instance for `port`. `key` must be
+/// the viewer-generated session key; a re-prepare with a different key
+/// replaces the instance, which is safe because the host cannot send any
+/// sealed frame before `startStream` completes.
+pub(crate) fn register_media_crypto(port: u16, key: &[u8; 32]) -> SharedMediaCrypto {
+    let crypto: SharedMediaCrypto = Arc::new(MediaSessionCrypto::new(*key));
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, Arc::clone(&crypto));
+    crypto
+}
+
+/// Register를 소모하지 않고 등록된 크립토를 조회한다(재바인드 폴백용).
+pub(crate) fn media_crypto_for(port: u16) -> Option<SharedMediaCrypto> {
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(&port))
+        .cloned()
+}
+
+/// Claim and remove the media crypto registered for `port`.
+pub(crate) fn take_media_crypto(port: u16) -> Option<SharedMediaCrypto> {
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&port)
+}
+
+/// Split variant: bind one tile listener against an already-shared crypto
+/// instance (both tiles must share one AEAD counter sequence).
+pub(crate) fn prepare_split_receiver(
+    port: u16,
+    expected_host: &str,
+    crypto: &SharedMediaCrypto,
+) -> Result<(), String> {
+    let stale = remove_prepared(port);
+    drop(stale);
+    let prepared = PreparedUdpReceiver::bind(port, expected_host.to_owned(), Arc::clone(crypto))
+        .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
+    insert_prepared(port, prepared);
+    Ok(())
+}
+
 pub(crate) fn prepare_udp_receiver(
     port: u16,
     expected_host: &str,
     transport: &str,
+    media_key: &[u8; 32],
 ) -> Result<(), String> {
     if port == 0 || !host_is_valid(expected_host) {
         return Err("invalid prepared media port or host".into());
+    }
+    // One shared instance per logical stream: the listener worker answers the
+    // sealed challenge through it and hands the same Arc to the renderer.
+    let crypto = register_media_crypto(port, media_key);
+    if matches!(transport, "usb") {
+        // The AOAP bridge echo path must stay inside the same counter
+        // sequence, so hand the prepared instance to the live bridge.
+        if let Some(bridge) = PREPARED_USB_BRIDGE.lock().unwrap().as_ref() {
+            bridge.set_media_crypto(Arc::clone(&crypto));
+        }
     }
 
     // A Host restart does not send a terminal packet to an existing UDP
@@ -536,7 +750,9 @@ pub(crate) fn prepare_udp_receiver(
     // same port again. Reclaim that logical stream before binding the
     // replacement preflight listener; the subsequent Activity recreation
     // will attach a fresh renderer to the new Host session.
-    reclaim_udp_port(port);
+    if !reclaim_udp_port(port) {
+        return Err("previous decoder cleanup is incomplete; retry stopping the stream".into());
+    }
 
     let active_port = RENDERER_LIFECYCLE
         .lock()
@@ -552,11 +768,7 @@ pub(crate) fn prepare_udp_receiver(
 
     // A retry for the same not-yet-opened window replaces its old preflight.
     // Drop outside the map lock because the worker has a bounded join.
-    let stale = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let stale = remove_prepared(port);
     drop(stale);
 
     let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "usb" | "auto") {
@@ -564,16 +776,13 @@ pub(crate) fn prepare_udp_receiver(
     } else {
         expected_host.to_owned()
     };
-    let prepared = PreparedUdpReceiver::bind(port, prepared_hosts)
+    let prepared = PreparedUdpReceiver::bind(port, prepared_hosts, Arc::clone(&crypto))
         .map_err(|error| format!("failed to prepare UDP media port {port}: {error}"))?;
-    PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(port, prepared);
+    insert_prepared(port, prepared);
     if matches!(transport, "tcp" | "adbTcp" | "auto") {
-        if let Err(error) = prepare_tcp_bridge(port, expected_host, transport) {
+        if let Err(error) = prepare_tcp_bridge(port, expected_host, transport, &crypto) {
             let _ = cancel_prepared_receiver(port);
+            take_media_crypto(port);
             return Err(error);
         }
     }
@@ -584,11 +793,7 @@ pub(crate) fn take_prepared_receiver(
     port: u16,
     expected_host: &str,
 ) -> Option<PreparedUdpReceiver> {
-    let prepared = PREPARED_RECEIVERS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .remove(&port);
+    let prepared = remove_prepared(port);
     match prepared {
         Some(prepared)
             if prepared
@@ -652,6 +857,16 @@ pub(crate) fn restore_prepared_receiver(port: u16, receiver: PreparedUdpReceiver
 #[cfg(test)]
 mod renderer_lifecycle_tests {
     use super::*;
+    #[test]
+    fn decoder_cleanup_timeout_is_not_acknowledged() {
+        let control = RendererControl::new_split(57000, 60);
+        let result: &dyn std::any::Any = &wait_for_renderer(&control);
+        assert_eq!(result.downcast_ref::<bool>(), Some(&false));
+        control.finished.store(true, Ordering::SeqCst);
+        let result: &dyn std::any::Any = &wait_for_renderer(&control);
+        assert_eq!(result.downcast_ref::<bool>(), Some(&true));
+    }
+
     use std::sync::{mpsc, Arc, Mutex};
 
     struct LifecycleTestHarness {
@@ -777,6 +992,13 @@ mod renderer_lifecycle_tests {
     }
 }
 
+/// PREPARED_RECEIVERS/MEDIA_CRYPTO는 프로세스 전역이다. 스토어 절대
+/// 상태를 검증하는 모든 테스트(jni_exports의 split prepare 테스트 포함)가
+/// 이 잠금으로 직렬화된다 — 서로 다른 테스트 모듈이 같은 전역을 만질 때
+/// 경합으로 포트·항목이 섞이는 것을 막는다.
+#[cfg(test)]
+pub(crate) static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod split_receiver_tests {
     use super::*;
@@ -784,12 +1006,17 @@ mod split_receiver_tests {
 
     const HOST: &str = "127.0.0.1";
 
-    // PREPARED_RECEIVERS is process-global; these tests assert absolute store
-    // counts, so they serialize on this lock instead of racing each other.
-    static STORE_LOCK: Mutex<()> = Mutex::new(());
+    // 전역 스토어 테스트의 직렬화 잠금 — jni_exports의 split 테스트와
+    // 같은 잠금을 공유한다.
+    use super::TEST_STORE_LOCK as STORE_LOCK;
 
     fn bind_prepared() -> PreparedUdpReceiver {
-        PreparedUdpReceiver::bind(0, HOST.to_owned()).unwrap()
+        PreparedUdpReceiver::bind(
+            0,
+            HOST.to_owned(),
+            std::sync::Arc::new(crate::media_crypto::MediaSessionCrypto::new([3u8; 32])),
+        )
+        .unwrap()
     }
 
     fn insert_prepared(port: u16, receiver: PreparedUdpReceiver) {
@@ -888,5 +1115,55 @@ mod split_receiver_tests {
         let right = bind_prepared();
         assert!(take_split_receivers(left.port().unwrap(), right.port().unwrap(), HOST).is_none());
         assert_eq!(store_len(), before);
+    }
+}
+
+#[cfg(test)]
+mod native_owner_tests {
+    use super::*;
+
+    #[test]
+    fn old_state_cleanup_never_stops_same_port_successor() {
+        let instance = "native-owner-stale-release";
+        let old = Arc::new(RendererControl::new_split(51_221, 60));
+        old.finished.store(true, Ordering::SeqCst);
+        let new = Arc::new(RendererControl::new_split(51_221, 60));
+        bind_owned_renderer(101, instance, Arc::clone(&old));
+        bind_owned_renderer(102, instance, Arc::clone(&new));
+        install_renderer(instance, Arc::clone(&new));
+        assert!(detach_owned_renderer(101, instance));
+        assert!(!new.stop.load(Ordering::SeqCst));
+        let finished = finished_owned_renderer(101, instance)
+            .expect("old decoder already finished")
+            .unwrap();
+        assert!(Arc::ptr_eq(&finished, &old));
+        assert!(!new.stop.load(Ordering::SeqCst));
+        assert!(Arc::ptr_eq(&active_renderer(instance).unwrap(), &new));
+        forget_owned_renderer(101, instance, &finished);
+        assert!(owned_renderer(101, instance).is_none());
+        assert!(Arc::ptr_eq(&owned_renderer(102, instance).unwrap(), &new));
+        remove_renderer_if_current(instance, &new);
+        forget_owned_renderer(102, instance, &new);
+    }
+    #[test]
+    fn timeout_retains_owner_and_stale_removal_cannot_erase_reused_state() {
+        let instance = "native-owner-timeout-reuse";
+        let old = Arc::new(RendererControl::new_split(51_222, 60));
+        bind_owned_renderer(201, instance, Arc::clone(&old));
+        assert!(finished_owned_renderer(201, instance).is_err());
+        assert!(Arc::ptr_eq(&owned_renderer(201, instance).unwrap(), &old));
+        old.finished.store(true, Ordering::SeqCst);
+        let finished = finished_owned_renderer(201, instance).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&finished, &old));
+        forget_owned_renderer(201, instance, &finished);
+        let reused = Arc::new(RendererControl::new_split(51_222, 60));
+        bind_owned_renderer(201, instance, Arc::clone(&reused));
+        forget_owned_renderer(201, instance, &old);
+        assert!(Arc::ptr_eq(
+            &owned_renderer(201, instance).unwrap(),
+            &reused
+        ));
+        assert!(!reused.stop.load(Ordering::SeqCst));
+        forget_owned_renderer(201, instance, &reused);
     }
 }

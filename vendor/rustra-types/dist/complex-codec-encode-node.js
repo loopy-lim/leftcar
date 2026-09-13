@@ -126,16 +126,15 @@ export function encodeNode(writer, node, value, maxDepth, depth, maxCollectionLe
 function variantMatches(variant, value) {
     switch (variant.matcher.kind) {
         case 'discriminator': {
-            if (!variant.tag || typeof value !== 'object' || value === null)
+            if (typeof value !== 'object' || value === null)
                 return false;
-            return Object.is(value[variant.tag.key], variant.tag.value);
+            return Object.is(value[variant.matcher.key], variant.matcher.value);
         }
         case 'singleProperty':
             return (typeof value === 'object' &&
                 value !== null &&
                 Object.prototype.hasOwnProperty.call(value, variant.matcher.key));
         case 'constEq':
-            return Object.is(variant.matcher.value, value);
         case 'enumSingle':
             return Object.is(variant.matcher.value, value);
         case 'anyString':

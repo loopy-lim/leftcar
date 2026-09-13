@@ -116,14 +116,7 @@ impl FragmentAssembler {
                     // delta before config/keyframe in this epoch is dropped; a
                     // delta whose predecessors were lost triggers an IDR request
                     // with rate limiting (docs/03 6.2)
-                    let should_request = state
-                        .last_idr_request_frame
-                        .map(|last| {
-                            frag.header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64
-                        })
-                        .unwrap_or(true);
-                    if should_request {
-                        state.last_idr_request_frame = Some(frag.header.frame_id);
+                    if Self::should_request_idr(state, frag.header.frame_id, self.idr_rate_limit) {
                         return Ok(AssembledOutput::RequestIdr {
                             source_id: frag.header.source_id.clone(),
                         });
@@ -138,7 +131,7 @@ impl FragmentAssembler {
             .partials
             .entry(frag.header.source_id.clone())
             .or_default();
-        Self::evict_overflow(source_partials, frag.header.frame_id, now)?;
+        Self::evict_overflow(source_partials, frag.header.frame_id)?;
 
         // duplicate detection
         if let Some(existing) = source_partials.get(&frag.header.frame_id) {
@@ -187,6 +180,19 @@ impl FragmentAssembler {
         }
     }
 
+    /// 끊긴 참조 사슬 뒤의 델타에 IDR 요청이 필요한지 판정한다. 요청 폭주를
+    /// 막는 프레임 격리(rate_limit)를 feed와 deliver가 공유한다.
+    fn should_request_idr(state: &mut StreamState, frame_id: u64, rate_limit: u32) -> bool {
+        let should_request = state
+            .last_idr_request_frame
+            .map(|last| frame_id.saturating_sub(last) >= u64::from(rate_limit))
+            .unwrap_or(true);
+        if should_request {
+            state.last_idr_request_frame = Some(frame_id);
+        }
+        should_request
+    }
+
     fn expire_incomplete(&mut self, source: &SourceId, _now: Duration) {
         // keep at most MAX_INCOMPLETE_PER_SOURCE incomplete frames per source
         if let Some(partials) = self.partials.get_mut(source) {
@@ -200,7 +206,6 @@ impl FragmentAssembler {
     fn evict_overflow(
         partials: &mut BTreeMap<u64, PartialFrame>,
         incoming_frame_id: u64,
-        now: Duration,
     ) -> Result<(), AssembleError> {
         let mut total: usize = partials.values().map(|p| p.received_bytes).sum();
         // Newer incomplete frame supersedes older incomplete deltas: drop the
@@ -215,7 +220,6 @@ impl FragmentAssembler {
             }
             let removed = partials.remove(&oldest).expect("just keyed");
             total -= removed.received_bytes;
-            let _ = now;
         }
         Ok(())
     }
@@ -243,14 +247,7 @@ impl FragmentAssembler {
                 } else {
                     // late delta loss after which decoder cannot reference:
                     // request IDR with rate limit
-                    let should_request = state
-                        .last_idr_request_frame
-                        .map(|last| {
-                            header.frame_id.saturating_sub(last) >= self.idr_rate_limit as u64
-                        })
-                        .unwrap_or(true);
-                    if should_request {
-                        state.last_idr_request_frame = Some(header.frame_id);
+                    if Self::should_request_idr(state, header.frame_id, self.idr_rate_limit) {
                         AssembledOutput::RequestIdr {
                             source_id: header.source_id.clone(),
                         }

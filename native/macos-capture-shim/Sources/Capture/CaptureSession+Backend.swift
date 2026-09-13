@@ -73,6 +73,8 @@ extension CaptureSession {
 
     @discardableResult
     func setupScreenCaptureKit(filter: SCContentFilter) -> Bool {
+        guard sourceAuthorization?.begin() ?? true else { setLastError("source authorization revoked"); return false }
+        defer { sourceAuthorization?.end() }
         inputLock.lock()
         if #available(macOS 14.0, *) {
             inputBounds = filter.contentRect
@@ -86,12 +88,27 @@ extension CaptureSession {
         let completionLock = NSLock()
         var setupFailure: String?
         var startError: Error?
+        var stopAborted = false
 
         // Construct and start AppKit-adjacent ScreenCaptureKit objects on the
         // main queue. Do not wait there: the Rust control worker owns the
         // semaphore wait, leaving the main run loop free to receive replayd's
         // completion callback.
         DispatchQueue.main.async { [self] in
+            // beginCapture checked stopRequested before this hop was queued. A
+            // BYE that lands in between must not let the hop create a fresh
+            // stream — that would extend a new sleep assertion past the
+            // stop-driven teardown until the control plane reaps it.
+            stateLock.lock()
+            let aborted = stopRequested
+            stateLock.unlock()
+            if aborted {
+                completionLock.lock()
+                stopAborted = true
+                completionLock.unlock()
+                completion.signal()
+                return
+            }
             // The cursor plane is negotiated after creation, so the stream is
             // born with the embedded cursor. The one shared builder keeps the
             // creation-time and update-time configuration in lockstep —
@@ -154,7 +171,14 @@ extension CaptureSession {
         completionLock.lock()
         let failure = setupFailure
         let error = startError
+        let abortedByStop = stopAborted
         completionLock.unlock()
+        if abortedByStop {
+            // The stop path already owns the teardown; do not mark an
+            // intentional stop as an error (same convention as the
+            // CGDisplayStream stopped handler) and do not report success.
+            return false
+        }
         if let failure {
             setLastError(failure)
             markStopped(failure)
@@ -172,6 +196,8 @@ extension CaptureSession {
 
     @discardableResult
     func setupCGDisplayStream(displayID: CGDirectDisplayID) -> Bool {
+        guard sourceAuthorization?.begin() ?? true else { setLastError("source authorization revoked"); return false }
+        defer { sourceAuthorization?.end() }
         inputLock.lock()
         inputBounds = CGDisplayBounds(displayID)
         inputLock.unlock()

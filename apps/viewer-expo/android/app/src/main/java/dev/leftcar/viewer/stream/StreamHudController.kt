@@ -65,8 +65,7 @@ internal class StreamHudController(
     private var statsView: TextView? = null
     private var rebindPopup: PopupWindow? = null
     private var rebindView: TextView? = null
-    private var helpPopup: PopupWindow? = null
-    private var keyboardPopup: PopupWindow? = null
+    private var controls: StreamHudControls? = null
     private var keyboardChip: TextView? = null
 
     /** 제스처 안내는 첫 창에서 1회만 자동 노출되므로, 이 칩이 유일한 재열람 경로다. */
@@ -74,6 +73,9 @@ internal class StreamHudController(
 
     /** "ABC" 칩 탭 → Activity가 IME를 토글한다. */
     var onKeyboardToggle: (() -> Unit)? = null
+
+    /** "✕" 칩 탭 → Activity가 스트림 창을 닫는다(전체화면의 눈에 보이는 출구). */
+    var onExitTapped: (() -> Unit)? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -119,9 +121,11 @@ internal class StreamHudController(
     }
 
     fun show() {
+        if (inputPopup != null) return
         showInput()
         showGestureHelpChip()
         showKeyboardChip()
+        showExitChip()
         // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
         // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
         if (showDiagnostics) {
@@ -232,13 +236,10 @@ internal class StreamHudController(
         inputPopup?.dismiss()
         statsPopup?.dismiss()
         rebindPopup?.dismiss()
-        helpPopup?.dismiss()
-        keyboardPopup?.dismiss()
         inputPopup = null
         statsPopup = null
         rebindPopup = null
-        helpPopup = null
-        keyboardPopup = null
+        controls = null
         keyboardChip = null
         inputView = null
         inputIcon = null
@@ -322,13 +323,16 @@ internal class StreamHudController(
         inputLabel = label
         inputView = badge
         updateInput(-1)
+        val column = StreamHudControls(activity, panelScale)
+        column.view.addView(badge)
+        controls = column
         val popup = PopupWindow(
-            badge,
+            column.view,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             false,
         ).apply {
-            isTouchable = false
+            isTouchable = true
             isFocusable = false
             isOutsideTouchable = false
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -349,90 +353,16 @@ internal class StreamHudController(
         }
     }
 
-    /** 스트림 창 구석의 물음표 칩. 탭하면 [onGestureHelpTapped]로 제스처 안내를 다시 연다. */
     private fun showGestureHelpChip() {
-        if (helpPopup != null) return
-        val chip = TextView(activity).apply {
-            text = "?"
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f * panelScale
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(2), dp(8), dp(2))
-            background = badgeBackground(Color.argb(118, 15, 23, 42))
-            alpha = 0.72f
-            contentDescription = ViewerStrings.gestureHelpDescription
-        }
-        chip.setOnClickListener {
-            onGestureHelpTapped?.invoke()
-        }
-        val popup = PopupWindow(
-            chip,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            false,
-        ).apply {
-            isFocusable = false
-            isOutsideTouchable = false
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = dp(2).toFloat()
-        }
-        helpPopup = popup
-        activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed) {
-                popup.showAtLocation(
-                    activity.window.decorView,
-                    Gravity.TOP or Gravity.END,
-                    dp(12),
-                    dp(52),
-                )
-            }
-        }
+        controls?.addChip("?", ViewerStrings.gestureHelpDescription) { onGestureHelpTapped?.invoke() }
     }
 
-    /**
-     * 스트림 창 구석의 "ABC" 칩. 탭하면 [onKeyboardToggle]로 소프트키보드를
-     * 토글한다. "?"칩 아래 세 번째 슬롯에 세로로 쌓는다.
-     */
     private fun showKeyboardChip() {
-        if (keyboardPopup != null) return
-        val chip = TextView(activity).apply {
-            text = "ABC"
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f * panelScale
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(2), dp(8), dp(2))
-            background = badgeBackground(Color.argb(118, 15, 23, 42))
-            alpha = 0.72f
-            contentDescription = ViewerStrings.keyboardToggleDescription
-        }
-        keyboardChip = chip
-        chip.setOnClickListener {
-            onKeyboardToggle?.invoke()
-        }
-        val popup = PopupWindow(
-            chip,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            false,
-        ).apply {
-            isFocusable = false
-            isOutsideTouchable = false
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = dp(2).toFloat()
-        }
-        keyboardPopup = popup
-        activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed) {
-                popup.showAtLocation(
-                    activity.window.decorView,
-                    Gravity.TOP or Gravity.END,
-                    dp(12),
-                    dp(92),
-                )
-            }
-        }
+        keyboardChip = controls?.addChip("ABC", ViewerStrings.keyboardToggleDescription) { onKeyboardToggle?.invoke() }
+    }
+
+    private fun showExitChip() {
+        controls?.addChip("✕", ViewerStrings.exitStreamDescription) { onExitTapped?.invoke() }
     }
 
     private fun updateStats(packed: Long, latency: Long, surfaceReleaseLatency: Int) {
@@ -523,5 +453,42 @@ internal class StreamHudController(
                 revealStats()
             }
         }
+    }
+}
+
+/** All HUD targets share one measured column; labels and font scale determine
+ * actual height, and margins are applied after that height (never fixed y slots).
+ */
+internal class StreamHudControls(context: android.content.Context, private val scale: Float) {
+    private val density = context.resources.displayMetrics.density
+    private fun dp(value: Int) = StreamPanelDensity.dp(value.toFloat(), density, scale)
+    val view = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.END
+    }
+
+    fun addChip(text: String, description: String, onTap: () -> Unit): TextView {
+        val chip = TextView(view.context).apply {
+            this.text = text
+            setTextColor(Color.argb(224, 255, 255, 255))
+            textSize = 12f * scale
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.argb(118, 15, 23, 42))
+                setStroke(dp(1), Color.argb(36, 255, 255, 255))
+            }
+            alpha = 0.72f
+            contentDescription = description
+            setOnClickListener { onTap() }
+        }
+        view.addView(chip, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = if (view.childCount == 0) 0 else dp(8) })
+        return chip
     }
 }

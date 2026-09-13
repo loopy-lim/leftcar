@@ -64,26 +64,6 @@ func videoBitrateBounds(width: UInt32, height: UInt32, activeCount: Int) -> Vide
     )
 }
 
-enum EncoderExperiment: String, Equatable {
-    case auto
-    case rateControl
-    case adaptiveQp
-    case encoderPool
-    case splitHorizontal
-    case splitVertical
-
-    static func parse(_ raw: String?) -> EncoderExperiment? {
-        guard let raw else { return .auto }
-        guard let value = EncoderExperiment(rawValue: raw) else { return nil }
-        switch value {
-        case .auto, .rateControl, .adaptiveQp, .encoderPool, .splitVertical:
-            return value
-        case .splitHorizontal:
-            return nil
-        }
-    }
-}
-
 enum EncoderMode: String, Hashable {
     case ave
     case rtvc
@@ -461,6 +441,89 @@ func nextAdaptiveRaiseCeiling(
     guard currentCeiling > 0 else { return 0 }
     guard cleanStreak >= 30 else { return currentCeiling }
     return min(globalCeiling, Int(Double(currentCeiling) * 1.10))
+}
+
+// MARK: - Cross-session congestion sharing (R4)
+
+/// All sessions streaming through this shim share one Wi-Fi link, but each
+/// ABR controller only sees its own receiver feedback, so neither notices the
+/// congestion the other one is causing. A session whose OWN congestion
+/// detectors fired broadcasts that by stamping a monotonic timestamp under
+/// the registry lock; peers treat a mark that is still fresh as ONE ordinary
+/// congestion vote. Three seconds spans the two one-second windows that the
+/// confirming cut needs on both sides, while the unchanged
+/// two-consecutive-windows rule keeps a single transient elsewhere from
+/// slashing every session's bitrate on its own.
+func sharedCongestionMarkFresh(markNs: UInt64, nowNs: UInt64) -> Bool {
+    markNs != 0 && nowNs &- markNs <= 3_000_000_000
+}
+
+// MARK: - Bounded recovery ramp (R5)
+
+/// State machine for the fast recovery after a congestion cut. A cut arms a
+/// two-clean-window qualification phase; if those first two windows stay
+/// clean, at most THREE accelerated raises (+30% per clean window) may run.
+/// The three-window cap keeps the ramp from becoming a second, faster ladder
+/// racing into a link that only just recovered: at worst the stream is back
+/// at 90% of the pre-cut bitrate ~5s after the cut and from there obeys the
+/// slow 30-window ceiling relaxation again. Any congestion vote — including
+/// one shared from another session — cancels the ramp and hands control back
+/// to the normal eight-clean-window ladder.
+struct RecoveryRampState: Equatable {
+    var awaitingCleanWindows = false
+    var cleanWindows = 0
+    var windowsRemaining = 0
+
+    /// True when the current clean window may execute one accelerated raise.
+    var raiseEligible: Bool { windowsRemaining > 0 }
+
+    /// A congestion cut (re)arms the two-clean-window qualification phase.
+    func rearmedAfterCut() -> RecoveryRampState {
+        RecoveryRampState(awaitingCleanWindows: true, cleanWindows: 0, windowsRemaining: 0)
+    }
+
+    /// Any congestion vote cancels the ramp.
+    func cancelled() -> RecoveryRampState {
+        RecoveryRampState()
+    }
+
+    /// Advance the machine across one clean window. `restartLadderClock` is
+    /// true on the window that spends the final accelerated raise; the caller
+    /// resets `stableBitrateWindows` so the normal ladder needs eight fresh
+    /// clean windows after the ramp ends.
+    func advancedAfterCleanWindow() -> (state: RecoveryRampState, restartLadderClock: Bool) {
+        if raiseEligible {
+            let remaining = windowsRemaining - 1
+            let next = RecoveryRampState(
+                awaitingCleanWindows: false,
+                cleanWindows: 0,
+                windowsRemaining: remaining
+            )
+            return (next, remaining == 0)
+        }
+        guard awaitingCleanWindows else { return (self, false) }
+        let clean = cleanWindows + 1
+        if clean >= 2 {
+            let ramping = RecoveryRampState(
+                awaitingCleanWindows: false,
+                cleanWindows: 0,
+                windowsRemaining: 3
+            )
+            return (ramping, false)
+        }
+        return (
+            RecoveryRampState(awaitingCleanWindows: true, cleanWindows: clean, windowsRemaining: 0),
+            false
+        )
+    }
+}
+
+/// One accelerated ramp raise: +30% of the live target, capped by the
+/// congestion-cut memory ceiling (90% of the bitrate that failed) and
+/// therefore also by the policy ceiling — the ramp can never exceed
+/// min(90% of the pre-cut bitrate, current ceiling).
+func recoveryRampRaiseTarget(current: Int, ceiling: Int) -> Int {
+    min(ceiling, Int(Double(current) * 1.30))
 }
 
 enum EncoderBitrateApplicationRoute: Equatable {

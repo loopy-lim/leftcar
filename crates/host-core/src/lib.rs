@@ -6,7 +6,7 @@
 use domain::ids::{SessionId, SourceId};
 use domain::lease::{LeaseEvent, LeaseTable};
 use domain::source::{SourceDescriptor, SourceRegistry};
-use media_model::backpressure::{BoundedAuQueue, LatestFrameSlot};
+use media_model::backpressure::BoundedAuQueue;
 use media_model::fragment::packetize;
 use media_model::frame::{EncodedFrame, FrameKind};
 use std::collections::HashMap;
@@ -143,7 +143,6 @@ pub enum OrchestratorError {
 pub struct SourcePipeline {
     pub capture: FakeCapture,
     pub encoder: FakeEncoder,
-    pub capture_slot: LatestFrameSlot,
     pub au_queue: BoundedAuQueue,
     pub fragments_out: Vec<media_model::Fragment>,
 }
@@ -198,7 +197,6 @@ impl Orchestrator {
                 SourcePipeline {
                     capture,
                     encoder: FakeEncoder::new(),
-                    capture_slot: LatestFrameSlot::new(),
                     au_queue: BoundedAuQueue::new(2),
                     fragments_out: Vec::new(),
                 },

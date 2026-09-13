@@ -59,6 +59,16 @@ import {
   isUnauthorizedError,
   preferredCaptureBackend,
 } from "./control";
+import { ed25519, x25519 } from "@noble/curves/ed25519";
+import {
+  StreamSealer,
+  base64UrlToBytes,
+  bytesToBase64Url,
+  deriveKeys,
+  parseSealedLine,
+  sealedLine,
+  signedTranscript,
+} from "./secure-channel";
 
 function lastSocket(): FakeSocket {
   return sockets[sockets.length - 1];
@@ -82,7 +92,7 @@ setCurrentLanguage("ko");
 
 describe("connect token injection", () => {
   it("adds the provider token to every request envelope", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => "tok-123");
+    const client = await connect("127.0.0.1", 7777, 1000, async () => "tok-123");
     const promise = client.request<{ n: number }>("addNumbers", { a: 1, b: 2 });
     const socket = lastSocket();
     // The token is awaited before the write happens.
@@ -98,7 +108,7 @@ describe("connect token injection", () => {
   });
 
   it("omits the token field when the provider returns null", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => null);
+    const client = await connect("127.0.0.1", 7777, 1000, async () => null);
     const promise = client.request("getCatalog");
     const socket = lastSocket();
     await vi.waitFor(() => expect(socket.written.length).toBe(1));
@@ -112,7 +122,7 @@ describe("connect token injection", () => {
   });
 
   it("sends no token when no provider is given (pair command)", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000);
+    const client = await connect("127.0.0.1", 7777, 1000);
     const promise = client.request("pair", { offerId: "o", code: "123456" });
     const socket = lastSocket();
     await vi.waitFor(() => expect(socket.written.length).toBe(1));
@@ -125,7 +135,7 @@ describe("connect token injection", () => {
   });
 
   it("provider failure rejects the request without writing anything", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => {
+    const client = await connect("127.0.0.1", 7777, 1000, async () => {
       throw new Error("secure store unavailable");
     });
     await expect(client.request("getCatalog")).rejects.toThrow("secure store unavailable");
@@ -135,7 +145,7 @@ describe("connect token injection", () => {
 
   it("caches the token so a stream request is written in the same JS turn", async () => {
     const tokenProvider = vi.fn(async () => "tok-cached");
-    const client = await connect("1.2.3.4", 7777, 1000, tokenProvider);
+    const client = await connect("127.0.0.1", 7777, 1000, tokenProvider);
     const socket = lastSocket();
 
     const probe = client.request("getStatus");
@@ -155,7 +165,7 @@ describe("connect token injection", () => {
   });
 
   it("acknowledges the native socket write before the server response", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => "tok");
+    const client = await connect("127.0.0.1", 7777, 1000, async () => "tok");
     const socket = lastSocket();
     const onWritten = vi.fn();
 
@@ -173,7 +183,7 @@ describe("connect token injection", () => {
 });
 describe("unauthorized error handling", () => {
   it("rejects with kind unauthorized and beats the close event", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => "bad-token");
+    const client = await connect("127.0.0.1", 7777, 1000, async () => "bad-token");
     const promise = client.request<{ displays: [] }>("getCatalog");
     const socket = lastSocket();
     await vi.waitFor(() => expect(socket.written.length).toBe(1));
@@ -187,7 +197,7 @@ describe("unauthorized error handling", () => {
   });
 
   it("other remote errors keep the remote kind", async () => {
-    const client = await connect("1.2.3.4", 7777, 1000, async () => "tok");
+    const client = await connect("127.0.0.1", 7777, 1000, async () => "tok");
     const promise = client.request("nope");
     const socket = lastSocket();
     await vi.waitFor(() => expect(socket.written.length).toBe(1));
@@ -201,21 +211,21 @@ describe("unauthorized error handling", () => {
 
 describe("formatErrorMessage and socket error handling", () => {
   it("formats Error objects, strings, error code objects, and null/undefined without undefined", () => {
-    // 매핑되지 않은 영어 원문은 친절한 안내문 뒤 괄호로 붙는다.
+    // 매핑되지 않은 영어 원문은 안내문 하나로 통일된다(원문은 콘솔 기록).
     expect(formatErrorMessage(new Error("custom error"))).toBe(
-      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (custom error)",
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
     );
     expect(formatErrorMessage("string error")).toBe(
-      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (string error)",
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
     );
     expect(formatErrorMessage({ code: "ECONNREFUSED" })).toBe(
       "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.",
     );
     expect(formatErrorMessage({ message: "msg error" })).toBe(
-      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (msg error)",
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
     );
     expect(formatErrorMessage({ error: "err property" })).toBe(
-      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요. (err property)",
+      "문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
     );
     expect(formatErrorMessage(undefined)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     expect(formatErrorMessage(null)).toBe("문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
@@ -245,7 +255,7 @@ describe("formatErrorMessage and socket error handling", () => {
   });
 
   it("handles non-Error socket errors without producing 'control connection error: undefined'", async () => {
-    const connectPromise = connect("1.2.3.4", 7777, 1000);
+    const connectPromise = connect("127.0.0.1", 7777, 1000);
     const socket = lastSocket();
     socket.emit("error", { code: "ECONNREFUSED" });
     await expect(connectPromise).rejects.toThrow(
@@ -283,5 +293,127 @@ describe("host capture capabilities", () => {
       ],
     };
     expect(preferredCaptureBackend(catalog, "")).toBe("cgDisplayStream");
+  });
+});
+
+// -- 봉인(secure) 경로: 스크립트 서버로 핸드셰이크·봉인 프레임을 검증한다 ----
+
+const b64u = bytesToBase64Url;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+interface ScriptedServer {
+  serverKeys: { c2s: Uint8Array; s2c: Uint8Array };
+  spkB64: string;
+}
+
+/** ClientHello를 읽어 ServerHello로 답하고 키 확인 프레임을 소비한다. */
+async function handshakeAsServer(socket: FakeSocket): Promise<ScriptedServer> {
+  const hello = JSON.parse(socket.written[0].payload.trim()) as {
+    nc: string;
+    xk: string;
+  };
+  const nc = base64UrlToBytes(hello.nc);
+  const clientXk = base64UrlToBytes(hello.xk);
+  const serverSecret = new Uint8Array(32).fill(11);
+  const serverXk = x25519.getPublicKey(serverSecret);
+  const serverSeed = new Uint8Array(32).fill(12);
+  const spk = ed25519.getPublicKey(serverSeed);
+  const ns = new Uint8Array(32).fill(13);
+  const sig = ed25519.sign(signedTranscript(nc, ns, clientXk, serverXk, spk), serverSeed);
+  socket.emit(
+    "data",
+    `${JSON.stringify({
+      v: 1,
+      hello: "s",
+      ns: b64u(ns),
+      xk: b64u(serverXk),
+      spk: b64u(spk),
+      sig: b64u(sig),
+    })}\n`,
+  );
+  // 키 확인 프레임(두 번째 쓰기)을 서버 키로 연다.
+  await vi.waitFor(() => expect(socket.written.length).toBeGreaterThanOrEqual(2));
+  const confirm = parseSealedLine(socket.written[1].payload.trim());
+  const shared = x25519.getSharedSecret(serverSecret, clientXk);
+  const serverKeys = deriveKeys(shared, nc, ns);
+  const plaintext = new StreamSealer(serverKeys.c2s).open(confirm as Uint8Array);
+  expect(JSON.parse(dec.decode(plaintext))).toEqual({ hello: "ok", nc: hello.nc });
+  return { serverKeys, spkB64: b64u(spk) };
+}
+
+describe("secure control channel", () => {
+  it("handshakes with a pinned key and seals every frame", async () => {
+    const pending = connect("192.168.1.10", 7777, 5000, async () => "tok");
+    await vi.waitFor(() => expect(lastSocket().written.length).toBeGreaterThanOrEqual(1));
+    const server = await handshakeAsServer(lastSocket());
+    const client = await pending;
+    expect(client.hostKey).toBe(server.spkB64);
+
+    const reply = JSON.stringify({ ok: true, result: { displays: [1, 2] } });
+    const tx = new StreamSealer(server.serverKeys.s2c);
+    const pendingRequest = client.request<{ displays: number[] }>("getCatalog", {});
+    await vi.waitFor(() => expect(lastSocket().written.length).toBeGreaterThanOrEqual(3));
+    // 요청은 봉인 봉투로 나가야 한다.
+    const envelope = JSON.parse(lastSocket().written.at(-1)?.payload.trim() as string);
+    expect(typeof envelope.e).toBe("string");
+    lastSocket().emit("data", `${sealedLine(tx.seal(enc.encode(reply)))}\n`);
+    await expect(pendingRequest).resolves.toEqual({ displays: [1, 2] });
+
+    // 서버가 평문 JSON을 보내면 연결이 끊긴다(다운그레이드 거부).
+    const pending2 = connect("192.168.1.10", 7777, 5000, async () => "tok");
+    await vi.waitFor(() => {
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+      expect(sockets[sockets.length - 1].written.length).toBeGreaterThanOrEqual(1);
+    });
+    await handshakeAsServer(sockets[sockets.length - 1]);
+    const client2 = await pending2;
+    const pendingRequest2 = client2.request("getStatus", {});
+    sockets[sockets.length - 1].emit(
+      "data",
+      `${JSON.stringify({ ok: true, result: {} })}\n`,
+    );
+    await expect(pendingRequest2).rejects.toThrow("sealed frame");
+  });
+
+  it("rejects a server whose key does not match the pin", async () => {
+    const pending = connect("192.168.1.10", 7777, 5000, async () => null, {
+      pinnedHostKey: b64u(new Uint8Array(32).fill(99)),
+    });
+    // connect()는 소켓 연결 콜백 이후 ClientHello를 쓴다.
+    await vi.waitFor(() => expect(lastSocket().written.length).toBeGreaterThanOrEqual(1));
+    const hello = JSON.parse(lastSocket().written[0].payload.trim()) as {
+      nc: string;
+      xk: string;
+    };
+    const serverSecret = new Uint8Array(32).fill(11);
+    const serverXk = x25519.getPublicKey(serverSecret);
+    const serverSeed = new Uint8Array(32).fill(12);
+    const spk = ed25519.getPublicKey(serverSeed);
+    const ns = new Uint8Array(32).fill(13);
+    const sig = ed25519.sign(
+      signedTranscript(
+        base64UrlToBytes(hello.nc),
+        ns,
+        base64UrlToBytes(hello.xk),
+        serverXk,
+        spk,
+      ),
+      serverSeed,
+    );
+    lastSocket().emit(
+      "data",
+      `${JSON.stringify({
+        v: 1,
+        hello: "s",
+        ns: b64u(ns),
+        xk: b64u(serverXk),
+        spk: b64u(spk),
+        sig: b64u(sig),
+      })}\n`,
+    );
+    await expect(pending).rejects.toThrow("보안 키");
+    // 핀 불일치는 키 확인 전에 연결을 끊는다 — 확인 프레임을 쓰면 안 된다.
+    expect(lastSocket().written.length).toBe(1);
   });
 });

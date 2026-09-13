@@ -5,6 +5,7 @@
 //! carries media/control datagrams and channel 0 carries the local JSON
 //! control connection.
 
+use crate::media_crypto::SharedMediaCrypto;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -69,11 +70,16 @@ pub struct UsbBridge {
     control_addr: std::net::SocketAddr,
     control_port: u16,
     media_rx: Receiver<Vec<u8>>,
+    /// Session media crypto shared with the renderer. Installed at bridge
+    /// start from the prepare call and re-pointed at the per-port instance by
+    /// `prepare_udp_receiver` so the challenge echo and every later renderer
+    /// send share one AEAD counter sequence.
+    media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl UsbBridge {
-    pub fn start(fd: i32) -> io::Result<Self> {
+    pub fn start(fd: i32, media_key: [u8; 32]) -> io::Result<Self> {
         if fd < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -94,15 +100,26 @@ impl UsbBridge {
         let control_port = listener.local_addr()?.port();
         let (media_tx, media_rx) = mpsc::sync_channel(MEDIA_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(64);
+        let media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>> = Arc::new(Mutex::new(Some(
+            Arc::new(crate::media_crypto::MediaSessionCrypto::new(media_key)),
+        )));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let reader_crypto = Arc::clone(&media_crypto);
         let worker = thread::Builder::new()
             .name(format!("leftcar-usb-bridge-{control_port}"))
             .spawn(move || {
                 let reader_stop = Arc::clone(&worker_stop);
                 let reader_writer = Arc::clone(&writer);
                 let reader = thread::spawn(move || {
-                    read_accessory(file, reader_writer, media_tx, control_tx, reader_stop);
+                    read_accessory(
+                        file,
+                        reader_writer,
+                        media_tx,
+                        control_tx,
+                        reader_stop,
+                        &reader_crypto,
+                    );
                 });
                 let writer_stop = Arc::clone(&worker_stop);
                 let udp_writer = Arc::clone(&writer);
@@ -119,8 +136,24 @@ impl UsbBridge {
             control_addr,
             control_port,
             media_rx,
+            media_crypto,
             worker: Some(worker),
         })
+    }
+
+    /// Re-point the reader's crypto at a shared instance (same key, so no
+    /// host-visible state changes; the counter sequence simply continues).
+    pub fn set_media_crypto(&self, crypto: SharedMediaCrypto) {
+        if let Ok(mut slot) = self.media_crypto.lock() {
+            *slot = Some(crypto);
+        }
+    }
+
+    pub fn shared_crypto(&self) -> Option<SharedMediaCrypto> {
+        self.media_crypto
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone))
     }
 
     pub fn control_addr(&self) -> std::net::SocketAddr {
@@ -162,6 +195,7 @@ fn read_accessory(
     media_tx: SyncSender<Vec<u8>>,
     control_tx: SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    media_crypto: &Mutex<Option<SharedMediaCrypto>>,
 ) {
     let mut decoder = usb_mux::MuxDecoder::new();
     let mut buffer = [0u8; READ_BUFFER_BYTES];
@@ -181,17 +215,24 @@ fn read_accessory(
                 usb_mux::CHANNEL_MEDIA => &media_tx,
                 _ => unreachable!(),
             };
-            if frame.channel == usb_mux::CHANNEL_MEDIA && frame.payload.starts_with(b"LCH1") {
-                let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &frame.payload) else {
-                    break;
-                };
-                let Ok(mut output) = writer.lock() else { break };
-                if output.write_all(&bytes).is_err() {
-                    break;
+            if frame.channel == usb_mux::CHANNEL_MEDIA {
+                // Only a sealed frame that opens under the session key with
+                // the LCH1 prefix is echoed to the Host; media stays sealed
+                // end to end and is opened by the renderer.
+                let crypto = media_crypto.lock().ok().and_then(|slot| slot.clone());
+                if let Some(crypto) = crypto {
+                    if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
+                        if let Some(reply) = crypto.seal(&plaintext) {
+                            let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply) else {
+                                break;
+                            };
+                            let Ok(mut output) = writer.lock() else { break };
+                            if output.write_all(&bytes).is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
-                // Echo the challenge to the Host and also expose it to the
-                // renderer so the authenticated IDR/input/feedback path can
-                // use the same session token on USB as on UDP/TCP.
             }
             // Whole access units exceed the renderer's datagram buffers, so
             // they must re-enter it as shim-shaped fragments.
@@ -313,7 +354,7 @@ mod tests {
 
     #[test]
     fn start_rejects_invalid_fd() {
-        assert!(UsbBridge::start(-1).is_err());
+        assert!(UsbBridge::start(-1, [0u8; 32]).is_err());
     }
 
     fn l2_frame(body_len: usize) -> Vec<u8> {

@@ -7,8 +7,8 @@ import org.junit.Test
 class GestureHintRowsTest {
     @Test
     fun `안내는 네 가지 핵심 제스처를 모두 다룬다`() {
-        assertEquals(4, GestureHintRows.rows("ko").size)
-        assertEquals(4, GestureHintRows.rows("en").size)
+        assertEquals(5, GestureHintRows.rows("ko").size)
+        assertEquals(5, GestureHintRows.rows("en").size)
     }
 
     @Test
@@ -31,9 +31,9 @@ class GestureHintRowsTest {
     }
 
     @Test
-    fun `영어 행도 같은 네 동작을 짝지은 안내 문구다`() {
+    fun `영어 행도 같은 다섯 동작을 짝지은 안내 문구다`() {
         val actions = GestureHintRows.rows("en").map { it.second }
-        assertEquals(listOf("Click", "Drag", "Scroll", "Right-click"), actions)
+        assertEquals(listOf("Click", "Drag", "Scroll", "Right-click", "Zoom"), actions)
         val longPress = GestureHintRows.rows("en").firstOrNull { it.first == "Long press" }
         assertEquals("Right-click", longPress?.second)
     }

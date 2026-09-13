@@ -27,6 +27,7 @@ class MainApplication : Application(), ReactApplication {
           add(dev.leftcar.viewer.usb.UsbAccessoryPackage())
           // NSD host discovery (_leftcar._tcp)
           add(dev.leftcar.viewer.nsd.NsdPackage())
+          add(dev.leftcar.viewer.crypto.CryptoPackage())
         }
     )
   }

@@ -32,6 +32,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
         private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
+        private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
     }
 
     private var instanceId: String = ""
@@ -62,7 +63,26 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var cursorOverlay: CursorOverlayView? = null
     private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
+    private var balancedPresentation: Boolean = false
+    private var activityStarted = false
+    private val displayClock by lazy {
+        DisplayFrameClock(
+            post = { android.view.Choreographer.getInstance().postFrameCallback(it) },
+            remove = { android.view.Choreographer.getInstance().removeFrameCallback(it) },
+            display = { window.decorView.display?.let { it.displayId to it.refreshRate } },
+            deliver = { display, frame, period ->
+                ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, display, frame, period)
+            },
+        )
+    }
+    private fun syncPresentation() {
+        displayClock.stop()
+        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
+        if (balancedPresentation && activityStarted && surfaceLifecycle.isAttached) displayClock.start()
+    }
+
     private var localAudioEnabled: Boolean = true
+    private var opusAudioRequested: Boolean = false
     private var textLens: TextInputLensView? = null
     private var keyboardRequested = false
     private var terminationHandled = false
@@ -140,14 +160,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun handleTermination(reason: Int) {
         if (terminationHandled) return
         terminationHandled = true
-        val message = when (reason) {
-            1 -> "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."
-            2 -> "컴퓨터에서 이 화면 공유를 종료했습니다."
-            3 -> "컴퓨터에서 화면 공유를 종료했습니다."
-            4 -> "화면 렌더러를 다시 연결하고 있습니다."
-            5 -> "화면 공유를 다시 연결하고 있습니다."
-            else -> "화면 공유를 다시 연결하고 있습니다."
-        }
+        val message = ViewerStrings.terminationMessage(reason)
         if (reason == 4) {
             StreamLauncherModule.emitTermination(port, reason)
         }
@@ -234,10 +247,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             "local render recovery attempt=${attempt.number} result=$result " +
                 "port=$port source=${sourceWidth}x$sourceHeight fps=$fps",
         )
-        if (result == 0) {
-            hud?.onRebindFinished(true)
-        } else {
-            hud?.onRebindFinished(false)
+        // HUD 통지는 rebindOnSameSurface가 이미 했다 — 여기서 또 부르면
+        // 재시도마다 종료 폴링 재무장과 인디케이터 갱신이 두 번 일어난다.
+        if (result != 0) {
             scheduleRenderRecovery()
         }
     }
@@ -249,6 +261,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      * the two call sites cannot drift.
      */
     private fun rebindOnSameSurface(): Int {
+        displayClock.stop()
         if (splitVertical) {
             // The split renderer binds two listeners; a single rebind would
             // strand the right port and poison the next split attach. (Also
@@ -262,7 +275,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         val surface = streamSurfaces?.left?.holder?.surface
         val result = if (nativeState != 0L && !released && surface != null && surface.isValid) {
-            ViewerNative.rebindSurfacePort(
+            ViewerNative.rebindSurfacePortWithPresentation(
                 nativeState,
                 instanceId,
                 surface,
@@ -271,6 +284,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 sourceWidth,
                 sourceHeight,
                 fps,
+                balancedPresentation,
             )
         } else {
             -1
@@ -367,8 +381,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      * 렌더러에 뷰어의 현재 선호만 저장하면 된다. attach·재바인드 직후 호출해
      * 새로 만들어진 세션에도 선호가 즉시 반영되게 한다.
      */
+    internal fun audioStats(): Map<String, Any?> {
+        val value = audioPlayer?.metrics
+        return mapOf("requestedCodec" to if (opusAudioRequested) "opus128k" else "pcm",
+            "effectiveCodec" to value?.effectiveCodec, "enabled" to localAudioEnabled,
+            "requestedBufferFrames" to value?.requestedBufferFrames, "actualBufferFrames" to value?.actualBufferFrames,
+            "capacityFrames" to value?.capacityFrames, "underruns" to value?.underruns,
+            "writtenFrames" to value?.writtenFrames?.toDouble(), "playbackFrames" to value?.playbackFrames?.toDouble(),
+            "writeErrors" to value?.writeErrors?.toDouble(), "decodeNanoseconds" to value?.decodeNanoseconds?.toDouble(),
+            "avSkewUs" to null)
+    }
+
     private fun syncAudioStream() {
-        ViewerNative.setAudioStream(instanceId, localAudioEnabled)
+        ViewerNative.setAudioOwned(nativeState, instanceId, localAudioEnabled, audioPlayer?.configureOpus(opusAudioRequested) == true)
+        if (localAudioEnabled) audioPlayer?.start() else audioPlayer?.stop()
+        syncPresentation()
     }
 
     /**
@@ -399,7 +426,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun normalizedPoint(view: View, x: Float, y: Float): Pair<Float, Float> {
         val split = streamSurfaces?.right != null
         val videoWidth = if (split) sourceWidth / 2 else sourceWidth
-        val mapped = mapAspectFitPoint(x, y, view.width, view.height, videoWidth, sourceHeight)
+        // 핀치줌 역변환: 뷰 좌표를 줌 이전 내용 좌표로 되돌린 뒤 어스펙트
+        // 매핑을 적용한다(줌인 상태에서도 포인터가 정확한 원격 위치로 간다).
+        val (contentX, contentY) = if (streamZoom.isZoomed) {
+            streamZoom.toContent(x, y)
+        } else {
+            x to y
+        }
+        val mapped = mapAspectFitPoint(contentX, contentY, view.width, view.height, videoWidth, sourceHeight)
         val nx = when {
             !split -> mapped.first
             view === streamSurfaces?.right -> 0.5f + mapped.first * 0.5f
@@ -407,12 +441,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         return nx to mapped.second
     }
-
-    private fun normalizedX(event: MotionEvent, view: View): Float =
-        normalizedPoint(view, event.x, event.y).first
-
-    private fun normalizedY(event: MotionEvent, view: View): Float =
-        normalizedPoint(view, event.x, event.y).second
 
     /**
      * 호스트가 원격 입력을 잠근 동안(상태 0)은 터치·마우스·키보드 이벤트를
@@ -433,6 +461,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         actionButton: Int,
         horizontalScroll: Float,
         verticalScroll: Float,
+        pressure: Float = -1f,
     ): Boolean {
         if (remoteInputLocked()) return true
         return ViewerNative.sendPointer(
@@ -444,6 +473,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             actionButton,
             horizontalScroll,
             verticalScroll,
+            pressure,
         ) == 0
     }
 
@@ -604,14 +634,24 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
             else -> event.buttonState
         }
+        // 스타일러스만 압력을 싣는다 — 손가락·마우스의 pressure는
+        // 기기 의존적이라 의미가 없다(음수 = 압력 없음).
+        val stylusPressure =
+            if (event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
+                event.pressure.coerceIn(0f, 1f)
+            } else {
+                -1f
+            }
+        val (nx, ny) = normalizedPoint(view, event.x, event.y)
         return sendPointerUnlocked(
             action,
-            normalizedX(event, view),
-            normalizedY(event, view),
+            nx,
+            ny,
             buttons,
             actionButton,
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+            stylusPressure,
         )
     }
 
@@ -623,6 +663,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchSlopPx = ViewConfiguration.get(this).scaledTouchSlop.toFloat(),
         )
     }
+
+    /** 핀치줌 상태 — 좌·우 분할 타일 모두 같은 변환으로 확대한다. */
+    private val streamZoom = StreamZoomState()
     private var longPressRunnable: Runnable? = null
     private var gestureLastX = 0f
     private var gestureLastY = 0f
@@ -658,6 +701,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             centroidX /= event.pointerCount
             centroidY /= event.pointerCount
         }
+        val spanPx = if (event.pointerCount >= 2) {
+            val dx = event.getX(0) - event.getX(1)
+            val dy = event.getY(0) - event.getY(1)
+            kotlin.math.sqrt(dx * dx + dy * dy)
+        } else {
+            0f
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
             MotionEvent.ACTION_POINTER_DOWN,
@@ -674,6 +724,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.y,
             centroidX,
             centroidY,
+            spanPx,
         )
         commands.forEach { command -> runGestureCommand(command, view) }
         syncLongPressTimer(view)
@@ -722,16 +773,40 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 )
             }
             is TouchGestureCommand.Scroll -> {
+                val (nx, ny) = normalizedPoint(view, gestureLastX, gestureLastY)
                 sendPointerUnlocked(
                     4,
-                    normalizedPoint(view, gestureLastX, gestureLastY).first,
-                    normalizedPoint(view, gestureLastX, gestureLastY).second,
+                    nx,
+                    ny,
                     0,
                     0,
                     command.horizontalLines,
                     command.verticalLines,
                 )
             }
+            is TouchGestureCommand.Zoom -> {
+                streamZoom.applyScale(command.factor, command.focusX, command.focusY, view.width, view.height)
+                applyZoomToSurfaces()
+            }
+        }
+    }
+
+    /**
+     * 현재 줌 상태를 스트림 서피스에 반영하고, 줌인 중에는 로컬 커서
+     * 오버레이를 끈다 — 오버레이는 줌을 모르는 전역 좌표로 그려져 위치가
+     * 어긋나기 때문이다(스냅아웃하면 다시 켠다).
+     */
+    private fun applyZoomToSurfaces() {
+        val surfaces = streamSurfaces ?: return
+        val split = surfaces.right != null
+        surfaces.left?.let {
+            if (split) streamZoom.applyToTile(it, leftTile = true) else streamZoom.applyToView(it)
+        }
+        surfaces.right?.let { streamZoom.applyToTile(it, leftTile = false) }
+        if (streamZoom.isZoomed && localCursorEnabled) {
+            disableCursorOverlay()
+        } else if (!streamZoom.isZoomed && localCursorEnabled) {
+            enableCursorOverlay()
         }
     }
 
@@ -766,6 +841,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Saved state holds the effective configuration, including controls
+        // received since the original start intent. Never restore a toggle as
+        // a fresh stream launch.
+        savedInstanceState?.getBundle("effectiveStreamConfiguration")?.let { effective ->
+            setIntent(Intent(intent).replaceExtras(effective))
+        }
         instanceId = intent?.getStringExtra("instance")
             ?: savedInstanceState?.getString("instance")
             ?: "instance-${System.nanoTime()}"
@@ -807,6 +888,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         setContentView(surfaces.root)
         localCursorEnabled = intent?.getBooleanExtra("localCursor", true) ?: true
         localAudioEnabled = intent?.getBooleanExtra("localAudio", true) ?: true
+        opusAudioRequested = intent?.getBooleanExtra("opusAudio", false) ?: false
+        balancedPresentation = savedInstanceState?.takeIf { it.containsKey(KEY_BALANCED_PRESENTATION) }
+            ?.getBoolean(KEY_BALANCED_PRESENTATION)
+            ?: (intent?.getBooleanExtra(KEY_BALANCED_PRESENTATION, false) ?: false)
         // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
         intent?.getStringExtra("language")?.let { stored ->
             ViewerStrings.applyLanguage(stored)
@@ -832,6 +917,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ).also { hud ->
             hud.onGestureHelpTapped = { showGestureHint(true) }
             hud.onKeyboardToggle = { toggleSoftKeyboard() }
+            // 전체화면에서도 눈에 보이는 종료 경로 — finish()의 onDestroy가
+            // 렌더러 release(BYE)와 창 정리를 맡는다.
+            hud.onExitTapped = { finish() }
         }
         hud?.show()
         attachTextLens()
@@ -839,12 +927,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         surfaces.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()
+        // Register before allocating JNI state. A closed/stale restored intent
+        // may finish this Activity, but cannot resurrect a released native stream.
+        if (!StreamLauncherModule.registerStreamActivity(instanceId, ownershipGeneration, this)) return
         nativeState = ViewerNative.start()
         // Host audio is a passive plane: start draining with the renderer and
         // keep running across surface transitions. Rebinds clear the native
         // ring via the LCH1 challenge, so a replacement session never plays
         // stale chunks.
-        audioPlayer = StreamAudioPlayer(instanceId).also { it.start() }
+        audioPlayer = StreamAudioPlayer(instanceId, { bytes -> ViewerNative.pollAudioOwned(nativeState, instanceId, bytes) },
+            onCodecFallback = { ViewerNative.setAudioOwned(nativeState, instanceId, localAudioEnabled, false) }, signaledPoll = true).also { if (localAudioEnabled) it.start() }
         lifecycleEvent(1) // ACTIVITY_CREATE
         applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
     }
@@ -856,6 +948,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio)
+        outState.putBoolean(KEY_BALANCED_PRESENTATION, balancedPresentation)
+        outState.putBundle("effectiveStreamConfiguration", intent.extras?.let(::Bundle))
     }
 
     override fun onNewIntent(newIntent: Intent) {
@@ -865,7 +959,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
         val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
         val nextLocalCursor = newIntent.getBooleanExtra("localCursor", localCursorEnabled)
+        val nextBalanced = newIntent.getBooleanExtra("balancedPresentation", balancedPresentation)
         val nextLocalAudio = newIntent.getBooleanExtra("localAudio", localAudioEnabled)
+        val nextOpusAudio = newIntent.getBooleanExtra("opusAudio", opusAudioRequested)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
         val nextHeight = newIntent.getIntExtra("height", sourceHeight)
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
@@ -873,7 +969,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
         val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
         val togglesOnly = (nextLocalCursor != localCursorEnabled ||
-            nextLocalAudio != localAudioEnabled) &&
+            nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation) && !reconnectRequested &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
             nextSplitVertical == splitVertical && nextShowFps == showFps
@@ -881,12 +977,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight ||
                 nextSplitVertical != splitVertical || nextShowFps != showFps ||
-                nextLocalCursor != localCursorEnabled || nextLocalAudio != localAudioEnabled
+                nextLocalCursor != localCursorEnabled || nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation
 
-        setIntent(newIntent)
         if (newIntent.hasExtra("ownershipGeneration")) {
-            ownershipGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
+            val nextGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
+            if (!StreamLauncherModule.registerStreamActivity(instanceId, nextGeneration, this)) return
+            ownershipGeneration = nextGeneration
         }
+        // Preserve start configuration through partial controls. Keep the
+        // current invocation's reconnect decision above separate from the
+        // saved effective data so a previous start cannot turn a toggle into
+        // a renderer restart.
+        setIntent(Intent(intent).apply {
+            newIntent.extras?.let { putExtras(it) }
+            putExtra("reconnect", false)
+        })
         if (ratioChangeRequested) {
             // 비율 프리셋만 바꾸는 호출: 소스 해상도는 그대로 둔다. 값은
             // 다음 setIntent 이전 스트림 재구성에도 유지된다.
@@ -895,7 +1000,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (togglesOnly) {
             localCursorEnabled = nextLocalCursor
             if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
+            balancedPresentation = nextBalanced
             localAudioEnabled = nextLocalAudio
+            opusAudioRequested = nextOpusAudio
             syncAudioStream()
             return
         }
@@ -905,7 +1012,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             fps = nextFps
             showFps = nextShowFps
             localCursorEnabled = nextLocalCursor
+            balancedPresentation = nextBalanced
             localAudioEnabled = nextLocalAudio
+            opusAudioRequested = nextOpusAudio
             sourceWidth = nextWidth
             sourceHeight = nextHeight
             splitVertical = nextSplitVertical
@@ -959,6 +1068,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onStart() {
         super.onStart()
+        activityStarted = true
+        syncPresentation()
         lifecycleEvent(2) // ACTIVITY_START
     }
 
@@ -993,6 +1104,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      */
     private fun rebuildStreamSurfaces() {
         if (released || isFinishing || isDestroyed) return
+        // Retire this hierarchy's callback even if replacement attach is delayed
+        // or fails. Only successful attach may start the next clock epoch.
+        displayClock.stop()
+        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
         // Stop the renderer still bound to the replaced hierarchy BEFORE the
         // swap: the old SurfaceViews' late destroys then own nothing, so their
         // arrival order — interleaved with the new holders' creates or after
@@ -1016,6 +1131,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             { view, event -> forwardPointer(event, view) },
         )
         streamSurfaces = next
+        // 새 서피스는 변환 없이 태어나므로 줌 상태도 원점으로 되돌린다 —
+        // 남은 줌으로 두면 toContent가 낡은 변환으로 탭을 역산해 원격 입력이
+        // 엉뚱한 곳에 찍힌다. 커서 오버레이는 attach 직후 다시 켜진다.
+        streamZoom.reset()
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
         cancelPendingSurfaceAttach()
@@ -1058,7 +1177,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         val res = if (splitVertical) {
             val right = surfaces.right ?: return
-            ViewerNative.attachSplitSurfaces(
+            ViewerNative.attachSplitSurfacesWithPresentation(
                 nativeState,
                 instanceId,
                 surfaces.left.holder.surface,
@@ -1069,9 +1188,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 sourceHeight,
                 fps,
                 splitDecoderName,
+                balancedPresentation,
             )
         } else {
-            ViewerNative.attachSurfacePort(
+            ViewerNative.attachSurfacePortWithPresentation(
                 nativeState,
                 instanceId,
                 surfaces.left.holder.surface,
@@ -1080,6 +1200,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 sourceWidth,
                 sourceHeight,
                 fps,
+                balancedPresentation,
             )
         }
         surfaceLifecycle.confirmAttached(res == 0)
@@ -1155,6 +1276,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         cancelPendingSurfaceAttach()
+        displayClock.stop()
+        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
         android.util.Log.i(
             "LeftcarStream",
             "surfaceDestroyed: stop=$stop generation=${surfaceLifecycle.currentGeneration} " +
@@ -1163,13 +1286,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         lifecycleEvent(8) // SURFACE_DESTROY
         hideTabletCursor()
         ViewerNative.releaseInput(instanceId)
-        // Desktop-mode Back can destroy the Surface before onDestroy. Split
-        // detach intentionally stops silently for resize/rebind, so on a
-        // final Activity finish release the renderer here while its peer and
-        // authentication token are still available; otherwise the later
-        // onDestroy release has no active renderer left to send BYE. A holder
-        // from a replaced (rebuilt) hierarchy consumes the retired stop flag
-        // once — it can never detach a renderer the new hierarchy attached.
+        // A final Surface loss defers release to onDestroy so lifecycle/state
+        // callbacks finish before native memory is freed off the UI thread.
+        // A retired holder consumes its stop flag without touching a replacement.
         when (stop) {
             StreamSurfaceStop.NONE -> {}
             StreamSurfaceStop.DETACH_RENDERER -> {
@@ -1181,8 +1300,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
             StreamSurfaceStop.FINAL_RELEASE -> {
                 released = true
-                ViewerNative.release(nativeState, instanceId)
-                android.util.Log.i("LeftcarStream", "final release completed before onDestroy")
+                // Keep the owned native-window reference until onDestroy has
+                // finished all state callbacks, then release off the UI thread.
+                android.util.Log.i("LeftcarStream", "final release queued for onDestroy")
             }
         }
     }
@@ -1195,6 +1315,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onStop() {
+        activityStarted = false
+        syncPresentation()
         lifecycleEvent(10) // ACTIVITY_STOP
         super.onStop()
     }
@@ -1205,7 +1327,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         lifecycleEvent(11) // CONFIGURATION_CHANGE
     }
 
+    private fun releaseOwnedNativeStream() {
+        val releaseState = nativeState
+        val releaseInstance = instanceId
+        StreamLauncherModule.releaseStreamActivity(instanceId, ownershipGeneration, this) {
+            releaseState == 0L || ViewerNative.release(releaseState, releaseInstance) == 0
+        }
+    }
+
     override fun onDestroy() {
+        displayClock.stop()
         android.util.Log.i(
             "LeftcarStream",
             "onDestroy: final release instanceId=$instanceId attached=${surfaceLifecycle.isAttached}",
@@ -1232,9 +1363,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         hud = null
         releaseNetworkLocks()
         ViewerNative.releaseInput(instanceId)
-        ViewerNative.release(nativeState, instanceId)
-        StreamLauncherModule.forgetStream(instanceId, ownershipGeneration)
         super.onDestroy()
+        releaseOwnedNativeStream()
     }
 }
 

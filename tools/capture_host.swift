@@ -1,4 +1,4 @@
-// Host-side launcher for the macOS capture shim (v2 handle-based ABI).
+// Host-side launcher for the macOS capture shim (v8 sealed-media ABI).
 //
 // Loads libleftcar_capture.dylib (Swift SCK+VT shim), starts a capture
 // session toward the viewer's TCP endpoint, prints live stats JSON.
@@ -38,6 +38,7 @@ var width: UInt32 = 1920
 var height: UInt32 = 1080
 var fps: UInt32 = 90
 
+var mediaKeyHex = ""
 var i = 3
 while i < args.count {
     switch args[i] {
@@ -47,8 +48,33 @@ while i < args.count {
         if parts.count == 2 { width = parts[0]; height = parts[1] }
         i += 2
     case "--fps": fps = UInt32(args[i + 1]) ?? 90; i += 2
+    case "--mediaKeyHex": mediaKeyHex = args[i + 1]; i += 2
     default: seconds = Double(args[i]) ?? 60.0; i += 1
     }
+}
+
+// The media path is AEAD-sealed with the viewer's session key. A diagnostic
+// run without a receiver passes any 32-byte key; pair --mediaKeyHex with the
+// receiver's key when streaming to a real viewer.
+let mediaKey: [UInt8]
+if mediaKeyHex.isEmpty {
+    mediaKey = (0..<32).map { UInt8($0) }
+} else {
+    var parsed = [UInt8]()
+    var index = mediaKeyHex.hasPrefix("0x") ? 2 : 0
+    while index + 1 < mediaKeyHex.count + 1 && index + 1 <= mediaKeyHex.count - 1 + 1 {
+        let start = mediaKeyHex.index(mediaKeyHex.startIndex, offsetBy: index)
+        let end = mediaKeyHex.index(start, offsetBy: 2)
+        if let byte = UInt8(String(mediaKeyHex[start..<end]), radix: 16) {
+            parsed.append(byte)
+        }
+        index += 2
+    }
+    guard parsed.count == 32 else {
+        FileHandle.standardError.write("--mediaKeyHex must decode to 32 bytes\n".data(using: .utf8)!)
+        exit(2)
+    }
+    mediaKey = parsed
 }
 
 let dylibPath = "native/macos-capture-shim/libleftcar_capture.dylib"
@@ -61,25 +87,37 @@ guard let handle = dlopen(dylibPath, RTLD_NOW) else {
 }
 print("loaded \(dylibPath)")
 
-typealias StartV2 = @convention(c) (UnsafePointer<CChar>, UInt16, UInt32, UInt32, UInt32, UInt32) -> UInt32
+typealias StartV8 = @convention(c) (
+    UnsafePointer<CChar>, UInt16, UInt32, UInt32, UInt32, UInt32,
+    UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+    UnsafePointer<CChar>?, UnsafePointer<CChar>?, UInt8, UInt8, Int32,
+    UnsafePointer<UInt8>?, UInt32
+) -> UInt32
 typealias StopV2 = @convention(c) (UInt32) -> Int32
 typealias StatsV2 = @convention(c) (UInt32) -> UnsafeMutablePointer<CChar>
 typealias FreeString = @convention(c) (UnsafeMutablePointer<CChar>) -> Void
 typealias LastError = @convention(c) () -> UnsafePointer<CChar>
 
 guard
-    let start = dlsym(handle, "leftcar_capture_start_v2").map({ unsafeBitCast($0, to: StartV2.self) }),
+    let start = dlsym(handle, "leftcar_capture_start_v8").map({ unsafeBitCast($0, to: StartV8.self) }),
     let stop = dlsym(handle, "leftcar_capture_stop_v2").map({ unsafeBitCast($0, to: StopV2.self) }),
     let stats = dlsym(handle, "leftcar_capture_stats_v2").map({ unsafeBitCast($0, to: StatsV2.self) }),
     let freeStr = dlsym(handle, "leftcar_capture_free_string").map({ unsafeBitCast($0, to: FreeString.self) }),
     let lastError = dlsym(handle, "leftcar_capture_last_error_v2").map({ unsafeBitCast($0, to: LastError.self) })
 else {
-    FileHandle.standardError.write("missing v2 C ABI symbols in shim\n".data(using: .utf8)!)
+    FileHandle.standardError.write("missing v8 C ABI symbols in shim (rebuild native/macos-capture-shim)\n".data(using: .utf8)!)
     exit(1)
 }
 
 print("target \(host):\(port) display=\(display) size=\(width)x\(height) fps=\(fps) — starting (needs Screen Recording permission)...")
-let h = start(host, port, display, width, height, fps)
+var mediaKeyCopy = mediaKey
+let h = mediaKeyCopy.withUnsafeMutableBufferPointer { keyBuffer in
+    start(
+        host, port, display, width, height, fps,
+        "screenCaptureKit", "udp", "interactive", "auto", "legacy", 8, 2, 0,
+        keyBuffer.baseAddress, UInt32(keyBuffer.count)
+    )
+}
 if h == 0 {
     FileHandle.standardError.write("capture start FAILED: \(String(cString: lastError()))\n".data(using: .utf8)!)
     exit(1)

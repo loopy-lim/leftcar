@@ -10,19 +10,19 @@ func cursorPollingHz(fps: UInt32) -> UInt32 {
     return max(30, min(240, fps &* 2))
 }
 
-/// LCD1 cursor wire format:
-/// `LCD1 | sequence u32 BE | x u16 BE | y u16 BE | visibility u8 | shape u8 |
-/// token`. Coordinates arrive normalized to the capture content rect as
-/// 0...65535. Byte layout mirrors the viewer's `cursor_protocol.rs` parser;
+/// LCD1 cursor wire format (sealed at the socket boundary like every host
+/// datagram; the frame carries no inline session token):
+/// `LCD1 | sequence u32 BE | x u16 BE | y u16 BE | visibility u8 | shape u8`.
+/// Coordinates arrive normalized to the capture content rect as 0...65535.
+/// Byte layout mirrors the viewer's `cursor_protocol.rs` parser;
 /// the two must stay in lockstep.
 func encodeCursorPacket(
     sequence: UInt32,
     x: UInt16,
     y: UInt16,
-    visible: Bool,
-    token: Data
+    visible: Bool
 ) -> Data {
-    var bytes = Data(capacity: 14 + token.count)
+    var bytes = Data(capacity: 14)
     bytes.append(Data("LCD1".utf8))
     bytes.append(UInt8(truncatingIfNeeded: sequence >> 24))
     bytes.append(UInt8(truncatingIfNeeded: sequence >> 16))
@@ -35,7 +35,6 @@ func encodeCursorPacket(
     bytes.append(visible ? 1 : 0)
     // Shape is reserved; the MVP streams position only.
     bytes.append(0)
-    bytes.append(token)
     return bytes
 }
 
@@ -44,8 +43,8 @@ func encodeCursorPacket(
 /// mirroring the viewer's `InputScheduler` pointer path in reverse: no
 /// reliability layer, the newest sample is simply the truth. A packet is
 /// produced only when the cursor state changed since the last send, and only
-/// once an authenticated session token is known — samples are never emitted
-/// unauthenticated.
+/// while the stream is enabled — every datagram is authenticated by the
+/// session media key at the socket boundary.
 ///
 /// Single-owner contract: this is a value type whose mutable state must not
 /// fork. Exactly one owner (in the wiring task, the capture session's cursor
@@ -55,7 +54,6 @@ func encodeCursorPacket(
 struct CursorStreamCoordinator {
     private let pollingIntervalUs: UInt64
     private let bounds: CGRect
-    private var token: Data?
     private var enabled = false
     private var sequence: UInt32 = 0
     private var lastSentUs: UInt64 = 0
@@ -67,19 +65,6 @@ struct CursorStreamCoordinator {
     init(fps: UInt32, bounds: CGRect) {
         pollingIntervalUs = UInt64(1_000_000 / Int64(cursorPollingHz(fps: fps)))
         self.bounds = bounds
-    }
-
-    /// The session token travels inside every LCD1 packet so the viewer can
-    /// bind samples to the authenticated session. Until it arrives, `packetDue`
-    /// stays silent. Installing a different token means a freshly
-    /// authenticated viewer that never saw the last sample, so the current
-    /// state is flushed instead of waiting for the next cursor change.
-    mutating func setToken(_ newToken: Data) {
-        let sanitized = newToken.isEmpty ? nil : newToken
-        if sanitized != token {
-            dirty = dirty || hasSample
-        }
-        token = sanitized
     }
 
     mutating func setEnabled(_ newValue: Bool) {
@@ -115,7 +100,7 @@ struct CursorStreamCoordinator {
     /// the never-sent sentinel, which relies on an uptime clock never
     /// reporting exactly zero at a live call site.
     mutating func packetDue(nowUs: UInt64) -> Data? {
-        guard enabled, dirty, let token,
+        guard enabled, dirty,
               lastSentUs == 0 || nowUs >= lastSentUs + pollingIntervalUs
         else { return nil }
         dirty = false
@@ -128,8 +113,7 @@ struct CursorStreamCoordinator {
             sequence: sequence,
             x: normalized(position.x, origin: bounds.origin.x, extent: bounds.width),
             y: normalized(position.y, origin: bounds.origin.y, extent: bounds.height),
-            visible: visible,
-            token: token
+            visible: visible
         )
     }
 

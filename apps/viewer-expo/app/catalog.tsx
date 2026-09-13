@@ -49,6 +49,7 @@ import type { ActiveStream } from "../src/catalog-model-types";
 import { useCatalogModel } from "../src/use-catalog-model";
 import { transportBadgeLabel } from "../src/transport-label";
 import { DisplaySizeCard } from "../src/DisplaySizeCard";
+import { FileTransferCard } from "../src/FileTransferCard";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 
@@ -152,7 +153,13 @@ interface ViewerOptionsCardProps {
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
+  opusAudio: boolean;
+  onToggleOpusAudio: (enabled: boolean) => void;
+  balancedPresentation: boolean;
+  onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
+  clipboardShare: boolean;
+  onToggleClipboardShare: (enabled: boolean) => void;
   colors: ThemeTokens;
 }
 
@@ -162,7 +169,13 @@ function ViewerOptionsCard({
   localCursor,
   onToggleCursor,
   localAudio,
+  opusAudio,
+  onToggleOpusAudio,
+  balancedPresentation,
+  onToggleBalancedPresentation,
   onToggleAudio,
+  clipboardShare,
+  onToggleClipboardShare,
   colors,
 }: ViewerOptionsCardProps) {
   const { t } = useAppLanguage();
@@ -229,6 +242,36 @@ function ViewerOptionsCard({
           {...switchColor}
         />
       </View>
+      <View style={OPTION_ROW_STYLE}>
+        <Text style={{ flex: 1, color: colors.textPrimary }}>Opus 128 kbps (experimental)</Text>
+        <Switch value={opusAudio} onValueChange={onToggleOpusAudio}
+          accessibilityLabel="Opus 128 kbps experimental" {...switchColor} />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
+        </View>
+        <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
+          accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
+      </View>
+      {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+            {t.viewer.clipboardShareLabel}
+          </Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+            {t.viewer.clipboardShareHint}
+          </Text>
+        </View>
+        <Switch
+          value={clipboardShare}
+          onValueChange={onToggleClipboardShare}
+          accessibilityLabel={t.viewer.clipboardShareLabel}
+          {...switchColor}
+        />
+      </View>
     </View>
   );
 }
@@ -262,7 +305,8 @@ function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: Viewer
     {STREAM_PROFILES.map((p) => {
       const selected = p.id === profileId;
       const copy = QUALITY_TAB_KEYS[p.id];
-      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
+      const a11yLabel = `${t.viewer[copy.label]}: ${t.viewer[copy.detail]}`;
+      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={a11yLabel}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
     })}
   </View></View>;
 }
@@ -281,7 +325,13 @@ interface CatalogHeaderProps {
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
+  opusAudio: boolean;
+  onToggleOpusAudio: (enabled: boolean) => void;
+  balancedPresentation: boolean;
+  onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
+  clipboardShare: boolean;
+  onToggleClipboardShare: (enabled: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -308,7 +358,13 @@ function CatalogHeader({
   localCursor,
   onToggleCursor,
   localAudio,
+  opusAudio,
+  onToggleOpusAudio,
+  balancedPresentation,
+  onToggleBalancedPresentation,
   onToggleAudio,
+  clipboardShare,
+  onToggleClipboardShare,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -401,10 +457,18 @@ function CatalogHeader({
             onToggleFps={onToggleFps}
             localCursor={localCursor}
             onToggleCursor={onToggleCursor}
+            balancedPresentation={balancedPresentation}
+            onToggleBalancedPresentation={onToggleBalancedPresentation}
             localAudio={localAudio}
+            opusAudio={opusAudio}
+            onToggleOpusAudio={onToggleOpusAudio}
             onToggleAudio={onToggleAudio}
+            clipboardShare={clipboardShare}
+            onToggleClipboardShare={onToggleClipboardShare}
             colors={colors}
           />
+
+          <FileTransferCard colors={colors} />
 
           <EncoderExperimentChoices experiments={encoderExperiments} selected={encoderExperiment} requiresReconnect={requiresReconnect} colors={colors} t={t} onSelect={onSelectEncoderExperiment} />
 
@@ -479,16 +543,17 @@ function UsbTransportStatus({ styles }: { styles: ReturnType<typeof createCatalo
     return null;
   }
 
+  let transportLabel: string = t.viewer.usbDetected;
+  if (state.attached) {
+    transportLabel = t.viewer.usbAttached;
+  } else if (state.permissionPending) {
+    transportLabel = t.viewer.usbPending;
+  }
+
   return (
     <View style={styles.transportStrip}>
       <View style={[styles.transportDot, state.attached && styles.transportDotUsb]} />
-      <Text style={styles.transportText}>
-        {state.attached
-          ? t.viewer.usbAttached
-          : state.permissionPending
-            ? t.viewer.usbPending
-            : t.viewer.usbDetected}
-      </Text>
+      <Text style={styles.transportText}>{transportLabel}</Text>
       {canRequestPermission && !requesting ? (
         <Pressable
           onPress={handleGrantPermission}
@@ -622,7 +687,7 @@ function ActiveStreamItem({
         <View style={styles.streamNameRow}>
           <View style={styles.dotActive} />
           <Text style={styles.streamName} numberOfLines={1}>
-            #{stream.session} {stream.sourceName}
+            {stream.sourceName}
           </Text>
         </View>
         <View style={styles.streamSpecRow}>
@@ -753,8 +818,14 @@ export default function Catalog() {
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}
             onToggleCursor={model.handleToggleCursor}
+            balancedPresentation={model.balancedPresentation}
+            onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
             localAudio={model.localAudio}
+            opusAudio={model.opusAudio}
+            onToggleOpusAudio={model.handleToggleOpusAudio}
             onToggleAudio={model.handleToggleAudio}
+            clipboardShare={model.clipboardShare}
+            onToggleClipboardShare={model.handleToggleClipboardShare}
             encoderExperiments={model.selectedEncoderExperiments}
             encoderExperiment={model.effectiveNextEncoderExperiment}
             onSelectEncoderExperiment={model.handleSelectEncoderExperiment}

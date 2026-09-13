@@ -101,6 +101,12 @@ func nextStrictlyMonotonicSubmissionPTS(
     return sourcePTS
 }
 
+/// VideoToolbox DataRateLimits의 1초 바이트 상한 — 비트레이트의 125%.
+/// 모든 인코더 설정 경로가 같은 식을 쓰게 한곳에 모은다.
+func vtHardLimitBytes(bitrate: Int) -> Int {
+    max(1, Int(Double(bitrate) / 8.0 * 1.25))
+}
+
 final class VideoToolboxTileEncoder {
     let side: TileSide
     let encoderID: String
@@ -213,7 +219,7 @@ final class VideoToolboxTileEncoder {
                 ),
                 "AverageBitRate"
             )
-            let hardLimitBytes = max(1, Int(Double(max(1_000_000, bitrate)) / 8.0 * 1.25))
+            let hardLimitBytes = vtHardLimitBytes(bitrate: max(1_000_000, bitrate))
             try Self.require(
                 VTSessionSetProperty(
                     compressionSession,
@@ -379,7 +385,7 @@ final class VideoToolboxTileEncoder {
             key: kVTCompressionPropertyKey_AverageBitRate,
             value: bounded as CFNumber
         )
-        let hardLimitBytes = max(1, Int(Double(bounded) / 8.0 * 1.25))
+        let hardLimitBytes = vtHardLimitBytes(bitrate: bounded)
         let rateStatus = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_DataRateLimits,

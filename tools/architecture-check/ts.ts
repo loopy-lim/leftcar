@@ -27,7 +27,7 @@ function* walk(dir: string): Generator<string> {
     return;
   }
   for (const name of entries) {
-    if (name === "node_modules" || name === "dist" || name === ".git") continue;
+    if (name === "node_modules" || name === "dist" || name === ".git" || name === ".worktrees") continue;
     const full = join(dir, name);
     let st;
     try {
@@ -40,9 +40,15 @@ function* walk(dir: string): Generator<string> {
   }
 }
 
-function checkFiles(dir: string, patterns: Array<[RegExp, string]>, rule: string): void {
+function checkFiles(
+  dir: string,
+  patterns: Array<[RegExp, string]>,
+  rule: string,
+  allow?: (file: string) => boolean,
+): void {
   for (const file of walk(dir)) {
     if (!/\.(ts|tsx|kt)$/.test(file)) continue;
+    if (allow?.(file)) continue;
     const text = readFileSync(file, "utf8");
     for (const [re, why] of patterns) {
       if (re.test(text)) fail(rule, `${file}: ${why}`);
@@ -69,7 +75,21 @@ checkFiles(
 );
 
 // 2. The 120/180Hz input plane is native Kotlin/JNI/UDP. Keep it out of
-//    React/Rustra/JSON while continuing to deny clipboard and file transfer.
+//    React/Rustra/JSON while continuing to deny file transfer. Clipboard
+//    text sync is deliberately allowed again behind a double gate
+//    (docs/07 §20 policy change, 2026-09-09): expo-clipboard access lives
+//    ONLY in apps/viewer-expo/src/clipboard-sync.ts and the host-side gate
+//    still rejects every clipboard command while its toggle is closed.
+const CLIPBOARD_SYNC_FILES = new Set([
+  "apps/viewer-expo/src/clipboard-sync.ts",
+  // 테스트 파일은 모듈 경계 목 fixture로 모듈 이름을 적어야 한다 — 파일
+  // 상단 "test fixtures legitimately name the banned symbols" 예외와 같은
+  // 취지다.
+  "apps/viewer-expo/src/clipboard-sync.test.ts",
+]);
+const isClipboardSyncModule = (file: string): boolean =>
+  CLIPBOARD_SYNC_FILES.has(relative(ROOT, file).replaceAll("\\", "/"));
+
 for (const folder of [
   join(ROOT, "apps/viewer-android/src"),
   join(ROOT, "apps/viewer-expo/src"),
@@ -83,11 +103,19 @@ for (const folder of [
     ],
     "viewer-ts-no-high-rate-input",
   );
+  // docs/07 §20(정책 변경): 게이트 없는 클립보드 접근은 여전히 금지며,
+  // expo-clipboard 진입점은 단일 모듈로 한정한다.
+  checkFiles(
+    folder,
+    [[/["']expo-clipboard["']/, "expo-clipboard access outside clipboard-sync.ts"]],
+    "viewer-clipboard-single-gated-module",
+    isClipboardSyncModule,
+  );
 }
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
-const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|kotlin\.)/;
-const JUNIT_IMPORT = /^import org\.junit\./;
+const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|java\.security\.|kotlin\.)/; // java.security = SecureRandom(CSPRNG 어댑터, docs/07 §20)
+const JVM_TEST_IMPORT = /^import org\.(?:junit|robolectric)\./;
 const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
   "import kotlinx.coroutines.Dispatchers",
   "import kotlinx.coroutines.Job",
@@ -116,33 +144,38 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
     const text = readFileSync(file, "utf8");
     for (const line of text.split("\n")) {
       const m = line.match(/^import\s+(.+)$/);
-      const allowsJvmUnitTestJUnit = isAndroidJvmUnitTestSource(file, folder) && JUNIT_IMPORT.test(line);
+      const allowsJvmUnitTestDependency = isAndroidJvmUnitTestSource(file, folder) && JVM_TEST_IMPORT.test(line);
       const allowsStreamActivityXrCoroutine = isStreamActivityXrCoroutineImport(file, line);
-      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestJUnit && !allowsStreamActivityXrCoroutine) {
+      const audioPath = relative(ROOT, file).replaceAll("\\", "/");
+      const allowsAudioBuffer = /^apps\/viewer-expo\/android\/app\/src\/(?:main\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoder|test\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoderTest)\.kt$/.test(audioPath)
+        && /^import java\.nio\.(?:ByteBuffer|ByteOrder)$/.test(line);
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsAudioBuffer) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,
         );
       }
     }
-    // SplitDecoderCapability is the narrow Android platform-query boundary:
-    // it may inspect MediaCodecList but must never construct a decoder. All
-    // decoder lifecycle and fallback policy remain in the Rust core.
-    const isSplitDecoderCapability = file.endsWith("/SplitDecoderCapability.kt");
-    if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text) && !isSplitDecoderCapability) {
-      fail("kotlin-no-policy", `${file}: codec/network symbols belong to the Rust core`);
+    const path = relative(ROOT, file).replaceAll("\\", "/");
+    const base = "apps/viewer-expo/android/app/src/";
+    const stream = "java/dev/leftcar/viewer/stream/";
+    const query = path === `${base}main/${stream}SplitDecoderCapability.kt`;
+    const audio = path === `${base}main/${stream}OpusAudioDecoder.kt`;
+    const audioTest = path === `${base}test/${stream}OpusAudioDecoderTest.kt`;
+    const queryTest = path === `${base}test/${stream}SplitDecoderCapabilityTest.kt`;
+    if (/DatagramSocket|(?:Server)?Socket\s*\(|java\.net\./.test(text)) {
+      fail("kotlin-no-policy", `${file}: network creation belongs to Rust`);
     }
-    if (
-      isSplitDecoderCapability &&
-      (/createDecoderByType|createByCodecName|MediaCodec\.create/.test(text) ||
-        !/maxSupportedInstances\s*<\s*2/.test(text) ||
-        !/areSizeAndRateSupported\(1_920, 2_160, 60\.0\)/.test(text))
-    ) {
-      fail(
-        "kotlin-split-capability-only",
-        `${file}: capability shim must only verify dual 1920x2160@60 hardware support`,
-      );
+    if (/MediaCodec|AMediaCodec/.test(text) && !(query || audio || audioTest || queryTest)) {
+      fail("kotlin-no-policy", `${file}: codec outside approved platform boundary`);
     }
+    if ((query || queryTest) && /createDecoderByType|createEncoderByType|createByCodecName|MediaCodec\s*\.\s*create/.test(text)) {
+      fail("kotlin-split-capability-only", `${file}: capability query must never construct a codec`);
+    }
+    if ((audio || audioTest) && /createVideoFormat|MIMETYPE_VIDEO_|["']video\/|createEncoderByType|createDecoderByType/.test(text)) {
+      fail("kotlin-opus-only", `${file}: only the Opus audio adapter is permitted`);
+    }
+
   }
 }
 

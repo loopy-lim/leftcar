@@ -31,10 +31,29 @@ pub struct SplitFeedbackSnapshot {
     pub paired_idr_episodes: u32,
     pub suppressed_duplicate_recovery_requests: u32,
     pub fec_decode_failures: u32,
+    /// Coordinator-wide count of paired recovery episodes where BOTH tiles
+    /// observed the same IDR generation. Lives in the length-tolerant v3
+    /// suffix (bytes 120..124): a released viewer keeps sending exactly the
+    /// legacy 120B body and the Host gates this field on the explicit body
+    /// length, so both directions stay compatible.
+    pub paired_idr_resumes: u32,
+    /// Smoothed clock-corrected capture/send -> decoder-feed ages in
+    /// milliseconds. `u16::MAX` means "not measured" (no host clock offset
+    /// yet), matching the single-session latency convention. Suffix fields at
+    /// bytes 124..126 and 126..128.
+    pub wire_to_decoder_ms: u16,
+    pub capture_age_ms: u16,
+    /// Viewer-measured reliable-input send->ack round trip (EWMA, ms).
+    /// `u16::MAX` means no ack has landed yet. Suffix field at 128..130.
+    pub input_rtt_ms: u16,
+    /// Per-tile gap recovery (R2): per-tile episodes that resumed when THEIR
+    /// tile's decoder saw the new keyframe. Suffix field at 130..134; the
+    /// extended body length is also the Host's per-tile capability signal.
+    pub per_tile_idr_resumes: u32,
 }
 
 pub fn split_feedback_body(snapshot: SplitFeedbackSnapshot) -> Vec<u8> {
-    let mut body = Vec::with_capacity(120);
+    let mut body = Vec::with_capacity(134);
     body.extend_from_slice(b"LCF1");
     body.extend_from_slice(&snapshot.frame_gaps.to_be_bytes());
     body.extend_from_slice(&snapshot.input_drops.to_be_bytes());
@@ -68,6 +87,14 @@ pub fn split_feedback_body(snapshot: SplitFeedbackSnapshot) -> Vec<u8> {
             .to_be_bytes(),
     );
     body.extend_from_slice(&snapshot.fec_decode_failures.to_be_bytes());
+    // Length-tolerant v3 suffix. The Host parses the 120B v2 body it knows
+    // and reads each suffix field only when the datagram is long enough, so
+    // senders may keep appending fields without breaking older receivers.
+    body.extend_from_slice(&snapshot.paired_idr_resumes.to_be_bytes());
+    body.extend_from_slice(&snapshot.wire_to_decoder_ms.to_be_bytes());
+    body.extend_from_slice(&snapshot.capture_age_ms.to_be_bytes());
+    body.extend_from_slice(&snapshot.input_rtt_ms.to_be_bytes());
+    body.extend_from_slice(&snapshot.per_tile_idr_resumes.to_be_bytes());
     body
 }
 
@@ -101,6 +128,11 @@ mod tests {
             paired_idr_episodes: 17,
             suppressed_duplicate_recovery_requests: 18,
             fec_decode_failures: 19,
+            paired_idr_resumes: 20,
+            wire_to_decoder_ms: 21,
+            capture_age_ms: 22,
+            input_rtt_ms: 23,
+            per_tile_idr_resumes: 24,
         });
         assert_eq!(&body[..4], b"LCF1");
         // Bytes 16..20 are the stale-frame field the Host reads into its ABR
@@ -126,6 +158,57 @@ mod tests {
         assert_eq!(u32::from_be_bytes(body[108..112].try_into().unwrap()), 17);
         assert_eq!(u32::from_be_bytes(body[112..116].try_into().unwrap()), 18);
         assert_eq!(u32::from_be_bytes(body[116..120].try_into().unwrap()), 19);
-        assert_eq!(body.len(), 120);
+        // The legacy body ends at 120 bytes; the v3 suffix is pure append.
+        assert_eq!(u32::from_be_bytes(body[120..124].try_into().unwrap()), 20);
+        assert_eq!(u16::from_be_bytes(body[124..126].try_into().unwrap()), 21);
+        assert_eq!(u16::from_be_bytes(body[126..128].try_into().unwrap()), 22);
+        assert_eq!(u16::from_be_bytes(body[128..130].try_into().unwrap()), 23);
+        assert_eq!(u32::from_be_bytes(body[130..134].try_into().unwrap()), 24);
+        assert_eq!(body.len(), 134);
+        // The first 120 bytes are byte-for-byte the released v2 body: an old
+        // Host ignores the suffix and a new Host reads the legacy fields at
+        // the exact offsets it always has.
+        let legacy = split_feedback_body(SplitFeedbackSnapshot {
+            paired_idr_resumes: 0,
+            wire_to_decoder_ms: 0,
+            capture_age_ms: 0,
+            input_rtt_ms: 0,
+            per_tile_idr_resumes: 0,
+            ..snapshot_fields()
+        });
+        assert_eq!(&body[..120], &legacy[..120]);
+    }
+
+    fn snapshot_fields() -> SplitFeedbackSnapshot {
+        SplitFeedbackSnapshot {
+            frame_gaps: 1,
+            input_drops: 2,
+            incomplete_aus: 3,
+            stale_frames: 4,
+            rendered_fps: 55,
+            joined_rendered_fps: 54,
+            pair_ready_delta_p95_us: 700,
+            pair_ready_delta_max_us: 900,
+            pair_sync_timeouts: 5,
+            unmatched_output_drops: 6,
+            keyframe_gap_recoveries: 7,
+            delta_gap_recoveries: 8,
+            media_datagrams_received: 9,
+            data_datagrams_received: 10,
+            parity_datagrams_received: 11,
+            fec_restored_fragments: 12,
+            unrecoverable_fec_groups: 13,
+            max_missing_data_fragments: 14,
+            one_frame_gap_events: 15,
+            multi_frame_gap_events: 16,
+            paired_idr_episodes: 17,
+            suppressed_duplicate_recovery_requests: 18,
+            fec_decode_failures: 19,
+            paired_idr_resumes: 0,
+            wire_to_decoder_ms: 0,
+            capture_age_ms: 0,
+            input_rtt_ms: 0,
+            per_tile_idr_resumes: 0,
+        }
     }
 }

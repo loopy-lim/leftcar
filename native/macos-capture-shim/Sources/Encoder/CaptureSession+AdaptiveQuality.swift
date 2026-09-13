@@ -224,7 +224,7 @@ extension CaptureSession {
                 value: targetBitrate as CFNumber
             )
             if bitrateStatus == noErr {
-                let hardLimitBytes = max(1, Int(Double(targetBitrate) / 8.0 * 1.25))
+                let hardLimitBytes = vtHardLimitBytes(bitrate: targetBitrate)
                 _ = VTSessionSetProperty(
                     session,
                     key: kVTCompressionPropertyKey_DataRateLimits,

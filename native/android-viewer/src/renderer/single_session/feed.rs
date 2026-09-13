@@ -15,6 +15,7 @@ pub(super) fn feed_and_render(
     let rendered_before = dec.frames_rendered;
     // Do not wait for a hardware codec slot. A missed AU is cheaper than
     // turning a transient decoder backlog into visible interaction latency.
+    dec.set_output_target(control.presentation.lock().unwrap().target_now());
     let result = dec.feed_au_status(&frame.au, pts_us, DECODER_FEED_TIMEOUT_US);
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
@@ -62,18 +63,35 @@ pub(super) fn feed_and_render(
     if let Some(age) = wire_age_ms {
         store_smoothed_latency(&control.wire_to_decoder_ms, age);
     }
-    // This input produced the output released to the Surface, so record the
-    // capture-to-release approximation. Surface/compositor handoff is not the
-    // panel presentation instant and must not be reported as glass-to-glass.
-    if dec.frames_rendered > rendered_before {
-        if let Some(age) = capture_age_ms {
+    let rendered_delta = dec.frames_rendered.saturating_sub(rendered_before);
+    let (output_capture_wall, decoder_epoch) = {
+        let mut metadata = control.output_metadata.lock().unwrap();
+        let capture = metadata.observe(
+            pts_us,
+            frame.capture_wall_ms,
+            queued == FeedOutcome::Queued,
+            dec.last_released_pts_us,
+            rendered_delta,
+        );
+        (capture, metadata.epoch())
+    };
+    let release_capture_age_ms =
+        clock_corrected_age_ms(output_capture_wall, stats.host_clock_offset_ms);
+    if rendered_delta > 0 {
+        if let Some(age) = release_capture_age_ms {
             store_smoothed_latency(&control.capture_to_surface_release_ms, age);
+        } else {
+            control
+                .capture_to_surface_release_ms
+                .store(LATENCY_UNKNOWN, Ordering::Relaxed);
         }
     }
 
-    if dec.frames_rendered > 0 && dec.frames_rendered.is_multiple_of(30) {
+    if rendered_delta > 0 && dec.frames_rendered / 30 > rendered_before / 30 {
+        log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset", std::process::id(), control.port, control.metric_incarnation, decoder_epoch, control.rendered_frames.load(Ordering::Relaxed).saturating_add(rendered_delta), release_capture_age_ms, dec.last_released_pts_us);
+        let input_rtt = control.input_rtt_ms.load(Ordering::Relaxed);
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?} inputRttMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
@@ -96,10 +114,10 @@ pub(super) fn feed_and_render(
             stats.max_feed_us,
             capture_age_ms,
             encode_age_ms,
-            wire_age_ms
+            wire_age_ms,
+            (input_rtt != LATENCY_UNKNOWN).then_some(input_rtt)
         );
     }
-    let rendered_delta = dec.frames_rendered.saturating_sub(rendered_before);
     control
         .rendered_frames
         .fetch_add(rendered_delta, Ordering::Relaxed);

@@ -13,6 +13,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendPointer(
     action_button: i32,
     horizontal_scroll: f32,
     vertical_scroll: f32,
+    pressure: f32,
 ) -> i32 {
     let c = match unsafe { get_utf(env, instance) } {
         Some(c) => c,
@@ -28,6 +29,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendPointer(
             action_button as u32,
             horizontal_scroll,
             vertical_scroll,
+            pressure,
         )
     }
 }

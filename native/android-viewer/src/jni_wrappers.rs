@@ -43,6 +43,26 @@ unsafe fn get_utf(env: *mut JNIEnv, jstr: *mut jobject) -> Option<CString> {
     Some(s)
 }
 
+unsafe fn get_bytes(env: *mut JNIEnv, arr: *mut jobject) -> Option<Vec<u8>> {
+    if env.is_null() || arr.is_null() {
+        return None;
+    }
+    let fns = env_functions(env);
+    let length: unsafe extern "C" fn(*mut JNIEnv, *mut jobject) -> i32 =
+        std::mem::transmute(*fns.add(JNI_GET_ARRAY_LENGTH));
+    let len = length(env, arr);
+    if len <= 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; len as usize];
+    // GetByteArrayRegion(env, array, start, len, buf) — 5인자. start 슬롯에
+    // 버퍼 포인터가 들어가면 ART가 arraycopy 예외(offset=<포인터 잘림>)를 던진다.
+    let get: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, i32, i32, *mut c_void) =
+        std::mem::transmute(*fns.add(JNI_GET_BYTE_ARRAY_REGION));
+    get(env, arr, 0, len, bytes.as_mut_ptr().cast());
+    Some(bytes)
+}
+
 unsafe fn exception_pending(env: *mut JNIEnv) -> bool {
     if env.is_null() {
         return false;
@@ -54,21 +74,38 @@ unsafe fn exception_pending(env: *mut JNIEnv) -> bool {
 }
 
 extern "C" {
+    fn leftcar_jni_display_frame(
+        state: *mut c_void,
+        instance: *const c_char,
+        balanced: bool,
+        display: i32,
+        frame_ns: i64,
+        period_ns: i64,
+    ) -> i32;
     fn ANativeWindow_fromSurface(env: *mut JNIEnv, surface: *mut jobject) -> *mut c_void;
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
         -> i32;
-    fn leftcar_jni_prepare_port(port: u16, host: *const c_char, transport: *const c_char) -> i32;
+    fn leftcar_jni_prepare_port(
+        port: u16,
+        host: *const c_char,
+        transport: *const c_char,
+        key: *const u8,
+        key_len: usize,
+    ) -> i32;
     fn leftcar_jni_prepare_split_port(
         port: u16,
         host: *const c_char,
         transport: *const c_char,
+        key: *const u8,
+        key_len: usize,
     ) -> i32;
-    fn leftcar_jni_prepare_usb(fd: i32) -> i32;
+    fn leftcar_jni_prepare_usb(fd: i32, key: *const u8, key_len: usize) -> i32;
+    fn leftcar_jni_set_usb_media_key(key: *const u8, key_len: usize) -> i32;
     fn leftcar_jni_usb_control_port() -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_cancel_prepared_split(port: u16) -> i32;
-    fn leftcar_jni_attach_port(
+    fn leftcar_jni_attach_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         surface: *mut c_void,
@@ -77,8 +114,9 @@ extern "C" {
         width: u32,
         height: u32,
         fps: u32,
+        balanced: bool,
     ) -> i32;
-    fn leftcar_jni_rebind_port(
+    fn leftcar_jni_rebind_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         surface: *mut c_void,
@@ -87,8 +125,9 @@ extern "C" {
         width: u32,
         height: u32,
         fps: u32,
+        balanced: bool,
     ) -> i32;
-    fn leftcar_jni_attach_split_port(
+    fn leftcar_jni_attach_split_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         left_surface: *mut c_void,
@@ -99,6 +138,7 @@ extern "C" {
         height: u32,
         fps: u32,
         decoder_name: *const c_char,
+        balanced: bool,
     ) -> i32;
     fn leftcar_jni_surface_changed(
         state: *mut c_void,
@@ -124,6 +164,7 @@ extern "C" {
         action_button: u32,
         horizontal_scroll: f32,
         vertical_scroll: f32,
+        pressure: f32,
     ) -> i32;
     fn leftcar_jni_input_key(
         instance: *const c_char,
@@ -136,9 +177,22 @@ extern "C" {
     fn leftcar_jni_input_text(instance: *const c_char, data: *const u8, len: usize) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_poll_audio_owned(
+        state: *mut c_void,
+        instance: *const c_char,
+        out: *mut u8,
+        capacity: usize,
+    ) -> i32;
+    fn leftcar_jni_set_audio_owned(
+        state: *mut c_void,
+        instance: *const c_char,
+        enabled: bool,
+        opus: bool,
+    ) -> i32;
     fn leftcar_jni_poll_audio(instance: *const c_char, out: *mut u8, capacity: usize) -> i32;
     fn leftcar_jni_cursor_state(instance: *const c_char) -> i64;
     fn leftcar_jni_set_cursor_stream(instance: *const c_char, enabled: bool) -> i32;
+    fn leftcar_jni_set_audio_codec(instance: *const c_char, opus: bool) -> i32;
     fn leftcar_jni_set_audio_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
@@ -148,13 +202,15 @@ extern "C" {
 
 // Java signatures:
 //   start(): long
-//   prepareStream(int, String, String): int
+//   prepareStream(int, String, String, byte[]): int
+//   prepareSplitStream(int, String, String, byte[]): int
+//   prepareUsb(int, byte[]): int
 //   cancelPreparedStream(int): int
 //   attachSurface(long, String, Surface): int
 //   surfaceChanged(long, String, int, int): int
 //   detachSurface(long, String): int
 //   updateWindowEvent(long, String, int, long): int
-//   sendPointer(String, int, float, float, int, int, float, float): int
+//   sendPointer(String, int, float, float, int, int, float, float, float): int
 //   sendKey(String, int, int, int, boolean, int): int
 //   releaseInput(String): int
 //   inputStatus(String): int
@@ -182,6 +238,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
     port: i32,
     host: *mut jobject,
     transport: *mut jobject,
+    media_key: *mut jobject,
 ) -> i32 {
     if port <= 0 || port > i32::from(u16::MAX) {
         return 4;
@@ -194,7 +251,19 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareStream
         Some(transport) => transport,
         None => return 1,
     };
-    unsafe { leftcar_jni_prepare_port(port as u16, host.as_ptr(), transport.as_ptr()) }
+    let key = match unsafe { get_bytes(env, media_key) } {
+        Some(key) => key,
+        None => return 1,
+    };
+    unsafe {
+        leftcar_jni_prepare_port(
+            port as u16,
+            host.as_ptr(),
+            transport.as_ptr(),
+            key.as_ptr(),
+            key.len(),
+        )
+    }
 }
 
 #[no_mangle]
@@ -205,6 +274,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareSplitS
     port: i32,
     host: *mut jobject,
     transport: *mut jobject,
+    media_key: *mut jobject,
 ) -> i32 {
     if port <= 0 || port >= i32::from(u16::MAX) {
         return 4;
@@ -217,16 +287,56 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareSplitS
         Some(transport) => transport,
         None => return 1,
     };
-    unsafe { leftcar_jni_prepare_split_port(port as u16, host.as_ptr(), transport.as_ptr()) }
+    let key = match unsafe { get_bytes(env, media_key) } {
+        Some(key) => key,
+        None => return 1,
+    };
+    unsafe {
+        leftcar_jni_prepare_split_port(
+            port as u16,
+            host.as_ptr(),
+            transport.as_ptr(),
+            key.as_ptr(),
+            key.len(),
+        )
+    }
 }
 
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_prepareUsb(
-    _env: *mut JNIEnv,
+    env: *mut JNIEnv,
     _class: *mut jobject,
     fd: i32,
+    media_key: *mut jobject,
 ) -> i32 {
-    std::panic::catch_unwind(|| unsafe { leftcar_jni_prepare_usb(fd) }).unwrap_or(3)
+    let key = unsafe { get_bytes(env, media_key) };
+    std::panic::catch_unwind(|| {
+        let key = match key {
+            Some(key) => key,
+            None => return 4,
+        };
+        unsafe { leftcar_jni_prepare_usb(fd, key.as_ptr(), key.len()) }
+    })
+    .unwrap_or(3)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_setSessionMediaKey(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    media_key: *mut jobject,
+) -> i32 {
+    let key = unsafe { get_bytes(env, media_key) };
+    std::panic::catch_unwind(|| {
+        let key = match key {
+            Some(key) => key,
+            None => return 4,
+        };
+        unsafe { leftcar_jni_set_usb_media_key(key.as_ptr(), key.len()) }
+    })
+    .unwrap_or(3)
 }
 
 #[no_mangle]
@@ -267,3 +377,35 @@ mod attach;
 mod input;
 mod stats;
 mod surface;
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_displayFrame(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    balanced: u8,
+    display: i32,
+    frame_ns: i64,
+    period_ns: i64,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 3;
+        }
+        let Some(instance) = (unsafe { get_utf(env, instance) }) else {
+            return 1;
+        };
+        unsafe {
+            leftcar_jni_display_frame(
+                state as *mut c_void,
+                instance.as_ptr(),
+                balanced != 0,
+                display,
+                frame_ns,
+                period_ns,
+            )
+        }
+    })
+    .unwrap_or(3)
+}

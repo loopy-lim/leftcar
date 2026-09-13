@@ -296,14 +296,19 @@ fn gf_pow(base: u8, exponent: usize) -> u8 {
     result
 }
 
-fn gf_mul(left: u8, right: u8) -> u8 {
+/// Reference bit-loop multiply over GF(2^8) with reduction polynomial
+/// x^8 + x^4 + x^3 + x^2 + 1 (0x1d). This is the exact arithmetic the host
+/// shim and every shipped viewer has always used; the tables below only
+/// memoize it.
+const fn gf_mul_reference(left: u8, right: u8) -> u8 {
     if left == 0 || right == 0 {
         return 0;
     }
     let mut a = left;
     let mut b = right;
     let mut result = 0;
-    for _ in 0..8 {
+    let mut step = 0;
+    while step < 8 {
         if b & 1 != 0 {
             result ^= a;
         }
@@ -313,13 +318,59 @@ fn gf_mul(left: u8, right: u8) -> u8 {
             a ^= 0x1d;
         }
         b >>= 1;
+        step += 1;
     }
     result
 }
 
+/// 64 KiB multiply table over the same GF(256) field as the macOS host shim
+/// (`CaptureSession+UdpPacket.swift fecMultiplyTable`), so both sides keep
+/// producing bit-identical parity and recovery shards. Const-evaluated: the
+/// viewer RX recovery path pays one indexed load per byte instead of the
+/// eight-step bit loop (~0.3–1ms per recovered group on mobile).
+static MULTIPLY_TABLE: [u8; 256 * 256] = {
+    let mut table = [0u8; 256 * 256];
+    let mut left = 0usize;
+    while left < 256 {
+        let mut right = 0usize;
+        while right < 256 {
+            table[(left << 8) | right] = gf_mul_reference(left as u8, right as u8);
+            right += 1;
+        }
+        left += 1;
+    }
+    table
+};
+
+/// Multiplicative inverses for every nonzero element (0 stays unmapped; the
+/// callers assert nonzero). Replaces the pow-254 chain on the recovery path.
+static INVERSE_TABLE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut value = 1usize;
+    while value < 256 {
+        let mut inverse = 0u8;
+        let mut candidate = 1usize;
+        while candidate < 256 {
+            if MULTIPLY_TABLE[(value << 8) | candidate] == 1 {
+                inverse = candidate as u8;
+                break;
+            }
+            candidate += 1;
+        }
+        table[value] = inverse;
+        value += 1;
+    }
+    table
+};
+
+#[inline]
+fn gf_mul(left: u8, right: u8) -> u8 {
+    MULTIPLY_TABLE[(usize::from(left) << 8) | usize::from(right)]
+}
+
 fn gf_inv(value: u8) -> u8 {
     assert_ne!(value, 0, "zero has no multiplicative inverse");
-    gf_pow(value, 254)
+    INVERSE_TABLE[usize::from(value)]
 }
 
 #[cfg(test)]
@@ -399,5 +450,72 @@ mod tests {
             *slot = None;
         }
         assert!(decode_group_with_max_parity(received, 8, encoded.width, 4).is_err());
+    }
+
+    /// Independent log/exp construction of GF(256) mod 0x11d, sharing no code
+    /// with the table build, so the sweep below is a real cross-check.
+    fn gf_mul_log_exp(left: u8, right: u8) -> u8 {
+        if left == 0 || right == 0 {
+            return 0;
+        }
+        // 2 is primitive for x^8+x^4+x^3+x^2+1; walk the whole multiplicative
+        // group by repeated xtime (multiply by 2 with 0x11d reduction).
+        let mut log = [0u8; 256];
+        let mut exp = [0u8; 255];
+        let mut value: u16 = 1;
+        for (power, slot) in exp.iter_mut().enumerate() {
+            *slot = value as u8;
+            log[value as usize] = power as u8;
+            value = (value << 1) ^ if value & 0x80 != 0 { 0x11d } else { 0 };
+        }
+        exp[(usize::from(log[usize::from(left)]) + usize::from(log[usize::from(right)])) % 255]
+    }
+
+    /// Bit-equivalence proof: the shipped multiply table must agree with the
+    /// original bit loop AND with the independent log/exp construction for
+    /// every one of the 65536 operand pairs.
+    #[test]
+    fn multiply_table_matches_brute_force_for_every_operand_pair() {
+        for left in 0..=255u8 {
+            for right in 0..=255u8 {
+                let table = gf_mul(left, right);
+                assert_eq!(
+                    table,
+                    gf_mul_reference(left, right),
+                    "table != bit loop at {left}x{right}"
+                );
+                assert_eq!(
+                    table,
+                    gf_mul_log_exp(left, right),
+                    "table != log/exp at {left}x{right}"
+                );
+            }
+        }
+    }
+
+    /// The inverse table must be the exact two-sided inverse of the multiply
+    /// table and must agree with the legacy pow-254 computation.
+    #[test]
+    fn inverse_table_is_exact_for_every_nonzero_element() {
+        for value in 1..=255u8 {
+            let inverse = gf_inv(value);
+            assert_eq!(gf_mul(value, inverse), 1, "{value} * inverse != 1");
+            assert_eq!(gf_mul(inverse, value), 1, "inverse * {value} != 1");
+            assert_eq!(inverse, gf_pow(value, 254), "inverse != pow-254 at {value}");
+        }
+    }
+
+    /// Identity anchors for the 0x11d field the host shim's bit loop defines.
+    #[test]
+    fn field_anchors_match_the_host_shim_table() {
+        assert_eq!(gf_mul(1, 1), 1);
+        assert_eq!(gf_mul(2, 2), 4);
+        // xtime under the 0x1d reduction: the spilled bit cancels the 0x100
+        // term, so 128 * 2 == 0x1d.
+        assert_eq!(gf_mul(2, 128), 29);
+        assert_eq!(gf_mul(2, 64), 128);
+        assert_eq!(gf_mul(0, 0xab), 0);
+        assert_eq!(gf_mul(0xab, 0), 0);
+        assert_eq!(gf_inv(1), 1);
     }
 }

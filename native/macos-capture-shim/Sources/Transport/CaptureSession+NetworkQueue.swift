@@ -193,7 +193,8 @@ extension CaptureSession {
             if let splitAccessUnit {
                 let result = writeSplitPacketPair(splitAccessUnit)
                 networkLock.lock()
-                if splitAccessUnit.isKeyframe {
+                let currentLease = !result.cancelled && splitFlowAccepts(splitAccessUnit.lease)
+                if currentLease && splitAccessUnit.isKeyframe {
                     networkRecoveryBoundary.setAwaitingKeyframe(networkAwaitingKeyframeAfterSend(
                         currentAwaitingKeyframe: networkRecoveryBoundary.awaitingKeyframe,
                         isKeyframe: true,
@@ -203,6 +204,9 @@ extension CaptureSession {
                 }
                 networkKeyframeInFlight = false
                 networkLock.unlock()
+                // Late completion/failure belongs to an already retired episode.
+                // It must not erase or restart the newly seeded recovery boundary.
+                guard currentLease else { continue }
                 if result.succeeded {
                     _ = finishSplitFlowLease(splitAccessUnit.lease)
                     if splitAccessUnit.dropRightForTest {
@@ -211,7 +215,8 @@ extension CaptureSession {
                 } else {
                     beginSplitTransportRecovery(
                         reason: "split pair send failed",
-                        invalidatePendingBoundary: true
+                        invalidatePendingBoundary: true,
+                        failedLease: splitAccessUnit.lease
                     )
                 }
             } else if let frame {

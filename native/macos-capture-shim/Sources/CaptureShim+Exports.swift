@@ -43,186 +43,11 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
     return UnsafeMutablePointer<CChar>(strdup("[]"))
 }
 
-@_cdecl("leftcar_capture_start_v2")
-public func leftcarCaptureStartV2(
-    ip: UnsafePointer<CChar>,
-    port: UInt16,
-    displayIndex: UInt32,
-    width: UInt32,
-    height: UInt32,
-    fps: UInt32
-) -> UInt32 {
-    startCaptureSession(
-        ip: ip,
-        port: port,
-        displayIndex: displayIndex,
-        width: width,
-        height: height,
-        fps: fps,
-        backend: .screenCaptureKit,
-        encoderExperiment: .auto
-    )
-}
 
-@_cdecl("leftcar_capture_start_v3")
-public func leftcarCaptureStartV3(
-    ip: UnsafePointer<CChar>,
-    port: UInt16,
-    displayIndex: UInt32,
-    width: UInt32,
-    height: UInt32,
-    fps: UInt32,
-    backendName: UnsafePointer<CChar>?
-) -> UInt32 {
-    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
-    guard let backend = CaptureBackendKind.parse(rawBackend) else {
-        setLastError("unknown capture backend: \(rawBackend ?? "null")")
-        return 0
-    }
-    return startCaptureSession(
-        ip: ip,
-        port: port,
-        displayIndex: displayIndex,
-        width: width,
-        height: height,
-        fps: fps,
-        backend: backend,
-        mediaTransport: .udp,
-        encoderExperiment: .auto
-    )
-}
 
-/// v4 adds an explicit media transport. TCP transports feed the existing
-/// bounded UDP decoder path through the viewer's local bridge; `tcp` is the
-/// reliable Wi-Fi path and `adbTcp` is the USB fallback.
-@_cdecl("leftcar_capture_start_v4")
-public func leftcarCaptureStartV4(
-    ip: UnsafePointer<CChar>,
-    port: UInt16,
-    displayIndex: UInt32,
-    width: UInt32,
-    height: UInt32,
-    fps: UInt32,
-    backendName: UnsafePointer<CChar>?,
-    transportName: UnsafePointer<CChar>?
-) -> UInt32 {
-    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
-    guard let backend = CaptureBackendKind.parse(rawBackend) else {
-        setLastError("unknown capture backend: \(rawBackend ?? "null")")
-        return 0
-    }
-    let rawTransport = transportName.flatMap { String(validatingUTF8: $0) }
-    guard let mediaTransport = MediaTransportKind.parse(rawTransport) else {
-        setLastError("unknown media transport: \(rawTransport ?? "null")")
-        return 0
-    }
-    return startCaptureSession(
-        ip: ip,
-        port: port,
-        displayIndex: displayIndex,
-        width: width,
-        height: height,
-        fps: fps,
-        backend: backend,
-        mediaTransport: mediaTransport,
-        encoderExperiment: .auto
-    )
-}
-
-/// v5 adds a content-aware encoder policy while keeping v4 available for
-/// older Hosts. The video policy preserves the selected spatial resolution
-/// and spends a larger bitrate budget on high-change access units.
-@_cdecl("leftcar_capture_start_v5")
-public func leftcarCaptureStartV5(
-    ip: UnsafePointer<CChar>,
-    port: UInt16,
-    displayIndex: UInt32,
-    width: UInt32,
-    height: UInt32,
-    fps: UInt32,
-    backendName: UnsafePointer<CChar>?,
-    transportName: UnsafePointer<CChar>?,
-    contentModeName: UnsafePointer<CChar>?
-) -> UInt32 {
-    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
-    guard let backend = CaptureBackendKind.parse(rawBackend) else {
-        setLastError("unknown capture backend: \(rawBackend ?? "null")")
-        return 0
-    }
-    let rawTransport = transportName.flatMap { String(validatingUTF8: $0) }
-    guard let mediaTransport = MediaTransportKind.parse(rawTransport) else {
-        setLastError("unknown media transport: \(rawTransport ?? "null")")
-        return 0
-    }
-    let rawContentMode = contentModeName.flatMap { String(validatingUTF8: $0) }
-    guard let contentMode = StreamContentMode.parse(rawContentMode) else {
-        setLastError("unknown content mode: \(rawContentMode ?? "null")")
-        return 0
-    }
-    return startCaptureSession(
-        ip: ip,
-        port: port,
-        displayIndex: displayIndex,
-        width: width,
-        height: height,
-        fps: fps,
-        backend: backend,
-        mediaTransport: mediaTransport,
-        contentMode: contentMode,
-        encoderExperiment: .auto
-    )
-}
-
-/// v6 adds a start-time encoder experiment selection. Explicit profiles are
-/// validated by the encoder setup and never silently replaced by another
-/// profile.
-@_cdecl("leftcar_capture_start_v6")
-public func leftcarCaptureStartV6(
-    ip: UnsafePointer<CChar>,
-    port: UInt16,
-    displayIndex: UInt32,
-    width: UInt32,
-    height: UInt32,
-    fps: UInt32,
-    backendName: UnsafePointer<CChar>?,
-    transportName: UnsafePointer<CChar>?,
-    contentModeName: UnsafePointer<CChar>?,
-    encoderExperimentName: UnsafePointer<CChar>?
-) -> UInt32 {
-    let rawBackend = backendName.flatMap { String(validatingUTF8: $0) }
-    guard let backend = CaptureBackendKind.parse(rawBackend) else {
-        setLastError("unknown capture backend: \(rawBackend ?? "null")")
-        return 0
-    }
-    let rawTransport = transportName.flatMap { String(validatingUTF8: $0) }
-    guard let mediaTransport = MediaTransportKind.parse(rawTransport) else {
-        setLastError("unknown media transport: \(rawTransport ?? "null")")
-        return 0
-    }
-    let rawContentMode = contentModeName.flatMap { String(validatingUTF8: $0) }
-    guard let contentMode = StreamContentMode.parse(rawContentMode) else {
-        setLastError("unknown content mode: \(rawContentMode ?? "null")")
-        return 0
-    }
-    let experimentParseResult = parseEncoderExperimentCString(encoderExperimentName)
-    guard case let .success(encoderExperiment) = experimentParseResult else {
-        if case let .failure(error) = experimentParseResult { setLastError(error) }
-        return 0
-    }
-    return startCaptureSession(
-        ip: ip,
-        port: port,
-        displayIndex: displayIndex,
-        width: width,
-        height: height,
-        fps: fps,
-        backend: backend,
-        mediaTransport: mediaTransport,
-        contentMode: contentMode,
-        encoderExperiment: encoderExperiment
-    )
-}
-
+/// Shared sealed capture constructor. The current Host uses v9 stable source,
+/// authenticated owner and revocable lease; v8 retains explicit legacy identity
+/// behavior for older callers. Both exports require a 32-byte sealed media key.
  func startCaptureSession(
     ip: UnsafePointer<CChar>,
     port: UInt16,
@@ -234,8 +59,14 @@ public func leftcarCaptureStartV6(
     mediaTransport: MediaTransportKind = .udp,
     contentMode: StreamContentMode = .interactive,
     encoderExperiment: EncoderExperiment = .auto,
-    udpStability: AppliedUdpStability = .legacy
+    udpStability: AppliedUdpStability = .legacy,
+    mediaKey: Data,
+    sourceID: String? = nil,
+    authenticatedOwner: String? = nil,
+    authorization: SourceAuthorization? = nil
 ) -> UInt32 {
+    guard authorization?.begin() ?? true else { setLastError("source authorization revoked"); return 0 }
+    defer { authorization?.end() }
     guard hasScreenCaptureAccess() else {
         setLastError("screen-recording permission is not granted to Leftcar Host")
         return 0
@@ -254,6 +85,8 @@ public func leftcarCaptureStartV6(
 
     let session = CaptureSession(
         targetAddr: addr,
+        authenticatedOwner: authenticatedOwner,
+        authorization: authorization,
         targetPort: port,
         targetLabel: "\(ipStr):\(port)",
         width: width,
@@ -263,7 +96,8 @@ public func leftcarCaptureStartV6(
         mediaTransport: mediaTransport,
         contentMode: contentMode,
         requestedEncoderExperiment: encoderExperiment,
-        udpStability: udpStability
+        udpStability: udpStability,
+        mediaKey: mediaKey
     )
 
     // Register before setup: the stream configuration consults the registry
@@ -278,14 +112,29 @@ public func leftcarCaptureStartV6(
         return h
     }
 
+    // 공통 실패 정리: 등록 해제 + 세션 정지 후 0 반환. 메시지가 있으면 먼저
+    // 마지막 오류로 남긴다.
+    func abort(_ message: String?) -> UInt32 {
+        if let message = message {
+            setLastError(message)
+        }
+        removeFromRegistry(handle)
+        session.stop()
+        return 0
+    }
+
     // Establish the media socket first. Capture callbacks can then be accepted
     // immediately without losing the initial CFG/IDR while the viewer listener
     // is still racing to bind its port.
     let connected = session.connectSocket()
     guard connected else {
-        removeFromRegistry(handle)
-        return 0
+        return abort(nil)
     }
+
+    guard let selectedDisplay = selectDisplaySource(
+        candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
+        index: displayIndex, sourceID: sourceID
+    ) else { return abort("source unavailable, ambiguous, or outside benchmark approval") }
 
     let started: Bool
     switch backend {
@@ -295,49 +144,29 @@ public func leftcarCaptureStartV6(
         // the same SCK path — including its system-audio plane. Only a Mac
         // with neither consent falls through to the error below.
         guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
-            setLastError(
-                "screen-recording permission is not granted to Leftcar Host"
-            )
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
-        }
-        let displayIDs = activeDisplayIDs()
-        guard Int(displayIndex) < displayIDs.count else {
-            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort("screen-recording permission is not granted to Leftcar Host")
         }
         // Approved VNC-style builds reconnect directly to the requested
         // display after Screen Recording permission has been granted. Builds
         // without approval never show a picker; the Host advertises the
         // automatic CGDisplayStream backend instead.
         let selection = requestPersistentDisplayFilter(
-            displayID: displayIDs[Int(displayIndex)],
+            displayID: selectedDisplay,
             timeout: 15
         )
         guard let filter = selection.filter else {
-            setLastError(selection.error ?? "screen capture returned no display")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
+            return abort(selection.error ?? "screen capture returned no display")
         }
+        guard selectDisplaySource(
+            candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
+            index: displayIndex, sourceID: sourceID
+        ) == selectedDisplay else { return abort("display identity changed during selection") }
         started = session.setupScreenCaptureKit(filter: filter)
     case .cgDisplayStream:
-        let displayIDs = activeDisplayIDs()
-        guard Int(displayIndex) < displayIDs.count else {
-            setLastError("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-            removeFromRegistry(handle)
-            session.stop()
-            return 0
-        }
-        started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
+        started = session.setupCGDisplayStream(displayID: selectedDisplay)
     }
     guard started else {
-        removeFromRegistry(handle)
-        session.stop()
-        return 0
+        return abort(nil)
     }
 
     session.startPerformanceLogging()

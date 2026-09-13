@@ -1,4 +1,11 @@
 #!/bin/bash
+# LEGACY — builds the OLD apps/viewer-android app (pre-Expo skeleton), not the
+# current Expo viewer. The current viewer build flow is:
+#   cargo build -p android-viewer --target aarch64-linux-android --release
+#   (Android NDK llvm toolchain bin on PATH; .cargo/config.toml pins the linker)
+# followed by ./gradlew :app:assembleRelease from apps/viewer-expo/android
+# (see apps/viewer-expo/android/app/build.gradle buildViewerNative task).
+# Kept only for the legacy direct-SDK APK path. No functional changes.
 # Leftcar viewer APK build (C: real app, no Gradle — direct SDK tools).
 # Usage: tools/build_apk.sh [--release]
 set -euo pipefail
