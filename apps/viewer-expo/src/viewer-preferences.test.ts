@@ -118,6 +118,17 @@ describe("viewer preferences", () => {
     });
   });
 
+  it("surfaces read and parse failures instead of replacing them with defaults", async () => {
+    await expect(readViewerPreferences({
+      getItemAsync: async () => {
+        throw new Error("secure read failed");
+      },
+      setItemAsync: async () => undefined,
+    })).rejects.toThrow("secure read failed");
+
+    await expect(readViewerPreferences(memoryStore("not json"))).rejects.toThrow();
+  });
+
   it("defaults localAudio to true and persists toggles", async () => {
     expect(DEFAULT_VIEWER_PREFERENCES.localAudio).toBe(true);
     expect(parseViewerPreferences(null).localAudio).toBe(true);

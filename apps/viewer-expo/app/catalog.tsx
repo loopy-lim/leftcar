@@ -148,6 +148,7 @@ const OPTION_ROW_STYLE: ViewStyle = {
 };
 
 interface ViewerOptionsCardProps {
+  viewerPreferencesDisabled: boolean;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
@@ -159,11 +160,13 @@ interface ViewerOptionsCardProps {
   onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
   clipboardShare: boolean;
+  clipboardPreferenceDisabled: boolean;
   onToggleClipboardShare: (enabled: boolean) => void;
   colors: ThemeTokens;
 }
 
 function ViewerOptionsCard({
+  viewerPreferencesDisabled,
   showFps,
   onToggleFps,
   localCursor,
@@ -175,6 +178,7 @@ function ViewerOptionsCard({
   onToggleBalancedPresentation,
   onToggleAudio,
   clipboardShare,
+  clipboardPreferenceDisabled,
   onToggleClipboardShare,
   colors,
 }: ViewerOptionsCardProps) {
@@ -206,6 +210,7 @@ function ViewerOptionsCard({
         <Switch
           value={showFps}
           onValueChange={onToggleFps}
+          disabled={viewerPreferencesDisabled}
           accessibilityLabel={t.viewer.fpsToggleLabel}
           {...switchColor}
         />
@@ -222,6 +227,7 @@ function ViewerOptionsCard({
         <Switch
           value={localCursor}
           onValueChange={onToggleCursor}
+          disabled={viewerPreferencesDisabled}
           accessibilityLabel={t.viewer.cursorOverlayLabel}
           {...switchColor}
         />
@@ -238,6 +244,7 @@ function ViewerOptionsCard({
         <Switch
           value={localAudio}
           onValueChange={onToggleAudio}
+          disabled={viewerPreferencesDisabled}
           accessibilityLabel={t.viewer.audioToggleLabel}
           {...switchColor}
         />
@@ -245,6 +252,7 @@ function ViewerOptionsCard({
       <View style={OPTION_ROW_STYLE}>
         <Text style={{ flex: 1, color: colors.textPrimary }}>Opus 128 kbps (experimental)</Text>
         <Switch value={opusAudio} onValueChange={onToggleOpusAudio}
+          disabled={viewerPreferencesDisabled}
           accessibilityLabel="Opus 128 kbps experimental" {...switchColor} />
       </View>
       <View style={OPTION_ROW_STYLE}>
@@ -253,6 +261,7 @@ function ViewerOptionsCard({
           <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
         </View>
         <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
+          disabled={viewerPreferencesDisabled}
           accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
       </View>
       {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
@@ -268,6 +277,7 @@ function ViewerOptionsCard({
         <Switch
           value={clipboardShare}
           onValueChange={onToggleClipboardShare}
+          disabled={clipboardPreferenceDisabled}
           accessibilityLabel={t.viewer.clipboardShareLabel}
           {...switchColor}
         />
@@ -298,15 +308,15 @@ const QUALITY_TAB_KEYS = {
   clarity: { label: "qualityClarityLabel", detail: "qualityClarityDetail" },
 } as const;
 
-function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: ViewerProfileSelection; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
+function QualityProfileTabs({ profileId, disabled, styles, onSelect }: { profileId: ViewerProfileSelection; disabled: boolean; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
   const { t } = useAppLanguage();
   return <View style={styles.qualitySegmentWrapper}><View style={styles.qualitySegmentTabs}>
-    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel={t.viewer.qualityAutoA11y}><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>{t.viewer.qualityAutoLabel}</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>{t.viewer.qualityAutoDetail}</Text></Pressable>
+    <Pressable disabled={disabled} onPress={() => onSelect("auto")} style={[styles.qualityTab, disabled && { opacity: 0.5 }, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ disabled, selected: profileId === "auto" }} accessibilityLabel={t.viewer.qualityAutoA11y}><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>{t.viewer.qualityAutoLabel}</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>{t.viewer.qualityAutoDetail}</Text></Pressable>
     {STREAM_PROFILES.map((p) => {
       const selected = p.id === profileId;
       const copy = QUALITY_TAB_KEYS[p.id];
       const a11yLabel = `${t.viewer[copy.label]}: ${t.viewer[copy.detail]}`;
-      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={a11yLabel}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
+      return <Pressable key={p.id} disabled={disabled} onPress={() => onSelect(p.id)} style={[styles.qualityTab, disabled && { opacity: 0.5 }, selected && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ disabled, selected }} accessibilityLabel={a11yLabel}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
     })}
   </View></View>;
 }
@@ -320,6 +330,10 @@ interface CatalogHeaderProps {
   refreshing: boolean;
   onRefresh: () => void;
   onSelectProfile: (id: ViewerProfileSelection) => void;
+  preferencePersistenceIssue: "viewer-load" | "viewer-save" | "clipboard-load" | "clipboard-save" | null;
+  onRetryPreferencePersistence: () => void;
+  viewerPreferenceControlsDisabled: boolean;
+  clipboardPreferenceControlDisabled: boolean;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
@@ -353,6 +367,10 @@ function CatalogHeader({
   refreshing,
   onRefresh,
   onSelectProfile,
+  preferencePersistenceIssue,
+  onRetryPreferencePersistence,
+  viewerPreferenceControlsDisabled,
+  clipboardPreferenceControlDisabled,
   showFps,
   onToggleFps,
   localCursor,
@@ -387,6 +405,14 @@ function CatalogHeader({
     hasViewerOptions || encoderExperiments.length > 1 || udpStabilityOptions !== null;
   const [manuallyToggled, setManuallyToggled] = useState<boolean | null>(null);
   const showAdvanced = manuallyToggled !== null ? manuallyToggled : udpReconnectRequired;
+  const preferenceError = preferencePersistenceIssue
+    ? {
+        "viewer-load": t.viewer.preferenceLoadError,
+        "viewer-save": t.viewer.preferenceSaveError,
+        "clipboard-load": t.viewer.clipboardPreferenceLoadError,
+        "clipboard-save": t.viewer.clipboardPreferenceSaveError,
+      }[preferencePersistenceIssue]
+    : null;
 
   return (
     <View style={styles.headerContainer}>
@@ -427,7 +453,21 @@ function CatalogHeader({
         </View>
       ) : null}
 
-      <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
+      {preferenceError ? (
+        <View style={styles.errorCard}>
+          <Ionicons name="alert-circle-outline" size={16} color={colors.textPrimary} />
+          <View style={styles.errorBody}>
+            <Text style={styles.errorText}>{preferenceError}</Text>
+            <View style={styles.errorActions}>
+              <Pressable onPress={onRetryPreferencePersistence} style={styles.errorRetryBtn}>
+                <Text style={styles.errorRetryText}>{t.common.retry}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
+
+      <QualityProfileTabs profileId={profileId} disabled={viewerPreferenceControlsDisabled} styles={styles} onSelect={onSelectProfile} />
 
       {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
       {hasAdvancedOptions ? (
@@ -453,6 +493,7 @@ function CatalogHeader({
       {showAdvanced && hasAdvancedOptions ? (
         <View style={styles.advancedSectionContainer}>
           <ViewerOptionsCard
+            viewerPreferencesDisabled={viewerPreferenceControlsDisabled}
             showFps={showFps}
             onToggleFps={onToggleFps}
             localCursor={localCursor}
@@ -464,6 +505,7 @@ function CatalogHeader({
             onToggleOpusAudio={onToggleOpusAudio}
             onToggleAudio={onToggleAudio}
             clipboardShare={clipboardShare}
+            clipboardPreferenceDisabled={clipboardPreferenceControlDisabled}
             onToggleClipboardShare={onToggleClipboardShare}
             colors={colors}
           />
@@ -814,6 +856,10 @@ export default function Catalog() {
             refreshing={model.refreshing}
             onRefresh={model.handleRefresh}
             onSelectProfile={model.handleSelectProfile}
+            preferencePersistenceIssue={model.preferencePersistenceIssue}
+            onRetryPreferencePersistence={model.handleRetryPreferencePersistence}
+            viewerPreferenceControlsDisabled={model.viewerPreferenceControlsDisabled}
+            clipboardPreferenceControlDisabled={model.clipboardPreferenceControlDisabled}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}

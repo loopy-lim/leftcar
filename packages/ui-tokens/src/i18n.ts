@@ -71,6 +71,10 @@ export const translations = {
       audioToggleHint: "컴퓨터에서 나는 소리를 스트림으로 함께 전달합니다.",
       clipboardShareLabel: "클립보드 공유",
       clipboardShareHint: "컴퓨터와 텍스트 클립보드를 동기화합니다.",
+      preferenceLoadError: "저장된 시청 설정을 불러오지 못했습니다. 기존 저장값을 보호하기 위해 다시 시도할 때까지 설정 변경을 잠갔습니다.",
+      preferenceSaveError: "시청 설정을 저장하지 못했습니다. 다시 시도하면 현재 선택을 저장합니다.",
+      clipboardPreferenceLoadError: "저장된 클립보드 공유 설정을 불러오지 못했습니다. 기존 저장값을 보호하기 위해 다시 시도할 때까지 토글을 잠갔습니다.",
+      clipboardPreferenceSaveError: "클립보드 공유 설정을 저장하지 못했습니다. 다시 시도하면 현재 선택을 저장합니다.",
       qualityAutoLabel: "자동 추천",
       qualityAutoDetail: "디스플레이별",
       qualityAutoA11y: "자동 추천: 디스플레이별 권장 품질",
@@ -400,6 +404,10 @@ export const translations = {
       audioToggleHint: "Streams this computer's audio along with the video.",
       clipboardShareLabel: "Clipboard Sharing",
       clipboardShareHint: "Sync the text clipboard with this computer.",
+      preferenceLoadError: "Could not load saved playback settings. Controls are locked until retry to protect the existing stored value.",
+      preferenceSaveError: "Could not save playback settings. Retry to save the current selection.",
+      clipboardPreferenceLoadError: "Could not load the saved clipboard sharing setting. The toggle is locked until retry to protect the existing stored value.",
+      clipboardPreferenceSaveError: "Could not save the clipboard sharing setting. Retry to save the current selection.",
       qualityAutoLabel: "Auto",
       qualityAutoDetail: "Per Display",
       qualityAutoA11y: "Auto: recommended quality per display",
@@ -681,4 +689,3 @@ export function interpolate(template: string, params?: Record<string, string | n
 export function getTranslation(lang: SupportedLanguage): TranslationSchema {
   return translations[lang] ?? translations.ko;
 }
-

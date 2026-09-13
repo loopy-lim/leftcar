@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Alert, NativeModules } from "react-native";
-import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
@@ -76,22 +75,12 @@ import {
   type AdaptiveTarget,
 } from "./adaptive-resolution";
 import { useStreamController } from "./use-stream-controller";
+import { useCatalogPreferences } from "./use-catalog-preferences";
 import {
-  DEFAULT_VIEWER_PREFERENCES,
-  readViewerPreferences,
   resolveStreamMaximum,
   resolveViewerProfileId,
-  writeViewerPreferences,
   type ViewerProfileSelection,
-  type ViewerPreferences,
 } from "./viewer-preferences";
-import {
-  deviceClipboardIo,
-  loadClipboardShare,
-  saveClipboardShare,
-  startClipboardSync,
-  type ClipboardSyncLoop,
-} from "./clipboard-sync";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 
@@ -152,10 +141,16 @@ export function useCatalogModel() {
     // run between a capability await and publication of native ownership.
     if (launcher) void deviceDecoderReservations.refreshCapability(launcher);
   }, []);
-  const [preferences, setPreferences] = useState<ViewerPreferences>(
-    DEFAULT_VIEWER_PREFERENCES,
-  );
-  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const {
+    clipboardPreferenceControlDisabled,
+    clipboardShare,
+    preferencePersistenceIssue,
+    preferences,
+    retryPersistence: handleRetryPreferencePersistence,
+    updateClipboardPreference,
+    updateViewerPreferences,
+    viewerPreferenceControlsDisabled,
+  } = useCatalogPreferences();
   const [encoderExperiment, setEncoderExperiment] =
     useState<EncoderExperimentId>("auto");
   const [udpStability, setUdpStability] = useState<UdpStabilitySelection>({
@@ -187,30 +182,9 @@ export function useCatalogModel() {
   });
   const { refetch: refetchCatalog } = catalogQuery;
 
-  useEffect(() => {
-    let active = true;
-    void readViewerPreferences(SecureStore)
-      .then((stored) => {
-        if (active) setPreferences(stored);
-      })
-      .finally(() => {
-        if (active) setPreferencesLoaded(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!preferencesLoaded) return;
-    void writeViewerPreferences(SecureStore, preferences).catch(() => undefined);
-  }, [preferences, preferencesLoaded]);
-
   // 클립보드 공유 토글(U5): `leftcar.clipboardShare`(기본 꺼짐)에 저장하고,
   // 켜져 있으면 제어 세션과 함께 폴링 루프를 돌린다. 호스트 게이트도 기본
   // 꺼짐이므로 이중 잠금이다(docs/07 §20).
-  const clipboardSyncRef = useRef<ClipboardSyncLoop | null>(null);
-  const [clipboardShare, setClipboardShareState] = useState(false);
   // 디코더 어드미션(M4/R8)이 쓰는 라이브 스트림 스냅숏. reconfigure 콜백은
   // useStreamController보다 먼저 정의되므로 ref로 최신 목록을 운반한다.
   const [ownedReservations] = useState(() => new Set<ReservedStream>());
@@ -221,34 +195,9 @@ export function useCatalogModel() {
     // The device-wide pool retains unresolved cleanup across remounts.
   }, [ownedReservations, host]);
 
-  useEffect(() => {
-    let active = true;
-    void loadClipboardShare(SecureStore).then((enabled) => {
-      if (active) setClipboardShareState(enabled);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!clipboardSyncRef.current) {
-      clipboardSyncRef.current = startClipboardSync({
-        getClient: () => controlClient(),
-        ...deviceClipboardIo,
-      });
-    }
-    clipboardSyncRef.current.setEnabled(clipboardShare);
-    return () => {
-      clipboardSyncRef.current?.stop();
-      clipboardSyncRef.current = null;
-    };
-  }, [clipboardShare]);
-
   const handleToggleClipboardShare = useCallback((enabled: boolean) => {
-    setClipboardShareState(enabled);
-    void saveClipboardShare(SecureStore, enabled).catch(() => undefined);
-  }, []);
+    updateClipboardPreference(() => enabled);
+  }, [updateClipboardPreference]);
 
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
@@ -483,25 +432,25 @@ export function useCatalogModel() {
   }, [refetchCatalog]);
 
   const handleSelectProfile = useCallback((id: ViewerProfileSelection) => {
-    setPreferences((current) => ({ ...current, profileId: id }));
-  }, []);
+    updateViewerPreferences((current) => ({ ...current, profileId: id }));
+  }, [updateViewerPreferences]);
 
   const handleToggleFps = useCallback((showFps: boolean) => {
-    setPreferences((current) => ({ ...current, showFps }));
-  }, []);
+    updateViewerPreferences((current) => ({ ...current, showFps }));
+  }, [updateViewerPreferences]);
 
   const handleToggleCursor = useCallback((localCursor: boolean) => {
-    setPreferences((current) => ({ ...current, localCursor }));
+    updateViewerPreferences((current) => ({ ...current, localCursor }));
     updateLocalCursor(localCursor);
     if (launcher?.setCursorStream) {
       void Promise.all(
         streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
       ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
     }
-  }, [setError, streams, updateLocalCursor]);
+  }, [setError, streams, updateLocalCursor, updateViewerPreferences]);
 
   const handleToggleBalancedPresentation = useCallback((balancedPresentation: boolean) => {
-    setPreferences((current) => ({ ...current, balancedPresentation }));
+    updateViewerPreferences((current) => ({ ...current, balancedPresentation }));
     const request = ++presentationRequest.current;
     if (!launcher?.setBalancedPresentation) return;
     for (const stream of streams) {
@@ -526,10 +475,10 @@ export function useCatalogModel() {
             presentationLifetimes.current.get(stream.session) === operation) setError(String(reason));
       });
     }
-  }, [patchStream, streams]);
+  }, [patchStream, streams, updateViewerPreferences]);
 
   const applyAudioSetting = useCallback((key: "localAudio" | "opusAudio", enabled: boolean) => {
-    setPreferences((current) => ({ ...current, [key]: enabled }));
+    updateViewerPreferences((current) => ({ ...current, [key]: enabled }));
     const method = key === "localAudio" ? launcher?.setAudioStream : launcher?.setOpusAudio;
     const request = ++audioRequest.current;
     if (!method) return;
@@ -552,7 +501,7 @@ export function useCatalogModel() {
         if (audioRequest.current === request && audioLifetimes.current.get(lifetimeKey) === captured) setError(String(reason));
       });
     }
-  }, [patchStream, streams]);
+  }, [patchStream, streams, updateViewerPreferences]);
   const handleToggleAudio = useCallback((enabled: boolean) => applyAudioSetting("localAudio", enabled), [applyAudioSetting]);
   const handleToggleOpusAudio = useCallback((enabled: boolean) => applyAudioSetting("opusAudio", enabled), [applyAudioSetting]);
 
@@ -943,6 +892,10 @@ export function useCatalogModel() {
     udpSettingsDirty,
     udpStabilityOptions,
     visibleError,
+    preferencePersistenceIssue,
+    handleRetryPreferencePersistence,
+    viewerPreferenceControlsDisabled,
+    clipboardPreferenceControlDisabled,
     handleToggleFps,
     handleToggleCursor,
     handleToggleAudio,

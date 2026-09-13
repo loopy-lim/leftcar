@@ -96,6 +96,20 @@ describe("clipboard share toggle persistence", () => {
       setItemAsync: async (key, value) => void memoryStore.set(key, value),
     })).toBe(true);
   });
+
+  it("surfaces failed and malformed reads without inventing an off value", async () => {
+    await expect(loadClipboardShare({
+      getItemAsync: async () => {
+        throw new Error("secure read failed");
+      },
+      setItemAsync: async () => undefined,
+    })).rejects.toThrow("secure read failed");
+
+    await expect(loadClipboardShare({
+      getItemAsync: async () => "unexpected",
+      setItemAsync: async () => undefined,
+    })).rejects.toThrow("Invalid clipboard preference");
+  });
 });
 
 describe("pollHostClipboard", () => {
