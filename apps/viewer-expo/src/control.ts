@@ -564,7 +564,7 @@ export function connect(
       }
     };
 
-    socket.on("data", (data: Buffer | string) => {
+    socket.on("data", (data) => {
       buffer += typeof data === "string" ? data : data.toString("utf8");
       drain();
     });
