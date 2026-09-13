@@ -68,7 +68,7 @@
     "LEFTCAR_BENCHMARK_PROFILE=<matching-slug>",
     "LEFTCAR_BENCHMARK_ROOT=<existing dedicated absolute directory>",
     "LEFTCAR_BENCHMARK_SYSTEM_AUDIO=off (required for video-only acceptance)",
-    "LEFTCAR_BENCHMARK_SOURCE_ID=<exact task-created CoreGraphics display sourceId>"
+    "LEFTCAR_BENCHMARK_SOURCE_ID=<exact existing, user-approved CoreGraphics display sourceId>"
   ],
-  "limitations": "Profile isolation and identical restrictive initial/refresh audio-off plus exact native display selection only; no candidate grant or performance policy imported. Display selector rejects absent/mismatched/ambiguous benchmark identity before capture construction. Process/build proof does not authorize capture."
+  "limitations": "Profile isolation and identical restrictive initial/refresh audio-off plus exact native display selection only; no candidate grant or performance policy imported. Display selector rejects absent/mismatched/ambiguous benchmark identity before capture construction. Process/build proof does not authorize capture. Current validation uses existing, user-approved displays only; creating or resizing virtual displays, including through external tools, requires new explicit user authorization."
 }
