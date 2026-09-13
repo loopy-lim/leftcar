@@ -42,4 +42,3 @@ func parseEncoderExperimentCString(
     }
     return parseEncoderExperimentName(decoded)
 }
-

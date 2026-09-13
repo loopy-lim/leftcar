@@ -495,3 +495,7 @@ Ruling: Task11 FIX1 closes invalid-run comparability and structured-finalization
 Task11 실기기 준비 후속 보완: 종료된 Host 연결 실패 뒤의 잘못된 연결 표시를 실제 Host·시작 화면에서 수정했다. source `71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679`, Doctor100/JS559/계약4/UI78·9suite/타입·구조 검사 및 범위 독립 검토 통과. 새 APK 설치 바이트 일치와 실제 태블릿의 수동·빠른 실패 표시 복구를 확인했다. 당시 영상·10분·30분은 화면 공유 승인과 전송 경로 준비를 기다렸다. 이후 결과는 다음 단락을 따른다.
 
 Task11 명시적 승인 후 실행 (2026-09-13 20:41–20:51 KST): 사용자가 전용 Display1 공유와 2개 로컬 커밋을 승인했다. 최종 Host를 실행하고 실제 Host·Viewer UI에서 전용 화면1개만 허용됐음을 확인했다. 직접 LAN 응답 실패가 유지됐으며 ADB over Wi-Fi 제어 연결 뒤 UDP 영상 도달 증명에 실패했다. 영상 시작 실패를 장시간 수용으로 바꾸지 않으며 Step4는 미완료다. Host 종료 확인 뒤 합성 소스를 닫고 작업 전용 UI·제어 매핑만 정리했다. 구현 커밋은 `f91607cc8810258c16fa76d4de3c5dfbb4344102`, 스테이징 후 실제872개 입력 해시는 `cb0ad4e0e7b209f1d119446facc124eb3d81133ad01a69ecd165fd8afbb069ce`이다. 패키지 당시873개 목록과의 차이는 삭제된 파일의 부재 표식 하나뿐이다. 현재 검증 문서에 승인·실행·실패·정리와 판단74개를 반영한다.
+
+후속 통합 요청: 사용자가 simplify 후 push·merge를 요청하고 실기기 검사는 추후 직접 수행하기로 했다. 따라서 Task11 Step4는 실기기 수용 미완료로 유지하면서, 소스 정리와 자동 검증 후 PR 통합을 진행한다. 원격 main `27e33e4`에서 로컬 기준 `068b662`까지 기존20개 커밋도 포함되는 범위를 PR에 명시한다. 새 판단75–76은 현재 검증 문서에 기록한다.
+
+simplify 후 자동 검증 완료: `bun run verify all`,327.189초/exit0,전후 source `6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd` 동일. Doctor100·JS559·계약4·UI78/9suite·Host225+12·JVM118/19suite 및 Rust/Swift 자동 검사 통과. 실기기 Step4는 사용자가 나중에 직접 검사하는 미완료 항목으로 유지한다.

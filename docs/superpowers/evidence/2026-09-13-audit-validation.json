@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "recordedUtc": "2026-09-13T11:54:49.277814+00:00",
+  "recordedUtc": "2026-09-13T12:31:49.121694+00:00",
   "baselineCommit": "068b6628df5dc57f264446f8ec51215b37c51b6f",
   "candidateSourceSha256": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
   "candidateInputCount": 873,
-  "sourceStatus": "source review accepted; explicit display grant and actual failed UDP media attempt observed; 10/30-minute acceptance incomplete",
+  "sourceStatus": "latest simplify source fully automatically verified; prior candidateSource/package/device records remain historical; physical tests deferred by user before PR merge",
   "gateCounts": {
     "reactDoctor": 100,
     "javascriptTests": 559,
@@ -320,7 +320,13 @@
         "No ten-minute or thirty-minute acceptance, no FPS/latency/competitor ranking"
       ]
     },
-    "authorizedAttemptReceiptSha256": "a5d8a0f2ce217e7b198a4b4f6dfa31452aab9ce69087f1142c5e5fcb4e657e3e"
+    "authorizedAttemptReceiptSha256": "a5d8a0f2ce217e7b198a4b4f6dfa31452aab9ce69087f1142c5e5fcb4e657e3e",
+    "userDisposition": {
+      "decision": "User will perform physical tests later; proceed with simplify, push and PR merge",
+      "quote": "테스트는 내가 추후에 할게.",
+      "tenMinuteRun": "not started",
+      "thirtyMinuteRun": "not started"
+    }
   },
   "knownLimits": [
     "AOAP immediate stop/restart proxy join race remains outside approved fix scope",
@@ -330,7 +336,7 @@
     "AudioTrack/A-V, optical glass-to-glass and public signing/notarization unverified",
     "No same-device competitor performance ranking"
   ],
-  "rulingsCount": 74,
+  "rulingsCount": 76,
   "retainedPriorFix": {
     "sourceSha256": "7de7a418ad9ef0ffb0b0a815392127ec105f30b4df520c812ee1e1591baaeb6c",
     "fix": {
@@ -624,5 +630,48 @@
       "tools/benchmark-profile.baseline068.patch:512: trailing whitespace."
     ],
     "disposition": "Non-blocking review: 11 unified-patch blank context lines must retain their single context marker; two extra EOF blank lines are cosmetic. Preserve approved, tested source bytes. Earlier unstaged git diff --check did not inspect new files and is not evidence these had no whitespace findings."
+  },
+  "latestSourceSha256": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+  "latestInputCount": 872,
+  "simplifyVerification": {
+    "command": [
+      "bun",
+      "run",
+      "verify",
+      "all"
+    ],
+    "startedUtc": "2026-09-13T12:24:34.338041+00:00",
+    "sourceBefore": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+    "scope": "All automatic repository checks after behavior-preserving simplify; real devices deferred explicitly by user",
+    "endedUtc": "2026-09-13T12:30:01.520691+00:00",
+    "seconds": 327.189,
+    "exit": 0,
+    "sourceAfter": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+    "sourceUnchanged": true,
+    "logSha256": "8a924b5552d30fdef7d5c7fba7f412eb0827e1bd1190215c431b8b049040c333",
+    "changes": [
+      "apps/host-desktop/src/SourceGrantEditor.tsx",
+      "apps/host-desktop/src/paired-device-state.ts",
+      "tools/verify.mjs",
+      "native/macos-capture-shim/Sources/Capture/CaptureStartOptions.swift",
+      "native/macos-capture-shim/Sources/Encoder/EncoderExperimentParsing.swift"
+    ],
+    "counts": {
+      "reactDoctor": 100,
+      "js": 559,
+      "contract": 4,
+      "ui": 78,
+      "uiSuites": 9,
+      "hostUnit": 225,
+      "hostIntegration": 12,
+      "jvm": 118,
+      "jvmSuites": 19
+    },
+    "scopeNotes": [
+      "Fresh full automatic verification at current source; no install or device operations",
+      "Swift full library and adapter binaries compiled; pure split and retransmit policies executed",
+      "JS total includes contract and performance tests; totals are not additive",
+      "Previous package inputs are historical and were not rebuilt or installed after simplify"
+    ]
   }
 }

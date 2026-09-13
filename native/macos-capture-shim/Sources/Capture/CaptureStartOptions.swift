@@ -1,6 +1,6 @@
 import Foundation
 
- enum CaptureBackendKind: String {
+enum CaptureBackendKind: String {
     case screenCaptureKit
     case cgDisplayStream
 
@@ -14,7 +14,7 @@ import Foundation
     }
 }
 
- enum MediaTransportKind: String {
+enum MediaTransportKind: String {
     case udp
     case tcp
     case usb
@@ -36,7 +36,7 @@ import Foundation
     }
 }
 
- enum StreamContentMode: String {
+enum StreamContentMode: String {
     case interactive
     case video
 
@@ -49,4 +49,3 @@ import Foundation
         }
     }
 }
-

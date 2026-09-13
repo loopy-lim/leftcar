@@ -17,7 +17,8 @@ function runCommand(command, args=[], cwd=root, capture=false) {
 }
 export function verify(scope='all', { platform = process.platform, diagnose: doctor = diagnose, run = runCommand } = {}) {
   if(!['all','js','rust'].includes(scope))throw new Error('Usage: bun run verify [all|js|rust]');
-  if(!doctor(scope==='js'?'js':scope==='rust'?(platform==='darwin'?'host-macos':'rust'):'all'))throw new Error('Resolve doctor prerequisites first');
+  const prerequisiteScope = scope === 'rust' && platform === 'darwin' ? 'host-macos' : scope;
+  if (!doctor(prerequisiteScope)) throw new Error('Resolve doctor prerequisites first');
   if(scope!=='rust') {
     run('bun',['install','--frozen-lockfile']);
     requirePerfectReactDoctor(run('npx',['-y','react-doctor@latest','.','--verbose'],root,true));
