@@ -176,7 +176,7 @@ extension CaptureSession {
             // to the fragments it protects and avoids losing an entire AU's
             // recovery budget to one large primary burst. The shared UDP
             // pacer spreads both ordinary frames and recovery IDRs.
-            var transmissions = prepared.datagrams
+            let transmissions = prepared.datagrams
             expectedDatagramCount = transmissions.count
             if isKeyframe {
                 NSLog(

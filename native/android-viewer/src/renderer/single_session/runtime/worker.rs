@@ -56,6 +56,16 @@ fn sync_audio_stream(
     // attempt is recorded to avoid a busy retry loop, and the 1s cadence
     // heals a datagram lost after send_to succeeds.
     let _ = send_viewer_command(socket, peer, audio_stream_command(requested), crypto);
+    if requested {
+        let _ = send_viewer_command(
+            socket,
+            peer,
+            crate::audio_protocol::audio_codec_command(
+                control.audio_opus_requested.load(Ordering::SeqCst),
+            ),
+            crypto,
+        );
+    }
     delivery.record_attempt(requested, now_us);
 }
 
@@ -92,6 +102,7 @@ impl RenderHealthRuntime<'_> {
                     &mut *self.decoder,
                     &mut *self.codec_config,
                     &mut *self.awaiting_keyframe,
+                    self.control,
                 );
                 self.reassembler.clear();
                 self.frame_sequencer.clear();
@@ -273,7 +284,12 @@ fn run(launch: SingleRendererLaunch) {
             // UDP socket while hidden: if the receiver stops reading, the
             // Host's bounded latest-frame queue overflows and degrades the
             // other visible stream even though this Surface is transient.
-            reset_decoder(&mut decoder, &mut codec_config, &mut awaiting_keyframe);
+            reset_decoder(
+                &mut decoder,
+                &mut codec_config,
+                &mut awaiting_keyframe,
+                &control_clone,
+            );
             reassembler.clear();
             frame_sequencer.clear();
             fec_groups.clear();
@@ -678,7 +694,12 @@ fn run(launch: SingleRendererLaunch) {
                 fec_groups.clear();
                 fec_group_order.clear();
                 completed_fec_groups.clear();
-                reset_decoder(&mut decoder, &mut codec_config, &mut awaiting_keyframe);
+                reset_decoder(
+                    &mut decoder,
+                    &mut codec_config,
+                    &mut awaiting_keyframe,
+                    &control_clone,
+                );
                 last_frame_id = None;
                 aus = 0;
                 render_health.rebase(
@@ -780,8 +801,15 @@ fn run(launch: SingleRendererLaunch) {
                 packet,
                 &mut control_clone.audio.lock().unwrap(),
             ) {
+                control_clone.audio_available.notify_one();
                 continue;
             }
+            let network_rtt = control_clone.network_rtt_ms.load(Ordering::Relaxed);
+            frame_sequencer.configure_nack_grace(
+                !awaiting_keyframe,
+                (network_rtt != LATENCY_UNKNOWN).then_some(network_rtt),
+            );
+
             if queue_parity_packet(
                 packet,
                 peer,

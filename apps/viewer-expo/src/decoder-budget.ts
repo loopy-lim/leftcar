@@ -6,21 +6,10 @@ import {
 } from "./encoder-experiment";
 import { evenCodecDimension } from "./stream-resolution";
 
-/**
- * 하드웨어 디코더 동시 인스턴스 예산 (performance review M4/R8).
- *
- * splitVertical은 타일마다 디코더 인스턴스를 하나씩, 총 두 개를 점유하고
- * 일반 창은 하나를 점유한다. 네이티브 프로브(SplitDecoderCapability)는
- * split 타일 크기(1920×2160@60)에서 maxSupportedInstances ≥ 2만 보장할 뿐
- * 기기별 상한을 JS로 노출하지 않으므로, v1에서는 문서에 기록된 실패
- * 한계점(분할 1개 + 창 2개 = 4 인스턴스에서 생성 실패)에 맞춘 보수적
- * 상수 4를 쓴다.
- *
- * 네이티브 확장 경로: SplitDecoderCapability가 선택된 코덱의
- * maxSupportedInstances(및 임의 크기 지원 여부)를 반환하고
- * StreamLauncherModule이 이를 조회하는 @ReactMethod로 노출하면, JS는
- * 연결 시 한 번 읽어 planAdmission의 capacity 옵션으로 넘기면 된다.
- * 모듈이 capacity를 주입 가능하게 설계한 이유다.
+/** Hard ceiling for advisory hardware admission. Runtime DecoderReservations
+ * starts at one slot when native hints are absent; advertised values can reduce
+ * or raise that trial budget only up to this ceiling. Actual decoder failures
+ * retain their reservations until native cleanup acknowledges ownership release.
  */
 export const DEFAULT_DECODER_CAPACITY = 4;
 
@@ -111,11 +100,8 @@ export function requestedDecoderShape(request: {
  * - 일반 창: 슬롯이 남으면 allow, 넘치면 block. 해상도 강등은 디코더
  *   인스턴스 수를 줄이지 못하므로(슬롯은 split 여부에만 의존) 초과 창을
  *   강등으로 통과시켜 봤자 점유는 그대로 초과한다 — 거절하는 편이
- *   정직하다(errDecoderCapacity). 남은 v1 한계: 용량은 고정 상수
- *   DEFAULT_DECODER_CAPACITY=4(네이티브 프로브 미노출)이며, 동시
- *   openDisplay 경쟁(두 호출이 모두 등록 전에 검사를 통과)은 슬롯 예약
- *   없이는 그대로 허용된다. 이 두 한계는 네이티브 상한 노출 + 등록 시점
- *   재검토로 조일 수 있다.
+ *   정직하다(errDecoderCapacity). 실제 생명주기 입장은 아래 device-wide
+ *   DecoderReservations가 예약하며 이 함수는 기존 순수 정책 API다.
  */
 export function planAdmission(
   currentStreams: readonly AdmissionStream[],
@@ -191,3 +177,143 @@ export function downgradedStreamTarget(
     fps: target.fps,
   };
 }
+
+/** Native Task7 hint: instance count and aggregate pixels/second are independent.
+ * Missing/invalid instance hints admit one slot; advertised limits never exceed four.
+ */
+export interface DecoderCapabilityHint {
+  codecName?: string;
+  maxInstances?: number;
+  maxPixelRate?: number;
+  maxInstancePixelRate?: number;
+}
+export interface DecoderDemand extends AdmissionStream { target: AdaptiveTarget }
+export interface DecoderLease { readonly id: symbol }
+interface Reservation {
+  demand: DecoderDemand;
+  busy?: Promise<unknown>;
+  closing?: Promise<void>;
+  stopped: boolean;
+}
+
+/** Device-wide admission owner. React render/status snapshots never own slots.
+ * Leases and operation promises preserve identity through late completion,
+ * cancellation, reconfiguration, failed cleanup, and component remounts.
+ */
+export class DecoderReservations {
+  private readonly entries = new Map<DecoderLease, Reservation>();
+  constructor(private hint: DecoderCapabilityHint = {}) {}
+
+  setCapability(hint: DecoderCapabilityHint): void { this.hint = hint; }
+
+  async refreshCapability(launcher: {getDecoderCapabilityHint?(): Promise<DecoderCapabilityHint>}): Promise<void> {
+    try { this.setCapability(await launcher.getDecoderCapabilityHint?.() ?? {}); }
+    catch { this.setCapability({}); }
+  }
+
+  private capacity(): number {
+    const value = this.hint.maxInstances;
+    return value !== undefined && Number.isFinite(value) && value >= 1
+      ? Math.min(DEFAULT_DECODER_CAPACITY, Math.floor(value)) : 1;
+  }
+
+  private fits(demand: DecoderDemand, replacing?: DecoderLease): boolean {
+    if (demand.target.fps > 90) return false;
+    if (![demand.target.width, demand.target.height, demand.target.fps].every((value) => Number.isFinite(value) && value > 0)) return false;
+    const perInstanceLimit = this.hint.maxInstancePixelRate;
+    const instanceFits = (candidate: DecoderDemand): boolean => {
+      const rate = candidate.target.width * candidate.target.height * candidate.target.fps / decoderSlots(candidate);
+      return !(perInstanceLimit !== undefined && Number.isFinite(perInstanceLimit) && perInstanceLimit > 0 && rate > perInstanceLimit);
+    };
+    if (!instanceFits(demand)) return false;
+    let slots = decoderSlots(demand);
+    let pixels = demand.target.width * demand.target.height * demand.target.fps;
+    for (const [lease, entry] of this.entries) {
+      if (lease === replacing) continue;
+      slots += decoderSlots(entry.demand);
+      pixels += entry.demand.target.width * entry.demand.target.height * entry.demand.target.fps;
+    }
+    const pixelLimit = this.hint.maxPixelRate;
+    return slots <= this.capacity() &&
+      !(pixelLimit !== undefined && Number.isFinite(pixelLimit) && pixelLimit > 0 && pixels > pixelLimit);
+  }
+
+  /** Returns a smaller single target only when both independent budgets fit. */
+  plan(demand: DecoderDemand, replacing?: DecoderLease): DecoderDemand | null {
+    if (this.fits(demand, replacing)) return demand;
+    let target = downgradedStreamTarget(demand.target);
+    while (target) {
+      const candidate = {split: false, target};
+      if (this.fits(candidate, replacing)) return candidate;
+      target = downgradedStreamTarget(target);
+    }
+    return null;
+  }
+
+  reserve(demand: DecoderDemand): DecoderLease {
+    if (!this.fits(demand)) throw new Error('Decoder capacity exhausted');
+    const lease = {id: Symbol('decoder lease')};
+    this.entries.set(lease, {demand, stopped:false});
+    return lease;
+  }
+
+  isOpen(lease: DecoderLease): boolean {
+    const entry = this.entries.get(lease);
+    return entry !== undefined && !entry.stopped;
+  }
+
+  async run<T extends DecoderDemand>(
+    lease: DecoderLease, demand: DecoderDemand, work: () => Promise<T>,
+  ): Promise<T> {
+    const entry = this.entries.get(lease);
+    if (!entry || entry.stopped || entry.busy) throw new Error('Decoder operation is no longer available');
+    // A downgrade cannot lend its old slots/pixel rate while native replacement
+    // is still pending. Same-port operations are exclusive, including restores.
+    const previous = entry.demand;
+    const held = {
+      split: previous.split || demand.split,
+      target: previous.target.width * previous.target.height * previous.target.fps >
+        demand.target.width * demand.target.height * demand.target.fps ? previous.target : demand.target,
+    };
+    if (!this.fits(held, lease)) throw new Error('Decoder capacity exhausted');
+    entry.demand = held;
+    // Publish ownership BEFORE invoking work (which can synchronously reenter).
+    let complete!: () => void;
+    entry.busy = new Promise<void>((resolve) => { complete = resolve; });
+    try {
+      const accepted = await work();
+      if (decoderSlots(accepted) > decoderSlots(held) ||
+          accepted.target.width * accepted.target.height * accepted.target.fps >
+          held.target.width * held.target.height * held.target.fps) {
+        throw new Error('Native decoder exceeded its reservation');
+      }
+      entry.demand = accepted;
+      return accepted;
+    } catch (error) {
+      // Keep the maximum on failure: native cleanup may still be unresolved.
+      throw error;
+    } finally {
+      entry.busy = undefined;
+      complete();
+    }
+  }
+
+  close(lease: DecoderLease, cleanup: () => Promise<void>): Promise<void> {
+    const entry = this.entries.get(lease);
+    if (!entry) return Promise.resolve();
+    if (entry.closing) return entry.closing;
+    entry.stopped = true;
+    const operation = (async () => {
+      await entry.busy;
+      await cleanup();
+      // Delete this exact incarnation only after acknowledged resource cleanup.
+      if (this.entries.get(lease) === entry) this.entries.delete(lease);
+    })();
+    entry.closing = operation;
+    void operation.finally(() => { entry.closing = undefined; }).catch(() => undefined);
+    return operation;
+  }
+}
+
+/** Survives catalog unmounts and Host selections while native resources live. */
+export const deviceDecoderReservations = new DecoderReservations();

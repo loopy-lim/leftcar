@@ -308,6 +308,7 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                 None,
             );
             while !control.stop_requested() {
+                coordinator.set_display_timeline(*control.presentation.lock().unwrap());
                 match event_rx.recv_timeout(Duration::from_millis(1)) {
                     Ok(first_event) => {
                         for event in drain_available_events(first_event, &event_rx) {

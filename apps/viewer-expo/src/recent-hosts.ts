@@ -87,11 +87,16 @@ export function filterOutHost(
 
 export async function getRecentHosts(): Promise<RecentHostItem[]> {
   try {
-    const stored = await SecureStore.getItemAsync(RECENT_HOSTS_KEY);
-    return parseRecentHosts(stored);
+    return await getRecentHostsStrict();
   } catch {
     return [];
   }
+}
+
+/** Read the persisted list without converting provider failures into an empty list. */
+export async function getRecentHostsStrict(): Promise<RecentHostItem[]> {
+  const stored = await SecureStore.getItemAsync(RECENT_HOSTS_KEY);
+  return parseRecentHosts(stored);
 }
 
 export async function saveRecentHost(
@@ -101,13 +106,37 @@ export async function saveRecentHost(
   hostKey?: string,
 ): Promise<RecentHostItem[]> {
   try {
-    const current = await getRecentHosts();
-    const updated = updateRecentHostsList(current, host, port, name, Date.now(), hostKey);
-    await SecureStore.setItemAsync(RECENT_HOSTS_KEY, JSON.stringify(updated));
-    return updated;
+    return await saveRecentHostStrict(host, port, name, hostKey);
   } catch {
     return [];
   }
+}
+
+/**
+ * Pairing credential transactions need persistence failures to be observable so
+ * token and endpoint-alias changes can be rolled back together. Ordinary UI
+ * callers keep the best-effort `saveRecentHost` behavior above.
+ */
+export async function saveRecentHostStrict(
+  host: string,
+  port = DEFAULT_CONTROL_PORT,
+  name?: string,
+  hostKey?: string,
+  signal?: AbortSignal,
+): Promise<RecentHostItem[]> {
+  if (signal?.aborted) throw abortError();
+  const current = await getRecentHostsStrict();
+  if (signal?.aborted) throw abortError();
+  const updated = updateRecentHostsList(current, host, port, name, Date.now(), hostKey);
+  await SecureStore.setItemAsync(RECENT_HOSTS_KEY, JSON.stringify(updated));
+  if (signal?.aborted) throw abortError();
+  return updated;
+}
+
+function abortError(): Error {
+  const error = new Error("recent host persistence cancelled");
+  error.name = "AbortError";
+  return error;
 }
 
 export async function removeRecentHost(

@@ -33,9 +33,17 @@ import {
 import {
   planAdmission,
   type AdmissionStream,
+  type DecoderDemand,
+  type DecoderCapabilityHint,
 } from "./decoder-budget";
 
 export interface StreamLauncher {
+  getDecoderCapabilityHint?(): Promise<DecoderCapabilityHint>;
+  setBalancedPresentation?(instanceId: string, enabled: boolean): Promise<void>;
+  /** Exact native Activity incarnation; empty means no opened renderer. */
+  getStreamGeneration?(instanceId: string): Promise<string>;
+  /** Resolves only after this incarnation's native decoder cleanup finishes. */
+  closeStream?(instanceId: string, generation: string): Promise<void>;
   getLocalIpv4Addresses?(): Promise<string[]>;
   prepareStream(
     port: number,
@@ -61,6 +69,20 @@ export interface StreamLauncher {
     language?: string,
     localAudio?: boolean,
   ): Promise<string>;
+  openStreamWithPresentation?(
+    port: number,
+    host: string,
+    width: number,
+    height: number,
+    fps: number,
+    encoderExperiment: EncoderExperimentId,
+    displayName?: string,
+    showFps?: boolean,
+    localCursor?: boolean,
+    language?: string,
+    localAudio?: boolean,
+    balancedPresentation?: boolean,
+  ): Promise<string>;
   cancelPreparedStream(
     port: number,
     encoderExperiment: EncoderExperimentId,
@@ -71,6 +93,7 @@ export interface StreamLauncher {
    * 모듈이 구버전이면 setAudioStream가 없을 수 있고, 호출부는 best-effort로
    * 무시한다.
    */
+  setOpusAudio?(instanceId: string, enabled: boolean): Promise<void>;
   setAudioStream?(instanceId: string, enabled: boolean): Promise<void>;
   /**
    * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
@@ -86,7 +109,20 @@ export interface StreamLauncher {
   isXrWindowRatioSupported?(): Promise<boolean>;
 }
 
+/** Negotiate the additive native method; old modules keep their exact arity. */
+async function openConfiguredStream(launcher: StreamLauncher,
+  ...args: Parameters<NonNullable<StreamLauncher["openStreamWithPresentation"]>>
+): Promise<void> {
+  if (launcher.openStreamWithPresentation) {
+    await launcher.openStreamWithPresentation(...args);
+  } else {
+    const [port,host,width,height,fps,encoder,display,showFps,cursor,language,audio] = args;
+    await launcher.openStream(port,host,width,height,fps,encoder,display,showFps,cursor,language,audio);
+  }
+}
+
 export interface StartStreamArgs {
+  sourceId?: string;
   sourceIndex: number;
   viewerPort: number;
   width: number;
@@ -99,12 +135,17 @@ export interface StartStreamArgs {
   showFps?: boolean;
   localCursor?: boolean;
   localAudio?: boolean;
+  opusAudio?: boolean;
+  balancedPresentation?: boolean;
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
 }
 
 export interface StartedStream {
+  opusAudio?: boolean;
+  /** Effective native mode, distinct from the saved preference. */
+  balancedPresentation?: boolean;
   session: number;
   /** 뷰어가 생성한 세션 미디어 키 — 재구성(reconfigure) 시 그대로 재사용된다. */
   mediaKey: string;
@@ -114,6 +155,7 @@ export interface StartedStream {
   qualityState?: AdaptiveQualityState;
   /** 소스 전환 후 실제로 스트리밍 중인 캡처 소스(호스트 에코, 전환 요청 때만). */
   sourceIndex?: number;
+  sourceId?: string;
   sourceName?: string;
   viewerIps: string[];
   mediaTransport: ResolvedTransport;
@@ -161,7 +203,23 @@ export function isStreamPrepareError(cause: unknown): boolean {
   return String(cause).includes("ERR_STREAM_PREPARE");
 }
 
+function assertDecoderReservation(
+  reservation: DecoderDemand | undefined,
+  encoderExperiment: EncoderExperimentId,
+  target: AdaptiveTarget,
+): void {
+  if (!reservation) return;
+  const exceedsInstances = encoderExperiment === "splitVertical" && !reservation.split;
+  const invalidTarget = ![target.width, target.height, target.fps].every((value) => Number.isFinite(value) && value > 0);
+  const pixelRate = target.width * target.height * target.fps;
+  const reservedRate = reservation.target.width * reservation.target.height * reservation.target.fps;
+  if (exceedsInstances || invalidTarget || pixelRate > reservedRate) {
+    throw new Error("Host stream exceeds the decoder reservation");
+  }
+}
+
 interface StartPreparedStreamInput {
+  decoderReservation?: DecoderDemand;
   control: ControlClient;
   request?: StreamControlRequest;
   launcher: StreamLauncher;
@@ -216,6 +274,7 @@ export async function startPreparedStream({
   advertisedEncoderExperiments,
   advertisedUdpStabilityCapabilities,
   args,
+  decoderReservation,
 }: StartPreparedStreamInput): Promise<StartedStream> {
   let session: number | null = null;
   const selectedEncoderExperiment = resolveEncoderExperimentForStream(
@@ -270,6 +329,7 @@ export async function startPreparedStream({
       args.height,
       resolvedMediaTransport,
     );
+    assertDecoderReservation(decoderReservation, encoderExperiment, args);
     let mediaTransport = encoderExperiment === "splitVertical"
       ? "udp"
       : resolvedMediaTransport;
@@ -314,7 +374,7 @@ export async function startPreparedStream({
         mediaKey,
       );
     }
-    const { udpStability: _requestedUdpStability, ...baseArgs } = args;
+    const { udpStability: _requestedUdpStability, balancedPresentation: _localPresentation, ...baseArgs } = args;
     const startArgs = {
       ...baseArgs,
       ...(viewerIps.length > 0 ? { viewerIps } : {}),
@@ -341,7 +401,8 @@ export async function startPreparedStream({
     const width = started.width ?? args.width;
     const height = started.height ?? args.height;
     const fps = started.fps ?? args.fps;
-    await launcher.openStream(
+    assertDecoderReservation(decoderReservation, encoderExperiment, {width, height, fps});
+    await openConfiguredStream(launcher,
       args.viewerPort,
       host,
       width,
@@ -355,9 +416,13 @@ export async function startPreparedStream({
       currentLanguage(),
       // 오디오는 기본 전달(true) — 네이티브 기본값과 정합.
       args.localAudio ?? true,
+      args.balancedPresentation ?? false,
     );
+    await launcher.setOpusAudio?.(`src-${args.viewerPort}`, args.opusAudio ?? false);
     return {
       session,
+      opusAudio: Boolean(launcher.setOpusAudio && args.opusAudio),
+      balancedPresentation: Boolean(launcher.openStreamWithPresentation && args.balancedPresentation),
       // Optional fields stay undefined when the Host omitted them;
       // JSON drops undefined keys on the wire.
       width: started.width,
@@ -382,6 +447,9 @@ export async function startPreparedStream({
 }
 
 interface ReconfigurePreparedStreamInput {
+  request?: StreamControlRequest;
+  /** Native preparation must not exceed the already-owned reservation. */
+  decoderReservation?: DecoderDemand;
   control: ControlClient;
   launcher: StreamLauncher;
   host: string;
@@ -402,6 +470,7 @@ interface ReconfigurePreparedStreamInput {
    * viewer address, media port, and this prepared receiver stay untouched.
    */
   sourceIndex?: number;
+  sourceId?: string;
   /** Catalog capability `reconfigureSource`. Without it `sourceIndex` is ignored. */
   reconfigureSource?: boolean;
   /** Catalog `encoderExperiments` advertisement, for availability checks. */
@@ -425,7 +494,7 @@ interface ReconfigurePreparedStreamInput {
  * targets stay on the single path: the split pair is sized for the 4K60
  * contract only.
  */
-function resolveReconfigureExperiment(
+export function resolveReconfigureExperiment(
   active: ActiveStream,
   target: AdaptiveTarget,
   input: Pick<
@@ -452,6 +521,7 @@ function resolveReconfigureExperiment(
 
 export async function reconfigurePreparedStream({
   control,
+  request = control.request.bind(control),
   launcher,
   host,
   active,
@@ -459,9 +529,11 @@ export async function reconfigurePreparedStream({
   qualityState,
   reconfigureEncoderExperiment,
   sourceIndex,
+  sourceId,
   reconfigureSource,
   advertisedEncoderExperiments,
   decoderBudget,
+  decoderReservation,
 }: ReconfigurePreparedStreamInput): Promise<StartedStream> {
   // Cheap display switch (R7): a source change rides the exact same prepared
   // listener as a resolution reconfigure. The receiver is bound BEFORE the
@@ -479,7 +551,7 @@ export async function reconfigurePreparedStream({
     fps: target.fps,
     qualityState,
     ...(requestedExperiment ? { encoderExperiment: requestedExperiment } : {}),
-    ...(switchSource !== undefined ? { sourceIndex: switchSource } : {}),
+    ...(switchSource !== undefined ? { sourceIndex: switchSource, ...(sourceId ? { sourceId } : {}) } : {}),
   });
   const resolvedExperiment = resolveReconfigureExperiment(active, target, {
     reconfigureEncoderExperiment,
@@ -515,6 +587,7 @@ export async function reconfigurePreparedStream({
   // hosts never receive a field they do not know.
   const promotion = desiredExperiment === "splitVertical" &&
     desiredExperiment !== active.encoderExperiment;
+  assertDecoderReservation(decoderReservation, desiredExperiment, target);
   let preparedExperiment = desiredExperiment;
   let requestedExperiment: EncoderExperimentId | undefined = promotion
     ? desiredExperiment
@@ -547,7 +620,7 @@ export async function reconfigurePreparedStream({
     );
   }
   try {
-    const acceptedOnce = await control.request<ReconfigureStreamOutput>(
+    const acceptedOnce = await request<ReconfigureStreamOutput>(
       "reconfigureStream",
       reconfigureArgs(requestedExperiment),
     );
@@ -558,6 +631,9 @@ export async function reconfigurePreparedStream({
       accepted.encoderExperiment === "splitVertical" &&
       accepted.encoderExperiment !== preparedExperiment
     ) {
+      if (decoderReservation && !decoderReservation.split) {
+        throw new Error("Host split mode exceeds the decoder reservation");
+      }
       // The Host accepted split while the receiver was prepared for a single
       // mode. A split attach claims two fresh prepared listeners — openStream
       // assumes a matching preparation and never prepares itself. But the
@@ -582,7 +658,7 @@ export async function reconfigurePreparedStream({
         currentLanguage(),
         active.mediaKey,
       );
-      accepted = await control.request<ReconfigureStreamOutput>(
+      accepted = await request<ReconfigureStreamOutput>(
         "reconfigureStream",
         reconfigureArgs("splitVertical"),
       );
@@ -605,7 +681,8 @@ export async function reconfigurePreparedStream({
     // attach/rebind claims this exact prepared socket. In both cases the mode
     // opened is the one the prepared listeners can actually authenticate.
     const encoderExperiment = accepted.encoderExperiment ?? preparedExperiment;
-    await launcher.openStream(
+    assertDecoderReservation(decoderReservation, encoderExperiment, accepted);
+    await openConfiguredStream(launcher,
       active.port,
       host,
       accepted.width,
@@ -619,9 +696,13 @@ export async function reconfigurePreparedStream({
       active.localCursor ?? true,
       currentLanguage(),
       active.localAudio ?? true,
+      active.balancedPresentation ?? false,
     );
+    await launcher.setOpusAudio?.(`src-${active.port}`, active.opusAudio ?? false);
     return {
       session: accepted.session,
+      opusAudio: Boolean(launcher.setOpusAudio && active.opusAudio),
+      balancedPresentation: Boolean(launcher.openStreamWithPresentation && active.balancedPresentation),
       width: accepted.width,
       height: accepted.height,
       fps: accepted.fps,
@@ -632,6 +713,7 @@ export async function reconfigurePreparedStream({
       ...(switchSource !== undefined
         ? {
             sourceIndex: accepted.sourceIndex ?? switchSource,
+            ...(sourceId ? { sourceId } : {}),
             ...(accepted.sourceName ? { sourceName: accepted.sourceName } : {}),
           }
         : {}),

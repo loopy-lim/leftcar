@@ -46,6 +46,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
  */
 
 export interface DisplayInfo {
+  sourceId?: string;
   index: number;
   name: string;
   width: number;
@@ -89,6 +90,7 @@ export function preferredCaptureBackend(
 }
 
 export interface SessionView {
+  deviceName?: string;
   session: number;
   sourceIndex: number;
   sourceName: string;

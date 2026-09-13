@@ -1,246 +1,124 @@
-//! Architecture rule tests (H01).
-//!
-//! Red–Green: each test first asserts the rule engine fires on a violating
-//! fixture, then that the real workspace passes.
-
 use architecture_check::{check_workspace, parse_metadata};
+use serde_json::json;
 
-fn load_workspace() -> architecture_check::Workspace {
-    let json = std::process::Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .output()
-        .expect("cargo metadata runs")
-        .stdout;
-    parse_metadata(&String::from_utf8(json).expect("utf8"))
+fn graph(root: &str, dependency: &str, local: bool, kind: serde_json::Value) -> String {
+    json!({"packages":[
+      {"id":"root","name":root,"source":null,"manifest_path":"/unreadable/root/Cargo.toml"},
+      {"id":"dep","name":dependency,"source":if local {None} else {Some("registry+fixture")},"manifest_path":"/unreadable/dep/Cargo.toml"}
+    ],"workspace_members":["root"],"resolve":{"nodes":[
+      {"id":"root","deps":[{"name":"renamed_dependency","pkg":"dep","dep_kinds":[{"kind":kind,"target":"cfg(target_os = \"android\")"}]}]},
+      {"id":"dep","deps":[]}
+    ]}}).to_string()
 }
-
-/// Fixture manifest text with a domain crate that imports a platform dep.
-fn violating_manifest() -> String {
-    r#"{
-        "packages": [
-          {
-            "name": "domain",
-            "manifest_path": "tests/fixtures/domain_bad/Cargo.toml"
-          }
-        ]
-      }"#
-    .to_string()
+#[test]
+fn resolved_renamed_target_edge_is_not_hidden_by_unreadable_manifest() {
+    let ws = parse_metadata(&graph("fec-core", "domain", true, serde_json::Value::Null));
+    assert_eq!(ws["fec-core"].internal_deps, vec!["domain"]);
+    assert!(check_workspace(&ws)
+        .iter()
+        .any(|v| v.rule == "dependency-direction"));
 }
-
-fn write_fixture(dir: &std::path::Path, toml: &str) {
-    std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("Cargo.toml"), toml).unwrap();
+#[test]
+fn registry_alias_retains_domain_purity() {
+    let ws = parse_metadata(&graph("domain", "tauri", false, serde_json::Value::Null));
+    assert!(check_workspace(&ws)
+        .iter()
+        .any(|v| v.rule == "domain-purity"));
+}
+#[test]
+fn build_edges_checked_dev_edges_excluded() {
+    let build = parse_metadata(&graph("domain", "tauri", false, json!("build")));
+    assert!(!check_workspace(&build).is_empty());
+    let dev = parse_metadata(&graph("domain", "tauri", false, json!("dev")));
+    assert!(check_workspace(&dev).is_empty());
+}
+#[test]
+fn standalone_host_includes_local_nonmembers_and_allows_platform_facade() {
+    let ws = parse_metadata(&graph(
+        "leftcar-host-desktop",
+        "domain",
+        true,
+        serde_json::Value::Null,
+    ));
+    assert!(ws.contains_key("domain"));
+    assert!(check_workspace(&ws).is_empty());
+    assert!(check_workspace(&parse_metadata(&graph(
+        "leftcar-host-desktop",
+        "tauri",
+        false,
+        serde_json::Value::Null
+    )))
+    .is_empty());
+}
+#[test]
+fn unknown_local_package_rejected() {
+    assert!(check_workspace(&parse_metadata(&graph(
+        "session",
+        "surprise",
+        true,
+        serde_json::Value::Null
+    )))
+    .iter()
+    .any(|v| v.rule == "unknown-crate"));
+}
+#[test]
+fn incomplete_metadata_fails_visibly() {
+    assert!(std::panic::catch_unwind(|| parse_metadata(r#"{"packages":[]}"#)).is_err());
+}
+#[test]
+fn real_workspace_and_standalone_host_pass() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for manifest in ["Cargo.toml", "apps/host-desktop/src-tauri/Cargo.toml"] {
+        let output = std::process::Command::new("cargo")
+            .current_dir(&root)
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--locked",
+                "--manifest-path",
+                manifest,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ws = parse_metadata(&String::from_utf8(output.stdout).unwrap());
+        let violations = check_workspace(&ws);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
 }
 
 #[test]
-fn domain_with_platform_dependency_fails() {
-    let fixture_dir = std::env::temp_dir().join("arch_fixture_domain_bad");
-    write_fixture(
-        &fixture_dir,
-        r#"[dependencies]
-tauri = "2"
-serde = "1"
-"#,
-    );
-    // point the fixture json at the temp manifest
-    let manifest = fixture_dir.join("Cargo.toml");
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"domain","manifest_path":"{}"}}]}}"#,
-        manifest.display()
-    );
-    let _ = violating_manifest();
-    let ws = parse_metadata(&crafted);
-    let violations = check_workspace(&ws);
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.rule == "platform-dep-isolation" || v.rule == "domain-purity"),
-        "expected domain platform-dep violation, got: {violations:?}"
-    );
-}
-
-#[test]
-fn real_workspace_has_no_violations() {
-    let ws = load_workspace();
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.is_empty(),
-        "architecture violations:\n{}",
-        violations
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-}
-
-#[test]
-fn domain_declares_no_internal_deps() {
-    let ws = load_workspace();
-    let domain = ws.get("domain").expect("domain crate exists");
-    assert!(
-        domain.internal_deps.is_empty(),
-        "domain must not depend upward"
-    );
-}
-
-#[test]
-fn layering_direction_is_acyclic_per_rules() {
-    // media-model -> domain only; reverse edge must be rejected by the engine.
-    let fixture_dir = std::env::temp_dir().join("arch_fixture_media_bad");
-    write_fixture(
-        &fixture_dir,
-        r#"[dependencies]
-media-model = { path = "../../crates/media-model" }
-"#,
-    );
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"domain","manifest_path":"{}"}}]}}"#,
-        fixture_dir.join("Cargo.toml").display()
-    );
-    let ws = parse_metadata(&crafted);
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.iter().any(|v| v.rule == "dependency-direction"),
-        "expected dependency-direction violation, got: {violations:?}"
-    );
-}
-
-/// Fixture layout for `{ workspace = true }` resolution:
-///   <root>/Cargo.toml            — [workspace.dependencies]
-///   <root>/crates/host-core/Cargo.toml — member manifest under test
-fn write_workspace_fixture(root: &std::path::Path, member_rel: &str, member_toml: &str) {
-    let member = root.join(member_rel);
-    write_fixture(&member, member_toml);
+fn cargo_resolves_actual_renamed_inherited_target_dependency() {
+    let root = std::env::temp_dir().join(format!("leftcar-architecture-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("domain/src")).unwrap();
+    std::fs::create_dir_all(root.join("host/src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers=['domain','host']\nresolver='2'\n[workspace.dependencies]\nrenamed_domain={package='domain',path='domain'}\n").unwrap();
     std::fs::write(
-        root.join("Cargo.toml"),
-        r#"[workspace]
-[workspace.dependencies]
-domain = { path = "crates/domain" }
-control-contract = { path = "crates/control-contract" }
-thiserror = "2"
-"#,
+        root.join("domain/Cargo.toml"),
+        "[package]\nname='domain'\nversion='0.0.0'\nedition='2021'\n",
     )
     .unwrap();
-}
-
-#[test]
-fn workspace_true_path_dep_is_internal_and_enforced() {
-    // The declared "host-core" -> ["domain", "media-model"] edge uses
-    // { workspace = true } in the real manifest; it must surface as an
-    // internal edge now (previously invisible to the parser).
-    let root = std::env::temp_dir().join("arch_fixture_ws_internal");
-    write_workspace_fixture(
-        &root,
-        "crates/host-core",
-        r#"[dependencies]
-domain = { workspace = true }
-thiserror = { workspace = true }
-"#,
-    );
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"host-core","manifest_path":"{}"}}]}}"#,
-        root.join("crates/host-core/Cargo.toml").display()
-    );
-    let ws = parse_metadata(&crafted);
-    let host_core = ws.get("host-core").expect("host-core fixture crate");
+    std::fs::write(root.join("host/Cargo.toml"), "[package]\nname='host-core'\nversion='0.0.0'\nedition='2021'\n[target.'cfg(target_os = \"windows\")'.dependencies]\nrenamed_domain={workspace=true}\n").unwrap();
+    for name in ["domain", "host"] {
+        std::fs::write(root.join(name).join("src/lib.rs"), "").unwrap();
+    }
+    let output = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["metadata", "--format-version", "1", "--offline"])
+        .output()
+        .unwrap();
     assert!(
-        host_core.internal_deps.iter().any(|d| d == "domain"),
-        "workspace=true path dep must be internal, got: {:?}",
-        host_core.internal_deps
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        host_core.external_deps.iter().any(|d| d == "thiserror"),
-        "workspace=true version-only dep must stay external, got: {:?}",
-        host_core.external_deps
-    );
-    // host-core -> domain is an allowed edge: no violations.
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.is_empty(),
-        "allowed workspace=true edge must pass, got: {violations:?}"
-    );
-}
-
-#[test]
-fn forbidden_workspace_true_edge_fails() {
-    // media-model must not depend on control-contract; declaring the edge as
-    // { workspace = true } must not hide it from the layering rule.
-    let root = std::env::temp_dir().join("arch_fixture_ws_forbidden");
-    write_workspace_fixture(
-        &root,
-        "crates/media-model",
-        r#"[dependencies]
-control-contract = { workspace = true }
-"#,
-    );
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"media-model","manifest_path":"{}"}}]}}"#,
-        root.join("crates/media-model/Cargo.toml").display()
-    );
-    let ws = parse_metadata(&crafted);
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.iter().any(|v| v.rule == "dependency-direction"),
-        "forbidden workspace=true edge must fail, got: {violations:?}"
-    );
-}
-
-#[test]
-fn target_specific_dependency_edges_are_checked() {
-    // fec-core must stay dependency-free; a cfg-gated path dep is still a
-    // declared edge of the crate and must be caught.
-    let fixture_dir = std::env::temp_dir().join("arch_fixture_target_bad");
-    write_fixture(
-        &fixture_dir,
-        r#"[target.'cfg(target_os = "macos")'.dependencies]
-domain = { path = "../../crates/domain" }
-"#,
-    );
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"fec-core","manifest_path":"{}"}}]}}"#,
-        fixture_dir.join("Cargo.toml").display()
-    );
-    let ws = parse_metadata(&crafted);
-    let fec_core = ws.get("fec-core").expect("fec-core fixture crate");
-    assert!(
-        fec_core.internal_deps.iter().any(|d| d == "domain"),
-        "target-specific path dep must be internal, got: {:?}",
-        fec_core.internal_deps
-    );
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.iter().any(|v| v.rule == "dependency-direction"),
-        "target-specific forbidden edge must fail, got: {violations:?}"
-    );
-}
-
-#[test]
-fn target_specific_workspace_dep_resolves_internal() {
-    // session -> domain is allowed; declared via workspace=true inside a
-    // target-specific table it must resolve to an internal edge and pass.
-    let root = std::env::temp_dir().join("arch_fixture_target_ws");
-    write_workspace_fixture(
-        &root,
-        "crates/session",
-        r#"[target.'cfg(target_os = "android")'.dependencies]
-domain = { workspace = true }
-"#,
-    );
-    let crafted = format!(
-        r#"{{"packages":[{{"name":"session","manifest_path":"{}"}}]}}"#,
-        root.join("crates/session/Cargo.toml").display()
-    );
-    let ws = parse_metadata(&crafted);
-    let session = ws.get("session").expect("session fixture crate");
-    assert!(
-        session.internal_deps.iter().any(|d| d == "domain"),
-        "target-specific workspace=true path dep must be internal, got: {:?}",
-        session.internal_deps
-    );
-    let violations = check_workspace(&ws);
-    assert!(
-        violations.is_empty(),
-        "allowed target-specific workspace edge must pass, got: {violations:?}"
-    );
+    let ws = parse_metadata(&String::from_utf8(output.stdout).unwrap());
+    assert_eq!(ws["host-core"].internal_deps, ["domain"]);
+    assert!(check_workspace(&ws).is_empty());
+    std::fs::remove_dir_all(root).unwrap();
 }

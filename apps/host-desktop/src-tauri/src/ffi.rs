@@ -1,9 +1,9 @@
 //! FFI backend: drives the macOS capture shim dylib (v2 handle-based C ABI)
 //! through libloading. Symbol set:
-//!   leftcar_capture_list_displays() -> JSON [{index,name,width,height}]
-//!   leftcar_capture_start_v8(ip, port, display, w, h, fps, backend, transport,
+//!   leftcar_capture_list_displays() -> JSON [{index,sourceId,name,width,height}]
+//!   leftcar_capture_start_v9(ip, port, display, w, h, fps, backend, transport,
 //!       contentMode, encoderExperiment, udpProfile, burst, parity, adaptive,
-//!       mediaKey, mediaKeyLen) -> handle
+//!       mediaKey, mediaKeyLen, sourceID, owner, context, begin, end, release) -> handle
 //!   leftcar_capture_stop_v2(handle)
 //!   leftcar_capture_stats_v2(handle) -> JSON {frames,bytes,state,fps,kbps}
 //!   leftcar_capture_free_string(ptr)
@@ -23,6 +23,31 @@ use control_contract::udp_stability::AppliedUdpStability;
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
+
+type StartV9 = unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    u16,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    u8,
+    u8,
+    i32,
+    *const u8,
+    u32,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *mut std::ffi::c_void,
+    extern "C" fn(*mut std::ffi::c_void) -> i32,
+    extern "C" fn(*mut std::ffi::c_void),
+    extern "C" fn(*mut std::ffi::c_void),
+) -> u32;
 
 pub struct FfiBackend {
     _lib: Library,
@@ -106,28 +131,11 @@ impl FfiBackend {
         unsafe {
             let lib = self.lib()?;
             type CPtr = *mut std::ffi::c_char;
-            // v8 (sealed media start) is the minimum start ABI; older shims
-            // cannot produce encrypted media and are rejected at load time.
+            // Current Host requires both sealed media and Host-owned source
+            // authorization; reject a legacy shim before opening the UI.
             let _ = lib
-                .get::<unsafe extern "C" fn(
-                    CPtr,
-                    u16,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    CPtr,
-                    CPtr,
-                    CPtr,
-                    CPtr,
-                    CPtr,
-                    u8,
-                    u8,
-                    i32,
-                    *const u8,
-                    u32,
-                ) -> u32>(b"leftcar_capture_start_v8")
-                .map_err(|e| e.to_string())?;
+                .get::<StartV9>(b"leftcar_capture_start_v9")
+                .map_err(|e| format!("source authorization v9 unavailable: {e}"))?;
             let _ = lib
                 .get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_capture_stop_v2")
                 .map_err(|e| e.to_string())?;
@@ -570,7 +578,12 @@ impl CaptureBackend for FfiBackend {
         encoder_experiment: EncoderExperiment,
         udp_stability: &AppliedUdpStability,
         media_key: &[u8; 32],
+        access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
+        let access = access.ok_or("Host source authorization is required")?;
+        let c_source =
+            CString::new(access.source_id.as_str()).map_err(|_| "source contains NUL")?;
+        let c_owner = CString::new(access.owner.as_str()).map_err(|_| "owner contains NUL")?;
         let lib = self.lib()?;
         let c_ip = CString::new(ip).map_err(|_| "ip contains NUL")?;
         let c_backend = CString::new(capture_backend).map_err(|_| "backend contains NUL")?;
@@ -582,32 +595,13 @@ impl CaptureBackend for FfiBackend {
         let c_udp_profile = CString::new(udp_stability.applied.as_str())
             .map_err(|_| "UDP stability profile contains NUL")?;
         unsafe {
-            // v8 is the sealed-media ABI: identical to v7 plus the trailing
-            // viewer-generated 32-byte media key. There is deliberately no
-            // plaintext fallback — a shim without v8 cannot start a stream.
-            type StartV8 = unsafe extern "C" fn(
-                *const std::ffi::c_char,
-                u16,
-                u32,
-                u32,
-                u32,
-                u32,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                *const std::ffi::c_char,
-                u8,
-                u8,
-                i32,
-                *const u8,
-                u32,
-            ) -> u32;
-            let f = match lib.get::<StartV8>(b"leftcar_capture_start_v8") {
+            // v9 adds stable source and Host-authenticated owner/lease to
+            // the sealed v8 arguments. No legacy authority fallback.
+            let f = match lib.get::<StartV9>(b"leftcar_capture_start_v9") {
                 Ok(f) => f,
                 Err(_) => {
                     return Err(
-                        "capture shim does not support media-path encryption (rebuild native/macos-capture-shim)"
+                        "capture shim does not support Host source authorization v9 (rebuild native/macos-capture-shim)"
                             .into(),
                     );
                 }
@@ -629,6 +623,12 @@ impl CaptureBackend for FfiBackend {
                 i32::from(udp_stability.adaptive_pacing),
                 media_key.as_ptr(),
                 media_key.len() as u32,
+                c_source.as_ptr(),
+                c_owner.as_ptr(),
+                std::sync::Arc::into_raw(access.lease.clone()) as *mut std::ffi::c_void,
+                crate::source_grants::native_begin,
+                crate::source_grants::native_end,
+                crate::source_grants::native_release,
             );
             if handle == 0 {
                 let err_f: Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> = lib

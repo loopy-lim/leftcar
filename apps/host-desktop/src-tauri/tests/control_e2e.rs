@@ -16,12 +16,14 @@ fn fake_backend() -> SharedBackend {
         displays: vec![
             DisplayInfo {
                 index: 0,
+                source_id: Some("test:display:0".into()),
                 name: "Main Display".into(),
                 width: 1920,
                 height: 1080,
             },
             DisplayInfo {
                 index: 1,
+                source_id: Some("test:display:1".into()),
                 name: "Secondary Display".into(),
                 width: 2560,
                 height: 1440,
@@ -60,6 +62,7 @@ impl CaptureBackend for RecordingBackend {
         _encoder_experiment: EncoderExperiment,
         udp_stability: &AppliedUdpStability,
         _media_key: &[u8; 32],
+        _access: Option<&leftcar_host_desktop::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
         self.started_ips.lock().unwrap().push(ip.to_owned());
         self.started_udp_stability
@@ -188,7 +191,7 @@ fn pairing() -> Arc<PairingServer> {
     ))
 }
 
-async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>) {
+async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>, Arc<ControlServer>) {
     let p = pairing();
     let server = Arc::new(ControlServer::new(
         fake_backend(),
@@ -197,10 +200,11 @@ async fn spawn_test_server() -> (std::net::SocketAddr, Arc<PairingServer>) {
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let running = server.clone();
     tokio::spawn(async move {
-        server.run(listener).await;
+        running.run(listener).await;
     });
-    (addr, p)
+    (addr, p, server)
 }
 
 async fn send_request(sock: &mut TcpStream, cmd: &str, args: &str, token: &str) -> String {
@@ -225,6 +229,7 @@ async fn send_request(sock: &mut TcpStream, cmd: &str, args: &str, token: &str) 
 async fn pair_over_socket(
     sock: &mut TcpStream,
     pairing: &PairingServer,
+    server: &ControlServer,
     device_id: &str,
 ) -> String {
     let view = pairing.begin_pairing("127.0.0.1", 7777);
@@ -247,14 +252,25 @@ async fn pair_over_socket(
     .await;
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
     assert!(v["ok"].as_bool().unwrap(), "pair failed: {resp}");
-    v["result"]["token"].as_str().unwrap().to_owned()
+    let token = v["result"]["token"].as_str().unwrap().to_owned();
+    // These transport fixtures explicitly approve the available displays in
+    // the real Host admin boundary; pairing itself still grants nothing.
+    let sources = server
+        .host_sources()
+        .unwrap()
+        .into_iter()
+        .filter_map(|d| d.source_id)
+        .collect();
+    server.set_source_grants(device_id, sources).unwrap();
+    send_request(sock, "getCatalog", "{}", &token).await;
+    token
 }
 
 #[tokio::test]
 async fn test_catalog_query() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     let resp = send_request(&mut sock, "getCatalog", "{}", &token).await;
     assert!(resp.contains("\"ok\":true"), "{resp}");
@@ -278,6 +294,7 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
     let recorder = Arc::new(RecordingBackend {
         displays: vec![DisplayInfo {
             index: 0,
+            source_id: Some("test:display:0".into()),
             name: "Main".into(),
             width: 3840,
             height: 2160,
@@ -292,11 +309,12 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let running = server.clone();
     tokio::spawn(async move {
-        server.run(listener).await;
+        running.run(listener).await;
     });
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-udp-stability").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-udp-stability").await;
 
     let response = send_request(
         &mut sock,
@@ -325,9 +343,9 @@ async fn udp_stability_is_negotiated_echoed_and_passed_to_backend() {
 
 #[tokio::test]
 async fn encoder_experiment_is_carried_to_session_and_reserved_profiles_are_rejected() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-encoder-experiment").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-encoder-experiment").await;
 
     let start = send_request(
         &mut sock,
@@ -384,12 +402,14 @@ async fn test_full_stream_lifecycle() {
             displays: vec![
                 DisplayInfo {
                     index: 0,
+                    source_id: Some("test:display:0".into()),
                     name: "Main Display".into(),
                     width: 1920,
                     height: 1080,
                 },
                 DisplayInfo {
                     index: 1,
+                    source_id: Some("test:display:1".into()),
                     name: "Secondary Display".into(),
                     width: 2560,
                     height: 1440,
@@ -403,11 +423,12 @@ async fn test_full_stream_lifecycle() {
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let running = server.clone();
     tokio::spawn(async move {
-        server.run(listener).await;
+        running.run(listener).await;
     });
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     // 1. Start stream on display 0
     let start_resp = send_request(
@@ -478,9 +499,9 @@ async fn test_full_stream_lifecycle() {
 
 #[tokio::test]
 async fn test_rustra_delegation() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     let resp = send_request(&mut sock, "addNumbers", r#"{"a":20,"b":22}"#, &token).await;
     assert!(resp.contains("\"ok\":true"), "{resp}");
@@ -489,9 +510,9 @@ async fn test_rustra_delegation() {
 
 #[tokio::test]
 async fn test_error_handling() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     // Unknown command
     let unknown_resp = send_request(&mut sock, "unknownCmd", "{}", &token).await;
@@ -513,7 +534,7 @@ async fn test_error_handling() {
 
 #[tokio::test]
 async fn unauthenticated_getcatalog_is_rejected() {
-    let (addr, _p) = spawn_test_server().await;
+    let (addr, _p, _server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
 
     let resp = send_request(&mut sock, "getCatalog", "{}", "").await;
@@ -532,7 +553,7 @@ async fn unauthenticated_getcatalog_is_rejected() {
 
 #[tokio::test]
 async fn pair_then_catalog_works() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
 
     // unpaired: rejected
@@ -561,6 +582,15 @@ async fn pair_then_catalog_works() {
     let v: serde_json::Value = serde_json::from_str(&pair_resp).unwrap();
     let token = v["result"]["token"].as_str().unwrap();
     assert_eq!(token.len(), 64);
+    let denied = send_request(&mut sock, "getCatalog", "{}", token).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&denied).unwrap()["result"]["displays"],
+        serde_json::json!([])
+    );
+    server
+        .set_source_grants("viewer-9", vec!["test:display:0".into()])
+        .unwrap();
+    let mut sock = TcpStream::connect(addr).await.unwrap();
 
     let resp = send_request(&mut sock, "getCatalog", "{}", token).await;
     assert!(resp.contains("\"ok\":true"), "{resp}");
@@ -569,7 +599,7 @@ async fn pair_then_catalog_works() {
 
 #[tokio::test]
 async fn wrong_token_is_rejected() {
-    let (addr, _p) = spawn_test_server().await;
+    let (addr, _p, _server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
 
     let resp = send_request(&mut sock, "getCatalog", "{}", "0".repeat(64).as_str()).await;
@@ -582,6 +612,7 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
     let recorder = Arc::new(RecordingBackend {
         displays: vec![DisplayInfo {
             index: 0,
+            source_id: Some("test:display:0".into()),
             name: "Main".into(),
             width: 1920,
             height: 1080,
@@ -596,12 +627,13 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let running = server.clone();
     tokio::spawn(async move {
-        server.run(listener).await;
+        running.run(listener).await;
     });
 
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     let resp = send_request(
         &mut sock,
@@ -620,15 +652,15 @@ async fn startstream_rejects_unrelated_viewer_ip_and_uses_peer() {
 /// 같은 연결 위의 철회도 다음 명령부터는 거부되고 연결이 닫혀야 한다.
 #[tokio::test]
 async fn revoked_device_is_cut_off_mid_connection_before_the_next_command() {
-    let (addr, p) = spawn_test_server().await;
+    let (addr, p, server) = spawn_test_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let token = pair_over_socket(&mut sock, &p, "viewer-1").await;
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
 
     let resp = send_request(&mut sock, "getCatalog", "{}", &token).await;
     assert!(resp.contains("\"ok\":true"), "{resp}");
 
     // 소켓이 살아 있는 가운데 장치를 철회한다.
-    assert!(p.revoke("viewer-1"));
+    assert!(!p.revoke("viewer-1").removed_devices.is_empty());
 
     let resp = send_request(&mut sock, "getCatalog", "{}", &token).await;
     assert!(resp.contains("\"ok\":false"), "{resp}");
@@ -651,15 +683,16 @@ async fn cross_device_session_commands_are_scoped_to_the_owner() {
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let running = server.clone();
     tokio::spawn(async move {
-        server.run(listener).await;
+        running.run(listener).await;
     });
 
     // 두 장치를 각자의 소켓에서 페어링한다.
     let mut sock_a = TcpStream::connect(addr).await.unwrap();
-    let token_a = pair_over_socket(&mut sock_a, &p, "viewer-a").await;
+    let token_a = pair_over_socket(&mut sock_a, &p, &server, "viewer-a").await;
     let mut sock_b = TcpStream::connect(addr).await.unwrap();
-    let token_b = pair_over_socket(&mut sock_b, &p, "viewer-b").await;
+    let token_b = pair_over_socket(&mut sock_b, &p, &server, "viewer-b").await;
 
     let start_a = send_request(
         &mut sock_a,

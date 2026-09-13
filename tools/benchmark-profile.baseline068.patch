@@ -1,0 +1,561 @@
+diff --git a/apps/host-desktop/src-tauri/src/lib.rs b/apps/host-desktop/src-tauri/src/lib.rs
+--- a/apps/host-desktop/src-tauri/src/lib.rs
++++ b/apps/host-desktop/src-tauri/src/lib.rs
+@@ -17,6 +17,7 @@
+ pub mod lock;
+ pub mod pairing;
+ pub mod settings;
++mod state_profile;
+ #[cfg(target_os = "windows")]
+ pub mod windows_backend;
+ pub mod wire;
+@@ -52,22 +53,49 @@
+ 
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
++    let normal_data = dirs::data_dir();
++    let profile = state_profile::StateProfile::from_environment(normal_data.as_deref())
++        .unwrap_or_else(|message| fatal_startup_error(message));
++    if profile.is_benchmark() {
++        eprintln!("Leftcar Host: isolated internal benchmark profile");
++    }
+     let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
+     let warmup_backend = backend.clone();
+     // 호스트 정체 키: QR과 핸드셰이크 서명의 뿌리. 최초 기동에서 생성·영속된다.
+     let identity = Arc::new(identity::load_or_create(
+-        identity::default_identity_path().as_deref(),
++        (if profile.is_benchmark() {
++            profile.file("host_identity.json")
++        } else {
++            identity::default_identity_path()
++        })
++        .as_deref(),
+     ));
+-    let pairing_store_path = pairing::PairingServer::default_store_path();
++    let pairing_store_path = if profile.is_benchmark() {
++        profile.file("paired_devices.json")
++    } else {
++        pairing::PairingServer::default_store_path()
++    };
+     let pairing = Arc::new(pairing::PairingServer::new(
+         identity.public_key(),
+         pairing_store_path.clone(),
+-        pairing::token_store(pairing_store_path),
++        if profile.is_benchmark() {
++            pairing::token_store_with_service(pairing_store_path, profile.credential_service())
++        } else {
++            pairing::token_store(pairing_store_path)
++        },
+     ));
+-    let audit = Arc::new(audit::SessionAudit::new(audit::SessionAudit::default_path()));
++    let audit = Arc::new(audit::SessionAudit::new(if profile.is_benchmark() {
++        profile.file("sessions.jsonl")
++    } else {
++        audit::SessionAudit::default_path()
++    }));
+     // 파일 공유 게이트: 기본 꺼짐, 승인 토글처럼 영속된다(0600 settings.json).
+     let settings = Arc::new(settings::SharedSettings::load_or_default(
+-        settings::default_settings_path(),
++        if profile.is_benchmark() {
++            profile.file("settings.json")
++        } else {
++            settings::default_settings_path()
++        },
+     ));
+     let server = Arc::new(control::ControlServer::new(
+         backend.clone(),
+diff --git a/apps/host-desktop/src-tauri/src/pairing.rs b/apps/host-desktop/src-tauri/src/pairing.rs
+--- a/apps/host-desktop/src-tauri/src/pairing.rs
++++ b/apps/host-desktop/src-tauri/src/pairing.rs
+@@ -775,13 +775,23 @@
+ /// 파일 폴백이 없다 — 저장 실패는 폴백으로 흡수하지 않고 페어링을
+ /// 실패시킨다([PairingServerError::PersistenceFailed]).
+ pub fn token_store(fallback_path: Option<PathBuf>) -> Box<dyn TokenStore> {
++    token_store_with_service(fallback_path, "leftcar-host")
++}
++
++pub fn token_store_with_service(
++    fallback_path: Option<PathBuf>,
++    service: &str,
++) -> Box<dyn TokenStore> {
+     #[cfg(any(target_os = "macos", target_os = "windows"))]
+     {
+         let _ = fallback_path;
+-        Box::new(KeychainTokenStore)
++        Box::new(KeychainTokenStore {
++            service: service.to_owned(),
++        })
+     }
+     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+     {
++        let _ = service;
+         Box::new(FileTokenStore::new(
+             fallback_path.map(|p| p.with_extension("tokens")),
+         ))
+@@ -791,11 +801,13 @@
+ /// OS 자격 증명 보관소 (keyring 크레이트 → macOS Keychain / Windows Credential
+ /// Manager). 생성·저장 실패는 Err로 올라가 페어링을 실패시킨다 — 실패한
+ /// 저장을 무시하고 성공을 보고하지 않는다.
+-pub struct KeychainTokenStore;
++pub struct KeychainTokenStore {
++    service: String,
++}
+ 
+ impl TokenStore for KeychainTokenStore {
+     fn set(&self, device_id: &str, token_hex: &str) -> Result<(), PairingServerError> {
+-        let entry = keyring::Entry::new("leftcar-host", device_id).map_err(|e| {
++        let entry = keyring::Entry::new(&self.service, device_id).map_err(|e| {
+             eprintln!("leftcar: keychain entry failed for {device_id}: {e}");
+             PairingServerError::PersistenceFailed
+         })?;
+@@ -806,7 +818,7 @@
+     }
+ 
+     fn get(&self, device_id: &str) -> Option<String> {
+-        keyring::Entry::new("leftcar-host", device_id)
++        keyring::Entry::new(&self.service, device_id)
+             .ok()
+             .and_then(|entry| match entry.get_password() {
+                 Ok(token) => Some(token),
+@@ -819,7 +831,7 @@
+     }
+ 
+     fn delete(&self, device_id: &str) {
+-        if let Ok(entry) = keyring::Entry::new("leftcar-host", device_id) {
++        if let Ok(entry) = keyring::Entry::new(&self.service, device_id) {
+             let _ = entry.delete_credential();
+         }
+     }
+diff --git a/apps/viewer-expo/app.config.ts b/apps/viewer-expo/app.config.ts
+--- a/apps/viewer-expo/app.config.ts
++++ b/apps/viewer-expo/app.config.ts
+@@ -11,10 +11,16 @@
+   };
+ };
+ 
++const benchmarkSlug = process.env.LEFTCAR_BENCHMARK_PROFILE;
++if (benchmarkSlug !== undefined && !/^[a-z][a-z0-9-]{0,31}$/.test(benchmarkSlug)) {
++  throw new Error("Invalid LEFTCAR_BENCHMARK_PROFILE");
++}
++const benchmarkSuffix = benchmarkSlug === undefined ? "" : `.benchmark.${benchmarkSlug.replaceAll("-", "_")}`;
++
+ const config: LeftcarExpoConfig = {
+-  name: "Leftcar Viewer",
+-  slug: "leftcar-viewer",
+-  scheme: "leftcar",
++  name: benchmarkSlug === undefined ? "Leftcar Viewer" : `Leftcar Benchmark ${benchmarkSlug}`,
++  slug: benchmarkSlug === undefined ? "leftcar-viewer" : `leftcar-benchmark-${benchmarkSlug}`,
++  scheme: benchmarkSlug === undefined ? "leftcar" : `leftcar-benchmark-${benchmarkSlug}`,
+   version: "0.1.2",
+   orientation: "default",
+   userInterfaceStyle: "automatic",
+@@ -25,7 +31,7 @@
+     backgroundColor: "#09090B",
+   },
+   android: {
+-    package: "leftcar.ll3.kr",
++    package: `leftcar.ll3.kr${benchmarkSuffix}`,
+     adaptiveIcon: {
+       foregroundImage: "./assets/branding/leftcar-viewer-icon-foreground.png",
+       monochromeImage: "./assets/branding/leftcar-viewer-icon-monochrome.png",
+diff --git a/apps/viewer-expo/android/app/src/main/AndroidManifest.xml b/apps/viewer-expo/android/app/src/main/AndroidManifest.xml
+--- a/apps/viewer-expo/android/app/src/main/AndroidManifest.xml
++++ b/apps/viewer-expo/android/app/src/main/AndroidManifest.xml
+@@ -34,14 +34,14 @@
+         <action android:name="android.intent.action.VIEW"/>
+         <category android:name="android.intent.category.DEFAULT"/>
+         <category android:name="android.intent.category.BROWSABLE"/>
+-        <data android:scheme="leftcar"/>
+-        <data android:scheme="exp+leftcar-viewer"/>
++        <data android:scheme="${leftcarScheme}"/>
++        <data android:scheme="${leftcarExpoScheme}"/>
+       </intent-filter>
+       <intent-filter>
+-        <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
++        <action android:name="${leftcarAccessoryAction}" />
+       </intent-filter>
+       <meta-data
+-        android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
++        android:name="${leftcarAccessoryAction}"
+         android:resource="@xml/accessory_filter" />
+     </activity>
+     <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths">
+diff --git a/apps/host-desktop/src-tauri/src/state_profile.rs b/apps/host-desktop/src-tauri/src/state_profile.rs
+new file mode 100644
+--- /dev/null
++++ b/apps/host-desktop/src-tauri/src/state_profile.rs
+@@ -0,0 +1,215 @@
++//! Explicit internal benchmark state isolation. No environment changes or I/O
++//! to credentials. Call once before platform initialization and pass the result.
++use std::path::{Component, Path, PathBuf};
++
++#[derive(Debug, Clone)]
++pub struct StateProfile {
++    directory: Option<PathBuf>,
++    credential_service: String,
++    benchmark: bool,
++}
++impl StateProfile {
++    pub fn resolve(
++        slug: Option<&str>,
++        root: Option<&Path>,
++        normal: Option<&Path>,
++    ) -> Result<Self, String> {
++        match (slug, root) {
++            (None, None) => Ok(Self {
++                directory: normal.map(|p| p.join("leftcar-host")),
++                credential_service: "leftcar-host".into(),
++                benchmark: false,
++            }),
++            (Some(slug), Some(root)) => {
++                if slug.is_empty()
++                    || slug.len() > 32
++                    || !slug.as_bytes()[0].is_ascii_lowercase()
++                    || !slug
++                        .bytes()
++                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
++                {
++                    return Err("LEFTCAR_BENCHMARK_PROFILE must match [a-z][a-z0-9-]{0,31}".into());
++                }
++                if !root.is_absolute()
++                    || root
++                        .components()
++                        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
++                {
++                    return Err("LEFTCAR_BENCHMARK_ROOT must be an absolute dedicated directory without dot components".into());
++                }
++                let root = root
++                    .canonicalize()
++                    .map_err(|e| format!("benchmark root must already exist: {e}"))?;
++                if !root.is_dir() {
++                    return Err("benchmark root is not a directory".into());
++                }
++                if let Some(normal) = normal {
++                    let normal = normal.join("leftcar-host");
++                    let normal = normal.canonicalize().unwrap_or(normal);
++                    if root.starts_with(&normal) {
++                        return Err("benchmark root overlaps normal Host state".into());
++                    }
++                }
++                let directory = root.join(format!("host-{slug}"));
++                if let Ok(meta) = std::fs::symlink_metadata(&directory) {
++                    if meta.file_type().is_symlink() || !meta.is_dir() {
++                        return Err(
++                            "benchmark child must be a real directory, not a symlink or file"
++                                .into(),
++                        );
++                    }
++                    // Existing per-file aliases must not reach normal identity/state.
++                    for name in [
++                        "settings.json",
++                        "host_identity.json",
++                        "paired_devices.json",
++                        "sessions.jsonl",
++                        "paired_devices.tokens",
++                    ] {
++                        if let Ok(meta) = std::fs::symlink_metadata(directory.join(name)) {
++                            if !meta.is_file() || meta.file_type().is_symlink() {
++                                return Err(format!("invalid benchmark state file: {name}"));
++                            }
++                            #[cfg(unix)]
++                            {
++                                use std::os::unix::fs::MetadataExt;
++                                if meta.nlink() != 1 {
++                                    return Err(format!("linked benchmark state file: {name}"));
++                                }
++                            }
++                        }
++                    }
++                }
++                Ok(Self {
++                    directory: Some(directory),
++                    credential_service: format!("leftcar-host.benchmark.{slug}"),
++                    benchmark: true,
++                })
++            }
++            _ => Err(
++                "LEFTCAR_BENCHMARK_PROFILE and LEFTCAR_BENCHMARK_ROOT must be supplied together"
++                    .into(),
++            ),
++        }
++    }
++    pub fn from_environment(normal: Option<&Path>) -> Result<Self, String> {
++        let slug = std::env::var("LEFTCAR_BENCHMARK_PROFILE");
++        let root = std::env::var_os("LEFTCAR_BENCHMARK_ROOT");
++        let slug = match slug {
++            Ok(s) => Some(s),
++            Err(std::env::VarError::NotPresent) => None,
++            Err(_) => return Err("benchmark profile is not UTF-8".into()),
++        };
++        if let Some(audio) = std::env::var_os("LEFTCAR_BENCHMARK_SYSTEM_AUDIO") {
++            if audio != "off" || slug.is_none() {
++                return Err(
++                    "System audio restriction requires an explicit benchmark profile and value off"
++                        .into(),
++                );
++            }
++        }
++        Self::validate_build_profile(
++            option_env!("LEFTCAR_BENCHMARK_BUILD_PROFILE"),
++            slug.as_deref(),
++        )?;
++        Self::resolve(slug.as_deref(), root.as_deref().map(Path::new), normal)
++    }
++
++    fn validate_build_profile(built: Option<&str>, configured: Option<&str>) -> Result<(), String> {
++        if let Some(built) = built {
++            if Some(built) != configured {
++                return Err("This benchmark Host requires its matching LEFTCAR_BENCHMARK_PROFILE and dedicated LEFTCAR_BENCHMARK_ROOT at launch".into());
++            }
++        }
++        Ok(())
++    }
++    pub fn file(&self, name: &str) -> Option<PathBuf> {
++        self.directory.as_ref().map(|d| d.join(name))
++    }
++    pub fn credential_service(&self) -> &str {
++        &self.credential_service
++    }
++    pub fn is_benchmark(&self) -> bool {
++        self.benchmark
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn fixture() -> PathBuf {
++        let p = std::env::temp_dir().join(format!("leftcar-profile-{}", std::process::id()));
++        std::fs::create_dir_all(&p).unwrap();
++        p
++    }
++    #[test]
++    fn benchmark_bundle_without_matching_runtime_profile_fails_closed() {
++        assert!(StateProfile::validate_build_profile(Some("baseline068"), None).is_err());
++        assert!(
++            StateProfile::validate_build_profile(Some("baseline068"), Some("candidate")).is_err()
++        );
++        assert!(
++            StateProfile::validate_build_profile(Some("baseline068"), Some("baseline068")).is_ok()
++        );
++        assert!(StateProfile::validate_build_profile(None, None).is_ok());
++    }
++    #[test]
++    fn default_paths_and_credentials_are_compatible() {
++        let p = StateProfile::resolve(None, None, Some(Path::new("/normal"))).unwrap();
++        assert_eq!(
++            p.file("settings.json").unwrap(),
++            Path::new("/normal/leftcar-host/settings.json")
++        );
++        assert_eq!(p.credential_service(), "leftcar-host");
++        assert!(!p.is_benchmark());
++    }
++    #[test]
++    fn all_state_and_credentials_use_the_same_isolated_profile() {
++        let root = fixture();
++        let p = StateProfile::resolve(Some("baseline068"), Some(&root), Some(Path::new("/normal")))
++            .unwrap();
++        for file in [
++            "settings.json",
++            "host_identity.json",
++            "paired_devices.json",
++            "sessions.jsonl",
++        ] {
++            assert_eq!(
++                p.file(file).unwrap(),
++                root.canonicalize()
++                    .unwrap()
++                    .join("host-baseline068")
++                    .join(file)
++            );
++        }
++        assert_eq!(p.credential_service(), "leftcar-host.benchmark.baseline068");
++        assert!(p.is_benchmark());
++    }
++    #[test]
++    fn incomplete_or_invalid_explicit_profile_never_falls_back() {
++        let root = fixture();
++        for slug in ["", "../prod", "Prod", "a.b", "-bad", "a b"] {
++            assert!(
++                StateProfile::resolve(Some(slug), Some(&root), None).is_err(),
++                "{slug}"
++            );
++        }
++        assert!(StateProfile::resolve(Some("test"), None, None).is_err());
++        assert!(StateProfile::resolve(None, Some(&root), None).is_err());
++        assert!(StateProfile::resolve(Some("test"), Some(Path::new("relative")), None).is_err());
++    }
++    #[test]
++    fn normal_state_or_symlink_child_cannot_be_reused() {
++        let root = fixture();
++        let child = root.join("host-symlink");
++        #[cfg(unix)]
++        {
++            let _ = std::fs::remove_file(&child);
++            std::os::unix::fs::symlink(&root, &child).unwrap();
++            assert!(StateProfile::resolve(Some("symlink"), Some(&root), None).is_err());
++            std::fs::remove_file(child).unwrap();
++        }
++        let normal = root.join("leftcar-host");
++        std::fs::create_dir_all(&normal).unwrap();
++        assert!(StateProfile::resolve(Some("test"), Some(&normal), Some(&root)).is_err());
++    }
++}
+diff --git a/apps/viewer-expo/android/app/build.gradle b/apps/viewer-expo/android/app/build.gradle
+--- a/apps/viewer-expo/android/app/build.gradle
++++ b/apps/viewer-expo/android/app/build.gradle
+@@ -3,6 +3,14 @@
+ apply plugin: "com.facebook.react"
+ 
+ def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
++ext.leftcarProfile = { String slug ->
++    if (slug == null) return [suffix: '', scheme: 'leftcar', expoScheme: 'exp+leftcar-viewer', accessory: 'android.hardware.usb.action.USB_ACCESSORY_ATTACHED']
++    if (!(slug ==~ /[a-z][a-z0-9-]{0,31}/)) throw new GradleException('Invalid LEFTCAR_BENCHMARK_PROFILE')
++    def suffix = '.benchmark.' + slug.replace('-', '_')
++    return [suffix: suffix, scheme: 'leftcar-benchmark-' + slug, expoScheme: 'exp+leftcar-benchmark-' + slug, accessory: 'dev.leftcar.benchmark.' + slug + '.USB_DISABLED']
++}
++
++def benchmark = leftcarProfile(System.getenv("LEFTCAR_BENCHMARK_PROFILE"))
+ 
+ /**
+  * This is the configuration block to customize your React Native Android app.
+@@ -96,7 +104,8 @@
+ 
+     namespace 'dev.leftcar.viewer'
+     defaultConfig {
+-        applicationId 'leftcar.ll3.kr'
++        applicationId 'leftcar.ll3.kr' + benchmark.suffix
++        manifestPlaceholders = [leftcarScheme: benchmark.scheme, leftcarExpoScheme: benchmark.expoScheme, leftcarAccessoryAction: benchmark.accessory]
+         minSdkVersion rootProject.ext.minSdkVersion
+         targetSdkVersion rootProject.ext.targetSdkVersion
+         versionCode 4
+diff --git a/native/macos-capture-shim/Sources/Capture/SystemAudioOwnership.swift b/native/macos-capture-shim/Sources/Capture/SystemAudioOwnership.swift
+--- a/native/macos-capture-shim/Sources/Capture/SystemAudioOwnership.swift
++++ b/native/macos-capture-shim/Sources/Capture/SystemAudioOwnership.swift
+@@ -72,7 +72,7 @@
+ /// True only while a session may capture: it must hold the viewer's audio
+ /// plane and the viewer must not have muted it.
+ func shouldCaptureSystemAudio(owner: Bool, viewerKey: UInt32) -> Bool {
+-    owner && systemAudioDeliveryEnabled(forKey: viewerKey)
++    benchmarkSystemAudioAllowed() && owner && systemAudioDeliveryEnabled(forKey: viewerKey)
+ }
+ 
+ extension CaptureSession {
+diff --git a/native/macos-capture-shim/Sources/Capture/BenchmarkAudioPolicy.swift b/native/macos-capture-shim/Sources/Capture/BenchmarkAudioPolicy.swift
+new file mode 100644
+--- /dev/null
++++ b/native/macos-capture-shim/Sources/Capture/BenchmarkAudioPolicy.swift
+@@ -0,0 +1,8 @@
++import Foundation
++
++/// Restrictive internal benchmark control. The Host profile validator rejects
++/// use outside an explicit isolated profile. At the capture boundary, an off
++/// value always fails closed, including before the first SCStream exists.
++func benchmarkSystemAudioAllowed(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
++    environment["LEFTCAR_BENCHMARK_SYSTEM_AUDIO"] != "off"
++}
+diff --git a/native/macos-capture-shim/Sources/CaptureShim+Exports.swift b/native/macos-capture-shim/Sources/CaptureShim+Exports.swift
+--- a/native/macos-capture-shim/Sources/CaptureShim+Exports.swift
++++ b/native/macos-capture-shim/Sources/CaptureShim+Exports.swift
+@@ -126,6 +126,11 @@
+         return abort(nil)
+     }
+ 
++    guard let selectedDisplay = selectDisplaySource(
++        candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
++        index: displayIndex, sourceID: nil
++    ) else { return abort("source unavailable, ambiguous, or outside benchmark approval") }
++
+     let started: Bool
+     switch backend {
+     case .screenCaptureKit:
+@@ -136,28 +141,24 @@
+         guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
+             return abort("screen-recording permission is not granted to Leftcar Host")
+         }
+-        let displayIDs = activeDisplayIDs()
+-        guard Int(displayIndex) < displayIDs.count else {
+-            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+-        }
+         // Approved VNC-style builds reconnect directly to the requested
+         // display after Screen Recording permission has been granted. Builds
+         // without approval never show a picker; the Host advertises the
+         // automatic CGDisplayStream backend instead.
+         let selection = requestPersistentDisplayFilter(
+-            displayID: displayIDs[Int(displayIndex)],
++            displayID: selectedDisplay,
+             timeout: 15
+         )
+         guard let filter = selection.filter else {
+             return abort(selection.error ?? "screen capture returned no display")
+         }
++        guard selectDisplaySource(
++            candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
++            index: displayIndex, sourceID: nil
++        ) == selectedDisplay else { return abort("display identity changed during selection") }
+         started = session.setupScreenCaptureKit(filter: filter)
+     case .cgDisplayStream:
+-        let displayIDs = activeDisplayIDs()
+-        guard Int(displayIndex) < displayIDs.count else {
+-            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
+-        }
+-        started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
++        started = session.setupCGDisplayStream(displayID: selectedDisplay)
+     }
+     guard started else {
+         return abort(nil)
+diff --git a/native/macos-capture-shim/Sources/Capture/CaptureBackend.swift b/native/macos-capture-shim/Sources/Capture/CaptureBackend.swift
+--- a/native/macos-capture-shim/Sources/Capture/CaptureBackend.swift
++++ b/native/macos-capture-shim/Sources/Capture/CaptureBackend.swift
+@@ -244,6 +244,12 @@
+     }
+ }
+ 
++func stableDisplaySourceID(_ displayID: CGDirectDisplayID) -> String? {
++    guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
++          let value = CFUUIDCreateString(nil, uuid) else { return nil }
++    return "macos:display:\(value)".lowercased()
++}
++
+ func coreGraphicsCatalogJSON() -> String? {
+     let sortedIDs = sortedActiveDisplayIDs()
+     guard !sortedIDs.isEmpty else {
+@@ -253,6 +259,7 @@
+         let pixelSize = nativePixelSize(for: displayID)
+         return [
+             "index": index,
++            "sourceId": stableDisplaySourceID(displayID) as Any? ?? NSNull(),
+             "name": "Display \(index)",
+             "width": pixelSize.width,
+             "height": pixelSize.height,
+diff --git a/native/macos-capture-shim/Sources/Capture/DisplaySourceSelection.swift b/native/macos-capture-shim/Sources/Capture/DisplaySourceSelection.swift
+new file mode 100644
+--- /dev/null
++++ b/native/macos-capture-shim/Sources/Capture/DisplaySourceSelection.swift
+@@ -0,0 +1,27 @@
++import Foundation
++
++/// Pure selector shared by the real native boundary and synthetic tests.
++/// Indices remain legacy locators; a supplied stable ID must resolve exactly once.
++func selectDisplaySource<T>(
++    candidates: [(id: String?, value: T)], index: UInt32, sourceID: String?,
++    benchmarkProfile: String? = ProcessInfo.processInfo.environment["LEFTCAR_BENCHMARK_PROFILE"],
++    benchmarkSource: String? = ProcessInfo.processInfo.environment["LEFTCAR_BENCHMARK_SOURCE_ID"]
++) -> T? {
++    let selected: (id: String?, value: T)
++    if let sourceID {
++        guard !sourceID.isEmpty else { return nil }
++        let matches = candidates.filter { $0.id == sourceID }
++        guard matches.count == 1 else { return nil }
++        selected = matches[0]
++    } else {
++        guard Int(index) < candidates.count else { return nil }
++        selected = candidates[Int(index)]
++    }
++    if benchmarkProfile != nil || benchmarkSource != nil {
++        guard let benchmarkProfile, !benchmarkProfile.isEmpty,
++              let benchmarkSource, !benchmarkSource.isEmpty,
++              selected.id == benchmarkSource,
++              candidates.filter({ $0.id == benchmarkSource }).count == 1 else { return nil }
++    }
++    return selected.value
++}

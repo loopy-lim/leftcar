@@ -17,6 +17,7 @@ struct SplitFlowControlState {
 
     private var nextID: UInt64 = 0
     private var generation: UInt64 = 0
+    var recoveryGeneration: UInt64 { generation }
     private var boundaryLeaseID: UInt64?
     private var activeLeases = Set<SplitFlowLease>()
 

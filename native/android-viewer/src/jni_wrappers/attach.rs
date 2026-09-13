@@ -31,6 +31,7 @@ fn attach_port_body(
     width: i32,
     height: i32,
     fps: i32,
+    balanced: bool,
 ) -> i32 {
     if unsafe { exception_pending(env) } {
         return 3;
@@ -48,7 +49,7 @@ fn attach_port_body(
         return 4;
     }
     let r = unsafe {
-        leftcar_jni_attach_port(
+        leftcar_jni_attach_port_presentation(
             state as *mut c_void,
             c.as_ptr(),
             window,
@@ -57,6 +58,7 @@ fn attach_port_body(
             width.max(1) as u32,
             height.max(1) as u32,
             fps.clamp(1, 90) as u32,
+            balanced,
         )
     };
     if r != 0 {
@@ -78,6 +80,7 @@ fn attach_split_body(
     height: i32,
     fps: i32,
     decoder_name: *mut jobject,
+    balanced: bool,
 ) -> i32 {
     if unsafe { exception_pending(env) } || port <= 0 || port >= i32::from(u16::MAX) {
         return 4;
@@ -104,7 +107,7 @@ fn attach_split_body(
         return 4;
     }
     let result = unsafe {
-        leftcar_jni_attach_split_port(
+        leftcar_jni_attach_split_port_presentation(
             state as *mut c_void,
             instance.as_ptr(),
             left_window,
@@ -115,6 +118,7 @@ fn attach_split_body(
             height.max(1) as u32,
             fps.clamp(1, 90) as u32,
             decoder_name.as_ptr(),
+            balanced,
         )
     };
     if result != 0 {
@@ -154,7 +158,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurface
 ) -> i32 {
     std::panic::catch_unwind(|| {
         attach_port_body(
-            env, state, instance, surface, port, host, width, height, fps,
+            env, state, instance, surface, port, host, width, height, fps, false,
         )
     })
     .unwrap_or(3)
@@ -170,6 +174,7 @@ fn rebind_port_body(
     width: i32,
     height: i32,
     fps: i32,
+    balanced: bool,
 ) -> i32 {
     if unsafe { exception_pending(env) } || port <= 0 || port > i32::from(u16::MAX) {
         return 4;
@@ -187,7 +192,7 @@ fn rebind_port_body(
         return 4;
     }
     let result = unsafe {
-        leftcar_jni_rebind_port(
+        leftcar_jni_rebind_port_presentation(
             state as *mut c_void,
             instance.as_ptr(),
             window,
@@ -196,6 +201,7 @@ fn rebind_port_body(
             width.max(1) as u32,
             height.max(1) as u32,
             fps.clamp(1, 90) as u32,
+            balanced,
         )
     };
     if result != 0 {
@@ -220,7 +226,7 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_rebindSurface
 ) -> i32 {
     std::panic::catch_unwind(|| {
         rebind_port_body(
-            env, state, instance, surface, port, host, width, height, fps,
+            env, state, instance, surface, port, host, width, height, fps, false,
         )
     })
     .unwrap_or(3)
@@ -255,6 +261,107 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSplitSu
             height,
             fps,
             decoder_name,
+            false,
+        )
+    })
+    .unwrap_or(3)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSurfacePortWithPresentation(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    surface: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+    width: i32,
+    height: i32,
+    fps: i32,
+    balanced: u8,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        attach_port_body(
+            env,
+            state,
+            instance,
+            surface,
+            port,
+            host,
+            width,
+            height,
+            fps,
+            balanced != 0,
+        )
+    })
+    .unwrap_or(3)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_rebindSurfacePortWithPresentation(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    surface: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+    width: i32,
+    height: i32,
+    fps: i32,
+    balanced: u8,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        rebind_port_body(
+            env,
+            state,
+            instance,
+            surface,
+            port,
+            host,
+            width,
+            height,
+            fps,
+            balanced != 0,
+        )
+    })
+    .unwrap_or(3)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_attachSplitSurfacesWithPresentation(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    left_surface: *mut jobject,
+    right_surface: *mut jobject,
+    port: i32,
+    host: *mut jobject,
+    width: i32,
+    height: i32,
+    fps: i32,
+    decoder_name: *mut jobject,
+    balanced: u8,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        attach_split_body(
+            env,
+            state,
+            instance,
+            left_surface,
+            right_surface,
+            port,
+            host,
+            width,
+            height,
+            fps,
+            decoder_name,
+            balanced != 0,
         )
     })
     .unwrap_or(3)

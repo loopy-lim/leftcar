@@ -153,6 +153,10 @@ interface ViewerOptionsCardProps {
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
+  opusAudio: boolean;
+  onToggleOpusAudio: (enabled: boolean) => void;
+  balancedPresentation: boolean;
+  onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
   clipboardShare: boolean;
   onToggleClipboardShare: (enabled: boolean) => void;
@@ -165,6 +169,10 @@ function ViewerOptionsCard({
   localCursor,
   onToggleCursor,
   localAudio,
+  opusAudio,
+  onToggleOpusAudio,
+  balancedPresentation,
+  onToggleBalancedPresentation,
   onToggleAudio,
   clipboardShare,
   onToggleClipboardShare,
@@ -233,6 +241,19 @@ function ViewerOptionsCard({
           accessibilityLabel={t.viewer.audioToggleLabel}
           {...switchColor}
         />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <Text style={{ flex: 1, color: colors.textPrimary }}>Opus 128 kbps (experimental)</Text>
+        <Switch value={opusAudio} onValueChange={onToggleOpusAudio}
+          accessibilityLabel="Opus 128 kbps experimental" {...switchColor} />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
+        </View>
+        <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
+          accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
       </View>
       {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
       <View style={OPTION_ROW_STYLE}>
@@ -304,6 +325,10 @@ interface CatalogHeaderProps {
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
+  opusAudio: boolean;
+  onToggleOpusAudio: (enabled: boolean) => void;
+  balancedPresentation: boolean;
+  onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
   clipboardShare: boolean;
   onToggleClipboardShare: (enabled: boolean) => void;
@@ -333,6 +358,10 @@ function CatalogHeader({
   localCursor,
   onToggleCursor,
   localAudio,
+  opusAudio,
+  onToggleOpusAudio,
+  balancedPresentation,
+  onToggleBalancedPresentation,
   onToggleAudio,
   clipboardShare,
   onToggleClipboardShare,
@@ -428,7 +457,11 @@ function CatalogHeader({
             onToggleFps={onToggleFps}
             localCursor={localCursor}
             onToggleCursor={onToggleCursor}
+            balancedPresentation={balancedPresentation}
+            onToggleBalancedPresentation={onToggleBalancedPresentation}
             localAudio={localAudio}
+            opusAudio={opusAudio}
+            onToggleOpusAudio={onToggleOpusAudio}
             onToggleAudio={onToggleAudio}
             clipboardShare={clipboardShare}
             onToggleClipboardShare={onToggleClipboardShare}
@@ -785,7 +818,11 @@ export default function Catalog() {
             onToggleFps={model.handleToggleFps}
             localCursor={model.localCursor}
             onToggleCursor={model.handleToggleCursor}
+            balancedPresentation={model.balancedPresentation}
+            onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
             localAudio={model.localAudio}
+            opusAudio={model.opusAudio}
+            onToggleOpusAudio={model.handleToggleOpusAudio}
             onToggleAudio={model.handleToggleAudio}
             clipboardShare={model.clipboardShare}
             onToggleClipboardShare={model.handleToggleClipboardShare}

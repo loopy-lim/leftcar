@@ -54,6 +54,7 @@ pub trait CaptureBackend: Send + Sync {
         // The control plane rejects keyless starts, so implementations may
         // treat a wrong length as an internal contract violation.
         media_key: &[u8; 32],
+        _access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String>;
     fn stop(&self, handle: u32) -> Result<(), String>;
     /// Stop while telling a still-live viewer why (LCT1 wire code). The
@@ -143,6 +144,7 @@ impl CaptureBackend for FakeBackend {
         encoder_experiment: EncoderExperiment,
         _udp_stability: &AppliedUdpStability,
         _media_key: &[u8; 32],
+        _access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
         *self.encoder_experiment.lock().unwrap() = encoder_experiment;
         Ok(7)

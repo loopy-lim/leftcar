@@ -1,4 +1,5 @@
 use super::{MediaSender, Monitor, WindowsSession};
+use crate::media_pacing::{DrainIo, MediaPacer};
 use crate::wire;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::Ordering;
@@ -34,9 +35,20 @@ pub(super) fn run(
     if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err("Media Foundation H.264 dimensions must be even".into());
     }
+    let admission = session
+        .access
+        .lease
+        .enter()
+        .ok_or("source authorization revoked")?;
     let _winrt = WinRtGuard::new()?;
     let _media_foundation = MfGuard::new()?;
     let (device, runtime_device) = create_d3d_device()?;
+    // Resolve the same identity again at the actual WGC constructor. A stale
+    // HMONITOR captured before worker/transport setup cannot select a new target.
+    let current = super::select_monitor(super::monitors()?, &session.access.source_id)?;
+    if current.handle != monitor.handle || current.rect != monitor.rect {
+        return Err("source display changed before native capture; refresh sources".into());
+    }
     let item = capture_item(windows::Win32::Graphics::Gdi::HMONITOR(
         monitor.handle as *mut _,
     ))?;
@@ -55,102 +67,117 @@ pub(super) fn run(
         .StartCapture()
         .map_err(win("start Windows Graphics Capture"))?;
 
+    drop(admission);
     let bitrate = session.stats.lock().unwrap().current_bitrate;
     let mut encoder = HardwareH264Encoder::new(&device, width, height, fps, bitrate)?;
     let started = Instant::now();
-    let mut au_id = 0u16;
-    let mut config_sent = false;
-    if let Some(config) = wire::config_datagram(encoder.parameter_sets()) {
-        send_packet(&sender, &config, &session, false)?;
-        config_sent = true;
-    }
-    let mut last_frame = None;
-    let mut interval = FrameInterval::new();
-    let mut last_capture_to_encode_us = 0u64;
+    let mut pacing = CapturePacing::new(bitrate, fps, sender.is_tcp(), started);
+    // Always close WGC resources on a terminal drain, including partial AUs.
+    let result = (|| -> Result<(), String> {
+        let mut au_id = 0u16;
+        let mut config_sent = false;
+        if let Some(config) = wire::config_datagram(encoder.parameter_sets()) {
+            pacing.drain(&sender, &session, &[config], false)?;
+            config_sent = true;
+        }
+        let mut last_frame = None;
+        let mut interval = FrameInterval::new();
+        let mut last_capture_to_encode_us = 0u64;
 
-    while !session.stop.load(Ordering::Acquire) {
-        let frame = match pool.TryGetNextFrame() {
-            Ok(frame) => frame,
-            Err(_) => {
-                // An METransformHaveOutput raised after the last encode()
-                // call sits unpumped until the next WGC frame; on a static
-                // screen WGC goes quiet and finished encoder output would be
-                // held indefinitely. Run the same nonblocking
-                // MF_EVENT_FLAG_NO_WAIT pump encode() uses and forward
-                // whatever it drained. The send updates stats.frames, which
-                // also keeps the no-frame timeout below from misattributing
-                // an encoder-held stall to capture.
-                let pump_started = Instant::now();
-                let drained = encoder.pump_pending()?;
-                let encode_us = pump_started.elapsed().as_micros() as u64;
-                send_encoded_outputs(
-                    &sender,
-                    &session,
-                    started,
-                    drained,
-                    last_capture_to_encode_us,
-                    encode_us,
-                    &mut config_sent,
-                    &mut au_id,
-                    &mut last_frame,
-                    &mut interval,
-                )?;
-                if started.elapsed() > Duration::from_secs(5)
-                    && session.stats.lock().unwrap().frames == 0
-                {
-                    return Err(
-                        "Windows Graphics Capture produced no frame within 5 seconds".into(),
-                    );
+        while !session.stop.load(Ordering::Acquire) {
+            let frame = match pool.TryGetNextFrame() {
+                Ok(frame) => frame,
+                Err(_) => {
+                    // An METransformHaveOutput raised after the last encode()
+                    // call sits unpumped until the next WGC frame; on a static
+                    // screen WGC goes quiet and finished encoder output would be
+                    // held indefinitely. Run the same nonblocking
+                    // MF_EVENT_FLAG_NO_WAIT pump encode() uses and forward
+                    // whatever it drained. The send updates stats.frames, which
+                    // also keeps the no-frame timeout below from misattributing
+                    // an encoder-held stall to capture.
+                    let pump_started = Instant::now();
+                    let drained = encoder.pump_pending()?;
+                    let encode_us = pump_started.elapsed().as_micros() as u64;
+                    send_encoded_outputs(
+                        &sender,
+                        &session,
+                        started,
+                        drained,
+                        last_capture_to_encode_us,
+                        encode_us,
+                        &mut config_sent,
+                        &mut au_id,
+                        &mut last_frame,
+                        &mut interval,
+                        &mut pacing,
+                    )?;
+                    if started.elapsed() > Duration::from_secs(5)
+                        && session.stats.lock().unwrap().frames == 0
+                    {
+                        return Err(
+                            "Windows Graphics Capture produced no frame within 5 seconds".into(),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
                 }
-                std::thread::sleep(Duration::from_millis(1));
+            };
+            let capture_started = Instant::now();
+            let next_size = frame.ContentSize().map_err(win("read WGC frame size"))?;
+            if next_size.Width != content_size.Width || next_size.Height != content_size.Height {
+                content_size = next_size;
+                pool.Recreate(
+                    &runtime_device,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    2,
+                    content_size,
+                )
+                .map_err(win("recreate WGC pool after display resize"))?;
+                frame.Close().ok();
                 continue;
             }
-        };
-        let capture_started = Instant::now();
-        let next_size = frame.ContentSize().map_err(win("read WGC frame size"))?;
-        if next_size.Width != content_size.Width || next_size.Height != content_size.Height {
-            content_size = next_size;
-            pool.Recreate(
-                &runtime_device,
-                DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                2,
-                content_size,
-            )
-            .map_err(win("recreate WGC pool after display resize"))?;
+            let surface = frame.Surface().map_err(win("read WGC frame surface"))?;
+            let access: IDirect3DDxgiInterfaceAccess =
+                surface.cast().map_err(win("cast WGC surface interop"))?;
+            let texture: ID3D11Texture2D = unsafe { access.GetInterface() }
+                .map_err(win("obtain D3D11 texture from WGC frame"))?;
+            let capture_to_encode_us = capture_started.elapsed().as_micros() as u64;
+            last_capture_to_encode_us = capture_to_encode_us;
+            if session.force_keyframe.swap(false, Ordering::AcqRel) {
+                encoder.force_keyframe();
+            }
+            let encode_started = Instant::now();
+            let outputs = encoder.encode(&texture)?;
             frame.Close().ok();
-            continue;
+            let encode_us = encode_started.elapsed().as_micros() as u64;
+            send_encoded_outputs(
+                &sender,
+                &session,
+                started,
+                outputs,
+                capture_to_encode_us,
+                encode_us,
+                &mut config_sent,
+                &mut au_id,
+                &mut last_frame,
+                &mut interval,
+                &mut pacing,
+            )?;
         }
-        let surface = frame.Surface().map_err(win("read WGC frame surface"))?;
-        let access: IDirect3DDxgiInterfaceAccess =
-            surface.cast().map_err(win("cast WGC surface interop"))?;
-        let texture: ID3D11Texture2D =
-            unsafe { access.GetInterface() }.map_err(win("obtain D3D11 texture from WGC frame"))?;
-        let capture_to_encode_us = capture_started.elapsed().as_micros() as u64;
-        last_capture_to_encode_us = capture_to_encode_us;
-        if session.force_keyframe.swap(false, Ordering::AcqRel) {
-            encoder.force_keyframe();
-        }
-        let encode_started = Instant::now();
-        let outputs = encoder.encode(&texture)?;
-        frame.Close().ok();
-        let encode_us = encode_started.elapsed().as_micros() as u64;
-        send_encoded_outputs(
-            &sender,
-            &session,
-            started,
-            outputs,
-            capture_to_encode_us,
-            encode_us,
-            &mut config_sent,
-            &mut au_id,
-            &mut last_frame,
-            &mut interval,
-        )?;
-    }
+        Ok(())
+    })();
     capture.Close().ok();
     pool.Close().ok();
-    session.stats.lock().unwrap().state = "stopped".into();
-    Ok(())
+    pacing.snapshot("final");
+    if session.stop.load(Ordering::Acquire) {
+        // A user/input-worker stop remains a normal stop, even if a pacing
+        // boundary observed it while draining an AU.
+        session.stats.lock().unwrap().state = "stopped".into();
+        Ok(())
+    } else {
+        result
+    }
 }
 
 /// Per-interval fps/kbps counters, shared by the capture-driven encode path
@@ -187,6 +214,7 @@ fn send_encoded_outputs(
     au_id: &mut u16,
     last_frame: &mut Option<Instant>,
     interval: &mut FrameInterval,
+    pacing: &mut CapturePacing,
 ) -> Result<(), String> {
     if outputs.is_empty() {
         return Ok(());
@@ -198,16 +226,16 @@ fn send_encoded_outputs(
         let Some(annex_b) = wire::normalize_h264(&encoded) else {
             return Err("Media Foundation emitted malformed H.264".into());
         };
+        let mut config_packet = None;
         let parameter_sets = wire::h264_parameter_sets(&annex_b);
         let keyframe = contains_idr(&annex_b);
         if (!*config_sent || keyframe) && !parameter_sets.is_empty() {
             if let Some(config) = wire::config_datagram(&parameter_sets) {
-                send_packet(sender, &config, session, false)?;
-                *config_sent = true;
+                config_packet = Some(config);
             }
         }
         // Do not send an undecodable access unit before SPS/PPS are known.
-        if !*config_sent {
+        if !*config_sent && config_packet.is_none() {
             session.force_keyframe.store(true, Ordering::Release);
             continue;
         }
@@ -222,11 +250,19 @@ fn send_encoded_outputs(
         }
         let parity_datagrams = crate::fec::parity_datagrams_for_media(*au_id, wall_ms, &datagrams);
         let send_started = Instant::now();
-        let mut bytes = 0usize;
-        for datagram in datagrams.into_iter().chain(parity_datagrams) {
-            send_packet(sender, &datagram, session, true)?;
-            bytes += datagram.len();
-        }
+        let mut packets = Vec::with_capacity(
+            datagrams.len() + parity_datagrams.len() + usize::from(config_packet.is_some()),
+        );
+        let has_config = config_packet.is_some();
+        packets.extend(config_packet);
+        packets.extend(datagrams);
+        packets.extend(parity_datagrams);
+        // Shared production drain for both capture-driven output and idle pump.
+        // Any incomplete AU terminates this worker; dependent outputs cannot run.
+        let before_bytes = pacing.policy.metrics().submitted_wire_bytes;
+        pacing.drain(sender, session, &packets, true)?;
+        *config_sent |= has_config;
+        let bytes = (pacing.policy.metrics().submitted_wire_bytes - before_bytes) as usize;
         let send_us = send_started.elapsed().as_micros() as u64;
         interval.frames += 1;
         interval.bytes += bytes as u64;
@@ -686,26 +722,99 @@ fn contains_idr(annex_b: &[u8]) -> bool {
     false
 }
 
-fn send_packet(
-    sender: &MediaSender,
-    packet: &[u8],
-    session: &WindowsSession,
-    frame: bool,
-) -> Result<(), String> {
-    match sender.send(packet) {
-        Ok(size) if size == packet.len() => Ok(()),
-        Ok(size) => Err(format!(
-            "partial UDP datagram send: {size}/{}",
-            packet.len()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let mut stats = session.stats.lock().unwrap();
-            stats.network_dropped += i64::from(frame);
-            stats.dropped += i64::from(frame);
-            session.force_keyframe.store(true, Ordering::Release);
-            Ok(())
+/// The capture worker owns one pacer for its whole lifetime. Other socket
+/// traffic (input acknowledgements/notices) is not video and keeps its sender.
+struct CapturePacing {
+    policy: MediaPacer,
+    started: Instant,
+    last_snapshot: Instant,
+    capture_id: u128,
+    tcp: bool,
+}
+
+impl CapturePacing {
+    fn new(bitrate: u32, fps: u32, tcp: bool, started: Instant) -> Self {
+        Self {
+            policy: MediaPacer::new(bitrate, fps, tcp, started.elapsed()),
+            started,
+            last_snapshot: Instant::now(),
+            capture_id: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            tcp,
         }
-        Err(error) => Err(format!("send Windows media datagram: {error}")),
+    }
+
+    fn drain(
+        &mut self,
+        sender: &MediaSender,
+        session: &WindowsSession,
+        packets: &[Vec<u8>],
+        access_unit: bool,
+    ) -> Result<(), String> {
+        let mut io = WindowsDrain {
+            sender,
+            session,
+            started: self.started,
+        };
+        let result = self.policy.drain(packets, access_unit, &mut io);
+        if result.is_err() {
+            self.snapshot("terminal");
+        } else if self.last_snapshot.elapsed() >= Duration::from_secs(1) {
+            self.snapshot("periodic");
+        }
+        result.map_err(|error| {
+            format!(
+                "Windows media drain terminated: {error:?}; cause={:?}",
+                self.policy.metrics().terminal_cause
+            )
+        })
+    }
+
+    fn snapshot(&mut self, reason: &str) {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "windows_media_pacing",
+                "schema": 1,
+                "reason": reason,
+                "capture_id": self.capture_id.to_string(),
+                "session_thread": std::thread::current().name(),
+                "counter_lifetime": "capture_worker_cumulative",
+                "elapsed_us": self.started.elapsed().as_micros() as u64,
+                "transport": if self.tcp { "tcp" } else { "udp" },
+                "submission_mode": "bounded_ordinary",
+                "transport_budget_bytes_per_second": self.policy.transport_bytes_per_second(),
+                "terminal": self.policy.terminal(),
+                "metrics": self.policy.metrics(),
+            })
+        );
+        self.last_snapshot = Instant::now();
+    }
+}
+
+struct WindowsDrain<'a> {
+    sender: &'a MediaSender,
+    session: &'a WindowsSession,
+    started: Instant,
+}
+
+impl DrainIo for WindowsDrain<'_> {
+    fn now(&self) -> Duration {
+        self.started.elapsed()
+    }
+    fn wait(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn cancelled(&self) -> bool {
+        self.session.stop.load(Ordering::Acquire)
+    }
+    fn prepare(&mut self, packet: &[u8]) -> std::io::Result<Vec<u8>> {
+        self.sender.prepare(packet)
+    }
+    fn submit(&mut self, packet: &[u8]) -> std::io::Result<usize> {
+        self.sender.submit_sealed(packet)
     }
 }
 

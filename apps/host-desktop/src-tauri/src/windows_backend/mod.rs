@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Gdi::{
 
 #[derive(Clone)]
 pub(super) struct Monitor {
+    pub source_id: Option<String>,
     pub handle: isize,
     pub rect: RECT,
     pub name: String,
@@ -77,6 +78,7 @@ pub(super) struct MediaSender {
     /// (secure-channel), which also keeps the main sender and this notice
     /// sender from sharing a counter range.
     tx: Arc<DatagramSealer>,
+    access: Option<Arc<crate::source_grants::SourceLease>>,
 }
 
 impl MediaSender {
@@ -85,40 +87,53 @@ impl MediaSender {
         Self {
             socket,
             tx: Arc::new(DatagramSealer::new(keys.s2c)),
+            access: None,
         }
     }
 
-    /// Seal and send. Returns the plaintext length so callers' completeness
-    /// checks stay independent of the sealed wire overhead.
-    fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
-        if packet.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "empty media packet",
-            ));
-        }
-        let sealed = self.tx.seal(packet).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-        })?;
+    fn with_access(mut self, access: &crate::source_grants::CaptureAccess) -> Self {
+        self.access = Some(access.lease.clone());
+        self
+    }
+
+    fn is_tcp(&self) -> bool {
+        matches!(self.socket, MediaSocket::Tcp(_))
+    }
+
+    fn prepare(&self, packet: &[u8]) -> std::io::Result<Vec<u8>> {
+        wire::seal_media_packet(&self.tx, packet, self.is_tcp())
+    }
+
+    /// One ordinary datagram, or one existing length-prefixed TCP frame.
+    /// No GSO, scatter/gather-as-batch or uncertain automatic resend.
+    fn submit_sealed(&self, envelope: &[u8]) -> std::io::Result<usize> {
+        let _permission = self
+            .access
+            .as_ref()
+            .map(|lease| {
+                lease.enter().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "source authorization revoked",
+                    )
+                })
+            })
+            .transpose()?;
         match &self.socket {
-            MediaSocket::Udp(socket) => socket.send(&sealed).map(|_| packet.len()),
-            MediaSocket::Tcp(stream) => {
-                if sealed.len() > MAX_TCP_MEDIA_FRAME {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "sealed TCP media frame is outside the bounded range",
-                    ));
-                }
-                let mut frame = Vec::with_capacity(4 + sealed.len());
-                frame.extend_from_slice(&(sealed.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&sealed);
-                stream
-                    .lock()
-                    .map_err(|_| std::io::Error::other("TCP media writer lock poisoned"))?
-                    .write_all(&frame)
-                    .map(|_| packet.len())
-            }
+            MediaSocket::Udp(socket) => socket.send(envelope),
+            MediaSocket::Tcp(stream) => stream
+                .lock()
+                .map_err(|_| std::io::Error::other("TCP media writer lock poisoned"))?
+                .write_all(envelope)
+                .map(|_| envelope.len()),
         }
+    }
+
+    /// Input acknowledgements/notices retain the plaintext return contract.
+    fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
+        let envelope = self.prepare(packet)?;
+        let submitted = self.submit_sealed(&envelope)?;
+        wire::complete_plaintext_send(packet.len(), envelope.len(), submitted)
     }
 }
 
@@ -133,6 +148,7 @@ pub struct WindowsBackend {
 }
 
 pub(super) struct WindowsSession {
+    access: crate::source_grants::CaptureAccess,
     stop: AtomicBool,
     input_enabled: AtomicBool,
     force_keyframe: AtomicBool,
@@ -203,13 +219,13 @@ impl CaptureBackend for WindowsBackend {
         }
         session.stop.store(true, Ordering::Release);
         session.input_enabled.store(false, Ordering::Release);
-        session.injector.lock().unwrap().release_all()?;
+        let released_input = session.injector.lock().unwrap().release_all();
         let threads = std::mem::take(&mut *session.threads.lock().unwrap());
         for thread in threads {
             let _ = thread.join();
         }
         session.stats.lock().unwrap().state = "stopped".into();
-        Ok(())
+        released_input
     }
 
     fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
@@ -226,6 +242,7 @@ impl CaptureBackend for WindowsBackend {
                 .into_iter()
                 .enumerate()
                 .map(|(index, monitor)| DisplayInfo {
+                    source_id: monitor.source_id.clone(),
                     index: index as u32,
                     name: monitor.name,
                     width: (monitor.rect.right - monitor.rect.left).max(0) as u32,
@@ -237,7 +254,7 @@ impl CaptureBackend for WindowsBackend {
 
     fn start(
         &self,
-        source_index: u32,
+        _source_index: u32,
         ip: &str,
         port: u16,
         width: u32,
@@ -249,6 +266,7 @@ impl CaptureBackend for WindowsBackend {
         _encoder_experiment: EncoderExperiment,
         _udp_stability: &AppliedUdpStability,
         media_key: &[u8; 32],
+        access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
         if !matches!(media_transport, "udp" | "usb") {
             return Err("Windows backend supports Wi-Fi UDP or USB AOAP media".into());
@@ -258,10 +276,9 @@ impl CaptureBackend for WindowsBackend {
                 "unsupported Windows capture backend: {capture_backend}"
             ));
         }
-        let monitor = monitors()?
-            .get(source_index as usize)
-            .cloned()
-            .ok_or_else(|| format!("display index {source_index} no longer exists"))?;
+        let access = access.ok_or("Host source authorization is required")?;
+        let _admission = access.lease.enter().ok_or("source authorization revoked")?;
+        let monitor = select_monitor(monitors()?, &access.source_id)?;
         // Random LCH1 nonce: freshness for the reachability proof. The media
         // key — possession of it — is the actual authentication. The receive
         // side opens viewer frames under the derived c2s key.
@@ -288,7 +305,8 @@ impl CaptureBackend for WindowsBackend {
                         .map_err(|error| format!("clone USB media writer: {error}"))?,
                 ))),
                 media_key,
-            );
+            )
+            .with_access(access);
             prove_tcp_reachability(&stream, &sender, &crypto_rx, &challenge)?;
             (sender, MediaReceiver::Tcp(stream), None)
         } else {
@@ -300,7 +318,9 @@ impl CaptureBackend for WindowsBackend {
             socket
                 .set_write_timeout(Some(Duration::from_millis(20)))
                 .map_err(|error| format!("configure media socket: {error}"))?;
-            let sender = MediaSender::new(MediaSocket::Udp(Arc::new(socket)), media_key);
+            let socket = Arc::new(socket);
+            let sender =
+                MediaSender::new(MediaSocket::Udp(socket.clone()), media_key).with_access(access);
             prove_udp_reachability(&socket, &sender, &crypto_rx, &challenge, ip, port)?;
             let input_socket = socket
                 .try_clone()
@@ -311,10 +331,10 @@ impl CaptureBackend for WindowsBackend {
             (
                 sender,
                 MediaReceiver::Udp(input_socket),
-                Some(MediaSender::new(
-                    MediaSocket::Udp(Arc::new(notice_socket)),
-                    media_key,
-                )),
+                Some(
+                    MediaSender::new(MediaSocket::Udp(Arc::new(notice_socket)), media_key)
+                        .with_access(access),
+                ),
             )
         };
 
@@ -322,6 +342,7 @@ impl CaptureBackend for WindowsBackend {
         let mut initial_stats = initial_stats(width, height, fps);
         initial_stats.media_transport = media_transport.into();
         let session = Arc::new(WindowsSession {
+            access: access.clone(),
             stop: AtomicBool::new(false),
             input_enabled: AtomicBool::new(false),
             force_keyframe: AtomicBool::new(true),
@@ -383,13 +404,13 @@ impl CaptureBackend for WindowsBackend {
         }
         session.stop.store(true, Ordering::Release);
         session.input_enabled.store(false, Ordering::Release);
-        session.injector.lock().unwrap().release_all()?;
+        let released_input = session.injector.lock().unwrap().release_all();
         let threads = std::mem::take(&mut *session.threads.lock().unwrap());
         for thread in threads {
             let _ = thread.join();
         }
         session.stats.lock().unwrap().state = "stopped".into();
-        Ok(())
+        released_input
     }
 
     fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
@@ -419,6 +440,17 @@ impl CaptureBackend for WindowsBackend {
             .get(&handle)
             .cloned()
             .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
+        let _operation = if enabled {
+            Some(
+                session
+                    .access
+                    .lease
+                    .enter()
+                    .ok_or("source authorization revoked")?,
+            )
+        } else {
+            None
+        };
         session.input_enabled.store(enabled, Ordering::Release);
         if !enabled {
             session.injector.lock().unwrap().release_all()?;
@@ -567,6 +599,9 @@ fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSes
             session.force_keyframe.store(true, Ordering::Release);
             continue;
         }
+        let Some(_permission) = session.access.lease.enter() else {
+            break;
+        };
         match sequencer.accept(&message) {
             InputDecision::Ignore => {}
             InputDecision::AckDuplicate(sequence) => {
@@ -631,6 +666,9 @@ fn process_input_packet(
     sender: &MediaSender,
     started: std::time::Instant,
 ) {
+    let Some(_permission) = session.access.lease.enter() else {
+        return;
+    };
     let Ok(message) = session.crypto_rx.open(packet) else {
         return;
     };
@@ -840,6 +878,7 @@ fn monitors() -> Result<Vec<Monitor>, String> {
                 .position(|unit| *unit == 0)
                 .unwrap_or(info.szDevice.len());
             output.push(Monitor {
+                source_id: None,
                 handle: monitor.0 as isize,
                 rect: info.monitorInfo.rcMonitor,
                 name: String::from_utf16_lossy(&info.szDevice[..length]),
@@ -860,9 +899,88 @@ fn monitors() -> Result<Vec<Monitor>, String> {
     if !ok.as_bool() {
         return Err("EnumDisplayMonitors failed".into());
     }
+    let identities = active_monitor_identities()?;
+    for monitor in &mut output {
+        let matches: Vec<_> = identities
+            .iter()
+            .filter(|(name, _)| name == &monitor.name)
+            .collect();
+        if let [(_, source)] = matches.as_slice() {
+            monitor.source_id = Some(source.clone());
+        }
+    }
     output.sort_by_key(|monitor| (monitor.rect.left, monitor.rect.top));
     if output.is_empty() {
         return Err("Windows reported no active display monitors".into());
+    }
+    Ok(output)
+}
+
+fn select_monitor(monitors: Vec<Monitor>, source: &str) -> Result<Monitor, String> {
+    let mut matches = monitors
+        .into_iter()
+        .filter(|monitor| monitor.source_id.as_deref() == Some(source));
+    let monitor = matches.next().ok_or("source display is unavailable")?;
+    if source.is_empty() || matches.next().is_some() {
+        return Err("source display identity is ambiguous".into());
+    }
+    Ok(monitor)
+}
+
+/// Join active display configuration source names to target interface paths.
+/// Mirrored/multiple targets for one source are intentionally ungrantable.
+fn active_monitor_identities() -> Result<Vec<(String, String)>, String> {
+    use windows::Win32::Devices::Display::*;
+    let mut path_count = 0;
+    let mut mode_count = 0;
+    let status = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    };
+    if status.0 != 0 {
+        return Err(format!("GetDisplayConfigBufferSizes: {}", status.0));
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    let status = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    };
+    if status.0 != 0 {
+        return Err(format!("QueryDisplayConfig: {}", status.0));
+    }
+    let string = |units: &[u16]| {
+        String::from_utf16_lossy(
+            &units[..units.iter().position(|v| *v == 0).unwrap_or(units.len())],
+        )
+    };
+    let mut output = Vec::new();
+    for path in paths.into_iter().take(path_count as usize) {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+        source.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = std::mem::size_of_val(&source) as u32;
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+        target.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        target.header.size = std::mem::size_of_val(&target) as u32;
+        target.header.adapterId = path.targetInfo.adapterId;
+        target.header.id = path.targetInfo.id;
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0
+            || unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } != 0
+        {
+            continue;
+        }
+        let name = string(&source.viewGdiDeviceName);
+        let id = string(&target.monitorDevicePath);
+        if !name.is_empty() && !id.is_empty() {
+            output.push((name, format!("windows:display:{}", id.to_lowercase())));
+        }
     }
     Ok(output)
 }

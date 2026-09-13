@@ -67,6 +67,10 @@ interface FooterToggleProps {
   title: string;
   active: boolean;
   onToggle: () => void;
+  pending: boolean;
+  error: string | null;
+  onRetry: () => void;
+  retryText: string;
   onText: string;
   offText: string;
 }
@@ -75,8 +79,11 @@ interface FooterToggleProps {
 function FooterToggle(props: FooterToggleProps) {
   const Icon = props.icon;
   return (
+    <span>
     <button
       type="button"
+      disabled={props.pending}
+      aria-busy={props.pending}
       className={controlToggleVariants({ active: props.active })}
       onClick={props.onToggle}
       title={props.title}
@@ -84,7 +91,10 @@ function FooterToggle(props: FooterToggleProps) {
     >
       <Icon size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
       {props.label} <strong>{props.active ? props.onText : props.offText}</strong>
+      {props.pending && " …"}
     </button>
+    {props.error && <span role="alert">{props.label}: {props.error} <button type="button" disabled={props.pending} onClick={props.onRetry}>{props.retryText}</button></span>}
+    </span>
   );
 }
 
@@ -390,6 +400,15 @@ interface DashboardFooterProps {
   clipboardShare: boolean;
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
+  clipboardPending: boolean;
+  lockPending: boolean;
+  curtainPending: boolean;
+  clipboardError: string | null;
+  lockError: string | null;
+  curtainError: string | null;
+  retryClipboard: () => void;
+  retryLock: () => void;
+  retryCurtain: () => void;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
   language: SupportedLanguage;
@@ -455,6 +474,10 @@ function DashboardFooter(props: DashboardFooterProps) {
           label={t.host.clipboardShareLabel}
           title={t.host.clipboardShareDesc}
           active={props.clipboardShare}
+          pending={props.clipboardPending}
+          error={props.clipboardError}
+          onRetry={props.retryClipboard}
+          retryText={t.common.retry}
           onToggle={props.onToggleClipboardShare}
           onText={t.host.clipboardShareOn}
           offText={t.host.clipboardShareOff}
@@ -465,6 +488,10 @@ function DashboardFooter(props: DashboardFooterProps) {
           label={t.host.lockOnDisconnectLabel}
           title={t.host.lockOnDisconnectDesc}
           active={props.lockOnDisconnect}
+          pending={props.lockPending}
+          error={props.lockError}
+          onRetry={props.retryLock}
+          retryText={t.common.retry}
           onToggle={props.onToggleLockOnDisconnect}
           onText={t.host.clipboardShareOn}
           offText={t.host.clipboardShareOff}
@@ -475,6 +502,10 @@ function DashboardFooter(props: DashboardFooterProps) {
           label={t.host.privacyCurtainLabel}
           title={t.host.privacyCurtainDesc}
           active={props.privacyCurtain}
+          pending={props.curtainPending}
+          error={props.curtainError}
+          onRetry={props.retryCurtain}
+          retryText={t.common.retry}
           onToggle={props.onTogglePrivacyCurtain}
           onText={t.host.clipboardShareOn}
           offText={t.host.clipboardShareOff}
@@ -496,7 +527,7 @@ function TroubleshootingModal({
   t: TranslationSchema;
 }) {
   return (
-    <Modal onClose={onClose} closeOnOverlayClick>
+    <Modal ariaLabel={t.host.troubleshootTitle} onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 480 }}>
         <div className="modal-title-bar">
           <h3>{t.host.troubleshootTitle}</h3>
@@ -540,7 +571,7 @@ function PairingModal({
   t: TranslationSchema;
 }) {
   return (
-    <Modal onClose={onClose} closeOnOverlayClick>
+    <Modal ariaLabel={t.host.pairingModalTitle} onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()}>
         <div className="modal-title-bar">
           <h3>{t.host.pairingModalTitle}</h3>
@@ -1023,7 +1054,7 @@ function Dashboard() {
 
   // 클립보드 공유 호스트 게이트(U5) — 상태·토글은 Privacy 모듈의 훅이
   // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
-  const { clipboardShare, toggleClipboardShare } = useClipboardShare();
+  const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
 
   // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
   // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
@@ -1032,6 +1063,7 @@ function Dashboard() {
     privacyCurtain,
     toggleLockOnDisconnect,
     togglePrivacyCurtain,
+    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
   } = usePrivacySettings();
 
   useEffect(() => {
@@ -1224,6 +1256,15 @@ function Dashboard() {
         copiedToast={copiedToast}
         inputPermission={inputPermission}
         clipboardShare={clipboardShare}
+        retryClipboard={retryClipboard}
+        retryLock={retryLock}
+        retryCurtain={retryCurtain}
+        clipboardPending={clipboardPending}
+        clipboardError={clipboardError}
+        lockPending={lockPending}
+        lockError={lockError}
+        curtainPending={curtainPending}
+        curtainError={curtainError}
         lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
         platform={platform}
@@ -1302,6 +1343,7 @@ function SessionCard({
           <div className="stream-card-name-group">
             <div className="stream-name-badge-row">
               <h3>{session.sourceName}</h3>
+              {session.deviceName && <p>{session.deviceName}</p>}
             </div>
             <span className="stream-card-target">
               {interpolate(t.host.connectedDevice, { addr: session.viewerAddr })}

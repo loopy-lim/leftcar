@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getTranslation } from "@leftcar/ui-tokens";
 import { createToggleGate, type ToggleGate } from "./toggleGate";
@@ -14,32 +14,44 @@ import { createToggleGate, type ToggleGate } from "./toggleGate";
 function useOptimisticToggle(command: string, initial: boolean): {
   value: boolean;
   pending: boolean;
+  error: string | null;
+  setError: (error: string | null) => void;
   toggle: () => void;
   setValue: (next: boolean) => void;
   gate: ToggleGate;
 } {
   const [value, setValue] = useState(initial);
   const [pending, setPending] = useState(false);
+  const busy = useRef(false);
+  const [error, setError] = useState<string | null>(null);
   const [gate] = useState(() => createToggleGate());
   const toggle = useCallback(() => {
     // 진행 중인 요청이 있으면 이번 토글을 무시한다 — 뒤섞인 요청 순서가
     // 최종 상태를 어기지 않게 한다.
-    if (pending) return;
+    if (busy.current) return;
+    busy.current = true;
+    setError(null);
     const seq = gate.issue();
     const next = !value;
     setValue(next);
     setPending(true);
     void invoke(command, { enabled: next })
-      .catch(() => {
+      .catch((cause: unknown) => {
         // superseded된 요청의 실패는 되돌리지 않는다 — 되돌리면 나중
         // 토글이 반영한 값을 덮어쓴다.
-        if (gate.isCurrent(seq)) setValue(!next);
+        if (gate.isCurrent(seq)) {
+          setValue(!next);
+          setError(String(cause instanceof Error ? cause.message : cause));
+        }
       })
       .finally(() => {
-        if (gate.isCurrent(seq)) setPending(false);
+        if (gate.isCurrent(seq)) {
+          busy.current = false;
+          setPending(false);
+        }
       });
-  }, [command, gate, pending, value]);
-  return { value, pending, toggle, setValue, gate };
+  }, [command, gate, value]);
+  return { value, pending, error, setError, toggle, setValue, gate };
 }
 
 /**
@@ -49,23 +61,30 @@ function useOptimisticToggle(command: string, initial: boolean): {
  * 초기 로드 응답은 무시한다.
  */
 export function usePrivacySettings() {
+  const [loadAttempt, retryLoad] = useState(0);
   const lock = useOptimisticToggle("set_lock_on_disconnect", false);
   const curtain = useOptimisticToggle("set_privacy_curtain", false);
 
   useEffect(() => {
     let cancelled = false;
+    if (lock.gate.allowsInitialLoad()) lock.setError(null);
+    if (curtain.gate.allowsInitialLoad()) curtain.setError(null);
     void invoke<[boolean, boolean]>("get_privacy_settings")
       .then(([lockOn, curtainOn]) => {
-        if (!cancelled && lock.gate.allowsInitialLoad() && curtain.gate.allowsInitialLoad()) {
-          lock.setValue(lockOn);
-          curtain.setValue(curtainOn);
-        }
+        if (cancelled) return;
+        if (lock.gate.allowsInitialLoad()) lock.setValue(lockOn);
+        if (curtain.gate.allowsInitialLoad()) curtain.setValue(curtainOn);
       })
-      .catch(() => {});
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        const message = String(cause instanceof Error ? cause.message : cause);
+        if (lock.gate.allowsInitialLoad()) lock.setError(message);
+        if (curtain.gate.allowsInitialLoad()) curtain.setError(message);
+      });
     return () => {
       cancelled = true;
     };
-  }, [lock.gate, lock.setValue, curtain.gate, curtain.setValue]);
+  }, [loadAttempt, lock.gate, lock.setValue, lock.setError, curtain.gate, curtain.setValue, curtain.setError]);
 
   return {
     lockOnDisconnect: lock.value,
@@ -73,6 +92,12 @@ export function usePrivacySettings() {
     toggleLockOnDisconnect: lock.toggle,
     togglePrivacyCurtain: curtain.toggle,
     pending: lock.pending || curtain.pending,
+    lockPending: lock.pending,
+    curtainPending: curtain.pending,
+    lockError: lock.error,
+    curtainError: curtain.error,
+    retryLock: () => lock.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : lock.toggle(),
+    retryCurtain: () => curtain.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : curtain.toggle(),
   };
 }
 
@@ -82,26 +107,34 @@ export function usePrivacySettings() {
  * 뒤에 늦게 도착한 초기 로드 응답은 무시한다.
  */
 export function useClipboardShare() {
+  const [loadAttempt, retryLoad] = useState(0);
   const clipboard = useOptimisticToggle("set_clipboard_share", false);
 
   useEffect(() => {
     let cancelled = false;
+    if (clipboard.gate.allowsInitialLoad()) clipboard.setError(null);
     void invoke<boolean>("get_clipboard_share")
       .then((enabled) => {
         if (!cancelled && clipboard.gate.allowsInitialLoad()) {
           clipboard.setValue(enabled);
         }
       })
-      .catch(() => {});
+      .catch((cause: unknown) => {
+        if (!cancelled && clipboard.gate.allowsInitialLoad()) {
+          clipboard.setError(String(cause instanceof Error ? cause.message : cause));
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [clipboard.gate, clipboard.setValue]);
+  }, [loadAttempt, clipboard.gate, clipboard.setValue, clipboard.setError]);
 
   return {
     clipboardShare: clipboard.value,
     toggleClipboardShare: clipboard.toggle,
     pending: clipboard.pending,
+    error: clipboard.error,
+    retryClipboard: () => clipboard.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : clipboard.toggle(),
   };
 }
 

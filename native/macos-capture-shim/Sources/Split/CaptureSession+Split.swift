@@ -234,16 +234,14 @@ extension CaptureSession {
             packetizationQueue.async { [weak self] in
                 self?.packetizeSplitPair(lease: lease, left: left, right: right)
             }
-        case let .pairExpired(consecutiveExpiries, releasedPairs, releasedLeases):
-            // Soft rendezvous expiry: the expired frame's samples are
-            // discarded on both tiles, but generations, other in-flight
-            // pairs, and the encoder reference chains stay intact, and no
-            // transport recovery is started here. A discarded pair never
-            // reached the wire, so wire au ids (allocated only at send
-            // time) leave no gap for the viewer's repair path to notice;
-            // the paired keyframe request below forces the next admission
-            // to keyframes, otherwise the next delta would reference a
-            // frame the viewer never received.
+        case let .pairExpired(consecutiveExpiries, releasedPairs, _):
+            // Fence packetization and queued sends before freeing encode slots.
+            // The pipeline already advanced its lifecycle generation, so only
+            // this one event can invalidate a pending boundary for this loss.
+            beginSplitTransportRecovery(
+                reason: "encoded pair expiry",
+                invalidatePendingBoundary: true
+            )
             stateLock.lock()
             splitPairTimeouts &+= 1
             splitPairConsecutiveTimeouts = Int64(consecutiveExpiries)
@@ -254,10 +252,6 @@ extension CaptureSession {
             if releasedPairs > 0 {
                 completeEncodeSlots(releasedPairs)
             }
-            for lease in releasedLeases {
-                _ = finishSplitFlowLease(lease)
-            }
-            requestSplitPairedKeyframe(reason: "encoded pair expiry")
             NSLog(
                 "Leftcar split pair expired %@: consecutive=%d released=%d",
                 targetLabel,
@@ -289,7 +283,8 @@ extension CaptureSession {
                 } else {
                     self.beginSplitTransportRecovery(
                         reason: "injected split packetization failed",
-                        invalidatePendingBoundary: true
+                        invalidatePendingBoundary: true,
+                        failedLease: lease
                     )
                 }
             }
@@ -382,18 +377,22 @@ extension CaptureSession {
             stateLock.unlock()
             return
         }
-        guard let leftPayload = packetizeSplitTile(left),
-              let rightPayload = packetizeSplitTile(right) else {
-            stateLock.lock()
-            splitPairDrops &+= 1
-            framesDropped &+= 1
-            stateLock.unlock()
-            beginSplitTransportRecovery(
-                reason: "split packetization failed",
-                invalidatePendingBoundary: true
-            )
-            return
-        }
+        guard let (leftPayload, rightPayload) = prepareSplitPairPayloads(
+            lease: lease,
+            left: { packetizeSplitTile(left) },
+            right: { packetizeSplitTile(right) },
+            onFailure: { failedLease in
+                stateLock.lock()
+                splitPairDrops &+= 1
+                framesDropped &+= 1
+                stateLock.unlock()
+                beginSplitTransportRecovery(
+                    reason: "split packetization failed",
+                    invalidatePendingBoundary: true,
+                    failedLease: failedLease
+                )
+            }
+        ) else { return }
         // AU-level keyframe treatment (recovery parity, send-deadline class)
         // applies when EITHER tile carries an IDR: a per-tile recovery pair
         // (one IDR + peer delta) must not send its keyframe side with

@@ -60,12 +60,9 @@ final class DualEncoderPipeline {
     private var barrier: EncodedPairAssembler<TileEncodedSample>
     private var pairLifecycle = SplitPairLifecycleState()
     private var faultInjection = SplitFaultInjection()
-    // Soft rendezvous expiry state. Expiries discard only the late frame;
-    // three in a row mean one tile encoder stopped delivering, which falls
-    // back to the hard reset. Tombstones reject late callbacks for sequences
-    // whose slot was already retired at expiry.
+    // Expiry fences the whole admitted generation. Three consecutive failures
+    // retain the existing hard-recovery safety valve and reset its streak.
     private var consecutivePairExpiries = 0
-    private var pairExpiryTombstones = Set<UInt64>()
     private var stopped = false
 
     init(
@@ -294,8 +291,13 @@ final class DualEncoderPipeline {
                     reason: "mirror-left encoder callback failed: \(error)"
                 )
             case let .success(left):
-                let lease = self.pairLifecycle.completePair(sequence: sequence)
-                guard !left.requestedKeyframe || left.isKeyframe else {
+                guard case let .emit(lease) = self.pairLifecycle.completeEncodedPair(
+                    sequence: sequence,
+                    leftRequested: left.requestedKeyframe,
+                    rightRequested: left.requestedKeyframe,
+                    leftKeyframe: left.isKeyframe,
+                    rightKeyframe: left.isKeyframe
+                ) else {
                     self.beginPairedRecovery(reason: "mirror-left keyframe mismatch")
                     return
                 }
@@ -335,11 +337,6 @@ final class DualEncoderPipeline {
                     reason: "\(side) encoder callback failed: \(error)"
                 )
             case let .success(sample):
-                // A tile callback for an already-expired pair arrives after
-                // its slot was retired at expiry; drop it here instead of
-                // leaving a half pair in the assembler that would expire
-                // again and inflate the consecutive-expiry streak.
-                guard !pairExpiryTombstones.contains(sequence) else { return }
                 let decision = self.barrier.insert(
                     EncodedTile(
                         side: side,
@@ -354,24 +351,15 @@ final class DualEncoderPipeline {
                     self.schedulePairExpiry(generation: generation)
                 case let .emit(left, right):
                     self.consecutivePairExpiries = 0
-                    let lease = self.pairLifecycle.completePair(sequence: sequence)
-                    // Side-aware keyframe contract (per-tile recovery, R2):
-                    // a tile that was REQUESTED to keyframe must deliver one;
-                    // asymmetry itself is legal exactly when the request
-                    // pattern explains it. A pair carrying exactly the
-                    // requested side's keyframe (peer delta) emits normally
-                    // through this path — no recovery, no generation bump.
-                    // An asymmetry NO request explains still means the two
-                    // reference chains diverged, so the hard reset stays.
-                    let leftKeyframeMissing = left.requestedKeyframe && !left.isKeyframe
-                    let rightKeyframeMissing = right.requestedKeyframe && !right.isKeyframe
-                    let unexplainedAsymmetry =
-                        !left.requestedKeyframe
-                        && !right.requestedKeyframe
-                        && left.isKeyframe != right.isKeyframe
-                    guard !leftKeyframeMissing,
-                          !rightKeyframeMissing,
-                          !unexplainedAsymmetry else {
+                    // Validate both encoder outputs before releasing this slot;
+                    // a rejected IDR belongs to the recovery's retirement set.
+                    guard case let .emit(lease) = self.pairLifecycle.completeEncodedPair(
+                        sequence: sequence,
+                        leftRequested: left.requestedKeyframe,
+                        rightRequested: right.requestedKeyframe,
+                        leftKeyframe: left.isKeyframe,
+                        rightKeyframe: right.isKeyframe
+                    ) else {
                         self.beginPairedRecovery(reason: "paired keyframe mismatch")
                         return
                     }
@@ -412,47 +400,33 @@ final class DualEncoderPipeline {
         }
     }
 
-    /// Rendezvous expiry is a per-frame discard, not an encoder failure:
-    /// whole pairs are dropped on both tiles, so the VideoToolbox reference
-    /// chains and every other in-flight pair stay valid. A pair dropped
-    /// before enqueue never reaches the wire, so it burns no auID and leaves
-    /// no gap for the viewer to detect — each expiry therefore asks the
-    /// capture side for a paired keyframe directly, keeping later deltas
-    /// from referencing the dropped pair. Consecutive expiries mean one
-    /// encoder stopped delivering, so the third in a row falls back to
-    /// beginPairedRecovery. That hard reset remains the path for encoder
-    /// callback failures, keyframe mismatches, and barrier overflow.
+    /// Discard the unsent reference and every admitted dependent pair without
+    /// recreating encoders. A paired IDR in the new lifecycle/flow generation
+    /// reestablishes the reference chain; stale callbacks release nothing twice.
     private func handlePairCallbackExpiry(
         expiredSequences: [UInt64],
         generation: UInt64
     ) {
         guard generation == pairLifecycle.recoveryGeneration else { return }
-        consecutivePairExpiries += 1
-        if consecutivePairExpiries >= 3 {
+        if consecutivePairExpiries >= 2 {
             beginPairedRecovery(reason: "encoded pair callback timeout")
             return
         }
-        var releasedLeases = [SplitFlowLease]()
-        for sequence in expiredSequences {
-            pairExpiryTombstones.insert(sequence)
-            if let lease = pairLifecycle.completePair(sequence: sequence) {
-                releasedLeases.append(lease)
-            }
-        }
-        event(
-            .pairExpired(
-                consecutiveExpiries: consecutivePairExpiries,
-                releasedPairs: expiredSequences.count,
-                releasedLeases: releasedLeases
-            )
-        )
+        guard let recovery = pairLifecycle.expirePairs(
+            sequences: expiredSequences, generation: generation, barrier: &barrier
+        ) else { return }
+        consecutivePairExpiries += 1
+        event(.pairExpired(
+            consecutiveExpiries: consecutivePairExpiries,
+            releasedPairs: recovery.releasedPairCount,
+            releasedLeases: recovery.releasedLeases
+        ))
     }
 
     private func beginPairedRecovery(reason: String) {
         let recovery = pairLifecycle.beginPairedRecovery()
         barrier.reset()
         consecutivePairExpiries = 0
-        pairExpiryTombstones.removeAll(keepingCapacity: true)
         event(
             .dropped(
                 reason: reason,

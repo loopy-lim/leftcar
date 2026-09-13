@@ -306,6 +306,7 @@ extension CaptureSession {
         stateLock.unlock()
 
         if shouldLogPerf {
+            let rtx = MediaRetransmitBudget.shared.statistics()
             let perfLogLine = leftcarPerfLogLine(
                 captureCallbacks: captureCallbacks,
                 encodeOutputCallbacks: encodeOutputCallbacks,
@@ -322,7 +323,7 @@ extension CaptureSession {
                 encoderWatchdogOldestUs: reportedEncoderWatchdogOldestUs,
                 encoderMode: reportedEncoderMode,
                 encoderID: reportedEncoderID
-            )
+            ) + " schema=2 process=\(Self.metricProcessIncarnation) stream=\(metricIncarnation) incarnation=\(metricIncarnation) transport=\(mediaTransport.rawValue) rtxScope=process-budget rtxOwner=\(Self.metricProcessIncarnation) rtxRetainedEnvelopeBytes=\(rtx.retainedEnvelopeBytes) rtxRetainedAccessUnits=\(rtx.retainedAccessUnits) rtxServedEnvelopeBytes=\(rtx.servedEnvelopeBytes) rtxEvictedEnvelopeBytes=\(rtx.evictedEnvelopeBytes) rtxRejectedEnvelopeBytes=\(rtx.rejectedEnvelopeBytes) splitPairs=\(reportedSplitPairsEncoded) latencyBasis=host-monotonic outputStage=encoder-callback"
             leftcarPerformanceLogger.notice("\(perfLogLine, privacy: .public)")
             if reportedEncoderMode == "splitVertical" {
                 leftcarPerformanceLogger.notice(
@@ -332,6 +333,11 @@ extension CaptureSession {
         }
 
         var obj: [String: Any] = [
+            "metricSchema": 2,
+            "metricProcess": Self.metricProcessIncarnation,
+            "metricStream": metricIncarnation,
+            "metricIncarnation": metricIncarnation,
+            "metricTransport": mediaTransport.rawValue,
             "frames": framesEncoded,
             "dropped": framesDropped,
             "networkDropped": networkDropped,
@@ -542,6 +548,9 @@ extension CaptureSession {
             "error": error,
         ]
         obj.merge(experimentStatsFields) { _, testedValue in testedValue }
+        audioMetricsLock.lock()
+        obj.merge(audioMetrics) { _, audio in audio }
+        audioMetricsLock.unlock()
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let s = String(data: data, encoding: .utf8) {
             return s

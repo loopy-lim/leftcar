@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert } from "react-native";
+import { Alert, AppState } from "react-native";
+import { statusPollingInterval } from "./status-polling";
+const subscribeVisibility = (listener: () => void) => {
+  const subscription = AppState.addEventListener("change", listener);
+  return () => subscription.remove();
+};
+const isCatalogVisible = () => AppState.currentState === null || AppState.currentState === "active";
 import { replaceRestartedStreamState } from "./launch-stream";
 import {
   observeAdaptiveResolution,
@@ -80,6 +86,7 @@ export function useStreamController(
   );
   const host = controlHost();
   const queryClient = useQueryClient();
+  const visible = useSyncExternalStore(subscribeVisibility, isCatalogVisible, () => true);
   const statusQuery = useQuery({
     queryKey: ["host-status", host],
     queryFn: () => requestWithReconnect<StatusView>("getStatus"),
@@ -90,7 +97,9 @@ export function useStreamController(
     // only wall-clock gate is the 5s rebind cooldown. Downshift (~2 windows)
     // and upshift (~4 windows) therefore react in ~4s/~8s instead of
     // ~2s/~4s; the catalog screen already ran this cadence when idle.
-    refetchInterval: 2_000,
+    refetchInterval: statusPollingInterval(streams.length, visible),
+    refetchIntervalInBackground: streams.length > 0,
+    enabled: Boolean(host),
     staleTime: 1_000,
   });
   const statusView = statusQuery.data;
@@ -205,9 +214,10 @@ export function useStreamController(
       const terminalMessage = session?.error ?? "";
       const hostTermination = classifyHostTermination(terminalMessage);
       if (hostTermination) {
-        updateStreams((previous) =>
-          previous.filter((item) => item.session !== active.session),
-        );
+        const cleanup = active.reservation?.close() ?? Promise.resolve();
+        void cleanup.then(() => {
+          updateStreams((previous) => previous.filter((item) => item !== active));
+        }).catch((cause) => setStreamError(formatErrorMessage(cause)));
         lastRestartAt.current.delete(active.session);
         if (
           hostTermination !== "viewerClosed" &&

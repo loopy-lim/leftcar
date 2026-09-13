@@ -3,6 +3,14 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
 def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
+apply from: rootProject.file("../../../tools/build.android.gradle")
+def benchmarkSlug = System.getenv("LEFTCAR_BENCHMARK_PROFILE")
+def benchmark = leftcarProfile(benchmarkSlug)
+def internalBuildValue = findProperty("leftcarInternalBuild")
+if (internalBuildValue != null && !(internalBuildValue in ["true", "false"])) throw new GradleException("leftcarInternalBuild must be true or false")
+def internalBuild = internalBuildValue == "true"
+def releaseCredentials = [storeFile: System.getenv("LEFTCAR_RELEASE_STORE_FILE"), storePassword: System.getenv("LEFTCAR_RELEASE_STORE_PASSWORD"), keyAlias: System.getenv("LEFTCAR_RELEASE_KEY_ALIAS"), keyPassword: System.getenv("LEFTCAR_RELEASE_KEY_PASSWORD")]
+
 
 /**
  * This is the configuration block to customize your React Native Android app.
@@ -96,7 +104,8 @@ android {
 
     namespace 'dev.leftcar.viewer'
     defaultConfig {
-        applicationId 'leftcar.ll3.kr'
+        applicationId 'leftcar.ll3.kr' + benchmark.suffix
+        manifestPlaceholders = [leftcarScheme: benchmark.scheme, leftcarExpoScheme: benchmark.expoScheme, leftcarAccessoryAction: benchmark.accessory]
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 4
@@ -109,10 +118,18 @@ android {
     }
     signingConfigs {
         debug {
-            storeFile file('debug.keystore')
+            storeFile leftcarDebugKeystore(projectDir, System.getenv("LEFTCAR_INTERNAL_DEBUG_KEYSTORE"))
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+        }
+    }
+    signingConfigs {
+        configuredRelease {
+            if (releaseCredentials.storeFile) storeFile file(releaseCredentials.storeFile)
+            storePassword releaseCredentials.storePassword
+            keyAlias releaseCredentials.keyAlias
+            keyPassword releaseCredentials.keyPassword
         }
     }
     buildTypes {
@@ -120,9 +137,7 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig internalBuild ? signingConfigs.debug : signingConfigs.configuredRelease
             def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'false'
             shrinkResources enableShrinkResources.toBoolean()
             minifyEnabled enableMinifyInReleaseBuilds
@@ -141,6 +156,16 @@ android {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
     }
 }
+
+// This gate is a dependency, not task-name guessing: bundleRelease, assembleRelease
+// and direct packaging paths all pass through preReleaseBuild.
+tasks.register("validateReleaseIdentity") {
+    doLast {
+        if (benchmarkSlug != null && !internalBuild) throw new GradleException("Benchmark packages require -PleftcarInternalBuild=true")
+        println "Leftcar signing classification: " + leftcarReleaseSigning(internalBuild, releaseCredentials)
+    }
+}
+tasks.configureEach { if (name == "preReleaseBuild") dependsOn("validateReleaseIdentity") }
 
 // Apply static values from `gradle.properties` to the `android.packagingOptions`
 // Accepts values in comma delimited lists, example:
@@ -166,6 +191,7 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     // Jetpack XR Home Space panel sizing; the Activity gates runtime use to XR devices.
     implementation("androidx.xr.runtime:runtime:1.0.0-beta02")
     implementation("androidx.xr.scenecore:scenecore:1.0.0-beta02")
@@ -204,7 +230,8 @@ dependencies {
 // (docs/plans, .cargo/config.toml linker pin) into Gradle; copyViewerSo then
 // places the .so into the jniLibs source set. Rustra's generated module owns
 // its own staticlib build and Android CMake/autolinking.
-def viewerSo = rootProject.file("../../../target/aarch64-linux-android/release/libleftcar_viewer.so")
+def cargoTarget = leftcarCargoTarget(rootProject.file("../../.."), System.getenv("CARGO_TARGET_DIR"))
+def viewerSo = new File(cargoTarget, "aarch64-linux-android/release/libleftcar_viewer.so")
 def viewerCrateDir = rootProject.file("../../../native/android-viewer")
 def repoRootDir = rootProject.file("../../..")
 // Pinned by [target.aarch64-linux-android] linker in the repo-root .cargo/config.toml.
@@ -237,14 +264,11 @@ tasks.register("buildViewerNative", Exec) {
     group = "build"
     description = "Builds libleftcar_viewer.so (arm64-v8a) with cargo: cargo build -p android-viewer --target aarch64-linux-android --release"
     workingDir repoRootDir
-    commandLine "cargo", "build", "-p", "android-viewer", "--target", "aarch64-linux-android", "--release"
-    // Incremental: Gradle skips the cargo invocation entirely when the built
-    // .so is newer than the Rust sources (the manual cargo-ndk flow); when it
-    // is stale or missing, cargo itself rebuilds only what changed.
-    inputs.files fileTree(dir: viewerCrateDir, include: ["src/**"])
-    inputs.file new File(viewerCrateDir, "Cargo.toml")
-    inputs.file rootProject.file("../../../Cargo.lock")
+    commandLine "cargo", "build", "-p", "android-viewer", "--target", "aarch64-linux-android", "--release", "--locked", "--target-dir", cargoTarget.absolutePath
+    // Cargo owns its complete dependency graph, including root config and shared
+    // crates. Always invoke its incremental checker; never let Gradle hide it.
     outputs.file viewerSo
+    outputs.upToDateWhen { false }
 
     doFirst {
         def isWindows = System.getProperty("os.name").toLowerCase().contains("windows")
@@ -287,6 +311,10 @@ tasks.register("buildViewerNative", Exec) {
 }
 
 task copyViewerSo(type: Copy) {
+    doFirst {
+        if (!viewerSo.isFile()) throw new GradleException("Cargo output is missing: ${viewerSo}")
+        println "Leftcar native input: ${viewerSo.canonicalPath}"
+    }
     from viewerSo
     into "libs/arm64-v8a"
 }

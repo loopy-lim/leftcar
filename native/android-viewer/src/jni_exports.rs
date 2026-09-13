@@ -27,7 +27,6 @@ fn media_key_from_parts(key: *const u8, key_len: usize) -> Option<[u8; 32]> {
 #[cfg(target_os = "android")]
 use crate::renderer::single_session::{
     spawn_live_stream_renderer, stop_live_stream_renderer, suppress_resize_recovery,
-    suspend_live_stream_renderer,
 };
 #[cfg(target_os = "android")]
 use crate::renderer::split_session::{self, SplitRendererLaunch};
@@ -37,8 +36,9 @@ mod session_stubs {
     use std::ffi::c_void;
 
     pub(crate) fn suppress_resize_recovery(_instance_str: &str) {}
-    pub(crate) fn suspend_live_stream_renderer(_instance_str: &str) {}
-    pub(crate) fn stop_live_stream_renderer(_instance_str: &str, _send_bye: bool) {}
+    pub(crate) fn stop_live_stream_renderer(_instance_str: &str, _send_bye: bool) -> bool {
+        true
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_live_stream_renderer(
         _instance: String,
@@ -49,14 +49,15 @@ mod session_stubs {
         _height: u32,
         _fps: u32,
         _bridge: Option<crate::jni::MediaBridge>,
-    ) {
+        _balanced: bool,
+    ) -> Option<std::sync::Arc<crate::jni::RendererControl>> {
+        None
     }
 }
 
 #[cfg(not(target_os = "android"))]
 use session_stubs::{
     spawn_live_stream_renderer, stop_live_stream_renderer, suppress_resize_recovery,
-    suspend_live_stream_renderer,
 };
 
 mod session_io;
@@ -320,7 +321,7 @@ pub extern "C" fn leftcar_jni_cancel_prepared_split(base_port: u16) -> i32 {
 /// (5000+n), so multiple instances receive independent pushes. `host_c` is
 /// the control-plane host IP; the media listener accepts only that peer.
 #[no_mangle]
-pub extern "C" fn leftcar_jni_attach_port(
+pub extern "C" fn leftcar_jni_attach_port_presentation(
     state: StatePtr,
     instance_c: *const c_char,
     surface: *mut c_void,
@@ -329,7 +330,9 @@ pub extern "C" fn leftcar_jni_attach_port(
     width: u32,
     height: u32,
     fps: u32,
+    balanced: bool,
 ) -> i32 {
+    let state_key = state as usize;
     let guard = std::panic::catch_unwind(|| {
         let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
             Ok(resolved) => resolved,
@@ -356,8 +359,8 @@ pub extern "C" fn leftcar_jni_attach_port(
             .to_string_lossy()
             .into_owned();
         let tcp_bridge = take_media_bridge(port);
-        spawn_live_stream_renderer(
-            instance_str,
+        let Some(control) = spawn_live_stream_renderer(
+            instance_str.clone(),
             surface,
             port,
             host,
@@ -365,7 +368,12 @@ pub extern "C" fn leftcar_jni_attach_port(
             height,
             fps,
             tcp_bridge,
-        );
+            balanced,
+        ) else {
+            let _ = viewer_core::c_abi::stream_detach_surface(state, &instance);
+            return LEFTCAR_ERR_STATE;
+        };
+        bind_owned_renderer(state_key, &instance_str, control);
         0
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -375,7 +383,7 @@ pub extern "C" fn leftcar_jni_attach_port(
 /// Surface. The old worker is joined before Surface ownership is transferred,
 /// so packets from the previous generation cannot publish into the new one.
 #[no_mangle]
-pub extern "C" fn leftcar_jni_rebind_port(
+pub extern "C" fn leftcar_jni_rebind_port_presentation(
     state: StatePtr,
     instance_c: *const c_char,
     surface: *mut c_void,
@@ -384,7 +392,9 @@ pub extern "C" fn leftcar_jni_rebind_port(
     width: u32,
     height: u32,
     fps: u32,
+    balanced: bool,
 ) -> i32 {
+    let state_key = state as usize;
     let guard = std::panic::catch_unwind(|| {
         let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
             Ok(resolved) => resolved,
@@ -400,8 +410,9 @@ pub extern "C" fn leftcar_jni_rebind_port(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        stop_live_stream_renderer(&instance_str, false);
-        reclaim_udp_port(port);
+        if !stop_live_stream_renderer(&instance_str, false) || !reclaim_udp_port(port) {
+            return LEFTCAR_ERR_STATE;
+        }
         let old_surface = state.attached_surface(&instance);
         if viewer_core::c_abi::stream_detach_surface(state, &instance).is_err() {
             return LEFTCAR_ERR_STATE;
@@ -418,8 +429,8 @@ pub extern "C" fn leftcar_jni_rebind_port(
         {
             return LEFTCAR_ERR_STATE;
         }
-        spawn_live_stream_renderer(
-            instance_str,
+        let Some(control) = spawn_live_stream_renderer(
+            instance_str.clone(),
             surface,
             port,
             host,
@@ -427,7 +438,12 @@ pub extern "C" fn leftcar_jni_rebind_port(
             height,
             fps,
             take_media_bridge(port),
-        );
+            balanced,
+        ) else {
+            let _ = viewer_core::c_abi::stream_detach_surface(state, &instance);
+            return LEFTCAR_ERR_STATE;
+        };
+        bind_owned_renderer(state_key, &instance_str, control);
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -440,7 +456,7 @@ pub extern "C" fn leftcar_jni_rebind_port(
 /// test builds never spawn it.
 #[no_mangle]
 #[cfg(target_os = "android")]
-pub extern "C" fn leftcar_jni_attach_split_port(
+pub extern "C" fn leftcar_jni_attach_split_port_presentation(
     state: StatePtr,
     instance_c: *const c_char,
     left_surface: *mut c_void,
@@ -451,7 +467,9 @@ pub extern "C" fn leftcar_jni_attach_split_port(
     height: u32,
     fps: u32,
     decoder_name_c: *const c_char,
+    balanced: bool,
 ) -> i32 {
+    let state_key = state as usize;
     let guard = std::panic::catch_unwind(|| {
         let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
             Ok(resolved) => resolved,
@@ -482,9 +500,12 @@ pub extern "C" fn leftcar_jni_attach_split_port(
             .to_string_lossy()
             .into_owned();
 
-        stop_live_stream_renderer(&instance_str, false);
-        reclaim_udp_port(left_port);
-        reclaim_udp_port(right_port);
+        if !stop_live_stream_renderer(&instance_str, false)
+            || !reclaim_udp_port(left_port)
+            || !reclaim_udp_port(right_port)
+        {
+            return LEFTCAR_ERR_STATE;
+        }
         // Claim both preflight sockets atomically: either both come back or
         // the store is left untouched, so a half-present pair can never
         // strand the other side's UDP listener (P0-6).
@@ -509,9 +530,10 @@ pub extern "C" fn leftcar_jni_attach_split_port(
         }
 
         let control = Arc::new(RendererControl::new_split(base_port, fps));
+        control.presentation.lock().unwrap().set_balanced(balanced);
         install_renderer(&instance_str, Arc::clone(&control));
         let launch = SplitRendererLaunch {
-            instance: instance_str,
+            instance: instance_str.clone(),
             expected_host: host.clone(),
             fps,
             left_window: left_surface as usize,
@@ -544,14 +566,15 @@ pub extern "C" fn leftcar_jni_attach_split_port(
                 crate::jni::media_crypto_for(right_port),
             ) {
                 debug_assert_eq!(left_crypto.session_key(), right_crypto.session_key());
-                reclaim_udp_port(left_port);
-                reclaim_udp_port(right_port);
-                let _ = crate::jni::prepare_split_receiver(left_port, &host, &left_crypto);
-                let _ = crate::jni::prepare_split_receiver(right_port, &host, &left_crypto);
+                if reclaim_udp_port(left_port) && reclaim_udp_port(right_port) {
+                    let _ = crate::jni::prepare_split_receiver(left_port, &host, &left_crypto);
+                    let _ = crate::jni::prepare_split_receiver(right_port, &host, &left_crypto);
+                }
             }
             log_info!("failed to start split renderer: {error}");
             return LEFTCAR_ERR_STATE;
         }
+        bind_owned_renderer(state_key, &instance_str, control);
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -579,6 +602,7 @@ pub extern "C" fn leftcar_jni_surface_changed(
 
 #[no_mangle]
 pub extern "C" fn leftcar_jni_detach(state: StatePtr, instance_c: *const c_char) -> i32 {
+    let state_key = state as usize;
     let guard = std::panic::catch_unwind(|| {
         let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
             Ok(resolved) => resolved,
@@ -587,11 +611,8 @@ pub extern "C" fn leftcar_jni_detach(state: StatePtr, instance_c: *const c_char)
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        let split = active_renderer(&instance_str).is_some_and(|control| control.is_split());
-        if split {
-            stop_live_stream_renderer(&instance_str, false);
-        } else {
-            suspend_live_stream_renderer(&instance_str);
+        if !detach_owned_renderer(state_key, &instance_str) {
+            return LEFTCAR_ERR_STATE;
         }
         let surface = state.attached_surface(&instance);
         match viewer_core::c_abi::stream_detach_surface(state, &instance) {
@@ -635,6 +656,7 @@ pub extern "C" fn leftcar_jni_update_window(
 
 #[no_mangle]
 pub extern "C" fn leftcar_jni_release(state: StatePtr, instance_c: *const c_char) -> i32 {
+    let state_key = state as usize;
     let guard = std::panic::catch_unwind(|| {
         let (state, instance) = match unsafe { state_and_instance(state, instance_c) } {
             Ok(resolved) => resolved,
@@ -643,11 +665,17 @@ pub extern "C" fn leftcar_jni_release(state: StatePtr, instance_c: *const c_char
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        stop_live_stream_renderer(&instance_str, true);
+        let control = match finished_owned_renderer(state_key, &instance_str) {
+            Ok(control) => control,
+            Err(()) => return LEFTCAR_ERR_STATE,
+        };
         let surface = state.attached_surface(&instance);
         viewer_core::c_abi::stream_release(state, &instance);
         if let Some(surface) = surface {
             unsafe { ANativeWindow_release(surface as *mut c_void) };
+        }
+        if let Some(control) = control {
+            forget_owned_renderer(state_key, &instance_str, &control);
         }
         0
     });
@@ -765,5 +793,144 @@ mod split_prepare_tests {
         take_media_crypto(right);
         let _ = crate::jni::cancel_prepared_receiver(left);
         let _ = crate::jni::cancel_prepared_receiver(right);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_attach_port(
+    state: StatePtr,
+    instance_c: *const c_char,
+    surface: *mut c_void,
+    port: u16,
+    host_c: *const c_char,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> i32 {
+    leftcar_jni_attach_port_presentation(
+        state, instance_c, surface, port, host_c, width, height, fps, false,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_rebind_port(
+    state: StatePtr,
+    instance_c: *const c_char,
+    surface: *mut c_void,
+    port: u16,
+    host_c: *const c_char,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> i32 {
+    leftcar_jni_rebind_port_presentation(
+        state, instance_c, surface, port, host_c, width, height, fps, false,
+    )
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn leftcar_jni_attach_split_port(
+    state: StatePtr,
+    instance_c: *const c_char,
+    left_surface: *mut c_void,
+    right_surface: *mut c_void,
+    base_port: u16,
+    host_c: *const c_char,
+    width: u32,
+    height: u32,
+    fps: u32,
+    decoder_name_c: *const c_char,
+) -> i32 {
+    leftcar_jni_attach_split_port_presentation(
+        state,
+        instance_c,
+        left_surface,
+        right_surface,
+        base_port,
+        host_c,
+        width,
+        height,
+        fps,
+        decoder_name_c,
+        false,
+    )
+}
+
+/// State-specific display callback; cannot touch a successor Activity's renderer.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_display_frame(
+    state: StatePtr,
+    instance_c: *const c_char,
+    balanced: bool,
+    display: i32,
+    frame_ns: i64,
+    period_ns: i64,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if state.is_null() || instance_c.is_null() {
+            return LEFTCAR_ERR_NULL;
+        }
+        let Ok(instance) = (unsafe { CStr::from_ptr(instance_c) }).to_str() else {
+            return LEFTCAR_ERR_INVALID;
+        };
+        let Some(control) = owned_renderer(state as usize, instance) else {
+            return LEFTCAR_ERR_STATE;
+        };
+        let mut timeline = control.presentation.lock().unwrap();
+        timeline.set_balanced(balanced);
+        timeline.update(display, frame_ns, period_ns);
+        LEFTCAR_OK
+    })
+    .unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod display_boundary_tests {
+    use super::*;
+    #[test]
+    fn display_callback_updates_exact_owned_renderer_and_preserves_successor() {
+        let name = std::ffi::CString::new("display-boundary-7").unwrap();
+        let old = Arc::new(RendererControl::new_split(5717, 60));
+        let current = Arc::new(RendererControl::new_split(5717, 60));
+        bind_owned_renderer(701, "display-boundary-7", Arc::clone(&old));
+        bind_owned_renderer(702, "display-boundary-7", Arc::clone(&current));
+        assert_eq!(
+            leftcar_jni_display_frame(
+                701 as StatePtr,
+                name.as_ptr(),
+                true,
+                9,
+                9_876_543_210,
+                8_333_333
+            ),
+            0
+        );
+        assert_eq!(
+            old.presentation.lock().unwrap().target(9_876_543_211),
+            Some(9_884_876_543)
+        );
+        assert_eq!(
+            current.presentation.lock().unwrap().target(9_876_543_211),
+            None
+        );
+        assert_eq!(
+            leftcar_jni_display_frame(701 as StatePtr, name.as_ptr(), true, -1, 0, 0),
+            0
+        );
+        assert_eq!(old.presentation.lock().unwrap().target(9_876_543_211), None);
+        forget_owned_renderer(701, "display-boundary-7", &old);
+        assert_eq!(
+            leftcar_jni_display_frame(
+                701 as StatePtr,
+                name.as_ptr(),
+                true,
+                9,
+                9_876_543_210,
+                8_333_333
+            ),
+            LEFTCAR_ERR_STATE
+        );
+        forget_owned_renderer(702, "display-boundary-7", &current);
     }
 }

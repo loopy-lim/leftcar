@@ -75,28 +75,52 @@ extension CaptureSession {
 
     func beginSplitTransportRecovery(
         reason: String,
-        invalidatePendingBoundary: Bool = false
+        invalidatePendingBoundary: Bool = false,
+        failedLease: SplitFlowLease? = nil
     ) {
         captureLock.lock()
-        let recoveryAlreadyPending = splitFlowState.recoveryBoundaryPending
-        let shouldBeginRecovery = invalidatePendingBoundary || !recoveryAlreadyPending
-        if shouldBeginRecovery {
-            _ = splitFlowState.beginRecovery()
-            // Seed the boundary submission from the newest retained frame when
-            // capture is idle; otherwise recovery waits for the next
-            // ScreenCaptureKit callback, whose arrival on a static screen has
-            // no guaranteed latency. One uncontrolled host log showed a
-            // multi-second pair-timeout-to-recovery stall, but its baseline
-            // stimulus and concurrent CPU load were not controlled, so only
-            // the unbounded-wait property is established here — not the
-            // observed duration or a single cause.
-            // The encoder submission clock (nextStrictlyMonotonicSubmissionPTS)
-            // keeps this replay legal for the live VTCompressionSession even
-            // though the carrier's source PTS was already encoded.
-            seedSplitRecoveryCarrierLocked()
-            splitRecoveryGateStartedNs = DispatchTime.now().uptimeNanoseconds
+        let episode = beginSplitRecovery(
+            flow: &splitFlowState,
+            invalidatePendingBoundary: invalidatePendingBoundary,
+            failedLease: failedLease,
+            pendingCaptures: &pendingSplitCaptures,
+            carrier: splitRecoveryCarrier
+        )
+        captureLock.unlock()
+
+        guard let generation = episode else {
+            stateLock.lock()
+            recoveryRequestsSuppressed &+= 1
+            stateLock.unlock()
+            return
         }
-        let shouldSchedule = shouldBeginRecovery
+
+        // Drain uses this same network -> capture order. Revalidate the episode
+        // while holding both owners: an older operation must never clean a newer
+        // IDR or reserve an encode task it will later abandon. No platform or
+        // encoder callback runs inside this transaction.
+        networkLock.lock()
+        captureLock.lock()
+        guard let discarded = finishSplitRecoveryCleanup(
+            generation: generation,
+            flow: splitFlowState,
+            pending: &pendingSplitAccessUnits,
+            lease: { $0.lease }
+        ) else {
+            captureLock.unlock()
+            networkLock.unlock()
+            return
+        }
+        let needsBoundarySubmission = splitFlowState.activeCount == 0
+        if needsBoundarySubmission {
+            // Reuse retained capture immediately on an idle screen. A boundary
+            // already admitted/queued owns its carrier and needs no duplicate.
+            seedSplitRecoveryCarrierLocked()
+        }
+        splitRecoveryGateStartedNs = DispatchTime.now().uptimeNanoseconds
+        nextUdpSendNs = splitRecoveryGateStartedNs
+        networkRecoveryBoundary.establishAwaitingKeyframe()
+        let shouldSchedule = needsBoundarySubmission
             && hasPendingCaptureLocked()
             && !encodeScheduled
             && encodeInFlight < maxEncodeInFlight
@@ -105,19 +129,6 @@ extension CaptureSession {
             encodeScheduled = true
         }
         captureLock.unlock()
-
-        guard shouldBeginRecovery else {
-            stateLock.lock()
-            recoveryRequestsSuppressed &+= 1
-            stateLock.unlock()
-            return
-        }
-
-        networkLock.lock()
-        let discarded = pendingSplitAccessUnits.count
-        pendingSplitAccessUnits.removeAll(keepingCapacity: true)
-        nextUdpSendNs = DispatchTime.now().uptimeNanoseconds
-        networkRecoveryBoundary.establishAwaitingKeyframe()
         networkLock.unlock()
 
         stateLock.lock()
@@ -126,7 +137,10 @@ extension CaptureSession {
         framesDropped &+= Int64(discarded)
         stateLock.unlock()
 
-        requestSplitPairedKeyframe(reason: reason)
+        // The admitted recovery lease forces both encoder requests to IDR.
+        // A separate delayed request flag could otherwise spill into the next
+        // admission after this episode's boundary was already encoded.
+        NSLog("Leftcar split recovery %@: %@", targetLabel, reason)
         if shouldSchedule {
             encodeQueue.async { [weak self] in
                 self?.drainEncodeQueue()

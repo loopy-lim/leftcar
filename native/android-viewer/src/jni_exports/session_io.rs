@@ -1,6 +1,6 @@
 use crate::input_protocol::{normalized_axis, InputEvent};
 use crate::jni::*;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -136,6 +136,66 @@ pub extern "C" fn leftcar_jni_poll_audio(
         let mut audio = control.audio.lock().unwrap();
         audio.drain_into(buffer) as i32
     })
+}
+
+/// Exact Activity-owned audio drain. A retired Activity cannot resolve the
+/// latest renderer merely because its logical instance id was reused.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn leftcar_jni_poll_audio_owned(
+    state: *mut c_void,
+    instance_c: *const c_char,
+    out: *mut u8,
+    capacity: usize,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if instance_c.is_null() || out.is_null() || capacity < 6 {
+            return 0;
+        }
+        let instance = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy();
+        let Some(control) = owned_renderer(state as usize, &instance) else {
+            return 0;
+        };
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+        let audio = control.audio.lock().unwrap();
+        let (mut audio, _) = control
+            .audio_available
+            .wait_timeout_while(audio, std::time::Duration::from_millis(100), |audio| {
+                audio.is_empty() && !control.stop.load(Ordering::SeqCst)
+            })
+            .unwrap();
+        if control.stop.load(Ordering::SeqCst) {
+            return 0;
+        }
+        audio.drain_into(buffer) as i32
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn leftcar_jni_set_audio_owned(
+    state: *mut c_void,
+    instance_c: *const c_char,
+    enabled: bool,
+    opus: bool,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if instance_c.is_null() {
+            return LEFTCAR_ERR_INVALID;
+        }
+        let instance = unsafe { CStr::from_ptr(instance_c) }.to_string_lossy();
+        let Some(control) = owned_renderer(state as usize, &instance) else {
+            return LEFTCAR_ERR_STATE;
+        };
+        let previous = control.audio_requested.swap(enabled, Ordering::SeqCst);
+        if !enabled || previous != enabled {
+            control.audio.lock().unwrap().discard_pending();
+        }
+        control.audio_opus_requested.store(opus, Ordering::SeqCst);
+        LEFTCAR_OK
+    })
+    .unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
 /// Host or local termination reason for this stream, or -1 while active.
@@ -318,6 +378,14 @@ pub extern "C" fn leftcar_jni_set_cursor_stream(instance_c: *const c_char, enabl
 /// establishment or within its 1s cadence — so a toggle mid-stream applies
 /// without a reconfigure.
 #[no_mangle]
+pub extern "C" fn leftcar_jni_set_audio_codec(instance_c: *const c_char, opus: bool) -> i32 {
+    with_active_control_err(instance_c, |control| {
+        control.audio_opus_requested.store(opus, Ordering::SeqCst);
+        LEFTCAR_OK
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn leftcar_jni_set_audio_stream(instance_c: *const c_char, enabled: bool) -> i32 {
     with_active_control_err(instance_c, |control| {
         control.audio_requested.store(enabled, Ordering::SeqCst);
@@ -349,6 +417,119 @@ mod cursor_export_tests {
     fn drop_control(test_key: &str, control: &Arc<RendererControl>) {
         remove_renderer_if_current(test_key, control);
         clear_cached_termination(test_key);
+    }
+
+    #[test]
+    fn audio_owned_operations_never_drain_or_downgrade_same_instance_successor() {
+        let instance = CString::new("task8-audio-owner").unwrap();
+        let old = Arc::new(RendererControl::new_split(5000, 60));
+        let new = Arc::new(RendererControl::new_split(5000, 60));
+        bind_owned_renderer(7001, "task8-audio-owner", Arc::clone(&old));
+        bind_owned_renderer(7002, "task8-audio-owner", Arc::clone(&new));
+        install_renderer("task8-audio-owner", Arc::clone(&new));
+        let packet = crate::audio_protocol::encode_audio_packet(1, 48000, 2, &[1, 2, 3, 4]);
+        new.audio.lock().unwrap().push(&packet);
+        let mut bytes = [0; 128];
+        assert_eq!(
+            leftcar_jni_poll_audio_owned(
+                7001 as *mut c_void,
+                instance.as_ptr(),
+                bytes.as_mut_ptr(),
+                bytes.len()
+            ),
+            0
+        );
+        assert_eq!(new.audio.lock().unwrap().len(), 1);
+        assert_eq!(
+            leftcar_jni_set_audio_owned(7002 as *mut c_void, instance.as_ptr(), true, true),
+            0
+        );
+        assert_eq!(
+            leftcar_jni_set_audio_owned(7001 as *mut c_void, instance.as_ptr(), false, false),
+            0
+        );
+        assert!(new.audio_opus_requested.load(Ordering::SeqCst));
+        assert!(new.audio_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            leftcar_jni_poll_audio_owned(
+                7002 as *mut c_void,
+                instance.as_ptr(),
+                bytes.as_mut_ptr(),
+                bytes.len()
+            ),
+            10
+        );
+        forget_owned_renderer(7001, "task8-audio-owner", &old);
+        forget_owned_renderer(7002, "task8-audio-owner", &new);
+        remove_renderer_if_current("task8-audio-owner", &new);
+    }
+
+    #[test]
+    fn owned_audio_absent_stopped_live_and_wait_stop_boundary() {
+        let instance = CString::new("task8-fix1-poll").unwrap();
+        let mut bytes = [0; 128];
+        let poll = |bytes: &mut [u8]| {
+            leftcar_jni_poll_audio_owned(
+                7081 as *mut c_void,
+                instance.as_ptr(),
+                bytes.as_mut_ptr(),
+                bytes.len(),
+            )
+        };
+        assert_eq!(poll(&mut bytes), 0);
+        let stopped = Arc::new(RendererControl::new_split(5081, 60));
+        stopped.request_stop(false);
+        stopped
+            .audio
+            .lock()
+            .unwrap()
+            .push(&crate::audio_protocol::encode_audio_packet(
+                1,
+                48000,
+                2,
+                &[1, 2, 3, 4],
+            ));
+        bind_owned_renderer(7081, "task8-fix1-poll", Arc::clone(&stopped));
+        assert_eq!(
+            poll(&mut bytes),
+            0,
+            "stopped controls cannot deliver queued stale audio"
+        );
+        forget_owned_renderer(7081, "task8-fix1-poll", &stopped);
+        let live = Arc::new(RendererControl::new_split(5081, 60));
+        bind_owned_renderer(7081, "task8-fix1-poll", Arc::clone(&live));
+        std::thread::scope(|scope| {
+            let control = Arc::clone(&live);
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                control
+                    .audio
+                    .lock()
+                    .unwrap()
+                    .push(&crate::audio_protocol::encode_audio_packet(
+                        1,
+                        48000,
+                        2,
+                        &[1, 2, 3, 4],
+                    ));
+                control.audio_available.notify_all();
+            });
+            assert_eq!(poll(&mut bytes), 10);
+        });
+        std::thread::scope(|scope| {
+            let control = Arc::clone(&live);
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                control.request_stop(false);
+            });
+            let began = std::time::Instant::now();
+            assert_eq!(poll(&mut bytes), 0);
+            assert!(
+                began.elapsed() < std::time::Duration::from_millis(80),
+                "stop must wake the actual condvar wait"
+            );
+        });
+        forget_owned_renderer(7081, "task8-fix1-poll", &live);
     }
 
     #[test]

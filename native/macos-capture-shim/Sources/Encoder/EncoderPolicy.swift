@@ -64,26 +64,6 @@ func videoBitrateBounds(width: UInt32, height: UInt32, activeCount: Int) -> Vide
     )
 }
 
-enum EncoderExperiment: String, Equatable {
-    case auto
-    case rateControl
-    case adaptiveQp
-    case encoderPool
-    case splitHorizontal
-    case splitVertical
-
-    static func parse(_ raw: String?) -> EncoderExperiment? {
-        guard let raw else { return .auto }
-        guard let value = EncoderExperiment(rawValue: raw) else { return nil }
-        switch value {
-        case .auto, .rateControl, .adaptiveQp, .encoderPool, .splitVertical:
-            return value
-        case .splitHorizontal:
-            return nil
-        }
-    }
-}
-
 enum EncoderMode: String, Hashable {
     case ave
     case rtvc

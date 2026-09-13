@@ -60,7 +60,7 @@ extension CaptureSession {
             handleCursorStreamCommand(message, fd: fd, destination: destination)
             return .handled
         }
-        if message == Data("SNDON".utf8) || message == Data("SNDOFF".utf8) {
+        if message == Data("SNDON".utf8) || message == Data("SNDOFF".utf8) || message == Data("SNDA1O".utf8) || message == Data("SNDA1P".utf8) {
             // Same token-authenticated command class; audio needs no
             // reply address because it rides the existing media socket.
             handleSystemAudioCommand(message)

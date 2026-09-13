@@ -68,6 +68,8 @@ export default function Modal({
         // 브라우저 자체 닫힘을 막고 닫기 여부를 React 상태에 남긴다 — busy
         // 중이라 닫으면 안 되는 모달(종료 확인)은 onClose에서 골라 낸다.
         event.preventDefault();
+        event.stopPropagation();
+        if (event.target !== event.currentTarget) return;
         onClose();
       }}
     >

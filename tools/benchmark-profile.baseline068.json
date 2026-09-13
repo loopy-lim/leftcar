@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "label": "adapted-baseline068-profile-only",
+  "baseline": "068b6628df5dc57f264446f8ec51215b37c51b6f",
+  "patchSha256": "587dd7b263121b1a625c21ef628dec812d9dc01e13c9368fdc69b6314e069612",
+  "files": [
+    {
+      "path": "apps/host-desktop/src-tauri/src/lib.rs",
+      "beforeSha256": "d9e89e6a9bc093642bcc8b41b5a5ff42ad135e9d5e44c1637349ac2318076c37",
+      "afterSha256": "19e7b555a436c9a81873611d074e2a9746c6e398fed21db800406794b1702709"
+    },
+    {
+      "path": "apps/host-desktop/src-tauri/src/pairing.rs",
+      "beforeSha256": "c84c0a985c3e9d64e08e82466e3227f77be062a7a9766b91155843d33e80e9b7",
+      "afterSha256": "9c3c427d39d42fbe6547f6dc9a3da1082d697a6df1df9a36907c7483a6cc114c"
+    },
+    {
+      "path": "apps/viewer-expo/app.config.ts",
+      "beforeSha256": "180a0d3b0600ecc6c6bc6fbab79f9ff653dbc5270f5c5950f53009b187c6495f",
+      "afterSha256": "5f0c59a79c5857c207ada01bdce1a6aacea6b1a392dfce83cf20230a827bc850"
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/AndroidManifest.xml",
+      "beforeSha256": "6b9a09aebc5a08a3e16d6b8c23889257d8cb0f48eb4c7a1a1c575b975fad6b95",
+      "afterSha256": "4583ce298197680e00c0b1a10d18426dbff3c1a98f16191582f5b3072d67737a"
+    },
+    {
+      "path": "apps/host-desktop/src-tauri/src/state_profile.rs",
+      "beforeSha256": null,
+      "afterSha256": "7a94014e8e0811bc4b58d481a4c425175fe6315b4918cd8b2a99f0d79cb86f48"
+    },
+    {
+      "path": "apps/viewer-expo/android/app/build.gradle",
+      "beforeSha256": "4ca1fa897c9acae14e5fac017786b4b9dbefdec531cf4d75d2dc7f1434be7825",
+      "afterSha256": "7a66c4839550c09bbe6e006890104329a3d2636a0c770b5d5d7dfd77a465747d"
+    },
+    {
+      "path": "native/macos-capture-shim/Sources/Capture/SystemAudioOwnership.swift",
+      "beforeSha256": "473450cc18aecc58ba8fbecd21f073d4481b63a93cf3aabe838736ff3ad27f6a",
+      "afterSha256": "ef03032a476365809f55851aea988bcb39205ac1fb6a70f23883c26b04605c79"
+    },
+    {
+      "path": "native/macos-capture-shim/Sources/Capture/BenchmarkAudioPolicy.swift",
+      "beforeSha256": null,
+      "afterSha256": "260d26c3fe9da0ee1b57793fd4e0356d506cc3cb2c679541ca2e31c1eedbebc9"
+    },
+    {
+      "path": "native/macos-capture-shim/Sources/CaptureShim+Exports.swift",
+      "beforeSha256": "68ca154631ede5dab853b6c194e358effd009adac255240f37777f8b96b7a1f3",
+      "afterSha256": "d50296917d04ceb466bacb9e1b62e917890af235739fe7338d0ac94e9766d1ce"
+    },
+    {
+      "path": "native/macos-capture-shim/Sources/Capture/CaptureBackend.swift",
+      "beforeSha256": "ea4f940ede409dca3bc20e3801818a1d7f4e526279db2e629a3a395fd7ff875b",
+      "afterSha256": "03251e0853ea34ee2af1189511ac0ac53970fb4ac501c531371133917f9d68da"
+    },
+    {
+      "path": "native/macos-capture-shim/Sources/Capture/DisplaySourceSelection.swift",
+      "beforeSha256": null,
+      "afterSha256": "86d70afa62df8e3d37ca00124bec13a56d516070b12bbdfe6b365ee4c0ac7965"
+    }
+  ],
+  "requiredBuildEnvironment": [
+    "LEFTCAR_BENCHMARK_PROFILE=<slug>",
+    "LEFTCAR_BENCHMARK_BUILD_PROFILE=<same-slug> (Host compiler only)"
+  ],
+  "requiredRuntimeEnvironment": [
+    "LEFTCAR_BENCHMARK_PROFILE=<matching-slug>",
+    "LEFTCAR_BENCHMARK_ROOT=<existing dedicated absolute directory>",
+    "LEFTCAR_BENCHMARK_SYSTEM_AUDIO=off (required for video-only acceptance)",
+    "LEFTCAR_BENCHMARK_SOURCE_ID=<exact task-created CoreGraphics display sourceId>"
+  ],
+  "limitations": "Profile isolation and identical restrictive initial/refresh audio-off plus exact native display selection only; no candidate grant or performance policy imported. Display selector rejects absent/mismatched/ambiguous benchmark identity before capture construction. Process/build proof does not authorize capture."
+}

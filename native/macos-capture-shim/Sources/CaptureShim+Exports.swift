@@ -45,11 +45,9 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
 
 
 
-/// The single start ABI is `leftcar_capture_start_v8` (see
-/// CaptureShim+UdpStabilityExports.swift): identical parameter set to the
-/// retired v2..v7 sequence plus the trailing viewer-generated 32-byte media
-/// key. There is no plaintext media path anymore, so legacy start exports are
-/// removed rather than kept as unsealed fallbacks.
+/// Shared sealed capture constructor. The current Host uses v9 stable source,
+/// authenticated owner and revocable lease; v8 retains explicit legacy identity
+/// behavior for older callers. Both exports require a 32-byte sealed media key.
  func startCaptureSession(
     ip: UnsafePointer<CChar>,
     port: UInt16,
@@ -62,8 +60,13 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
     contentMode: StreamContentMode = .interactive,
     encoderExperiment: EncoderExperiment = .auto,
     udpStability: AppliedUdpStability = .legacy,
-    mediaKey: Data
+    mediaKey: Data,
+    sourceID: String? = nil,
+    authenticatedOwner: String? = nil,
+    authorization: SourceAuthorization? = nil
 ) -> UInt32 {
+    guard authorization?.begin() ?? true else { setLastError("source authorization revoked"); return 0 }
+    defer { authorization?.end() }
     guard hasScreenCaptureAccess() else {
         setLastError("screen-recording permission is not granted to Leftcar Host")
         return 0
@@ -82,6 +85,8 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
 
     let session = CaptureSession(
         targetAddr: addr,
+        authenticatedOwner: authenticatedOwner,
+        authorization: authorization,
         targetPort: port,
         targetLabel: "\(ipStr):\(port)",
         width: width,
@@ -126,6 +131,11 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         return abort(nil)
     }
 
+    guard let selectedDisplay = selectDisplaySource(
+        candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
+        index: displayIndex, sourceID: sourceID
+    ) else { return abort("source unavailable, ambiguous, or outside benchmark approval") }
+
     let started: Bool
     switch backend {
     case .screenCaptureKit:
@@ -136,28 +146,24 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
         guard hasPersistentContentCaptureEntitlement() || hasScreenCaptureAccess() else {
             return abort("screen-recording permission is not granted to Leftcar Host")
         }
-        let displayIDs = activeDisplayIDs()
-        guard Int(displayIndex) < displayIDs.count else {
-            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-        }
         // Approved VNC-style builds reconnect directly to the requested
         // display after Screen Recording permission has been granted. Builds
         // without approval never show a picker; the Host advertises the
         // automatic CGDisplayStream backend instead.
         let selection = requestPersistentDisplayFilter(
-            displayID: displayIDs[Int(displayIndex)],
+            displayID: selectedDisplay,
             timeout: 15
         )
         guard let filter = selection.filter else {
             return abort(selection.error ?? "screen capture returned no display")
         }
+        guard selectDisplaySource(
+            candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
+            index: displayIndex, sourceID: sourceID
+        ) == selectedDisplay else { return abort("display identity changed during selection") }
         started = session.setupScreenCaptureKit(filter: filter)
     case .cgDisplayStream:
-        let displayIDs = activeDisplayIDs()
-        guard Int(displayIndex) < displayIDs.count else {
-            return abort("displayIndex \(displayIndex) out of range (\(displayIDs.count) displays)")
-        }
-        started = session.setupCGDisplayStream(displayID: displayIDs[Int(displayIndex)])
+        started = session.setupCGDisplayStream(displayID: selectedDisplay)
     }
     guard started else {
         return abort(nil)

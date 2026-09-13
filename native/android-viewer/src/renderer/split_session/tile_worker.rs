@@ -338,6 +338,9 @@ fn tile_worker(launch: TileWorkerLaunch) {
                     per_tile_idr_resumes: stats.per_tile_idr_resumes.load(Ordering::Relaxed),
                 };
                 if periodic {
+                    if side == TileSide::Left {
+                        log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} kind=split released={} leftReleased={} rightReleased={} outputStage=paired-surface-release releaseCaptureAgeMs=None", std::process::id(), control.port, control.metric_incarnation, joined, stats.left_rendered.load(Ordering::Relaxed), stats.right_rendered.load(Ordering::Relaxed));
+                    }
                     log_info!(
                         "split {:?} stats renderedFps={} joinedFps={} rendered={} joined={} gaps={} inputDrops={} incomplete={} pairP95Us={} pairMaxUs={} pairTimeouts={} unmatched={} pairedResumes={} perTileResumes={} idrTransmitAttempts={} idrUnsent={} idrStaleCancelled={} nacksSent={} nacksHealed={}",
                         side,
@@ -426,6 +429,16 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         ),
                         &crypto,
                     );
+                    if control.audio_requested.load(Ordering::SeqCst) {
+                        send_authenticated(
+                            &socket,
+                            peer,
+                            crate::audio_protocol::audio_codec_command(
+                                control.audio_opus_requested.load(Ordering::SeqCst),
+                            ),
+                            &crypto,
+                        );
+                    }
                 }
             }
         }
@@ -637,6 +650,11 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             continue;
                         }
                         peer = Some(source);
+                        let network_rtt = control.network_rtt_ms.load(Ordering::Relaxed);
+                        sequencer.configure_nack_grace(
+                            !awaiting_keyframe,
+                            (network_rtt != crate::jni::LATENCY_UNKNOWN).then_some(network_rtt),
+                        );
                         // Open before parsing: only datagrams sealed with the
                         // session media key are trusted on this socket. The
                         // in-place open decrypts inside the recvmmsg buffer —
@@ -660,6 +678,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 packet,
                                 &mut control.audio.lock().unwrap(),
                             ) {
+                                control.audio_available.notify_one();
                                 continue;
                             }
                             if let Some(ack) = parse_ack(packet) {
@@ -842,7 +861,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 completed_fec_groups.remember(key);
                             }
                             if let Some(frame) = reassembler.push(fragment) {
-                                for frame in sequencer.push(frame) {
+                                for frame in sequencer.push_reassembled(frame, &reassembler) {
                                     process_frame(
                                         side,
                                         frame,

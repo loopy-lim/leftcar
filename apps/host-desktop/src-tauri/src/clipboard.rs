@@ -8,6 +8,10 @@
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 pub trait ClipboardBackend: Send + Sync {
+    /// Native change sequence, unavailable when no reliable signal exists.
+    fn revision(&self) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
     fn read_text(&self) -> Result<String, String>;
     fn write_text(&self, text: &str) -> Result<(), String>;
     /// 클립보드의 이미지를 PNG 바이트로 돌려준다. 이미지가 없으면
@@ -16,6 +20,62 @@ pub trait ClipboardBackend: Send + Sync {
     fn read_image_png(&self) -> Result<Option<Vec<u8>>, String>;
     /// PNG 바이트를 클립보드에 쓴다.
     fn write_image_png(&self, png: &[u8]) -> Result<(), String>;
+}
+
+/// Query only the native revision, never a clipboard payload. A missing or
+/// unusable native sequence forces the caller to read normally.
+#[cfg(target_os = "macos")]
+fn native_revision() -> Result<Option<u64>, String> {
+    use std::ffi::{c_char, c_void};
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+    struct Pool(*mut c_void);
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            unsafe { objc_autoreleasePoolPop(self.0) };
+        }
+    }
+    // NSPasteboard is provided by AppKit already linked by the Host. Calls
+    // have no payload arguments and use the documented NSInteger return ABI.
+    unsafe {
+        let _pool = Pool(objc_autoreleasePoolPush());
+        let class = objc_getClass(c"NSPasteboard".as_ptr());
+        if class.is_null() {
+            return Ok(None);
+        }
+        let object_send: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let integer_send: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let pasteboard = object_send(class, sel_registerName(c"generalPasteboard".as_ptr()));
+        if pasteboard.is_null() {
+            return Ok(None);
+        }
+        let value = integer_send(pasteboard, sel_registerName(c"changeCount".as_ptr()));
+        Ok(u64::try_from(value).ok())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_revision() -> Result<Option<u64>, String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClipboardSequenceNumber() -> u32;
+    }
+    // Zero means inaccessible window station or unavailable sequence.
+    let value = unsafe { GetClipboardSequenceNumber() };
+    Ok((value != 0).then_some(u64::from(value)))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn native_revision() -> Result<Option<u64>, String> {
+    Ok(None)
 }
 
 /// RGBA(프리멀티플일 수 있음)를 PNG으로 인코딩한다.
@@ -94,6 +154,9 @@ fn map_read_text_error(error: tauri_plugin_clipboard_manager::Error) -> Result<S
 }
 
 impl ClipboardBackend for TauriClipboard {
+    fn revision(&self) -> Result<Option<u64>, String> {
+        native_revision()
+    }
     fn read_text(&self) -> Result<String, String> {
         self.app
             .clipboard()
@@ -135,6 +198,9 @@ impl ClipboardBackend for TauriClipboard {
 pub struct SystemClipboard;
 
 impl ClipboardBackend for SystemClipboard {
+    fn revision(&self) -> Result<Option<u64>, String> {
+        native_revision()
+    }
     fn read_text(&self) -> Result<String, String> {
         let output = std::process::Command::new("pbpaste")
             .output()

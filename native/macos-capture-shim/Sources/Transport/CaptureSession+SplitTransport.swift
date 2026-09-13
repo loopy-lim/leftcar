@@ -16,6 +16,7 @@ struct SplitPairSendResult {
     let auID: UInt16
     let succeeded: Bool
     let attemptedDatagrams: Int
+    var cancelled: Bool = false
 }
 
 func interleaveSplitTransmissions(
@@ -170,6 +171,9 @@ extension CaptureSession {
     func writeSplitPacketPair(
         _ accessUnit: PendingSplitAccessUnit
     ) -> SplitPairSendResult {
+        guard splitFlowAccepts(accessUnit.lease) else {
+            return .init(auID: 0, succeeded: false, attemptedDatagrams: 0, cancelled: true)
+        }
         let auID = splitWireSequence.allocate()
         stateLock.lock()
         splitWirePairsAttempted &+= 1
@@ -266,6 +270,7 @@ extension CaptureSession {
         var sendSyscallUs: UInt64 = 0
         var succeeded = true
         var deadlineExceeded = false
+        var cancelled = false
         let burstLimit = splitPacingBurstLimit(
             configured: currentUdpBurstLimit(),
             leftFragmentCount: leftUnit.fragmentCount,
@@ -313,6 +318,13 @@ extension CaptureSession {
                 selectedParity: selectedParity
             )
             for index in range {
+                // Pacing can yield while expiry advances the flow generation.
+                // Stop old work before the next datagram, including after a wait.
+                guard splitFlowAccepts(accessUnit.lease) else {
+                    cancelled = true
+                    succeeded = false
+                    break sendLoop
+                }
                 let transmission = transmissions[index]
                 let syscallStart = DispatchTime.now().uptimeNanoseconds
                 let sent = sendMediaDatagram(
@@ -353,6 +365,9 @@ extension CaptureSession {
             sendUs: sendUs
         )
 
+        if cancelled || !splitFlowAccepts(accessUnit.lease) {
+            return .init(auID: auID, succeeded: false, attemptedDatagrams: sentDatagrams, cancelled: true)
+        }
         guard succeeded else {
             stateLock.lock()
             framesDropped &+= 1

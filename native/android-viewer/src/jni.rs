@@ -67,12 +67,16 @@ use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, O
 use std::sync::{Arc, LazyLock, Mutex};
 
 pub(crate) struct RendererControl {
+    pub(crate) metric_incarnation: String,
+    pub(crate) output_metadata: Mutex<crate::renderer::output_metadata::OutputMetadata>,
+    pub(crate) presentation: Mutex<crate::renderer::DisplayTimeline>,
     pub(crate) port: u16,
     pub(crate) split: bool,
     pub(crate) input: Mutex<InputScheduler>,
     // Host audio plane (LCAU): newest chunks only, drained by the Kotlin
     // playback thread through leftcar_jni_poll_audio.
     pub(crate) audio: Mutex<AudioRing>,
+    pub(crate) audio_available: std::sync::Condvar,
     // -1 = waiting for authenticated Host state, 0 = locked, 1 = enabled.
     pub(crate) input_enabled: AtomicI8,
     pub(crate) rendered_frames: AtomicU64,
@@ -135,6 +139,7 @@ pub(crate) struct RendererControl {
     // 1s refresh as LCDON. Audio plays by default, matching the pre-toggle
     // behavior, so the flag starts true.
     pub(crate) audio_requested: AtomicBool,
+    pub(crate) audio_opus_requested: AtomicBool,
 }
 
 impl RendererControl {
@@ -148,10 +153,14 @@ impl RendererControl {
 
     pub(crate) fn new_split(port: u16, fps: u32) -> Self {
         Self {
+            metric_incarnation: crate::renderer::metric_identity(),
+            output_metadata: Mutex::new(Default::default()),
+            presentation: Mutex::new(crate::renderer::DisplayTimeline::default()),
             port,
             split: true,
             input: Mutex::new(InputScheduler::new(fps)),
             audio: Mutex::new(AudioRing::default()),
+            audio_available: std::sync::Condvar::new(),
             input_enabled: AtomicI8::new(-1),
             rendered_frames: AtomicU64::new(0),
             stale_outputs: AtomicU64::new(0),
@@ -181,6 +190,7 @@ impl RendererControl {
             cursor_sequence: AtomicU32::new(0),
             cursor_requested: AtomicBool::new(false),
             audio_requested: AtomicBool::new(true),
+            audio_opus_requested: AtomicBool::new(false),
         }
     }
 
@@ -190,7 +200,14 @@ impl RendererControl {
 
     pub(crate) fn request_stop(&self, send_bye: bool) {
         self.send_bye.store(send_bye, Ordering::SeqCst);
+        self.signal_stop();
+    }
+
+    fn signal_stop(&self) {
+        // Serialize with the condvar predicate to avoid a lost stop wakeup.
+        let _audio = self.audio.lock().unwrap();
         self.stop.store(true, Ordering::SeqCst);
+        self.audio_available.notify_all();
     }
 
     pub(crate) fn mark_finished(&self) {
@@ -256,7 +273,7 @@ impl RendererLifecycle {
     pub(crate) fn install_renderer(&mut self, instance: &str, control: Arc<RendererControl>) {
         self.termination_reasons.remove(instance);
         if let Some(old_control) = self.active_renderers.insert(instance.to_owned(), control) {
-            old_control.stop.store(true, Ordering::SeqCst);
+            old_control.signal_stop();
         }
     }
 
@@ -454,14 +471,6 @@ impl MediaBridge {
         }
     }
 
-    /// The session crypto this bridge shares with the renderer.
-    pub(crate) fn shared_crypto(&self) -> Option<SharedMediaCrypto> {
-        match self {
-            Self::Tcp(bridge) => Some(bridge.shared_crypto()),
-            Self::Usb(bridge) => bridge.shared_crypto(),
-        }
-    }
-
     pub(crate) fn drain_media(&self) {
         match self {
             Self::Tcp(bridge) => bridge.drain_media(),
@@ -519,28 +528,105 @@ pub(crate) fn renderer_termination_reason(instance: &str) -> Option<i8> {
         .termination_reason(instance)
 }
 
-pub(crate) fn wait_for_renderer(control: &RendererControl) {
+// Activity core state and renderer identity have different lifetimes. Retain
+// the exact installed control until that state's own Surface is released.
+type RendererOwnerKey = (usize, String);
+type OwnedRendererMap = HashMap<RendererOwnerKey, Arc<RendererControl>>;
+static OWNED_RENDERERS: std::sync::LazyLock<Mutex<OwnedRendererMap>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn bind_owned_renderer(state: usize, instance: &str, control: Arc<RendererControl>) {
+    OWNED_RENDERERS
+        .lock()
+        .unwrap()
+        .insert((state, instance.to_owned()), control);
+}
+
+pub(crate) fn owned_renderer(state: usize, instance: &str) -> Option<Arc<RendererControl>> {
+    OWNED_RENDERERS
+        .lock()
+        .unwrap()
+        .get(&(state, instance.to_owned()))
+        .cloned()
+}
+
+pub(crate) fn forget_owned_renderer(state: usize, instance: &str, expected: &Arc<RendererControl>) {
+    let mut owners = OWNED_RENDERERS.lock().unwrap();
+    let key = (state, instance.to_owned());
+    if owners
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+    {
+        owners.remove(&key);
+    }
+}
+
+pub(crate) fn stop_renderer(control: &RendererControl, send_bye: bool) -> bool {
+    let should_send_bye = send_bye && control.termination_reason() < 0;
+    control.send_bye.store(should_send_bye, Ordering::SeqCst);
+    control.suspend.store(false, Ordering::SeqCst);
+    control.signal_stop();
+    wait_for_renderer(control)
+}
+
+pub(crate) fn detach_owned_renderer(state: usize, instance: &str) -> bool {
+    let Some(control) = owned_renderer(state, instance) else {
+        return true;
+    };
+    if control.is_split() {
+        return stop_renderer(&control, false);
+    }
+    control.suspend.store(true, Ordering::SeqCst);
+    // A native window cannot be freed while MediaCodec still owns it.
+    for _ in 0..40 {
+        if control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst)
+}
+
+pub(crate) fn finished_owned_renderer(
+    state: usize,
+    instance: &str,
+) -> Result<Option<Arc<RendererControl>>, ()> {
+    let control = owned_renderer(state, instance);
+    if control
+        .as_ref()
+        .is_some_and(|control| !stop_renderer(control, true))
+    {
+        return Err(());
+    }
+    Ok(control)
+}
+
+pub(crate) fn wait_for_renderer(control: &RendererControl) -> bool {
     // Accepted socket reads are bounded to 300 ms. Leave additional margin
     // for MediaCodec_stop/delete without hanging the Android UI indefinitely.
     for _ in 0..40 {
         if control.finished.load(Ordering::SeqCst) {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    control.finished.load(Ordering::SeqCst)
 }
 
 /// Stop any renderer still holding the UDP port and wait (bounded) for its
 /// thread to release the socket. Without this, a re-attached surface races
 /// the old thread and `bind` fails with Address-in-use.
-pub(crate) fn reclaim_udp_port(port: u16) {
+pub(crate) fn reclaim_udp_port(port: u16) -> bool {
     let running = RENDERER_LIFECYCLE.lock().unwrap().renderers_for_port(port);
     for control in running {
         control.send_bye.store(false, Ordering::SeqCst);
         control.suspend.store(false, Ordering::SeqCst);
-        control.stop.store(true, Ordering::SeqCst);
-        wait_for_renderer(&control);
+        control.signal_stop();
+        if !wait_for_renderer(&control) {
+            return false;
+        }
     }
+    true
 }
 
 pub(crate) fn cancel_prepared_receiver(port: u16) -> bool {
@@ -664,7 +750,9 @@ pub(crate) fn prepare_udp_receiver(
     // same port again. Reclaim that logical stream before binding the
     // replacement preflight listener; the subsequent Activity recreation
     // will attach a fresh renderer to the new Host session.
-    reclaim_udp_port(port);
+    if !reclaim_udp_port(port) {
+        return Err("previous decoder cleanup is incomplete; retry stopping the stream".into());
+    }
 
     let active_port = RENDERER_LIFECYCLE
         .lock()
@@ -769,6 +857,16 @@ pub(crate) fn restore_prepared_receiver(port: u16, receiver: PreparedUdpReceiver
 #[cfg(test)]
 mod renderer_lifecycle_tests {
     use super::*;
+    #[test]
+    fn decoder_cleanup_timeout_is_not_acknowledged() {
+        let control = RendererControl::new_split(57000, 60);
+        let result: &dyn std::any::Any = &wait_for_renderer(&control);
+        assert_eq!(result.downcast_ref::<bool>(), Some(&false));
+        control.finished.store(true, Ordering::SeqCst);
+        let result: &dyn std::any::Any = &wait_for_renderer(&control);
+        assert_eq!(result.downcast_ref::<bool>(), Some(&true));
+    }
+
     use std::sync::{mpsc, Arc, Mutex};
 
     struct LifecycleTestHarness {
@@ -1017,5 +1115,55 @@ mod split_receiver_tests {
         let right = bind_prepared();
         assert!(take_split_receivers(left.port().unwrap(), right.port().unwrap(), HOST).is_none());
         assert_eq!(store_len(), before);
+    }
+}
+
+#[cfg(test)]
+mod native_owner_tests {
+    use super::*;
+
+    #[test]
+    fn old_state_cleanup_never_stops_same_port_successor() {
+        let instance = "native-owner-stale-release";
+        let old = Arc::new(RendererControl::new_split(51_221, 60));
+        old.finished.store(true, Ordering::SeqCst);
+        let new = Arc::new(RendererControl::new_split(51_221, 60));
+        bind_owned_renderer(101, instance, Arc::clone(&old));
+        bind_owned_renderer(102, instance, Arc::clone(&new));
+        install_renderer(instance, Arc::clone(&new));
+        assert!(detach_owned_renderer(101, instance));
+        assert!(!new.stop.load(Ordering::SeqCst));
+        let finished = finished_owned_renderer(101, instance)
+            .expect("old decoder already finished")
+            .unwrap();
+        assert!(Arc::ptr_eq(&finished, &old));
+        assert!(!new.stop.load(Ordering::SeqCst));
+        assert!(Arc::ptr_eq(&active_renderer(instance).unwrap(), &new));
+        forget_owned_renderer(101, instance, &finished);
+        assert!(owned_renderer(101, instance).is_none());
+        assert!(Arc::ptr_eq(&owned_renderer(102, instance).unwrap(), &new));
+        remove_renderer_if_current(instance, &new);
+        forget_owned_renderer(102, instance, &new);
+    }
+    #[test]
+    fn timeout_retains_owner_and_stale_removal_cannot_erase_reused_state() {
+        let instance = "native-owner-timeout-reuse";
+        let old = Arc::new(RendererControl::new_split(51_222, 60));
+        bind_owned_renderer(201, instance, Arc::clone(&old));
+        assert!(finished_owned_renderer(201, instance).is_err());
+        assert!(Arc::ptr_eq(&owned_renderer(201, instance).unwrap(), &old));
+        old.finished.store(true, Ordering::SeqCst);
+        let finished = finished_owned_renderer(201, instance).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&finished, &old));
+        forget_owned_renderer(201, instance, &finished);
+        let reused = Arc::new(RendererControl::new_split(51_222, 60));
+        bind_owned_renderer(201, instance, Arc::clone(&reused));
+        forget_owned_renderer(201, instance, &old);
+        assert!(Arc::ptr_eq(
+            &owned_renderer(201, instance).unwrap(),
+            &reused
+        ));
+        assert!(!reused.stop.load(Ordering::SeqCst));
+        forget_owned_renderer(201, instance, &reused);
     }
 }

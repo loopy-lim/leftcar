@@ -60,7 +60,7 @@ pub(super) fn present_completed_frames(
             // frame-id observation epoch. Counting its jump from the
             // discarded stale frame would be another false loss.
             *last_frame_id = None;
-            resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
+            resync_decoder_after_frame_gap(decoder, awaiting_keyframe, control);
             request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
             continue;
         }
@@ -163,11 +163,11 @@ pub(super) fn present_completed_frames(
                     }
                     Some(FeedOutcome::ResyncRequired) => {
                         *last_frame_id = None;
-                        resync_decoder_after_frame_gap(decoder, awaiting_keyframe);
+                        resync_decoder_after_frame_gap(decoder, awaiting_keyframe, control);
                         request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                     Some(FeedOutcome::FatalError) => {
-                        reset_decoder(decoder, codec_config, awaiting_keyframe);
+                        reset_decoder(decoder, codec_config, awaiting_keyframe, control);
                         request_idr_debounced(control_socket, peer, crypto, recovery_gate, control);
                     }
                     None => {}

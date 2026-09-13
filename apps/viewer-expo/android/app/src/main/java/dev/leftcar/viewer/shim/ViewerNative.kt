@@ -55,6 +55,17 @@ object ViewerNative {
         height: Int,
         fps: Int,
     ): Int
+    external fun attachSurfacePortWithPresentation(
+        state: Long,
+        instanceId: String,
+        surface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        balanced: Boolean,
+    ): Int
     /** Replace the renderer while retaining the Activity-owned Surface. */
     external fun rebindSurfacePort(
         state: Long,
@@ -65,6 +76,17 @@ object ViewerNative {
         width: Int,
         height: Int,
         fps: Int,
+    ): Int
+    external fun rebindSurfacePortWithPresentation(
+        state: Long,
+        instanceId: String,
+        surface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        balanced: Boolean,
     ): Int
     external fun attachSplitSurfaces(
         state: Long,
@@ -78,6 +100,20 @@ object ViewerNative {
         fps: Int,
         decoderName: String,
     ): Int
+    external fun attachSplitSurfacesWithPresentation(
+        state: Long,
+        instanceId: String,
+        leftSurface: Surface,
+        rightSurface: Surface,
+        port: Int,
+        host: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        decoderName: String,
+        balanced: Boolean,
+    ): Int
+    external fun displayFrame(state: Long, instanceId: String, balanced: Boolean, displayId: Int, frameNs: Long, periodNs: Long): Int
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
     external fun sendPointer(
@@ -128,6 +164,9 @@ object ViewerNative {
      * renderer's idempotent command refresh, so a mid-stream toggle applies
      * without a reconfigure.
      */
+    external fun pollAudioOwned(state: Long, instanceId: String, out: ByteArray): Int
+    external fun setAudioOwned(state: Long, instanceId: String, enabled: Boolean, opus: Boolean): Int
+    external fun setAudioCodec(instanceId: String, opus: Boolean): Int
     external fun setAudioStream(instanceId: String, enabled: Boolean): Int
     /** Compact native renderer diagnostics; -1 when the stream is unavailable. */
     external fun streamStats(instanceId: String): Long

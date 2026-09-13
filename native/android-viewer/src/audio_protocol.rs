@@ -14,6 +14,17 @@ use std::collections::VecDeque;
 
 pub const AUDIO_MAGIC: &[u8; 4] = b"LCAU";
 pub const AUDIO_HEADER_LEN: usize = 12;
+pub const OPUS_MAGIC: &[u8; 4] = b"LCO1";
+pub const OPUS_HEADER_LEN: usize = 24;
+pub const AUDIO_OPUS_ON: &[u8] = b"SNDA1O";
+pub const AUDIO_PCM_ONLY: &[u8] = b"SNDA1P";
+pub fn audio_codec_command(opus: bool) -> &'static [u8] {
+    if opus {
+        AUDIO_OPUS_ON
+    } else {
+        AUDIO_PCM_ONLY
+    }
+}
 /// Host-side chunk cap; one datagram stays comfortably under the media MTU.
 /// The receiver rejects anything larger — no legitimate sender builds it.
 pub const AUDIO_MAX_FRAMES_PER_DATAGRAM: usize = 300;
@@ -49,10 +60,14 @@ pub struct AudioChunk {
     pub sample_rate: u16,
     pub channels: u8,
     pub frame_count: u16,
+    pub epoch: Option<u64>,
+    pub pre_skip: u16,
 }
 
 pub fn parse_audio_chunk(packet: &[u8]) -> Option<AudioChunk> {
-    if packet.len() < AUDIO_HEADER_LEN || packet.get(..4)? != AUDIO_MAGIC {
+    if packet.len() < AUDIO_HEADER_LEN
+        || !matches!(packet.get(..4)?, magic if magic == AUDIO_MAGIC || magic == OPUS_MAGIC)
+    {
         return None;
     }
     let chunk = AudioChunk {
@@ -60,9 +75,30 @@ pub fn parse_audio_chunk(packet: &[u8]) -> Option<AudioChunk> {
         sample_rate: u16::from_be_bytes(packet[6..8].try_into().ok()?),
         channels: packet[8],
         frame_count: u16::from_be_bytes(packet[10..12].try_into().ok()?),
+        epoch: if packet.get(..4)? == OPUS_MAGIC {
+            Some(u64::from_be_bytes(packet.get(12..20)?.try_into().ok()?))
+        } else {
+            None
+        },
+        pre_skip: if packet.get(..4)? == OPUS_MAGIC {
+            u16::from_be_bytes(packet.get(20..22)?.try_into().ok()?)
+        } else {
+            0
+        },
     };
     if chunk.sample_rate == 0 || chunk.channels == 0 || chunk.channels > 2 {
         return None;
+    }
+    if let Some(epoch) = chunk.epoch {
+        let payload = usize::from(u16::from_be_bytes(packet.get(22..24)?.try_into().ok()?));
+        return (epoch != 0
+            && chunk.sample_rate == 48000
+            && chunk.frame_count == 480
+            && packet[9] == 0
+            && chunk.pre_skip <= 5760
+            && (1..=1276).contains(&payload)
+            && packet.len() == OPUS_HEADER_LEN + payload)
+            .then_some(chunk);
     }
     let pcm_len = chunk.frame_count as usize * chunk.channels as usize * 2;
     if pcm_len == 0
@@ -80,6 +116,9 @@ pub fn parse_audio_chunk(packet: &[u8]) -> Option<AudioChunk> {
 #[derive(Default)]
 pub struct AudioRing {
     chunks: VecDeque<(AudioChunk, Vec<u8>)>,
+    newest_sequence: Option<u16>,
+    highest_epoch: Option<u64>,
+    epoch_format: Option<(u8, u16)>,
 }
 
 impl AudioRing {
@@ -87,20 +126,39 @@ impl AudioRing {
         let Some(chunk) = parse_audio_chunk(packet) else {
             return false;
         };
+        if let Some(epoch) = chunk.epoch {
+            if self.highest_epoch == Some(epoch)
+                && self.epoch_format != Some((chunk.channels, chunk.pre_skip))
+            {
+                return false;
+            }
+            if self.highest_epoch.is_some_and(|highest| epoch < highest) {
+                return false;
+            }
+            if self.highest_epoch.is_none_or(|highest| epoch > highest) {
+                self.highest_epoch = Some(epoch);
+                self.epoch_format = Some((chunk.channels, chunk.pre_skip));
+                self.newest_sequence = None;
+                self.chunks.clear();
+            }
+        }
         let newer = self
-            .chunks
-            .back()
-            .map(|(newest, _)| (chunk.sequence.wrapping_sub(newest.sequence) as i16) > 0)
+            .newest_sequence
+            .map(|newest| (chunk.sequence.wrapping_sub(newest) as i16) > 0)
             .unwrap_or(true);
         if !newer {
             return false;
         }
         if self.chunks.front().is_some_and(|(oldest, _)| {
-            oldest.sample_rate != chunk.sample_rate || oldest.channels != chunk.channels
+            oldest.sample_rate != chunk.sample_rate
+                || oldest.channels != chunk.channels
+                || oldest.epoch != chunk.epoch
+                || oldest.pre_skip != chunk.pre_skip
         }) {
             // A format change invalidates everything buffered before it.
             self.chunks.clear();
         }
+        self.newest_sequence = Some(chunk.sequence);
         self.chunks.push_back((chunk, packet.to_vec()));
         while self.chunks.len() > AUDIO_RING_CAPACITY {
             self.chunks.pop_front();
@@ -109,6 +167,13 @@ impl AudioRing {
     }
 
     pub fn clear(&mut self) {
+        self.newest_sequence = None;
+        self.highest_epoch = None;
+        self.epoch_format = None;
+        self.chunks.clear();
+    }
+
+    pub fn discard_pending(&mut self) {
         self.chunks.clear();
     }
 
@@ -129,6 +194,14 @@ impl AudioRing {
         let Some(&(head, _)) = self.chunks.front() else {
             return 0;
         };
+        if head.epoch.is_some() {
+            let (_, packet) = self.chunks.pop_front().unwrap();
+            if packet.len() > out.len() {
+                return 0;
+            }
+            out[..packet.len()].copy_from_slice(&packet);
+            return packet.len();
+        }
         let channels = head.channels as usize;
         let mut written = AUDIO_BLOB_HEADER_LEN;
         let mut frames = 0usize;
@@ -164,7 +237,9 @@ fn encode_blob_header(out: &mut [u8], sample_rate: u16, channels: usize, frames:
 /// Demux helper for the media receive loops: a recognized LCAU packet is
 /// stored and fully consumed.
 pub fn accept_audio_packet(packet: &[u8], ring: &mut AudioRing) -> bool {
-    if packet.len() >= AUDIO_HEADER_LEN && &packet[..4] == AUDIO_MAGIC {
+    if packet.len() >= AUDIO_HEADER_LEN
+        && (&packet[..4] == AUDIO_MAGIC || &packet[..4] == OPUS_MAGIC)
+    {
         ring.push(packet);
         true
     } else {
@@ -235,6 +310,8 @@ mod tests {
                 sample_rate: 48_000,
                 channels: 2,
                 frame_count: 300,
+                epoch: None,
+                pre_skip: 0,
             }
         );
         assert_eq!(packet.len(), AUDIO_HEADER_LEN + 300 * 2 * 2);
@@ -288,6 +365,111 @@ mod tests {
         assert_eq!(
             u16::from_be_bytes([blob[4], blob[5]]) as usize,
             AUDIO_RING_CAPACITY * 4
+        );
+    }
+
+    fn opus_packet(sequence: u16, epoch: u64) -> Vec<u8> {
+        let mut packet = b"LCO1".to_vec();
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(&48000u16.to_be_bytes());
+        packet.extend_from_slice(&[2, 0]);
+        packet.extend_from_slice(&480u16.to_be_bytes());
+        packet.extend_from_slice(&epoch.to_be_bytes());
+        packet.extend_from_slice(&312u16.to_be_bytes());
+        packet.extend_from_slice(&3u16.to_be_bytes());
+        packet.extend_from_slice(&[1, 2, 3]);
+        packet
+    }
+
+    #[test]
+    fn opus_epoch_survives_drain_and_rejects_retired_owner_and_reordering() {
+        let mut ring = AudioRing::default();
+        let mut out = [0; 1400];
+        // First packet lost: repeated format allows sequence 8 to initialize.
+        assert!(ring.push(&opus_packet(8, 41)));
+        assert_eq!(ring.drain_into(&mut out), 27);
+        assert_eq!(&out[..27], opus_packet(8, 41));
+        assert!(!ring.push(&opus_packet(7, 41)));
+        assert!(ring.push(&opus_packet(65535, 42)));
+        assert!(ring.push(&opus_packet(0, 42)));
+        assert!(!ring.push(&opus_packet(9, 41)));
+        ring.clear();
+        assert!(ring.push(&opus_packet(0, 1)));
+        let mut invalid = opus_packet(1, 1);
+        invalid[23] = 4;
+        assert!(!ring.push(&invalid));
+    }
+
+    #[test]
+    fn pcm_fallback_preserves_epoch_and_shared_sequence_until_new_owner_ring() {
+        let mut owner = AudioRing::default();
+        let pcm = |sequence| encode_audio_packet(sequence, 48_000, 2, &stereo_pcm(2));
+        let mut out = [0; 1400];
+        assert!(owner.push(&opus_packet(20, 50)));
+        assert_eq!(owner.drain_into(&mut out), 27);
+        assert!(
+            owner.push(&pcm(21)),
+            "same owner downgrades using continuous sequence"
+        );
+        owner.discard_pending();
+        assert!(
+            !owner.push(&opus_packet(22, 49)),
+            "mute/drain/PCM must retain retired epoch fence"
+        );
+        assert!(
+            !owner.push(&opus_packet(20, 50)),
+            "same epoch duplicate remains stale after PCM"
+        );
+        assert!(
+            owner.push(&opus_packet(22, 50)),
+            "an in-flight current epoch may arrive while downgrade refresh is lost"
+        );
+        let mut changed_format = opus_packet(23, 50);
+        changed_format[8] = 1;
+        assert!(
+            !owner.push(&changed_format),
+            "format cannot mutate within an epoch"
+        );
+        assert!(
+            owner.push(&pcm(23)),
+            "repeated downgrade eventually resumes PCM"
+        );
+        assert!(
+            owner.push(&opus_packet(24, 51)),
+            "explicit retry constructs a newer encoder"
+        );
+        assert!(!owner.push(&opus_packet(25, 50)));
+        assert!(
+            !owner.push(&pcm(24u16.wrapping_add(32768))),
+            "ambiguous half-range is stale"
+        );
+        // Actual host transfer selects a distinct CaptureSession/media channel;
+        // its renderer owns a distinct ring, rather than resetting this owner.
+        let mut successor = AudioRing::default();
+        assert!(successor.push(&pcm(1)));
+        assert!(!owner.push(&pcm(1)));
+    }
+
+    #[test]
+    fn drained_ring_retains_sequence_watermark_until_explicit_session_reset() {
+        let mut ring = AudioRing::default();
+        let packet = |sequence| encode_audio_packet(sequence, 48_000, 2, &stereo_pcm(2));
+        assert!(ring.push(&packet(65535)));
+        let mut blob = [0u8; 64];
+        assert!(ring.drain_into(&mut blob) > 0);
+        assert!(
+            !ring.push(&packet(65534)),
+            "drain must not forget stale audio"
+        );
+        assert!(
+            !ring.push(&packet(65535)),
+            "drain must not admit duplicates"
+        );
+        assert!(ring.push(&packet(0)), "sequence wraps forward");
+        ring.clear();
+        assert!(
+            ring.push(&packet(65530)),
+            "session reset starts a new sequence domain"
         );
     }
 

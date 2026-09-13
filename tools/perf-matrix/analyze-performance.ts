@@ -315,6 +315,7 @@ function nearestOneSecondFps(samples: Array<{ timestampMs: number; frames: numbe
 export function summarizeCounterSeries(
   samples: Array<{ timestampMs: number; frames: number }>,
   expectedDurationMs: number,
+  boundary?: {startMs:number;endMs:number},
 ): CounterSummary {
   const ordered = [...samples].sort((left, right) => left.timestampMs - right.timestampMs);
   if (ordered.length < 2) {
@@ -345,21 +346,23 @@ export function summarizeCounterSeries(
       unchangedForAtLeastOneSecond = true;
     }
   }
-  const expectedEndMs = first.timestampMs + expectedDurationMs;
+  const expectedEndMs = boundary?.endMs ?? first.timestampMs + expectedDurationMs;
+  const missingHeadMs = boundary ? Math.max(0, first.timestampMs - boundary.startMs) : 0;
+  const reset = ordered.some((sample,index) => index > 0 && sample.frames < ordered[index-1].frames);
   const missingTailMs = Math.max(0, expectedEndMs - last.timestampMs);
   const rolling = nearestOneSecondFps(ordered);
-  const externalStallDetected = unchangedForAtLeastOneSecond || maxSampleGapMs > 1_500 || missingTailMs > 1_500;
+  const externalStallDetected = missingHeadMs > 1_500 || unchangedForAtLeastOneSecond || maxSampleGapMs > 1_500 || missingTailMs > 1_500;
   const zeroFpsStallDetected = externalStallDetected || rolling.some((fps) => fps === 0);
   if (externalStallDetected) rolling.push(0);
 
   return {
     sampleCount: ordered.length,
     elapsedMs,
-    averageFps: elapsedMs > 0 ? ((last.frames - first.frames) * 1_000) / elapsedMs : null,
+    averageFps: !reset && elapsedMs > 0 ? ((last.frames - first.frames) * 1_000) / elapsedMs : null,
     rollingOneSecondP5Fps: rolling.length > 0 ? percentile(rolling, 0.05) : zeroFpsStallDetected ? 0 : null,
     maxSampleGapMs,
     zeroFpsStallDetected,
-    errors: elapsedMs > 0 ? [] : ["counter timestamps must advance"],
+    errors: reset ? ["counter reset requires a new segment"] : elapsedMs > 0 ? [] : ["counter timestamps must advance"],
   };
 }
 

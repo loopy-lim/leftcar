@@ -24,6 +24,8 @@ extension CaptureSession {
         fd: Int32,
         destination: sockaddr_in?
     ) {
+        guard sourceAuthorization?.begin() ?? true else { return }
+        defer { sourceAuthorization?.end() }
         guard message.count >= 10,
               message.prefix(4) == Data("LCI1".utf8) else {
             return

@@ -1,0 +1,20 @@
+const {chromium}=require('playwright-core');const assert=require('node:assert/strict');
+(async()=>{const browser=await chromium.launch({headless:true});try{for(const remove of [false,true]){const page=await browser.newPage();try{
+ await page.goto(`file://${process.env.UI_TEST_DIR||'/tmp/leftcar-task4-ui'}/pairing-grants.html`);
+ await page.getByText('화면 접근: 1',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'화면 접근 모두 제거',exact:true}).click();
+ assert.equal(await page.evaluate(()=>window.pairingIo.pending[0].args.credentialId),'credential-A','actual save binds expected credential');
+ await page.evaluate(remove=>{const io=window.pairingIo;io.old=structuredClone(io.devices);io.revision=3;io.devices=remove?[]:[{...io.devices[0],name:'Repaired fixture',source_grants:{credentialId:'credential-B',stateRevision:3,sourceIds:[],revision:0,reviewRequired:true,persistenceError:null}}];},remove);
+ if(remove)await page.waitForFunction(()=>!document.body.textContent.includes('Fixture device'));
+ else await page.getByText('Repaired fixture',{exact:true}).waitFor();
+ await page.evaluate(()=>window.pairingIo.pending.shift().resolve({credentialId:'credential-A',stateRevision:2,sourceIds:['display:A'],revision:2,reviewRequired:false,persistenceError:null}));
+ await page.waitForTimeout(20);
+ if(!remove)await page.getByText('Host에서 화면 접근 검토가 필요합니다').waitFor();
+ const reads=await page.evaluate(()=>{const io=window.pairingIo;io.revision=1;io.devices=io.old;return io.reads;});
+ await page.waitForFunction(reads=>window.pairingIo.reads>reads,reads);await page.waitForTimeout(30);
+ await page.evaluate(()=>window.mountPairing(false));await page.waitForTimeout(20);await page.evaluate(()=>window.mountPairing(true));
+ await page.waitForTimeout(50);
+ assert.equal(await page.getByText('Fixture device',{exact:true}).count(),0,'late snapshot cannot resurrect retired credential');
+ assert.equal(await page.getByText('화면 접근: 1',{exact:true}).count(),0,'late save cannot approve new credential');
+ console.log(`PASS actual parent ${remove?'removed':'repaired'} credential rejects late old save and stale snapshot across remount`);
+}finally{await page.close();}}}finally{await browser.close();}})().catch(error=>{console.error(error);process.exitCode=1;});

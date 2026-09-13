@@ -4,7 +4,12 @@ pub(super) fn reset_decoder(
     decoder: &mut Option<viewer_decoder::AndroidDecoder>,
     codec_config: &mut Option<viewer_decoder::CodecConfig>,
     awaiting_keyframe: &mut bool,
+    control: &RendererControl,
 ) {
+    control.output_metadata.lock().unwrap().reset();
+    control
+        .capture_to_surface_release_ms
+        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
     if let Some(d) = decoder.as_mut() {
         d.stop();
     }
@@ -20,7 +25,12 @@ pub(super) fn reset_decoder(
 pub(super) fn resync_decoder_after_frame_gap(
     decoder: &mut Option<viewer_decoder::AndroidDecoder>,
     awaiting_keyframe: &mut bool,
+    control: &RendererControl,
 ) {
+    control.output_metadata.lock().unwrap().reset();
+    control
+        .capture_to_surface_release_ms
+        .store(LATENCY_UNKNOWN, Ordering::Relaxed);
     if let Some(Err(error)) = decoder.as_mut().map(|decoder| decoder.flush()) {
         log_info!(
             "decoder flush during recovery failed: {}; rebuilding",

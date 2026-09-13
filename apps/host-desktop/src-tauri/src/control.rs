@@ -4,6 +4,11 @@
 //! `addNumbers` delegates to the real rustra host_package so the H02 proof
 //! path stays intact; stateful v1 stream commands dispatch locally.
 
+#[path = "session_lifecycle.rs"]
+mod session_lifecycle;
+#[cfg(test)]
+#[path = "source_grants_tests.rs"]
+mod source_grants_tests;
 use crate::backend::SharedBackend;
 use control_contract::host::{
     decode_media_key, CatalogView, EncoderExperiment, EncoderExperimentInfo,
@@ -13,6 +18,7 @@ use control_contract::host::{
 use control_contract::udp_stability::{
     host_udp_stability_capabilities, resolve_udp_stability, AppliedUdpStability,
 };
+use session_lifecycle::{Lifecycle, Operation, StartAttempt, Starts};
 
 use base64::Engine as _;
 pub use control_contract::host::{StatsInfo, StatusView as StatusViewPublic};
@@ -31,10 +37,14 @@ use crate::clipboard::ClipboardBackend;
 
 /// Geometry and transport facts of the live session being reconfigured,
 /// captured before the old backend handle is stopped.
+#[derive(Clone)]
 struct ReconfigureSnapshot {
+    transport_attempt: Option<StartAttempt>,
+    device_id: Option<String>,
+    operation: Operation,
+    authorization: Option<crate::pairing::Authorization>,
     handle: u32,
     source_index: u32,
-    source_name: String,
     viewer_host: String,
     viewer_port: u16,
     capture_backend: String,
@@ -49,10 +59,13 @@ struct ReconfigureSnapshot {
     width: u32,
     height: u32,
     fps_target: u32,
-    input_enabled: bool,
 }
 
+#[derive(Clone)]
 struct Session {
+    transport_owner: Option<StartAttempt>,
+    lifecycle: Lifecycle,
+    authorization: Option<crate::pairing::Authorization>,
     handle: u32,
     source_index: u32,
     source_name: String,
@@ -147,6 +160,7 @@ fn validate_split_start(input: &StartStreamInput, concrete_transport: &str) -> R
 /// Validated startStream parameters; transport and content mode are the
 /// wire-canonical spellings.
 struct StartPlan {
+    source: control_contract::host::DisplayInfo,
     name: String,
     transport: &'static str,
     content_mode: &'static str,
@@ -345,18 +359,24 @@ fn clipboard_sha256_hex(text: &str) -> String {
 }
 
 pub struct ControlServer {
+    source_operations: crate::source_grants::SourceLease,
+    input_changes: Mutex<()>,
+    replacement_retired: Mutex<HashMap<u32, u32>>,
+    pending_retirements: Mutex<HashMap<u32, String>>,
     backend: SharedBackend,
     pairing: std::sync::Arc<crate::pairing::PairingServer>,
     /// 제어 평면 핸드셰이크의 ServerHello 서명에 쓰이는 호스트 정체 키.
     identity: std::sync::Arc<secure_channel::HostIdentity>,
     control_port: AtomicU16,
     sessions: Mutex<State>,
+    starting: Mutex<Starts>,
     /// :7777 토큰 무차별 시도에 대한 IP별 백오프.
     auth_limiter: AuthRateLimiter,
     /// 세션 감사 로그(선택 — set_audit으로 주입).
     audit: std::sync::OnceLock<std::sync::Arc<crate::audit::SessionAudit>>,
     /// 클립보드 텍스트 동기화 호스트 게이트(U5, 기본 꺼짐 — docs/07 §20).
     clipboard_share: AtomicBool,
+    clipboard_revision_cache: Mutex<Option<(u64, String)>>,
     /// 클립보드 접근 백엔드(선택 — set_clipboard로 플러그인 구현을 주입;
     /// 미주입 시 pbcopy/pbpaste 폴백).
     clipboard: std::sync::OnceLock<std::sync::Arc<dyn ClipboardBackend>>,
@@ -406,9 +426,11 @@ impl ControlServer {
                 next: 1,
                 live: HashMap::new(),
             }),
+            starting: Mutex::new(Starts::default()),
             auth_limiter: AuthRateLimiter::new(),
             audit: std::sync::OnceLock::new(),
             clipboard_share: AtomicBool::new(false),
+            clipboard_revision_cache: Mutex::new(None),
             clipboard: std::sync::OnceLock::new(),
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
@@ -417,6 +439,10 @@ impl ControlServer {
             curtain: std::sync::OnceLock::new(),
             curtain_state: Mutex::new(false),
             reconfiguring: Mutex::new(std::collections::HashSet::new()),
+            source_operations: crate::source_grants::SourceLease::default(),
+            input_changes: Mutex::new(()),
+            replacement_retired: Mutex::new(HashMap::new()),
+            pending_retirements: Mutex::new(HashMap::new()),
             conn_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS)),
         }
     }
@@ -500,6 +526,7 @@ impl ControlServer {
                     None
                 } else {
                     Some(ReconfigureStreamInput {
+                        source_id: None,
                         session: id,
                         width: s.width,
                         height: s.height,
@@ -555,6 +582,9 @@ impl ControlServer {
     /// 즉시 전환된다). 기본값은 꺼짐 — 문서 §20의 이중 잠금 중 호스트 쪽.
     pub fn set_clipboard_share(&self, enabled: bool) {
         self.clipboard_share.store(enabled, Ordering::Release);
+        if !enabled {
+            *self.clipboard_revision_cache.lock().unwrap() = None;
+        }
     }
 
     pub fn clipboard_share_enabled(&self) -> bool {
@@ -598,69 +628,241 @@ impl ControlServer {
     /// `device`가 Some이면 그 장치의 인증 연결만, None이면 전부 끊는다.
     fn teardown_targets(
         &self,
-        targets: Vec<((u32, u32), (String, u16))>,
+        targets: Vec<(u32, Session)>,
         reason: &str,
         device: Option<&str>,
     ) -> usize {
-        for ((_, handle), _) in &targets {
-            let _ = self.backend.stop_with_reason(*handle, 2);
-        }
-        for ((id, _), (transport, port)) in &targets {
-            cleanup_media_transport(transport, *port);
-            let fields = match device {
-                Some(device) => json!({ "session": id, "device": device, "reason": reason }),
-                None => json!({ "session": id, "reason": reason }),
-            };
-            self.audit_log("session_stopped", fields);
-        }
-        let removed = targets.len();
+        // Disconnect the affected connections before a blocking backend can
+        // allow newly authenticated successors to join the registry.
         match device {
             Some(device) => self.disconnect_device_conns(device),
             None => self.disconnect_all_conns(),
         }
+        for (id, session) in &targets {
+            Self::invalidate_session_source(session);
+            if !session.backend_released {
+                let _ = self.retire_session_capture(*id, session.handle, Some(2));
+            }
+            self.cleanup_registered_transport(session.transport_owner.as_ref());
+            self.audit_log(
+                "session_stopped",
+                json!({"session":id,"device":session.device_id,"reason":reason}),
+            );
+        }
+        let removed = targets.len();
         self.maybe_lock_after_teardown(removed);
         self.refresh_curtain();
         removed
     }
 
-    /// 장치 철회를 라이브 세션에 즉시 반영한다(문서 §18). 토큰이 이미
-    /// 무효라도 소켓이 살아 있던 구세대 세션을 강제 종료한다. 살아 있는
-    /// 인증 연결도 함께 끊는다 — 연결 인증은 한 번만 통과하므로, 소켓을
-    /// 남기면 철회된 장치가 같은 연결로 새 명령을 계속 보낼 수 있다.
     pub fn stop_sessions_for_device(&self, device_id: &str) -> usize {
-        // retain로 세션을 지우기 전에 media_transport/viewer_port를 떼어 둔다 —
-        // cleanup_stopped_media는 live 맵에서 찾아오므로 먼저 지우면 무효가 된다.
-        let targets: Vec<((u32, u32), (String, u16))> = {
-            let mut st = self.sessions.lock().unwrap();
-            let mut removed: Vec<((u32, u32), (String, u16))> = Vec::new();
-            st.live.retain(|id, session| {
-                if session.device_id.as_deref() == Some(device_id) {
-                    removed.push((
-                        (*id, session.handle),
-                        (session.media_transport.clone(), session.viewer_port),
-                    ));
-                    false
-                } else {
-                    true
-                }
-            });
-            removed
+        let targets = {
+            let mut state = self.sessions.lock().unwrap();
+            let ids: Vec<_> = state
+                .live
+                .iter()
+                .filter(|(_, s)| s.device_id.as_deref() == Some(device_id))
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| state.live.remove(&id).map(|session| (id, session)))
+                .collect()
         };
         self.teardown_targets(targets, "device_revoked", Some(device_id))
     }
 
-    /// 모든 라이브 세션 강제 종료(revoke_all 경로).
-    pub fn stop_all_sessions(&self) {
-        let targets: Vec<((u32, u32), (String, u16))> = {
-            let mut st = self.sessions.lock().unwrap();
-            let removed: Vec<((u32, u32), (String, u16))> = st
-                .live
-                .iter()
-                .map(|(id, s)| ((*id, s.handle), (s.media_transport.clone(), s.viewer_port)))
-                .collect();
-            st.live.clear();
-            removed
+    fn invalidate_session_source(session: &Session) {
+        if let Some(access) = session
+            .authorization
+            .as_ref()
+            .and_then(|auth| auth.access.as_ref())
+        {
+            access.lease.invalidate();
+        }
+    }
+    // Only a logical session's old handle can be a known completed retirement.
+    // Uncommitted replacement/recovery handles always go through native stop,
+    // even if a backend reuses the same numeric handle.
+    fn retire_session_capture(
+        &self,
+        session: u32,
+        handle: u32,
+        reason: Option<u8>,
+    ) -> Result<(), String> {
+        if self.replacement_retired.lock().unwrap().get(&session) == Some(&handle) {
+            return Ok(());
+        }
+        self.retire_capture(handle, reason)
+    }
+    fn retire_capture(&self, handle: u32, reason: Option<u8>) -> Result<(), String> {
+        let result = match reason {
+            Some(reason) => self.backend.stop_with_reason(handle, reason),
+            None => self.backend.stop(handle),
         };
+        let mut pending = self.pending_retirements.lock().unwrap();
+        match &result {
+            Ok(()) => {
+                pending.remove(&handle);
+            }
+            Err(error) => {
+                pending.insert(handle, error.clone());
+            }
+        }
+        result
+    }
+    pub fn host_sources(&self) -> Result<Vec<control_contract::host::DisplayInfo>, String> {
+        self.backend.list_displays()
+    }
+    pub fn set_source_grants(
+        &self,
+        device: &str,
+        sources: Vec<String>,
+    ) -> Result<crate::source_grants::GrantView, String> {
+        self.set_source_grants_for_credential(device, sources, None)
+    }
+    pub fn set_source_grants_for_credential(
+        &self,
+        device: &str,
+        sources: Vec<String>,
+        expected_credential: Option<&str>,
+    ) -> Result<crate::source_grants::GrantView, String> {
+        let _operation = self
+            .source_operations
+            .enter()
+            .ok_or("Host is shutting down")?;
+        let displays = if sources.is_empty() {
+            vec![]
+        } else {
+            self.backend.list_displays()?
+        };
+        for source in &sources {
+            resolve_display(&displays, Some(source), None)?;
+        }
+        let (result, leases) = self.pairing.update_source_grants_for_credential(
+            device,
+            sources,
+            expected_credential,
+        )?;
+        self.stop_sessions_for_device(device);
+        for lease in leases {
+            lease.wait_idle();
+        }
+        if let Some(error) = self.pending_retirements.lock().unwrap().values().next() {
+            return Err(format!(
+                "capture retirement failed; access is blocked: {error}"
+            ));
+        }
+        result
+    }
+    pub(crate) fn admit_source_admin(&self) -> Option<crate::source_grants::SourceOperation<'_>> {
+        self.source_operations.enter()
+    }
+    pub fn shutdown_source_access(&self) -> Result<(), String> {
+        self.source_operations.invalidate();
+        let leases = self.pairing.fence_source_access();
+        for lease in leases {
+            lease.wait_idle();
+        }
+        self.source_operations.wait_idle();
+        let targets: Vec<_> = self.sessions.lock().unwrap().live.drain().collect();
+        self.disconnect_all_conns();
+        let pending: Vec<_> = self
+            .pending_retirements
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        // Admissions are fenced and drained: no handle can acquire a newer
+        // incarnation during this shutdown pass. Do not retry a successful
+        // pending retirement again through its remaining logical tombstone.
+        let mut retired = std::collections::HashSet::new();
+        for handle in pending {
+            if self.retire_capture(handle, Some(3)).is_ok() {
+                retired.insert(handle);
+            }
+        }
+        let mut failure = None;
+        for (id, session) in targets {
+            if !session.backend_released && !retired.contains(&session.handle) {
+                if let Err(error) = self.retire_session_capture(id, session.handle, Some(3)) {
+                    failure = Some(error);
+                }
+            }
+            self.cleanup_registered_transport(session.transport_owner.as_ref());
+        }
+        if failure.is_none() {
+            failure = self
+                .pending_retirements
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .cloned();
+        }
+        if let Some(error) = failure {
+            return Err(format!(
+                "capture retirement failed; grant journal remains dirty: {error}"
+            ));
+        }
+        self.pairing.finish_source_shutdown()
+    }
+
+    pub fn revoke_device(&self, device_id: &str) -> crate::pairing::RevokeOutcome {
+        let Some(_operation) = self.admit_source_admin() else {
+            return crate::pairing::RevokeOutcome {
+                persistence_errors: vec!["Host is shutting down".into()],
+                ..Default::default()
+            };
+        };
+        let mut outcome = self.pairing.revoke(device_id);
+        if !outcome.removed_devices.is_empty() {
+            let stopped = self.stop_sessions_for_device(device_id);
+            self.audit_log(
+                "device_revoked",
+                json!({"device":device_id,"stopped_sessions":stopped}),
+            );
+        }
+        for lease in outcome.retired_leases.drain(..) {
+            lease.wait_idle();
+        }
+        outcome.persistence_errors.extend(
+            self.pending_retirements
+                .lock()
+                .unwrap()
+                .values()
+                .map(|error| format!("capture retirement failed; access is blocked: {error}")),
+        );
+        outcome
+    }
+    pub fn revoke_all_devices(&self) -> crate::pairing::RevokeOutcome {
+        let Some(_operation) = self.admit_source_admin() else {
+            return crate::pairing::RevokeOutcome {
+                persistence_errors: vec!["Host is shutting down".into()],
+                ..Default::default()
+            };
+        };
+        let mut outcome = self.pairing.revoke_all();
+        self.stop_all_sessions();
+        self.audit_log(
+            "devices_revoked_all",
+            json!({"devices":outcome.removed_devices.len()}),
+        );
+        for lease in outcome.retired_leases.drain(..) {
+            lease.wait_idle();
+        }
+        outcome.persistence_errors.extend(
+            self.pending_retirements
+                .lock()
+                .unwrap()
+                .values()
+                .map(|error| format!("capture retirement failed; access is blocked: {error}")),
+        );
+        outcome
+    }
+
+    pub fn stop_all_sessions(&self) {
+        let targets = self.sessions.lock().unwrap().live.drain().collect();
         self.teardown_targets(targets, "devices_revoked_all", None);
     }
 
@@ -729,59 +931,203 @@ impl ControlServer {
         previous: &ReconfigureSnapshot,
         failure: &str,
     ) -> Result<u32, String> {
-        let recovered = self.start_replacement_from_snapshot(
-            previous,
-            previous.source_index,
-            previous.encoder_experiment,
-            previous.width,
-            previous.height,
-            previous.fps_target,
-        );
+        if !self.replacement_is_current(session_id, previous) {
+            return Err("session ended during reconfigure".into());
+        }
+        let setup = self
+            .with_start_transport(previous.transport_attempt.as_ref().unwrap(), || {
+                self.prepare_owned_transport(
+                    previous.transport_attempt.as_ref().unwrap(),
+                    &previous.media_transport,
+                    previous.viewer_port,
+                )
+            })
+            .unwrap_or_else(|| Err("recovery superseded".to_owned()));
+        let recovered = setup.and_then(|()| {
+            self.start_replacement_from_snapshot(
+                previous,
+                previous.source_index,
+                previous.encoder_experiment,
+                previous.width,
+                previous.height,
+                previous.fps_target,
+            )
+        });
         let recovered = match recovered {
             Ok(handle) => match self.wait_for_first_frame(handle).await {
                 Ok(()) => Ok(handle),
                 Err(error) => {
-                    // 복구 스트림이 첫 프레임을 못 만들었어도 핸들을 유출하지
-                    // 않게 즉시 멈춘다(F02).
-                    let _ = self.backend.stop(handle);
+                    self.discard_backend(handle);
                     Err(error)
                 }
             },
-            Err(recovery_error) => Err(recovery_error),
+            Err(error) => Err(error),
         };
-        // Same carry-over as reconfigure: a restored backend handle restarts
-        // with input off, so the session's enablement must be re-applied.
-        let input_enabled = match &recovered {
-            Ok(handle) if previous.input_enabled => {
-                self.backend.set_input_enabled(*handle, true).is_ok()
-            }
+        let _input_change = self.input_changes.lock().unwrap();
+        let current_input = self
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get(&session_id)
+            .is_some_and(|s| s.input_enabled);
+        let input_enabled = match recovered {
+            Ok(handle) if current_input => self.backend.set_input_enabled(handle, true).is_ok(),
             _ => false,
         };
-        let mut state = self.sessions.lock().unwrap();
-        if let Some(session) = state.live.get_mut(&session_id) {
-            match recovered {
-                Ok(recovered) => {
-                    session.handle = recovered;
-                    session.input_enabled = input_enabled;
-                    session.backend_released = false;
+        let committed = self
+            .pairing
+            .with_authorization(previous.authorization.as_ref(), || {
+                let mut starts = self.starting.lock().unwrap();
+                if !previous
+                    .transport_attempt
+                    .as_ref()
+                    .is_some_and(|attempt| starts.accepts(attempt))
+                {
+                    return false;
                 }
-                Err(_) => {
-                    session.terminal_error = Some(failure.to_owned());
-                    session.terminal_since = Some(Instant::now());
-                    session.backend_released = true;
+                let mut state = self.sessions.lock().unwrap();
+                let Some(session) = state
+                    .live
+                    .get_mut(&session_id)
+                    .filter(|s| s.lifecycle.accepts(previous.operation, s.backend_released))
+                else {
+                    return false;
+                };
+                match &recovered {
+                    Ok(handle) => {
+                        let owner = previous.transport_attempt.as_ref().unwrap();
+                        starts.register(owner);
+                        session.transport_owner = Some(owner.clone());
+
+                        self.replacement_retired.lock().unwrap().remove(&session_id);
+                        session.handle = *handle;
+                        session.input_enabled = input_enabled;
+                    }
+                    Err(_) => {
+                        session.input_enabled = false;
+                        session.terminal_error = Some(failure.to_owned());
+                        session.terminal_since = Some(Instant::now());
+                        session.backend_released = true;
+                        session.lifecycle.invalidate();
+                    }
                 }
+                true
+            })
+            .unwrap_or(false);
+        if !committed || recovered.is_err() {
+            self.cleanup_owned_transport(previous.transport_attempt.as_ref().unwrap());
+        }
+        if !committed {
+            if let Ok(handle) = recovered {
+                self.discard_backend(handle);
             }
-        } else {
-            // 복구 도중 세션이 끝났다면 회복된 핸들을 세션 맵 밖에 두지
-            // 않는다(F02) — 캡처와 입력이 계속 돌는 유출이 된다.
-            if let Ok(recovered) = recovered {
-                if input_enabled {
-                    let _ = self.backend.set_input_enabled(recovered, false);
-                }
-                let _ = self.backend.stop(recovered);
-            }
+            return Err("session ended during reconfigure".into());
         }
         recovered.map_err(|_| format!("replacement stream failed: {failure}"))
+    }
+
+    fn replacement_is_current(&self, session_id: u32, previous: &ReconfigureSnapshot) -> bool {
+        self.pairing
+            .with_authorization(previous.authorization.as_ref(), || {
+                let starts = self.starting.lock().unwrap();
+                if !previous
+                    .transport_attempt
+                    .as_ref()
+                    .is_some_and(|attempt| starts.accepts(attempt))
+                {
+                    return false;
+                }
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .live
+                    .get(&session_id)
+                    .is_some_and(|s| s.lifecycle.accepts(previous.operation, s.backend_released))
+            })
+            .unwrap_or(false)
+    }
+
+    /// All callbacks happen after releasing pairing and session locks, including
+    /// cleanup of a result rejected by the final commit predicate.
+    fn discard_backend(&self, handle: u32) {
+        let _ = self.backend.set_input_enabled(handle, false);
+        let _ = self.retire_capture(handle, None);
+    }
+
+    /// Logical transport lease: mutations execute without a mutex held, but a
+    /// competing start cannot claim this endpoint until the action finishes.
+    fn with_start_transport<T>(
+        &self,
+        attempt: &StartAttempt,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        if !self
+            .starting
+            .lock()
+            .unwrap()
+            .begin_transport_action(attempt)
+        {
+            return None;
+        }
+        let _guard = StartTransportGuard {
+            starts: &self.starting,
+            attempt,
+        };
+        Some(action())
+    }
+
+    /// Transfer the actual resource while holding the logical setup lease.
+    /// Publication can happen much later, after first-frame validation.
+    fn prepare_owned_transport(
+        &self,
+        attempt: &StartAttempt,
+        transport: &str,
+        port: u16,
+    ) -> Result<(), String> {
+        let predecessor = self
+            .starting
+            .lock()
+            .unwrap()
+            .replace_transport(attempt, transport, port);
+        if let Some((kind, old_port)) = predecessor {
+            cleanup_media_transport(&kind, old_port);
+        }
+        cleanup_media_transport(transport, port);
+        let result = if transport == "adbTcp" {
+            adb_forward(port)
+        } else if transport == "usb" {
+            crate::aoap_proxy::start_media_proxy(port)
+        } else {
+            Ok(())
+        };
+        if result.is_err() {
+            // Setup may allocate a resource before reporting an error.
+            cleanup_media_transport(transport, port);
+            self.starting.lock().unwrap().release_transport(attempt);
+        }
+        result
+    }
+
+    /// Cleanup follows physical ownership, not the newest request or the
+    /// presence of a Session. A pending start owns its resource immediately.
+    fn cleanup_owned_transport(&self, owner: &StartAttempt) {
+        let resource = self.starting.lock().unwrap().begin_owned_cleanup(owner);
+        if let Some((transport, port)) = resource {
+            let _guard = StartTransportGuard {
+                starts: &self.starting,
+                attempt: owner,
+            };
+            cleanup_media_transport(&transport, port);
+            self.starting.lock().unwrap().release_transport(owner);
+        }
+    }
+
+    fn cleanup_registered_transport(&self, owner: Option<&StartAttempt>) {
+        if let Some(owner) = owner {
+            self.cleanup_owned_transport(owner);
+            self.starting.lock().unwrap().release_registered(owner);
+        }
     }
 
     fn start_replacement_from_snapshot(
@@ -818,6 +1164,10 @@ impl ControlServer {
             encoder_experiment,
             udp_stability,
             &previous.media_key,
+            previous
+                .authorization
+                .as_ref()
+                .and_then(|auth| auth.access.as_ref()),
         )
     }
 
@@ -825,6 +1175,10 @@ impl ControlServer {
         &self,
         input: ReconfigureStreamInput,
     ) -> Result<ReconfigureStreamOutput, String> {
+        let _source_operation = self
+            .source_operations
+            .enter()
+            .ok_or("Host is shutting down")?;
         // 같은 세션의 동시 재구성은 하나만 진행한다(F02). 교차하면 두 요청이
         // 같은 이전 핸들을 읽어 stop/start가 엇갈리고, 늦게 스왑한 쪽이
         // 상대의 교체 핸들을 덮어써 유출한다. 실패 경로에서도 풀리도록
@@ -837,7 +1191,13 @@ impl ControlServer {
         }
         let _guard = ReconfigureGuard {
             in_flight: &self.reconfiguring,
+            retired: &self.replacement_retired,
             session: input.session,
+        };
+        let request = self.starting.lock().unwrap().begin();
+        let _request_guard = StartRequestGuard {
+            starts: &self.starting,
+            request,
         };
         validate_stream_shape(input.width, input.height, input.fps)?;
         if !matches!(
@@ -851,12 +1211,12 @@ impl ControlServer {
             _ => "native",
         };
 
-        let previous = {
-            let state = self.sessions.lock().unwrap();
+        let mut previous = {
+            let mut state = self.sessions.lock().unwrap();
             let session = state
                 .live
-                .get(&input.session)
-                .filter(|session| !session.backend_released)
+                .get_mut(&input.session)
+                .filter(|session| !session.backend_released && !session.lifecycle.is_stopped())
                 .ok_or_else(|| format!("no such session {}", input.session))?;
             let viewer_host = session
                 .viewer_addr
@@ -864,9 +1224,12 @@ impl ControlServer {
                 .map(|(host, _)| host.to_owned())
                 .ok_or_else(|| "session viewer address is invalid".to_owned())?;
             ReconfigureSnapshot {
+                transport_attempt: None,
+                device_id: session.device_id.clone(),
+                operation: session.lifecycle.begin(),
+                authorization: session.authorization.clone(),
                 handle: session.handle,
                 source_index: session.source_index,
-                source_name: session.source_name.clone(),
                 viewer_host,
                 viewer_port: session.viewer_port,
                 capture_backend: session.capture_backend.clone(),
@@ -878,7 +1241,6 @@ impl ControlServer {
                 width: session.width,
                 height: session.height,
                 fps_target: session.fps_target,
-                input_enabled: session.input_enabled,
             }
         };
 
@@ -948,27 +1310,93 @@ impl ControlServer {
         // must leave the live stream untouched, exactly like the shape and
         // experiment validations above. An absent index keeps the session's
         // current display — the legacy wire shape for old viewers.
-        let requested_source = match input.source_index {
-            None => None,
-            Some(index) if index == previous.source_index => None,
-            Some(index) => {
-                let displays = self.backend.list_displays()?;
-                let display = displays
-                    .get(index as usize)
-                    .ok_or_else(|| format!("no such display {index}"))?;
-                Some((index, display.name.clone()))
+        let previous_source_id = previous
+            .authorization
+            .as_ref()
+            .and_then(|a| a.access.as_ref())
+            .map(|a| a.source_id.clone());
+        let requested_source_id = match (input.source_id.clone(), input.source_index) {
+            (Some(id), _) => Some(id),
+            (None, Some(index)) => Some(
+                self.pairing.catalog_source(
+                    previous
+                        .authorization
+                        .as_ref()
+                        .ok_or("source_access_denied")?,
+                    index,
+                )?,
+            ),
+            (None, None) => previous_source_id.clone(),
+        };
+        let requested_id = requested_source_id.as_deref();
+        let replacement_source = resolve_display(
+            &self.backend.list_displays()?,
+            requested_id,
+            input.source_index.or(Some(previous.source_index)),
+        )?;
+        let replacement_source_index = replacement_source.index;
+        let replacement_source_name = replacement_source.name.clone();
+        let source_changed =
+            previous_source_id.as_deref() != replacement_source.source_id.as_deref();
+        let auth = previous
+            .authorization
+            .as_ref()
+            .ok_or("source_access_denied")?;
+        // Rebind from the original credential incarnation, never from device ID.
+        let replacement_authorization = Some(
+            self.pairing
+                .source_authorization(auth, replacement_source.source_id.as_deref().unwrap())?,
+        );
+
+        previous.transport_attempt = self.starting.lock().unwrap().claim(
+            request,
+            previous.device_id.as_deref(),
+            &format!("{}:{}", previous.viewer_host, previous.viewer_port),
+        );
+        if previous.transport_attempt.is_none() {
+            return Err("reconfigure superseded or transport operation in progress".into());
+        }
+        if !self.replacement_is_current(input.session, &previous) {
+            return Err(format!(
+                "session {} ended during reconfigure",
+                input.session
+            ));
+        }
+        let mut backend_stopped = false;
+        let setup = self
+            .with_start_transport(previous.transport_attempt.as_ref().unwrap(), || {
+                {
+                    // Serialize actual handle retirement with Host input application.
+                    let _input_change = self.input_changes.lock().unwrap();
+                    self.retire_capture(previous.handle, None)?;
+                    self.replacement_retired
+                        .lock()
+                        .unwrap()
+                        .insert(input.session, previous.handle);
+                    backend_stopped = true;
+                }
+                self.prepare_owned_transport(
+                    previous.transport_attempt.as_ref().unwrap(),
+                    &previous.media_transport,
+                    previous.viewer_port,
+                )
+            })
+            .ok_or_else(|| "reconfigure superseded".to_owned())?;
+        if let Err(error) = setup {
+            if backend_stopped {
+                let _ = self
+                    .restore_previous_stream(input.session, &previous, &error)
+                    .await;
             }
-        };
-        let (replacement_source_index, replacement_source_name) = match requested_source {
-            Some((index, name)) => (index, name),
-            None => (previous.source_index, previous.source_name.clone()),
-        };
+            return Err(error);
+        }
 
-        self.backend.stop(previous.handle)?;
-        cleanup_media_transport(&previous.media_transport, previous.viewer_port);
-
+        let replacement_snapshot = ReconfigureSnapshot {
+            authorization: replacement_authorization.clone(),
+            ..previous.clone()
+        };
         let replacement_handle = match self.start_replacement_from_snapshot(
-            &previous,
+            &replacement_snapshot,
             replacement_source_index,
             replacement_encoder_experiment,
             input.width,
@@ -978,8 +1406,8 @@ impl ControlServer {
             Ok(handle) => match self.wait_for_first_frame(handle).await {
                 Ok(()) => handle,
                 Err(error) => {
-                    let _ = self.backend.stop(handle);
-                    cleanup_media_transport(&previous.media_transport, previous.viewer_port);
+                    self.discard_backend(handle);
+                    self.cleanup_owned_transport(previous.transport_attempt.as_ref().unwrap());
                     let _ = self
                         .restore_previous_stream(input.session, &previous, &error)
                         .await;
@@ -987,7 +1415,7 @@ impl ControlServer {
                 }
             },
             Err(error) => {
-                cleanup_media_transport(&previous.media_transport, previous.viewer_port);
+                self.cleanup_owned_transport(previous.transport_attempt.as_ref().unwrap());
                 let _ = self
                     .restore_previous_stream(input.session, &previous, &error)
                     .await;
@@ -995,41 +1423,72 @@ impl ControlServer {
             }
         };
 
-        // The replacement backend handle starts with remote input disabled;
-        // re-apply the session's enablement so a resolution switch never
-        // silently strips the viewer of control.
-        let input_enabled = previous.input_enabled
+        let _input_change = self.input_changes.lock().unwrap();
+        let input_enabled = !source_changed
+            && self
+                .sessions
+                .lock()
+                .unwrap()
+                .live
+                .get(&input.session)
+                .is_some_and(|s| {
+                    s.input_enabled && s.lifecycle.accepts(previous.operation, s.backend_released)
+                })
             && self
                 .backend
                 .set_input_enabled(replacement_handle, true)
                 .is_ok();
 
-        let mut state = self.sessions.lock().unwrap();
-        let Some(session) = state.live.get_mut(&input.session) else {
-            // 재구성 도중 세션이 끝났다면 교체 핸들을 유출하지 않는다(F02) —
-            // 그대로 두면 캡처와 입력이 세션 맵 밖에서 계속 돈다.
-            drop(state);
-            if input_enabled {
-                let _ = self.backend.set_input_enabled(replacement_handle, false);
-            }
-            let _ = self.backend.stop(replacement_handle);
+        let committed = self
+            .pairing
+            .with_authorization(replacement_authorization.as_ref(), || {
+                let mut starts = self.starting.lock().unwrap();
+                if !previous
+                    .transport_attempt
+                    .as_ref()
+                    .is_some_and(|attempt| starts.accepts(attempt))
+                {
+                    return false;
+                }
+                let mut state = self.sessions.lock().unwrap();
+                let Some(session) = state
+                    .live
+                    .get_mut(&input.session)
+                    .filter(|s| s.lifecycle.accepts(previous.operation, s.backend_released))
+                else {
+                    return false;
+                };
+
+                let owner = previous.transport_attempt.as_ref().unwrap();
+                starts.register(owner);
+                session.transport_owner = Some(owner.clone());
+                self.replacement_retired
+                    .lock()
+                    .unwrap()
+                    .remove(&input.session);
+                session.handle = replacement_handle;
+                session.authorization = replacement_authorization.clone();
+                session.input_enabled = input_enabled;
+                session.source_index = replacement_source_index;
+                session.source_name = replacement_source_name.clone();
+                session.width = input.width;
+                session.height = input.height;
+                session.fps_target = input.fps;
+                session.quality_state = settled_quality_state.into();
+                session.encoder_experiment = replacement_encoder_experiment;
+                session.terminal_error = None;
+                session.terminal_since = None;
+                true
+            })
+            .unwrap_or(false);
+        if !committed {
+            self.discard_backend(replacement_handle);
+            self.cleanup_owned_transport(previous.transport_attempt.as_ref().unwrap());
             return Err(format!(
                 "session {} ended during reconfigure",
                 input.session
             ));
-        };
-        session.handle = replacement_handle;
-        session.input_enabled = input_enabled;
-        session.source_index = replacement_source_index;
-        session.source_name = replacement_source_name.clone();
-        session.width = input.width;
-        session.height = input.height;
-        session.fps_target = input.fps;
-        session.quality_state = settled_quality_state.into();
-        session.encoder_experiment = replacement_encoder_experiment;
-        session.terminal_error = None;
-        session.terminal_since = None;
-        session.backend_released = false;
+        }
         Ok(ReconfigureStreamOutput {
             session: input.session,
             width: input.width,
@@ -1103,14 +1562,22 @@ impl ControlServer {
 
     /// Snapshot for the Tauri UI (`get_status` command reuses this).
     pub fn snapshot(&self) -> StatusView {
+        let paired = self.pairing.list_device_views();
         let now = Instant::now();
-        let (sessions, expired) = {
-            let mut state = self.sessions.lock().unwrap();
-            let mut sessions = Vec::with_capacity(state.live.len());
-            let mut expired_ids = Vec::new();
-
-            for (id, s) in &mut state.live {
-                let mut metrics = self.backend.stats(s.handle).unwrap_or_else(|_| StatsInfo {
+        // Sample external backends without the state lock. A callback may stop
+        // or revoke a session; re-check its handle when applying the sample.
+        let handles: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .iter()
+            .map(|(id, s)| (*id, s.handle))
+            .collect();
+        let mut sampled: HashMap<_, _> = handles
+            .into_iter()
+            .map(|(id, handle)| {
+                let metrics = self.backend.stats(handle).unwrap_or_else(|_| StatsInfo {
                     state: "stopped".into(),
                     encoder_experiment_requested: "auto".into(),
                     encoder_experiment_applied: "rateControl".into(),
@@ -1124,6 +1591,21 @@ impl ControlServer {
                     error: Some("backend stats unavailable".into()),
                     ..StatsInfo::default()
                 });
+                (id, (handle, metrics))
+            })
+            .collect();
+        let (mut sessions, expired) = {
+            let mut state = self.sessions.lock().unwrap();
+            let mut sessions = Vec::with_capacity(state.live.len());
+            let mut expired_ids = Vec::new();
+
+            for (id, s) in &mut state.live {
+                let Some((handle, mut metrics)) = sampled.remove(id) else {
+                    continue;
+                };
+                if handle != s.handle {
+                    continue;
+                }
 
                 if let Some(error) = &s.terminal_error {
                     metrics.state = "stopped".into();
@@ -1151,27 +1633,63 @@ impl ControlServer {
                     s.terminal_since = None;
                 }
 
-                sessions.push(Self::session_view(*id, s, metrics));
+                sessions.push(Self::session_view(*id, s, metrics, &paired));
             }
 
             let expired = expired_ids
                 .into_iter()
-                .filter_map(|id| state.live.remove(&id))
+                .filter_map(|id| {
+                    if !self.reconfiguring.lock().unwrap().insert(id) {
+                        return None;
+                    }
+                    state.live.get(&id).cloned().map(|session| (id, session))
+                })
                 .collect::<Vec<_>>();
             (sessions, expired)
         };
 
-        let removed_count = expired.len();
-        for session in expired {
+        let mut removed_count = 0;
+        for (id, session) in expired {
+            Self::invalidate_session_source(&session);
+            let _cleanup_guard = ReconfigureGuard {
+                in_flight: &self.reconfiguring,
+                retired: &self.replacement_retired,
+                session: id,
+            };
             if !session.backend_released {
-                if let Err(error) = self.backend.stop(session.handle) {
+                if let Err(error) = self.retire_session_capture(id, session.handle, None) {
                     eprintln!(
                         "failed to release terminal session {}: {error}",
                         session.handle
                     );
+                    sessions.push(Self::session_view(
+                        id,
+                        &session,
+                        StatsInfo {
+                            state: "stopped".into(),
+                            error: session.terminal_error.clone().or(Some(error)),
+                            ..StatsInfo::default()
+                        },
+                        &paired,
+                    ));
+                    continue;
                 }
             }
-            cleanup_media_transport(&session.media_transport, session.viewer_port);
+            let removed = {
+                let mut state = self.sessions.lock().unwrap();
+                if state.live.get(&id).is_some_and(|current| {
+                    current.handle == session.handle && current.lifecycle == session.lifecycle
+                }) {
+                    state.live.remove(&id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if removed {
+                self.cleanup_registered_transport(session.transport_owner.as_ref());
+                removed_count += 1;
+            }
         }
         self.maybe_lock_after_teardown(removed_count);
         self.refresh_curtain();
@@ -1181,8 +1699,19 @@ impl ControlServer {
 
     /// SessionView construction for one live session; the 1:1 metrics
     /// plumbing lives here so `snapshot` stays focused on retention.
-    fn session_view(id: u32, s: &Session, metrics: StatsInfo) -> SessionView {
+    fn session_view(
+        id: u32,
+        s: &Session,
+        metrics: StatsInfo,
+        paired: &[crate::pairing::PairedDeviceView],
+    ) -> SessionView {
         SessionView {
+            device_name: s.device_id.as_ref().and_then(|id| {
+                paired
+                    .iter()
+                    .find(|d| &d.device_id == id)
+                    .map(|d| d.name.clone())
+            }),
             session: id,
             source_index: s.source_index,
             source_name: s.source_name.clone(),
@@ -1250,26 +1779,79 @@ impl ControlServer {
     }
 
     pub fn set_session_input(&self, session_id: u32, enabled: bool) -> Result<(), String> {
-        let handle = {
-            let state = self.sessions.lock().unwrap();
-            state
+        let _operation = self
+            .source_operations
+            .enter()
+            .ok_or("Host is shutting down")?;
+        let _input_change = self.input_changes.lock().unwrap();
+        let (handle, access) = {
+            let mut state = self.sessions.lock().unwrap();
+            let session = state
                 .live
-                .get(&session_id)
-                .filter(|session| !session.backend_released)
-                .map(|session| session.handle)
-                .ok_or_else(|| format!("no such session {session_id}"))?
+                .get_mut(&session_id)
+                .filter(|session| !session.backend_released && !session.lifecycle.is_stopped())
+                .ok_or_else(|| format!("no such session {session_id}"))?;
+            // Host denial is a logical session decision, even when the old
+            // native handle is gone or its disable operation will fail.
+            if !enabled {
+                session.input_enabled = false;
+            }
+            (
+                session.handle,
+                session
+                    .authorization
+                    .as_ref()
+                    .and_then(|auth| auth.access.clone()),
+            )
         };
-        self.backend.set_input_enabled(handle, enabled)?;
+        if self.replacement_retired.lock().unwrap().get(&session_id) == Some(&handle) {
+            return if enabled {
+                Err("input enable requires a live replacement handle".into())
+            } else {
+                Ok(())
+            };
+        }
+        let source = access
+            .as_ref()
+            .map(|access| access.lease.enter().ok_or("source authorization revoked"))
+            .transpose()?;
+        let applied = self.backend.set_input_enabled(handle, enabled);
+        drop(source);
+        if let Err(error) = applied {
+            if !enabled {
+                // A live backend may retain its enabled flag after an error.
+                // Retire/fence actual native authority, not only the UI flag.
+                if let Some(access) = &access {
+                    access.lease.invalidate();
+                }
+                let retirement = self.force_stop_session(session_id);
+                if let Some(access) = &access {
+                    access.lease.wait_idle();
+                }
+                return Err(format!("input disable failed; session access fenced: {error}; retirement: {retirement:?}"));
+            }
+            return Err(error);
+        }
         let mut state = self.sessions.lock().unwrap();
         let session = state
             .live
             .get_mut(&session_id)
+            .filter(|session| {
+                session.handle == handle
+                    && !session.backend_released
+                    && !session.lifecycle.is_stopped()
+                    && access.as_ref().is_none_or(|access| access.lease.current())
+            })
             .ok_or_else(|| format!("session {session_id} ended while changing input"))?;
         session.input_enabled = enabled;
         Ok(())
     }
 
     pub fn set_session_quality(&self, session_id: u32, quality: Option<f32>) -> Result<(), String> {
+        let _operation = self
+            .source_operations
+            .enter()
+            .ok_or("Host is shutting down")?;
         if let Some(value) = quality {
             if !(0.25..=0.5).contains(&value) {
                 return Err("quality override must be between 0.25 and 0.50".into());
@@ -1280,7 +1862,7 @@ impl ControlServer {
             state
                 .live
                 .get(&session_id)
-                .filter(|session| !session.backend_released)
+                .filter(|session| !session.backend_released && !session.lifecycle.is_stopped())
                 .map(|session| session.handle)
                 .ok_or_else(|| format!("no such session {session_id}"))?
         };
@@ -1291,32 +1873,58 @@ impl ControlServer {
     /// still-live viewer (LCT1 code 2) so it closes its window and shows why
     /// instead of waiting for a media timeout or auto-restarting.
     pub fn force_stop_session(&self, session_id: u32) -> Result<(), String> {
-        let handle = {
-            let state = self.sessions.lock().unwrap();
-            state
+        let _operation = self
+            .source_operations
+            .enter()
+            .ok_or("Host is shutting down")?;
+        // Publish the tombstone before any callback can re-enter and finish a
+        // replacement. A failed backend stop must not revive authorization.
+        let (handle, device, owner) = {
+            let mut state = self.sessions.lock().unwrap();
+            let session = state
                 .live
-                .get(&session_id)
-                .filter(|session| !session.backend_released)
-                .map(|session| session.handle)
-                .ok_or_else(|| format!("no such session {session_id}"))?
+                .get_mut(&session_id)
+                .filter(|s| !s.backend_released)
+                .ok_or_else(|| format!("no such session {session_id}"))?;
+            if let Some(access) = session
+                .authorization
+                .as_ref()
+                .and_then(|a| a.access.as_ref())
+            {
+                access.lease.invalidate();
+            }
+            session.lifecycle.stop();
+            session.input_enabled = false;
+            session.terminal_since = Some(Instant::now());
+            session.terminal_error = Some("host operator stopped the stream".into());
+            session.backend_released = true;
+            (
+                session.handle,
+                session.device_id.clone(),
+                session.transport_owner.clone(),
+            )
         };
-        self.backend.stop_with_reason(handle, 2)?;
-
-        let mut state = self.sessions.lock().unwrap();
-        let session = state
-            .live
-            .get_mut(&session_id)
-            .ok_or_else(|| format!("session {session_id} ended while stopping"))?;
-        session.input_enabled = false;
-        session.terminal_since = Some(Instant::now());
-        session.terminal_error = Some("host operator stopped the stream".into());
-        session.backend_released = true;
-        cleanup_media_transport(&session.media_transport, session.viewer_port);
+        let _ = self.backend.set_input_enabled(handle, false);
+        let result = self.retire_session_capture(session_id, handle, Some(2));
+        if result.is_err()
+            && self
+                .retire_session_capture(session_id, handle, None)
+                .is_err()
+        {
+            // Keep failed cleanup visible and retryable, but terminal policy
+            // must continue to reject replacement/input operations.
+            if let Some(session) = self.sessions.lock().unwrap().live.get_mut(&session_id) {
+                if session.handle == handle {
+                    session.backend_released = false;
+                }
+            }
+        }
+        self.cleanup_registered_transport(owner.as_ref());
         self.audit_log(
             "session_stopped",
-            json!({ "session": session_id, "device": session.device_id, "reason": "operator_forced" }),
+            json!({"session": session_id, "device": device, "reason": "operator_forced"}),
         );
-        Ok(())
+        result
     }
 
     /// A viewer restart can leave the old capture handle alive until its TCP
@@ -1345,20 +1953,21 @@ impl ControlServer {
                 })
                 .collect();
             ids.into_iter()
-                .filter_map(|id| state.live.remove(&id))
+                .filter_map(|id| state.live.remove(&id).map(|session| (id, session)))
                 .collect::<Vec<_>>()
         };
 
-        for session in stale {
+        for (id, session) in stale {
+            Self::invalidate_session_source(&session);
             if !session.backend_released {
-                if let Err(error) = self.backend.stop(session.handle) {
+                if let Err(error) = self.retire_session_capture(id, session.handle, None) {
                     eprintln!(
                         "failed to stop stale viewer session {}: {error}",
                         session.handle
                     );
                 }
             }
-            cleanup_media_transport(&session.media_transport, session.viewer_port);
+            self.cleanup_registered_transport(session.transport_owner.as_ref());
         }
     }
 
@@ -1401,13 +2010,12 @@ impl ControlServer {
                 input.encoder_experiment.as_str()
             ));
         }
-        let name = self
-            .backend
-            .list_displays()
-            .ok()
-            .and_then(|d| d.get(input.source_index as usize).cloned())
-            .map(|d| d.name)
-            .unwrap_or_else(|| format!("display {}", input.source_index));
+        let source = resolve_display(
+            &self.backend.list_displays()?,
+            input.source_id.as_deref(),
+            Some(input.source_index),
+        )?;
+        let name = source.name.clone();
         let Some(transport) = normalize_media_transport(&input.media_transport) else {
             return Err(format!(
                 "unsupported media transport: {}",
@@ -1442,6 +2050,7 @@ impl ControlServer {
         }
 
         Ok(StartPlan {
+            source,
             name,
             transport,
             content_mode,
@@ -1450,6 +2059,9 @@ impl ControlServer {
         })
     }
 
+    /// Tests may supply a trusted device identity; production TCP/AOAP paths
+    /// always use dispatch_with_authorization with the original token proof.
+    #[cfg(test)]
     pub(crate) async fn dispatch(
         &self,
         command: &str,
@@ -1457,6 +2069,90 @@ impl ControlServer {
         viewer_ip: &str,
         authenticated_device: Option<&str>,
     ) -> serde_json::Value {
+        // Existing lifecycle fixtures use trusted local calls. Production
+        // authorization regressions call dispatch_with_authorization directly.
+        let source_command = matches!(command, "startStream" | "getCatalog" | "reconfigureStream");
+        let fixture_device = authenticated_device.unwrap_or("test-local-host");
+        if source_command
+            && authenticated_device.is_none()
+            && !self.pairing.is_device_paired(fixture_device)
+        {
+            let offer = self.pairing.begin_pairing("127.0.0.1", 7777);
+            self.pairing
+                .pair_by_code(&offer.code, fixture_device, "test local")
+                .unwrap();
+        }
+        let authorization = if source_command {
+            self.pairing.authorization(fixture_device)
+        } else {
+            authenticated_device.and_then(|device| self.pairing.authorization(device))
+        };
+        if source_command {
+            let displays = self.backend.list_displays().unwrap_or_default();
+            if self
+                .pairing
+                .list_device_views()
+                .iter()
+                .find(|d| d.device_id == fixture_device)
+                .is_some_and(|d| d.source_grants.review_required)
+            {
+                let _ = self.pairing.update_source_grants(
+                    fixture_device,
+                    displays
+                        .iter()
+                        .filter_map(|d| d.source_id.clone())
+                        .collect(),
+                );
+            }
+            if let Some(auth) = &authorization {
+                self.pairing.remember_catalog(auth, &displays);
+                let accesses: HashMap<_, _> = displays
+                    .iter()
+                    .filter_map(|d| {
+                        d.source_id
+                            .as_deref()
+                            .and_then(|id| self.pairing.source_authorization(auth, id).ok())
+                            .map(|auth| (d.index, auth))
+                    })
+                    .collect();
+                let mut sessions = self.sessions.lock().unwrap();
+                for session in sessions
+                    .live
+                    .values_mut()
+                    .filter(|s| s.authorization.is_none())
+                {
+                    session.authorization = accesses.get(&session.source_index).cloned();
+                }
+            }
+        }
+        self.dispatch_with_authorization(
+            command,
+            args,
+            viewer_ip,
+            authenticated_device,
+            authorization.as_ref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_with_authorization(
+        &self,
+        command: &str,
+        args: serde_json::Value,
+        viewer_ip: &str,
+        authenticated_device: Option<&str>,
+        request_authorization: Option<&crate::pairing::Authorization>,
+    ) -> serde_json::Value {
+        let Some(_source_operation) = self.source_operations.enter() else {
+            return err("Host is shutting down");
+        };
+        if self
+            .pairing
+            .with_authorization(request_authorization, || ())
+            .is_none()
+        {
+            return err("unauthorized");
+        }
         match command {
             "requestUsb" => match crate::aoap_control::ensure_usb_accessory().await {
                 Ok(()) => ok(json!({ "attached": true })),
@@ -1522,6 +2218,19 @@ impl ControlServer {
                     Ok(displays) => displays,
                     Err(e) => return err(&e),
                 };
+                let displays: Vec<_> = displays
+                    .into_iter()
+                    .filter(|display| {
+                        let Some(source) = display.source_id.as_deref() else {
+                            return false;
+                        };
+                        request_authorization
+                            .is_some_and(|auth| self.pairing.source_allowed(auth, source))
+                    })
+                    .collect();
+                if let Some(auth) = request_authorization {
+                    self.pairing.remember_catalog(auth, &displays);
+                }
                 let encoder_experiments = match self.backend.encoder_experiments() {
                     Ok(experiments) => advertised_encoder_experiments(experiments),
                     Err(e) => return err(&e),
@@ -1542,14 +2251,50 @@ impl ControlServer {
                 })
             }
             "startStream" => {
-                let input: StartStreamInput = match serde_json::from_value(args) {
+                let request = self.starting.lock().unwrap().begin();
+                let _request_guard = StartRequestGuard {
+                    starts: &self.starting,
+                    request,
+                };
+
+                let mut authorization = request_authorization.cloned();
+                if authenticated_device.is_some() && authorization.is_none() {
+                    return err("unauthorized");
+                }
+                let mut input: StartStreamInput = match serde_json::from_value(args) {
                     Ok(v) => v,
                     Err(e) => return err(&format!("bad args: {e}")),
+                };
+                if input.source_id.is_none() {
+                    let Some(auth) = authorization.as_ref() else {
+                        return err("source_access_denied");
+                    };
+                    input.source_id = match self.pairing.catalog_source(auth, input.source_index) {
+                        Ok(id) => Some(id),
+                        Err(error) => return err(&error),
+                    };
+                }
+                let Some(auth) = authorization.as_ref() else {
+                    return err("source_access_denied: Host에서 이 기기의 화면 접근을 허용한 뒤 다시 시도하세요");
+                };
+                authorization = match self
+                    .pairing
+                    .source_authorization(auth, input.source_id.as_deref().unwrap())
+                {
+                    Ok(auth) => Some(auth),
+                    Err(error) => return err(&error),
                 };
                 let plan = match self.plan_start(&input).await {
                     Ok(plan) => plan,
                     Err(error) => return err(&error),
                 };
+                if self
+                    .pairing
+                    .with_authorization(authorization.as_ref(), || ())
+                    .is_none()
+                {
+                    return err("source_access_denied");
+                }
 
                 // A non-bypassable VPN can route a local control connection
                 // through a LAN subnet router, so its TCP peer is not always
@@ -1592,22 +2337,29 @@ impl ControlServer {
                 self.prepare_curtain_for_start();
                 for (candidate, transport) in attempts {
                     let viewer_addr = format!("{candidate}:{}", input.viewer_port);
-                    self.stop_sessions_for_viewer(&viewer_addr, authenticated_device);
-                    if transport == "adbTcp" {
-                        if let Err(error) = adb_forward(input.viewer_port) {
+                    let claimed = self.starting.lock().unwrap().claim(
+                        request,
+                        authenticated_device,
+                        &viewer_addr,
+                    );
+                    let Some(attempt) = claimed else {
+                        self.refresh_curtain();
+                        return err("start superseded or transport operation in progress");
+                    };
+                    let setup = self.with_start_transport(&attempt, || {
+                        self.stop_sessions_for_viewer(&viewer_addr, authenticated_device);
+                        self.prepare_owned_transport(&attempt, transport, input.viewer_port)
+                    });
+                    match setup {
+                        Some(Ok(())) => {}
+                        Some(Err(error)) => {
                             last_error = Some(error);
                             continue;
                         }
-                    }
-                    if transport == "usb" {
-                        if let Err(error) = crate::aoap_proxy::start_media_proxy(input.viewer_port)
-                        {
-                            last_error = Some(error);
-                            continue;
-                        }
+                        None => return err("start superseded"),
                     }
                     match self.backend.start(
-                        input.source_index,
+                        plan.source.index,
                         &candidate,
                         input.viewer_port,
                         input.width,
@@ -1619,6 +2371,7 @@ impl ControlServer {
                         input.encoder_experiment,
                         &plan.udp_stability,
                         &plan.media_key,
+                        authorization.as_ref().and_then(|auth| auth.access.as_ref()),
                     ) {
                         Ok(handle) => match self.wait_for_first_frame(handle).await {
                             Ok(()) => {
@@ -1629,71 +2382,82 @@ impl ControlServer {
                                 if authenticated_device
                                     .is_some_and(|device| !self.pairing.is_device_paired(device))
                                 {
-                                    let _ = self.backend.stop(handle);
-                                    cleanup_media_transport(transport, input.viewer_port);
+                                    self.discard_backend(handle);
+                                    self.cleanup_owned_transport(&attempt);
                                     revoked_during_start = true;
                                     break;
                                 }
-                                started = Some((handle, candidate, transport));
+                                started = Some((handle, candidate, transport, attempt));
                                 break;
                             }
                             Err(error) => {
-                                let _ = self.backend.stop(handle);
-                                cleanup_media_transport(transport, input.viewer_port);
+                                self.discard_backend(handle);
+                                self.cleanup_owned_transport(&attempt);
                                 last_error = Some(format!(
                                     "{candidate} ({transport}) startup failed: {error}"
                                 ));
                             }
                         },
                         Err(e) => {
-                            cleanup_media_transport(transport, input.viewer_port);
+                            self.cleanup_owned_transport(&attempt);
                             last_error = Some(format!("{candidate} ({transport}): {e}"));
                         }
                     }
                 }
                 match started {
-                    Some((handle, candidate, transport)) => {
+                    Some((handle, candidate, transport, attempt)) => {
                         let viewer_addr = format!("{candidate}:{}", input.viewer_port);
-                        // Remote input turns itself on with the session when
-                        // the OS input permission is already granted, so the
-                        // viewer never has to ask; without it the host banner
-                        // and manual toggle remain the path in. A failure to
-                        // apply degrades to disabled rather than failing the
-                        // stream.
-                        let input_enabled = self.backend.input_permission().unwrap_or(false)
-                            && self.backend.set_input_enabled(handle, true).is_ok();
-                        let session_id = {
-                            let mut st = self.sessions.lock().unwrap();
-                            let id = st.next;
-                            st.next += 1;
-                            st.live.insert(
-                                id,
-                                Session {
-                                    handle,
-                                    source_index: input.source_index,
-                                    source_name: plan.name.clone(),
-                                    device_id: authenticated_device.map(str::to_owned),
-                                    width: input.width,
-                                    height: input.height,
-                                    fps_target: input.fps,
-                                    quality_state: "native".into(),
-                                    capture_backend: input.capture_backend.clone(),
-                                    content_mode: plan.content_mode.into(),
-                                    encoder_experiment: input.encoder_experiment,
-                                    viewer_addr: viewer_addr.clone(),
-                                    viewer_port: input.viewer_port,
-                                    media_transport: transport.into(),
-                                    udp_stability: (transport == "udp")
-                                        .then(|| plan.udp_stability.clone()),
-                                    media_key: plan.media_key,
-                                    input_enabled,
-                                    input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
-                                    terminal_since: None,
-                                    terminal_error: None,
-                                    backend_released: false,
-                                },
-                            );
-                            id
+                        // Viewing permission never grants remote input.
+                        let input_enabled = false;
+                        let session_id = self
+                            .pairing
+                            .with_authorization(authorization.as_ref(), || {
+                                let mut starts = self.starting.lock().unwrap();
+                                if !starts.accepts(&attempt) {
+                                    return None;
+                                }
+                                let mut st = self.sessions.lock().unwrap();
+                                let id = st.next;
+                                st.next += 1;
+                                starts.register(&attempt);
+                                st.live.insert(
+                                    id,
+                                    Session {
+                                        handle,
+                                        source_index: plan.source.index,
+                                        source_name: plan.name.clone(),
+                                        device_id: authenticated_device.map(str::to_owned),
+                                        width: input.width,
+                                        height: input.height,
+                                        fps_target: input.fps,
+                                        quality_state: "native".into(),
+                                        capture_backend: input.capture_backend.clone(),
+                                        content_mode: plan.content_mode.into(),
+                                        encoder_experiment: input.encoder_experiment,
+                                        viewer_addr: viewer_addr.clone(),
+                                        viewer_port: input.viewer_port,
+                                        media_transport: transport.into(),
+                                        udp_stability: (transport == "udp")
+                                            .then(|| plan.udp_stability.clone()),
+                                        media_key: plan.media_key,
+                                        input_enabled,
+                                        input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
+                                        terminal_since: None,
+                                        terminal_error: None,
+                                        backend_released: false,
+                                        lifecycle: Lifecycle::default(),
+                                        transport_owner: Some(attempt.clone()),
+                                        authorization: authorization.clone(),
+                                    },
+                                );
+                                Some(id)
+                            })
+                            .flatten();
+                        let Some(session_id) = session_id else {
+                            self.discard_backend(handle);
+                            self.cleanup_owned_transport(&attempt);
+                            self.refresh_curtain();
+                            return err("unauthorized or start superseded");
                         };
                         // 커튼 설정이 켜져 있으면 세션 시작과 함께 오버레이를
                         // 띄운다(창이 필터 생성보다 먼저 있어야 캡처에서
@@ -1706,9 +2470,15 @@ impl ControlServer {
                         if input_enabled {
                             let displaced: Vec<(u32, u32)> = {
                                 let mut st = self.sessions.lock().unwrap();
+                                let still_enabled = st.live.get(&session_id).is_some_and(|s| {
+                                    s.handle == handle && s.input_enabled && !s.backend_released
+                                });
                                 st.live
                                     .iter_mut()
                                     .filter_map(|(id, session)| {
+                                        if !still_enabled {
+                                            return None;
+                                        }
                                         if *id == session_id || !session.input_enabled {
                                             return None;
                                         }
@@ -1802,17 +2572,20 @@ impl ControlServer {
                 };
                 match removed {
                     Some(s) => {
+                        Self::invalidate_session_source(&s);
                         let result = if s.backend_released {
                             Ok(())
                         } else {
                             match input.reason {
-                                Some(code) => self.backend.stop_with_reason(s.handle, code),
-                                None => self.backend.stop(s.handle),
+                                Some(code) => {
+                                    self.retire_session_capture(input.session, s.handle, Some(code))
+                                }
+                                None => self.retire_session_capture(input.session, s.handle, None),
                             }
                         };
                         match result {
                             Ok(()) => {
-                                cleanup_media_transport(&s.media_transport, s.viewer_port);
+                                self.cleanup_registered_transport(s.transport_owner.as_ref());
                                 self.audit_log(
                                     "session_stopped",
                                     json!({
@@ -2039,8 +2812,11 @@ impl ControlServer {
     /// 토큰으로 페어링된 장치 ID를 찾는다. USB 제어 경로(aoap_control)에서
     /// 세션을 장치에 귀속시키기 위해 쓴다 — TCP 경로의
     /// `pairing.authorize_device`와 동일한 규칙이다.
-    pub(crate) fn authorize_device_token(&self, token: &str) -> Option<String> {
-        self.pairing.authorize_device(token)
+    pub(crate) fn authorize_device_token(
+        &self,
+        token: &str,
+    ) -> Option<crate::pairing::Authorization> {
+        self.pairing.authenticate(token)
     }
 
     /// `setClipboard` 제어 명령(U5, docs/07 §20). 토큰 인증은 연결 레벨에서
@@ -2151,6 +2927,22 @@ impl ControlServer {
             return err("clipboard share disabled");
         }
         let backend = self.clipboard_backend();
+        let revision = backend.revision().ok().flatten();
+        if revision.is_some_and(|revision| {
+            self.clipboard_revision_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(cached, hash)| *cached == revision && *hash == input.hash)
+        }) {
+            return ok(json!({ "unchanged": true }));
+        }
+        let remember = |hash: &str| {
+            let after = backend.revision().ok().flatten();
+            let valid = revision.filter(|before| Some(*before) == after);
+            *self.clipboard_revision_cache.lock().unwrap() =
+                valid.map(|value| (value, hash.to_owned()));
+        };
         let current = match backend.read_text() {
             Ok(text) => text,
             Err(e) => return err(&e),
@@ -2160,6 +2952,7 @@ impl ControlServer {
                 return err("clipboard too large");
             }
             let hash = clipboard_sha256_hex(&current);
+            remember(&hash);
             if input.hash == hash {
                 return ok(json!({ "unchanged": true }));
             }
@@ -2178,6 +2971,7 @@ impl ControlServer {
                     return err("clipboard too large");
                 }
                 let hash = format!("i:{}", clipboard_sha256_hex(&image_base64));
+                remember(&hash);
                 if input.hash == hash {
                     return ok(json!({ "unchanged": true }));
                 }
@@ -2198,6 +2992,7 @@ impl ControlServer {
             Ok(None) => {
                 // 빈 클립보드 — 빈 텍스트 해시로 unchanged 판정에 맡긴다.
                 let hash = clipboard_sha256_hex("");
+                remember(&hash);
                 if input.hash == hash {
                     ok(json!({ "unchanged": true }))
                 } else {
@@ -2228,13 +3023,44 @@ impl Drop for AuthedConnLease<'_> {
 /// 집합에 넣고, 실패·성공 어느 경로로 끝나도 drop에서 뺀다. 첫 프레임 대기
 /// 전체를 포함한 재구성 구간 내내 쥔다 — 중간에 풀었다면 두 번째 재구성이
 /// 아직 스왑되지 않은 이전 핸들 스냅샷을 다시 읽게 된다.
+struct StartRequestGuard<'a> {
+    starts: &'a Mutex<Starts>,
+    request: u64,
+}
+impl Drop for StartRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.starts.lock().unwrap().finish(self.request);
+    }
+}
+struct StartTransportGuard<'a> {
+    starts: &'a Mutex<Starts>,
+    attempt: &'a StartAttempt,
+}
+impl Drop for StartTransportGuard<'_> {
+    fn drop(&mut self) {
+        loop {
+            let deferred = self
+                .starts
+                .lock()
+                .unwrap()
+                .end_transport_action(self.attempt);
+            let Some((transport, port)) = deferred else {
+                break;
+            };
+            cleanup_media_transport(&transport, port);
+        }
+    }
+}
+
 struct ReconfigureGuard<'a> {
     in_flight: &'a Mutex<std::collections::HashSet<u32>>,
+    retired: &'a Mutex<HashMap<u32, u32>>,
     session: u32,
 }
 
 impl Drop for ReconfigureGuard<'_> {
     fn drop(&mut self) {
+        self.retired.lock().unwrap().remove(&self.session);
         self.in_flight.lock().unwrap().remove(&self.session);
     }
 }
@@ -2280,10 +3106,12 @@ async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
 ) -> Result<Option<String>, ()> {
-    let read = tokio::time::timeout(
-        CONTROL_IDLE_TIMEOUT,
-        read_bounded_line(reader, COMMAND_LINE_LIMIT),
-    );
+    let cap = if killed.is_some() {
+        COMMAND_LINE_LIMIT
+    } else {
+        HANDSHAKE_LINE_LIMIT
+    };
+    let read = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, read_bounded_line(reader, cap));
     match killed {
         Some(notify) => {
             tokio::pin!(read);
@@ -2331,6 +3159,7 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
         return;
     };
     let mut device: Option<String> = None;
+    let mut authorization: Option<crate::pairing::Authorization> = None;
     // 철회 즉시 차단: 인증을 통과한 연결은 레지스트리에 등록되고, 장치가
     // 철회되면 깨워져 루프가 다음 줄을 기다리지 않고 종료한다.
     let mut killed: Option<std::sync::Arc<tokio::sync::Notify>> = None;
@@ -2346,7 +3175,12 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(()) => {
-                        eprintln!("control command line exceeded {COMMAND_LINE_LIMIT} bytes from {peer}; closing");
+                        let cap = if device.is_some() {
+                            COMMAND_LINE_LIMIT
+                        } else {
+                            HANDSHAKE_LINE_LIMIT
+                        };
+                        eprintln!("control command line exceeded {cap} bytes from {peer}; closing");
                         break;
                     }
                 }
@@ -2376,11 +3210,10 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 // closed, not just the request rejected (design §2).
                 let local_pairing = cmd == "beginPairing" && is_loopback_peer(peer);
                 if device.is_none() && cmd != "pair" && !local_pairing {
-                    match server
-                        .pairing
-                        .authorize_device(token.as_deref().unwrap_or(""))
-                    {
-                        Some(device_id) => {
+                    match server.pairing.authenticate(token.as_deref().unwrap_or("")) {
+                        Some(auth) => {
+                            let device_id = auth.device_id().to_owned();
+                            authorization = Some(auth);
                             let (notify, lease) = server.register_authed_conn(&device_id);
                             killed = Some(notify);
                             _lease = Some(lease);
@@ -2404,9 +3237,10 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 // 완주된다(startStream은 첫 프레임까지 몇 초를 기다린다).
                 // 디스패치 바로 앞에서 장치의 페어링 유효성을 다시 확인해
                 // 철회된 장치의 명령 유리시간을 없앤다.
-                if device
-                    .as_deref()
-                    .is_some_and(|d| !server.pairing.is_device_paired(d))
+                if server
+                    .pairing
+                    .with_authorization(authorization.as_ref(), || ())
+                    .is_none()
                 {
                     let _ = write_response(
                         &mut wr,
@@ -2416,7 +3250,15 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                     .await;
                     break;
                 }
-                let out = server.dispatch(&cmd, args, peer, device.as_deref()).await;
+                let out = server
+                    .dispatch_with_authorization(
+                        &cmd,
+                        args,
+                        peer,
+                        device.as_deref(),
+                        authorization.as_ref(),
+                    )
+                    .await;
                 serde_json::to_string(&out).unwrap_or_else(|_| "{\"ok\":false}".into())
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
@@ -2789,6 +3631,7 @@ mod tests {
     fn backend() -> SharedBackend {
         Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 1920,
@@ -2808,7 +3651,7 @@ mod tests {
 
     impl CaptureBackend for TerminalBackend {
         fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
-            Ok(Vec::new())
+            backend().list_displays()
         }
 
         fn start(
@@ -2825,6 +3668,7 @@ mod tests {
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
             _media_key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
         ) -> Result<u32, String> {
             Ok(7)
         }
@@ -3154,7 +3998,16 @@ mod tests {
         });
         let line = request(sock, "pair", &args.to_string(), "").await;
         let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
-        resp["result"]["token"].as_str().unwrap().to_owned()
+        let token = resp["result"]["token"].as_str().unwrap().to_owned();
+        pairing
+            .update_source_grants("test-viewer", vec!["test:display:0".into()])
+            .0
+            .unwrap();
+        pairing.remember_catalog(
+            &pairing.authenticate(&token).unwrap(),
+            &backend().list_displays().unwrap(),
+        );
+        token
     }
 
     #[tokio::test]
@@ -3206,7 +4059,7 @@ mod tests {
         assert!(line.contains("\"state\":\"running\""), "{line}");
         assert!(line.contains("\"width\":2560"), "{line}");
         assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
-        assert!(line.contains("\"inputEnabled\":true"), "{line}");
+        assert!(line.contains("\"inputEnabled\":false"), "{line}");
         assert!(line.contains("\"bitrateFloorCollapseCount\":7"), "{line}");
         assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
@@ -3492,6 +4345,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
 
@@ -3521,7 +4377,13 @@ mod tests {
     #[test]
     fn last_session_teardown_locks_the_screen_only_when_enabled() {
         // 설정 켜짐 + 잠금 카운터 주입.
-        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: Arc::new(AtomicUsize::new(0)),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
         let settings = crate::settings::SharedSettings::in_memory();
         settings.set_lock_on_disconnect(true).unwrap();
         server.set_settings(settings);
@@ -3709,6 +4571,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
 
@@ -3735,6 +4600,24 @@ mod tests {
     }
 
     fn insert_live_session(server: &ControlServer, id: u32, device: Option<&str>) {
+        if let Some(device) = device {
+            if !server.pairing.is_device_paired(device) {
+                direct_pair_token(&server.pairing, device);
+            }
+        }
+        let fixture_device = device.unwrap_or("test-local-host");
+        if !server.pairing.is_device_paired(fixture_device) {
+            direct_pair_token(&server.pairing, fixture_device);
+        }
+        let authorization = server
+            .pairing
+            .authorization(fixture_device)
+            .and_then(|auth| {
+                server
+                    .pairing
+                    .source_authorization(&auth, "test:display:0")
+                    .ok()
+            });
         server.sessions.lock().unwrap().live.insert(
             id,
             Session {
@@ -3759,6 +4642,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization,
             },
         );
     }
@@ -3797,6 +4683,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
 
@@ -3852,6 +4741,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
 
@@ -3889,6 +4781,7 @@ mod tests {
                 _encoder_experiment: EncoderExperiment,
                 _udp_stability: &AppliedUdpStability,
                 _media_key: &[u8; 32],
+                _access: Option<&crate::source_grants::CaptureAccess>,
             ) -> Result<u32, String> {
                 Err("not under test".into())
             }
@@ -3917,6 +4810,7 @@ mod tests {
     fn input_test_backend(permission: bool) -> Arc<FakeBackend> {
         Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 1920,
@@ -3931,7 +4825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_stream_auto_enables_input_when_permission_is_granted() {
+    async fn task10_start_stream_requires_host_input_approval_even_with_os_permission() {
         let fake = input_test_backend(true);
         let server = Arc::new(ControlServer::new(
             fake.clone(),
@@ -3959,8 +4853,14 @@ mod tests {
 
         let state = server.sessions.lock().unwrap();
         let session = state.live.values().next().unwrap();
-        assert!(session.input_enabled, "{resp}");
-        assert_eq!(*fake.input_calls.lock().unwrap(), vec![(7, true)], "{resp}");
+        assert!(
+            !session.input_enabled,
+            "OS permission is not Host approval: {resp}"
+        );
+        assert!(
+            fake.input_calls.lock().unwrap().is_empty(),
+            "must not enable input: {resp}"
+        );
     }
 
     #[tokio::test]
@@ -4033,7 +4933,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_start_stream_takes_input_from_the_older_session() {
+    async fn second_start_stream_does_not_steal_explicit_host_input_approval() {
         // 입력 중재(U4b): 마지막 세션이 이긴다. 두 번째 startStream이 입력을
         // 얻으면 첫 세션의 입력은 세션 상태와 백엔드 양쪽에서 꺼진다.
         let fake = input_test_backend(true);
@@ -4069,6 +4969,9 @@ mod tests {
                     terminal_since: None,
                     terminal_error: None,
                     backend_released: false,
+                    lifecycle: Lifecycle::default(),
+                    transport_owner: None,
+                    authorization: None,
                 },
             );
             st.next = 2;
@@ -4095,20 +4998,16 @@ mod tests {
         let state = server.sessions.lock().unwrap();
         assert_eq!(state.live.len(), 2, "{resp}");
         assert!(
-            !state.live.get(&1).unwrap().input_enabled,
-            "older session must lose input: {resp}"
+            state.live.get(&1).unwrap().input_enabled,
+            "older session preserves Host approval: {resp}"
         );
         assert!(
-            state.live.get(&2).unwrap().input_enabled,
-            "new session must win input: {resp}"
+            !state.live.get(&2).unwrap().input_enabled,
+            "new session starts input-off: {resp}"
         );
         drop(state);
         // 새 세션 활성화(true) 뒤 이전 세션도 백엔드에서 꺼진다(false).
-        assert_eq!(
-            *fake.input_calls.lock().unwrap(),
-            vec![(7, true), (7, false)],
-            "{resp}"
-        );
+        assert_eq!(*fake.input_calls.lock().unwrap(), vec![], "{resp}");
     }
 
     #[tokio::test]
@@ -4145,6 +5044,9 @@ mod tests {
                     terminal_since: None,
                     terminal_error: None,
                     backend_released: false,
+                    lifecycle: Lifecycle::default(),
+                    transport_owner: None,
+                    authorization: None,
                 },
             );
             st.next = 2;
@@ -4185,6 +5087,9 @@ mod tests {
         writes: AtomicUsize,
         image: Mutex<Option<Vec<u8>>>,
         image_writes: AtomicUsize,
+        revision: AtomicUsize,
+        reads: AtomicUsize,
+        image_reads: AtomicUsize,
     }
 
     impl FakeClipboard {
@@ -4194,12 +5099,22 @@ mod tests {
                 writes: AtomicUsize::new(0),
                 image: Mutex::new(None),
                 image_writes: AtomicUsize::new(0),
+                revision: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
+                image_reads: AtomicUsize::new(0),
             }
         }
     }
 
     impl ClipboardBackend for FakeClipboard {
+        fn revision(&self) -> Result<Option<u64>, String> {
+            Ok(match self.revision.load(Ordering::SeqCst) {
+                0 => None,
+                value => Some(value as u64),
+            })
+        }
         fn read_text(&self) -> Result<String, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.text.lock().unwrap().clone())
         }
 
@@ -4210,6 +5125,7 @@ mod tests {
         }
 
         fn read_image_png(&self) -> Result<Option<Vec<u8>>, String> {
+            self.image_reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.image.lock().unwrap().clone())
         }
 
@@ -4230,6 +5146,35 @@ mod tests {
         let clipboard = Arc::new(FakeClipboard::new(""));
         server.set_clipboard(clipboard.clone());
         (server, clipboard)
+    }
+
+    #[test]
+    fn native_clipboard_revision_skips_payload_only_for_validated_matching_hash() {
+        let (server, clipboard) = clipboard_server(true);
+        clipboard.revision.store(1, Ordering::SeqCst);
+        *clipboard.image.lock().unwrap() = Some(vec![1, 2, 3]);
+        let first = server.handle_get_clipboard(json!({ "hash": "unknown" }), None);
+        let hash = first["result"]["hash"].as_str().unwrap();
+        let second = server.handle_get_clipboard(json!({ "hash": hash }), None);
+        assert_eq!(second["result"]["unchanged"], true);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(clipboard.image_reads.load(Ordering::SeqCst), 1);
+        let different_caller = server.handle_get_clipboard(json!({ "hash": "other" }), None);
+        assert_eq!(different_caller["result"]["unchanged"], false);
+        assert_eq!(clipboard.image_reads.load(Ordering::SeqCst), 2);
+        clipboard.revision.store(2, Ordering::SeqCst);
+        server.handle_get_clipboard(json!({ "hash": hash }), None);
+        assert_eq!(clipboard.image_reads.load(Ordering::SeqCst), 3);
+        clipboard.revision.store(0, Ordering::SeqCst);
+        server.handle_get_clipboard(json!({ "hash": hash }), None);
+        server.handle_get_clipboard(json!({ "hash": hash }), None);
+        assert_eq!(clipboard.image_reads.load(Ordering::SeqCst), 5);
+        server.set_clipboard_share(false);
+        assert_eq!(
+            server.handle_get_clipboard(json!({ "hash": hash }), None)["error"],
+            "clipboard share disabled"
+        );
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
@@ -4521,6 +5466,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
     }
@@ -4547,6 +5495,7 @@ mod tests {
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
             _media_key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
         ) -> Result<u32, String> {
             Ok(9)
         }
@@ -4596,6 +5545,7 @@ mod tests {
     impl CaptureBackend for ReplacingBackend {
         fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
             Ok(vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -4630,6 +5580,7 @@ mod tests {
             encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
             _media_key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
         ) -> Result<u32, String> {
             self.starts
                 .lock()
@@ -4659,6 +5610,7 @@ mod tests {
     async fn reconfigure_stream_explicit_split_targets_exact_4k_and_reports_actual_mode() {
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -4715,6 +5667,7 @@ mod tests {
     async fn reconfigure_stream_explicit_auto_leaves_split_for_single_path() {
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -4766,6 +5719,7 @@ mod tests {
     async fn reconfigure_stream_rejects_unsupported_split_shape_before_stopping() {
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -4817,6 +5771,7 @@ mod tests {
     async fn reconfigure_stream_rejects_unsupported_requested_mode_before_stopping() {
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -4922,12 +5877,14 @@ mod tests {
         fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
             Ok(vec![
                 DisplayInfo {
+                    source_id: Some("test:display:0".into()),
                     index: 0,
                     name: "Main".into(),
                     width: 1920,
                     height: 1080,
                 },
                 DisplayInfo {
+                    source_id: Some("test:display:1".into()),
                     index: 1,
                     name: "Side".into(),
                     width: 2560,
@@ -4950,6 +5907,7 @@ mod tests {
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
             _media_key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
         ) -> Result<u32, String> {
             self.starts
                 .lock()
@@ -5063,7 +6021,7 @@ mod tests {
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         let message = resp["error"].as_str().unwrap_or_default();
-        assert!(message.contains("no such display 5"), "{resp}");
+        assert!(message.contains("source_refresh_required"), "{resp}");
         assert_eq!(backend.stops.load(Ordering::SeqCst), 0, "{resp}");
         assert!(backend.starts.lock().unwrap().is_empty(), "{resp}");
         let state = server.sessions.lock().unwrap();
@@ -5135,6 +6093,7 @@ mod tests {
         // 4K split → 1080p 프리셋 실패 재현).
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 1920,
@@ -5178,6 +6137,9 @@ mod tests {
                 terminal_since: None,
                 terminal_error: None,
                 backend_released: false,
+                lifecycle: Lifecycle::default(),
+                transport_owner: None,
+                authorization: None,
             },
         );
 
@@ -5222,6 +6184,7 @@ mod tests {
         // 스트림과 기록은 그대로여야 한다.
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -5272,6 +6235,7 @@ mod tests {
     async fn reconfigure_stream_omitted_mode_rejects_split_4k_30fps_before_stopping() {
         let fake = Arc::new(FakeBackend {
             displays: vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 3840,
@@ -5684,9 +6648,29 @@ mod tests {
     /// 테스트용 직접 페어링: 소켓 없이 장치 토큰을 발금한다.
     fn direct_pair_token(pairing: &crate::pairing::PairingServer, device_id: &str) -> String {
         let view = pairing.begin_pairing("127.0.0.1", 7777);
-        pairing
+        let token = pairing
             .pair_by_code(&view.code, device_id, device_id)
-            .unwrap()
+            .unwrap();
+        pairing
+            .update_source_grants(
+                device_id,
+                vec!["test:display:0".into(), "test:display:1".into()],
+            )
+            .0
+            .unwrap();
+        if let Some(auth) = pairing.authenticate(&token) {
+            pairing.remember_catalog(
+                &auth,
+                &[control_contract::host::DisplayInfo {
+                    source_id: Some("test:display:0".into()),
+                    index: 0,
+                    name: "test".into(),
+                    width: 1920,
+                    height: 1080,
+                }],
+            );
+        }
+        token
     }
 
     #[tokio::test]
@@ -5833,6 +6817,8 @@ mod tests {
     /// 테스트에서 잡을 수 있게 한다. FakeBackend는 first_send_ms=26이라 즉시
     /// 통과하므로 대기 창 테스트에는 이 백엔드가 필요하다.
     struct LatchBackend {
+        stopped_handles: Mutex<Vec<u32>>,
+        input_changes: Mutex<Vec<(u32, bool)>>,
         released: AtomicBool,
         starts: AtomicUsize,
         stops: AtomicUsize,
@@ -5841,6 +6827,8 @@ mod tests {
     impl LatchBackend {
         fn new() -> Self {
             Self {
+                stopped_handles: Mutex::new(Vec::new()),
+                input_changes: Mutex::new(Vec::new()),
                 released: AtomicBool::new(false),
                 starts: AtomicUsize::new(0),
                 stops: AtomicUsize::new(0),
@@ -5855,6 +6843,7 @@ mod tests {
     impl CaptureBackend for LatchBackend {
         fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
             Ok(vec![DisplayInfo {
+                source_id: Some("test:display:0".into()),
                 index: 0,
                 name: "Main".into(),
                 width: 1920,
@@ -5876,12 +6865,18 @@ mod tests {
             _encoder_experiment: EncoderExperiment,
             _udp_stability: &AppliedUdpStability,
             _media_key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
         ) -> Result<u32, String> {
-            self.starts.fetch_add(1, Ordering::SeqCst);
-            Ok(11)
+            Ok(11 + self.starts.fetch_add(1, Ordering::SeqCst) as u32)
         }
 
-        fn stop(&self, _handle: u32) -> Result<(), String> {
+        fn set_input_enabled(&self, handle: u32, enabled: bool) -> Result<(), String> {
+            self.input_changes.lock().unwrap().push((handle, enabled));
+            Ok(())
+        }
+
+        fn stop(&self, handle: u32) -> Result<(), String> {
+            self.stopped_handles.lock().unwrap().push(handle);
             self.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -5948,7 +6943,7 @@ mod tests {
         // 첫 프레임 대기에 들어간 뒤 철회하고 나서 프레임을 푼다 — 등록 직전
         // 재검사(F02)가 이 순서의 철회를 잡아야 한다.
         wait_until(|| latch.starts.load(Ordering::SeqCst) == 1).await;
-        assert!(pairing.revoke("viewer-1"));
+        assert!(!pairing.revoke("viewer-1").removed_devices.is_empty());
         latch.release();
 
         let resp = task.await.unwrap();
@@ -6011,9 +7006,11 @@ mod tests {
                 .contains("ended during reconfigure"),
             "{resp}"
         );
-        // 이전 핸들(재구성) 1회 + stopStream의 이전 핸들 1회 + 유출되지 않은
-        // 교체 핸들 1회 = 3. 교체 핸들이 세션 맵 밖에서 도는 일이 없다.
-        assert_eq!(latch.stops.load(Ordering::SeqCst), 3, "{resp}");
+        assert_eq!(
+            *latch.stopped_handles.lock().unwrap(),
+            vec![8, 11],
+            "old and rejected replacement each retire once; cancellation cannot leak either handle"
+        );
         assert!(server.sessions.lock().unwrap().live.is_empty());
     }
 
@@ -6148,4 +7145,977 @@ mod tests {
         let line = String::from_utf8(response).unwrap();
         assert!(line.contains("\"ok\":false"), "{line}");
     }
+    #[tokio::test]
+    async fn reaudit_operator_stop_during_reconfigure_must_not_revive() {
+        let latch = Arc::new(LatchBackend::new());
+        let server = Arc::new(ControlServer::new(
+            latch.clone(),
+            test_pairing(),
+            test_identity(),
+        ));
+        insert_live_session(&server, 1, Some("viewer-1"));
+        let task = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server.dispatch("reconfigureStream", serde_json::json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}), "192.168.0.9",Some("viewer-1")).await
+            })
+        };
+        wait_until(|| latch.starts.load(Ordering::SeqCst) == 1).await;
+        server.force_stop_session(1).unwrap();
+        assert!(
+            server
+                .sessions
+                .lock()
+                .unwrap()
+                .live
+                .get(&1)
+                .unwrap()
+                .backend_released
+        );
+        latch.release();
+        let response = task.await.unwrap();
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(
+            latch.stopped_handles.lock().unwrap().contains(&11),
+            "replacement handle must be stopped after operator cancellation"
+        );
+        assert!(
+            latch.input_changes.lock().unwrap().contains(&(11, false)),
+            "rejected replacement input must be disabled"
+        );
+        let state = server.sessions.lock().unwrap();
+        let s = state.live.get(&1).unwrap();
+        println!(
+            "response={response}, backend_released={}, terminal_error={:?}, starts={}, stops={}",
+            s.backend_released,
+            s.terminal_error,
+            latch.starts.load(Ordering::SeqCst),
+            latch.stops.load(Ordering::SeqCst)
+        );
+        assert!(
+            s.backend_released,
+            "operator-stopped tombstone was revived by replacement"
+        );
+    }
+
+    struct RevokeOnInputCheck {
+        latch: LatchBackend,
+        pairing: Arc<crate::pairing::PairingServer>,
+        target: &'static str,
+        repair: bool,
+        fired: AtomicBool,
+        server: std::sync::OnceLock<std::sync::Weak<ControlServer>>,
+    }
+    impl CaptureBackend for RevokeOnInputCheck {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            self.latch.list_displays()
+        }
+        fn start(
+            &self,
+            source: u32,
+            ip: &str,
+            port: u16,
+            w: u32,
+            h: u32,
+            fps: u32,
+            capture: &str,
+            transport: &str,
+            content: &str,
+            experiment: EncoderExperiment,
+            stability: &AppliedUdpStability,
+            key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            self.latch.start(
+                source, ip, port, w, h, fps, capture, transport, content, experiment, stability,
+                key, _access,
+            )
+        }
+        fn set_input_enabled(&self, handle: u32, enabled: bool) -> Result<(), String> {
+            self.latch.set_input_enabled(handle, enabled)
+        }
+
+        fn stop(&self, h: u32) -> Result<(), String> {
+            self.latch.stop(h)
+        }
+        fn stats(&self, h: u32) -> Result<StatsInfo, String> {
+            self.revoke_from_stats();
+            self.latch.stats(h)
+        }
+    }
+    impl RevokeOnInputCheck {
+        fn revoke_from_stats(&self) {
+            if self.fired.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            assert!(!self.pairing.revoke(self.target).removed_devices.is_empty());
+            self.server
+                .get()
+                .unwrap()
+                .upgrade()
+                .unwrap()
+                .stop_sessions_for_device(self.target);
+            if self.repair {
+                direct_pair_token(&self.pairing, self.target);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn reaudit_revoke_after_check_before_registration_must_stop_start() {
+        let pairing = test_pairing();
+        let _token = direct_pair_token(&pairing, "viewer-1");
+        let backend = Arc::new(RevokeOnInputCheck {
+            latch: LatchBackend::new(),
+            pairing: pairing.clone(),
+            target: "viewer-1",
+            repair: false,
+            fired: AtomicBool::new(false),
+            server: std::sync::OnceLock::new(),
+        });
+        backend.latch.release();
+        let server = Arc::new(ControlServer::new(
+            backend.clone(),
+            pairing.clone(),
+            test_identity(),
+        ));
+        backend.server.set(Arc::downgrade(&server)).unwrap();
+        let response=server.dispatch("startStream",serde_json::json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":TEST_MEDIA_KEY}),"192.168.0.9",Some("viewer-1")).await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(backend.latch.stops.load(Ordering::SeqCst), 1);
+        assert!(
+            backend
+                .latch
+                .input_changes
+                .lock()
+                .unwrap()
+                .contains(&(11, false)),
+            "revoked candidate input must be disabled"
+        );
+        println!(
+            "response={response}, still_paired={}, live_sessions={}, stops={}",
+            pairing.is_device_paired("viewer-1"),
+            server.sessions.lock().unwrap().live.len(),
+            backend.latch.stops.load(Ordering::SeqCst)
+        );
+        assert!(
+            server.sessions.lock().unwrap().live.is_empty(),
+            "revoked device was registered after final auth check"
+        );
+    }
+    struct StopDuringRollback {
+        inner: LatchBackend,
+        server: std::sync::OnceLock<std::sync::Weak<ControlServer>>,
+    }
+    impl CaptureBackend for StopDuringRollback {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            self.inner.list_displays()
+        }
+        fn start(
+            &self,
+            source: u32,
+            ip: &str,
+            port: u16,
+            w: u32,
+            h: u32,
+            fps: u32,
+            capture: &str,
+            transport: &str,
+            content: &str,
+            experiment: EncoderExperiment,
+            stability: &AppliedUdpStability,
+            key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            let result = self.inner.start(
+                source, ip, port, w, h, fps, capture, transport, content, experiment, stability,
+                key, _access,
+            );
+            if self.inner.starts.load(Ordering::SeqCst) == 2 {
+                self.server
+                    .get()
+                    .unwrap()
+                    .upgrade()
+                    .unwrap()
+                    .force_stop_session(1)
+                    .unwrap();
+            }
+            result
+        }
+        fn stop(&self, handle: u32) -> Result<(), String> {
+            self.inner.stop(handle)
+        }
+        fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
+            if self.inner.starts.load(Ordering::SeqCst) == 1 {
+                Err("replacement failed".into())
+            } else {
+                self.inner.stats(handle)
+            }
+        }
+    }
+    #[tokio::test]
+    async fn reaudit_operator_stop_during_rollback_must_not_revive() {
+        let backend = Arc::new(StopDuringRollback {
+            inner: LatchBackend::new(),
+            server: std::sync::OnceLock::new(),
+        });
+        backend.inner.release();
+        let server = Arc::new(ControlServer::new(
+            backend.clone(),
+            test_pairing(),
+            test_identity(),
+        ));
+        backend.server.set(Arc::downgrade(&server)).unwrap();
+        insert_live_session(&server, 1, None);
+        let response = server
+            .dispatch(
+                "reconfigureStream",
+                json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}),
+                "127.0.0.1",
+                None,
+            )
+            .await;
+        assert_eq!(response["ok"], false);
+        let state = server.sessions.lock().unwrap();
+        let session = state.live.get(&1).unwrap();
+        assert!(
+            session.backend_released,
+            "rollback resurrected an operator-stopped session"
+        );
+        assert_eq!(
+            session.terminal_error.as_deref(),
+            Some("host operator stopped the stream")
+        );
+        assert_eq!(
+            *backend.inner.stopped_handles.lock().unwrap(),
+            vec![8, 11, 12],
+            "old, failed replacement and rejected recovery each retire once; operator stop does not repeat old retirement"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaudit_pairing_command_does_not_grant_large_command_budget() {
+        use tokio::io::AsyncReadExt;
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
+        let mut socket = TcpStream::connect(addr).await.unwrap();
+        let token = pair_token(&mut socket, &pairing).await;
+        // Possessing a returned token is not authenticating this connection.
+        socket.write_all(&vec![b' '; 16 * 1024 + 1]).await.unwrap();
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+            "pre-token command retained a large buffer: {closed:?}"
+        );
+        let mut socket = TcpStream::connect(addr).await.unwrap();
+        let valid = request(&mut socket, "getStatus", "{}", &token).await;
+        assert!(valid.contains("\"ok\":true"), "{valid}");
+        let large = " ".repeat(20 * 1024);
+        let accepted = request(&mut socket, "getStatus", &format!("{{{large}}}"), &token).await;
+        assert!(accepted.contains("\"ok\":true"), "{accepted}");
+    }
+
+    #[tokio::test]
+    async fn reaudit_repair_cannot_validate_old_start_but_other_device_revoke_is_independent() {
+        for (target, repair, expected_success) in
+            [("viewer-1", true, false), ("viewer-2", false, true)]
+        {
+            let pairing = test_pairing();
+            direct_pair_token(&pairing, "viewer-1");
+            direct_pair_token(&pairing, "viewer-2");
+            let backend = Arc::new(RevokeOnInputCheck {
+                latch: LatchBackend::new(),
+                pairing: pairing.clone(),
+                target,
+                repair,
+                fired: AtomicBool::new(false),
+                server: std::sync::OnceLock::new(),
+            });
+            backend.latch.release();
+            let server = Arc::new(ControlServer::new(
+                backend.clone(),
+                pairing,
+                test_identity(),
+            ));
+            backend.server.set(Arc::downgrade(&server)).unwrap();
+            let response = server.dispatch("startStream", json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":TEST_MEDIA_KEY}), "192.168.0.9", Some("viewer-1")).await;
+            assert_eq!(response["ok"], expected_success, "{response}");
+            assert_eq!(
+                server.sessions.lock().unwrap().live.len(),
+                usize::from(expected_success)
+            );
+        }
+    }
+
+    struct StopFromStats {
+        server: std::sync::OnceLock<std::sync::Weak<ControlServer>>,
+    }
+    impl CaptureBackend for StopFromStats {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            Ok(vec![])
+        }
+        fn start(
+            &self,
+            _: u32,
+            _: &str,
+            _: u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: EncoderExperiment,
+            _: &AppliedUdpStability,
+            _: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            Ok(7)
+        }
+        fn stop(&self, _: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn stats(&self, _: u32) -> Result<StatsInfo, String> {
+            self.server
+                .get()
+                .unwrap()
+                .upgrade()
+                .unwrap()
+                .force_stop_session(1)?;
+            Ok(StatsInfo {
+                state: "running".into(),
+                ..StatsInfo::default()
+            })
+        }
+    }
+    #[test]
+    fn reaudit_status_backend_can_reenter_operator_stop() {
+        let backend = Arc::new(StopFromStats {
+            server: std::sync::OnceLock::new(),
+        });
+        let server = Arc::new(ControlServer::new(
+            backend.clone(),
+            test_pairing(),
+            test_identity(),
+        ));
+        backend.server.set(Arc::downgrade(&server)).unwrap();
+        insert_live_session(&server, 1, None);
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            send.send(server.snapshot()).unwrap();
+        });
+        let snapshot = receive
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stats callback deadlocked on session state");
+        assert_eq!(
+            snapshot.sessions[0].stats.error.as_deref(),
+            Some("host operator stopped the stream")
+        );
+    }
+    struct OrderedStarts {
+        fail_stop: bool,
+        fail_old: bool,
+        starts: AtomicUsize,
+        old_ready: AtomicBool,
+        stopped: Mutex<Vec<u32>>,
+    }
+    impl CaptureBackend for OrderedStarts {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            LatchBackend::new().list_displays()
+        }
+        fn start(
+            &self,
+            _: u32,
+            _: &str,
+            _: u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: EncoderExperiment,
+            _: &AppliedUdpStability,
+            _: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            Ok(self.starts.fetch_add(1, Ordering::SeqCst) as u32 + 1)
+        }
+        fn stop(&self, handle: u32) -> Result<(), String> {
+            self.stopped.lock().unwrap().push(handle);
+            if self.fail_stop {
+                return Err("backend still owns handle".into());
+            }
+
+            Ok(())
+        }
+        fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
+            if handle == 1 && self.old_ready.load(Ordering::SeqCst) && self.fail_old {
+                return Err("delayed replacement failure".into());
+            }
+            Ok(StatsInfo {
+                state: "running".into(),
+                first_send_ms: if handle > 1 || self.old_ready.load(Ordering::SeqCst) {
+                    1
+                } else {
+                    0
+                },
+                ..StatsInfo::default()
+            })
+        }
+    }
+    #[tokio::test]
+    async fn reaudit_newer_start_supersedes_only_the_same_viewer_endpoint() {
+        for newer_port in [5001, 5002] {
+            let backend = Arc::new(OrderedStarts {
+                fail_stop: false,
+                fail_old: false,
+                starts: AtomicUsize::new(0),
+                old_ready: AtomicBool::new(false),
+                stopped: Mutex::new(vec![]),
+            });
+            let server = Arc::new(ControlServer::new(
+                backend.clone(),
+                test_pairing(),
+                test_identity(),
+            ));
+            let old = {
+                let server = server.clone();
+                tokio::spawn(async move {
+                    server.dispatch("startStream",json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":TEST_MEDIA_KEY}),"192.168.0.9",None).await
+                })
+            };
+            wait_until(|| backend.starts.load(Ordering::SeqCst) == 1).await;
+            let newer = server.dispatch("startStream",json!({"sourceIndex":0,"viewerPort":newer_port,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":TEST_MEDIA_KEY}),"192.168.0.9",None).await;
+            assert_eq!(newer["ok"], true, "{newer}");
+            backend.old_ready.store(true, Ordering::SeqCst);
+            let older = old.await.unwrap();
+            assert_eq!(
+                older["ok"],
+                newer_port != 5001,
+                "older start published after its successor: {older}"
+            );
+            let state = server.sessions.lock().unwrap();
+            assert_eq!(state.live.len(), if newer_port == 5001 { 1 } else { 2 });
+            assert!(
+                state.live.values().any(|s| s.handle == 2),
+                "newer session removed by stale completion"
+            );
+            assert!(
+                !backend.stopped.lock().unwrap().contains(&2),
+                "stale cleanup stopped successor backend"
+            );
+            if newer_port == 5001 {
+                assert_eq!(*backend.stopped.lock().unwrap(), vec![1]);
+            }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn reaudit_stale_start_does_not_remove_successors_adb_mapping() {
+        const CHILD: &str = "LEFTCAR_TASK1_TRANSPORT_CHILD";
+        if let Ok(state_file) = std::env::var(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                for replacement in [false, true] {
+                let backend = Arc::new(OrderedStarts { fail_stop: false, fail_old: replacement, starts:AtomicUsize::new(0), old_ready:AtomicBool::new(false), stopped:Mutex::new(vec![]) });
+                let server = Arc::new(ControlServer::new(backend.clone(),test_pairing(),test_identity()));
+                if replacement {
+                    insert_live_session(&server, 1, None);
+                    {
+                        let mut state = server.sessions.lock().unwrap();
+                        let session = state.live.get_mut(&1).unwrap();
+                        session.viewer_addr = "127.0.0.1:5001".into();
+                        session.media_transport = "adbTcp".into();
+                        state.next = 2;
+                    }
+                    adb_forward(5001).unwrap();
+                }
+                let old = { let server=server.clone(); tokio::spawn(async move {
+                    if replacement {
+                        return server.dispatch("reconfigureStream",json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}),"127.0.0.1",None).await;
+                    }
+
+                    server.dispatch("startStream",json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"adbTcp","mediaKey":TEST_MEDIA_KEY}),"127.0.0.1",None).await
+                })};
+                wait_until(|| backend.starts.load(Ordering::SeqCst)==1).await;
+                let newer = server.dispatch("startStream",json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"adbTcp","mediaKey":TEST_MEDIA_KEY}),"127.0.0.1",None).await;
+                assert_eq!(newer["ok"],true,"{newer}");
+                backend.old_ready.store(true,Ordering::SeqCst);
+                assert_eq!(old.await.unwrap()["ok"],false);
+                assert!(std::path::Path::new(&state_file).exists(),"stale cleanup removed the successor's ADB forwarding resource");
+                }
+            });
+            return;
+        }
+        // Isolate PATH in a child test process. No connected device or global
+        // process environment is changed; the production adb command runs.
+        let _fixture = crate::source_grants::profile_process_fixture();
+        let root = std::env::temp_dir().join(format!("leftcar-transport-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("adb");
+        std::fs::write(&executable, "#!/bin/sh\nif [ \"$2\" = \"--remove\" ]; then /bin/rm -f \"$LEFTCAR_TASK1_TRANSPORT_CHILD\"; else /usr/bin/touch \"$LEFTCAR_TASK1_TRANSPORT_CHILD\"; fi\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "control::tests::reaudit_stale_start_does_not_remove_successors_adb_mapping",
+                "--nocapture",
+            ])
+            .env(CHILD, root.join("forward-live"))
+            .env("PATH", &root)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[tokio::test]
+    async fn reaudit_failed_operator_stop_keeps_cleanup_ownership_without_reviving() {
+        let backend = Arc::new(OrderedStarts {
+            fail_stop: true,
+            fail_old: false,
+            starts: AtomicUsize::new(0),
+            old_ready: AtomicBool::new(false),
+            stopped: Mutex::new(vec![]),
+        });
+        let server = ControlServer::new(backend.clone(), test_pairing(), test_identity());
+        insert_live_session(&server, 1, None);
+        assert!(server.force_stop_session(1).is_err());
+        assert!(
+            !server
+                .sessions
+                .lock()
+                .unwrap()
+                .live
+                .get(&1)
+                .unwrap()
+                .backend_released,
+            "failed stop discarded ownership of an unreleased backend"
+        );
+        let result = server
+            .dispatch(
+                "reconfigureStream",
+                json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}),
+                "127.0.0.1",
+                None,
+            )
+            .await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(
+            backend.starts.load(Ordering::SeqCst),
+            0,
+            "terminal session became startable after stop failure"
+        );
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get_mut(&1)
+            .unwrap()
+            .terminal_since =
+            Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
+        server.snapshot();
+        assert!(
+            server.sessions.lock().unwrap().live.contains_key(&1),
+            "failed terminal cleanup lost its retryable handle"
+        );
+    }
+    #[tokio::test]
+    async fn fix1_authenticated_socket_cannot_adopt_repaired_device_generation() {
+        let pairing = test_pairing();
+        let addr = spawn_server_with_pairing(pairing.clone()).await;
+        let mut old = TcpStream::connect(addr).await.unwrap();
+        let token_a = pair_token(&mut old, &pairing).await;
+        let authenticated = request(&mut old, "getStatus", "{}", &token_a).await;
+        assert!(authenticated.contains("\"ok\":true"));
+        let token_b = direct_pair_token(&pairing, "test-viewer");
+        assert!(!pairing.authorize(&token_a));
+        let args = json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"udp","mediaKey":TEST_MEDIA_KEY}).to_string();
+        let rejected = request(&mut old, "startStream", &args, &token_a).await;
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(
+            rejected["ok"], false,
+            "old socket adopted the new credential: {rejected}"
+        );
+        let mut fresh = TcpStream::connect(addr).await.unwrap();
+        let accepted = request(&mut fresh, "startStream", &args, &token_b).await;
+        let accepted: serde_json::Value = serde_json::from_str(&accepted).unwrap();
+        assert_eq!(
+            accepted["ok"], true,
+            "new credential connection must work: {accepted}"
+        );
+    }
+
+    #[cfg(unix)]
+    struct TeardownBarrier {
+        inner: OrderedStarts,
+        armed: AtomicBool,
+        entered: AtomicBool,
+        released: Mutex<bool>,
+        wake: std::sync::Condvar,
+        terminal: AtomicBool,
+        successor_ready: AtomicBool,
+        fail_successor: AtomicBool,
+    }
+    #[cfg(unix)]
+    impl CaptureBackend for TeardownBarrier {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            self.inner.list_displays()
+        }
+        fn start(
+            &self,
+            source: u32,
+            ip: &str,
+            port: u16,
+            w: u32,
+            h: u32,
+            fps: u32,
+            capture: &str,
+            transport: &str,
+            content: &str,
+            experiment: EncoderExperiment,
+            stability: &AppliedUdpStability,
+            key: &[u8; 32],
+            _access: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            self.inner.start(
+                source, ip, port, w, h, fps, capture, transport, content, experiment, stability,
+                key, _access,
+            )
+        }
+        fn stop(&self, handle: u32) -> Result<(), String> {
+            if handle == 1 && self.armed.swap(false, Ordering::SeqCst) {
+                self.entered.store(true, Ordering::SeqCst);
+                let mut released = self.released.lock().unwrap();
+                while !*released {
+                    released = self.wake.wait(released).unwrap();
+                }
+            }
+            self.inner.stop(handle)
+        }
+        fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
+            let mut stats = self.inner.stats(handle)?;
+            if handle == 2 {
+                if !self.successor_ready.load(Ordering::SeqCst) {
+                    stats.first_send_ms = 0;
+                } else if self.fail_successor.load(Ordering::SeqCst) {
+                    return Err("controlled successor first-frame failure".into());
+                }
+            }
+            if handle == 1 && self.terminal.load(Ordering::SeqCst) {
+                stats.state = "stopped".into();
+            }
+            Ok(stats)
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fix1_registered_teardown_cannot_remove_successors_adb_mapping() {
+        const CHILD: &str = "LEFTCAR_TASK1_TEARDOWN_CHILD";
+        if let Ok(state_file) = std::env::var(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                for kind in ["forced","stopStream","gc","device","all","viewer"] {
+                    let backend=Arc::new(TeardownBarrier {
+                        inner:OrderedStarts { fail_stop:false,fail_old:false,starts:AtomicUsize::new(0),old_ready:AtomicBool::new(true),stopped:Mutex::new(vec![]) },
+                        armed:AtomicBool::new(false),entered:AtomicBool::new(false),released:Mutex::new(false),wake:std::sync::Condvar::new(),terminal:AtomicBool::new(false),successor_ready:AtomicBool::new(true),fail_successor:AtomicBool::new(false),
+                    });
+                    let pairing=test_pairing();direct_pair_token(&pairing,"viewer-1");
+                    let server=Arc::new(ControlServer::new(backend.clone(),pairing,test_identity()));
+                    let args=json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"adbTcp","mediaKey":TEST_MEDIA_KEY});
+                    let first=server.dispatch("startStream",args.clone(),"127.0.0.1",Some("viewer-1")).await;
+                    assert_eq!(first["ok"],true,"{first}");
+                    if kind=="gc" {
+                        backend.terminal.store(true,Ordering::SeqCst);
+                        server.sessions.lock().unwrap().live.get_mut(&1).unwrap().terminal_since=Some(Instant::now()-TERMINAL_SESSION_RETENTION-Duration::from_millis(1));
+                    }
+                    backend.armed.store(true,Ordering::SeqCst);
+                    let stop={let server=server.clone();std::thread::spawn(move || {
+                        match kind {
+                            "forced" => { server.force_stop_session(1).unwrap(); },
+                            "stopStream" => { tokio::runtime::Runtime::new().unwrap().block_on(server.dispatch("stopStream",json!({"session":1}),"127.0.0.1",Some("viewer-1"))); },
+                            "gc" => { server.snapshot(); },
+                            "device" => { server.stop_sessions_for_device("viewer-1"); },
+                            "all" => server.stop_all_sessions(),
+                            "viewer" => server.stop_sessions_for_viewer("127.0.0.1:5001",Some("viewer-1")),
+                            _=>unreachable!(),
+                        }
+                    })};
+                    wait_until(||backend.entered.load(Ordering::SeqCst)).await;
+                    let successor=server.dispatch("startStream",args,"127.0.0.1",Some("viewer-1")).await;
+                    *backend.released.lock().unwrap()=true;backend.wake.notify_all();stop.join().unwrap();
+                    assert_eq!(successor["ok"],true,"{kind}: {successor}");
+                    assert!(server.sessions.lock().unwrap().live.values().any(|s|s.handle==2),"{kind}: successor lost registration");
+                    assert!(std::path::Path::new(&state_file).exists(),"{kind}: old registered teardown deleted successor transport");
+                    assert!(!backend.inner.stopped.lock().unwrap().contains(&2),"{kind}: successor backend stopped");
+                    server.force_stop_session(2).unwrap();
+                    assert!(!std::path::Path::new(&state_file).exists(), "{kind}: current owner failed to clean its own mapping");
+
+                }
+            });
+            return;
+        }
+        let _fixture = crate::source_grants::profile_process_fixture();
+        let root = std::env::temp_dir().join(format!("leftcar-teardown-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("adb");
+        std::fs::write(&executable,"#!/bin/sh\nif [ \"$2\" = \"--remove\" ]; then /bin/rm -f \"$LEFTCAR_TASK1_TEARDOWN_CHILD\"; else /usr/bin/touch \"$LEFTCAR_TASK1_TEARDOWN_CHILD\"; fi\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "control::tests::fix1_registered_teardown_cannot_remove_successors_adb_mapping",
+                "--nocapture",
+            ])
+            .env(CHILD, root.join("forward-live"))
+            .env("PATH", &root)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    fn run_fix2_transport_case(scenario: &str, test_name: &str) {
+        const CHILD: &str = "LEFTCAR_TASK1_FIX2_CHILD";
+        if let Ok(state_file) = std::env::var(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let kinds: &[&str] = match scenario {
+                    "pending" => &["forced", "stopStream", "gc", "device", "all", "viewer"],
+                    "failure" => &["first_frame"],
+                    "setup_failure" => &["setup"],
+                    "deferred" => &["deferred"],
+                    "switch" => &["udp", "tcp"],
+                    "reconfigure" => &["success", "rollback", "setup_rollback", "setup_terminal"],
+                    _ => unreachable!(),
+                };
+                for &kind in kinds {
+                    let backend = Arc::new(TeardownBarrier {
+                        inner: OrderedStarts { fail_stop:scenario=="deferred", fail_old:false, starts:AtomicUsize::new(0), old_ready:AtomicBool::new(true), stopped:Mutex::new(vec![]) },
+                        armed:AtomicBool::new(false), entered:AtomicBool::new(false), released:Mutex::new(false), wake:std::sync::Condvar::new(), terminal:AtomicBool::new(false),
+                        successor_ready:AtomicBool::new(false), fail_successor:AtomicBool::new(scenario=="failure" || scenario=="setup_failure" || kind=="rollback"),
+                    });
+                    let pairing=test_pairing(); direct_pair_token(&pairing,"viewer-1");
+                    let server=Arc::new(ControlServer::new(backend.clone(),pairing,test_identity()));
+                    let mut args=json!({"sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":60,"mediaTransport":"adbTcp","mediaKey":TEST_MEDIA_KEY});
+                    let first=server.dispatch("startStream",args.clone(),"127.0.0.1",Some("viewer-1")).await;
+                    assert_eq!(first["ok"],true,"{first}");
+                    assert!(std::path::Path::new(&state_file).exists());
+                    if scenario=="deferred" {
+                        backend.armed.store(true,Ordering::SeqCst);
+                        let reconfigure={let server=server.clone();std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(server.dispatch("reconfigureStream",json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}),"127.0.0.1",Some("viewer-1"))))};
+                        wait_until(||backend.entered.load(Ordering::SeqCst)).await;
+                        assert!(server.force_stop_session(1).is_err());
+                        assert!(std::path::Path::new(&state_file).exists(),"teardown must be deferred while setup owns the lease");
+                        *backend.released.lock().unwrap()=true; backend.wake.notify_all();
+                        assert_eq!(reconfigure.join().unwrap()["ok"],false);
+                        assert!(!std::path::Path::new(&state_file).exists(),"aborted setup silently dropped deferred predecessor cleanup");
+                        continue;
+                    }
+                    if scenario=="reconfigure" {
+                        if kind=="setup_rollback" {std::fs::write(format!("{state_file}.fail_once"),b"fail once").unwrap();}
+                        if kind=="setup_terminal" {std::fs::write(format!("{state_file}.fail"),b"fail always").unwrap();}
+                        let successor={let server=server.clone();tokio::spawn(async move {server.dispatch("reconfigureStream",json!({"session":1,"width":2560,"height":1440,"fps":60,"qualityState":"native"}),"127.0.0.1",Some("viewer-1")).await})};
+                        if kind!="setup_terminal" {
+                            wait_until(||backend.inner.starts.load(Ordering::SeqCst)==2).await;
+                            assert!(std::path::Path::new(&state_file).exists(),"{kind}: reconfigure removed its own ADB mapping before first frame");
+                            backend.successor_ready.store(true,Ordering::SeqCst);
+                        }
+                        let response=successor.await.unwrap();
+                        assert_eq!(response["ok"],kind=="success","{kind}: {response}");
+                        if kind=="setup_terminal" {
+                            assert!(server.sessions.lock().unwrap().live.get(&1).unwrap().backend_released);
+                            assert!(!std::path::Path::new(&state_file).exists());
+                            std::fs::remove_file(format!("{state_file}.fail")).unwrap();
+                        } else {
+                            let expected=if kind=="rollback" {3} else {2};
+                            assert_eq!(server.sessions.lock().unwrap().live.get(&1).unwrap().handle,expected);
+                            assert!(std::path::Path::new(&state_file).exists(),"{kind}: committed reconfigure/recovery lost its mapping");
+                            if kind=="rollback" {assert!(backend.inner.stopped.lock().unwrap().contains(&2));}
+                            server.force_stop_session(1).unwrap();
+                            assert!(!std::path::Path::new(&state_file).exists());
+                        }
+                        continue;
+                    }
+                    let stop = if scenario=="pending" || kind=="first_frame" {
+                        if kind=="gc" {
+                            backend.terminal.store(true,Ordering::SeqCst);
+                            server.sessions.lock().unwrap().live.get_mut(&1).unwrap().terminal_since=Some(Instant::now()-TERMINAL_SESSION_RETENTION-Duration::from_millis(1));
+                        }
+                        backend.armed.store(true,Ordering::SeqCst);
+                        let server=server.clone();
+                        let stop=std::thread::spawn(move || match kind {
+                            "forced" => {server.force_stop_session(1).unwrap();},
+                            "gc" => {server.snapshot();},
+                            "device" => {server.stop_sessions_for_device("viewer-1");},
+                            "all" => server.stop_all_sessions(),
+                            "viewer" => server.stop_sessions_for_viewer("127.0.0.1:5001",Some("viewer-1")),
+                            _ => {tokio::runtime::Runtime::new().unwrap().block_on(server.dispatch("stopStream",json!({"session":1}),"127.0.0.1",Some("viewer-1")));},
+                        });
+                        wait_until(||backend.entered.load(Ordering::SeqCst)).await;
+                        Some(stop)
+                    } else {None};
+                    if scenario=="switch" { args["mediaTransport"]=json!(kind); }
+                    if kind=="setup" { std::fs::write(format!("{state_file}.fail"), b"fail after allocating mapping").unwrap(); }
+                    let successor={let server=server.clone();tokio::spawn(async move {server.dispatch("startStream",args,"127.0.0.1",Some("viewer-1")).await})};
+                    if kind!="setup" {
+                        wait_until(||backend.inner.starts.load(Ordering::SeqCst)==2).await;
+                        assert!(!server.sessions.lock().unwrap().live.values().any(|s|s.handle==2),"test must release teardown BEFORE successor registration");
+                        if let Some(stop)=stop {
+                            *backend.released.lock().unwrap()=true; backend.wake.notify_all(); stop.join().unwrap();
+                        }
+                        if scenario=="pending" || kind=="first_frame" {
+                            assert!(std::path::Path::new(&state_file).exists(),"{kind}: predecessor teardown deleted pending successor mapping");
+                        } else {
+                            assert!(!std::path::Path::new(&state_file).exists(),"{kind}: transport switch orphaned predecessor ADB mapping");
+                        }
+                        backend.successor_ready.store(true,Ordering::SeqCst);
+                    }
+                    let response=successor.await.unwrap();
+                    if scenario=="failure" || scenario=="setup_failure" {
+                        assert_eq!(response["ok"],false,"{kind}: {response}");
+                        assert!(!std::path::Path::new(&state_file).exists(),"{kind}: failed successor leaked mapping");
+                        assert!(server.sessions.lock().unwrap().live.is_empty(),"failed successor must not register");
+                        if kind=="first_frame" { assert!(backend.inner.stopped.lock().unwrap().contains(&2)); }
+                        if kind=="setup" { std::fs::remove_file(format!("{state_file}.fail")).unwrap(); }
+                    } else {
+                        assert_eq!(response["ok"],true,"{kind}: {response}");
+                        assert!(!backend.inner.stopped.lock().unwrap().contains(&2));
+                        server.force_stop_session(2).unwrap();
+                        assert!(!std::path::Path::new(&state_file).exists(),"{kind}: current owner did not clean mapping");
+                    }
+                }
+            });
+            return;
+        }
+        let _fixture = crate::source_grants::profile_process_fixture();
+        let root = std::env::temp_dir().join(format!("leftcar-fix2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("adb");
+        std::fs::write(&executable, r##"#!/bin/sh
+if [ "$2" = "--remove" ]; then
+  /bin/rm -f "$LEFTCAR_TASK1_FIX2_CHILD"
+else
+  /usr/bin/touch "$LEFTCAR_TASK1_FIX2_CHILD"
+  if [ -f "$LEFTCAR_TASK1_FIX2_CHILD.fail_once" ]; then /bin/rm -f "$LEFTCAR_TASK1_FIX2_CHILD.fail_once"; exit 1; fi
+  if [ -f "$LEFTCAR_TASK1_FIX2_CHILD.fail" ]; then exit 1; fi
+fi
+"##).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, root.join("forward-live"))
+            .env("PATH", &root)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix2_pending_successor_owns_adb_before_first_frame() {
+        run_fix2_transport_case(
+            "pending",
+            "control::tests::fix2_pending_successor_owns_adb_before_first_frame",
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fix2_failed_successor_releases_transport() {
+        run_fix2_transport_case(
+            "failure",
+            "control::tests::fix2_failed_successor_releases_transport",
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fix2_transport_switch_cleans_predecessor_kind() {
+        run_fix2_transport_case(
+            "switch",
+            "control::tests::fix2_transport_switch_cleans_predecessor_kind",
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fix2_partial_setup_failure_releases_transport() {
+        run_fix2_transport_case(
+            "setup_failure",
+            "control::tests::fix2_partial_setup_failure_releases_transport",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix2_reconfigure_and_rollback_keep_owned_adb_transport() {
+        run_fix2_transport_case(
+            "reconfigure",
+            "control::tests::fix2_reconfigure_and_rollback_keep_owned_adb_transport",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix2_aborted_setup_drains_deferred_predecessor_cleanup() {
+        run_fix2_transport_case(
+            "deferred",
+            "control::tests::fix2_aborted_setup_drains_deferred_predecessor_cleanup",
+        );
+    }
+}
+
+fn resolve_display(
+    displays: &[control_contract::host::DisplayInfo],
+    source: Option<&str>,
+    index: Option<u32>,
+) -> Result<control_contract::host::DisplayInfo, String> {
+    let selected: Vec<_> = displays
+        .iter()
+        .filter(|display| match source {
+            Some(source) => !source.is_empty() && display.source_id.as_deref() == Some(source),
+            None => Some(display.index) == index,
+        })
+        .collect();
+    let display =
+        match selected.as_slice() {
+            [display] => *display,
+            _ => return Err(
+                "source_unavailable: 화면이 없거나 식별자가 중복되었습니다. 목록을 새로 고치세요"
+                    .into(),
+            ),
+        };
+    let id = display
+        .source_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or("source_unavailable: stable display identity missing")?;
+    if displays
+        .iter()
+        .filter(|display| display.source_id.as_deref() == Some(id))
+        .count()
+        != 1
+    {
+        return Err("source_unavailable: ambiguous display identity".into());
+    }
+    Ok(display.clone())
 }

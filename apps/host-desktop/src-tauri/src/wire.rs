@@ -15,6 +15,40 @@ const MEDIA_HEADER: usize = FRAME_HEADER_V1_LEN;
 pub const MAX_MEDIA_PAYLOAD: usize = MAX_DATAGRAM - FRAME_HEADER_V2_LEN;
 pub const PARITY_HEADER: usize = 19;
 
+/// Seal exactly one existing media packet; TCP prefixes the sealed length.
+pub fn seal_media_packet(
+    tx: &secure_channel::DatagramSealer,
+    packet: &[u8],
+    tcp: bool,
+) -> std::io::Result<Vec<u8>> {
+    if packet.is_empty() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let sealed = tx
+        .seal(packet)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if tcp {
+        Ok([&(sealed.len() as u32).to_be_bytes()[..], &sealed].concat())
+    } else {
+        Ok(sealed)
+    }
+}
+/// Preserve callers' plaintext completeness contract without hiding short
+/// encrypted submissions. A local success is not delivery acknowledgement.
+pub fn complete_plaintext_send(
+    plaintext: usize,
+    wire: usize,
+    submitted: usize,
+) -> std::io::Result<usize> {
+    if submitted != wire {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("partial sealed media submission: {submitted}/{wire}"),
+        ));
+    }
+    Ok(plaintext)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     PointerMove {
@@ -375,6 +409,25 @@ fn annex_b_nals(data: &[u8]) -> impl Iterator<Item = &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealed_packet_preserves_plaintext_contract_and_rejects_short_submission() {
+        let tx = secure_channel::DatagramSealer::new([3; 32]);
+        for tcp in [false, true] {
+            let envelope = seal_media_packet(&tx, &[7; 1384], tcp).unwrap();
+            assert_eq!(envelope.len(), if tcp { 1412 } else { 1408 });
+            if tcp {
+                assert_eq!(&envelope[..4], &1408u32.to_be_bytes());
+            }
+            assert_eq!(
+                complete_plaintext_send(1384, envelope.len(), envelope.len()).unwrap(),
+                1384
+            );
+            assert!(complete_plaintext_send(1384, envelope.len(), envelope.len() - 1).is_err());
+        }
+        assert!(seal_media_packet(&tx, &[], false).is_err());
+        assert!(seal_media_packet(&tx, &vec![0; 65_537], true).is_err());
+    }
 
     #[test]
     fn lan_media_datagram_budget_stays_below_ethernet_mtu() {

@@ -16,6 +16,7 @@ extension CaptureSession {
         stopRequested = true
         recoveryDropRetryState.clear()
         stateLock.unlock()
+        retireAudioEncoder()
         stopPerformanceLogging()
         // Kill the control receiver first: cancelling the read source (and
         // waiting out any in-flight drain) guarantees no concurrent LCDON can
@@ -159,6 +160,7 @@ extension CaptureSession {
         sock = -1
         stateLock.unlock()
 
+        retireAudioEncoder()
         stopPerformanceLogging()
         if staleSocket >= 0 {
             close(staleSocket)

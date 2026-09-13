@@ -10,112 +10,6 @@ import Security
 import Darwin
 import OSLog
 
-/// Bounded retransmit ring for viewer-requested selective retransmission
-/// (NAK/RTX). Stores the plaintext pre-seal envelope of every DATA (`G`)
-/// fragment datagram, keyed by (tile side, au id, fragment index).
-///
-/// Bounds: the most recent 8 au ids per side (the viewer reassembles at most
-/// 4 AUs in flight, so 8 gives reordering headroom) and at most 512 stored
-/// envelopes per side with oldest-AU FIFO eviction. 512 covers an observed
-/// worst case (317-fragment 4K recovery IDR plus ordinary deltas); a
-/// pathological keyframe storm evicts whole oldest AUs, which only narrows
-/// the healable window — a NACK for an evicted fragment is counted as a miss
-/// and the existing IDR recovery runs. Memory ceiling ≈ 8×512×1.4KB ≈ 5.8MB
-/// per side, reached only while the queue holds fragments of many large AUs;
-/// observed steady state is two orders below it. Storing a `Data` is a
-/// copy-on-write retain: the ring adds no per-datagram heap copy on the send
-/// path beyond what already exists.
-final class MediaRetransmitRing {
-    static let maxAccessUnitsPerSide = 8
-    static let maxEntriesPerSide = 512
-
-    /// Reference type so per-fragment stores mutate the AU entry in place;
-    /// a value-type dictionary would be copied out of and back into the
-    /// side ring on every stored fragment (quadratic in the AU fragment
-    /// count on the hot send path).
-    private final class AccessUnitEnvelopes {
-        var fragments: [UInt16: Data] = [:]
-    }
-
-    private struct SideRing {
-        var envelopes: [UInt16: AccessUnitEnvelopes] = [:]
-        var order: [UInt16] = []
-        var count = 0
-    }
-
-    private var sides: [Int: SideRing] = [:]
-    private let lock = NSLock()
-
-    /// Single-session sends carry nil side; a session is either single or
-    /// split, so nil and .left can never collide within one ring lifetime.
-    private static func sideKey(_ side: TileSide?) -> Int {
-        side == .right ? 1 : 0
-    }
-
-    func store(_ envelope: Data, side: TileSide?) {
-        // G | fragment_index u16 BE | fragment_count u16 BE | au_id u16 LE …
-        // DATA fragments only: parity (`P`), config (`CF*`), audio, and
-        // control datagrams must never enter the ring.
-        let start = envelope.startIndex
-        guard envelope.count > 7, envelope[start] == 0x47 else { return }
-        let fragmentIndex = (UInt16(envelope[start + 1]) << 8)
-            | UInt16(envelope[start + 2])
-        let auID = UInt16(envelope[start + 5])
-            | (UInt16(envelope[start + 6]) << 8)
-        let key = Self.sideKey(side)
-        lock.lock()
-        defer { lock.unlock() }
-        var ring = sides[key] ?? SideRing()
-        if ring.envelopes[auID] == nil {
-            while ring.order.count >= Self.maxAccessUnitsPerSide {
-                let oldest = ring.order.removeFirst()
-                ring.count -= ring.envelopes[oldest]?.fragments.count ?? 0
-                ring.envelopes[oldest] = nil
-            }
-            ring.order.append(auID)
-            ring.envelopes[auID] = AccessUnitEnvelopes()
-        }
-        if ring.envelopes[auID]?.fragments[fragmentIndex] == nil {
-            ring.count += 1
-        }
-        // Entry-cap eviction stops at the AU currently being stored: one AU
-        // larger than the whole cap is retained whole (the observed maximum
-        // is 317 fragments, well under 512).
-        while ring.count > Self.maxEntriesPerSide,
-              let oldest = ring.order.first,
-              oldest != auID {
-            ring.count -= ring.envelopes[oldest]?.fragments.count ?? 0
-            ring.order.removeFirst()
-            ring.envelopes[oldest] = nil
-        }
-        ring.envelopes[auID]?.fragments[fragmentIndex] = envelope
-        sides[key] = ring
-    }
-
-    func lookup(
-        auID: UInt16,
-        fragmentIndex: UInt16,
-        side: TileSide?
-    ) -> Data? {
-        let key = Self.sideKey(side)
-        lock.lock()
-        defer { lock.unlock() }
-        return sides[key]?.envelopes[auID]?.fragments[fragmentIndex]
-    }
-}
-
-/// Send-result contract shared with the TCP path (`sendTCPFrame`): a full
-/// send of the sealed wire bytes is reported as the plaintext length so
-/// callers can compare against the data they handed in; any other result
-/// passes through unchanged.
-func normalizedSendResult(
-    _ result: Int,
-    sealedCount: Int,
-    plaintextCount: Int
-) -> Int {
-    result == sealedCount ? plaintextCount : result
-}
-
 extension CaptureSession {
     // MARK: Setup
 
@@ -134,7 +28,9 @@ extension CaptureSession {
     }
 
      func sendTCPBytes(_ data: Data, fd: Int32) -> Int {
-        data.withUnsafeBytes { raw in
+        guard sourceAuthorization?.begin() ?? true else { return -1 }
+        defer { sourceAuthorization?.end() }
+        return data.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return 0 }
             var offset = 0
             while offset < raw.count {
@@ -174,6 +70,8 @@ extension CaptureSession {
     /// wire bytes (8B counter + 16B tag), so the raw sendto count is
     /// normalized through `normalizedSendResult` before returning.
      func send(_ data: Data, fd: Int32, to addr: inout sockaddr_in) -> Int {
+        guard sourceAuthorization?.begin() ?? true else { return -1 }
+        defer { sourceAuthorization?.end() }
         guard let sealed = mediaCrypto.seal(data) else { return -1 }
         let result = sealed.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return -1 }

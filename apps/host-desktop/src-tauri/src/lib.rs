@@ -15,8 +15,11 @@ pub mod ffi;
 pub mod file_transfer;
 pub mod identity;
 pub mod lock;
+pub mod media_pacing;
 pub mod pairing;
 pub mod settings;
+pub mod source_grants;
+mod state_profile;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -52,22 +55,62 @@ fn fatal_startup_error(message: String) -> ! {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let normal_data = dirs::data_dir();
+    let profile = state_profile::StateProfile::from_environment(normal_data.as_deref())
+        .unwrap_or_else(|message| fatal_startup_error(message));
+    if profile.is_benchmark() {
+        eprintln!("Leftcar Host: isolated internal benchmark profile");
+    }
+    let _profile_owner = source_grants::lock_profile(
+        &profile
+            .file(".source-grants.lock")
+            .unwrap_or_else(|| fatal_startup_error("Host state directory unavailable".into())),
+    )
+    .unwrap_or_else(|message| fatal_startup_error(message));
     let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = backend.clone();
     // 호스트 정체 키: QR과 핸드셰이크 서명의 뿌리. 최초 기동에서 생성·영속된다.
     let identity = Arc::new(identity::load_or_create(
-        identity::default_identity_path().as_deref(),
+        (if profile.is_benchmark() {
+            profile.file("host_identity.json")
+        } else {
+            identity::default_identity_path()
+        })
+        .as_deref(),
     ));
-    let pairing_store_path = pairing::PairingServer::default_store_path();
+    let pairing_store_path = if profile.is_benchmark() {
+        profile.file("paired_devices.json")
+    } else {
+        pairing::PairingServer::default_store_path()
+    };
     let pairing = Arc::new(pairing::PairingServer::new(
         identity.public_key(),
         pairing_store_path.clone(),
-        pairing::token_store(pairing_store_path),
+        if profile.is_benchmark() {
+            pairing::token_store_with_service(pairing_store_path, profile.credential_service())
+        } else {
+            pairing::token_store(pairing_store_path)
+        },
     ));
-    let audit = Arc::new(audit::SessionAudit::new(audit::SessionAudit::default_path()));
+    pairing
+        .initialize_source_grants(
+            profile
+                .file("source_grants.json")
+                .unwrap_or_else(|| fatal_startup_error("Host state directory unavailable".into())),
+        )
+        .unwrap_or_else(|message| fatal_startup_error(message));
+    let audit = Arc::new(audit::SessionAudit::new(if profile.is_benchmark() {
+        profile.file("sessions.jsonl")
+    } else {
+        audit::SessionAudit::default_path()
+    }));
     // 파일 공유 게이트: 기본 꺼짐, 승인 토글처럼 영속된다(0600 settings.json).
     let settings = Arc::new(settings::SharedSettings::load_or_default(
-        settings::default_settings_path(),
+        if profile.is_benchmark() {
+            profile.file("settings.json")
+        } else {
+            settings::default_settings_path()
+        },
     ));
     let server = Arc::new(control::ControlServer::new(
         backend.clone(),
@@ -116,6 +159,9 @@ pub fn run() {
             approve_pending_pairing,
             reject_pending_pairing,
             list_paired_devices,
+            list_paired_device_state,
+            list_host_sources,
+            set_source_grants,
             revoke_paired_device,
             revoke_all_devices,
             get_clipboard_share,
@@ -208,7 +254,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("tauri build")
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Err(error) = app
+                    .state::<Arc<control::ControlServer>>()
+                    .shutdown_source_access()
+                {
+                    eprintln!("Host grant shutdown uncertain: {error}");
+                }
+            }
+        });
 }
 
 #[cfg(target_os = "macos")]
@@ -565,6 +620,22 @@ fn reject_pending_pairing(
 }
 
 #[tauri::command]
+fn list_host_sources(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+) -> Result<Vec<control_contract::host::DisplayInfo>, String> {
+    server.host_sources()
+}
+#[tauri::command]
+fn set_source_grants(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    device_id: String,
+    source_ids: Vec<String>,
+    credential_id: String,
+) -> Result<source_grants::GrantView, String> {
+    server.set_source_grants_for_credential(&device_id, source_ids, Some(&credential_id))
+}
+
+#[tauri::command]
 fn list_paired_devices(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
 ) -> Vec<pairing::PairedDeviceView> {
@@ -572,37 +643,24 @@ fn list_paired_devices(
 }
 
 #[tauri::command]
-fn revoke_paired_device(
-    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
-    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
-    device_id: String,
-) -> bool {
-    let removed = state.revoke(&device_id);
-    if removed {
-        // 철회는 즉시 효력을 가진다 — 라이브 스트림도 함께 끊는다(문서 §18).
-        let stopped = server.stop_sessions_for_device(&device_id);
-        audit_state.log(
-            "device_revoked",
-            serde_json::json!({ "device": device_id, "stopped_sessions": stopped }),
-        );
-    }
-    removed
+fn list_paired_device_state(
+    state: tauri::State<'_, Arc<pairing::PairingServer>>,
+) -> pairing::PairedDeviceState {
+    state.list_device_state()
 }
 
 #[tauri::command]
+fn revoke_paired_device(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    device_id: String,
+) -> pairing::RevokeOutcome {
+    server.revoke_device(&device_id)
+}
+#[tauri::command]
 fn revoke_all_devices(
-    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
-    server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
-    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
-) -> usize {
-    let count = state.revoke_all();
-    server.stop_all_sessions();
-    audit_state.log(
-        "devices_revoked_all",
-        serde_json::json!({ "devices": count }),
-    );
-    count
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+) -> pairing::RevokeOutcome {
+    server.revoke_all_devices()
 }
 
 #[tauri::command]

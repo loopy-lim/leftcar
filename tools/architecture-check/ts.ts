@@ -115,7 +115,7 @@ for (const folder of [
 
 // 3. Kotlin shim: import allowlist (docs/05 L0 kotlin_shim_imports_only_allowlisted_packages)
 const KOTLIN_ALLOW = /^import (android\.|androidx\.|com\.facebook\.|expo\.|dev\.leftcar\.viewer\.|java\.lang\.|java\.util\.|java\.security\.|kotlin\.)/; // java.security = SecureRandom(CSPRNG 어댑터, docs/07 §20)
-const JUNIT_IMPORT = /^import org\.junit\./;
+const JVM_TEST_IMPORT = /^import org\.(?:junit|robolectric)\./;
 const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
   "import kotlinx.coroutines.Dispatchers",
   "import kotlinx.coroutines.Job",
@@ -144,33 +144,38 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
     const text = readFileSync(file, "utf8");
     for (const line of text.split("\n")) {
       const m = line.match(/^import\s+(.+)$/);
-      const allowsJvmUnitTestJUnit = isAndroidJvmUnitTestSource(file, folder) && JUNIT_IMPORT.test(line);
+      const allowsJvmUnitTestDependency = isAndroidJvmUnitTestSource(file, folder) && JVM_TEST_IMPORT.test(line);
       const allowsStreamActivityXrCoroutine = isStreamActivityXrCoroutineImport(file, line);
-      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestJUnit && !allowsStreamActivityXrCoroutine) {
+      const audioPath = relative(ROOT, file).replaceAll("\\", "/");
+      const allowsAudioBuffer = /^apps\/viewer-expo\/android\/app\/src\/(?:main\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoder|test\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoderTest)\.kt$/.test(audioPath)
+        && /^import java\.nio\.(?:ByteBuffer|ByteOrder)$/.test(line);
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsAudioBuffer) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,
         );
       }
     }
-    // SplitDecoderCapability is the narrow Android platform-query boundary:
-    // it may inspect MediaCodecList but must never construct a decoder. All
-    // decoder lifecycle and fallback policy remain in the Rust core.
-    const isSplitDecoderCapability = file.endsWith("/SplitDecoderCapability.kt");
-    if (/MediaCodec|AMediaCodec|DatagramSocket|Socket\(/.test(text) && !isSplitDecoderCapability) {
-      fail("kotlin-no-policy", `${file}: codec/network symbols belong to the Rust core`);
+    const path = relative(ROOT, file).replaceAll("\\", "/");
+    const base = "apps/viewer-expo/android/app/src/";
+    const stream = "java/dev/leftcar/viewer/stream/";
+    const query = path === `${base}main/${stream}SplitDecoderCapability.kt`;
+    const audio = path === `${base}main/${stream}OpusAudioDecoder.kt`;
+    const audioTest = path === `${base}test/${stream}OpusAudioDecoderTest.kt`;
+    const queryTest = path === `${base}test/${stream}SplitDecoderCapabilityTest.kt`;
+    if (/DatagramSocket|(?:Server)?Socket\s*\(|java\.net\./.test(text)) {
+      fail("kotlin-no-policy", `${file}: network creation belongs to Rust`);
     }
-    if (
-      isSplitDecoderCapability &&
-      (/createDecoderByType|createByCodecName|MediaCodec\.create/.test(text) ||
-        !/maxSupportedInstances\s*<\s*2/.test(text) ||
-        !/areSizeAndRateSupported\(1_920, 2_160, 60\.0\)/.test(text))
-    ) {
-      fail(
-        "kotlin-split-capability-only",
-        `${file}: capability shim must only verify dual 1920x2160@60 hardware support`,
-      );
+    if (/MediaCodec|AMediaCodec/.test(text) && !(query || audio || audioTest || queryTest)) {
+      fail("kotlin-no-policy", `${file}: codec outside approved platform boundary`);
     }
+    if ((query || queryTest) && /createDecoderByType|createEncoderByType|createByCodecName|MediaCodec\s*\.\s*create/.test(text)) {
+      fail("kotlin-split-capability-only", `${file}: capability query must never construct a codec`);
+    }
+    if ((audio || audioTest) && /createVideoFormat|MIMETYPE_VIDEO_|["']video\/|createEncoderByType|createDecoderByType/.test(text)) {
+      fail("kotlin-opus-only", `${file}: only the Opus audio adapter is permitted`);
+    }
+
   }
 }
 

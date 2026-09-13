@@ -181,6 +181,8 @@ describe("startPreparedStream", () => {
         }),
       ).resolves.toEqual({
         session: 17,
+        balancedPresentation: false,
+      opusAudio: false,
         viewerIps: ["192.168.0.42"],
         mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         mediaTransport: "usb",
@@ -212,6 +214,8 @@ describe("startPreparedStream", () => {
       }),
     ).resolves.toEqual({
       session: 17,
+      balancedPresentation: false,
+      opusAudio: false,
       viewerIps: ["192.168.0.42"],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
@@ -461,6 +465,8 @@ describe("startPreparedStream", () => {
       }),
     ).resolves.toEqual({
       session: 17,
+      balancedPresentation: false,
+      opusAudio: false,
       viewerIps: [],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
@@ -512,6 +518,8 @@ describe("startPreparedStream", () => {
       }),
     ).resolves.toEqual({
       session: 17,
+      balancedPresentation: false,
+      opusAudio: false,
       viewerIps: ["192.168.0.42"],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       mediaTransport: "udp",
@@ -1174,5 +1182,38 @@ describe("isStreamPrepareError", () => {
     });
     expect(isStreamPrepareError(capability)).toBe(false);
     expect(isStreamPrepareError(undefined)).toBe(false);
+  });
+
+});
+
+describe("presentation method negotiation", () => {
+  it("keeps the old native eleven-argument contract and reports immediate fallback", async () => {
+    const {control,launcher}=harness();
+    const result=await startPreparedStream({control,launcher,host:"192.168.0.134",advertisedEncoderExperiments,args:{...args,balancedPresentation:true}});
+    expect(vi.mocked(launcher.openStream).mock.calls[0]).toHaveLength(11);
+    expect(result.balancedPresentation).toBe(false);
+    const request=vi.mocked(control.request).mock.calls.find(([command])=>command==="startStream")?.[1];
+    expect(request).not.toHaveProperty("balancedPresentation");
+  });
+  it("passes the optional mode through the new native launch and reconfigure boundary", async () => {
+    const {control,launcher}=harness();
+    launcher.openStreamWithPresentation=vi.fn(async()=>"src-5003");
+    const result=await startPreparedStream({control,launcher,host:"192.168.0.134",advertisedEncoderExperiments,args:{...args,balancedPresentation:true}});
+    expect(result.balancedPresentation).toBe(true);
+    expect(launcher.openStream).not.toHaveBeenCalled();
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0]).toHaveLength(12);
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0][11]).toBe(true);
+    const accepted={session:31,width:3840,height:2160,fps:60,qualityState:"native" as const};
+    const reconfigure={...control,request:vi.fn(async()=>accepted) as ControlClient["request"]};
+    const active: ActiveStream = {...result,...accepted,port:5003,sourceIndex:1,sourceName:"Main",
+      sourceTarget:accepted,activeTarget:accepted,fallbackTarget:null,captureBackend:"cgDisplayStream",
+      contentMode:"interactive",startedAt:1,balancedPresentation:true};
+    const next=await reconfigurePreparedStream({control:reconfigure,launcher,host:"192.168.0.134",active,target:accepted,qualityState:"native"});
+    expect(next.balancedPresentation).toBe(true);
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls.at(-1)?.[11]).toBe(true);
+    delete launcher.openStreamWithPresentation;
+    const legacy=await reconfigurePreparedStream({control:reconfigure,launcher,host:"192.168.0.134",active,target:accepted,qualityState:"native"});
+    expect(legacy.balancedPresentation).toBe(false);
+    expect(vi.mocked(launcher.openStream).mock.calls.at(-1)).toHaveLength(11);
   });
 });

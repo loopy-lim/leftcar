@@ -74,6 +74,14 @@ unsafe fn exception_pending(env: *mut JNIEnv) -> bool {
 }
 
 extern "C" {
+    fn leftcar_jni_display_frame(
+        state: *mut c_void,
+        instance: *const c_char,
+        balanced: bool,
+        display: i32,
+        frame_ns: i64,
+        period_ns: i64,
+    ) -> i32;
     fn ANativeWindow_fromSurface(env: *mut JNIEnv, surface: *mut jobject) -> *mut c_void;
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
@@ -97,7 +105,7 @@ extern "C" {
     fn leftcar_jni_usb_control_port() -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_cancel_prepared_split(port: u16) -> i32;
-    fn leftcar_jni_attach_port(
+    fn leftcar_jni_attach_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         surface: *mut c_void,
@@ -106,8 +114,9 @@ extern "C" {
         width: u32,
         height: u32,
         fps: u32,
+        balanced: bool,
     ) -> i32;
-    fn leftcar_jni_rebind_port(
+    fn leftcar_jni_rebind_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         surface: *mut c_void,
@@ -116,8 +125,9 @@ extern "C" {
         width: u32,
         height: u32,
         fps: u32,
+        balanced: bool,
     ) -> i32;
-    fn leftcar_jni_attach_split_port(
+    fn leftcar_jni_attach_split_port_presentation(
         state: *mut c_void,
         instance: *const c_char,
         left_surface: *mut c_void,
@@ -128,6 +138,7 @@ extern "C" {
         height: u32,
         fps: u32,
         decoder_name: *const c_char,
+        balanced: bool,
     ) -> i32;
     fn leftcar_jni_surface_changed(
         state: *mut c_void,
@@ -166,9 +177,22 @@ extern "C" {
     fn leftcar_jni_input_text(instance: *const c_char, data: *const u8, len: usize) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_poll_audio_owned(
+        state: *mut c_void,
+        instance: *const c_char,
+        out: *mut u8,
+        capacity: usize,
+    ) -> i32;
+    fn leftcar_jni_set_audio_owned(
+        state: *mut c_void,
+        instance: *const c_char,
+        enabled: bool,
+        opus: bool,
+    ) -> i32;
     fn leftcar_jni_poll_audio(instance: *const c_char, out: *mut u8, capacity: usize) -> i32;
     fn leftcar_jni_cursor_state(instance: *const c_char) -> i64;
     fn leftcar_jni_set_cursor_stream(instance: *const c_char, enabled: bool) -> i32;
+    fn leftcar_jni_set_audio_codec(instance: *const c_char, opus: bool) -> i32;
     fn leftcar_jni_set_audio_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
@@ -353,3 +377,35 @@ mod attach;
 mod input;
 mod stats;
 mod surface;
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_displayFrame(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    state: i64,
+    instance: *mut jobject,
+    balanced: u8,
+    display: i32,
+    frame_ns: i64,
+    period_ns: i64,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 3;
+        }
+        let Some(instance) = (unsafe { get_utf(env, instance) }) else {
+            return 1;
+        };
+        unsafe {
+            leftcar_jni_display_frame(
+                state as *mut c_void,
+                instance.as_ptr(),
+                balanced != 0,
+                display,
+                frame_ns,
+                period_ns,
+            )
+        }
+    })
+    .unwrap_or(3)
+}

@@ -17,14 +17,17 @@ import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import { resolveCameraState, type CameraState } from "../src/cameraPermission";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
-import { connectHost, controlHost } from "../src/session";
+import { controlHost } from "../src/session";
+import {
+  PairingWorkflow,
+  runPinPairingWorkflow,
+  runQrPairingWorkflow,
+} from "../src/connect-flow";
 import {
   formatHostEndpoint,
   canSubmitPairingCode,
+  isPairingRejectedError,
   isPairingUnsupportedError,
-  pairWithHost,
-  pairWithHostApproval,
-  pairWithHostByCode,
   parseHostEndpoint,
   parseQrPayload,
   resolvePairingHost,
@@ -393,35 +396,7 @@ const stylesLocal = StyleSheet.create({
   },
 });
 
-export default function Pairing() {
-  const { colors, isDark } = useAppTheme();
-  const { t } = useAppLanguage();
-  const { width } = useWindowDimensions();
-  const density = panelDensityScale(width);
-  const styles = useMemo(
-    () => applyPanelDensity(createStyles(colors, isDark), density),
-    [colors, isDark, density],
-  );
-
-  const params = useLocalSearchParams<{ endpoint?: string }>();
-  const routeEndpoint = params.endpoint?.trim() || "";
-
-  const [permission, requestPermission, getPermission] = useCameraPermissions();
-  const cameraState = resolveCameraState(permission);
-
-  // 설정 앱에서 돌아왔을 때 권한을 다시 읽는다 — expo 훅은 마운트·요청 시에만
-  // 조회하므로 포그라운드 복귀를 반영해야 차단 화면이 스캐너로 바뀐다.
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (status) => {
-      if (status === "active") void getPermission();
-    });
-    return () => subscription.remove();
-  }, [getPermission]);
-
-  const openAppSettings = useCallback(() => {
-    void Linking.openSettings().catch(() => undefined);
-  }, []);
-
+function usePairingWorkflow(routeEndpoint: string, t: TranslationSchema) {
   const [state, dispatch] = useReducer(
     pairingViewReducer,
     routeEndpoint,
@@ -439,10 +414,9 @@ export default function Pairing() {
   } = state;
 
   const host = scannedHost || resolvePairingHost(routeEndpoint, controlHost());
-  const scanningLockRef = useRef(false);
-  // 승인 폴링은 화면이 떠 있는 동안만 산다 — 언마운트/새 스캔이 이전 폴링을
-  // 끊고, 승인 완료 후의 화면 전환도 취소된 스캔이 수행하지 않게 한다.
-  const approvalAbortRef = useRef<AbortController | null>(null);
+  // QR/PIN 모두 같은 attempt 수명을 쓴다. 언마운트·새 시도는 저장, 연결,
+  // 화면 전환 중 어디에 있든 이전 작업을 취소하고 그 시도의 저장을 되돌린다.
+  const pairingWorkflow = useMemo(() => new PairingWorkflow(), []);
   // 자동 제출은 같은 코드를 두 번 제출하지 않는다 — 실패 후 busy가 풀려도
   // 사용자가 코드를 고칠 때까지 재시도 루프가 돌지 않는다.
   const lastAutoSubmittedCodeRef = useRef<string | null>(null);
@@ -460,9 +434,9 @@ export default function Pairing() {
 
   useEffect(
     () => () => {
-      approvalAbortRef.current?.abort();
+      void pairingWorkflow.cancel();
     },
-    [],
+    [pairingWorkflow],
   );
 
   const handlePairWithCode = useCallback(
@@ -483,24 +457,27 @@ export default function Pairing() {
           statusMessage: t.viewer.pairingBusy,
         },
       });
+      const run = pairingWorkflow.beginPin();
       try {
-        if (scannedPayload) {
-          await pairWithHost(scannedPayload, trimmed);
-          await connectHost(scannedPayload.host, scannedPayload.port);
-        } else if (hostEndpoint) {
-          await pairWithHostByCode(hostEndpoint.host, hostEndpoint.port, trimmed);
-          await connectHost(hostEndpoint.host, hostEndpoint.port);
-        } else {
-          throw new Error(t.viewer.notConnectedError);
-        }
-        router.replace("/catalog");
+        const target = scannedPayload ?? hostEndpoint;
+        if (!target) throw new Error(t.viewer.notConnectedError);
+        await runPinPairingWorkflow({
+          run,
+          target,
+          code: trimmed,
+          navigate: () => router.replace("/catalog"),
+        });
       } catch (e) {
-        dispatch({ type: "update", patch: { error: formatErrorMessage(e) } });
+        if (!(e instanceof Error && e.name === "AbortError")) {
+          dispatch({ type: "update", patch: { error: formatErrorMessage(e) } });
+        }
       } finally {
-        dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
+        if (pairingWorkflow.finish(run)) {
+          dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
+        }
       }
     },
-    [hostEndpoint, scannedPayload, t],
+    [hostEndpoint, pairingWorkflow, scannedPayload, t],
   );
 
   // Auto-submit code when 6 digits are typed and target is ready
@@ -518,24 +495,20 @@ export default function Pairing() {
 
   const handleQrScanned = useCallback(
     async (scannedData: string) => {
-      if (busy || scanningLockRef.current) return;
-      scanningLockRef.current = true;
+      const payload = parseQrPayload(scannedData);
+      if (!payload) {
+        dispatch({ type: "update", patch: { error: t.viewer.invalidQrError } });
+        return;
+      }
+      const run = pairingWorkflow.beginQr(payload);
+      // CameraView may emit the same visible barcode repeatedly. The approval
+      // offer already in flight owns that event identity and continues.
+      if (!run) return;
       dispatch({ type: "update", patch: { busy: true, error: null, statusMessage: null } });
       try {
-        const payload = parseQrPayload(scannedData);
-        if (!payload) {
-          dispatch({
-            type: "update",
-            patch: { error: t.viewer.invalidQrError },
-          });
-          return;
-        }
         // QR 스캔으로 페어링이 완결된다: 시크릿을 제시하고 Mac 화면의
         // [허용]을 기다린다. 카메라는 계속 켜져 있어 다른 QR로 재시도도
         // 바로 가능하다.
-        approvalAbortRef.current?.abort();
-        const approvalAbort = new AbortController();
-        approvalAbortRef.current = approvalAbort;
         dispatch({
           type: "update",
           patch: {
@@ -544,34 +517,35 @@ export default function Pairing() {
             statusMessage: t.viewer.qrApprovalWaitDesc,
           },
         });
-        const result = await pairWithHostApproval(payload, {
-          signal: approvalAbort.signal,
-          onPending: () =>
-            dispatch({
-              type: "update",
-              patch: { statusMessage: t.viewer.qrApprovalWaitDesc },
-            }),
-        });
-        if (result.kind === "approved") {
-          if (approvalAbort.signal.aborted) return;
-          await connectHost(payload.host, payload.port);
-          router.replace("/catalog");
-          return;
-        }
-        dispatch({
-          type: "update",
-          patch: {
-            error: t.viewer.errPairingDeclined,
-            scannedPayload: null,
-            scannedHost: "",
+        await runQrPairingWorkflow({
+          run,
+          payload,
+          onPending: () => {
+            if (!run.attempt.signal.aborted) {
+              dispatch({
+                type: "update",
+                patch: { statusMessage: t.viewer.qrApprovalWaitDesc },
+              });
+            }
           },
+          navigate: () => router.replace("/catalog"),
         });
+        return;
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") {
           // 화면 이탈·새 스캔으로 취소된 폴링 — 조용히 끝낸다.
           return;
         }
-        if (isPairingUnsupportedError(e)) {
+        if (isPairingRejectedError(e)) {
+          dispatch({
+            type: "update",
+            patch: {
+              error: t.viewer.errPairingDeclined,
+              scannedPayload: null,
+              scannedHost: "",
+            },
+          });
+        } else if (isPairingUnsupportedError(e)) {
           // 구버전 호스트는 시크릿만으로 pair을 받지 않는다 — 6자리 입력으로
           // 전환한다(스캔한 대상은 그대로 유지). 모드가 바뀐 이유를 실패
           // 지점에서 한 번 알려 준다.
@@ -586,14 +560,77 @@ export default function Pairing() {
           });
         }
       } finally {
-        dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
-        setTimeout(() => {
-          scanningLockRef.current = false;
-        }, 1500);
+        if (pairingWorkflow.finish(run)) {
+          dispatch({ type: "update", patch: { busy: false, statusMessage: null } });
+        }
       }
     },
-    [busy, t],
+    [pairingWorkflow, t],
   );
+
+  return {
+    ...state,
+    dispatch,
+    host,
+    hasCodeTarget,
+    canSubmitCode,
+    handlePairWithCode,
+    handleQrScanned,
+  };
+}
+
+export default function Pairing() {
+  const { colors, isDark } = useAppTheme();
+  const { t } = useAppLanguage();
+  const { width } = useWindowDimensions();
+  const density = panelDensityScale(width);
+  const styles = useMemo(
+    () => applyPanelDensity(createStyles(colors, isDark), density),
+    [colors, isDark, density],
+  );
+
+  const params = useLocalSearchParams<{ endpoint?: string }>();
+  const routeEndpoint = params.endpoint?.trim() || "";
+  const [permission, requestPermission, getPermission] = useCameraPermissions();
+  const cameraState = resolveCameraState(permission);
+  const {
+    mode,
+    code,
+    busy,
+    statusMessage,
+    notice,
+    error,
+    dispatch,
+    host,
+    hasCodeTarget,
+    canSubmitCode,
+    handlePairWithCode,
+    handleQrScanned,
+  } = usePairingWorkflow(routeEndpoint, t);
+
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const cameraRequest = useRef(0);
+  useEffect(() => () => { cameraRequest.current += 1; }, []);
+  const runCameraAction = useCallback(async (action: () => Promise<unknown>) => {
+    const request = ++cameraRequest.current;
+    setCameraError(null);
+    try { await action(); }
+    catch (failure) {
+      if (cameraRequest.current === request) setCameraError(formatErrorMessage(failure));
+    }
+  }, []);
+  const refreshPermission = useCallback(() => {
+    void runCameraAction(getPermission);
+  }, [getPermission, runCameraAction]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (status) => {
+      if (status === "active") refreshPermission();
+    });
+    return () => subscription.remove();
+  }, [refreshPermission]);
+  const openAppSettings = useCallback(() => {
+    void runCameraAction(Linking.openSettings);
+  }, [runCameraAction]);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
@@ -672,7 +709,13 @@ export default function Pairing() {
           </View>
         )}
 
-        <PairingModeCard mode={mode} cameraState={cameraState} onRequestPermission={requestPermission} onOpenSettings={openAppSettings} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
+        {cameraError && (
+          <View style={styles.errorCard} accessibilityRole="alert">
+            <Text style={styles.errorText}>{cameraError}</Text>
+            <Pressable onPress={refreshPermission}><Text>{t.common.retry}</Text></Pressable>
+          </View>
+        )}
+        <PairingModeCard mode={mode} cameraState={cameraState} onRequestPermission={() => { void runCameraAction(requestPermission); }} onOpenSettings={openAppSettings} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
       </ScrollView>
     </SafeAreaView>
   );

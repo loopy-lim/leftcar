@@ -151,7 +151,14 @@ pub(super) fn process_restored(
         let Some(frame) = reassembler.push(fragment) else {
             continue;
         };
-        for frame in sequencer.push(frame) {
+        sequencer.configure_nack_grace(
+            !*awaiting_keyframe,
+            match control.network_rtt_ms.load(Ordering::Relaxed) {
+                crate::jni::LATENCY_UNKNOWN => None,
+                rtt => Some(rtt),
+            },
+        );
+        for frame in sequencer.push_reassembled(frame, reassembler) {
             process_frame(
                 side,
                 frame,

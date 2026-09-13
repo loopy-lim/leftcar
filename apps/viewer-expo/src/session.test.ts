@@ -112,6 +112,74 @@ async function secureStore(): Promise<Map<string, string>> {
 }
 
 describe("control session connect lifecycle", () => {
+  it("closes a new verified socket when credential migration fails and keeps the active session", async () => {
+    const { connect } = await import("./control");
+    const clientA = makeClient();
+    const clientB = { ...makeClient(), hostKey: "K".repeat(43) };
+    vi.mocked(connect).mockResolvedValueOnce(clientA).mockResolvedValueOnce(clientB);
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    (await secureStore()).set(`leftcar.token.v3.${"K".repeat(43)}`, "b".repeat(64));
+    const secureStoreModule = await import("expo-secure-store");
+    vi.mocked(secureStoreModule.setItemAsync).mockRejectedValueOnce(
+      new Error("endpoint alias write failed"),
+    );
+
+    await expect(session.connectHost("10.0.0.2", 7777)).rejects.toThrow(
+      "endpoint alias write failed",
+    );
+
+    expect(clientB.close).toHaveBeenCalledTimes(1);
+    expect(clientA.close).not.toHaveBeenCalled();
+    expect(session.controlClient()).toBe(clientA);
+    expect(session.controlHost()).toBe("10.0.0.1:7777");
+  });
+
+  it("a reconnect bound to A cannot overtake a newer B user selection", async () => {
+    const { connect } = await import("./control");
+    const clientA = makeClient();
+    const clientB = makeClient();
+    const gateB = deferred<ControlClient>();
+    vi.mocked(connect)
+      .mockResolvedValueOnce(clientA)
+      .mockImplementationOnce(() => gateB.promise);
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    const requestA = session.captureRequestContext();
+    expect(requestA).not.toBeNull();
+
+    const selectionB = session.beginHostSelection();
+    const pendingB = session.connectHost("10.0.0.2", 7777, { selection: selectionB });
+    await expect(session.reconnectHost(requestA!)).rejects.toMatchObject({ name: "AbortError" });
+
+    gateB.resolve(clientB);
+    await expect(pendingB).resolves.toBe(clientB);
+    expect(session.controlHost()).toBe("10.0.0.2:7777");
+  });
+
+  it("uses a verified host identity token after the same host changes address", async () => {
+    const hostKey = "K".repeat(43);
+    (await secureStore()).set(`leftcar.token.v3.${hostKey}`, "a".repeat(64));
+
+    const { connect } = await import("./control");
+    let provider: (() => Promise<string | null>) | undefined;
+    vi.mocked(connect).mockImplementation(async (_host, _port, _timeoutMs, tokenProvider) => {
+      provider = tokenProvider;
+      return { ...makeClient(), hostKey };
+    });
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.42", 7777);
+
+    expect(await provider?.()).toBe("a".repeat(64));
+    expect(session.captureRequestContext()?.identity).toBe(hostKey);
+    expect((await secureStore()).get("leftcar.token.v2.10.0.0.42.7777")).toBe(
+      "a".repeat(64),
+    );
+  });
+
   it("sends each host its own stored token across an A→B→A round-trip", async () => {
     (await secureStore()).set("leftcar.token.v2.10.0.0.1.7777", "a".repeat(64));
     (await secureStore()).set("leftcar.token.v2.10.0.0.2.7777", "b".repeat(64));
@@ -163,7 +231,7 @@ describe("control session connect lifecycle", () => {
     session.disconnectHost();
     gate.resolve(clientA);
 
-    await expect(pending).rejects.toMatchObject({ name: "LocalizedError" });
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(clientA.close).toHaveBeenCalledTimes(1);
     expect(session.controlClient()).toBeNull();
     expect(session.controlHost()).toBe("");
@@ -187,7 +255,7 @@ describe("control session connect lifecycle", () => {
     expect(clientA.close).not.toHaveBeenCalled();
 
     gateA.resolve(clientA);
-    await expect(pendingA).rejects.toMatchObject({ name: "LocalizedError" });
+    await expect(pendingA).rejects.toMatchObject({ name: "AbortError" });
     expect(clientA.close).toHaveBeenCalledTimes(1);
     expect(clientB.close).not.toHaveBeenCalled();
     expect(session.controlClient()).toBe(clientB);

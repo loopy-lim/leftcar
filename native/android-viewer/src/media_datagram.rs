@@ -411,6 +411,12 @@ impl FecGroup {
             || fragment.k as usize != self.k
             || fragment.base != self.base
             || fragment.total != self.total
+            || usize::from(fragment.index) >= self.parity.len()
+            || !(2..=MAX_DATAGRAM_BYTES).contains(&fragment.payload.len())
+            || self
+                .width
+                .is_some_and(|width| width != fragment.payload.len())
+            || self.parity[usize::from(fragment.index)].is_some()
         {
             return;
         }
@@ -443,7 +449,22 @@ impl FecGroup {
         // common late-parity arrival used to pay a full identity matrix
         // inversion plus a k*width multiply pass here on the completing
         // datagram before returning None.
-        if self.data.iter().all(Option::is_some) {
+        // Count unique usable slots before pack_shard/clone. Retries with
+        // fewer than k valid shards do no heap work (including bad widths).
+        let packable = |payload: &Vec<u8>| {
+            width >= 2 && payload.len() <= width - 2 && payload.len() <= usize::from(u16::MAX)
+        };
+        let available_data = self.data.iter().flatten().filter(|p| packable(p)).count();
+        if available_data == self.k {
+            return Ok(None);
+        }
+        let available_parity = self
+            .parity
+            .iter()
+            .flatten()
+            .filter(|p| p.len() == width)
+            .count();
+        if available_data + available_parity < self.k {
             return Ok(None);
         }
         let received = self
@@ -463,7 +484,7 @@ impl FecGroup {
             fec_core::decode_group_with_max_parity(received, self.k, width, self.parity.len())?;
         let mut output = Vec::new();
         for (index, payload) in restored.into_iter().enumerate() {
-            if self.data[index].is_none() {
+            if !self.data[index].as_ref().is_some_and(packable) {
                 self.data[index] = Some(payload.clone());
                 output.push(RestoredFragment {
                     index: self.base + index as u16,
@@ -516,6 +537,10 @@ pub struct CompletedFrameSequencer {
     /// deadline (never extended past its grace) and is cleared by any
     /// clear/epoch reset, so it can never stall delivery.
     hold_until: Option<Instant>,
+    completion_nack_grace: Option<Duration>,
+    // Reserve at completion, before a receive batch can flush the hole. Keep
+    // an expired reservation for this hole so later arrivals cannot renew it.
+    nack_reservation: Option<(u16, Instant)>,
 }
 
 impl Default for CompletedFrameSequencer {
@@ -525,6 +550,8 @@ impl Default for CompletedFrameSequencer {
             pending: HashMap::new(),
             codec: viewer_decoder::VideoCodec::H264,
             hold_until: None,
+            completion_nack_grace: None,
+            nack_reservation: None,
         }
     }
 }
@@ -534,12 +561,14 @@ impl CompletedFrameSequencer {
         self.last_delivered = None;
         self.pending.clear();
         self.hold_until = None;
+        self.nack_reservation = None;
     }
 
     pub fn establish_epoch(&mut self, last_delivered: u16) {
         self.last_delivered = Some(last_delivered);
         self.pending.clear();
         self.hold_until = None;
+        self.nack_reservation = None;
     }
 
     pub fn set_codec(&mut self, codec: viewer_decoder::VideoCodec) {
@@ -603,6 +632,62 @@ impl CompletedFrameSequencer {
             return Vec::new();
         }
         self.drain_next_available()
+    }
+
+    /// Set receiver eligibility before processing completions (including FEC).
+    /// This reserves time only; the normal requester tick sends the NACK.
+    pub fn configure_nack_grace(&mut self, eligible: bool, rtt: Option<u64>) {
+        self.completion_nack_grace = eligible.then(|| nack_grace_duration(rtt));
+        if !eligible {
+            self.nack_reservation = None;
+            self.clear_hold();
+        }
+    }
+
+    pub fn push_reassembled(
+        &mut self,
+        frame: ReassembledFrame,
+        reassembler: &FrameReassembler,
+    ) -> Vec<ReassembledFrame> {
+        self.push_reassembled_at(frame, reassembler, Instant::now())
+    }
+
+    fn push_reassembled_at(
+        &mut self,
+        frame: ReassembledFrame,
+        reassembler: &FrameReassembler,
+        now: Instant,
+    ) -> Vec<ReassembledFrame> {
+        if let (Some(grace), Some(last)) = (self.completion_nack_grace, self.last_delivered) {
+            let distance = frame.id.wrapping_sub(last);
+            let hole = last.wrapping_add(1);
+            if distance > 1 && distance <= i16::MAX as u16 {
+                if self.nack_reservation.is_some_and(|(id, _)| id != hole) {
+                    self.nack_reservation = None;
+                    self.clear_hold();
+                }
+                if self.nack_reservation.is_none()
+                    && reassembler
+                        .missing_fragment_indexes(hole)
+                        .is_some_and(|missing| {
+                            !missing.is_empty() && missing.len() <= MAX_NACK_REQUEST_TOTAL
+                        })
+                {
+                    let deadline = self.hold_until.unwrap_or(now + grace).min(now + grace);
+                    self.nack_reservation = Some((hole, deadline));
+                    self.hold_reorder_expiry_until(deadline);
+                }
+            }
+        }
+        let ready = self.push_at(frame, now);
+        if self
+            .nack_reservation
+            .is_some_and(|(hole, _)| self.blocked_hole() != Some(hole))
+        {
+            self.nack_reservation = None;
+            self.clear_hold();
+        }
+        ready
     }
 
     pub fn push(&mut self, frame: ReassembledFrame) -> Vec<ReassembledFrame> {
@@ -1165,7 +1250,17 @@ pub fn tick_nack_requester(
         sequencer.clear_hold();
         return outcome;
     }
-    let grace = nack_grace_duration(network_rtt_ms);
+    let deadline = sequencer
+        .nack_reservation
+        .filter(|(id, _)| *id == hole)
+        .map_or(
+            now + nack_grace_duration(network_rtt_ms),
+            |(_, deadline)| deadline,
+        );
+    if now >= deadline {
+        sequencer.clear_hold();
+        return outcome;
+    }
     let mut sent = 0u64;
     for chunk in missing.chunks(MAX_NACK_FRAGMENTS) {
         if let Some(body) = encode_nack_request(hole, chunk) {
@@ -1173,9 +1268,9 @@ pub fn tick_nack_requester(
             sent += 1;
         }
     }
-    requester.armed = Some((hole, now + grace));
+    requester.armed = Some((hole, deadline));
     requester.fragments_requested = missing.len();
-    sequencer.hold_reorder_expiry_until(now + grace);
+    sequencer.hold_reorder_expiry_until(deadline);
     NackTickOutcome {
         au_id: Some(hole),
         sent_messages: sent,
@@ -1290,6 +1385,98 @@ mod tests {
         bytes.extend_from_slice(&wall.to_be_bytes());
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    #[test]
+    fn fec_fixed_wire_vector_preserves_length_prefix_and_short_tail() {
+        // First parity row is XOR: [0,1,10,0] ^ [0,2,20,21].
+        // Literal bytes, independent of the encoder used by production.
+        let parity = [0, 3, 30, 21];
+        let encoded = fec_core::encode_group(&[vec![10], vec![20, 21]]).unwrap();
+        assert_eq!(encoded.data, vec![vec![0, 1, 10, 0], vec![0, 2, 20, 21]]);
+        assert_eq!(encoded.parity, vec![parity.to_vec()]);
+        let mut group = FecGroup::new(0x0102, 2, 0, 2).unwrap();
+        group.push_data(FrameFragment {
+            index: 0,
+            count: 2,
+            id: 0x0102,
+            capture_wall_ms: Some(1),
+            encode_wall_ms: Some(2),
+            send_wall_ms: 3,
+            payload: &[10],
+        });
+        group.push_parity(ParityFragment {
+            id: 0x0102,
+            k: 2,
+            index: 0,
+            base: 0,
+            total: 2,
+            send_wall_ms: 3,
+            payload: &parity,
+        });
+        let restored = group.try_restore_result().unwrap().unwrap();
+        assert_eq!(
+            restored,
+            vec![RestoredFragment {
+                index: 1,
+                count: 2,
+                id: 0x0102,
+                capture_wall_ms: Some(1),
+                encode_wall_ms: Some(2),
+                send_wall_ms: 3,
+                payload: vec![20, 21]
+            }]
+        );
+    }
+
+    #[test]
+    fn fec_rejects_invalid_parity_index_width_and_duplicate_before_retaining() {
+        let mut group = FecGroup::new(1, 8, 0, 8).unwrap();
+        let parity = |index, payload| ParityFragment {
+            id: 1,
+            k: 8,
+            index,
+            base: 0,
+            total: 8,
+            send_wall_ms: 0,
+            payload,
+        };
+        group.push_parity(parity(255, &[0; 4]));
+        group.push_parity(parity(0, &[0]));
+        assert_eq!(group.width, None);
+        group.push_parity(parity(0, &[0; 4]));
+        group.push_parity(parity(0, &[9; 6]));
+        group.push_parity(parity(1, &[9; 6]));
+        assert_eq!(group.width, Some(4));
+        assert_eq!(group.parity.iter().flatten().count(), 1);
+        assert_eq!(group.parity[0].as_deref(), Some(&[0; 4][..]));
+        assert!(group.try_restore_result().unwrap().is_none());
+    }
+
+    #[test]
+    fn fec_counts_only_unique_packable_data_and_full_width_parity() {
+        let mut group = FecGroup::new(1, 2, 0, 2).unwrap();
+        let fragment = FrameFragment {
+            index: 0,
+            count: 2,
+            id: 1,
+            capture_wall_ms: None,
+            encode_wall_ms: None,
+            send_wall_ms: 0,
+            payload: &[1, 2, 3],
+        };
+        group.push_data(fragment);
+        group.push_data(fragment);
+        group.push_parity(ParityFragment {
+            id: 1,
+            k: 2,
+            index: 0,
+            base: 0,
+            total: 2,
+            send_wall_ms: 0,
+            payload: &[0; 4],
+        });
+        assert!(group.try_restore_result().unwrap().is_none());
     }
 
     #[test]
@@ -1985,6 +2172,272 @@ mod tests {
 
         fn missing(&self) -> Vec<u16> {
             self.reassembler.missing_fragment_indexes(11).unwrap()
+        }
+    }
+
+    #[test]
+    fn nack_completion_boundary_holds_one_rx_batch_and_repaired_order() {
+        let start = Instant::now();
+        let mut sequencer = CompletedFrameSequencer::default();
+        sequencer.establish_epoch(10);
+        sequencer.configure_nack_grace(true, Some(3));
+        let mut reassembler = FrameReassembler::default();
+        assert!(reassembler
+            .push(parse_fragment(&datagram(1, 2, 11, 1, 2, 3, b"b")).unwrap())
+            .is_none());
+        // No requester tick between these completions: exactly one receive batch.
+        for id in [12, 13, 14] {
+            let frame = reassembler
+                .push(parse_fragment(&datagram(0, 1, id, 1, 2, 3, b"x")).unwrap())
+                .unwrap();
+            assert!(
+                sequencer
+                    .push_reassembled_at(frame, &reassembler, start)
+                    .is_empty(),
+                "AU {id} escaped before NACK had a chance to run"
+            );
+        }
+        let mut requester = NackRequester::default();
+        let mut sent = Vec::new();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut sequencer,
+            &reassembler,
+            false,
+            Some(3),
+            start + Duration::from_millis(1),
+            |body| sent.push(body.to_vec()),
+        );
+        assert_eq!(outcome.sent_messages, 1);
+        assert_eq!(sent, vec![encode_nack_request(11, &[0]).unwrap()]);
+        let repaired = reassembler
+            .push(parse_fragment(&datagram(0, 2, 11, 1, 2, 3, b"a")).unwrap())
+            .unwrap();
+        let ready =
+            sequencer.push_reassembled_at(repaired, &reassembler, start + Duration::from_millis(9));
+        assert_eq!(
+            ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            vec![11, 12, 13, 14]
+        );
+    }
+
+    fn push_nack_test_au(
+        sequencer: &mut CompletedFrameSequencer,
+        reassembler: &mut FrameReassembler,
+        id: u16,
+        now: Instant,
+    ) -> Vec<ReassembledFrame> {
+        let Some(frame) =
+            reassembler.push(parse_fragment(&datagram(0, 1, id, 1, 2, 3, b"x")).unwrap())
+        else {
+            return Vec::new();
+        };
+        sequencer.push_reassembled_at(frame, reassembler, now)
+    }
+
+    #[test]
+    fn nack_completion_boundary_duplicate_reorder_keeps_original_deadline() {
+        let mut fixture = NackFixture::new();
+        // The fixture has AU12 queued, but no tick or completion reservation yet.
+        fixture.sequencer.configure_nack_grace(true, Some(3));
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            14,
+            fixture.start
+        )
+        .is_empty());
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            13,
+            fixture.start + Duration::from_millis(1)
+        )
+        .is_empty());
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            13,
+            fixture.start + Duration::from_millis(9)
+        )
+        .is_empty());
+        // A later RTT update and request tick must not give this hole a new 25ms.
+        fixture.sequencer.configure_nack_grace(true, Some(100));
+        let mut requester = NackRequester::default();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(9),
+            |_| {},
+        );
+        assert_eq!(outcome.sent_messages, 1);
+        assert!(fixture
+            .sequencer
+            .drain_expired_at(fixture.start + Duration::from_millis(10))
+            .is_empty());
+        let ready = fixture
+            .sequencer
+            .drain_expired_at(fixture.start + Duration::from_millis(11));
+        assert_eq!(
+            ready.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![12, 13, 14]
+        );
+        let late = fixture
+            .reassembler
+            .push(parse_fragment(&datagram(0, 2, 11, 1, 2, 3, b"a")).unwrap())
+            .unwrap();
+        assert!(fixture
+            .sequencer
+            .push_reassembled_at(
+                late,
+                &fixture.reassembler,
+                fixture.start + Duration::from_millis(12)
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn nack_completion_boundary_hard_cap_without_any_tick() {
+        let mut fixture = NackFixture::new();
+        fixture.sequencer.configure_nack_grace(true, Some(100));
+        for id in [13, 14, 15, 16] {
+            assert!(push_nack_test_au(
+                &mut fixture.sequencer,
+                &mut fixture.reassembler,
+                id,
+                fixture.start
+            )
+            .is_empty());
+        }
+        let ready = push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            17,
+            fixture.start,
+        );
+        assert_eq!(
+            ready.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![12, 13, 14, 15, 16, 17]
+        );
+    }
+
+    #[test]
+    fn nack_completion_boundary_expired_reservation_cannot_be_rearmed() {
+        let mut fixture = NackFixture::new();
+        fixture.sequencer.configure_nack_grace(true, None);
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            13,
+            fixture.start
+        )
+        .is_empty());
+        let mut requester = NackRequester::default();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(8),
+            |_| panic!("expired hole must not send a fresh NACK"),
+        );
+        assert_eq!(outcome.sent_messages, 0);
+        let ready = push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            14,
+            fixture.start + Duration::from_millis(9),
+        );
+        assert_eq!(
+            ready.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![12, 13, 14]
+        );
+    }
+
+    #[test]
+    fn nack_completion_boundary_recovery_and_idr_reset_the_old_hold() {
+        let mut fixture = NackFixture::new();
+        fixture.sequencer.configure_nack_grace(true, Some(100));
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            13,
+            fixture.start
+        )
+        .is_empty());
+        fixture.sequencer.configure_nack_grace(false, Some(100));
+        let ready = push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            14,
+            fixture.start,
+        );
+        assert_eq!(
+            ready.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![12, 13, 14]
+        );
+        fixture.sequencer.clear();
+        fixture.reassembler.clear();
+        let idr = ReassembledFrame {
+            id: 50,
+            capture_wall_ms: None,
+            encode_wall_ms: None,
+            send_wall_ms: 0,
+            au: vec![0, 0, 0, 1, 0x65, 1],
+        };
+        assert_eq!(
+            fixture
+                .sequencer
+                .push_reassembled_at(idr, &fixture.reassembler, fixture.start)[0]
+                .id,
+            50
+        );
+        fixture.sequencer.configure_nack_grace(true, None);
+        fixture
+            .reassembler
+            .push(parse_fragment(&datagram(1, 2, 51, 1, 2, 3, b"b")).unwrap());
+        assert!(push_nack_test_au(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            52,
+            fixture.start + Duration::from_millis(1)
+        )
+        .is_empty());
+        assert!(fixture
+            .sequencer
+            .drain_expired_at(fixture.start + Duration::from_millis(8))
+            .is_empty());
+        assert_eq!(
+            fixture
+                .sequencer
+                .drain_expired_at(fixture.start + Duration::from_millis(9))[0]
+                .id,
+            52
+        );
+    }
+
+    #[test]
+    fn nack_completion_boundary_only_holds_retransmittable_holes() {
+        for missing_count in [0, 41] {
+            let start = Instant::now();
+            let mut sequencer = CompletedFrameSequencer::default();
+            sequencer.establish_epoch(10);
+            sequencer.configure_nack_grace(true, Some(100));
+            let mut reassembler = FrameReassembler::default();
+            if missing_count > 0 {
+                reassembler.push(parse_fragment(&datagram(41, 42, 11, 1, 2, 3, b"b")).unwrap());
+            }
+            assert!(push_nack_test_au(&mut sequencer, &mut reassembler, 12, start).is_empty());
+            assert!(push_nack_test_au(&mut sequencer, &mut reassembler, 13, start).is_empty());
+            let ready = push_nack_test_au(&mut sequencer, &mut reassembler, 14, start);
+            assert_eq!(
+                ready.iter().map(|f| f.id).collect::<Vec<_>>(),
+                vec![12, 13, 14]
+            );
         }
     }
 

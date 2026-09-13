@@ -3,6 +3,22 @@ import CoreMedia
 import Darwin
 
 extension CaptureSession {
+    private func recordAudioMetrics(codec: String, encoder: OpusAudioEncoder? = nil) {
+        audioMetricsLock.lock()
+        audioMetrics = [
+            "audioRequestedCodec": audioOpusRequested ? "opus128k" : "pcm",
+            "audioEffectiveCodec": codec,
+            "audioFallback": audioOpusRequested && codec == "pcm",
+            "audioTargetBitrate": encoder == nil ? NSNull() : NSNumber(value: 128000),
+            "audioEncodedPackets": encoder.map { NSNumber(value: $0.encodedPackets) } ?? NSNull(),
+            "audioEncodedBytes": encoder.map { NSNumber(value: $0.encodedBytes) } ?? NSNull(),
+            "audioEncodeMeanUs": encoder.flatMap { $0.encodedPackets > 0 ? NSNumber(value: Double($0.encodeNanoseconds) / Double($0.encodedPackets) / 1000) : nil } ?? NSNull(),
+            "audioEncoderPreSkipFrames": encoder.map { NSNumber(value: $0.preSkip) } ?? NSNull(),
+            "audioAvSkewUs": NSNull(),
+        ]
+        audioMetricsLock.unlock()
+    }
+
     /// One datagram carries at most 300 stereo frames (1200 B of PCM), so an
     /// LCAU packet stays comfortably under the media MTU and a lost datagram
     /// is a ~6ms skip instead of a broken stream.
@@ -73,7 +89,11 @@ extension CaptureSession {
         let fd = sock
         let stopped = stopRequested
         stateLock.unlock()
-        guard fd >= 0, !stopped else { return }
+        guard fd >= 0, !stopped,
+              shouldCaptureSystemAudio(owner: isSystemAudioOwner(), viewerKey: viewerAddressKey) else {
+            opusAudioEncoder = nil
+            return
+        }
 
         guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
               let description = CMAudioFormatDescriptionGetStreamBasicDescription(format)
@@ -98,7 +118,7 @@ extension CaptureSession {
         // CoreMedia may hand back a non-contiguous block, so walk it by
         // offset; SCK audio is a single small contiguous region in practice.
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var floats = [Float32]()
+        audioPCMStorage.samples.removeAll(keepingCapacity: true)
         var offset = 0
         var totalLength = 0
         var pointer: UnsafeMutablePointer<Int8>?
@@ -113,27 +133,56 @@ extension CaptureSession {
             let count = segmentLength / 4
             pointer.withMemoryRebound(to: Float32.self, capacity: count) { rebound in
                 for index in 0..<count {
-                    floats.append(rebound[index])
+                    audioPCMStorage.samples.append(rebound[index])
                 }
             }
             offset += segmentLength
         }
         let channels = Int(asbd.mChannelsPerFrame)
-        guard floats.count >= channels, floats.count % channels == 0 else { return }
-        let pcm: [UInt8]
-        if asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
-            // Planar: each channel's samples occupy one consecutive run.
-            let perChannel = floats.count / channels
-            let frames = (0..<perChannel).map { frame in
-                (0..<channels).map { channel in
-                    floats[channel * perChannel + frame]
+        let sampleCount = audioPCMStorage.samples.count
+        guard sampleCount >= channels, sampleCount % channels == 0 else { return }
+        let samples = audioPCMStorage.samples
+        let pcm = audioPCMStorage.convert(samples: samples, channels: channels,
+            planar: asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0)
+        let wanted = systemAudioOpusPreferred(forKey: viewerAddressKey)
+        if wanted != audioOpusRequested {
+            audioOpusRequested = wanted
+            audioOpusFailed = false
+            opusAudioEncoder = nil
+        }
+        if wanted && !audioOpusFailed && asbd.mSampleRate == 48000 {
+            do {
+                if opusAudioEncoder?.channels != channels { opusAudioEncoder = try OpusAudioEncoder(channels: channels) }
+                if let encoder = opusAudioEncoder {
+                    for packet in try encoder.appendPCM(pcm) {
+                        audioSequence &+= 1
+                        var datagram = Data("LCO1".utf8)
+                        func append<T>(_ value: T) { withUnsafeBytes(of: value) { datagram.append(contentsOf: $0) } }
+                        append(audioSequence.bigEndian)
+                        append(UInt16(48000).bigEndian)
+                        datagram.append(UInt8(channels)); datagram.append(0)
+                        append(UInt16(480).bigEndian)
+                        append(encoder.epoch.bigEndian)
+                        append(encoder.preSkip.bigEndian)
+                        append(UInt16(packet.count).bigEndian)
+                        datagram.append(packet)
+                        _ = sendMediaDatagram(datagram, fd: fd)
+                    }
+                    recordAudioMetrics(codec: "opus128k", encoder: encoder)
+                    return
                 }
+            } catch {
+                // Latch for this preference lifetime: repeated capability
+                // refreshes must not repeatedly construct a failing codec.
+                audioOpusFailed = true
+                opusAudioEncoder = nil
+                NSLog("Leftcar Opus unavailable or failed; falling back to PCM: %@", String(describing: error))
             }
-            pcm = CaptureSession.int16LeAudio(planar: frames)
         } else {
-            pcm = CaptureSession.int16LeAudio(floats)
+            opusAudioEncoder = nil
         }
 
+        recordAudioMetrics(codec: "pcm")
         let frameBytes = channels * 2
         let totalFrames = pcm.count / frameBytes
         var frameOffset = 0

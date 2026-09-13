@@ -89,6 +89,7 @@ impl AndroidDecoder {
             return Err(DecoderError::OpFailed { status });
         }
         self.frames_rendered = self.frames_rendered.saturating_add(1);
+        self.last_released_pts_us = Some(output.pts_us);
         Ok(())
     }
 

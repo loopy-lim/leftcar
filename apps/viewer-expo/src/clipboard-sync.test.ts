@@ -323,11 +323,11 @@ describe("startClipboardSync loop", () => {
     try {
       const harness = fakeIo();
       const requests: string[] = [];
-      harness.io.getClient = () =>
-        fakeClient((command) => {
+      const client = fakeClient((command) => {
           requests.push(command);
           return { unchanged: true };
         });
+      harness.io.getClient = () => client;
       const loop = startClipboardSync(harness.io);
       expect(loop.isEnabled()).toBe(false);
 
@@ -382,14 +382,14 @@ describe("startClipboardSync loop", () => {
     try {
       const harness = fakeIo();
       const hostText = "왕복 텍스트";
-      harness.io.getClient = () =>
-        fakeClient((command) => {
+      const firstClient = fakeClient((command) => {
           if (command === "getClipboard") {
             return { unchanged: false, text: hostText, hash: clipboardHash(hostText) };
           }
           // setClipboard 에코는 호스트가 무시한다(해시 동일) — 성공으로 답한다.
           return {};
         });
+      harness.io.getClient = () => firstClient;
       const loop = startClipboardSync(harness.io);
       loop.setEnabled(true);
       await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
@@ -397,12 +397,12 @@ describe("startClipboardSync loop", () => {
 
       // 두 번째 라운드: 기기 텍스트는 호스트 텍스트와 같다(에코) → 밀어 올리지 않는다.
       let setCalls = 0;
-      harness.io.getClient = () =>
-        fakeClient((command) => {
+      const secondClient = fakeClient((command) => {
           if (command === "setClipboard") setCalls += 1;
           if (command === "getClipboard") return { unchanged: true };
           return {};
         });
+      harness.io.getClient = () => secondClient;
       await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
       expect(setCalls).toBe(0);
       loop.stop();
@@ -417,14 +417,14 @@ describe("startClipboardSync loop", () => {
       const harness = fakeIo();
       harness.device.text = "기기에서 복사";
       let setCalls = 0;
-      harness.io.getClient = () =>
-        fakeClient((command) => {
+      const client = fakeClient((command) => {
           if (command === "setClipboard") {
             setCalls += 1;
             throw new Error("clipboard share disabled");
           }
           return { unchanged: true };
         });
+      harness.io.getClient = () => client;
       const loop = startClipboardSync(harness.io);
       loop.setEnabled(true);
       // 임계치 이후 틱에서는 setClipboard 시도가 없다.
@@ -453,8 +453,7 @@ describe("startClipboardSync loop", () => {
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      harness.io.getClient = () =>
-        fakeClient(async (command) => {
+      const client = fakeClient(async (command) => {
           if (command === "getClipboard") {
             polls += 1;
             // 첫 라운드가 15초 제어 타임아웃에 붙잡혀 있는 상태를 흉내 낸다.
@@ -462,6 +461,7 @@ describe("startClipboardSync loop", () => {
           }
           return { unchanged: true };
         });
+      harness.io.getClient = () => client;
       const loop = startClipboardSync(harness.io);
       loop.setEnabled(true);
       await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
@@ -487,8 +487,7 @@ describe("startClipboardSync loop", () => {
         releaseGet = resolve;
       });
       const sent: string[] = [];
-      harness.io.getClient = () =>
-        fakeClient(async (command) => {
+      const client = fakeClient(async (command) => {
           sent.push(command);
           if (command === "getClipboard") {
             await gate;
@@ -500,6 +499,7 @@ describe("startClipboardSync loop", () => {
           }
           return {};
         });
+      harness.io.getClient = () => client;
       const deviceReads: number[] = [];
       const realRead = harness.io.readDeviceClipboard;
       harness.io.readDeviceClipboard = async () => {
@@ -534,8 +534,7 @@ describe("startClipboardSync loop", () => {
         releaseGet = resolve;
       });
       const sent: string[] = [];
-      harness.io.getClient = () =>
-        fakeClient(async (command) => {
+      const client = fakeClient(async (command) => {
           sent.push(command);
           if (command === "getClipboard") {
             await gate;
@@ -544,6 +543,7 @@ describe("startClipboardSync loop", () => {
           }
           return {};
         });
+      harness.io.getClient = () => client;
       let imageReads = 0;
       const realReadImage = harness.io.readDeviceClipboardImage;
       harness.io.readDeviceClipboardImage = async () => {
@@ -563,6 +563,40 @@ describe("startClipboardSync loop", () => {
       expect(sent).toEqual(["getClipboard"]);
       expect(harness.imageWrites).toEqual([]); // writeDeviceClipboardImage 없음
       expect(imageReads).toBe(0); // pushDeviceClipboard 자체가 시작하지 않는다
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons an old host round when the control client is replaced during its poll", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo("new local value");
+      let releaseOld!: () => void;
+      const oldGate = new Promise<void>((resolve) => {
+        releaseOld = resolve;
+      });
+      const oldClient = fakeClient(async (command) => {
+        if (command === "getClipboard") {
+          await oldGate;
+          throw new Error("old socket closed");
+        }
+        throw new Error(`stale side effect: ${command}`);
+      });
+      const newClient = fakeClient(() => ({ unchanged: true }));
+      let currentClient: ClipboardSyncClient | null = oldClient;
+      harness.io.getClient = () => currentClient;
+      const readDevice = vi.spyOn(harness.io, "readDeviceClipboard");
+
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      currentClient = newClient;
+      releaseOld();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(readDevice).not.toHaveBeenCalled();
+      loop.stop();
     } finally {
       vi.useRealTimers();
     }
@@ -610,5 +644,35 @@ describe("round cancellation signal", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(sent).toEqual([]);
+  });
+});
+
+describe("native clipboard change signaling", () => {
+  it("skips unchanged image reads, recovers lost events, and disposes retired listeners", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = fakeIo();
+      const client = fakeClient(() => ({ unchanged: true }));
+      harness.io.getClient = () => client;
+      let notify = () => {};
+      const dispose = vi.fn();
+      harness.io.subscribeDeviceChanges = (listener) => { notify = listener; return dispose; };
+      const read = vi.spyOn(harness.io, "readDeviceClipboardImage");
+      const loop = startClipboardSync(harness.io);
+      loop.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS * 3);
+      expect(read).toHaveBeenCalledTimes(1);
+      notify();
+      await vi.advanceTimersByTimeAsync(CLIPBOARD_SYNC_INTERVAL_MS);
+      expect(read).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(read.mock.calls.length).toBeGreaterThan(2);
+      loop.stop();
+      expect(dispose).toHaveBeenCalledTimes(1);
+      const count = read.mock.calls.length;
+      notify();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(read).toHaveBeenCalledTimes(count);
+    } finally { vi.useRealTimers(); }
   });
 });

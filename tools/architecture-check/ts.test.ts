@@ -105,3 +105,45 @@ test("allows org.junit only from exact Android JVM unit-test source-set layouts"
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Robolectric is a JVM-test dependency and remains forbidden in production", () => {
+  const root = mkdtempSync(join(tmpdir(), "leftcar-robolectric-architecture-"));
+  try {
+    writeRequiredExpoSources(root);
+    for (const sourceSet of ["test", "main", "androidTest"]) {
+      writeFixture(root, `apps/viewer-expo/android/app/src/${sourceSet}/java/dev/leftcar/viewer/${sourceSet}.kt`, "import org.robolectric.RobolectricTestRunner");
+    }
+    const result = spawnSync("bun", [CHECKER], {cwd:root, encoding:"utf8"});
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("main.kt: import org.robolectric.RobolectricTestRunner");
+    expect(result.stderr).toContain("androidTest.kt: import org.robolectric.RobolectricTestRunner");
+    expect(result.stderr).not.toContain("test.kt: import org.robolectric.RobolectricTestRunner");
+    expect(result.stderr).toContain("architecture-check: 2 violation(s)");
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test("approved codec boundaries allow queries and Opus CSD but reject network and video", () => {
+  const root = mkdtempSync(join(tmpdir(), "leftcar-codec-boundary-"));
+  const base = "apps/viewer-expo/android/app/src/";
+  const main = `${base}main/java/dev/leftcar/viewer/stream/`;
+  const cases: Array<[string, string, boolean]> = [
+    [main + "SplitDecoderCapability.kt", "import android.media.MediaCodecList\nval hints = codec.maxSupportedInstances >= 2\nvideo.areSizeAndRateSupported(width, height, fps)", true],
+    [main + "OpusAudioDecoder.kt", "import android.media.MediaCodec\nimport java.nio.ByteBuffer\nimport java.nio.ByteOrder\nMediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 2)\nMediaCodec.createByCodecName(name)", true],
+    [base + "test/java/dev/leftcar/viewer/stream/OpusAudioDecoderTest.kt", "import java.nio.ByteBuffer\nimport java.nio.ByteOrder\nMediaFormat.MIMETYPE_AUDIO_OPUS", true],
+    [main + "OpusAudioDecoder.kt", "java.net.Socket(host, port)", false],
+    [main + "SplitDecoderCapability.kt", "MediaCodec.createByCodecName(name)", false],
+    [main + "Other.kt", "MediaCodec.createDecoderByType(\"audio/opus\")", false],
+    [main + "OpusAudioDecoder.kt", "MediaFormat.createVideoFormat(\"video/avc\", 1920, 1080)\nMediaCodec.createByCodecName(name)", false],
+    [main + "Other/OpusAudioDecoder.kt", "MediaCodec.createByCodecName(name)", false],
+    [main + "SplitDecoderCapability.kt", "java.net.DatagramSocket()", false],
+  ];
+  try {
+    for (const [path, source, allowed] of cases) {
+      writeRequiredExpoSources(root);
+      writeFixture(root, path, source);
+      const result = spawnSync("bun", [CHECKER], {cwd: root, encoding: "utf8"});
+      expect(result.status, `${path}: ${source}\n${result.stderr}`).toBe(allowed ? 0 : 1);
+      rmSync(join(root, path));
+    }
+  } finally { rmSync(root, {recursive:true, force:true}); }
+});

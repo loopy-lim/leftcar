@@ -12,6 +12,10 @@ import OSLog
 
 extension CaptureSession {
     func setInputEnabled(_ enabled: Bool) -> Bool {
+        if enabled {
+            guard sourceAuthorization?.begin() ?? true else { return false }
+        }
+        defer { if enabled { sourceAuthorization?.end() } }
         if enabled && !CGPreflightPostEventAccess() {
             return false
         }

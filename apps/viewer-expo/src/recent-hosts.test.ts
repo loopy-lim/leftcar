@@ -23,6 +23,7 @@ import {
   parseRecentHosts,
   removeRecentHost,
   saveRecentHost,
+  saveRecentHostStrict,
   updateRecentHostsList,
   type RecentHostItem,
 } from "./recent-hosts";
@@ -35,6 +36,15 @@ beforeEach(() => {
 });
 
 describe("recent-hosts module", () => {
+  it("strict persistence propagates a read failure without replacing the list", async () => {
+    vi.mocked(SecureStore.getItemAsync).mockRejectedValueOnce(new Error("secure read failed"));
+
+    await expect(
+      saveRecentHostStrict("192.168.0.50", 7777, "Office Mac"),
+    ).rejects.toThrow("secure read failed");
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+  });
+
   it("parses empty or invalid string gracefully", () => {
     expect(parseRecentHosts(null)).toEqual([]);
     expect(parseRecentHosts("")).toEqual([]);

@@ -8,6 +8,8 @@ import CoreGraphics
 import Darwin
 
 final class CaptureSession {
+    static let metricProcessIncarnation = UUID().uuidString
+    let metricIncarnation = UUID().uuidString
      let queue = DispatchQueue(label: "leftcar.capture", qos: .userInteractive)
     // Capture callbacks only publish the newest sample here. Encoding runs on
     // its own serial queue, so a slow VideoToolbox callback cannot make
@@ -63,8 +65,15 @@ final class CaptureSession {
     // Audio plane (LCAU). PCM chunks are converted and sent on this serial
     // queue; the datagram sequence is single-owner here, so it needs no
     // separate lock.
+     let audioQueueKey = DispatchSpecificKey<Void>()
      let audioQueue = DispatchQueue(label: "leftcar.audio", qos: .userInteractive)
      var audioSequence: UInt16 = 0
+    let audioMetricsLock = NSLock()
+    var audioMetrics: [String: Any] = [:]
+    var audioPCMStorage = AudioPCMStorage()
+    var opusAudioEncoder: OpusAudioEncoder?
+    var audioOpusRequested = false
+    var audioOpusFailed = false
     // Set once, under the registry lock, at insertion — before setup can ask
     // the registry who owns the system-audio plane. Never mutated after.
     var sessionHandle: UInt32 = 0
@@ -101,6 +110,8 @@ final class CaptureSession {
      var cgStreamAPI: LegacyCGDisplayStreamAPI?
      var session: VTCompressionSession?
      var splitPipeline: DualEncoderPipeline?
+     let sourceAuthorization: SourceAuthorization?
+     let authenticatedOwner: String?
      let targetAddr: sockaddr_in
      let targetPort: UInt16
      let targetLabel: String
@@ -466,6 +477,8 @@ final class CaptureSession {
 
      init(
         targetAddr: sockaddr_in,
+        authenticatedOwner: String? = nil,
+        authorization: SourceAuthorization? = nil,
         targetPort: UInt16,
         targetLabel: String,
         width: UInt32,
@@ -478,6 +491,8 @@ final class CaptureSession {
         udpStability: AppliedUdpStability = .legacy,
         mediaKey: Data
     ) {
+        self.sourceAuthorization = authorization
+        self.authenticatedOwner = authenticatedOwner
         self.targetAddr = targetAddr
         self.targetPort = targetPort
         self.targetLabel = targetLabel
@@ -505,6 +520,7 @@ final class CaptureSession {
             limit: packetizationInFlightLimit(width: width, height: height)
         )
         encodeQueue.setSpecific(key: encodeQueueKey, value: ())
+        audioQueue.setSpecific(key: audioQueueKey, value: ())
         performanceLogTicker = PerformanceLogTicker(
             interval: .seconds(1),
             queue: DispatchQueue(label: "leftcar.performance", qos: .utility)

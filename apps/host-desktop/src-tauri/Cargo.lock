@@ -2362,6 +2362,7 @@ dependencies = [
  "fec-core",
  "futures-lite",
  "keyring",
+ "libc",
  "libloading 0.8.9",
  "mdns-sd",
  "nusb",

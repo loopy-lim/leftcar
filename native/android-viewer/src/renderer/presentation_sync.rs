@@ -1,3 +1,58 @@
+/// Optional display pacing. The epoch is a real Choreographer frame timestamp,
+/// never a fabricated refresh grid. Callback freshness bounds scheduling lead.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayTimeline {
+    balanced: bool,
+    sample: Option<(i32, i64, i64)>,
+}
+impl DisplayTimeline {
+    pub fn new(balanced: bool) -> Self {
+        Self {
+            balanced,
+            sample: None,
+        }
+    }
+    pub fn set_balanced(&mut self, balanced: bool) {
+        if self.balanced != balanced {
+            self.sample = None;
+        }
+        self.balanced = balanced;
+    }
+    pub fn update(&mut self, display: i32, frame_ns: i64, period_ns: i64) {
+        self.sample =
+            (self.balanced && frame_ns > 0 && (4_000_000..=50_000_000).contains(&period_ns))
+                .then_some((display, frame_ns, period_ns));
+    }
+    pub fn target_now(&self) -> Option<i64> {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+            return None;
+        }
+        self.target(
+            now.tv_sec
+                .saturating_mul(1_000_000_000)
+                .saturating_add(now.tv_nsec),
+        )
+    }
+    pub fn target(&self, now_ns: i64) -> Option<i64> {
+        if !self.balanced {
+            return None;
+        }
+        let (_, frame, period) = self.sample?;
+        let age = now_ns.checked_sub(frame)?;
+        if age < 0 || age >= period.saturating_mul(3) {
+            return None;
+        }
+        Some(frame.saturating_add((age / period + 1).saturating_mul(period)))
+    }
+    pub fn balanced(&self) -> bool {
+        self.balanced
+    }
+}
+
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 use viewer_decoder::ReadyOutput;
@@ -97,6 +152,7 @@ struct ReleasedFrame {
 }
 
 pub struct PairPresentationCoordinator {
+    display: DisplayTimeline,
     wait_budget_ns: i64,
     released_metadata_budget_ns: i64,
     left: BTreeMap<i64, PendingFrame>,
@@ -145,6 +201,7 @@ impl PairPresentationCoordinator {
     pub fn new(fps: u32) -> Self {
         let frame_period_ns = 1_000_000_000i64 / i64::from(fps.max(1));
         Self {
+            display: DisplayTimeline::default(),
             wait_budget_ns: frame_period_ns.min(DECODER_PAIR_WAIT_NS),
             released_metadata_budget_ns: frame_period_ns.saturating_add(DECODER_LATE_PEER_GRACE_NS),
             left: BTreeMap::new(),
@@ -152,6 +209,28 @@ impl PairPresentationCoordinator {
             released_left: BTreeMap::new(),
             released_right: BTreeMap::new(),
         }
+    }
+
+    pub fn set_display_timeline(&mut self, display: DisplayTimeline) {
+        let changed = self.display.balanced != display.balanced
+            || match (self.display.sample, display.sample) {
+                (Some((old_id, old_frame, old_period)), Some((id, frame, period))) => {
+                    old_id != id || frame < old_frame || period != old_period
+                }
+                (Some(_), None) => true,
+                _ => false,
+            };
+        if changed {
+            self.released_left.clear();
+            self.released_right.clear();
+            // Keep every owned output, but retire timing metadata from the old
+            // display epoch so a reset cannot retain it indefinitely.
+            let ready_ns = display.sample.map(|(_, frame, _)| frame).unwrap_or(0);
+            for pending in self.left.values_mut().chain(self.right.values_mut()) {
+                pending.ready_ns = ready_ns;
+            }
+        }
+        self.display = display;
     }
 
     pub fn pending_count(&self) -> usize {
@@ -263,6 +342,14 @@ impl PairPresentationCoordinator {
         if slot.len() > MAX_PENDING_PER_TILE {
             let oldest_pts = *slot.first_key_value().expect("bounded slot is non-empty").0;
             let oldest = slot.remove(&oldest_pts).expect("oldest pending exists");
+            if self.display.balanced() {
+                return SyncDecision::Discard {
+                    commands: vec![WorkerCommand::Discard {
+                        side,
+                        output: oldest.frame.output,
+                    }],
+                };
+            }
             let target_present_ns = self.next_present_time(now_ns);
             let released = ReleasedFrame {
                 ready_ns: oldest.ready_ns,
@@ -343,7 +430,9 @@ impl PairPresentationCoordinator {
         // MediaCodec and SurfaceFlinger already latch timed releases on the
         // next display opportunity. Rounding to an artificial 60Hz epoch here
         // could add almost one full frame before the real compositor wait.
-        now_ns.saturating_add(1_000_000)
+        self.display
+            .target(now_ns)
+            .unwrap_or_else(|| now_ns.saturating_add(1_000_000))
     }
 }
 
@@ -593,5 +682,113 @@ mod tests {
         }
         assert!(presented);
         assert!(matches!(sync.expire(20_000_000), SyncDecision::Wait));
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    #[test]
+    fn actual_nonzero_display_epoch_at_60_90_120_hz_and_late_frames() {
+        for hz in [60, 90, 120] {
+            let period = 1_000_000_000 / hz;
+            let origin = 9_876_543_210;
+            let mut display = DisplayTimeline::new(true);
+            display.update(7, origin, period);
+            assert_eq!(display.target(origin + 123), Some(origin + period));
+            assert_eq!(
+                display.target(origin + period + 123),
+                Some(origin + 2 * period)
+            );
+            assert_eq!(
+                display.target(origin + 4 * period),
+                None,
+                "stale callback cannot synthesize an endless clock"
+            );
+            let mut pair = PairPresentationCoordinator::new(60);
+            pair.set_display_timeline(display);
+            let ready = |pts| ReadyFrame {
+                pts_us: pts,
+                output: viewer_decoder::ReadyOutput {
+                    index: pts as usize,
+                    pts_us: pts,
+                },
+            };
+            pair.push_ready(TileSide::Left, ready(1), origin + 123);
+            let SyncDecision::Present {
+                target_present_ns, ..
+            } = pair.push_ready(TileSide::Right, ready(1), origin + 456)
+            else {
+                panic!("pair")
+            };
+            assert_eq!(target_present_ns, origin + period);
+        }
+    }
+    #[test]
+    fn display_changes_clock_reset_and_mode_changes_drop_old_timebase() {
+        let mut display = DisplayTimeline::new(true);
+        display.update(1, 10_000_000_001, 16_666_666);
+        display.update(2, 1_000_000_001, 8_333_333);
+        assert_eq!(display.target(1_000_000_002), Some(1_008_333_334));
+        assert_eq!(display.target(999), None);
+        display.set_balanced(false);
+        assert_eq!(display.target(1_000_000_002), None);
+        display.set_balanced(true);
+        assert_eq!(display.target(1_000_000_002), None);
+    }
+}
+
+#[cfg(test)]
+mod balanced_ownership_tests {
+    use super::*;
+    fn ready(pts: i64) -> ReadyFrame {
+        ReadyFrame {
+            pts_us: pts,
+            output: ReadyOutput {
+                index: pts as usize,
+                pts_us: pts,
+            },
+        }
+    }
+    #[test]
+    fn balanced_discards_only_surplus_decoded_output_and_retires_old_epoch_metadata() {
+        let mut display = DisplayTimeline::new(true);
+        display.update(7, 9_876_543_210, 16_666_666);
+        let mut pair = PairPresentationCoordinator::new(60);
+        pair.set_display_timeline(display);
+        pair.push_ready(TileSide::Left, ready(1), 9_876_543_211);
+        let SyncDecision::Discard { commands } =
+            pair.push_ready(TileSide::Left, ready(2), 9_876_543_212)
+        else {
+            panic!("surplus decoded output must be returned")
+        };
+        assert_eq!(
+            commands,
+            vec![WorkerCommand::Discard {
+                side: TileSide::Left,
+                output: ready(1).output
+            }]
+        );
+        assert_eq!(pair.pending_count(), 1);
+        assert!(matches!(
+            pair.expire(9_880_000_000),
+            SyncDecision::PresentMany { .. }
+        ));
+        display.update(9, 1_000_000_001, 8_333_333);
+        pair.set_display_timeline(display);
+        assert_eq!(
+            pair.push_ready(TileSide::Right, ready(2), 1_000_000_002),
+            SyncDecision::Wait
+        );
+        let SyncDecision::PresentMany { commands } = pair.expire(1_001_000_002) else {
+            panic!("new epoch")
+        };
+        assert!(matches!(
+            commands[0],
+            WorkerCommand::PresentAt {
+                target_present_ns: 1_008_333_334,
+                ..
+            }
+        ));
     }
 }

@@ -2,10 +2,32 @@
 
 set -euo pipefail
 
+if [[ -v LEFTCAR_BENCHMARK_PROFILE || -v LEFTCAR_BENCHMARK_ROOT ]]; then
+  print -u2 "The normal-app updater cannot install benchmark profiles. Use bun run build -- host-macos-internal."
+  exit 2
+fi
+
 tool_dir=${0:A:h}
 repo_root=${tool_dir:h}
 host_dir="$repo_root/apps/host-desktop"
-built_app="$host_dir/src-tauri/target/release/bundle/macos/Leftcar Host.app"
+# Resolve the same locked Cargo output used by the actual invocation. Explicit
+# native --target prevents CARGO_BUILD_TARGET/config from selecting another tree.
+host_plan=("${(@0)$(bun "$repo_root/tools/build.host-plan.mjs" "$host_dir/src-tauri" "Leftcar Host")}")
+if (( ${#host_plan} != 10 )); then
+  print -u2 "Could not resolve the Host build plan."
+  exit 1
+fi
+export CARGO_TARGET_DIR="$host_plan[1]"
+built_app="$host_plan[2]"
+host_build_args=("${host_plan[@]:2}")
+if [[ ${1:-} == --print-build-plan ]]; then
+  printf '%s\0' "$CARGO_TARGET_DIR" "$built_app" "${host_build_args[@]}"
+  exit 0
+fi
+if (( $# != 0 )); then
+  print -u2 "Usage: dev-host-macos.zsh [--print-build-plan]"
+  exit 2
+fi
 installed_app="/Applications/Leftcar Host.app"
 process_name="leftcar-host-desktop"
 shim_output="$repo_root/native/macos-capture-shim/libleftcar_capture.dylib"
@@ -37,9 +59,7 @@ verify_same_shim() {
 "$repo_root/tools/build-macos-capture-shim.zsh" library "$shim_output"
 
 cd "$host_dir"
-bun run tauri build \
-  --config src-tauri/tauri.macos.conf.json \
-  --bundles app
+bun run tauri build "${host_build_args[@]}"
 
 if [[ ! -d "$built_app" ]]; then
   print -u2 "Signed Host app was not produced at: $built_app"
@@ -82,15 +102,9 @@ if /usr/bin/pgrep -x "$process_name" >/dev/null 2>&1; then
   /usr/bin/pkill -TERM -x "$process_name"
 fi
 
-# ditto merges into an existing bundle without deleting stale files; a leftover
-# resource that the fresh seal does not cover fails strict codesign
-# verification. Remove the old bundle first (the Screen Recording approval
-# follows the stable designated requirement, not the directory inode).
-if [[ -d "$installed_app" ]]; then
-  /bin/rm -rf "$installed_app"
-fi
-
-/usr/bin/ditto "$built_app" "$installed_app"
+# Stage and verify before moving the old app. Keep its verified bundle for
+# rollback; the replacement helper restores it automatically on failure.
+bun "$repo_root/tools/build.bundle.mjs" "$built_app" "$installed_app"
 verify_same_shim "$shim_output" "$installed_shim" "Installed Host"
 /usr/bin/codesign --verify --deep --strict "$installed_app"
 /usr/bin/open "$installed_app"

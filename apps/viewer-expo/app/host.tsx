@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,9 +14,18 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
-import { connectHost, controlClient, controlTarget, disconnectHost } from "../src/session";
+import {
+  beginHostSelection,
+  isHostSelectionCurrent,
+  isRequestContextCurrent,
+  type SessionRequestContext,
+  captureRequestContext,
+  connectHost,
+  controlTarget,
+  disconnectHost,
+} from "../src/session";
 import {
   formatErrorMessage,
   isUnauthorizedError,
@@ -25,6 +34,7 @@ import {
 import { DEFAULT_CONTROL_PORT } from "../src/defaults";
 import { handleUnauthorized } from "../src/connect-flow";
 import {
+  clearStoredCredential,
   clearToken,
   formatHostEndpoint,
   getStoredToken,
@@ -35,7 +45,7 @@ import {
   clearRecentHosts,
   getRecentHosts,
   removeRecentHost,
-  saveRecentHost,
+  saveRecentHostStrict,
   type RecentHostItem,
 } from "../src/recent-hosts";
 import {
@@ -45,6 +55,12 @@ import {
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
+
+interface HostConnectionAction {
+  controller: AbortController;
+  context: SessionRequestContext | null;
+  completed: boolean;
+}
 
 type NsdNative = {
   startDiscovery(): void;
@@ -532,14 +548,25 @@ export default function Host() {
   );
 
   const [ip, setIp] = useState("");
-  const [busy, setBusy] = useState(false);
   const [connectingTarget, setConnectingTarget] = useState<string | null>(null);
+  const busy = connectingTarget !== null;
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundHost>>({});
   const [hasStoredToken, setHasStoredToken] = useState(false);
   const [recentHosts, setRecentHosts] = useState<RecentHostItem[]>([]);
   const [showTroubleshoot, setShowTroubleshoot] = useState(false);
   const [discoverySettled, setDiscoverySettled] = useState(false);
+
+  const connectionAction = useRef<HostConnectionAction | null>(null);
+  useFocusEffect(useCallback(() => {
+    setConnectingTarget(null);
+    return () => {
+      const action = connectionAction.current;
+      connectionAction.current = null;
+      action?.controller.abort();
+      if (action?.context && !action.completed) disconnectHost(action.context);
+    };
+  }, []));
 
   useEffect(() => {
     const timer = setTimeout(
@@ -550,9 +577,12 @@ export default function Host() {
   }, []);
 
   useEffect(() => {
-    // 토큰은 호스트 엔드포인트별로 저장된다 — 현재 제어 세션 대상의 키만 본다.
+    // 검증된 세션은 stable identity 자격 증명을 우선 본다. USB/레거시처럼
+    // identity가 없을 때만 엔드포인트 저장소를 조회한다.
+    const context = captureRequestContext();
     const target = controlTarget();
-    if (target) void getStoredToken(target).then((token) => setHasStoredToken(!!token));
+    if (context?.credential) setHasStoredToken(true);
+    else if (target) void getStoredToken(target).then((token) => setHasStoredToken(!!token));
     void getRecentHosts().then(setRecentHosts);
   }, []);
 
@@ -565,9 +595,15 @@ export default function Host() {
         text: t.viewer.deleteHost,
         style: "destructive",
         onPress: () => {
+          const context = captureRequestContext();
           const target = controlTarget();
-          void (target ? clearToken(target) : Promise.resolve()).then(() => {
-            disconnectHost();
+          const clear = context?.credential
+            ? clearStoredCredential(context.credential)
+            : target
+              ? clearToken(target)
+              : Promise.resolve();
+          void clear.then(() => {
+            disconnectHost(context ?? undefined);
             setHasStoredToken(false);
           });
         },
@@ -612,38 +648,41 @@ export default function Host() {
   }, [ip]);
 
   const doConnect = useCallback(async (target: string, port = DEFAULT_CONTROL_PORT) => {
-    setBusy(true);
+    connectionAction.current?.controller.abort();
+    const action: HostConnectionAction = { controller: new AbortController(), context: null, completed: false };
+    connectionAction.current = action;
+    const selection = beginHostSelection();
+    const cancelSelection = () => action.controller.abort();
+    selection.signal.addEventListener("abort", cancelSelection, { once: true });
+    const isCurrent = () => connectionAction.current === action &&
+      !action.controller.signal.aborted && isHostSelectionCurrent(selection);
     setConnectingTarget(target);
     setError(null);
     try {
-      if (!isTrustedHost(target)) {
-        throw new Error(t.viewer.trustedHostError);
-      }
-      let lastError: unknown = null;
+      if (!isTrustedHost(target)) throw new Error(t.viewer.trustedHostError);
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (!isCurrent()) return;
         try {
-          await connectHost(target, port);
-          lastError = null;
+          await connectHost(target, port, { selection, signal: action.controller.signal });
           break;
         } catch (e) {
-          lastError = e;
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-          }
+          if (!isCurrent() || (e instanceof Error && e.name === "AbortError")) return;
+          if (attempt === 2) throw e;
+          await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
         }
       }
-      if (lastError) throw lastError;
-
-      // Save to recent hosts on successful network connection
-      const matched = Object.values(found).find((h) => h.host === target);
-      void saveRecentHost(target, port, matched?.name).then(setRecentHosts);
-
+      if (!isCurrent()) return;
+      const context = captureRequestContext();
+      if (!context || !isRequestContextCurrent(context)) return;
+      action.context = context;
       try {
-        await controlClient()?.request<CatalogView>("getCatalog");
-        setHasStoredToken(true);
+        await context.client.request<CatalogView>("getCatalog");
       } catch (e) {
+        if (!isCurrent() || !isRequestContextCurrent(context)) return;
         if (isUnauthorizedError(e)) {
           await handleUnauthorized({
+            context,
+            signal: action.controller.signal,
             beforeNavigate: () => setHasStoredToken(false),
             navigate: { endpoint: formatHostEndpoint(target, port) },
           });
@@ -651,12 +690,26 @@ export default function Host() {
         }
         throw e;
       }
+      if (!isCurrent() || !isRequestContextCurrent(context)) return;
+      const matched = Object.values(found).find((h) => h.host === target);
+      // Recent-host persistence is best effort, but its late UI publication and
+      // navigation still belong to this exact action and authenticated context.
+      const recent = await saveRecentHostStrict(target, port, matched?.name, undefined, action.controller.signal)
+        .catch(() => null);
+      if (!isCurrent() || !isRequestContextCurrent(context)) return;
+      if (recent) setRecentHosts(recent);
+      setHasStoredToken(true);
+      action.completed = true;
       router.push("/catalog");
     } catch (e) {
-      setError(formatErrorMessage(e));
+      if (isCurrent()) setError(formatErrorMessage(e));
     } finally {
-      setBusy(false);
-      setConnectingTarget(null);
+      selection.signal.removeEventListener("abort", cancelSelection);
+      if (action.context && !action.completed) disconnectHost(action.context);
+      if (connectionAction.current === action) {
+        connectionAction.current = null;
+        setConnectingTarget(null);
+      }
     }
   }, [found, t]);
 
@@ -684,6 +737,7 @@ export default function Host() {
         style={styles.root}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         {error && (
           <View style={styles.errorBlock}>

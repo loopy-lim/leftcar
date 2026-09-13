@@ -73,6 +73,8 @@ extension CaptureSession {
 
     @discardableResult
     func setupScreenCaptureKit(filter: SCContentFilter) -> Bool {
+        guard sourceAuthorization?.begin() ?? true else { setLastError("source authorization revoked"); return false }
+        defer { sourceAuthorization?.end() }
         inputLock.lock()
         if #available(macOS 14.0, *) {
             inputBounds = filter.contentRect
@@ -194,6 +196,8 @@ extension CaptureSession {
 
     @discardableResult
     func setupCGDisplayStream(displayID: CGDirectDisplayID) -> Bool {
+        guard sourceAuthorization?.begin() ?? true else { setLastError("source authorization revoked"); return false }
+        defer { sourceAuthorization?.end() }
         inputLock.lock()
         inputBounds = CGDisplayBounds(displayID)
         inputLock.unlock()

@@ -15,8 +15,9 @@ pub(super) fn queue_reassembled_frame(
     completed_count: &mut usize,
     peer: std::net::SocketAddr,
     reassembled: ReassembledFrame,
+    reassembler: &FrameReassembler,
 ) {
-    for completed in frame_sequencer.push(reassembled) {
+    for completed in frame_sequencer.push_reassembled(reassembled, reassembler) {
         let frame = FramePacket {
             id: completed.id,
             au: completed.au,
@@ -80,6 +81,7 @@ pub(super) fn queue_restored_fragments(
                 completed_count,
                 peer,
                 reassembled,
+                reassembler,
             );
         }
     }
@@ -257,5 +259,6 @@ pub(super) fn queue_fragment_packet(
         completed_count,
         peer,
         reassembled,
+        reassembler,
     );
 }

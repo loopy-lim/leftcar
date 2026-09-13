@@ -51,13 +51,16 @@ vi.mock("./control", () => {
 });
 
 import * as SecureStore from "expo-secure-store";
-import { connect } from "./control";
+import { connect, type ControlClient } from "./control";
 import type { QrPayload } from "./pairing";
 import {
   clearToken,
   deviceName,
   getDeviceId,
   getStoredToken,
+  getStoredCredential,
+  clearStoredCredential,
+  createPairingAttempt,
   isTrustedHost,
   isPairingRejectedError,
   isPairingUnsupportedError,
@@ -85,6 +88,22 @@ function makePayload(): QrPayload {
 
 const TOKEN_64HEX = "a".repeat(64);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function makeQrClient(): ControlClient {
+  return {
+    request: vi.fn(async () => ({ status: "pending" })) as ControlClient["request"],
+    close: vi.fn(),
+    hostKey: HOST_KEY,
+  };
+}
+
 /** pairing.ts의 v2 키 규칙(호스트는 SecureStore 허용 문자로만 구성된다). */
 function tokenKeyOf(host: string, port: number): string {
   return `leftcar.token.v2.${host}.${port}`;
@@ -93,6 +112,12 @@ function tokenKeyOf(host: string, port: number): string {
 beforeEach(() => {
   store.clear();
   vi.clearAllMocks();
+  vi.mocked(SecureStore.setItemAsync).mockImplementation(async (key, value) => {
+    store.set(key, value);
+  });
+  vi.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => {
+    store.delete(key);
+  });
 });
 
 afterEach(() => {
@@ -291,6 +316,157 @@ describe("pairing code readiness", () => {
 });
 
 describe("token storage", () => {
+  it("a lookup paused before serialization cannot overwrite a newer same-host pairing", async () => {
+    const endpoint = { host: "192.168.1.5", port: 7777 };
+    const identityKey = `leftcar.token.v3.${HOST_KEY}`;
+    const endpointKey = tokenKeyOf(endpoint.host, endpoint.port);
+    const staleToken = "a".repeat(64);
+    const freshToken = "b".repeat(64);
+    store.set(identityKey, staleToken);
+    store.set(endpointKey, staleToken);
+
+    const identityRead = deferred<void>();
+    const releaseIdentityRead = deferred<void>();
+    let pauseIdentityRead = true;
+    vi.mocked(SecureStore.getItemAsync).mockImplementation(async (key) => {
+      if (key === identityKey && pauseIdentityRead) {
+        pauseIdentityRead = false;
+        identityRead.resolve();
+        await releaseIdentityRead.promise;
+        return staleToken;
+      }
+      return store.get(key) ?? null;
+    });
+
+    const staleLookup = getStoredCredential(endpoint, HOST_KEY);
+    await identityRead.promise;
+
+    requestMock.mockResolvedValueOnce({ token: freshToken });
+    vi.mocked(connect).mockResolvedValueOnce({
+      request: requestMock,
+      close: closeMock,
+      hostKey: HOST_KEY,
+    });
+    const freshPairing = pairWithHostByCode(endpoint.host, endpoint.port, "123456");
+    await Promise.resolve();
+    // The lookup owns the serialized read/migration boundary, so pairing waits
+    // instead of committing T2 underneath an already captured T1.
+    expect(store.get(identityKey)).toBe(staleToken);
+
+    releaseIdentityRead.resolve();
+    await staleLookup;
+    await freshPairing;
+
+    expect(store.get(identityKey)).toBe(freshToken);
+    expect(store.get(endpointKey)).toBe(freshToken);
+  });
+
+  it("prefers the stable identity token only after verification and refreshes its endpoint alias", async () => {
+    const identityToken = "b".repeat(64);
+    store.set(`leftcar.token.v3.${HOST_KEY}`, identityToken);
+    store.set(tokenKeyOf("192.168.1.99", 7777), TOKEN_64HEX);
+
+    expect(
+      await getStoredCredential({ host: "192.168.1.99", port: 7777 }, HOST_KEY),
+    ).toMatchObject({ token: identityToken, hostKey: HOST_KEY });
+    expect(await getStoredToken({ host: "192.168.1.99", port: 7777 })).toBe(identityToken);
+  });
+
+  it("safely migrates an endpoint token after verification without deleting the endpoint key", async () => {
+    const endpoint = { host: "192.168.1.99", port: 7777 };
+    store.set(tokenKeyOf(endpoint.host, endpoint.port), TOKEN_64HEX);
+
+    const credential = await getStoredCredential(endpoint, HOST_KEY);
+
+    expect(credential).toMatchObject({ token: TOKEN_64HEX, hostKey: HOST_KEY });
+    expect(store.get(tokenKeyOf(endpoint.host, endpoint.port))).toBe(TOKEN_64HEX);
+    expect(store.get(`leftcar.token.v3.${HOST_KEY}`)).toBe(TOKEN_64HEX);
+    expect(store.get("leftcar.recent_hosts")).toContain(HOST_KEY);
+  });
+
+  it("keeps a different verified host identity isolated when clearing A", async () => {
+    const hostKeyB = "C".repeat(43);
+    store.set(`leftcar.token.v3.${HOST_KEY}`, TOKEN_64HEX);
+    store.set(`leftcar.token.v3.${hostKeyB}`, "b".repeat(64));
+    const credentialA = await getStoredCredential(
+      { host: "192.168.1.5", port: 7777 },
+      HOST_KEY,
+    );
+
+    await clearStoredCredential(credentialA!);
+
+    expect(store.get(`leftcar.token.v3.${HOST_KEY}`)).toBeUndefined();
+    expect(store.get(`leftcar.token.v3.${hostKeyB}`)).toBe("b".repeat(64));
+  });
+
+  it("a stale credential incarnation cannot clear a newly re-paired token for the same host", async () => {
+    const endpoint = { host: "192.168.1.5", port: 7777 };
+    store.set(`leftcar.token.v3.${HOST_KEY}`, TOKEN_64HEX);
+    store.set(tokenKeyOf(endpoint.host, endpoint.port), TOKEN_64HEX);
+    const stale = await getStoredCredential(endpoint, HOST_KEY);
+    expect(stale).not.toBeNull();
+
+    const fresh = "c".repeat(64);
+    store.set(`leftcar.token.v3.${HOST_KEY}`, fresh);
+    store.set(tokenKeyOf(endpoint.host, endpoint.port), fresh);
+    await clearStoredCredential(stale!);
+
+    expect(store.get(`leftcar.token.v3.${HOST_KEY}`)).toBe(fresh);
+    expect(store.get(tokenKeyOf(endpoint.host, endpoint.port))).toBe(fresh);
+  });
+
+  it("rolls identity, endpoint, and alias persistence back together on failure", async () => {
+    const endpointKey = tokenKeyOf("192.168.1.5", 7777);
+    const identityKey = `leftcar.token.v3.${HOST_KEY}`;
+    const recentKey = "leftcar.recent_hosts";
+    const previousRecent = JSON.stringify([{ host: "192.168.1.5", port: 7777, lastConnected: 1 }]);
+    store.set(endpointKey, TOKEN_64HEX);
+    store.set(identityKey, TOKEN_64HEX);
+    store.set(recentKey, previousRecent);
+    requestMock.mockResolvedValue({ token: "c".repeat(64) });
+    vi.mocked(connect).mockResolvedValueOnce({
+      request: requestMock,
+      close: closeMock,
+      hostKey: HOST_KEY,
+    });
+    let failed = false;
+    vi.mocked(SecureStore.setItemAsync).mockImplementation(async (key, value) => {
+      if (key === recentKey && !failed) {
+        failed = true;
+        throw new Error("recent alias write failed");
+      }
+      store.set(key, value);
+    });
+
+    await expect(
+      pairWithHostByCode("192.168.1.5", 7777, "123456"),
+    ).rejects.toThrow("recent alias write failed");
+
+    expect(store.get(endpointKey)).toBe(TOKEN_64HEX);
+    expect(store.get(identityKey)).toBe(TOKEN_64HEX);
+    expect(store.get(recentKey)).toBe(previousRecent);
+  });
+
+  it("a cancelled pairing lifetime rolls back credentials persisted before connect", async () => {
+    const attempt = createPairingAttempt();
+    requestMock.mockResolvedValue({ token: TOKEN_64HEX });
+    vi.mocked(connect).mockResolvedValueOnce({
+      request: requestMock,
+      close: closeMock,
+      hostKey: HOST_KEY,
+    });
+
+    await pairWithHostByCode("192.168.1.5", 7777, "123456", { attempt });
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBe(TOKEN_64HEX);
+    expect(store.get(`leftcar.token.v3.${HOST_KEY}`)).toBe(TOKEN_64HEX);
+
+    await attempt.cancel();
+
+    expect(store.get(tokenKeyOf("192.168.1.5", 7777))).toBeUndefined();
+    expect(store.get(`leftcar.token.v3.${HOST_KEY}`)).toBeUndefined();
+    expect(store.get("leftcar.recent_hosts")).toBeUndefined();
+  });
+
   it("getStoredToken_none_returns_null", async () => {
     expect(await getStoredToken({ host: "192.168.1.5", port: 7777 })).toBeNull();
   });
@@ -330,6 +506,22 @@ describe("deviceName", () => {
 });
 
 describe("approval-based QR pairing", () => {
+  it("cancellation during the approval handshake closes the late client without issuing pair", async () => {
+    const attempt = createPairingAttempt();
+    const connected = deferred<ReturnType<typeof makeQrClient>>();
+    const qrClient = makeQrClient();
+    vi.mocked(connect).mockImplementationOnce(() => connected.promise);
+
+    const pending = pairWithHostApproval(makePayload(), { attempt, pollMs: 1 });
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
+    await attempt.cancel();
+    connected.resolve(qrClient);
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(qrClient.request).not.toHaveBeenCalled();
+    expect(qrClient.close).toHaveBeenCalledTimes(1);
+  });
+
   it("polls pending until the host completes approval, then stores the token", async () => {
     requestMock
       .mockResolvedValueOnce({ status: "pending" })

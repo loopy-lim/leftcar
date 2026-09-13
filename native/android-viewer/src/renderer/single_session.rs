@@ -58,31 +58,6 @@ mod runtime;
 
 pub(crate) use runtime::spawn_live_stream_renderer;
 
-pub(crate) fn suspend_live_stream_renderer(instance_str: &str) {
-    let control = active_renderer(instance_str);
-    if let Some(control) = control {
-        control.suspend.store(true, Ordering::SeqCst);
-        // The socket read timeout is 100 ms. Wait until the decoder has been
-        // dropped before releasing the native window reference.
-        for _ in 0..40 {
-            if control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-    }
-}
-
-pub(crate) fn stop_live_stream_renderer(instance_str: &str, send_bye: bool) {
-    let control = active_renderer(instance_str);
-    if let Some(control) = control {
-        // Activity.onDestroy follows a host-initiated finish. Preserve the
-        // renderer's earlier decision not to send BYE back to a host that has
-        // already torn the session down.
-        let should_send_bye = send_bye && control.termination_reason() < 0;
-        control.send_bye.store(should_send_bye, Ordering::SeqCst);
-        control.suspend.store(false, Ordering::SeqCst);
-        control.stop.store(true, Ordering::SeqCst);
-        wait_for_renderer(&control);
-    }
+pub(crate) fn stop_live_stream_renderer(instance_str: &str, send_bye: bool) -> bool {
+    active_renderer(instance_str).is_none_or(|control| stop_renderer(&control, send_bye))
 }

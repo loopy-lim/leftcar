@@ -7,7 +7,7 @@ import ScreenCaptureKit
 struct SystemAudioCandidate {
     let handle: UInt32
     let screenCaptureKit: Bool
-    let viewerKey: UInt32
+    let viewerKey: String
 }
 
 /// Exactly one system-audio stream per viewer device: the lowest-handle live
@@ -16,7 +16,7 @@ struct SystemAudioCandidate {
 /// the same system audio and the viewer would hear everything twice.
 func systemAudioOwnerHandle(
     candidates: [SystemAudioCandidate],
-    viewerKey: UInt32
+    viewerKey: String
 ) -> UInt32? {
     candidates
         .filter { $0.screenCaptureKit && $0.viewerKey == viewerKey }
@@ -40,14 +40,27 @@ private func projectedCandidates(_ registry: [UInt32: CaptureSession]) -> [Syste
 /// second, so a datagram lost after a toggle or a host restart heals without
 /// an ACK plane, and the set needs no expiry: a stale key is harmless while
 /// no live session carries it.
-private var systemAudioMutedKeys: Set<UInt32> = []
+private var systemAudioMutedKeys: Set<String> = []
+private var systemAudioOpusKeys: Set<String> = []
 private let systemAudioMuteLock = NSLock()
 
 /// Whether the viewer behind `key` still wants the system-audio plane.
-func systemAudioDeliveryEnabled(forKey key: UInt32) -> Bool {
+func systemAudioDeliveryEnabled(forKey key: String) -> Bool {
     systemAudioMuteLock.lock()
     defer { systemAudioMuteLock.unlock() }
     return !systemAudioMutedKeys.contains(key)
+}
+
+func systemAudioOpusPreferred(forKey key: String) -> Bool {
+    systemAudioMuteLock.lock()
+    defer { systemAudioMuteLock.unlock() }
+    return systemAudioOpusKeys.contains(key)
+}
+
+private func setSystemAudioOpusPreferred(_ opus: Bool, viewerKey: String) {
+    systemAudioMuteLock.lock()
+    if opus { systemAudioOpusKeys.insert(viewerKey) } else { systemAudioOpusKeys.remove(viewerKey) }
+    systemAudioMuteLock.unlock()
 }
 
 /// Viewer opt-in (SNDON) or opt-out (SNDOFF) of the system-audio plane,
@@ -55,14 +68,14 @@ func systemAudioDeliveryEnabled(forKey key: UInt32) -> Bool {
 /// that viewer re-applies its stream configuration: only the owner's
 /// `capturesAudio` matters, and updateConfiguration applies it live without
 /// a session restart.
-func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: UInt32) {
+func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: String) {
     systemAudioMuteLock.lock()
     let changed = enabled
         ? systemAudioMutedKeys.remove(viewerKey) != nil
         : systemAudioMutedKeys.insert(viewerKey).inserted
     systemAudioMuteLock.unlock()
     guard changed else { return }
-    NSLog("Leftcar system audio muted=%d viewerKey=%u", enabled ? 0 : 1, viewerKey)
+    NSLog("Leftcar system audio muted=%d viewerKey=%@", enabled ? 0 : 1, viewerKey)
     let sessions = withRegistry { registry in
         registry.values.filter { $0.viewerAddressKey == viewerKey }
     }
@@ -71,16 +84,16 @@ func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: UInt32) {
 
 /// True only while a session may capture: it must hold the viewer's audio
 /// plane and the viewer must not have muted it.
-func shouldCaptureSystemAudio(owner: Bool, viewerKey: UInt32) -> Bool {
-    owner && systemAudioDeliveryEnabled(forKey: viewerKey)
+func shouldCaptureSystemAudio(owner: Bool, viewerKey: String) -> Bool {
+    benchmarkSystemAudioAllowed() && owner && systemAudioDeliveryEnabled(forKey: viewerKey)
 }
 
 extension CaptureSession {
     /// Viewer identity for shared-resource arbitration. Sessions streaming
     /// different displays to the same device share one audio plane; sessions
     /// to different devices each keep their own.
-    var viewerAddressKey: UInt32 {
-        targetAddr.sin_addr.s_addr
+    var viewerAddressKey: String {
+        authenticatedOwner ?? "legacy-ip:\(targetAddr.sin_addr.s_addr)"
     }
 
     func isSystemAudioOwner() -> Bool {
@@ -103,6 +116,9 @@ extension CaptureSession {
         stateLock.lock()
         let live = running && !stopRequested && stream != nil
         stateLock.unlock()
+        if !shouldCaptureSystemAudio(owner: isSystemAudioOwner(), viewerKey: viewerAddressKey) {
+            retireAudioEncoder()
+        }
         guard live else { return }
         NSLog(
             "Leftcar system audio owner %@ capturesAudio=%d",
@@ -118,14 +134,28 @@ extension CaptureSession {
         )
     }
 
+    private func setCodecIfCurrentOwner(_ opus: Bool) {
+        // Membership/owner validation and preference publication share the
+        // registry critical section; retirement cannot interleave between them.
+        withRegistry { registry in
+            guard registry[sessionHandle] === self,
+                systemAudioOwnerHandle(candidates: projectedCandidates(registry), viewerKey: viewerAddressKey) == sessionHandle else { return }
+            setSystemAudioOpusPreferred(opus, viewerKey: viewerAddressKey)
+        }
+    }
+
     /// SNDOFF mutes the audio plane; SNDON restores it. Any session aimed at
     /// the viewer may carry the command — the toggle is per viewer, so the
     /// session that owns the plane obeys even when a sibling display's
     /// session received the datagram.
     func handleSystemAudioCommand(_ command: Data) {
-        guard backend == .screenCaptureKit else { return }
+        guard backend == .screenCaptureKit, withRegistry({ $0[sessionHandle] === self }) else { return }
         if command == Data("SNDON".utf8) {
             setSystemAudioDeliveryEnabled(true, viewerKey: viewerAddressKey)
+        } else if command == Data("SNDA1O".utf8) {
+            setCodecIfCurrentOwner(true)
+        } else if command == Data("SNDA1P".utf8) {
+            setCodecIfCurrentOwner(false)
         } else if command == Data("SNDOFF".utf8) {
             setSystemAudioDeliveryEnabled(false, viewerKey: viewerAddressKey)
         }
@@ -143,10 +173,19 @@ func transferSystemAudioOwnership(afterRemoving removed: CaptureSession) {
         guard let handle = systemAudioOwnerHandle(
             candidates: projectedCandidates(reg),
             viewerKey: key
-        ), handle > removed.sessionHandle else { return nil }
+        ) else { return nil }
         return reg[handle]
     }
-    guard let successor else { return }
+    guard let successor else {
+        // A future legacy peer at this address has not negotiated Opus.
+        // Preserve preference only while a surviving current owner exists.
+        systemAudioMuteLock.lock()
+        systemAudioMutedKeys.remove(key)
+        systemAudioOpusKeys.remove(key)
+        systemAudioMuteLock.unlock()
+        return
+    }
+    guard successor.sessionHandle > removed.sessionHandle else { return }
     NSLog(
         "Leftcar system audio ownership transfer %@ -> %@",
         removed.targetLabel,

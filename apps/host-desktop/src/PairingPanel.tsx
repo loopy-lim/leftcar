@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import QRCode from "qrcode";
+import { confirmSourceGrants, getPairedDeviceState, markSourceGrantsUncertain, receivePairedDeviceState, receiveRevokeOutcome, subscribePairedDeviceState, sourceGrantUncertaintyEpoch, type PairedDevice, type PairedDeviceState, type RevokeOutcome } from "./paired-device-state";
+import SourceGrantEditor, { type SourceGrantView } from "./SourceGrantEditor";
 import {
   AlertTriangle,
   Check,
@@ -32,11 +34,7 @@ interface PendingPairingView {
   device_name: string;
   requested_at: string;
 }
-interface PairedDevice {
-  device_id: string;
-  name: string;
-  paired_at: string;
-}
+
 
 interface ActiveSession {
   qrDataUrl: string;
@@ -285,6 +283,7 @@ function PendingApprovalCard({
 }
 
 function PairedDevicesSection({
+  onGrantsSaved,
   devices,
   revoking,
   language,
@@ -292,6 +291,7 @@ function PairedDevicesSection({
   onRevoke,
   onRevokeAll,
 }: {
+  onGrantsSaved: (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => Promise<void>;
   devices: PairedDevice[];
   revoking: string | null;
   language: SupportedLanguage;
@@ -321,7 +321,7 @@ function PairedDevicesSection({
       {devices.length > 0 ? (
         <div className="device-rows-container">
           {devices.map((device) => (
-            <div key={device.device_id} className="device-row-item">
+            <div key={device.source_grants.credentialId} className="device-row-item">
               <div className="device-row-main">
                 <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                   {device.name.toLowerCase().includes("pc") || device.name.toLowerCase().includes("mac") ? (
@@ -332,6 +332,7 @@ function PairedDevicesSection({
                   {device.name}
                 </span>
                 <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
+                <SourceGrantEditor deviceId={device.device_id} grants={device.source_grants} language={language} onSaved={onGrantsSaved} onFailure={markSourceGrantsUncertain} onSaving={sourceGrantUncertaintyEpoch} />
               </div>
               <button
                 onClick={() => onRevoke(device.device_id)}
@@ -359,7 +360,8 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const [session, setSession] = useState<ActiveSession | null>(null);
   const [starting, setStarting] = useState(false);
-  const [devices, setDevices] = useState<PairedDevice[]>([]);
+  const pairedState = useSyncExternalStore(subscribePairedDeviceState, getPairedDeviceState);
+  const devices = pairedState.devices;
   const [pendingRequests, setPendingRequests] = useState<PendingPairingView[]>([]);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -384,15 +386,20 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const refreshDevices = useCallback(async () => {
     try {
-      const list = await invoke<PairedDevice[]>("list_paired_devices");
-      if (list.length > deviceCountRef.current) {
+      const snapshot = await invoke<PairedDeviceState>("list_paired_device_state");
+      if (snapshot.devices.length > deviceCountRef.current) {
         setSession(null);
       }
-      setDevices(list);
+      receivePairedDeviceState(snapshot);
     } catch {
       // best effort
     }
   }, []);
+
+  const sourceGrantsSaved = useCallback(async (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => {
+    confirmSourceGrants(deviceId, grants, startedAtEpoch);
+    await refreshDevices();
+  }, [refreshDevices]);
 
   const startPairing = useCallback(async () => {
     setStarting(true);
@@ -457,7 +464,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       setRevoking(deviceId);
       setError(null);
       try {
-        await invoke("revoke_paired_device", { deviceId });
+        receiveRevokeOutcome(await invoke<RevokeOutcome>("revoke_paired_device", { deviceId }));
         await refreshDevices();
       } catch (e) {
         setError(connectionErrorMessage(e, t));
@@ -472,7 +479,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     setRevoking("all");
     setError(null);
     try {
-      await invoke("revoke_all_devices");
+      receiveRevokeOutcome(await invoke<RevokeOutcome>("revoke_all_devices"));
       await refreshDevices();
     } catch (e) {
       setError(connectionErrorMessage(e, t));
@@ -571,10 +578,10 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         />
       )}
 
-      {error && (
-        <div className={bannerAlertVariants({ tone: "danger" })}>
+      {(error || pairedState.administrativeError) && (
+        <div role="alert" className={bannerAlertVariants({ tone: "danger" })}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <AlertTriangle size={15} /> {error}
+            <AlertTriangle size={15} /> {[error, pairedState.administrativeError].filter(Boolean).join(" · ")}
           </span>
         </div>
       )}
@@ -616,6 +623,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       />
 
       <PairedDevicesSection
+        onGrantsSaved={sourceGrantsSaved}
         devices={devices}
         revoking={revoking}
         language={language}

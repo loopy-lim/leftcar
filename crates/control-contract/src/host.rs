@@ -257,6 +257,8 @@ pub struct CaptureBackendInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub index: u32,
     pub name: String,
     pub width: u32,
@@ -659,6 +661,7 @@ mod split_flow_contract_tests {
         assert_eq!(stats.split_wire_pairs_attempted, 600);
 
         let status = SessionView {
+            device_name: None,
             stats: stats.clone(),
             ..SessionView::default()
         };
@@ -686,6 +689,7 @@ mod split_flow_contract_tests {
 
         // status 계약도 그 값을 전달하며, None일 때는 와이어에서 생략된다.
         let status = SessionView {
+            device_name: None,
             stats: stats.clone(),
             ..SessionView::default()
         };
@@ -772,6 +776,8 @@ pub fn phase_a_encoder_experiments() -> Vec<EncoderExperimentInfo> {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartStreamInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub source_index: u32,
     pub viewer_port: u16,
     pub width: u32,
@@ -866,6 +872,8 @@ pub struct StartStreamOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconfigureStreamInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub session: u32,
     pub width: u32,
     pub height: u32,
@@ -927,6 +935,8 @@ pub struct StatusView {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
     pub session: u32,
     pub source_index: u32,
     pub source_name: String,
@@ -1101,6 +1111,7 @@ mod stream_control_tests {
     fn status_view_serializes() {
         let v = StatusView {
             sessions: vec![SessionView {
+                device_name: None,
                 session: 1,
                 source_index: 0,
                 source_name: "Main Display".into(),

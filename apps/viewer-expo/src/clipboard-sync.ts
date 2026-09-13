@@ -52,6 +52,8 @@ export interface ClipboardShareStore {
 export interface ClipboardSyncIo {
   /** 현재 제어 세션. 없으면 폴링 라운드를 건너뛴다. */
   getClient(): ClipboardSyncClient | null;
+  /** Optional native change signal. Returning null retains bounded polling. */
+  subscribeDeviceChanges?(listener: () => void): (() => void) | null;
   readDeviceClipboard(): Promise<string>;
   writeDeviceClipboard(text: string): Promise<void>;
   /** 기기 클립보드의 이미지(PNG base64). 없으면 null. */
@@ -62,8 +64,13 @@ export interface ClipboardSyncIo {
 /** expo-clipboard 기본 기기 입출력. 이 파일이 유일한 expo-clipboard 진입점이다. */
 export const deviceClipboardIo: Pick<
   ClipboardSyncIo,
-  "readDeviceClipboard" | "writeDeviceClipboard" | "readDeviceClipboardImage" | "writeDeviceClipboardImage"
+  "readDeviceClipboard" | "writeDeviceClipboard" | "readDeviceClipboardImage" | "writeDeviceClipboardImage" | "subscribeDeviceChanges"
 > = {
+  subscribeDeviceChanges: (listener) => {
+    if (typeof ExpoClipboard.addClipboardListener !== "function") return null;
+    const subscription = ExpoClipboard.addClipboardListener(listener);
+    return () => subscription.remove();
+  },
   readDeviceClipboard: async () => await ExpoClipboard.getStringAsync(),
   // setStringAsync는 boolean을 돌려주므로 void 계약으로 맞춘다.
   writeDeviceClipboard: async (text) => {
@@ -125,6 +132,11 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
 }
 
+function assertRoundActive(signal?: AbortSignal, isCurrent?: () => boolean): void {
+  throwIfAborted(signal);
+  if (isCurrent && !isCurrent()) throw abortError();
+}
+
 /** 저장된 토글 값 해석. 값이 없거나 판독 실패면 기본 꺼짐이다. */
 export function parseClipboardShare(raw: string | null): boolean {
   return raw === "1";
@@ -165,25 +177,29 @@ export async function pollHostClipboard(
   client: ClipboardSyncClient,
   io: ClipboardSyncIo,
   signal?: AbortSignal,
+  isCurrent?: () => boolean,
 ): Promise<ClipboardSyncState> {
+  assertRoundActive(signal, isCurrent);
   let result: HostClipboardResult;
   try {
     result = await client.request<HostClipboardResult>("getClipboard", {
       hash: state.lastHash,
     });
   } catch {
+    assertRoundActive(signal, isCurrent);
     // 전송 오류·게이트 거부는 다음 폴링에서 다시 시도한다.
     return state;
   }
   // 요청 대기 중 라운드가 취소됐을 수 있다 — 기기 쓰기로 넘어가지 않는다.
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   if (result.unchanged || !result.hash) {
     return state;
   }
   if (typeof result.imageBase64 === "string") {
-    throwIfAborted(signal);
+    assertRoundActive(signal, isCurrent);
     try {
       await io.writeDeviceClipboardImage(result.imageBase64);
+      assertRoundActive(signal, isCurrent);
     } catch {
       // 쓰기 실패는 상태를 갱신하지 않는다 — 다음 폴링이 재시도한다.
       return state;
@@ -198,9 +214,10 @@ export async function pollHostClipboard(
   if (typeof result.text !== "string") {
     return state;
   }
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   try {
     await io.writeDeviceClipboard(result.text);
+    assertRoundActive(signal, isCurrent);
   } catch {
     // 쓰기 실패는 상태를 갱신하지 않는다 — 다음 폴링이 같은 텍스트로 재시도한다.
     return state;
@@ -218,12 +235,13 @@ export async function pushDeviceClipboard(
   client: ClipboardSyncClient,
   io: ClipboardSyncIo,
   signal?: AbortSignal,
+  isCurrent?: () => boolean,
 ): Promise<ClipboardSyncState> {
   if (state.gateRejections >= CLIPBOARD_GATE_LATCH_LIMIT) {
     // 게이트 꺼짐 래치 — 설정 토글로 재무장할 때까지 푸시를 시도하지 않는다.
     return state;
   }
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   let device: string;
   try {
     device = await io.readDeviceClipboard();
@@ -231,12 +249,12 @@ export async function pushDeviceClipboard(
     return state;
   }
   // 읽기가 끝난 뒤에도 취소됐으면 밀어 올리지 않는다.
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   if (device.length === 0) {
     // 텍스트가 비어 있으면 이미지 클립보드를 본다(텍스트 우선). Android
     // 10+의 백그라운드 접근 거부는 빈 텍스트로 나타나는데, 빈 텍스트를
     // 밀면 호스트 클립보드가 지워지므로 빈 읽기는 이미지 조회 후 무시된다.
-    return pushDeviceImage(state, client, io, signal);
+    return pushDeviceImage(state, client, io, signal, isCurrent);
   }
   if (device === state.localText) {
     // 우리가 방금 쓴 텍스트(호스트에서 내려온 에코)다 — 다시 올리지 않는다.
@@ -247,7 +265,9 @@ export async function pushDeviceClipboard(
     return { ...state, localText: device };
   }
   try {
+    assertRoundActive(signal, isCurrent);
     await client.request("setClipboard", { text: device });
+    assertRoundActive(signal, isCurrent);
   } catch (error) {
     return isClipboardGateError(error) ? gateRejected(state) : state;
   }
@@ -266,15 +286,16 @@ async function pushDeviceImage(
   client: ClipboardSyncClient,
   io: ClipboardSyncIo,
   signal?: AbortSignal,
+  isCurrent?: () => boolean,
 ): Promise<ClipboardSyncState> {
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   let image: string | null;
   try {
     image = await io.readDeviceClipboardImage();
   } catch {
     return state;
   }
-  throwIfAborted(signal);
+  assertRoundActive(signal, isCurrent);
   if (!image) return state;
   const hash = imageClipboardHash(image);
   // 우리가 방금 호스트에서 내려받아 쓴 이미지(에코)다 — 다시 올리지 않는다.
@@ -282,7 +303,9 @@ async function pushDeviceImage(
     return state;
   }
   try {
+    assertRoundActive(signal, isCurrent);
     await client.request("setClipboard", { imageBase64: image });
+    assertRoundActive(signal, isCurrent);
   } catch (error) {
     return isClipboardGateError(error) ? gateRejected(state) : state;
   }
@@ -311,6 +334,12 @@ export function startClipboardSync(io: ClipboardSyncIo): ClipboardSyncLoop {
   // 진행 중 라운드의 취소 지점 — setEnabled(false)·stop()이 abort하면 그
   // 라운드는 이미 시작한 패킷을 제외한 나머지 읽기·쓰기·전송을 하지 않는다.
   let round: AbortController | null = null;
+  let disposeChanges: (() => void) | null = null;
+  let changeGeneration = 0;
+  let readGeneration = -1;
+  let lastLocalReadAt = 0;
+  let sourceClient: ClipboardSyncClient | null = null;
+  let listenerLifetime = 0;
 
   const tick = async () => {
     if (!enabled || inFlight) return;
@@ -320,8 +349,19 @@ export function startClipboardSync(io: ClipboardSyncIo): ClipboardSyncLoop {
     try {
       const client = io.getClient();
       if (!client) return;
-      state = await pollHostClipboard(state, client, io, controller.signal);
-      state = await pushDeviceClipboard(state, client, io, controller.signal);
+      if (sourceClient !== client) {
+        sourceClient = client;
+        readGeneration = -1;
+      }
+      const isCurrent = () => enabled && io.getClient() === client;
+      state = await pollHostClipboard(state, client, io, controller.signal, isCurrent);
+      if (!disposeChanges || readGeneration !== changeGeneration || Date.now() - lastLocalReadAt >= 30_000) {
+        const readingGeneration = changeGeneration;
+        state = await pushDeviceClipboard(state, client, io, controller.signal, isCurrent);
+        assertRoundActive(controller.signal, isCurrent);
+        readGeneration = readingGeneration;
+        lastLocalReadAt = Date.now();
+      }
     } catch {
       // AbortError(취소된 라운드)만 여기 온다 — 조용히 끝낸다.
     } finally {
@@ -337,9 +377,19 @@ export function startClipboardSync(io: ClipboardSyncIo): ClipboardSyncLoop {
       // 설정 변경은 게이트 꺼짐 래치의 재무장이다 — 사용자가 토글을 다시
       // 켜면 호스트 게이트가 바뀌었을 수 있으므로 푸시를 다시 시도한다.
       state = { ...state, gateRejections: 0 };
+      const lifetime = ++listenerLifetime;
       if (enabled) {
+        readGeneration = -1;
+        try {
+          disposeChanges = io.subscribeDeviceChanges?.(() => {
+            if (enabled && listenerLifetime === lifetime) changeGeneration++;
+          }) ?? null;
+        } catch { disposeChanges = null; }
         timer = setInterval(() => void tick(), CLIPBOARD_SYNC_INTERVAL_MS);
       } else {
+        disposeChanges?.();
+        disposeChanges = null;
+        sourceClient = null;
         round?.abort();
         if (timer !== null) {
           clearInterval(timer);

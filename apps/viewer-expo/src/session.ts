@@ -2,7 +2,12 @@ import { connect, type ControlClient } from "./control";
 import { DEFAULT_CONTROL_PORT } from "./defaults";
 import { markConnected } from "./auto-reconnect";
 import { LocalizedError } from "./localized-error";
-import { getStoredToken, isTrustedHost, type HostEndpoint } from "./pairing";
+import {
+  getStoredCredential,
+  isTrustedHost,
+  type HostEndpoint,
+  type StoredCredential,
+} from "./pairing";
 import { getPinnedHostKey, registerPinnedHostKey, rememberPinnedHostKey } from "./pinned-host-keys";
 import { getUsbState } from "./usb";
 
@@ -16,13 +21,61 @@ let hostAddr = "";
 let hostTarget = "";
 let hostPort = DEFAULT_CONTROL_PORT;
 let nextPort = 5001;
-let reconnectInFlight: Promise<ControlClient> | null = null;
+let reconnectInFlight: { generation: number; promise: Promise<ControlClient> } | null = null;
 /**
  * 연결 시도 세대. disconnect나 새 connectHost가 세대를 올리고, 늦게 끝나는
  * 이전 시도는 자기 세대가 최신이 아니면 소켓을 닫고 물러난다 — 대기 중이던
  * 연결이 이미 끊긴(또는 다른 호스트로 바뀐) 세션을 되살리지 않는다.
  */
 let connectGeneration = 0;
+let selectionCancellation = new AbortController();
+let activeContext: SessionRequestContext | null = null;
+const errorContexts = new WeakMap<object, SessionRequestContext>();
+
+export interface HostSelection {
+  readonly generation: number;
+  readonly signal: AbortSignal;
+}
+
+export interface SessionRequestContext {
+  readonly client: ControlClient;
+  readonly target: HostEndpoint;
+  readonly selectionGeneration: number;
+  /** Verified network identity; null for the endpoint-bound USB path. */
+  readonly identity: string | null;
+  /** Exact token incarnation cached by this socket. */
+  readonly credential: StoredCredential | null;
+}
+
+export interface ConnectHostOptions {
+  selection?: HostSelection;
+  signal?: AbortSignal;
+}
+
+function abortError(): Error {
+  const error = new Error("host selection superseded");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function assertSelectionCurrent(selection: HostSelection, signal?: AbortSignal): void {
+  if (signal?.aborted || selection.generation !== connectGeneration) throw abortError();
+}
+
+export function isHostSelectionCurrent(selection: HostSelection): boolean {
+  return selection.generation === connectGeneration;
+}
+
+/** Reserve a user-selection generation before any async discovery/storage work. */
+export function beginHostSelection(): HostSelection {
+  selectionCancellation.abort();
+  selectionCancellation = new AbortController();
+  return { generation: ++connectGeneration, signal: selectionCancellation.signal };
+}
 
 export function controlClient(): ControlClient | null {
   return client;
@@ -37,42 +90,114 @@ export function controlTarget(): HostEndpoint | null {
   return hostTarget ? { host: hostTarget, port: hostPort } : null;
 }
 
+/** Capture client, target, selection, and credential at the request's async origin. */
+export function captureRequestContext(): SessionRequestContext | null {
+  return activeContext;
+}
+
+export function isRequestContextCurrent(context: SessionRequestContext): boolean {
+  return activeContext === context &&
+    client === context.client &&
+    connectGeneration === context.selectionGeneration;
+}
+
+export function bindRequestContext(error: unknown, context: SessionRequestContext): void {
+  if ((typeof error === "object" && error !== null) || typeof error === "function") {
+    errorContexts.set(error as object, context);
+  }
+}
+
+export function requestContextForError(error: unknown): SessionRequestContext | null {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") return null;
+  return errorContexts.get(error as object) ?? null;
+}
+
 /**
  * 제어 소켓 하나를 연다. USB 액세서리가 붙어 있으면 루프백 포트를 먼저
  * 시도하고(호스트 앱 재시작에도 살아 있는 경로), 실패하면 네트워크로 폴백한다.
  * 두 경로 모두 이 대상 호스트의 토큰을 쓴다 — 액세서리는 대상의 프록시다.
  */
-async function openControl(target: string, port: number): Promise<ControlClient> {
+async function openControl(
+  target: string,
+  port: number,
+  signal?: AbortSignal,
+): Promise<{ client: ControlClient; credential: StoredCredential | null; identity: string | null }> {
+  const endpoint = { host: target, port };
   const usb = await getUsbState();
+  assertNotAborted(signal);
   if (usb.attached && usb.controlPort > 0) {
     try {
-      return await connect("127.0.0.1", usb.controlPort, 5000, () =>
-        getStoredToken({ host: target, port }),
+      const credential = await getStoredCredential(endpoint, null, signal);
+      const usbClient = await connect(
+        "127.0.0.1",
+        usb.controlPort,
+        5000,
+        async () => credential?.token ?? null,
       );
+      return { client: usbClient, credential, identity: null };
     } catch {
+      assertNotAborted(signal);
       // 루프백 실패는 네트워크 경로로 이어 시도한다.
     }
   }
-  return connect(
+  assertNotAborted(signal);
+  let verifiedHostKey: string | null = null;
+  let credentialPromise: Promise<StoredCredential | null> | null = null;
+  const networkClient = await connect(
     target,
     port,
     5000,
-    () => getStoredToken({ host: target, port }),
-    secureOptions(target, port),
+    async () => {
+      credentialPromise ??= getStoredCredential(endpoint, verifiedHostKey, signal);
+      return (await credentialPromise)?.token ?? null;
+    },
+    secureOptions(
+      target,
+      port,
+      (key) => {
+        verifiedHostKey = key;
+      },
+      signal,
+    ),
   );
+  try {
+    if (signal?.aborted) throw abortError();
+    verifiedHostKey = networkClient.hostKey ?? verifiedHostKey;
+    const credential = await getStoredCredential(endpoint, verifiedHostKey, signal);
+    // Credential migration owns the endpoint/identity/recent-host transaction.
+    // Only an unpaired connection needs this standalone TOFU persistence; doing
+    // it before migration would leave the alias committed if token migration
+    // later rolled back.
+    if (verifiedHostKey && !credential && !signal) {
+      await rememberPinnedHostKey(target, port, verifiedHostKey).catch(() => undefined);
+    }
+    credentialPromise = Promise.resolve(credential);
+    return { client: networkClient, credential, identity: verifiedHostKey };
+  } catch (error) {
+    networkClient.close();
+    throw error;
+  }
 }
 
-export async function connectHost(host: string, port = DEFAULT_CONTROL_PORT): Promise<ControlClient> {
+export async function connectHost(
+  host: string,
+  port = DEFAULT_CONTROL_PORT,
+  options: ConnectHostOptions = {},
+): Promise<ControlClient> {
   if (!isTrustedHost(host)) {
     throw new LocalizedError("trustedHostError");
   }
-  const generation = ++connectGeneration;
-  const c = await openControl(host, port);
-  if (generation !== connectGeneration) {
+  const selection = options.selection ?? beginHostSelection();
+  assertSelectionCurrent(selection, options.signal);
+  const opened = await openControl(host, port, options.signal);
+  const c = opened.client;
+  try {
+    assertSelectionCurrent(selection, options.signal);
+  } catch (error) {
     // 대기 중에 disconnect나 더 새로운 connectHost가 이겼다 — 늦게 도착한
     // 이 소켓은 닫고 상태는 그대로 둔다.
     c.close();
-    throw new LocalizedError("errGeneric");
+    throw error;
   }
   // Keep the previous connection alive until the replacement succeeds, then
   // release it so switching between multiple computers does not leak sockets.
@@ -81,32 +206,52 @@ export async function connectHost(host: string, port = DEFAULT_CONTROL_PORT): Pr
   hostAddr = `${host}:${port}`;
   hostTarget = host;
   hostPort = port;
+  activeContext = {
+    client: c,
+    target: { host, port },
+    selectionGeneration: selection.generation,
+    identity: opened.identity,
+    credential: opened.credential,
+  };
   markConnected();
   return c;
 }
 
 /** Reopen the control socket after the host app was restarted. */
-export async function reconnectHost(): Promise<ControlClient> {
-  if (!hostTarget) throw new LocalizedError("errNoReconnectTarget");
-  if (reconnectInFlight) return reconnectInFlight;
+export async function reconnectHost(
+  origin: SessionRequestContext | null = captureRequestContext(),
+): Promise<ControlClient> {
+  if (!origin) throw new LocalizedError("errNoReconnectTarget");
+  if (!isRequestContextCurrent(origin)) throw abortError();
+  if (reconnectInFlight?.generation === origin.selectionGeneration) {
+    return reconnectInFlight.promise;
+  }
 
-  reconnectInFlight = (async () => {
-    const generation = ++connectGeneration;
-    const previous = client;
-    const c = await openControl(hostTarget, hostPort);
-    if (generation !== connectGeneration) {
+  const promise = (async () => {
+    const previous = origin.client;
+    const opened = await openControl(origin.target.host, origin.target.port);
+    const c = opened.client;
+    if (!isRequestContextCurrent(origin)) {
       c.close();
-      throw new LocalizedError("errGeneric");
+      throw abortError();
     }
     if (previous && previous !== c) previous.close();
     client = c;
+    activeContext = {
+      client: c,
+      target: origin.target,
+      selectionGeneration: origin.selectionGeneration,
+      identity: opened.identity,
+      credential: opened.credential,
+    };
     markConnected();
     return c;
   })();
+  reconnectInFlight = { generation: origin.selectionGeneration, promise };
   try {
-    return await reconnectInFlight;
+    return await promise;
   } finally {
-    reconnectInFlight = null;
+    if (reconnectInFlight?.promise === promise) reconnectInFlight = null;
   }
 }
 
@@ -117,13 +262,16 @@ export async function reconnectHost(): Promise<ControlClient> {
 function secureOptions(
   host: string,
   port: number,
+  onVerified: (key: string) => void,
+  signal?: AbortSignal,
 ): { pinnedHostKey: string | null; onHostKey: (key: string) => void } {
   const pinned = getPinnedHostKey(host, port);
   return {
     pinnedHostKey: pinned,
     onHostKey: (key) => {
-      if (pinned) return;
-      rememberPinnedHostKey(host, port, key);
+      if (signal?.aborted) return;
+      onVerified(key);
+      if (!pinned) registerPinnedHostKey(host, port, key);
     },
   };
 }
@@ -160,9 +308,11 @@ export function allocPort(): number {
 }
 
 /** Terminate the active control session and clear client state. */
-export function disconnectHost(): void {
+export function disconnectHost(context?: SessionRequestContext): boolean {
+  if (context && !isRequestContextCurrent(context)) return false;
   // 대기 중인 connect/reconnect를 무효화한다 — 늦게 끝나는 시도가 상태를
   // 되살리지 못하게 세대를 올린다.
+  selectionCancellation.abort();
   connectGeneration += 1;
   if (client) {
     client.close();
@@ -170,5 +320,7 @@ export function disconnectHost(): void {
   }
   hostAddr = "";
   hostTarget = "";
+  activeContext = null;
   reconnectInFlight = null;
+  return true;
 }

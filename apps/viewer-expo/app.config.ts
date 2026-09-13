@@ -11,10 +11,16 @@ type LeftcarExpoConfig = ExpoConfig & {
   };
 };
 
+const benchmarkSlug = process.env.LEFTCAR_BENCHMARK_PROFILE;
+if (benchmarkSlug !== undefined && !/^[a-z][a-z0-9-]{0,31}$/.test(benchmarkSlug)) {
+  throw new Error("Invalid LEFTCAR_BENCHMARK_PROFILE");
+}
+const benchmarkSuffix = benchmarkSlug === undefined ? "" : `.benchmark.${benchmarkSlug.replaceAll("-", "_")}`;
+
 const config: LeftcarExpoConfig = {
-  name: "Leftcar Viewer",
-  slug: "leftcar-viewer",
-  scheme: "leftcar",
+  name: benchmarkSlug === undefined ? "Leftcar Viewer" : `Leftcar Benchmark ${benchmarkSlug}`,
+  slug: benchmarkSlug === undefined ? "leftcar-viewer" : `leftcar-benchmark-${benchmarkSlug}`,
+  scheme: benchmarkSlug === undefined ? "leftcar" : `leftcar-benchmark-${benchmarkSlug}`,
   version: "0.1.2",
   orientation: "default",
   userInterfaceStyle: "automatic",
@@ -25,7 +31,7 @@ const config: LeftcarExpoConfig = {
     backgroundColor: "#09090B",
   },
   android: {
-    package: "leftcar.ll3.kr",
+    package: `leftcar.ll3.kr${benchmarkSuffix}`,
     adaptiveIcon: {
       foregroundImage: "./assets/branding/leftcar-viewer-icon-foreground.png",
       monochromeImage: "./assets/branding/leftcar-viewer-icon-monochrome.png",

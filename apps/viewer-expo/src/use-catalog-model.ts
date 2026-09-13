@@ -8,9 +8,11 @@ import { currentTranslation } from "./language-store";
 import { interpolate } from "@leftcar/ui-tokens";
 import {
   isStreamPrepareError,
+  resolveReconfigureExperiment,
   reconfigurePreparedStream,
   startPreparedStream,
   type StreamLauncher,
+  type StreamControlRequest,
 } from "./launch-stream";
 import { handleUnauthorized } from "./connect-flow";
 import {
@@ -26,10 +28,12 @@ import {
 } from "./window-aspect-ratio";
 import {
   allocPorts,
+  captureRequestContext,
   controlClient,
   controlHost,
   disconnectHost,
   reconnectHost,
+  requestContextForError,
 } from "./session";
 import {
   STREAM_PROFILES,
@@ -60,11 +64,10 @@ import {
   streamTargetAfterResize,
 } from "./display-resize";
 import {
-  admissionStreamsFrom,
-  downgradedStreamTarget,
-  planAdmission,
+  deviceDecoderReservations,
   requestedDecoderShape,
 } from "./decoder-budget";
+import { ReservedStream, retryAbandonedDecoderCleanup } from "./reserved-stream";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
   deriveQualityState,
@@ -91,6 +94,22 @@ import {
 } from "./clipboard-sync";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
+
+function sameStreamLifetime(left: ActiveStream, right: ActiveStream): boolean {
+  return left.session === right.session && left.port === right.port &&
+    left.startedAt === right.startedAt && left.reservation === right.reservation;
+}
+
+/** Pin the selection, while permitting Task2's reconnect within that selection. */
+function requestForCurrentSelection(): StreamControlRequest {
+  const origin = captureRequestContext();
+  return <T>(command: string, args?: unknown) => {
+    if (!origin || captureRequestContext()?.selectionGeneration !== origin.selectionGeneration) {
+      return Promise.reject(new Error("Host selection changed; this stream operation was cancelled"));
+    }
+    return requestWithReconnect<T>(command, args);
+  };
+}
 
 export function useCatalogModel() {
   // 오류 문구는 발생 시점 언어를 따른다 — 훅 t를 넣으면 언어 전환마다
@@ -127,6 +146,12 @@ export function useCatalogModel() {
       active = false;
     };
   }, []);
+  useEffect(() => {
+    // Until this device-wide probe settles the pool admits one instance only.
+    // Keep launch reservation synchronous so unmount/selection cleanup cannot
+    // run between a capability await and publication of native ownership.
+    if (launcher) void deviceDecoderReservations.refreshCapability(launcher);
+  }, []);
   const [preferences, setPreferences] = useState<ViewerPreferences>(
     DEFAULT_VIEWER_PREFERENCES,
   );
@@ -139,6 +164,19 @@ export function useCatalogModel() {
   const [udpSettingsDirty, setUdpSettingsDirty] = useState(false);
   const [udpReconnecting, setUdpReconnecting] = useState(false);
   const host = controlHost();
+  const audioRequest = useRef(0);
+  const audioLifetimes = useRef(new Map<string, { stream: ActiveStream; successfulRequest: number }>());
+  const presentationRequest = useRef(0);
+  const presentationLifetimes = useRef(new Map<number, {
+    stream: ActiveStream;
+    successfulRequest: number;
+  }>());
+  useEffect(() => () => {
+    audioRequest.current += 1;
+    audioLifetimes.current.clear();
+    presentationRequest.current += 1;
+    presentationLifetimes.current.clear();
+  }, [host]);
   // 시작 크기 우선순위는 별도 다이얼 없이 선택한 품질 프로필에서 파생한다
   // (기존 streamingPriority 저장값은 마이그레이션 호환용으로만 남는다).
   const streamingPriority = streamingPriorityFromProfileId(preferences.profileId);
@@ -175,7 +213,13 @@ export function useCatalogModel() {
   const [clipboardShare, setClipboardShareState] = useState(false);
   // 디코더 어드미션(M4/R8)이 쓰는 라이브 스트림 스냅숏. reconfigure 콜백은
   // useStreamController보다 먼저 정의되므로 ref로 최신 목록을 운반한다.
-  const liveStreamsRef = useRef<ActiveStream[]>([]);
+  const [ownedReservations] = useState(() => new Set<ReservedStream>());
+  useEffect(() => () => {
+    for (const reservation of ownedReservations) {
+      reservation.abandon();
+    }
+    // The device-wide pool retains unresolved cleanup across remounts.
+  }, [ownedReservations, host]);
 
   useEffect(() => {
     let active = true;
@@ -211,6 +255,7 @@ export function useCatalogModel() {
       // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
       // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
       void handleUnauthorized({
+        context: requestContextForError(catalogQuery.error),
         navigate: { endpoint: controlHost(), replace: true },
       });
     }
@@ -282,56 +327,71 @@ export function useCatalogModel() {
       if (!launcher) {
         throw new LocalizedError("errRestartLauncher");
       }
-      const refreshed = await refetchCatalog();
-      const currentCatalog = refreshed.data ?? catalogQuery.data;
-      if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
-        throw new LocalizedError("errBackendQuery");
-      }
-      const captureBackend = preferredCaptureBackend(
-        currentCatalog,
-        active.captureBackend,
-      );
-      // Re-resolve from the just-fetched catalog: the media host can differ
-      // from the cached `mediaHost` computed at render time.
-      const refreshedMediaHost = currentCatalog.mediaHost?.trim()
-        ? catalogDisplayHost(currentCatalog.mediaHost.trim())
-        : catalogDisplayHost(host);
-      await requestWithReconnect("stopStream", { session: active.session }).catch(
-        () => undefined,
-      );
-      const control = controlClient() ?? (await reconnectHost());
-      const restarted = await startPreparedStream({
-        control,
-        request: requestWithReconnect,
-        launcher,
-        host: refreshedMediaHost,
-        advertisedEncoderExperiments: currentCatalog.encoderExperiments,
-        advertisedUdpStabilityCapabilities:
-          currentCatalog.udpStabilityCapabilities,
-        args: {
-          sourceIndex: active.sourceIndex,
-          viewerPort: active.port,
-          width: active.activeTarget.width,
-          height: active.activeTarget.height,
-          fps: active.activeTarget.fps,
+      const reservation = active.reservation;
+      if (!reservation) throw new Error("Missing decoder reservation");
+      const demand = reservation.pool.plan({
+        split: active.encoderExperiment === "splitVertical" ||
+          (active.encoderExperiment === "auto" && is4KResolution(active.activeTarget.width, active.activeTarget.height)),
+        target: active.activeTarget,
+      }, reservation.lease);
+      if (!demand) throw new LocalizedError("errDecoderCapacity");
+      const restored = await reservation.run(demand, async (reservedLauncher) => {
+        const refreshed = await refetchCatalog();
+        const currentCatalog = refreshed.data ?? catalogQuery.data;
+        if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
+          throw new LocalizedError("errBackendQuery");
+        }
+        const captureBackend = preferredCaptureBackend(
+          currentCatalog,
+          active.captureBackend,
+        );
+        // Re-resolve from the just-fetched catalog: the media host can differ
+        // from the cached `mediaHost` computed at render time.
+        const refreshedMediaHost = currentCatalog.mediaHost?.trim()
+          ? catalogDisplayHost(currentCatalog.mediaHost.trim())
+          : catalogDisplayHost(host);
+        await reservation.controlRequest("stopStream", { session: active.session }).catch(
+          () => undefined,
+        );
+        const control = controlClient() ?? (await reconnectHost());
+        const restarted = await startPreparedStream({
+          control,
+          request: reservation.controlRequest,
+          launcher: reservedLauncher,
+          decoderReservation: demand,
+          host: refreshedMediaHost,
+          advertisedEncoderExperiments: currentCatalog.encoderExperiments,
+          advertisedUdpStabilityCapabilities:
+            currentCatalog.udpStabilityCapabilities,
+          args: {
+            sourceIndex: active.sourceIndex,
+            sourceId: active.sourceId,
+            viewerPort: active.port,
+            width: demand.target.width,
+            height: demand.target.height,
+            fps: demand.target.fps,
+            captureBackend,
+            mediaTransport: "auto",
+            encoderExperiment: active.encoderExperiment,
+            contentMode: active.contentMode,
+            udpStability: active.udpStability,
+            showFps: active.showFps ?? preferences.showFps,
+            localCursor: active.localCursor ?? preferences.localCursor,
+            localAudio: active.localAudio ?? preferences.localAudio,
+            opusAudio: active.opusAudio ?? preferences.opusAudio,
+            balancedPresentation: active.balancedPresentation ?? preferences.balancedPresentation,
+          },
+        });
+        return {
+          ...restarted,
           captureBackend,
-          mediaTransport: "auto",
-          encoderExperiment: active.encoderExperiment,
-          contentMode: active.contentMode,
-          udpStability: active.udpStability,
-          showFps: active.showFps ?? preferences.showFps,
-          localCursor: active.localCursor ?? preferences.localCursor,
-          localAudio: active.localAudio ?? preferences.localAudio,
-        },
+          width: restarted.width ?? demand.target.width,
+          height: restarted.height ?? demand.target.height,
+          fps: restarted.fps ?? demand.target.fps,
+          qualityState: active.qualityState,
+        };
       });
-      return {
-        ...restarted,
-        captureBackend,
-        width: restarted.width ?? active.activeTarget.width,
-        height: restarted.height ?? active.activeTarget.height,
-        fps: restarted.fps ?? active.activeTarget.fps,
-        qualityState: active.qualityState,
-      };
+      return restored;
     },
     [
       catalogQuery.data,
@@ -339,6 +399,8 @@ export function useCatalogModel() {
       preferences.showFps,
       preferences.localCursor,
       preferences.localAudio,
+      preferences.opusAudio,
+      preferences.balancedPresentation,
       refetchCatalog,
     ],
   );
@@ -351,30 +413,41 @@ export function useCatalogModel() {
       // 소스 전환(R7): 지정하면 reconfigure 요청에 sourceIndex를 실어 같은
       // 세션 창을 다른 호스트 디스플레이로 옮긴다. 능력 플래그가 없는
       // 구버전 호스트에는 절대 보내지 않는다(launch-stream에서 게이트).
-      source?: { index: number },
+      source?: { index: number; sourceId?: string },
     ): Promise<RestoredStream> => {
       if (!launcher) {
         throw new LocalizedError("errResizeLauncher");
       }
-      const control = controlClient() ?? (await reconnectHost());
-      const reconfigured = await reconfigurePreparedStream({
-        control,
-        launcher,
-        host: mediaHost,
-        active,
+      const reservation = active.reservation;
+      if (!reservation) throw new Error("Missing decoder reservation");
+      const requested = {
+        split: resolveReconfigureExperiment(active, target, {
+          reconfigureEncoderExperiment: catalogQuery.data?.reconfigureEncoderExperiment === true,
+          advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
+        }) === "splitVertical",
         target,
-        qualityState,
-        // capability가 있을 때만 인코더 모드 전환(Auto↔Split)을 요청한다.
-        reconfigureEncoderExperiment:
-          catalogQuery.data?.reconfigureEncoderExperiment === true,
-        ...(source ? { sourceIndex: source.index } : {}),
-        reconfigureSource: catalogQuery.data?.reconfigureSource === true,
-        advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
-        // split 승격도 디코더 예산(M4/R8) 안에서만 — 자기 슬롯을 반납한
-        // 뒤 두 슬롯이 들어갈 때만 승격한다.
-        decoderBudget: {
-          currentStreams: admissionStreamsFrom(liveStreamsRef.current),
-        },
+      };
+      const demand = reservation.pool.plan(requested, reservation.lease);
+      if (!demand) throw new LocalizedError("errDecoderCapacity");
+      const reconfigured = await reservation.run(demand, async (reservedLauncher) => {
+        const control = controlClient() ?? (await reconnectHost());
+        return reconfigurePreparedStream({
+          control,
+          request: reservation.controlRequest,
+          launcher: reservedLauncher,
+          host: mediaHost,
+          active,
+          target: demand.target,
+          decoderReservation: demand,
+          qualityState,
+          // capability가 있을 때만 인코더 모드 전환(Auto↔Split)을 요청한다.
+          reconfigureEncoderExperiment:
+            catalogQuery.data?.reconfigureEncoderExperiment === true,
+          ...(source ? { sourceIndex: source.index, sourceId: source.sourceId } : {}),
+          reconfigureSource: catalogQuery.data?.reconfigureSource === true,
+          advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
+
+        });
       });
       return {
         ...reconfigured,
@@ -384,10 +457,17 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor, updateLocalAudio } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
     useStreamController(restoreActiveStream, reconfigureActiveStream);
   useEffect(() => {
-    liveStreamsRef.current = streams;
+    for (const [key, lifetime] of audioLifetimes.current) {
+      if (!streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))) audioLifetimes.current.delete(key);
+    }
+    for (const [session, lifetime] of presentationLifetimes.current) {
+      if (!streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))) {
+        presentationLifetimes.current.delete(session);
+      }
+    }
   }, [streams]);
   const replaceStreamState = useCallback(
     (next: ActiveStream) => {
@@ -398,6 +478,7 @@ export function useCatalogModel() {
 
   const handleRefresh = useCallback(() => {
     setError(null);
+    void retryAbandonedDecoderCleanup().catch((cause) => setError(formatErrorMessage(cause)));
     void refetchCatalog();
   }, [refetchCatalog]);
 
@@ -419,15 +500,61 @@ export function useCatalogModel() {
     }
   }, [setError, streams, updateLocalCursor]);
 
-  const handleToggleAudio = useCallback((localAudio: boolean) => {
-    setPreferences((current) => ({ ...current, localAudio }));
-    updateLocalAudio(localAudio);
-    if (launcher?.setAudioStream) {
-      void Promise.all(
-        streams.map((stream) => launcher.setAudioStream?.(`src-${stream.port}`, localAudio)),
-      ).catch(() => setError(currentTranslation().viewer.errAudioUpdate));
+  const handleToggleBalancedPresentation = useCallback((balancedPresentation: boolean) => {
+    setPreferences((current) => ({ ...current, balancedPresentation }));
+    const request = ++presentationRequest.current;
+    if (!launcher?.setBalancedPresentation) return;
+    for (const stream of streams) {
+      let lifetime = presentationLifetimes.current.get(stream.session);
+      if (!lifetime || !sameStreamLifetime(lifetime.stream, stream)) {
+        lifetime = { stream, successfulRequest: 0 };
+        presentationLifetimes.current.set(stream.session, lifetime);
+      }
+      const operation = lifetime;
+      void launcher.setBalancedPresentation(`src-${stream.port}`, balancedPresentation).then(() => {
+        // Issuing a newer request does not cancel this native operation. Only
+        // a newer successful request (or a retired lifetime) supersedes it.
+        if (presentationLifetimes.current.get(stream.session) !== operation ||
+            request < operation.successfulRequest) return;
+        patchStream(stream.session, (current) => {
+          if (!sameStreamLifetime(current, stream)) return current;
+          operation.successfulRequest = request;
+          return { ...current, balancedPresentation };
+        });
+      }).catch((reason) => {
+        if (presentationRequest.current === request &&
+            presentationLifetimes.current.get(stream.session) === operation) setError(String(reason));
+      });
     }
-  }, [setError, streams, updateLocalAudio]);
+  }, [patchStream, streams]);
+
+  const applyAudioSetting = useCallback((key: "localAudio" | "opusAudio", enabled: boolean) => {
+    setPreferences((current) => ({ ...current, [key]: enabled }));
+    const method = key === "localAudio" ? launcher?.setAudioStream : launcher?.setOpusAudio;
+    const request = ++audioRequest.current;
+    if (!method) return;
+    for (const stream of streams) {
+      const lifetimeKey = `${stream.session}:${key}`;
+      let operation = audioLifetimes.current.get(lifetimeKey);
+      if (!operation || !sameStreamLifetime(operation.stream, stream)) {
+        operation = { stream, successfulRequest: 0 };
+        audioLifetimes.current.set(lifetimeKey, operation);
+      }
+      const captured = operation;
+      void method(`src-${stream.port}`, enabled).then(() => {
+        if (audioLifetimes.current.get(lifetimeKey) !== captured || request < captured.successfulRequest) return;
+        patchStream(stream.session, (current) => {
+          if (!sameStreamLifetime(current, stream)) return current;
+          captured.successfulRequest = request;
+          return { ...current, [key]: enabled };
+        });
+      }).catch((reason) => {
+        if (audioRequest.current === request && audioLifetimes.current.get(lifetimeKey) === captured) setError(String(reason));
+      });
+    }
+  }, [patchStream, streams]);
+  const handleToggleAudio = useCallback((enabled: boolean) => applyAudioSetting("localAudio", enabled), [applyAudioSetting]);
+  const handleToggleOpusAudio = useCallback((enabled: boolean) => applyAudioSetting("opusAudio", enabled), [applyAudioSetting]);
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
@@ -519,99 +646,102 @@ export function useCatalogModel() {
           height: initialTarget.height,
           fps: initialTarget.fps,
         };
-        // 디코더 어드미션(M4/R8): 네이티브 prepare 전에 라이브 창 점유
-        // 인스턴스를 합산해 요청 형태(split은 2, 일반은 1)를 검사한다.
-        // 스트림 목록이 단일 출처(ledger)라 종료된 스트림의 슬롯은 자동으로
-        // 반납된다. 두 openDisplay가 서로의 addStream 등록 전에 검사를
-        // 통과하는 작은 경쟁은 v1에서 허용한다.
-        let launchTarget = requestedTarget;
-        const admission = planAdmission(
-          admissionStreamsFrom(streams),
-          {
-            target: requestedTarget,
-            split: requestedDecoderShape({
+        const demand = deviceDecoderReservations.plan({
+          target: requestedTarget,
+          split: requestedDecoderShape({encoderExperiment, width: requestedTarget.width,
+            height: requestedTarget.height, advertisedEncoderExperiments}),
+        });
+        if (!demand) throw new LocalizedError("errDecoderCapacity");
+        const launchTarget = demand.target;
+        // Reservation is synchronous, before the first native/network await.
+        const reservation = new ReservedStream(port, demand, launcher, client.request.bind(client), deviceDecoderReservations, requestForCurrentSelection());
+        ownedReservations.add(reservation);
+        try {
+          const { width, height, fps } = launchTarget;
+          const sourceTarget = {
+            width: maximumTarget.width,
+            height: maximumTarget.height,
+            fps: maximumTarget.fps,
+          };
+          const started = await reservation.run(demand, (reservedLauncher) => startPreparedStream({
+            control: client,
+            request: reservation.controlRequest,
+            launcher: reservedLauncher,
+            decoderReservation: demand,
+            host: mediaHost,
+            advertisedEncoderExperiments,
+            advertisedUdpStabilityCapabilities:
+              catalogQuery.data?.udpStabilityCapabilities,
+            args: {
+              sourceIndex: display.index,
+              sourceId: display.sourceId,
+              viewerPort: port,
+              width,
+              height,
+              fps,
+              captureBackend: effectiveCaptureBackend,
+              mediaTransport: "auto",
               encoderExperiment,
-              width: requestedTarget.width,
-              height: requestedTarget.height,
-              advertisedEncoderExperiments,
-            }),
-          },
-        );
-        if (!admission.allowed) {
-          throw new LocalizedError("errDecoderCapacity");
-        }
-        if (admission.action === "downgradeResolution") {
-          // split 거절 → 가장 큰 단일 해상도로(4K 요청이므로 사다리에 다음
-          // 단계가 항상 있고, 4K 미만 목표는 prepare 경로에서 분할로
-          // 승격되지 않는다). 일반 창 만석은 이제 block이므로 이 분기에
-          // 도달하는 강등은 split 거절뿐이다.
-          const lowered = downgradedStreamTarget(requestedTarget);
-          if (lowered) launchTarget = lowered;
-        }
-        const { width, height, fps } = launchTarget;
-        const sourceTarget = {
-          width: maximumTarget.width,
-          height: maximumTarget.height,
-          fps: maximumTarget.fps,
-        };
-        const started = await startPreparedStream({
-          control: client,
-          request: requestWithReconnect,
-          launcher,
-          host: mediaHost,
-          advertisedEncoderExperiments,
-          advertisedUdpStabilityCapabilities:
-            catalogQuery.data?.udpStabilityCapabilities,
-          args: {
+              displayName: display.name,
+              contentMode: displayProfile.contentMode,
+              udpStability: effectiveUdpStability,
+              showFps: preferences.showFps,
+              localCursor: preferences.localCursor,
+              localAudio: preferences.localAudio,
+              opusAudio: preferences.opusAudio,
+            balancedPresentation: preferences.balancedPresentation,
+            },
+          }));
+          const acceptedTarget = {
+            width: started.width ?? width,
+            height: started.height ?? height,
+            fps: started.fps ?? fps,
+          };
+          addStream({
+            reservation,
+            port,
+            session: started.session,
             sourceIndex: display.index,
-            viewerPort: port,
-            width,
-            height,
-            fps,
+            sourceId: display.sourceId,
+            sourceName: display.name,
+            width: acceptedTarget.width,
+            height: acceptedTarget.height,
+            fps: acceptedTarget.fps,
+            sourceTarget,
+            activeTarget: acceptedTarget,
+            fallbackTarget: fallbackTargetFor(sourceTarget),
+            qualityState: deriveQualityState(
+              acceptedTarget,
+              sourceTarget,
+              started.qualityState,
+            ),
             captureBackend: effectiveCaptureBackend,
-            mediaTransport: "auto",
-            encoderExperiment,
-            displayName: display.name,
             contentMode: displayProfile.contentMode,
-            udpStability: effectiveUdpStability,
+            encoderExperiment: started.encoderExperiment,
+            udpStability: started.udpStability,
             showFps: preferences.showFps,
             localCursor: preferences.localCursor,
             localAudio: preferences.localAudio,
-          },
-        });
-        const acceptedTarget = {
-          width: started.width ?? width,
-          height: started.height ?? height,
-          fps: started.fps ?? fps,
-        };
-        addStream({
-          port,
-          session: started.session,
-          sourceIndex: display.index,
-          sourceName: display.name,
-          width: acceptedTarget.width,
-          height: acceptedTarget.height,
-          fps: acceptedTarget.fps,
-          sourceTarget,
-          activeTarget: acceptedTarget,
-          fallbackTarget: fallbackTargetFor(sourceTarget),
-          qualityState: deriveQualityState(
-            acceptedTarget,
-            sourceTarget,
-            started.qualityState,
-          ),
-          captureBackend: effectiveCaptureBackend,
-          contentMode: displayProfile.contentMode,
-          encoderExperiment: started.encoderExperiment,
-          udpStability: started.udpStability,
-          showFps: preferences.showFps,
-          localCursor: preferences.localCursor,
-          localAudio: preferences.localAudio,
-          viewerIps: started.viewerIps,
-          mediaTransport: started.mediaTransport,
-          mediaKey: started.mediaKey,
-          startedAt: Date.now(),
-        });
+            opusAudio: started.opusAudio ?? false,
+            balancedPresentation: started.balancedPresentation ?? false,
+            viewerIps: started.viewerIps,
+            mediaTransport: started.mediaTransport,
+            mediaKey: started.mediaKey,
+            startedAt: Date.now(),
+          });
+        } catch (cause) {
+          try {
+            await reservation.close();
+          } catch (cleanupError) {
+            // No ActiveStream/Stop action exists for a failed launch. Transfer
+            // its counted lease to the cleanup queue used by visible Refresh.
+            reservation.retainForCleanupRetry();
+            throw cleanupError;
+          } finally {
+            ownedReservations.delete(reservation);
+          }
+          throw cause;
+        }
       };
       try {
         try {
@@ -643,8 +773,10 @@ export function useCatalogModel() {
       preferences.showFps,
       preferences.localCursor,
       preferences.localAudio,
+      preferences.opusAudio,
+      preferences.balancedPresentation,
       selectedProfile,
-      streams,
+      ownedReservations,
       streamingPriority,
     ],
   );
@@ -652,13 +784,15 @@ export function useCatalogModel() {
   const stopStream = useCallback(
     async (active: ActiveStream) => {
       try {
-        await requestWithReconnect("stopStream", { session: active.session });
-      } catch {
-        // best effort
+        if (active.reservation) await active.reservation.close();
+        else await requestWithReconnect("stopStream", { session: active.session });
+        removeStream(active.session);
+        if (active.reservation) ownedReservations.delete(active.reservation);
+      } catch (cause) {
+        setError(formatErrorMessage(cause));
       }
-      removeStream(active.session);
     },
-    [removeStream],
+    [removeStream, ownedReservations],
   );
 
   /**
@@ -707,7 +841,7 @@ export function useCatalogModel() {
         setError(currentTranslation().viewer.launchFeatureError);
         return false;
       }
-      if (display.index === active.sourceIndex) return true;
+      if (display.sourceId && active.sourceId ? display.sourceId === active.sourceId : !display.sourceId && !active.sourceId && display.index === active.sourceIndex) return true;
       setSwitchingSession(active.session);
       try {
         // 새 디스플레이를 새 창을 여는 것과 같은 규칙으로 맞춘다: 스트리밍
@@ -729,7 +863,7 @@ export function useCatalogModel() {
           active,
           target,
           "native",
-          { index: display.index },
+          { index: display.index, sourceId: display.sourceId },
         );
         const sourceTarget = {
           width: maximumTarget.width,
@@ -744,6 +878,7 @@ export function useCatalogModel() {
         replaceStreamState({
           ...streamTargetAfterResize(active, target, reconfigured),
           sourceIndex: reconfigured.sourceIndex ?? display.index,
+          sourceId: display.sourceId,
           sourceName: reconfigured.sourceName ?? display.name,
           width: acceptedTarget.width,
           height: acceptedTarget.height,
@@ -778,7 +913,8 @@ export function useCatalogModel() {
   const visibleError =
     error ||
     streamError ||
-    (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null);
+    (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null) ||
+    (catalogQuery.data && displays.length === 0 ? new LocalizedError("errSourceAccess").format() : null);
 
   return {
     displays,
@@ -810,6 +946,7 @@ export function useCatalogModel() {
     handleToggleFps,
     handleToggleCursor,
     handleToggleAudio,
+    handleToggleBalancedPresentation,
     handleToggleClipboardShare,
     clipboardShare,
     profileId: preferences.profileId,
@@ -817,6 +954,9 @@ export function useCatalogModel() {
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
     localAudio: preferences.localAudio,
+    opusAudio: preferences.opusAudio ?? false,
+    handleToggleOpusAudio,
+    balancedPresentation: preferences.balancedPresentation,
     resizingSession,
     switchingSession,
   };
