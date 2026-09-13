@@ -1,5 +1,24 @@
 # 구현 증거 문서 (EVIDENCE)
 
+## 현재 판정의 진입점 — 2026-09-13
+
+[지원 범위와 완료 기준](completion-and-support.md)은 최신 후보의 수용 경계를, [감사 개선 검증](2026-09-13-audit-remediation-validation.md)은 앞선 코드·패키지·실기기 시도를 기록한다. 이 문서 아래의 날짜별 기록은 **그때의 소스와 패키지에 대한 역사 기록**이다. 일부 crate·테스트·capture API·Activity 설정·버전은 이후 제거 또는 변경됐으며 현재 테스트 inventory로 사용하지 않는다.
+
+현재 검사 범위의 소스 진입점:
+
+| 경계 | 현재 진입점 | 증거 한계 |
+| --- | --- | --- |
+| 인증·암호화 | `crates/secure-channel`, `crates/session`, Host `src-tauri/src/control.rs` | 단위·소켓 통합과 물리 미디어는 별개 |
+| 제어 계약 | `crates/control-contract`, `packages/control-generated`, `apps/viewer-expo/modules/rustra-bridge` | 실제 앱 전달·native ABI는 패키지 검증도 필요 |
+| 전송·복구 | `crates/media-model`, `crates/fec-core`, `crates/usb-mux`, `native/android-viewer`, `native/macos-capture-shim` | 큐·재전송·컴파일만으로 무선/USB E6 성립 안 함 |
+| Viewer 수명·설정 | `apps/viewer-expo/src`, `apps/viewer-expo/android/app/src/test` | 정책·JVM 검사는 물리 Surface·OEM 결과와 구분 |
+| Host 승인·감사 | `apps/host-desktop/src-tauri/src/source_grants.rs`, `audit.rs`, `control.rs` | 파일/권한 정책과 실제 OS 권한 수용은 별개 |
+| 전체 검사·패키지 | `tools/verify.mjs`, `tools/build.mjs`, `tools/release-manifest.mjs` | 정확한 소스·target·artifact·서명을 함께 기록 |
+
+과거 표의 `crates/network-protocol`, `crates/diagnostics`, `crates/transport-api` 경로는 현재 독립 crate가 아니다. 당시 테스트 이름이나 아래 누적 개수를 지금 실행한 검사 결과로 옮기지 않는다. 현재 후보의 LAN 미디어 실패 및 10·30분 미실행은 이후 과거 성공 기록으로 덮지 않는다.
+
+## 과거 snapshot과 날짜별 관측
+
 기준일: 2026-09-01
 작성 근거: docs/README.md 검증 수준(E0–E7) 규칙. 이 문서는 달성한 증거와 대기 중인 증거를 구분한다. **E5/E6는 부분 달성이고, E5 이상을 온전히 달성한 항목은 없다 — 상세는 표 참조.**
 

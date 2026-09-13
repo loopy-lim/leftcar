@@ -4,11 +4,11 @@
 
 Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에서 빠르게 보고, 필요할 때 키보드와 포인터로 조작하는 다중 화면 뷰어다. 컴퓨터마다 Leftcar를 실행하고, Viewer 앱에서 원하는 화면을 별도 창으로 열 수 있다.
 
-설치 가능한 macOS Host와 Android Viewer는 [GitHub Releases](https://github.com/loopy-lim/leftcar/releases)에서 받을 수 있다. 최신 릴리스는 `v0.1.2`이며 macOS Apple Silicon DMG, Windows x64 unsigned NSIS 설치판, Android arm64 APK를 제공한다. 바이너리는 아직 서명·공증되지 않아 첫 실행 시 OS 경고 확인이 필요하다.
+2026-09-13에 확인한 최신 공개 릴리스는 [v0.1.4](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.4)이며 `Leftcar-Viewer-0.1.4.apk`만 제공한다. 이 태그에 macOS·Windows 설치판이 함께 있다고 가정하지 않는다. 개발 후보와 공개 APK의 변경·호환성·서명 상태는 [지원 범위와 완료 기준](docs/completion-and-support.md), [버전·업데이트 안내](docs/versioning.md)를 확인한다.
 
 ## 한 문장 정의
 
-> 사용자가 선택한 컴퓨터 화면이나 앱 창을 신뢰하는 로컬 네트워크로 전송하고, Android 기기에서 각각 독립된 창으로 보여 주는 도구
+> 사용자가 승인한 컴퓨터 디스플레이를 신뢰하는 로컬 네트워크로 전송하고, Android 기기에서 각각 독립된 창으로 보여 주는 도구
 
 ## 고정된 기본 범위
 
@@ -16,7 +16,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - 특정 기기 전용 기능 없이 일반 Android 앱의 다중 창 기능을 사용한다.
 - 원격 source 하나를 Android Activity/task 인스턴스 하나에 연결해 여러 독립 창으로 보여 준다.
 - 선택적인 Hub 창은 연결과 source 선택을 담당하고, 선택적인 Overview 창만 여러 타일을 한 화면에 모은다.
-- 실제 OS 가상 모니터 드라이버보다 앱 창 또는 물리 디스플레이 캡처를 먼저 지원한다.
+- 현재 캡처·화면 승인 대상은 디스플레이다. 앱 창 단독 캡처는 후속 목표이며, 가상 디스플레이 생성·관리는 제품에서 제거됐다.
 - Rustra는 Rust와 TypeScript 사이의 명령, 상태, 오류 계약에 사용한다.
 - 압축 영상과 고주파 입력 데이터는 Rustra나 JavaScript를 통과시키지 않고 별도 네이티브 데이터 경로로 전송한다.
 - 제품 로직은 TypeScript와 Rust로 작성한다. Kotlin은 Activity, Intent, Surface와 Android 플랫폼 입력 이벤트를 네이티브 코어에 연결하는 shim으로 제한한다.
@@ -25,6 +25,8 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 ## 문서
 
 - [문서 인덱스](docs/README.md)
+- [지원 범위와 완료 기준](docs/completion-and-support.md)
+- [마무리 후속 작업 검증](docs/2026-09-13-completion-followup-validation.md)
 - [제품 요구사항](docs/01-product-requirements.md)
 - [기술 타당성 조사](docs/02-feasibility-research.md)
 - [시스템 아키텍처](docs/03-system-architecture.md)
@@ -45,8 +47,8 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 현재 상태
 
-- 검증 기준일: 2026-09-01
-- 상태: `v0.1.2` 릴리스 배포 중. QR 페어링 인증 + Android 미디어 수신 보안 + macOS/Windows 세션별 네이티브 원격 입력 + 적응형 해상도 복구 + 단일 인코더 세션 워치독 + UDP 안정화(FEC parity 4)까지 코드·빌드·CI 검증 반영. 입력 지연과 120/180Hz, Windows 실기기 스트리밍 계측은 대기 중이다. 상세는 [구현 증거 문서](docs/EVIDENCE.md) 참고
+- 상태 기준일: 2026-09-13
+- 개발 후보에는 기기별 화면 승인, 입력 기본 OFF, 연결·디코더 수명과 전송 복구 개선이 있다. 최신 후보의 실제 영상 연결과 10·30분 수용은 아직 완료되지 않았다. 공개 APK와 개발 소스의 검사 결과를 섞지 않는다. 현재 기준은 [지원 범위와 완료 기준](docs/completion-and-support.md), 과거 실측은 [구현 증거 문서](docs/EVIDENCE.md)에 구분한다.
 - 구현: Rust workspace + Tauri 2 macOS/Windows Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows (코드 및 교차 컴파일 완료, 물리 E6/E7 대기)
@@ -86,6 +88,8 @@ cargo run -p control-contract --bin generate   # 생성물 갱신/검증
 cargo test --workspace
 cargo clippy --workspace --tests -- -D warnings
 ```
+
+`bun run release:preflight -- --scope android-internal --json` 또는 `--scope host-macos-internal`로 구성·의존성·내부/공개 준비 상태를 먼저 확인할 수 있다. 실제 패키지의 버전·ABI·내장 코드·서명은 빌드 manifest에서도 검사한다. 남은 경고와 미검증 상태는 [버전·업데이트 안내](docs/versioning.md#빌드-전-검사와-소스-일치)를 따른다.
 
 Android SDK/NDK와 `JAVA_HOME`을 준비한 뒤 `bun run build android-internal`, macOS에서는 `bun run build host-macos-internal`로 내부 시험 산출물을 만든다. 빌드는 저장소 밖에 소스·패키지·네이티브 파일 해시를 담은 manifest를 남긴다. `bun run release:manifest -- verify /absolute/path/build-manifest.json`으로 보관된 산출물의 일치를 확인한다. 내부 APK는 기존 디버그 서명 파일을 사용하며, 별도 위치라면 `LEFTCAR_INTERNAL_DEBUG_KEYSTORE`에 그 절대 경로를 지정한다. 내부 빌드는 공개 서명·공증·배포를 수행하지 않는다.
 
