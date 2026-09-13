@@ -1,8 +1,7 @@
-import {readFile,readdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
+import {collectGradleLicenses} from './release-gradle-licenses.mjs';
 const failure={ecosystem:'gradle',lockfile:null,lockSha256:null,licenseMetadataStatus:'unavailable',records:[]};
-const decodeXml=text=>text.replaceAll('&amp;','&').replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&quot;','"').replaceAll('&apos;',"'");
 export async function collectGradleInventory(root,{run,gradleCache=process.env.GRADLE_USER_HOME??join(homedir(),'.gradle')}={}) {
  let result;
  try {result=run(process.platform==='win32'?'gradlew.bat':'./gradlew',['--offline',':app:dependencies','--configuration','releaseRuntimeClasspath','--no-daemon'],join(root,'apps/viewer-expo/android'));}
@@ -18,15 +17,11 @@ export async function collectGradleInventory(root,{run,gradleCache=process.env.G
   coordinates.set(parts.join(':'),parts);
  }
  if(!coordinates.size)return {...failure,status:'error',reason:'Gradle did not report resolved external coordinates'};
+ const licenses=await collectGradleLicenses(root,[...coordinates.values()],gradleCache);
  const records=[];
  for(const [group,name,version] of [...coordinates.values()].sort((a,b)=>a.join(':').localeCompare(b.join(':'),'en'))) {
-  const licenseNames=new Set(),base=join(gradleCache,'caches/modules-2/files-2.1',group,name,version);
-  for(const dir of await readdir(base).catch(()=>[]))for(const file of await readdir(join(base,dir)).catch(()=>[]))if(file.endsWith('.pom')) {
-   const pom=await readFile(join(base,dir,file),'utf8').catch(()=>'');
-   const licenses=pom.match(/<licenses>([\s\S]*?)<\/licenses>/)?.[1]??'';
-   for(const match of licenses.matchAll(/<name>([^<]+)<\/name>/g))licenseNames.add(decodeXml(match[1].trim()));
-  }
-  records.push({name:`${group}:${name}`,version,scope:'releaseRuntimeClasspath',license:licenseNames.size?[...licenseNames].sort().join('; '):null,licenseStatus:licenseNames.size?'declared':'unknown'});
+  const metadata=licenses.get(`${group}:${name}:${version}`);
+  records.push({name:`${group}:${name}`,version,scope:'releaseRuntimeClasspath',license:null,licenseStatus:metadata?'declared':'unknown',...metadata});
  }
  return {...failure,status:'observed-unlocked',licenseMetadataStatus:records.some(r=>r.license!==null)?'observed':'unavailable',records,reason:'Offline resolved runtime inventory only; no checked-in dependency lock or verification trust policy; not a vulnerability scan'};
 }

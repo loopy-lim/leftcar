@@ -1,5 +1,7 @@
 # 2026-09-13 의존성 배포 준비 조사와 수정
 
+후속 상태는 [2026-09-14 조사](2026-09-14-dependency-readiness.md)를 따른다. Maven 감사와 일부 수정, 라이선스 출처 확인 결과가 추가됐으며 이 문서의 날짜별 관찰은 그대로 보존한다.
+
 현재 lockfile에 대한 기계 판독 결과는 [검사 기록](../superpowers/evidence/2026-09-13-dependency-readiness.json)에 있다. 이 기록의 lock SHA와 후보 manifest의 SHA를 대조해야 한다. 검사 성공·취약점 부재·배포 수락은 서로 다른 판단이다.
 
 ## 적용한 수정
