@@ -1,6 +1,7 @@
 # 보안과 개인정보 보호
 
-문서 상태: 제안안 0.1  
+문서 상태: 초기 요구와 구현 기록. 2026-09-13 현재 저장·권한 경계는 §6, §11, §16 및 [완료/지원 기준](completion-and-support.md)을 따른다.
+
 보호 대상: 실시간 화면, source metadata, 장치 identity, pairing material, 진단 정보
 
 ## 1. 보안 목표
@@ -33,7 +34,8 @@ v1은 다음 공격 환경을 완전히 해결한다고 주장하지 않는다.
 | --- | --- | --- |
 | 화면 frame | 매우 높음 | 메모리와 network transit만, 기본 영구 저장 없음 |
 | 창 제목/앱 이름 | 높음 | UI process memory, 사용자 승인 source metadata |
-| Host/Viewer private key | 매우 높음 | OS secure storage, export 금지 |
+| Host 장기 Ed25519 seed | 매우 높음 | `host_identity.json`; Unix 신규 생성 0600, §6의 파일 저장 경계 |
+| Viewer pairing credential / Host token | 매우 높음 | Viewer Expo SecureStore, Host 플랫폼별 token store; §6 |
 | pairing offer secret | 매우 높음 | 짧은 수명 memory만 |
 | paired public identity | 중간 | secure/local storage |
 | source ID | 중간 | opaque local/network state |
@@ -87,19 +89,17 @@ v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제�
 
 ## 6. 장치 identity
 
-각 설치는 long-term device key pair를 생성한다.
+현재 Host는 `identity.rs`의 Ed25519 identity를 `data_dir/leftcar-host/host_identity.json`에 seed hex로 저장한다. Unix 새 파일 생성은 0600이며 Windows에서는 사용자 데이터 디렉터리의 ACL에 의존한다. 기존 파일의 과도한 권한을 고치는 별도 이관, 하드웨어 키 보관, private seed export 방지는 구현되어 있지 않다. 이 파일 저장을 Keychain 보관과 같은 보장으로 설명하지 않는다.
 
-요구:
+이 위협 모델은 OS와 로그인 계정을 신뢰한다. 같은 계정으로 실행되는 프로세스, 관리자, 백업 접근 권한자는 파일을 읽거나 복제할 수 있다. 파일을 다른 Host에 복사하면 같은 public identity도 복제되므로 일반 지원 첨부·클라우드 동기화·공유 백업에 넣지 않는다. 이번 마무리 작업은 기존 사용자 키를 이동하거나 삭제하지 않는다.
 
-- cryptographically secure RNG
-- private key export 금지
-- Host는 macOS Keychain 또는 Windows 보호 저장소 사용
-- Viewer는 Android Keystore-backed 저장 사용
-- TypeScript에는 public fingerprint와 opaque key handle만 전달
-- backup/restore로 같은 identity를 복제하지 않음
-- 앱 데이터 삭제 후 새 identity 생성
+`load_or_create`는 파일 부재·손상·읽기 실패 때 새 identity를 생성하고 저장을 시도한다. 저장까지 실패하면 해당 프로세스의 새 키만 남을 수 있다. 기존 Viewer의 핀 불일치는 우회하지 않고 실패한다. 복구 시 Host 저장 경로/권한과 실제 fingerprint를 먼저 확인하고, 기존 파일을 보존한 상태에서 의도한 Host인지 대조한 뒤 다시 페어링한다. 앱 재설치만으로 사용자 데이터가 삭제된다고 가정하지 않는다.
 
-알고리즘은 transport library 지원과 security review에서 확정한다. 자체 cryptographic primitive를 만들지 않는다.
+Host **pairing token**은 이 장기 seed와 별개다. `pairing.rs`의 플랫폼 token store는 macOS Keychain / Windows Credential Manager를 사용하고, 지원되지 않는 플랫폼의 파일 저장과 레거시 token 이관을 별도로 처리한다. 이관은 저장 후 다시 읽어 동일함을 확인한 경우에만 인라인 값을 제거한다. 저장 실패를 정상 페어링으로 알리지 않는다.
+
+Android Viewer의 pairing credential과 설정은 Expo SecureStore를 사용한다. Android Keystore로 암호화된 shared preferences이므로 복원 뒤 해독할 수 없는 항목을 백업에서 제외해야 한다. 현재 자체 XML은 `SecureStore`와 레거시 `ReactNativePreferences.xml`을 full/cloud/device-transfer에서 제외하고, Expo `configureAndroidBackup: false`로 해당 규칙의 소유권을 명시한다. 앱 삭제·데이터 초기화 후에는 재페어링이 필요하다. [Expo SecureStore 공식 안내](https://docs.expo.dev/versions/latest/sdk/securestore/#android-auto-backup)
+
+장기 키를 OS 보호 저장소로 옮기는 설계는 별도 이관·복구 검증이 필요한 후속 항목이다. 현재 Viewer JavaScript 경로는 SecureStore에서 pairing credential을 읽어 제어 채널을 연다. 아래 native 경계의 opaque handle 전용 요구는 목표이며, 현재 모든 credential이 JavaScript에서 격리되어 있다는 증거가 아니다.
 
 ## 7. 페어링 프로토콜
 
@@ -178,14 +178,7 @@ view_source(source_id, revision, expiry)
 remote_input(stream_session, host_opt_in)
 ```
 
-존재하지 않는 capability:
-
-```text
-read_clipboard
-write_clipboard
-read_file
-record_stream
-```
+현재 파일·클립보드 기능은 별도의 Host 토글(기본 OFF)과 인증된 명령으로 제한한다. 초기 설계의 “존재하지 않는 capability” 목록은 현재 구현과 달라 삭제했다. 화면 녹화 저장 기능(`record_stream`)은 제공하지 않는다.
 
 source capability는 다음에 bind한다.
 
@@ -219,10 +212,10 @@ Host UI가 crash해도 capture core가 무기한 invisible 상태로 남지 않�
 - crash dump에 large media buffer가 들어가지 않도록 설정을 검토한다.
 - buffer pool은 재사용하며 release 후 참조하지 않는다.
 - debug build의 frame dump는 explicit local developer flag, synthetic source에서만 허용한다.
-- clipboard/screenshot share action을 제공하지 않는다.
+- 화면 screenshot/녹화 export action은 제공하지 않는다. 클립보드 텍스트·이미지 공유는 별도 opt-in 기능이며 화면 캡처 저장과 구분한다.
 - Android recent task preview에 원격 화면이 노출될 수 있으므로 secure flag 정책을 검토한다.
 
-`FLAG_SECURE`를 사용하면 screenshot/task preview를 막을 수 있지만 Home Space compositor/Surface 동작에 영향을 줄 수 있다. Phase 1에서 보안과 호환성을 함께 검증하고 결정한다.
+현재 StreamActivity는 recent task에 나타나고 `FLAG_SECURE`를 설정하지 않는다. 따라서 원격 화면의 screenshot/recent preview 차단을 보장하지 않는다. Android 공식 API는 secure window의 screenshot과 비보안 display 표시를 제한한다. XR Home Space/Surface가 영향을 받는지는 이 프로젝트의 실기기 미검증 항목이다. 태블릿과 Galaxy XR 각각에서 표시·창 전환·복귀·preview 결과를 기록한 뒤 별도 변경으로 결정한다. [Android의 민감한 화면 보호](https://developer.android.com/security/fraud-prevention/activities)
 
 ## 12. metadata 최소화
 
@@ -324,7 +317,11 @@ denylist:
 - file path
 - raw native exception message 검토 전 값
 
-export 전에 automatic redaction test와 사용자 preview를 제공한다.
+감사 로그 저장 경로에는 허용 이벤트·타입별 필드만 기록하는 회귀 검증을 적용한다. 지원용 자동 export/사용자 preview UI는 아직 제공하지 않는다. `sessions.jsonl` 외의 콘솔·빌드·성능 도구 로그까지 같은 필터가 적용된다고 가정하지 않는다. 공유 전에는 사용자가 내용을 확인해야 한다. 과거 로그는 자동으로 재작성/삭제하지 않으므로 이전 세대에는 장치 ID·IP·파일명이 남아 있을 수 있다.
+
+기기 식별자는 프로세스마다 새로 만든 임의 키와 SHA-256으로 변환한 `dev:<24 hex>` 형태로만 남는다. 같은 Host 실행 안에서만 연결해서 볼 수 있고, 재시작하면 달라진다. 세션 ID는 숫자로 유지하며 입력 소유권 변경 목록은 최대 32개와 원래 개수를 남긴다.
+
+보관은 시간 만료가 아닌 5 MiB 기준 회전과 한 세대 백업이다. 레코드는 줄바꿈을 제외하고 최대 1,024바이트이며, 쓰기 전 크기를 확인하므로 활성 파일은 한 레코드만큼 상한을 넘은 뒤 다음 기록에서 회전할 수 있다. 같은 프로세스의 append/회전을 직렬화하며 Unix에서 현재/회전 파일 권한을 0600으로 제한한다. 파일 시스템 오류로 보관 상한이나 권한을 지킬 수 없으면 새 기록을 중단하고 스트림은 계속한다. 이 직렬화는 별도의 프로세스 간 파일 잠금을 뜻하지 않는다. 정확한 테스트·패키지 증거는 최종 완료 기록을 따른다.
 
 ## 17. 의존성과 release
 
@@ -399,11 +396,8 @@ stream_task_restore_requires_reauthentication
 - **:7777 무차별 백오프**: 60초 창 5회 토큰 실패 시 60초 차단(루프백 제외).
 - **철회 즉시 효력**: 세션을 장치에 귀속(`authorize_device`)해 revoke 시
   라이브 스트림을 강제 종료 — §18 `revocation_closes_existing_streams` 충족.
-- **토큰 저장소 분리**: macOS Keychain / Windows Credential Manager 우선,
-  0600 파일 폴백. 구버전 인라인 토큰은 기동 시 자동 이관 후 메타데이터
-  파일에서 삭제.
-- **세션 감사 로그**: 시작/종료·철회를 `sessions.jsonl`(0600)에 JSONL 기록
-  (장치·IP·사유만, 토큰·키 금지).
+- **토큰 저장소 분리**: macOS Keychain / Windows Credential Manager를 사용한다. 현재 운영 플랫폼에서는 OS 저장 실패를 파일 폴백으로 숨기지 않는다. 기타 플랫폼의 파일 저장과 레거시 이관은 §6을 따른다.
+- **세션 감사 로그(당시 구현)**: 시작/종료·철회를 `sessions.jsonl`에 기록했다. 당시에는 장치·IP·파일명이 일부 이벤트에 포함됐다. 2026-09-13 후속의 제한 필드/식별자 정책은 §16을 따른다.
 - **권한 게이트 클립보드 텍스트 동기화(기본 꺼짐 — 호스트 토글이 닫혀 있으면
   모든 클립보드 명령 거부, 256KiB 상한, 접근 기록은 감사 로그에 메타만)**
 - 파일 전송 v2(호스트 게이트 기본 꺼짐, 512MiB 상한, 1MiB 청크, 암호화된 제어 채널 경유, 전송 기록은 감사 로그에 메타만). v2부터 양쪽

@@ -5384,8 +5384,20 @@ mod tests {
         assert_eq!(resp["ok"], true, "{resp}");
 
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("\"clipboard_write\""), "{body}");
-        assert!(body.contains("\"device\":\"viewer-1\""), "{body}");
+        let record: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(record["event"], "clipboard_write", "{body}");
+        assert_eq!(record["bytes"], secret.len(), "{body}");
+        let device = record["device"].as_str().unwrap();
+        let pseudonym = device.strip_prefix("dev:").unwrap();
+        assert_eq!(pseudonym.len(), 24, "{body}");
+        assert!(
+            pseudonym
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{body}"
+        );
+        assert_ne!(device, "viewer-1", "{body}");
+        assert!(!body.contains("viewer-1"), "{body}");
         assert!(
             !body.contains(secret),
             "audit must never contain clipboard text: {body}"

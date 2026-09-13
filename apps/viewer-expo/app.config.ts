@@ -40,6 +40,8 @@ const config: LeftcarExpoConfig = {
   },
   plugins: [
     "expo-router",
+    // Native Android XML owns both cloud backup and device-transfer exclusions.
+    ["expo-secure-store", { configureAndroidBackup: false }],
     [
       "expo-camera",
       {
