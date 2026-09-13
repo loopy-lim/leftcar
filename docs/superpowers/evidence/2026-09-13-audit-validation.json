@@ -1,0 +1,628 @@
+{
+  "schema": 1,
+  "recordedUtc": "2026-09-13T11:54:49.277814+00:00",
+  "baselineCommit": "068b6628df5dc57f264446f8ec51215b37c51b6f",
+  "candidateSourceSha256": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+  "candidateInputCount": 873,
+  "sourceStatus": "source review accepted; explicit display grant and actual failed UDP media attempt observed; 10/30-minute acceptance incomplete",
+  "gateCounts": {
+    "reactDoctor": 100,
+    "javascriptTests": 559,
+    "performanceTests": 67,
+    "performanceCountOverlap": "included in the JS suite; do not add as independent total",
+    "uiCases": 78,
+    "uiSuites": 9,
+    "jvmTests": 118,
+    "jvmSuites": 19,
+    "jvmFailures": 0,
+    "jvmErrors": 0,
+    "jvmEvidence": "118/19 retained at7de7; all JVM/native inputs unchanged by runtime follow-up"
+  },
+  "retainedFullVerification": {
+    "command": [
+      "bun",
+      "run",
+      "verify",
+      "all"
+    ],
+    "startedUtc": "2026-09-13T08:36:25.990474+00:00",
+    "endedUtc": "2026-09-13T08:41:20.015914+00:00",
+    "seconds": 294.025,
+    "exit": 0,
+    "sourceBefore": "6db6a17617bc9f29503900ec1f3862f7799e7b0df2ac21cbceac7c5b790ae15f",
+    "sourceAfter": "6db6a17617bc9f29503900ec1f3862f7799e7b0df2ac21cbceac7c5b790ae15f",
+    "sourceUnchanged": true,
+    "logSha256": "9c8d64c5f9519747a9ef5b7e70311be885f285c42b0c8a3440bdbf1ffb038a55",
+    "scope": "unchanged Host/Rust/Swift/native and related input portions only; changed files use the fresh gates above"
+  },
+  "packages": [
+    {
+      "manifestName": "leftcar-host-macos-internal-fJBlBH/host-macos-internal-manifest.json",
+      "manifestSha256": "e9e9fdc2b09e7291b8fa07561f54369eee4d0fa91ff63386dc3d1d5d7a65206d",
+      "sourceSha256": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "target": {
+        "platform": "darwin",
+        "architecture": "arm64",
+        "triple": "aarch64-apple-darwin"
+      },
+      "signing": {
+        "classification": "internal-ad-hoc",
+        "notarized": false,
+        "details": [
+          "Identifier=leftcar.ll3.kr.benchmark.audit-candidate",
+          "Signature=adhoc",
+          "TeamIdentifier=not set"
+        ]
+      },
+      "artifacts": [
+        {
+          "role": "host-bundle",
+          "sha256": "ed5dcd9e8490b7092561204f5ef0a4cd163ec59532d3deea723335a7aa7fd674",
+          "bytes": null,
+          "inspection": {
+            "machO": {
+              "architectures": [
+                "arm64"
+              ]
+            }
+          }
+        },
+        {
+          "role": "native-shim",
+          "sha256": "c280c8c5fa967ceaba449ce2603e3dff58fd731a5ae01bd2ae7036cda5680dc1",
+          "bytes": 1437976,
+          "inspection": {
+            "machO": {
+              "architectures": [
+                "arm64"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "manifestName": "leftcar-android-internal-NhgHNQ/android-internal-manifest.json",
+      "manifestSha256": "3779669f90a383ae9ad7bb4955e0cdc759e3efc7b1425c89a1f0934a0d7d686e",
+      "sourceSha256": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "target": {
+        "platform": "android",
+        "architecture": "arm64",
+        "abi": "arm64-v8a",
+        "triple": "aarch64-linux-android"
+      },
+      "signing": {
+        "classification": "internal-debug-key",
+        "certificateSha256": [
+          "V2 Signer: certificate SHA-256 digest: dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655"
+        ]
+      },
+      "artifacts": [
+        {
+          "role": "viewer-apk",
+          "sha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+          "bytes": 26076844,
+          "inspection": {
+            "native": {
+              "entry": "lib/arm64-v8a/libleftcar_viewer.so",
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+              "bytes": 1009568
+            },
+            "javascript": {
+              "status": "observed",
+              "entry": "assets/index.android.bundle",
+              "sha256": "c049924746ae738d953be567afcdf23b400571f0eceda7b8e5e677b06ad45dcf",
+              "bytes": 3542620,
+              "format": "hermes-bytecode"
+            }
+          }
+        },
+        {
+          "role": "native-cargo-unstripped",
+          "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+          "bytes": 1394056,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+              "bytes": 1394056
+            }
+          }
+        },
+        {
+          "role": "native-gradle-copy",
+          "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+          "bytes": 1394056,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+              "bytes": 1394056
+            }
+          }
+        },
+        {
+          "role": "native-agp-stripped-apk-input",
+          "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+          "bytes": 1009568,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+              "bytes": 1009568
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "candidateInstall": {
+    "endedUtc": "2026-09-13T10:12:36.708971+00:00",
+    "exit": 0,
+    "archiveSha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+    "installedSha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+    "normalAppInstallMetadataUnchanged": true,
+    "receiptSha256": "bd3a04ae26191569d21fbd073353682bf1d19e0e785707f9400eb33acbf6027e"
+  },
+  "physical": {
+    "streamingStarted": false,
+    "tenMinuteRun": "not started",
+    "thirtyMinuteRun": "not started",
+    "displayGrant": "explicit user approval received; applied via Host UI to exact dedicated Display1 only; confirmed restricted Viewer catalog",
+    "transport": "direct LAN reply timeout; ADB over Wi-Fi control succeeded; UDP media reachability to127.0.0.1:5001 failed",
+    "idleCollectorSeconds": 10.002428,
+    "idleCollectorVerdict": "invalid due to missing attributed stage metrics; no streaming FPS/latency claim",
+    "focusedManualTap": "one tap triggered connection attempt on selected device; software keyboard not displayed",
+    "failedConnectionUi": {
+      "status": "observed corrected on selected TB710FU API36",
+      "sourceSha256": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "apkSha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+      "cases": [
+        "manual failure followed by Hub remains disconnected",
+        "quick reconnect failure displays error and remains disconnected"
+      ],
+      "observedUtc": "2026-09-13T10:16:01.820583+00:00",
+      "receiptSha256": "d093a8f9d6b4e981e22a25b144b09d5d3b9b5e678d32867293ad8170fe0d0579",
+      "scope": "no software keyboard displayed; no media, actual throughput, successful stream or soak claim"
+    },
+    "testCleanup": {
+      "utc": "2026-09-13T10:22:46.353300+00:00",
+      "removedOwnedMapping": "tcp44711 -> tcp64091",
+      "otherMappingsUnchanged": true,
+      "uiPid52822NoLongerRunning": true,
+      "purpose": "finished stopped-Host UI check; remove only its stale task-owned reverse mapping; physical stream remains unstarted",
+      "receiptSha256": "0348d3887df71657f9cb255b28b126e20d33eb31378c64ae63e829ede499a0fd"
+    },
+    "authorizedAttempt": {
+      "utc": "2026-09-13T11:54:49.277814+00:00",
+      "authorization": {
+        "userReply": "그러몀 다 해줘",
+        "scope": "Exact dedicated display Leftcar Audit 20260913 S1 only for TB710FU test Viewer; audio and input off; two concrete local commits",
+        "receiptSha256": "b7cad689fee370aa8e2a871bb5f32364ad7f450216ee0e246ed3f463e306b0c7"
+      },
+      "sourceGrant": {
+        "appliedVia": "actual Host UI",
+        "checkboxesBeforeApproval": {
+          "Display 0 (3840 x 2160)": false,
+          "Display 1 (2560 x 1440)": true
+        },
+        "confirmedHostUi": "화면 접근: 1",
+        "viewerCatalog": "Display 1 only",
+        "nativeSourceID": "macos:display:fb90b109-f8c6-42f2-b056-82f886fdcba9"
+      },
+      "network": {
+        "utc": "2026-09-13T11:45:12.802767+00:00",
+        "hostPid": 40745,
+        "controlPort": 50744,
+        "scope": "Public handshake only, no authentication, grants or capture",
+        "results": [
+          {
+            "host": "127.0.0.1",
+            "status": "reply",
+            "bytes": 269,
+            "ms": 2
+          },
+          {
+            "host": "192.168.0.134",
+            "stage": "reply",
+            "status": "TimeoutError",
+            "ms": 3004
+          }
+        ]
+      },
+      "shortAttempt": {
+        "hostPid": 40745,
+        "sourcePid": 49367,
+        "hostManifestSha256": "e9e9fdc2b09e7291b8fa07561f54369eee4d0fa91ff63386dc3d1d5d7a65206d",
+        "apkSha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+        "control": "ADB reverse tcp44711 -> tcp50744 over Wi-Fi ADB",
+        "requestedMedia": "UDP",
+        "viewerPort": 5001,
+        "display": "2560x1440 at 60Hz; owned Display 1",
+        "workload": "synthetic scroll",
+        "hostSystemAudio": "off by benchmark profile before capture",
+        "viewerLocalAudio": false,
+        "remoteInput": "default off; no enable operation performed",
+        "observedHostError": "UDP reachability proof failed for 127.0.0.1:5001",
+        "hostErrorUtc": "2026-09-13T11:48:52.062Z",
+        "viewerUi": "connection failed, no stream opened",
+        "syntheticSourceLifetimeSeconds": 70.219,
+        "sourceLifetimeIsNotStreamOrSoak": true,
+        "successfulMedia": false,
+        "tenMinuteRun": "not started",
+        "thirtyMinuteRun": "not started",
+        "sourceStop": {
+          "startedUtc": "2026-09-13T11:48:24.610002+00:00",
+          "hostPid": 40745,
+          "hostExe": "/private/tmp/leftcar-runtime-candidate-20260913/receipts/leftcar-host-macos-internal-fJBlBH/artifacts/host-bundle-Leftcar Benchmark audit-candidate.app/Contents/MacOS/leftcar-host-desktop",
+          "sourceCommand": [
+            "/tmp/leftcar-benchmark-source-20260912/BenchmarkSource",
+            "--task-owned-screen-id",
+            "10",
+            "--mode",
+            "scroll",
+            "--source-dir",
+            "/tmp/leftcar-benchmark-source-20260912",
+            "--max-seconds",
+            "240"
+          ],
+          "display": {
+            "displayID": 10,
+            "frame": [
+              1920,
+              -360,
+              2560,
+              1440
+            ],
+            "isMain": false,
+            "modePixelHeight": 1440,
+            "modePixelWidth": 2560,
+            "name": "Leftcar Audit 20260913 S1",
+            "nativeSourceID": "macos:display:fb90b109-f8c6-42f2-b056-82f886fdcba9",
+            "pixelHeight": 1440,
+            "pixelWidth": 2560,
+            "refreshRate": 60,
+            "scale": 1
+          },
+          "scope": "User approved dedicated synthetic display only, audio/input off. Source guarded at 250 ms; Host lifetime bounded to 180 s and stopped before source removal. Short stream attempt, no performance acceptance.",
+          "sourcePid": 49367,
+          "hostAbsentBeforeSourceRemoval": true,
+          "sourceExit": -15,
+          "endedUtc": "2026-09-13T11:49:34.831576+00:00",
+          "elapsedSeconds": 70.219,
+          "reason": "host-exited",
+          "sourceLogSha256": "a44aa93f8f2e42d28fc03d8cae6631a05ff3ab78332deffd8d66e143e90efb5d"
+        },
+        "hostStderrSha256": "2d1704f4889681da0874c5fd2b80c6308c7cd6da42632fb92d3cee3a866625c0"
+      },
+      "cleanup": {
+        "utc": "2026-09-13T11:51:55.979540+00:00",
+        "uiPid": 41696,
+        "uiStop": "SIGTERM verified owned scrcpy",
+        "reverseBefore": "host-26 tcp:8877 tcp:8877\nhost-26 tcp:44711 tcp:50744\n\n",
+        "reverseAfter": "host-26 tcp:8877 tcp:8877\n\n",
+        "preservedUnrelated": true,
+        "host40745Absent": true,
+        "source49367Absent": true,
+        "normalHost8773Present": true
+      },
+      "remaining": [
+        "Viable media transport; data USB availability requested from user",
+        "Baseline automatic input enablement must not be treated as equivalent input-off",
+        "No ten-minute or thirty-minute acceptance, no FPS/latency/competitor ranking"
+      ]
+    },
+    "authorizedAttemptReceiptSha256": "a5d8a0f2ce217e7b198a4b4f6dfa31452aab9ce69087f1142c5e5fcb4e657e3e"
+  },
+  "knownLimits": [
+    "AOAP immediate stop/restart proxy join race remains outside approved fix scope",
+    "Gradle10 deprecations have mixed checked-in Groovy and RN/Expo/AGP origins",
+    "ARCore1.53.0 R8 stack-map warnings also occur in baseline",
+    "Windows runtime/installer signing, Android API24 and OEM decoder concurrency unverified",
+    "AudioTrack/A-V, optical glass-to-glass and public signing/notarization unverified",
+    "No same-device competitor performance ranking"
+  ],
+  "rulingsCount": 74,
+  "retainedPriorFix": {
+    "sourceSha256": "7de7a418ad9ef0ffb0b0a815392127ec105f30b4df520c812ee1e1591baaeb6c",
+    "fix": {
+      "changedInputCount": 17,
+      "retainedInputCount": 853,
+      "evidenceFileCount": 100,
+      "patchSha256": "249df9068806ae18b21c4cb92cfcc2511b1d876a0f1e6484feed0ebfd6be05c7",
+      "reportSha256": "ac977e5172cb8f4c8f01b3839f5c1bd0e813f0b51546364f92590dc67ccdd67d",
+      "reviewSha256": "4139260c412ece125dd74a9878d892aeafe6340e697cb6acb7ef5a9971f33e5f",
+      "findingsRemaining": []
+    },
+    "gates": [
+      {
+        "command": [
+          "npx",
+          "-y",
+          "react-doctor@latest",
+          ".",
+          "--verbose"
+        ],
+        "start": "2026-09-13T09:27:33.922260+00:00",
+        "end": "2026-09-13T09:27:39.041758+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "bun",
+          "run",
+          "typecheck"
+        ],
+        "start": "2026-09-13T09:28:18.925601+00:00",
+        "end": "2026-09-13T09:28:27.256836+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "bun",
+          "run",
+          "test"
+        ],
+        "start": "2026-09-13T09:28:20.139047+00:00",
+        "end": "2026-09-13T09:28:24.145059+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "bun",
+          "run",
+          "test",
+          "tools/perf-matrix"
+        ],
+        "start": "2026-09-13T09:28:21.434816+00:00",
+        "end": "2026-09-13T09:28:23.478502+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "bun",
+          "run",
+          "test:ui"
+        ],
+        "start": "2026-09-13T09:28:36.215224+00:00",
+        "end": "2026-09-13T09:29:19.105726+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "apps/viewer-expo/android/gradlew",
+          "-p",
+          "apps/viewer-expo/android",
+          ":app:testDebugUnitTest",
+          "--no-daemon"
+        ],
+        "start": "2026-09-13T09:28:40.127310+00:00",
+        "end": "2026-09-13T09:29:08.738104+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "bun",
+          "run",
+          "test:architecture"
+        ],
+        "start": "2026-09-13T09:28:22.607477+00:00",
+        "end": "2026-09-13T09:28:22.875820+00:00",
+        "exit": 0
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "start": "2026-09-13T09:29:42.279869+00:00",
+        "end": "2026-09-13T09:29:42.329154+00:00",
+        "exit": 0
+      }
+    ],
+    "scope": "only unchanged input portions; latest React/screens use the fresh runtime-follow-up gates"
+  },
+  "runtimeFollowup": {
+    "changedInputCount": 10,
+    "retainedInputCount": 863,
+    "evidenceFileCount": 136,
+    "patchSha256": "1fa682719e8f790a6f5e8305950b5f9382083a97356ad5d2b3743b0ad40c44b5",
+    "reportSha256": "af5c10427efc94e84f22fb8f5bddc16a8b8c92f1ed973711c7237b1982b4d9d2",
+    "reviewSha256": "1cfc4bdf80e07df1a1f43bfe42281af2b9112076571871531ea22a29713317e9",
+    "findingsRemaining": []
+  },
+  "freshFinalGates": [
+    {
+      "name": "19-react-doctor-permitted",
+      "command": "npx",
+      "args": [
+        "-y",
+        "react-doctor@latest",
+        ".",
+        "--verbose"
+      ],
+      "startedAt": "2026-09-13T10:07:21.736Z",
+      "endedAt": "2026-09-13T10:07:26.973Z",
+      "seconds": 5.23681175,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    },
+    {
+      "name": "20-typecheck",
+      "command": "bun",
+      "args": [
+        "run",
+        "typecheck"
+      ],
+      "startedAt": "2026-09-13T10:07:47.735Z",
+      "endedAt": "2026-09-13T10:07:53.666Z",
+      "seconds": 5.930503707999999,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    },
+    {
+      "name": "21-js-full",
+      "command": "bun",
+      "args": [
+        "run",
+        "test"
+      ],
+      "startedAt": "2026-09-13T10:08:11.072Z",
+      "endedAt": "2026-09-13T10:08:14.148Z",
+      "seconds": 3.0767220420000005,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    },
+    {
+      "name": "22-contract",
+      "command": "bun",
+      "args": [
+        "run",
+        "test:contract"
+      ],
+      "startedAt": "2026-09-13T10:08:11.129Z",
+      "endedAt": "2026-09-13T10:08:11.977Z",
+      "seconds": 0.8482646660000001,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    },
+    {
+      "name": "23-architecture",
+      "command": "bun",
+      "args": [
+        "run",
+        "test:architecture"
+      ],
+      "startedAt": "2026-09-13T10:08:11.186Z",
+      "endedAt": "2026-09-13T10:08:11.697Z",
+      "seconds": 0.510749375,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    },
+    {
+      "name": "24-diff-check",
+      "command": "git",
+      "args": [
+        "diff",
+        "--check"
+      ],
+      "startedAt": "2026-09-13T10:08:11.229Z",
+      "endedAt": "2026-09-13T10:08:11.601Z",
+      "seconds": 0.37183174999999996,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "scope": "unstaged tracked changes only; newly staged files later produced documented non-blocking whitespace findings"
+    },
+    {
+      "name": "25-ui-full",
+      "command": "bun",
+      "args": [
+        "run",
+        "test:ui"
+      ],
+      "startedAt": "2026-09-13T10:08:22.079Z",
+      "endedAt": "2026-09-13T10:09:13.431Z",
+      "seconds": 51.351127375,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "sourceBefore": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679",
+      "sourceAfter": "71e5ddcca2b9de75d4bc21d7c3455e1ac95b8064e1696ed923edac8d82975679"
+    }
+  ],
+  "packageBuilds": [
+    {
+      "command": [
+        "bun",
+        "run",
+        "build",
+        "android-internal"
+      ],
+      "started": "2026-09-13T10:10:10.523586+00:00",
+      "ended": "2026-09-13T10:10:38.512209+00:00",
+      "seconds": 27.988,
+      "exit": 0,
+      "logSha256": "045efac8d386020c23323b667d9107651eaec95dc975ba4cfdf53a6120ca7dc1",
+      "benchmarkProfile": "audit-candidate",
+      "systemAudioCapture": false,
+      "publication": false
+    },
+    {
+      "command": [
+        "bun",
+        "run",
+        "build",
+        "host-macos-internal"
+      ],
+      "started": "2026-09-13T10:10:12.594375+00:00",
+      "ended": "2026-09-13T10:12:10.272237+00:00",
+      "seconds": 117.675,
+      "exit": 0,
+      "logSha256": "f1f0ddcf98ec21e578ee3cead0576a9cde37c07ce6dcccce197cfcb795ef76ad",
+      "benchmarkProfile": "audit-candidate",
+      "systemAudioCapture": false,
+      "publication": false
+    }
+  ],
+  "committedSource": {
+    "commit": "f91607cc8810258c16fa76d4de3c5dfbb4344102",
+    "sourceSha256": "cb0ad4e0e7b209f1d119446facc124eb3d81133ad01a69ecd165fd8afbb069ce",
+    "inputCount": 872,
+    "equivalence": "All 872 live build input bytes and modes identical. Staging deletion removes the prior absent-file marker vitest.contract.config.ts. Historical package manifests retain their exact pre-staging input and commit provenance. CONTRIBUTING remains approved second-commit input.",
+    "sourceReceiptSha256": "9d7ac57f164d2d37212a1985d470958f6873a61699495cad9dc54dbf059f2c47",
+    "publication": false
+  },
+  "stagedWhitespaceCheck": {
+    "exit": 2,
+    "findings": [
+      "native/macos-capture-shim/Sources/Capture/CaptureStartOptions.swift:52: new blank line at EOF.",
+      "native/macos-capture-shim/Sources/Encoder/EncoderExperimentParsing.swift:45: new blank line at EOF.",
+      "tools/benchmark-profile.baseline068.patch:13: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:103: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:113: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:122: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:135: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:408: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:418: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:422: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:441: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:462: trailing whitespace.",
+      "tools/benchmark-profile.baseline068.patch:512: trailing whitespace."
+    ],
+    "disposition": "Non-blocking review: 11 unified-patch blank context lines must retain their single context marker; two extra EOF blank lines are cosmetic. Preserve approved, tested source bytes. Earlier unstaged git diff --check did not inspect new files and is not evidence these had no whitespace findings."
+  }
+}
