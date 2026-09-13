@@ -311,7 +311,10 @@ impl FileTransferState {
     /// `stale_after`보다 활동이 없던 전송을 버리고 스테이징 파일까지 지운다.
     /// 버린 뷰어가 End/Cancel 없이 사라진 경우의 안전망이다.
     fn sweep_with(inner: &mut Inner, stale_after: Duration) {
-        let now = Instant::now();
+        Self::sweep_at(inner, stale_after, Instant::now());
+    }
+
+    fn sweep_at(inner: &mut Inner, stale_after: Duration, now: Instant) {
         let mut stale_parts: Vec<PathBuf> = Vec::new();
         inner.incoming.retain(|_, transfer| {
             if now.duration_since(transfer.last_activity) > stale_after {
@@ -585,14 +588,13 @@ mod tests {
     }
 
     /// 만료는 마지막 활동 기준이다 — begin이 30분 전이라도 청크가 이어지는
-    /// 전송은 스윕에 살아 남아야 한다(512MiB 상한과의 정합성, M2).
+    /// 전송은 스윕에 살아 남아야 한다(M2).
     #[test]
     fn fresh_chunk_activity_keeps_a_long_transfer_out_of_the_sweep() {
-        let old = |minutes: u64| {
-            Instant::now()
-                .checked_sub(Duration::from_secs(minutes * 60))
-                .expect("instant subtraction stays in range for test durations")
-        };
+        // A freshly booted Windows runner cannot represent forty minutes ago.
+        // A future marker proves that chunk I/O replaces the activity stamp;
+        // an explicit sweep clock tests the full timeout without clock sleeps.
+        let untouched_activity = Instant::now() + Duration::from_secs(40 * 60);
 
         let root = temp_dir("activity-in");
         let state = FileTransferState::default();
@@ -600,7 +602,7 @@ mod tests {
         let token = state.begin_incoming("viewer-1", "long.bin", 1).unwrap();
         {
             let mut inner = state.inner.lock().unwrap();
-            inner.incoming.get_mut(&token).unwrap().last_activity = old(40);
+            inner.incoming.get_mut(&token).unwrap().last_activity = untouched_activity;
         }
         // 청크 트래픽이 활동을 갱신한다 — 스윕은 begin 시점이 아니라 이
         // 갱신 시점에서 만료를 계산해야 한다.
@@ -609,7 +611,9 @@ mod tests {
             .unwrap();
         {
             let mut inner = state.inner.lock().unwrap();
-            FileTransferState::sweep_with(&mut inner, STALE_TRANSFER);
+            let activity = inner.incoming[&token].last_activity;
+            assert!(activity < untouched_activity, "chunk must refresh activity");
+            FileTransferState::sweep_at(&mut inner, STALE_TRANSFER, activity + STALE_TRANSFER);
         }
         assert!(
             state.finish_incoming("viewer-1", &token).is_ok(),
@@ -626,8 +630,12 @@ mod tests {
             .unwrap();
         {
             let mut inner = state_idle.inner.lock().unwrap();
-            inner.incoming.get_mut(&idle_token).unwrap().last_activity = old(31);
-            FileTransferState::sweep_with(&mut inner, STALE_TRANSFER);
+            let activity = inner.incoming[&idle_token].last_activity;
+            FileTransferState::sweep_at(
+                &mut inner,
+                STALE_TRANSFER,
+                activity + STALE_TRANSFER + Duration::from_secs(1),
+            );
         }
         assert_eq!(
             state_idle.append_incoming("viewer-1", &idle_token, "eA==", 0),
@@ -647,14 +655,16 @@ mod tests {
             .unwrap();
         {
             let mut inner = state_out.inner.lock().unwrap();
-            inner.outgoing.get_mut(&out_token).unwrap().last_activity = old(40);
+            inner.outgoing.get_mut(&out_token).unwrap().last_activity = untouched_activity;
         }
         state_out
             .read_outgoing("viewer-1", &out_token, 0, 8)
             .unwrap();
         {
             let mut inner = state_out.inner.lock().unwrap();
-            FileTransferState::sweep_with(&mut inner, STALE_TRANSFER);
+            let activity = inner.outgoing[&out_token].last_activity;
+            assert!(activity < untouched_activity, "read must refresh activity");
+            FileTransferState::sweep_at(&mut inner, STALE_TRANSFER, activity + STALE_TRANSFER);
         }
         assert!(
             state_out.finish_outgoing("viewer-1", &out_token).is_ok(),

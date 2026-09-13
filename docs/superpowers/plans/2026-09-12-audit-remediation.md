@@ -499,3 +499,5 @@ Task11 명시적 승인 후 실행 (2026-09-13 20:41–20:51 KST): 사용자가 
 후속 통합 요청: 사용자가 simplify 후 push·merge를 요청하고 실기기 검사는 추후 직접 수행하기로 했다. 따라서 Task11 Step4는 실기기 수용 미완료로 유지하면서, 소스 정리와 자동 검증 후 PR 통합을 진행한다. 원격 main `27e33e4`에서 로컬 기준 `068b662`까지 기존20개 커밋도 포함되는 범위를 PR에 명시한다. 새 판단75–76은 현재 검증 문서에 기록한다.
 
 simplify 후 자동 검증 완료: `bun run verify all`,327.189초/exit0,전후 source `6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd` 동일. Doctor100·JS559·계약4·UI78/9suite·Host225+12·JVM118/19suite 및 Rust/Swift 자동 검사 통과. 실기기 Step4는 사용자가 나중에 직접 검사하는 미완료 항목으로 유지한다.
+
+PR #5 첫 CI 후 이식성 보완: macOS 캡처 리소스 선행 빌드, Android cargo-ndk·x86_64·고정 NDK 환경, Windows 만료 테스트 시각과 교체 후 오류 주입 경계를 수정했다. 소스 `89197fba4b7214531f3f917c121eaf909eae33280dd7d844bad5f71691ca8a82`. Host225+12·엄격 검사와 JS559/57파일 통과, macOS 준비 순서 회귀의 수정 전 실패 확인. 별도 OS의 최종 결과는 PR CI로 확인한다. 실기기 Step4는 사용자 후속 수행으로 유지한다.

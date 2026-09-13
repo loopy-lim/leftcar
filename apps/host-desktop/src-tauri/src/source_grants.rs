@@ -344,6 +344,9 @@ fn durable_replace_checked(
                 )
             }
             .map_err(std::io::Error::other)?;
+            // MoveFileExW combines replacement and flushing. Keep the same
+            // post-replacement fault boundary as the Unix writer.
+            checkpoint(4)?;
         }
         checkpoint(5)?;
         Ok(())

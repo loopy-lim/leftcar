@@ -42,6 +42,11 @@ test('macOS Rust verification still checks Swift and preserves pure RTX executio
   const commands = [], scopes = [];
   verify('rust', { platform: 'darwin', diagnose: scope => { scopes.push(scope); return true; }, run: (command, args) => { commands.push([command, args]); return ''; } });
   expect(scopes).toEqual(['host-macos']);
+  const libraryBuild = commands.findIndex(([command, args]) => command === 'zsh' && args[1] === 'library');
+  const hostTests = commands.findIndex(([command, args]) => command === 'cargo' && args[0] === 'test' && args.includes('apps/host-desktop/src-tauri/Cargo.toml'));
+  expect(libraryBuild).toBeGreaterThanOrEqual(0);
+  expect(commands[libraryBuild][1][2]).toBe(join(root, 'native/macos-capture-shim/libleftcar_capture.dylib'));
+  expect(libraryBuild).toBeLessThan(hostTests);
   expect(commands.some(([command, args]) => command === 'zsh' && args[1] === 'retransmit-policy-test')).toBe(true);
   expect(commands.some(([command]) => command.endsWith('/retransmit-policy-test'))).toBe(true);
   expect(diagnose('host-macos', { platform: 'darwin' })).toBe(false);

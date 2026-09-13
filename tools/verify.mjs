@@ -33,12 +33,15 @@ export function verify(scope='all', { platform = process.platform, diagnose: doc
     run('cargo',['fmt','--manifest-path','apps/host-desktop/src-tauri/Cargo.toml','--','--check']);
     run('cargo',['run','-p','architecture-check','--locked']);
     run('cargo',['test','--workspace','--locked']);
+    if (platform === 'darwin') {
+      // Tauri validates the configured bundle resource even for cargo test.
+      run('zsh',['tools/build-macos-capture-shim.zsh','library',join(root,'native/macos-capture-shim/libleftcar_capture.dylib')]);
+    }
     run('cargo',['test','--manifest-path','apps/host-desktop/src-tauri/Cargo.toml','--locked']);
     run('cargo',['clippy','--workspace','--all-targets','--locked','--','-D','warnings']);
     run('cargo',['clippy','--manifest-path','apps/host-desktop/src-tauri/Cargo.toml','--all-targets','--locked','--','-D','warnings']);
     if(platform==='darwin') {
       const dir=mkdtempSync(join(tmpdir(),'leftcar-verify-'));
-      run('zsh',['tools/build-macos-capture-shim.zsh','library',join(dir,'libleftcar_capture.dylib')]);
       for(const mode of ['policy-test','retransmit-ring-test','split-test'])run('zsh',['tools/build-macos-capture-shim.zsh',mode,join(dir,mode)]);
       run('zsh',['tools/build-macos-capture-shim.zsh','split-policy-test',join(dir,'split-policy-test')]);
       run(join(dir,'split-policy-test'));

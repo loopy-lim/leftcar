@@ -631,7 +631,7 @@
     ],
     "disposition": "Non-blocking review: 11 unified-patch blank context lines must retain their single context marker; two extra EOF blank lines are cosmetic. Preserve approved, tested source bytes. Earlier unstaged git diff --check did not inspect new files and is not evidence these had no whitespace findings."
   },
-  "latestSourceSha256": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+  "latestSourceSha256": "89197fba4b7214531f3f917c121eaf909eae33280dd7d844bad5f71691ca8a82",
   "latestInputCount": 872,
   "simplifyVerification": {
     "command": [
@@ -668,10 +668,67 @@
       "jvmSuites": 19
     },
     "scopeNotes": [
-      "Fresh full automatic verification at current source; no install or device operations",
+      "Fresh full automatic verification at recorded pre-CI-correction source; no install or device operations",
       "Swift full library and adapter binaries compiled; pure split and retransmit policies executed",
       "JS total includes contract and performance tests; totals are not additive",
       "Previous package inputs are historical and were not rebuilt or installed after simplify"
     ]
+  },
+  "ciPortabilityCorrection": {
+    "sourceSha256": "89197fba4b7214531f3f917c121eaf909eae33280dd7d844bad5f71691ca8a82",
+    "firstCiRun": "https://github.com/loopy-lim/leftcar/actions/runs/34757386802",
+    "firstCiResults": {
+      "typescript": "success",
+      "macos": "failure: missing configured capture resource before Host tests",
+      "android": "failure: missing cargo-ndk",
+      "windows": "failure: Instant subtraction on new runner and missing post-replacement fault checkpoint"
+    },
+    "changes": [
+      "Build canonical macOS capture resource before Host tests in CI and local verify",
+      "Install pinned cargo-ndk 4.1.2, both Android targets, and NDK environment",
+      "Use explicit sweep clock while retaining actual chunk activity and expiry assertions",
+      "Retain Windows post-replacement fault checkpoint"
+    ],
+    "localRust": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "apps/host-desktop/src-tauri/Cargo.toml",
+          "--locked"
+        ],
+        "startedUtc": "2026-09-13T12:43:57.294441+00:00",
+        "seconds": 28.377,
+        "exit": 0,
+        "logSha256": "f71fc8750af9790a8f44e9b83877b42e9df4ddcfb3d8da13c03f5bb680d92af7"
+      },
+      {
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "apps/host-desktop/src-tauri/Cargo.toml",
+          "--all-targets",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "startedUtc": "2026-09-13T12:44:25.671345+00:00",
+        "seconds": 2.06,
+        "exit": 0,
+        "logSha256": "5b7158323be45933b32faf94cc635b895acea2bea860ba053284c6bd93881b75"
+      }
+    ],
+    "localJs": {
+      "command": "bun run test",
+      "passed": 559,
+      "files": 57,
+      "logSha256": "8ecc53a59ddb7391617d3ffb4c8a7c1337a4a34dd44874f6d359619b30df70e7",
+      "regression": "macOS prerequisite output and ordering failed before fix, passed after"
+    },
+    "ciRetry": "pending; read PR check status for current result",
+    "physical": "deferred by user; no new device run"
   }
 }
