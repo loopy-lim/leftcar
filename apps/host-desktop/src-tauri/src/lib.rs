@@ -40,6 +40,7 @@ enum DashboardPresentation {
     Visible,
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn dock_visibility_for_dashboard(presentation: DashboardPresentation) -> bool {
     matches!(presentation, DashboardPresentation::Visible)
 }
@@ -839,9 +840,9 @@ fn local_lan_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        activation_policy_for_dashboard, dock_visibility_for_dashboard, DashboardPresentation,
-    };
+    #[cfg(target_os = "macos")]
+    use super::activation_policy_for_dashboard;
+    use super::{dock_visibility_for_dashboard, DashboardPresentation};
 
     #[cfg(target_os = "macos")]
     #[test]
