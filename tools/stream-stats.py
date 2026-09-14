@@ -25,18 +25,44 @@ import argparse
 import json
 import signal
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 PAIRING_PATH = Path.home() / "Library/Application Support/leftcar-host/paired_devices.json"
+KEYCHAIN_SERVICE = "leftcar-host"
 
 
-def load_token():
+def load_token(device=None):
+    """Paired-device control token. Since 2026-09-10 tokens live in the macOS
+    login Keychain (service "leftcar-host", account = the device's
+    credential_id) and paired_devices.json holds metadata only. The first CLI
+    read may pop a one-time Keychain consent dialog — allow it once."""
     try:
-        return json.loads(PAIRING_PATH.read_text())[0]["token_hex"]
-    except (OSError, IndexError, KeyError, ValueError):
+        devices = json.loads(PAIRING_PATH.read_text())
+    except (OSError, ValueError):
         return None
+    for entry in devices:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", ""))
+        device_id = str(entry.get("device_id", ""))
+        if device and device.lower() not in name.lower() and device != device_id:
+            continue
+        account = entry.get("credential_id") or device_id
+        try:
+            found = subprocess.run(
+                ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if found.returncode == 0 and found.stdout.strip():
+            return found.stdout.strip()
+    return None
 
 
 def get_status(host, port, token, timeout=3.0):
@@ -87,9 +113,13 @@ def main():
     parser.add_argument("--log")
     parser.add_argument("--duration", type=float)
     parser.add_argument("--token")
+    parser.add_argument(
+        "--device",
+        help="paired device name/id whose token to use when several devices are paired",
+    )
     args = parser.parse_args()
 
-    token = args.token or load_token()
+    token = args.token or load_token(args.device)
     if not token:
         raise SystemExit("no pairing token: pass --token or pair the host first")
 
