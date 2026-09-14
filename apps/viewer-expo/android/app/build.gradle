@@ -103,13 +103,16 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace 'dev.leftcar.viewer'
+    buildFeatures {
+        aidl true
+    }
     defaultConfig {
         applicationId 'leftcar.ll3.kr' + benchmark.suffix
         manifestPlaceholders = [leftcarScheme: benchmark.scheme, leftcarExpoScheme: benchmark.expoScheme, leftcarAccessoryAction: benchmark.accessory]
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "0.1.5"
+        versionCode 5
+        versionName "0.1.6"
 
         // Leftcar UI는 한국어/영어만 제공한다. 의존성의 미사용 번역 리소스를 제외한다.
         resourceConfigurations += ["ko", "en"]

@@ -416,9 +416,6 @@ export function useStreamController(
   const removeStream = useCallback((session: number) => {
     updateStreams((previous) => previous.filter((stream) => stream.session !== session));
   }, [updateStreams]);
-  const updateLocalCursor = useCallback((localCursor: boolean) => {
-    updateStreams((previous) => previous.map((stream) => ({ ...stream, localCursor })));
-  }, [updateStreams]);
   const updateLocalAudio = useCallback((localAudio: boolean) => {
     updateStreams((previous) => previous.map((stream) => ({ ...stream, localAudio })));
   }, [updateStreams]);
@@ -484,7 +481,6 @@ export function useStreamController(
     removeStream,
     streams,
     syncAdaptiveTarget,
-    updateLocalCursor,
     updateLocalAudio,
   };
 }

@@ -39,7 +39,6 @@ describe("viewer preferences", () => {
       profileId: "clarity",
       streamingPriority: "clarity",
       showFps: false,
-      localCursor: true,
       localAudio: true,
       balancedPresentation: false,
       opusAudio: false,
@@ -48,7 +47,6 @@ describe("viewer preferences", () => {
       profileId: "auto",
       streamingPriority: "responsive",
       showFps: false,
-      localCursor: true,
       localAudio: true,
       balancedPresentation: false,
       opusAudio: false,
@@ -64,7 +62,6 @@ describe("viewer preferences", () => {
       profileId: "clarity",
       streamingPriority: "clarity",
       showFps: false,
-      localCursor: true,
       localAudio: true,
       balancedPresentation: false,
       opusAudio: false,
@@ -104,7 +101,6 @@ describe("viewer preferences", () => {
       profileId: "video" as const,
       streamingPriority: "clarity" as const,
       showFps: false,
-      localCursor: true,
       localAudio: false,
       balancedPresentation: false,
       opusAudio: false,
@@ -141,16 +137,13 @@ describe("viewer preferences", () => {
     ).toBe(true);
   });
 
-  it("defaults localCursor to true and persists toggles", async () => {
-    expect(DEFAULT_VIEWER_PREFERENCES.localCursor).toBe(true);
-    expect(parseViewerPreferences(null).localCursor).toBe(true);
-    expect(parseViewerPreferences('{"showFps":true}').localCursor).toBe(true);
-    expect(
-      parseViewerPreferences('{"localCursor":false,"showFps":true}').localCursor,
-    ).toBe(false);
-    expect(
-      parseViewerPreferences('{"localCursor":"yes"}').localCursor,
-    ).toBe(true);
+  it("ignores and removes the legacy manual cursor preference", async () => {
+    const parsed = parseViewerPreferences('{"localCursor":false,"showFps":true}');
+    expect(parsed).not.toHaveProperty("localCursor");
+
+    const store = memoryStore();
+    await writeViewerPreferences(store, parsed);
+    expect(JSON.parse(store.value ?? "{}")).not.toHaveProperty("localCursor");
   });
 
   it("recommends a profile from each display's actual pixel size", () => {

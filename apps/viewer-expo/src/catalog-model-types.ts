@@ -29,7 +29,6 @@ export interface ActiveStream {
   encoderExperiment: EncoderExperimentId;
   udpStability?: UdpStabilitySelection;
   showFps?: boolean;
-  localCursor?: boolean;
   localAudio?: boolean;
   /** Requested codec admitted by native module; runtime fallback is separately native. */
   opusAudio?: boolean;

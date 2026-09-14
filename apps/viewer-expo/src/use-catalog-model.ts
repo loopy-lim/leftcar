@@ -325,7 +325,6 @@ export function useCatalogModel() {
             contentMode: active.contentMode,
             udpStability: active.udpStability,
             showFps: active.showFps ?? preferences.showFps,
-            localCursor: active.localCursor ?? preferences.localCursor,
             localAudio: active.localAudio ?? preferences.localAudio,
             opusAudio: active.opusAudio ?? preferences.opusAudio,
             balancedPresentation: active.balancedPresentation ?? preferences.balancedPresentation,
@@ -346,7 +345,6 @@ export function useCatalogModel() {
       catalogQuery.data,
       host,
       preferences.showFps,
-      preferences.localCursor,
       preferences.localAudio,
       preferences.opusAudio,
       preferences.balancedPresentation,
@@ -406,7 +404,7 @@ export function useCatalogModel() {
     [catalogQuery.data, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
+  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget } =
     useStreamController(restoreActiveStream, reconfigureActiveStream);
   useEffect(() => {
     for (const [key, lifetime] of audioLifetimes.current) {
@@ -438,16 +436,6 @@ export function useCatalogModel() {
   const handleToggleFps = useCallback((showFps: boolean) => {
     updateViewerPreferences((current) => ({ ...current, showFps }));
   }, [updateViewerPreferences]);
-
-  const handleToggleCursor = useCallback((localCursor: boolean) => {
-    updateViewerPreferences((current) => ({ ...current, localCursor }));
-    updateLocalCursor(localCursor);
-    if (launcher?.setCursorStream) {
-      void Promise.all(
-        streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
-      ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
-    }
-  }, [setError, streams, updateLocalCursor, updateViewerPreferences]);
 
   const handleToggleBalancedPresentation = useCallback((balancedPresentation: boolean) => {
     updateViewerPreferences((current) => ({ ...current, balancedPresentation }));
@@ -635,7 +623,6 @@ export function useCatalogModel() {
               contentMode: displayProfile.contentMode,
               udpStability: effectiveUdpStability,
               showFps: preferences.showFps,
-              localCursor: preferences.localCursor,
               localAudio: preferences.localAudio,
               opusAudio: preferences.opusAudio,
             balancedPresentation: preferences.balancedPresentation,
@@ -669,7 +656,6 @@ export function useCatalogModel() {
             encoderExperiment: started.encoderExperiment,
             udpStability: started.udpStability,
             showFps: preferences.showFps,
-            localCursor: preferences.localCursor,
             localAudio: preferences.localAudio,
             opusAudio: started.opusAudio ?? false,
             balancedPresentation: started.balancedPresentation ?? false,
@@ -720,7 +706,6 @@ export function useCatalogModel() {
       mediaHost,
       preferences.profileId,
       preferences.showFps,
-      preferences.localCursor,
       preferences.localAudio,
       preferences.opusAudio,
       preferences.balancedPresentation,
@@ -897,7 +882,6 @@ export function useCatalogModel() {
     viewerPreferenceControlsDisabled,
     clipboardPreferenceControlDisabled,
     handleToggleFps,
-    handleToggleCursor,
     handleToggleAudio,
     handleToggleBalancedPresentation,
     handleToggleClipboardShare,
@@ -905,7 +889,6 @@ export function useCatalogModel() {
     profileId: preferences.profileId,
     streamingPriority,
     showFps: preferences.showFps,
-    localCursor: preferences.localCursor,
     localAudio: preferences.localAudio,
     opusAudio: preferences.opusAudio ?? false,
     handleToggleOpusAudio,

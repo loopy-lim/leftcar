@@ -21,7 +21,7 @@ const config: LeftcarExpoConfig = {
   name: benchmarkSlug === undefined ? "Leftcar Viewer" : `Leftcar Benchmark ${benchmarkSlug}`,
   slug: benchmarkSlug === undefined ? "leftcar-viewer" : `leftcar-benchmark-${benchmarkSlug}`,
   scheme: benchmarkSlug === undefined ? "leftcar" : `leftcar-benchmark-${benchmarkSlug}`,
-  version: "0.1.2",
+  version: "0.1.6",
   orientation: "default",
   userInterfaceStyle: "automatic",
   icon: "./assets/branding/leftcar-viewer-icon-source.png",

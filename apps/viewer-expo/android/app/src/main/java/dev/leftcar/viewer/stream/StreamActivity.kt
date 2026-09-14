@@ -29,7 +29,6 @@ import kotlinx.coroutines.Job
 
 class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
-        private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
         private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
@@ -53,16 +52,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val recoveryRetryPolicy = StreamRecoveryRetryPolicy()
     private var surfaceChangeCount = 0
     private var pendingSurfaceAttach: Runnable? = null
-    private val tabletCursorHandler = Handler(Looper.getMainLooper())
-    private val hideTabletCursorRunnable = Runnable {
-        streamSurfaces?.left?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
-        streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
-    }
     private var hud: StreamHudController? = null
     private var gestureHint: GestureHintOverlay? = null
     private var cursorOverlay: CursorOverlayView? = null
     private var audioPlayer: StreamAudioPlayer? = null
-    private var localCursorEnabled: Boolean = false
+    private val inputOwnership = InputOwnershipController()
+    private var keyBridgeInput: KeyBridgeInputAdapter? = null
+    private var pendingCaptureView: View? = null
+    private var consumeEscapeUp = false
     private var balancedPresentation: Boolean = false
     private var activityStarted = false
     private val displayClock by lazy {
@@ -294,9 +291,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             terminationHandled = false
             recoveryFallbackEmitted = false
             recoveryRetryPolicy.reset()
-            // A rebind builds a fresh renderer session, so the host opt-in
-            // (LCDON) must ride again with the new control channel.
-            enableCursorOverlay()
+            // A rebind builds a fresh renderer session, so LCD1 subscription
+            // must ride again with the new control channel.
+            subscribeCursorStream()
             syncAudioStream()
         }
         hud?.onRebindFinished(result == 0)
@@ -353,16 +350,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    /**
-     * 화면 오른쪽 위 입력 배지처럼 커서도 스트림 창 밖 팝업 윈도우로 띄운다 —
-     * 스트림 SurfaceView가 setZOrderOnTop으로 합성돼 창 안 어떤 뷰도 비디오 위를
-     * 그릴 수 없다. attach·재바인드마다 LCDON을 보내 새 호스트 세션에 옵트인을
-     * 다시 알린다. 사용자가 오버레이를 끄면 LCDOFF를 즉시 보내고, 세션 종료는
-     * BYE가 최종 정리를 맡는다.
-     */
-    private fun enableCursorOverlay() {
-        if (!localCursorEnabled) return
+    /** Keep host cursor data available; ownership decides which cursor is visible. */
+    private fun subscribeCursorStream() {
         ViewerNative.setCursorStream(instanceId, true)
+        applyCursorPresentation()
+    }
+
+    private fun showRemoteCursorOverlay() {
+        if (streamZoom.isZoomed) return
         val overlay = cursorOverlay ?: CursorOverlayView(this, instanceId).also { view ->
             cursorOverlay = view
         }
@@ -370,10 +365,25 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         overlay.start()
     }
 
-    private fun disableCursorOverlay() {
-        ViewerNative.setCursorStream(instanceId, false)
+    private fun hideRemoteCursorOverlay() {
         cursorOverlay?.stop()
         cursorOverlay = null
+    }
+
+    private fun setLocalCursorVisible(visible: Boolean) {
+        val type = if (visible) PointerIcon.TYPE_ARROW else PointerIcon.TYPE_NULL
+        streamSurfaces?.left?.pointerIcon = PointerIcon.getSystemIcon(this, type)
+        streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, type)
+    }
+
+    private fun applyCursorPresentation() {
+        if (inputOwnership.owner == InputOwner.REMOTE_MAC) {
+            setLocalCursorVisible(false)
+            showRemoteCursorOverlay()
+        } else {
+            hideRemoteCursorOverlay()
+            setLocalCursorVisible(true)
+        }
     }
 
     /**
@@ -399,13 +409,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * 제스처 안내는 첫 스트림 창에서 자동으로 1회 보여 주고(force=false),
-     * 이후에는 HUD 물음표 칩으로 다시 연다(force=true). 닫힐 때 "본 적
-     * 있음" 플래그를 저장한다.
+     * 제스처 안내는 첫 스트림 창에서 자동으로 1회 보여 준다.
+     * 닫힐 때 "본 적 있음" 플래그를 저장한다.
      */
-    private fun showGestureHint(force: Boolean) {
+    private fun showGestureHint() {
         val prefs = getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
-        if (!force && prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
+        if (prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
         gestureHint?.dismiss()
         gestureHint = GestureHintOverlay(this) {
             prefs.edit().putBoolean(GestureHintOverlay.PREF_SHOWN, true).apply()
@@ -517,7 +526,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val lens = TextInputLensView(this, relay).also { view ->
             view.onImeVisibilityChanged = { visible ->
                 keyboardRequested = visible
-                hud?.setKeyboardChipActive(visible)
             }
             textLens = view
         }
@@ -528,7 +536,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * HUD "ABC" 칩의 토글. 열 때는 포커스가 렌즈로 넘어가고(하드웨어 키는
+     * 소프트키보드를 열 때는 포커스가 렌즈로 넘어가고(하드웨어 키는
      * Activity dispatchKeyEvent가 여전히 Mac으로 포워딩한다), 닫으면 포커스를
      * 스트림 Surface로 돌려 놓는다. [keyboardRequested]는 우리가 요청한 상태고,
      * 렌즈의 insets 콜백(API 30+)이 뒤로가기 닫기 같은 시스템 주도 변화로
@@ -554,36 +562,103 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             imm.hideSoftInputFromWindow(lens.windowToken, 0)
             lens.clearFocus()
             streamSurfaces?.requestFocus()
-            hud?.setKeyboardChipActive(false)
         }
     }
 
-    private fun hideTabletCursor() {
-        tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
-        hideTabletCursorRunnable.run()
-    }
-
-    private fun updateTabletCursor(event: MotionEvent, view: View) {
-        if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) {
-            if (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) ||
-                event.isFromSource(InputDevice.SOURCE_STYLUS)
-            ) {
-                hideTabletCursor()
+    private fun applyInputOwnershipEffects(
+        effects: List<InputOwnershipEffect>,
+        activationView: View? = null,
+    ) {
+        for (effect in effects) {
+            when (effect) {
+                InputOwnershipEffect.ACQUIRE_KEYBRIDGE -> {
+                    val target = activationView ?: pendingCaptureView ?: streamSurfaces?.left
+                    keyBridgeInput?.acquire { acquired ->
+                        if (!acquired) {
+                            forceReleaseInput(InputOwnershipEvent.RemoteAcquireFailed)
+                            val message = if (keyBridgeInput?.availability == KeyBridgeAvailability.UPDATE_REQUIRED) {
+                                ViewerStrings.keyBridgeUpdateRequired
+                            } else {
+                                ViewerStrings.keyBridgeUnavailable
+                            }
+                            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+                            return@acquire
+                        }
+                        if (inputOwnership.owner != InputOwner.ACQUIRING_REMOTE ||
+                            target == null || !target.hasWindowFocus()
+                        ) {
+                            keyBridgeInput?.release()
+                            forceReleaseInput(InputOwnershipEvent.FocusLost)
+                            return@acquire
+                        }
+                        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
+                            forceReleaseInput(InputOwnershipEvent.RemoteAcquireFailed)
+                            return@acquire
+                        }
+                        runCatching {
+                            target.requestFocus()
+                            target.requestPointerCapture()
+                        }.onFailure {
+                            forceReleaseInput(InputOwnershipEvent.RemoteAcquireFailed)
+                        }
+                        target.postDelayed({
+                            if (inputOwnership.owner == InputOwner.ACQUIRING_REMOTE) {
+                                forceReleaseInput(InputOwnershipEvent.RemoteAcquireFailed)
+                            }
+                        }, 1_000L)
+                    }
+                }
+                // Pointer capture is requested only after the asynchronous
+                // KeyBridge acquire above succeeds.
+                InputOwnershipEffect.REQUEST_POINTER_CAPTURE -> Unit
+                InputOwnershipEffect.HIDE_LOCAL_CURSOR -> setLocalCursorVisible(false)
+                InputOwnershipEffect.SHOW_REMOTE_CURSOR -> showRemoteCursorOverlay()
+                InputOwnershipEffect.FORWARD_POINTER -> Unit
+                InputOwnershipEffect.RELEASE_REMOTE_INPUT -> ViewerNative.releaseInput(instanceId)
+                InputOwnershipEffect.RELEASE_POINTER_CAPTURE -> {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        listOfNotNull(streamSurfaces?.left, streamSurfaces?.right)
+                            .firstOrNull { it.hasPointerCapture() }
+                            ?.releasePointerCapture()
+                    }
+                    pendingCaptureView = null
+                }
+                InputOwnershipEffect.RELEASE_KEYBRIDGE -> keyBridgeInput?.release()
+                InputOwnershipEffect.HIDE_REMOTE_CURSOR -> hideRemoteCursorOverlay()
+                InputOwnershipEffect.SHOW_LOCAL_CURSOR -> setLocalCursorVisible(true)
             }
-            return
         }
-        if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT ||
-            event.actionMasked == MotionEvent.ACTION_CANCEL
-        ) {
-            hideTabletCursor()
-            return
+    }
+
+    private fun forceReleaseInput(event: InputOwnershipEvent) {
+        val effects = inputOwnership.on(event)
+        if (effects.isEmpty()) ViewerNative.releaseInput(instanceId)
+        applyInputOwnershipEffects(effects)
+    }
+
+    private fun activateRemoteInput(event: MotionEvent, view: View): Boolean {
+        hideRemoteCursorOverlay()
+        setLocalCursorVisible(true)
+        if (inputOwnership.owner == InputOwner.ACQUIRING_REMOTE) return true
+        if (inputOwnership.owner != InputOwner.LOCAL_ANDROID) return false
+        if (event.actionMasked != MotionEvent.ACTION_BUTTON_PRESS &&
+            event.actionMasked != MotionEvent.ACTION_DOWN
+        ) return false
+        if (remoteInputLocked()) {
+            forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
+            return true
         }
-        view.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_ARROW)
-        tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
-        tabletCursorHandler.postDelayed(
-            hideTabletCursorRunnable,
-            TABLET_CURSOR_IDLE_TIMEOUT_MS,
+        if (streamZoom.isZoomed) {
+            streamZoom.reset()
+            applyZoomToSurfaces()
+        }
+        val (nx, ny) = normalizedPoint(view, event.x, event.y)
+        pendingCaptureView = view
+        applyInputOwnershipEffects(
+            inputOwnership.on(InputOwnershipEvent.MouseActivation(nx, ny)),
+            view,
         )
+        return true
     }
 
     private fun forwardPointer(event: MotionEvent, view: View): Boolean {
@@ -591,12 +666,22 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // two-finger scroll, long-press right click); physical mice and
         // styluses keep the direct event mapping below.
         if (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+            setLocalCursorVisible(false)
+            showRemoteCursorOverlay()
             return forwardTouchGesture(event, view)
+        }
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+            inputOwnership.owner != InputOwner.REMOTE_MAC
+        ) {
+            return activateRemoteInput(event, view)
         }
         // Touchscreen events never reach here (routed to the gesture machine
         // above), so only the stylus still counts as touch-like.
         val touchLike = event.isFromSource(InputDevice.SOURCE_STYLUS)
-        updateTabletCursor(event, view)
+        if (touchLike) {
+            setLocalCursorVisible(false)
+            showRemoteCursorOverlay()
+        }
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
         ) {
@@ -620,7 +705,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             MotionEvent.ACTION_UP -> if (touchLike) 3 else return false
             MotionEvent.ACTION_SCROLL -> 4
             MotionEvent.ACTION_CANCEL -> {
-                ViewerNative.releaseInput(instanceId)
+                forceReleaseInput(InputOwnershipEvent.Disconnected)
                 return true
             }
             else -> return false
@@ -655,6 +740,64 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         )
     }
 
+    private fun forwardCapturedPointer(event: MotionEvent, view: View): Boolean {
+        if (inputOwnership.owner != InputOwner.REMOTE_MAC) return false
+        if (remoteInputLocked()) {
+            forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
+            return true
+        }
+        if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            forceReleaseInput(InputOwnershipEvent.Disconnected)
+            return true
+        }
+        val dx = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+        val dy = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+        val surfaces = streamSurfaces
+        val canvasWidth = if (surfaces?.right != null) {
+            surfaces.left.width + surfaces.right.width
+        } else {
+            view.width
+        }.coerceAtLeast(1)
+        val canvasHeight = if (surfaces?.right != null) {
+            maxOf(surfaces.left.height, surfaces.right.height)
+        } else {
+            view.height
+        }.coerceAtLeast(1)
+        applyInputOwnershipEffects(
+            inputOwnership.on(
+                InputOwnershipEvent.CapturedMove(dx, dy, canvasWidth, canvasHeight),
+            ),
+        )
+        if (inputOwnership.owner != InputOwner.REMOTE_MAC) return true
+
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_MOVE -> 1
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_DOWN -> 2
+            MotionEvent.ACTION_BUTTON_RELEASE, MotionEvent.ACTION_UP -> 3
+            MotionEvent.ACTION_SCROLL -> 4
+            else -> return false
+        }
+        if (action == 2) {
+            hud?.revealInput()
+            hud?.revealStats()
+        }
+        val position = inputOwnership.pointerPosition
+        val actionButton = when {
+            event.actionButton != 0 -> event.actionButton
+            action == 2 || action == 3 -> MotionEvent.BUTTON_PRIMARY
+            else -> 0
+        }
+        return sendPointerUnlocked(
+            action,
+            position.x,
+            position.y,
+            event.buttonState,
+            actionButton,
+            event.getAxisValue(MotionEvent.AXIS_HSCROLL),
+            event.getAxisValue(MotionEvent.AXIS_VSCROLL),
+        )
+    }
+
     private val gestureHandler = Handler(Looper.getMainLooper())
     // Activity field initializers run before onCreate attaches the base
     // context, so anything needing Context must wait for first use.
@@ -671,7 +814,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var gestureLastY = 0f
 
     private fun forwardTouchGesture(event: MotionEvent, view: View): Boolean {
-        updateTabletCursor(event, view)
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             hud?.revealInput()
             hud?.revealStats()
@@ -791,11 +933,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    /**
-     * 현재 줌 상태를 스트림 서피스에 반영하고, 줌인 중에는 로컬 커서
-     * 오버레이를 끈다 — 오버레이는 줌을 모르는 전역 좌표로 그려져 위치가
-     * 어긋나기 때문이다(스냅아웃하면 다시 켠다).
-     */
+    /** Apply zoom and keep the remote overlay hidden while its coordinates differ. */
     private fun applyZoomToSurfaces() {
         val surfaces = streamSurfaces ?: return
         val split = surfaces.right != null
@@ -803,11 +941,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             if (split) streamZoom.applyToTile(it, leftTile = true) else streamZoom.applyToView(it)
         }
         surfaces.right?.let { streamZoom.applyToTile(it, leftTile = false) }
-        if (streamZoom.isZoomed && localCursorEnabled) {
-            disableCursorOverlay()
-        } else if (!streamZoom.isZoomed && localCursorEnabled) {
-            enableCursorOverlay()
-        }
+        if (streamZoom.isZoomed) hideRemoteCursorOverlay() else applyCursorPresentation()
     }
 
     private fun isRemoteKey(keyCode: Int): Boolean = keyCode !in setOf(
@@ -825,7 +959,25 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP) {
             return super.dispatchKeyEvent(event)
         }
-        if (event.action == KeyEvent.ACTION_DOWN) {
+        val down = event.action == KeyEvent.ACTION_DOWN
+        if (!down && event.keyCode == KeyEvent.KEYCODE_ESCAPE && consumeEscapeUp) {
+            consumeEscapeUp = false
+            return true
+        }
+        when (inputOwnership.routePhysicalKey(event.keyCode, down)) {
+            KeyRoute.LOCAL_ANDROID -> return super.dispatchKeyEvent(event)
+            KeyRoute.RELEASE_REMOTE -> {
+                if (down) consumeEscapeUp = true
+                forceReleaseInput(InputOwnershipEvent.Escape)
+                return true
+            }
+            KeyRoute.REMOTE_MAC -> Unit
+        }
+        if (remoteInputLocked()) {
+            forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
+            return true
+        }
+        if (down) {
             hud?.revealInput()
             hud?.revealStats()
         }
@@ -833,7 +985,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.keyCode,
             event.scanCode,
             event.metaState,
-            event.action == KeyEvent.ACTION_DOWN,
+            down,
             event.repeatCount,
         )
         return result || super.dispatchKeyEvent(event)
@@ -869,6 +1021,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             splitVertical,
             this,
             { view, event -> forwardPointer(event, view) },
+            { view, event -> forwardCapturedPointer(event, view) },
         )
         streamSurfaces = surfaces
         surfaceLifecycle.hierarchySwapped(surfaces.holders)
@@ -886,7 +1039,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             window.attributes.preferredRefreshRate = fps.toFloat()
         }
         setContentView(surfaces.root)
-        localCursorEnabled = intent?.getBooleanExtra("localCursor", true) ?: true
+        keyBridgeInput = KeyBridgeInputAdapter.create(this).also { it.prepare() }
         localAudioEnabled = intent?.getBooleanExtra("localAudio", true) ?: true
         opusAudioRequested = intent?.getBooleanExtra("opusAudio", false) ?: false
         balancedPresentation = savedInstanceState?.takeIf { it.containsKey(KEY_BALANCED_PRESENTATION) }
@@ -914,16 +1067,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             showFps,
             ::handleTermination,
             ::markRenderHealthy,
-        ).also { hud ->
-            hud.onGestureHelpTapped = { showGestureHint(true) }
-            hud.onKeyboardToggle = { toggleSoftKeyboard() }
-            // 전체화면에서도 눈에 보이는 종료 경로 — finish()의 onDestroy가
-            // 렌더러 release(BYE)와 창 정리를 맡는다.
-            hud.onExitTapped = { finish() }
-        }
+            onInputStatusChanged = { status ->
+                if (status == 0) forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
+            },
+        )
         hud?.show()
         attachTextLens()
-        showGestureHint(false)
+        showGestureHint()
         surfaces.requestFocus()
         hideSystemBars()
         acquireNetworkLocks()
@@ -958,7 +1108,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextPort = newIntent.getIntExtra("port", port)
         val nextFps = newIntent.getIntExtra("fps", fps).coerceIn(1, 90)
         val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
-        val nextLocalCursor = newIntent.getBooleanExtra("localCursor", localCursorEnabled)
         val nextBalanced = newIntent.getBooleanExtra("balancedPresentation", balancedPresentation)
         val nextLocalAudio = newIntent.getBooleanExtra("localAudio", localAudioEnabled)
         val nextOpusAudio = newIntent.getBooleanExtra("opusAudio", opusAudioRequested)
@@ -968,8 +1117,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
         val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
-        val togglesOnly = (nextLocalCursor != localCursorEnabled ||
-            nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation) && !reconnectRequested &&
+        val togglesOnly = (nextLocalAudio != localAudioEnabled ||
+            nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation) && !reconnectRequested &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
             nextSplitVertical == splitVertical && nextShowFps == showFps
@@ -977,7 +1126,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             nextHost != host || nextPort != port || nextFps != fps ||
                 nextWidth != sourceWidth || nextHeight != sourceHeight ||
                 nextSplitVertical != splitVertical || nextShowFps != showFps ||
-                nextLocalCursor != localCursorEnabled || nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation
+                nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation
 
         if (newIntent.hasExtra("ownershipGeneration")) {
             val nextGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
@@ -998,8 +1147,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             applyWindowAspectRatio(newIntent.getFloatExtra(KEY_XR_WINDOW_RATIO, xrWindowRatio))
         }
         if (togglesOnly) {
-            localCursorEnabled = nextLocalCursor
-            if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
             balancedPresentation = nextBalanced
             localAudioEnabled = nextLocalAudio
             opusAudioRequested = nextOpusAudio
@@ -1007,11 +1154,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         if (streamConfigurationChanged || reconnectRequested) {
+            forceReleaseInput(InputOwnershipEvent.Disconnected)
             host = nextHost
             port = nextPort
             fps = nextFps
             showFps = nextShowFps
-            localCursorEnabled = nextLocalCursor
             balancedPresentation = nextBalanced
             localAudioEnabled = nextLocalAudio
             opusAudioRequested = nextOpusAudio
@@ -1024,7 +1171,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 xrPreferredRatio = null
                 applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
             }
-            if (!localCursorEnabled) disableCursorOverlay()
             when (
                 decideSurfaceTransition(
                     nextSplitVertical = splitVertical,
@@ -1086,12 +1232,17 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             streamSurfaces?.requestFocus()
             window.decorView.post { hideSystemBars() }
         } else {
-            hideTabletCursor()
             // 창 포커스를 잃으면 시스템이 IME를 닫으므로 요청 상태도 원점으로.
             keyboardRequested = false
-            hud?.setKeyboardChipActive(false)
-            ViewerNative.releaseInput(instanceId)
+            forceReleaseInput(InputOwnershipEvent.FocusLost)
         }
+    }
+
+    override fun onPointerCaptureChanged(hasCapture: Boolean) {
+        super.onPointerCaptureChanged(hasCapture)
+        applyInputOwnershipEffects(
+            inputOwnership.on(InputOwnershipEvent.PointerCaptureChanged(hasCapture)),
+        )
     }
 
     /**
@@ -1129,11 +1280,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             splitVertical,
             this,
             { view, event -> forwardPointer(event, view) },
+            { view, event -> forwardCapturedPointer(event, view) },
         )
         streamSurfaces = next
         // 새 서피스는 변환 없이 태어나므로 줌 상태도 원점으로 되돌린다 —
         // 남은 줌으로 두면 toContent가 낡은 변환으로 탭을 역산해 원격 입력이
-        // 엉뚱한 곳에 찍힌다. 커서 오버레이는 attach 직후 다시 켜진다.
+        // 엉뚱한 곳에 찍힌다. 커서는 attach 직후 소유권에 맞춰 복원된다.
         streamZoom.reset()
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
@@ -1211,7 +1363,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             hud?.resetTerminationPolling()
             hud?.armTerminationPolling()
             hud?.clearRebindIndicator()
-            enableCursorOverlay()
+            subscribeCursorStream()
             syncAudioStream()
         }
         android.util.Log.i(
@@ -1284,8 +1436,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 "geometryChanges=$surfaceChangeCount instanceId=$instanceId",
         )
         lifecycleEvent(8) // SURFACE_DESTROY
-        hideTabletCursor()
-        ViewerNative.releaseInput(instanceId)
+        forceReleaseInput(InputOwnershipEvent.SurfaceLost)
         // A final Surface loss defers release to onDestroy so lifecycle/state
         // callbacks finish before native memory is freed off the UI thread.
         // A retired holder consumes its stop flag without touching a replacement.
@@ -1308,8 +1459,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
-        hideTabletCursor()
-        ViewerNative.releaseInput(instanceId)
+        forceReleaseInput(InputOwnershipEvent.FocusLost)
         lifecycleEvent(9) // ACTIVITY_PAUSE
         super.onPause()
     }
@@ -1345,11 +1495,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             lifecycleEvent(12) // TASK_REMOVE / final Activity destruction
             released = true
         }
+        forceReleaseInput(InputOwnershipEvent.Disconnected)
+        keyBridgeInput?.close()
+        keyBridgeInput = null
         surfaceLifecycle.invalidate()
         cancelPendingSurfaceAttach()
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
-        tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()
         cursorOverlay = null
@@ -1362,7 +1514,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         hud?.stop()
         hud = null
         releaseNetworkLocks()
-        ViewerNative.releaseInput(instanceId)
+        ViewerNative.setCursorStream(instanceId, false)
         super.onDestroy()
         releaseOwnedNativeStream()
     }

@@ -151,8 +151,6 @@ interface ViewerOptionsCardProps {
   viewerPreferencesDisabled: boolean;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
-  localCursor: boolean;
-  onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
   opusAudio: boolean;
   onToggleOpusAudio: (enabled: boolean) => void;
@@ -169,8 +167,6 @@ function ViewerOptionsCard({
   viewerPreferencesDisabled,
   showFps,
   onToggleFps,
-  localCursor,
-  onToggleCursor,
   localAudio,
   opusAudio,
   onToggleOpusAudio,
@@ -212,23 +208,6 @@ function ViewerOptionsCard({
           onValueChange={onToggleFps}
           disabled={viewerPreferencesDisabled}
           accessibilityLabel={t.viewer.fpsToggleLabel}
-          {...switchColor}
-        />
-      </View>
-      <View style={OPTION_ROW_STYLE}>
-        <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
-            {t.viewer.cursorOverlayLabel}
-          </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
-            {t.viewer.cursorOverlayHint}
-          </Text>
-        </View>
-        <Switch
-          value={localCursor}
-          onValueChange={onToggleCursor}
-          disabled={viewerPreferencesDisabled}
-          accessibilityLabel={t.viewer.cursorOverlayLabel}
           {...switchColor}
         />
       </View>
@@ -336,8 +315,6 @@ interface CatalogHeaderProps {
   clipboardPreferenceControlDisabled: boolean;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
-  localCursor: boolean;
-  onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
   opusAudio: boolean;
   onToggleOpusAudio: (enabled: boolean) => void;
@@ -373,8 +350,6 @@ function CatalogHeader({
   clipboardPreferenceControlDisabled,
   showFps,
   onToggleFps,
-  localCursor,
-  onToggleCursor,
   localAudio,
   opusAudio,
   onToggleOpusAudio,
@@ -496,8 +471,6 @@ function CatalogHeader({
             viewerPreferencesDisabled={viewerPreferenceControlsDisabled}
             showFps={showFps}
             onToggleFps={onToggleFps}
-            localCursor={localCursor}
-            onToggleCursor={onToggleCursor}
             balancedPresentation={balancedPresentation}
             onToggleBalancedPresentation={onToggleBalancedPresentation}
             localAudio={localAudio}
@@ -862,8 +835,6 @@ export default function Catalog() {
             clipboardPreferenceControlDisabled={model.clipboardPreferenceControlDisabled}
             showFps={model.showFps}
             onToggleFps={model.handleToggleFps}
-            localCursor={model.localCursor}
-            onToggleCursor={model.handleToggleCursor}
             balancedPresentation={model.balancedPresentation}
             onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
             localAudio={model.localAudio}
