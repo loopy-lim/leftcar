@@ -388,9 +388,6 @@ pub struct ControlServer {
     /// 장치별 살아 있는 인증 연결. 연결 인증은 소켓 수명당 한 번이므로,
     /// 철회가 즉시 효력을 가지려면 열린 소켓도 함께 깨워야 한다.
     authenticated_conns: Mutex<HashMap<String, Vec<std::sync::Arc<tokio::sync::Notify>>>>,
-    /// 화면 잠금 실행부(선택 — set_lock_screen으로 주입; 테스트는 카운터로
-    /// 대체한다). 미주입 시 잠금 설정이 켜져 있어도 아무 것도 하지 않는다.
-    lock_screen: std::sync::OnceLock<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// 프라이버시 커튼 실행부(선택 — show/hide; lib.rs가 Tauri 창으로 구현해
     /// 주입한다). 상태 변화 시에만 호출되며, 적용 성공 여부를 돌려준다 —
     /// 커튼 상태 커밋은 성공 뒤에만 하기 위해서다(M3).
@@ -435,7 +432,6 @@ impl ControlServer {
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
             authenticated_conns: Mutex::new(HashMap::new()),
-            lock_screen: std::sync::OnceLock::new(),
             curtain: std::sync::OnceLock::new(),
             curtain_state: Mutex::new(false),
             reconfiguring: Mutex::new(std::collections::HashSet::new()),
@@ -449,11 +445,6 @@ impl ControlServer {
 
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
-    }
-
-    /// 화면 잠금 실행부 주입(lib.rs setup). 테스트는 카운터를 넣는다.
-    pub fn set_lock_screen(&self, lock: std::sync::Arc<dyn Fn() + Send + Sync>) {
-        let _ = self.lock_screen.set(lock);
     }
 
     /// 커튼 실행부 주입(lib.rs setup — 모니터별 검은 오버레이 창).
@@ -552,28 +543,6 @@ impl ControlServer {
         }
     }
 
-    /// 이번 teardown에서 세션이 실제로 제거되어 live가 비게 됐을 때만
-    /// (설정 켜짐) 화면을 잠근다. `removed`는 이번에 치운 세션 수 —
-    /// reconfigure는 live 맵에서 세션을 치우지 않으므로 이 훅에 걸리지
-    /// 않고, 같은 뷰어 주소의 교체(stale 정리)도 의도적으로 제외한다.
-    /// 이미 비어 있는 상태의 getStatus 폴링이 잠금을 반복하지 않게 하는
-    /// 것도 이 전이 조건의 역할이다.
-    fn maybe_lock_after_teardown(&self, removed: usize) {
-        if removed == 0 {
-            return;
-        }
-        if !self.sessions.lock().unwrap().live.is_empty() {
-            return;
-        }
-        if !self.settings.get().is_some_and(|s| s.lock_on_disconnect()) {
-            return;
-        }
-        if let Some(lock) = self.lock_screen.get() {
-            lock();
-            self.audit_log("screen_locked", json!({ "reason": "last_session_ended" }));
-        }
-    }
-
     pub fn set_audit(&self, audit: std::sync::Arc<crate::audit::SessionAudit>) {
         let _ = self.audit.set(audit);
     }
@@ -650,7 +619,6 @@ impl ControlServer {
             );
         }
         let removed = targets.len();
-        self.maybe_lock_after_teardown(removed);
         self.refresh_curtain();
         removed
     }
@@ -1648,7 +1616,6 @@ impl ControlServer {
             (sessions, expired)
         };
 
-        let mut removed_count = 0;
         for (id, session) in expired {
             Self::invalidate_session_source(&session);
             let _cleanup_guard = ReconfigureGuard {
@@ -1688,10 +1655,8 @@ impl ControlServer {
             };
             if removed {
                 self.cleanup_registered_transport(session.transport_owner.as_ref());
-                removed_count += 1;
             }
         }
-        self.maybe_lock_after_teardown(removed_count);
         self.refresh_curtain();
 
         StatusView { sessions }
@@ -2594,7 +2559,6 @@ impl ControlServer {
                                         "reason": input.reason.unwrap_or(3),
                                     }),
                                 );
-                                self.maybe_lock_after_teardown(1);
                                 self.refresh_curtain();
                                 ok(json!({}))
                             }
@@ -3065,23 +3029,29 @@ impl Drop for ReconfigureGuard<'_> {
     }
 }
 
+#[derive(Debug)]
+enum ControlLineReadError {
+    TooLong,
+    Io(std::io::Error),
+}
+
 /// 상한 있는 한 줄 읽기(F08). '\n' 전에 `cap`을 넘기면 Err — 호출자는
 /// 연결을 끊는다. tokio Lines는 줄 길이 상한이 없어 인증 전 소켓이라도
 /// '\n' 없는 입력을 무한히 버퍼링할 수 있으므로 fill_buf 루프로 직접 읽는다.
-/// Ok(None)은 소켓 오류·EOF(연결 종료 취급)다.
-async fn read_bounded_line(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+/// Ok(None)은 EOF이며, 소켓 오류와 상한 초과는 구분해 반환한다.
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
     cap: usize,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let mut line: Vec<u8> = Vec::new();
     loop {
-        let available = reader.fill_buf().await.map_err(|_| ())?;
+        let available = reader.fill_buf().await.map_err(ControlLineReadError::Io)?;
         if available.is_empty() {
             return Ok(None);
         }
         if let Some(pos) = available.iter().position(|&byte| byte == b'\n') {
             if line.len() + pos > cap {
-                return Err(());
+                return Err(ControlLineReadError::TooLong);
             }
             line.extend_from_slice(&available[..pos]);
             reader.consume(pos + 1);
@@ -3092,7 +3062,7 @@ async fn read_bounded_line(
             return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
         }
         if line.len() + available.len() > cap {
-            return Err(());
+            return Err(ControlLineReadError::TooLong);
         }
         let buffered = available.len();
         line.extend_from_slice(available);
@@ -3105,7 +3075,7 @@ async fn read_bounded_line(
 async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let cap = if killed.is_some() {
         COMMAND_LINE_LIMIT
     } else {
@@ -3141,9 +3111,16 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     .await
     {
         Ok(Ok(Some(line))) => line,
-        Ok(Err(())) => {
+        Ok(Err(ControlLineReadError::TooLong)) => {
             eprintln!(
                 "control handshake line exceeded {HANDSHAKE_LINE_LIMIT} bytes from {peer}; closing"
+            );
+            return;
+        }
+        Ok(Err(ControlLineReadError::Io(error))) => {
+            eprintln!(
+                "control handshake read failed ({:?}); closing",
+                error.kind()
             );
             return;
         }
@@ -3174,13 +3151,17 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 match read_authed_line(&mut reader, killed.as_ref()).await {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
-                    Err(()) => {
+                    Err(ControlLineReadError::TooLong) => {
                         let cap = if device.is_some() {
                             COMMAND_LINE_LIMIT
                         } else {
                             HANDSHAKE_LINE_LIMIT
                         };
                         eprintln!("control command line exceeded {cap} bytes from {peer}; closing");
+                        break;
+                    }
+                    Err(ControlLineReadError::Io(error)) => {
+                        eprintln!("control command read failed ({:?}); closing", error.kind());
                         break;
                     }
                 }
@@ -4375,60 +4356,6 @@ mod tests {
     }
 
     #[test]
-    fn last_session_teardown_locks_the_screen_only_when_enabled() {
-        // 설정 켜짐 + 잠금 카운터 주입.
-        let server = ControlServer::new(
-            Arc::new(TerminalBackend {
-                stopped: Arc::new(AtomicUsize::new(0)),
-            }),
-            test_pairing(),
-            test_identity(),
-        );
-        let settings = crate::settings::SharedSettings::in_memory();
-        settings.set_lock_on_disconnect(true).unwrap();
-        server.set_settings(settings);
-        let locks = Arc::new(AtomicUsize::new(0));
-        let counter = locks.clone();
-        server.set_lock_screen(Arc::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }));
-        insert_live_session(&server, 1, None);
-        server
-            .sessions
-            .lock()
-            .unwrap()
-            .live
-            .get_mut(&1)
-            .unwrap()
-            .terminal_since =
-            Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
-
-        // 만료 세션 GC가 live를 비우면 잠금이 정확히 한 번 불린다.
-        let _ = server.snapshot();
-        assert_eq!(locks.load(Ordering::SeqCst), 1);
-        // 빈 live에 대한 이후 폴링은 중복 잠금하지 않는다(전이 조건).
-        let _ = server.snapshot();
-        assert_eq!(locks.load(Ordering::SeqCst), 1);
-
-        // 설정 꺼짐: 세션 제거가 잠금을 부르지 않는다.
-        let server_off = ControlServer::new(backend(), test_pairing(), test_identity());
-        server_off.set_settings(crate::settings::SharedSettings::in_memory());
-        let locks_off = Arc::new(AtomicUsize::new(0));
-        let counter_off = locks_off.clone();
-        server_off.set_lock_screen(Arc::new(move || {
-            counter_off.fetch_add(1, Ordering::SeqCst);
-        }));
-        insert_live_session(&server_off, 1, None);
-        server_off.sessions.lock().unwrap().live.remove(&1);
-        server_off.maybe_lock_after_teardown(1);
-        assert_eq!(
-            locks_off.load(Ordering::SeqCst),
-            0,
-            "disabled setting must not lock"
-        );
-    }
-
-    #[test]
     fn privacy_curtain_follows_session_lifecycle() {
         let server = ControlServer::new(backend(), test_pairing(), test_identity());
         server.set_settings(crate::settings::SharedSettings::in_memory());
@@ -5384,8 +5311,20 @@ mod tests {
         assert_eq!(resp["ok"], true, "{resp}");
 
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("\"clipboard_write\""), "{body}");
-        assert!(body.contains("\"device\":\"viewer-1\""), "{body}");
+        let record: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(record["event"], "clipboard_write", "{body}");
+        assert_eq!(record["bytes"], secret.len(), "{body}");
+        let device = record["device"].as_str().unwrap();
+        let pseudonym = device.strip_prefix("dev:").unwrap();
+        assert_eq!(pseudonym.len(), 24, "{body}");
+        assert!(
+            pseudonym
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{body}"
+        );
+        assert_ne!(device, "viewer-1", "{body}");
+        assert!(!body.contains("viewer-1"), "{body}");
         assert!(
             !body.contains(secret),
             "audit must never contain clipboard text: {body}"
@@ -7082,6 +7021,20 @@ mod tests {
     }
 
     // -- 인증 전 입력·연결 상한(F08) ------------------------------------------
+
+    #[tokio::test]
+    async fn bounded_line_preserves_socket_error_instead_of_reporting_overflow() {
+        let socket = tokio_test::io::Builder::new()
+            .read(b"partial request")
+            .read_error(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+            .build();
+        let mut reader = BufReader::new(socket);
+        assert!(matches!(
+            read_bounded_line(&mut reader, HANDSHAKE_LINE_LIMIT).await,
+            Err(ControlLineReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::ConnectionReset
+        ));
+    }
 
     #[tokio::test]
     async fn oversized_preauth_line_is_dropped_and_server_stays_responsive() {

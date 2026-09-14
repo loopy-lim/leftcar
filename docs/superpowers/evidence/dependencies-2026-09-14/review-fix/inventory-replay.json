@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13T15:37:48.694Z",
+  "evidence": "Updated collector replay of the existing actual Gradle report against current cached metadata. No Gradle or build process executed. The original audit evidence remains historical and unchanged.",
+  "report": {
+    "path": "docs/superpowers/evidence/dependencies-2026-09-14/gradle-runtime-after.txt",
+    "sha256": "6f8b2b29d11851dd5be7d4157d406751100c30165f555e93fa2266a2f7d674cf"
+  },
+  "inventorySha256": "ebf221fe2253c75e4c7bf7812c04bfb60d591a8d05ce9e8d1f4a87a93f4b2a01",
+  "identicalRecordsToOriginal": true,
+  "counts": {
+    "coordinates": 248,
+    "declared": 248,
+    "unknown": 0,
+    "sources": {
+      "cached-pom": 227,
+      "cached-parent-pom": 7,
+      "npm-local-publication": 14
+    }
+  }
+}

@@ -55,7 +55,60 @@ function io() {
   } as ControlClient;
   return { launcher, control, calls };
 }
+
+/** TurboModuleBinding starts with an empty cache and materializes prototype methods on access. */
+function lazyNativeLauncher(implementation: StreamLauncher): StreamLauncher {
+  const cache: StreamLauncher = Object.create(new Proxy({}, {
+    get(_target, key, receiver) {
+      const method = Reflect.get(implementation, key);
+      if (typeof method !== "function") return method;
+      const boundNativeMethod = function (this: unknown, ...args: unknown[]) {
+        expect(this).toBe(cache);
+        return Reflect.apply(method, implementation, args);
+      };
+      Object.defineProperty(receiver, key, { value: boundNativeMethod, enumerable: true });
+      return boundNativeMethod;
+    },
+  }));
+  return cache;
+}
+
 describe("reserved production launch lifecycle", () => {
+  it("preserves uncached native cancellation and the original start failure", async () => {
+    const { launcher, calls } = io();
+    const native = lazyNativeLauncher(launcher);
+    const cause = new Error("sealed media reachability proof failed");
+    const request = async () => { throw cause; };
+    const reservation = new ReservedStream(5003, { split: false, target }, native, request,
+      new DecoderReservations({ maxInstances: 1 }));
+    await expect(reservation.run({ split: false, target }, owned => startPreparedStream({
+      launcher: owned, control: { request, close() {} }, host: "127.0.0.1",
+      advertisedEncoderExperiments: [], args,
+    }))).rejects.toBe(cause);
+    expect(calls).toContain("cancel");
+    await reservation.close();
+  });
+
+  it("forwards uncached native discovery and audio methods with their original receiver", async () => {
+    const { launcher, control, calls } = io();
+    launcher.getLocalIpv4Addresses = async () => {
+      calls.push("addresses");
+      return ["192.168.1.23"];
+    };
+    launcher.setOpusAudio = async () => { calls.push("opus"); };
+    const native = lazyNativeLauncher(launcher);
+    const reservation = new ReservedStream(5003, { split: false, target }, native,
+      control.request.bind(control), new DecoderReservations({ maxInstances: 1 }));
+    const started = await reservation.run({ split: false, target }, owned => startPreparedStream({
+      launcher: owned, control, host: "127.0.0.1", advertisedEncoderExperiments: [],
+      args: { ...args, opusAudio: true },
+    }));
+    expect(started.viewerIps).toEqual(["192.168.1.23"]);
+    expect(started.opusAudio).toBe(true);
+    expect(calls).toContain("opus");
+    await reservation.close();
+  });
+
   it.each(["legacy", "presentation"] as const)("cancel during %s native open counts resources until late completion and cleanup acknowledge", async (method) => {
     const pool = new DecoderReservations({ maxInstances: 1 });
     const { launcher, control, calls } = io();

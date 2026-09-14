@@ -34,6 +34,11 @@ export async function replaceBundle(source, destination, verify) {
 export function verifySignedBundle(path) {
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', path], { stdio: 'pipe' });
 }
+export function signingRequirementFromOutputs(stdout, stderr) {
+  const line = `${stdout}\n${stderr}`.match(/^designated => .+$/m)?.[0];
+  if (!line) throw new Error('Missing designated signing requirement');
+  return line;
+}
 if (import.meta.main) {
   const [source, destination] = process.argv.slice(2);
   if (!source || !destination) throw new Error('Usage: bun tools/build.bundle.mjs <verified-source.app-or-backup> <destination.app>');
@@ -44,9 +49,7 @@ if (import.meta.main) {
     const readRequirement = path => {
       const p = Bun.spawnSync(['/usr/bin/codesign', '-d', '-r-', path]);
       if (p.exitCode) throw new Error('Cannot read signing requirement');
-      const line = p.stderr.toString().match(/^designated => .+$/m)?.[0];
-      if (!line) throw new Error('Missing designated signing requirement');
-      return line;
+      return signingRequirementFromOutputs(p.stdout.toString(), p.stderr.toString());
     };
     if (readRequirement(source) !== readRequirement(destination)) throw new Error('Signing requirements differ; refusing replacement');
   }

@@ -117,12 +117,11 @@ class StreamActivityPresentationTest {
         recreated.destroy()
     }
 
-    @Test fun `partial controls preserve both effective modes across save and recreation`() {
+    @Test fun `partial controls preserve effective modes across save and recreation`() {
         for (balanced in listOf(true, false)) {
             val controller = Robolectric.buildActivity(StreamActivity::class.java, intent(!balanced)).create()
             val activity = controller.get()
             controller.newIntent(controlIntent().putExtra("balancedPresentation", balanced))
-            controller.newIntent(controlIntent().putExtra("localCursor", false))
             controller.newIntent(controlIntent().putExtra("localAudio", false))
             controller.newIntent(controlIntent().putExtra("xrWindowRatio", 1.5f))
             val saved = Bundle()
@@ -139,7 +138,7 @@ class StreamActivityPresentationTest {
 
     @Test fun `complete effective configuration survives partial toggles and recreation`() {
         val start = intent(true).putExtra("width", 3200).putExtra("height", 2000)
-            .putExtra("fps", 90).putExtra("localAudio", false).putExtra("localCursor", false).putExtra("opusAudio", true)
+            .putExtra("fps", 90).putExtra("localAudio", false).putExtra("opusAudio", true)
             .putExtra("splitVertical", true).putExtra("splitDecoderName", "synthetic.decoder")
             .putExtra("displayName", "Synthetic screen").putExtra("showFps", true)
             .putExtra("ownershipGeneration", 17L)
@@ -153,7 +152,6 @@ class StreamActivityPresentationTest {
         val recreated = Robolectric.buildActivity(StreamActivity::class.java, recreatedIntent).create(saved)
         val activity = recreated.get()
         assertFalse(ReflectionHelpers.getField<Boolean>(activity, "localAudioEnabled"))
-        assertFalse(ReflectionHelpers.getField<Boolean>(activity, "localCursorEnabled"))
         assertFalse(ReflectionHelpers.getField<Boolean>(activity, "balancedPresentation"))
         assertTrue(ReflectionHelpers.getField<Boolean>(activity, "opusAudioRequested"))
         assertEquals("opus128k", activity.audioStats()["requestedCodec"])

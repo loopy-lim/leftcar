@@ -9,6 +9,9 @@ pub(crate) mod single_session {
     pub(crate) mod health {
         include!("single_session/health.rs");
     }
+    mod control_response {
+        include!("single_session/network/control_response.rs");
+    }
 }
 /// V2 paired-IDR dispatch semantics (single selected path per action,
 /// bounded alternate retry, episode-owned cancellation, truthful

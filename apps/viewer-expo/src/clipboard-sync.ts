@@ -137,7 +137,7 @@ function assertRoundActive(signal?: AbortSignal, isCurrent?: () => boolean): voi
   if (isCurrent && !isCurrent()) throw abortError();
 }
 
-/** 저장된 토글 값 해석. 값이 없거나 판독 실패면 기본 꺼짐이다. */
+/** 저장된 토글 값 해석. 값이 없으면 기본 꺼짐이다. */
 export function parseClipboardShare(raw: string | null): boolean {
   return raw === "1";
 }
@@ -145,11 +145,11 @@ export function parseClipboardShare(raw: string | null): boolean {
 export async function loadClipboardShare(
   store: ClipboardShareStore,
 ): Promise<boolean> {
-  try {
-    return parseClipboardShare(await store.getItemAsync(CLIPBOARD_SHARE_KEY));
-  } catch {
-    return false;
+  const raw = await store.getItemAsync(CLIPBOARD_SHARE_KEY);
+  if (raw !== null && raw !== "0" && raw !== "1") {
+    throw new Error("Invalid clipboard preference");
   }
+  return parseClipboardShare(raw);
 }
 
 export async function saveClipboardShare(

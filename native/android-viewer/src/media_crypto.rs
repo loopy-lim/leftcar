@@ -10,18 +10,21 @@
 //! the sealed `LCH1 ‖ nonce` challenge keeps only its reachability/NAT-pinning
 //! role.
 //!
-//! Wire layout (crates/secure-channel): `counter u64 BE ‖ poly1305 tag 16B
-//! ‖ ct`, nonce `00{4} ‖ counter u64 BE`. Counters start at a random point
+//! Wire layout (crates/secure-channel): `counter u64 BE ‖ ct
+//! ‖ poly1305 tag 16B`, nonce `00{4} ‖ counter u64 BE`. Counters start at a random point
 //! per instance, so a reconfigure that restarts the sealers under the reused
 //! session key still cannot repeat a nonce.
 
 use secure_channel::{DatagramSealer, OpenError};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
 /// Plaintext prefix of the sealed reachability challenge.
 pub const CHALLENGE_PREFIX: &[u8] = b"LCH1";
+/// Bound the authenticated challenge accepted by preflight and renderers.
+pub const MAX_CHALLENGE_BYTES: usize = 192;
 
 pub struct MediaSessionCrypto {
     /// 세션 키 사본 — [MediaSessionCrypto::session_key]가 재바인드 폴백에 쓴다.
@@ -33,6 +36,8 @@ pub struct MediaSessionCrypto {
     /// Set once the sealed LCH1 challenge was observed, mirroring the old
     /// "session token known" gate for IDR/input/feedback sends.
     established: AtomicBool,
+    /// A retried echo must not reset replay protection for already-opened media.
+    challenges: Mutex<HashSet<Vec<u8>>>,
 }
 
 impl MediaSessionCrypto {
@@ -48,6 +53,7 @@ impl MediaSessionCrypto {
             tx: DatagramSealer::new(keys.c2s),
             rx: DatagramSealer::new(keys.s2c),
             established: AtomicBool::new(false),
+            challenges: Mutex::new(HashSet::new()),
         }
     }
 
@@ -60,7 +66,9 @@ impl MediaSessionCrypto {
     /// Open one incoming datagram. `None` means forged, replayed, or
     /// truncated — callers drop the frame without any further parsing.
     pub fn open(&self, frame: &[u8]) -> Option<Vec<u8>> {
-        self.rx.open(frame).ok()
+        let plaintext = self.rx.open(frame).ok()?;
+        self.record_authenticated_challenge(&plaintext);
+        Some(plaintext)
     }
 
     /// In-place variant of [MediaSessionCrypto::open] for the RX hot loop:
@@ -69,33 +77,52 @@ impl MediaSessionCrypto {
     /// datagram. `None` means forged, replayed, or truncated — the buffer
     /// contents must then be discarded.
     pub fn open_into<'a>(&self, frame: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.rx.open_into(frame).ok()
+        let plaintext = self.rx.open_into(frame).ok()?;
+        self.record_authenticated_challenge(plaintext);
+        Some(plaintext)
     }
 
-    /// Recognize a sealed host `LCH1` reachability challenge. Returns the
-    /// challenge plaintext when `frame` opens and starts with `LCH1`.
+    /// Active single/split renderers open every datagram before classifying
+    /// it. Remember challenges here too, so a later suspended/prepared retry
+    /// cannot mistake them for a new Host incarnation and reset the window.
+    /// Ordinary media needs no extra decryption, allocation, or lock.
+    fn record_authenticated_challenge(&self, plaintext: &[u8]) {
+        if plaintext.starts_with(CHALLENGE_PREFIX) && plaintext.len() <= MAX_CHALLENGE_BYTES {
+            self.challenges.lock().unwrap().insert(plaintext.to_vec());
+            self.establish();
+        }
+    }
+
+    /// Authenticate a host `LCH1` challenge and enable session control sends.
+    /// Ordinary media stays sealed for the renderer without consuming its
+    /// receive counter in the prepared UDP/TCP/USB listener.
     ///
     /// Host `backend.start` retries mint a fresh TX sealer (random counter
     /// start) under the same media key while this viewer keeps one crypto
     /// instance — the persisted RX watermark can then sit above every
     /// retried challenge, and the windowed open rejects them as replays. A
-    /// frame that still authenticates under the s2c key and carries LCH1
-    /// could only have been sealed by the key holder, so it is proof the
-    /// host restarted: reset the receive window exactly there and never on
-    /// media datagrams.
+    /// new challenge nonce authenticated under the s2c key allows that
+    /// restart. Remember previous nonces so duplicate or delayed challenges
+    /// can be echoed without ever resetting media replay protection again.
     pub fn open_challenge(&self, frame: &[u8]) -> Option<Vec<u8>> {
-        match self.rx.open(frame) {
-            Ok(plaintext) => plaintext.starts_with(CHALLENGE_PREFIX).then_some(plaintext),
-            Err(OpenError::Replay) => {
-                let plaintext = self.rx.authenticate(frame).ok()?;
-                if !plaintext.starts_with(CHALLENGE_PREFIX) {
-                    return None;
-                }
-                self.rx.reset_receive_window();
-                Some(plaintext)
-            }
-            Err(_) => None,
+        let plaintext = self.rx.authenticate(frame).ok()?;
+        if !plaintext.starts_with(CHALLENGE_PREFIX) || plaintext.len() > MAX_CHALLENGE_BYTES {
+            return None;
         }
+        let mut challenges = self.challenges.lock().unwrap();
+        if !challenges.contains(&plaintext) {
+            match self.rx.open(frame) {
+                Ok(_) => {}
+                Err(OpenError::Replay) => {
+                    self.rx.reset_receive_window();
+                    self.rx.open(frame).ok()?;
+                }
+                Err(_) => return None,
+            }
+            challenges.insert(plaintext.clone());
+        }
+        self.establish();
+        Some(plaintext)
     }
 
     /// Record that the challenge handshake completed. Later sends are gated
@@ -163,6 +190,10 @@ mod tests {
         assert!(!wire.starts_with(CHALLENGE_PREFIX));
         let opened = viewer.open_challenge(&wire).expect("challenge opens");
         assert_eq!(opened, plaintext);
+        assert!(
+            viewer.is_established(),
+            "authenticated preflight enables control sends"
+        );
         let echo = viewer.seal(&opened).expect("echo seals");
         let host_rx = DatagramSealer::new(keys.c2s);
         assert_eq!(host_rx.open(&echo).unwrap(), plaintext);
@@ -179,27 +210,41 @@ mod tests {
         // 두 개의 독립 TX 인스턴스(첫 시도 / 재시작)를 만들고, 카운터가 큰 쪽을
         // 첫 시도로 역할을 고정해 "재시작이 워터마크 아래에서 시작"하게 만든다.
         let (first, restarted) = (DatagramSealer::new(keys.s2c), DatagramSealer::new(keys.s2c));
-        let challenge = [CHALLENGE_PREFIX, b"retry-nonce".as_slice()].concat();
-        let frames = |sealer: &DatagramSealer| {
+        let first_plaintext = [CHALLENGE_PREFIX, b"first-nonce".as_slice()].concat();
+        let retry_plaintext = [CHALLENGE_PREFIX, b"retry-nonce".as_slice()].concat();
+        let frames = |sealer: &DatagramSealer, challenge: &[u8]| {
             (
-                sealer.seal(&challenge).unwrap(),
+                sealer.seal(challenge).unwrap(),
                 sealer.seal(b"media").unwrap(),
             )
         };
-        let (first_challenge, first_media) = frames(&first);
-        let (retry_challenge, retry_media) = frames(&restarted);
+        let (first_challenge, first_media) = frames(&first, &first_plaintext);
+        let (retry_challenge, retry_media) = frames(&restarted, &retry_plaintext);
         let first_is_high = secure_channel::frame_counter(&first_media).unwrap()
             > secure_channel::frame_counter(&retry_media).unwrap();
-        let (high_challenge, low_challenge, low_media) = if first_is_high {
-            (first_challenge, retry_challenge, retry_media)
-        } else {
-            (retry_challenge, first_challenge, first_media)
-        };
+        let (high_challenge, high_plaintext, low_challenge, low_plaintext, low_media) =
+            if first_is_high {
+                (
+                    first_challenge,
+                    first_plaintext,
+                    retry_challenge,
+                    retry_plaintext,
+                    retry_media,
+                )
+            } else {
+                (
+                    retry_challenge,
+                    retry_plaintext,
+                    first_challenge,
+                    first_plaintext,
+                    first_media,
+                )
+            };
 
         // 첫 시도의 챌린지가 워터마크를 올린다.
         assert_eq!(
             viewer.open_challenge(&high_challenge).as_deref(),
-            Some(challenge.as_slice())
+            Some(high_plaintext.as_slice())
         );
         // 재시작 인스턴스의 미디어는 워터마크 아래라 창 경로에서 거부되고,
         // LCH1이 아니므로 창을 초기화하지도 않는다.
@@ -213,7 +258,7 @@ mod tests {
         // 재시작한 호스트의 유효한 LCH1은 재시작 증거 — 창을 초기화하고 받는다.
         assert_eq!(
             viewer.open_challenge(&low_challenge).as_deref(),
-            Some(challenge.as_slice())
+            Some(low_plaintext.as_slice())
         );
         // 초기화된 창 위로 재시작 인스턴스의 미디어가 흐르고, 재생 방지는 그대로다.
         assert_eq!(viewer.open(&low_media).as_deref(), Some(&b"media"[..]));
@@ -229,6 +274,7 @@ mod tests {
         assert_eq!(viewer.open(b"not-sealed"), None);
         assert_eq!(viewer.open(&[]), None);
         assert_eq!(viewer.open_challenge(&sealed), None);
+        assert!(!viewer.is_established());
     }
 
     /// 원본 세션 키를 그대로 쓰는 구세대 봉인기는 더 이상 열리지 않는다 —
@@ -244,9 +290,134 @@ mod tests {
     #[test]
     fn established_gate_tracks_the_challenge_handshake() {
         let viewer = MediaSessionCrypto::new(key(4));
+        let host_tx = DatagramSealer::new(secure_channel::media_keys(&key(4)).s2c);
+        let challenge = host_tx.seal(b"LCH1authenticated-nonce").unwrap();
+        let mut forged = challenge.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        let oversized = host_tx
+            .seal(&[CHALLENGE_PREFIX, &[b'x'; MAX_CHALLENGE_BYTES][..]].concat())
+            .unwrap();
         assert!(!viewer.is_established());
-        viewer.establish();
+        for invalid in [
+            &forged[..],
+            &challenge[..12],
+            b"LCH1plaintext-forgery",
+            &[],
+            &oversized,
+        ] {
+            assert_eq!(viewer.open_challenge(invalid), None);
+            assert!(
+                !viewer.is_established(),
+                "only an authenticated challenge establishes"
+            );
+        }
+        assert_eq!(
+            viewer.open_challenge(&challenge).as_deref(),
+            Some(&b"LCH1authenticated-nonce"[..])
+        );
         assert!(viewer.is_established());
+    }
+
+    #[test]
+    fn challenge_classification_preserves_media_for_the_renderer() {
+        let viewer = MediaSessionCrypto::new(key(10));
+        let host_tx = DatagramSealer::new(secure_channel::media_keys(&key(10)).s2c);
+        let media = host_tx.seal(b"CFGmedia-configuration").unwrap();
+        assert_eq!(viewer.open_challenge(&media), None);
+        assert!(!viewer.is_established());
+        assert_eq!(
+            viewer.open(&media).as_deref(),
+            Some(&b"CFGmedia-configuration"[..])
+        );
+        assert_eq!(viewer.open_challenge(&media), None);
+        assert_eq!(
+            viewer.open(&media),
+            None,
+            "classification cannot revive received media"
+        );
+    }
+
+    #[test]
+    fn repeated_challenges_do_not_revive_received_media() {
+        let viewer = MediaSessionCrypto::new(key(11));
+        let host_tx = DatagramSealer::new(secure_channel::media_keys(&key(11)).s2c);
+        let first = host_tx.seal(b"LCH1first-nonce").unwrap();
+        assert!(viewer.open_challenge(&first).is_some());
+        let media = host_tx.seal(b"media").unwrap();
+        assert_eq!(viewer.open(&media).as_deref(), Some(&b"media"[..]));
+        assert!(
+            viewer.open_challenge(&first).is_some(),
+            "a lost echo may be retried"
+        );
+        assert_eq!(
+            viewer.open(&media),
+            None,
+            "duplicate challenge cannot reset replay state"
+        );
+        let resealed_first = host_tx.seal(b"LCH1first-nonce").unwrap();
+        assert!(viewer.open_challenge(&resealed_first).is_some());
+        assert_eq!(
+            viewer.open(&media),
+            None,
+            "a freshly sealed retry cannot reset replay state"
+        );
+
+        let second = host_tx.seal(b"LCH1second-nonce").unwrap();
+        assert!(viewer.open_challenge(&second).is_some());
+        let next_media = host_tx.seal(b"next-media").unwrap();
+        assert_eq!(
+            viewer.open(&next_media).as_deref(),
+            Some(&b"next-media"[..])
+        );
+        assert!(viewer.open_challenge(&first).is_some());
+        assert_eq!(
+            viewer.open(&next_media),
+            None,
+            "an older challenge cannot reset replay state"
+        );
+    }
+
+    #[test]
+    fn active_single_renderer_records_challenge_before_suspend_retry() {
+        assert_active_challenge_survives_suspend(true);
+    }
+
+    #[test]
+    fn active_split_renderer_records_challenge_before_suspend_retry() {
+        assert_active_challenge_survives_suspend(false);
+    }
+
+    fn assert_active_challenge_survives_suspend(in_place: bool) {
+        // Single uses open_into; split uses open. Both then share their same
+        // crypto with a suspended worker that can echo a challenge retry.
+        let viewer = Arc::new(MediaSessionCrypto::new(key(13)));
+        let host_tx = DatagramSealer::new(secure_channel::media_keys(&key(13)).s2c);
+        let challenge = host_tx.seal(b"LCH1active-session-nonce").unwrap();
+        if in_place {
+            let mut packet = challenge.clone();
+            assert_eq!(
+                viewer.open_into(&mut packet).unwrap(),
+                b"LCH1active-session-nonce"
+            );
+        } else {
+            assert_eq!(
+                viewer.open(&challenge).unwrap(),
+                b"LCH1active-session-nonce"
+            );
+        }
+        assert!(
+            viewer.is_established(),
+            "the common open path records the challenge"
+        );
+        let media = host_tx.seal(b"active-media").unwrap();
+        assert_eq!(viewer.open(&media).as_deref(), Some(&b"active-media"[..]));
+        let suspended = Arc::clone(&viewer);
+        assert!(suspended.open_challenge(&challenge).is_some());
+        assert_eq!(
+                viewer.open(&media),
+                None,
+                "an active challenge retried while suspended must preserve replay protection (in_place={in_place})"
+            );
     }
 
     /// 두 논리 세션(좌·우 타일 등)이 같은 키의 독립 인스턴스를 써도 각자의

@@ -19,7 +19,6 @@ export interface ViewerPreferences {
   profileId: ViewerProfileSelection;
   streamingPriority: StreamingPriority;
   showFps: boolean;
-  localCursor: boolean;
   localAudio: boolean;
   opusAudio?: boolean;
   balancedPresentation: boolean;
@@ -33,9 +32,6 @@ export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   // 진단 표시(FPS 배지·상세 통계 HUD)는 기본 끔. 필요하면 카탈로그의
   // "실제 FPS 항상 표시"로 켠다.
   showFps: false,
-  // 커서 오버레이는 진단이 아니라 입력 피드백이라 기본 켠다. 저장값이
-  // 있으면 그 값이 우선한다.
-  localCursor: true,
   // 시스템 소리는 스트리밍과 함께 기본 전달한다. 토글 전 기본 동작과 같다.
   localAudio: true,
   opusAudio: false,
@@ -96,35 +92,43 @@ function isViewerProfileSelection(value: unknown): value is ViewerProfileSelecti
       && STREAM_PROFILES.some((profile) => profile.id === value));
 }
 
+function normalizeViewerPreferences(parsed: Record<string, unknown>): ViewerPreferences {
+  const profileId = isViewerProfileSelection(parsed.profileId)
+    ? parsed.profileId
+    : DEFAULT_VIEWER_PREFERENCES.profileId;
+  // Migrate legacy profile intent into streamingPriority. An explicitly
+  // stored priority wins; otherwise it is derived from the stored profile
+  // so older installs keep their clarity/responsiveness intent while
+  // profileId and showFps are preserved untouched.
+  const streamingPriority = isStreamingPriority(parsed.streamingPriority)
+    ? parsed.streamingPriority
+    : streamingPriorityFromProfileId(profileId);
+  return {
+    profileId,
+    streamingPriority,
+    balancedPresentation: parsed.balancedPresentation === true,
+    opusAudio: parsed.opusAudio === true,
+    showFps: typeof parsed.showFps === "boolean"
+      ? parsed.showFps
+      : DEFAULT_VIEWER_PREFERENCES.showFps,
+    localAudio: typeof parsed.localAudio === "boolean"
+      ? parsed.localAudio
+      : DEFAULT_VIEWER_PREFERENCES.localAudio,
+  };
+}
+
+function decodeViewerPreferences(raw: string | null): ViewerPreferences {
+  if (raw === null) return { ...DEFAULT_VIEWER_PREFERENCES };
+  const parsed: unknown = JSON.parse(raw);
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Invalid viewer preferences");
+  }
+  return normalizeViewerPreferences(parsed as Record<string, unknown>);
+}
+
 export function parseViewerPreferences(raw: string | null): ViewerPreferences {
-  if (!raw) return { ...DEFAULT_VIEWER_PREFERENCES };
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const profileId = isViewerProfileSelection(parsed.profileId)
-      ? parsed.profileId
-      : DEFAULT_VIEWER_PREFERENCES.profileId;
-    // Migrate legacy profile intent into streamingPriority. An explicitly
-    // stored priority wins; otherwise it is derived from the stored profile
-    // so older installs keep their clarity/responsiveness intent while
-    // profileId, showFps and localCursor are preserved untouched.
-    const streamingPriority = isStreamingPriority(parsed.streamingPriority)
-      ? parsed.streamingPriority
-      : streamingPriorityFromProfileId(profileId);
-    return {
-      profileId,
-      streamingPriority,
-      balancedPresentation: parsed.balancedPresentation === true,
-      opusAudio: parsed.opusAudio === true,
-      showFps: typeof parsed.showFps === "boolean"
-        ? parsed.showFps
-        : DEFAULT_VIEWER_PREFERENCES.showFps,
-      localCursor: typeof parsed.localCursor === "boolean"
-        ? parsed.localCursor
-        : DEFAULT_VIEWER_PREFERENCES.localCursor,
-      localAudio: typeof parsed.localAudio === "boolean"
-        ? parsed.localAudio
-        : DEFAULT_VIEWER_PREFERENCES.localAudio,
-    };
+    return decodeViewerPreferences(raw);
   } catch {
     return { ...DEFAULT_VIEWER_PREFERENCES };
   }
@@ -133,11 +137,7 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
 export async function readViewerPreferences(
   store: ViewerPreferencesStore,
 ): Promise<ViewerPreferences> {
-  try {
-    return parseViewerPreferences(await store.getItemAsync(VIEWER_PREFERENCES_KEY));
-  } catch {
-    return { ...DEFAULT_VIEWER_PREFERENCES };
-  }
+  return decodeViewerPreferences(await store.getItemAsync(VIEWER_PREFERENCES_KEY));
 }
 
 export async function writeViewerPreferences(
@@ -150,7 +150,6 @@ export async function writeViewerPreferences(
       profileId: preferences.profileId,
       streamingPriority: preferences.streamingPriority,
       showFps: preferences.showFps,
-      localCursor: preferences.localCursor,
       localAudio: preferences.localAudio,
       opusAudio: preferences.opusAudio === true,
       balancedPresentation: preferences.balancedPresentation,

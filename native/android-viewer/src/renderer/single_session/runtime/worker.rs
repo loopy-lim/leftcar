@@ -464,11 +464,17 @@ fn run(launch: SingleRendererLaunch) {
                 |control_health| loop {
                     match control_socket.recv_from(&mut control_buf) {
                         Ok((received, source)) if source == peer => {
-                            let _ = consume_viewer_response(
-                                &control_buf[..received],
-                                control_health,
-                                &control_clone,
-                                &mut renderer_stats,
+                            let _ = consume_control_datagram(
+                                &crypto,
+                                &mut control_buf[..received],
+                                |plaintext| {
+                                    consume_viewer_response(
+                                        plaintext,
+                                        control_health,
+                                        &control_clone,
+                                        &mut renderer_stats,
+                                    )
+                                },
                             );
                         }
                         Ok((_received, source)) => {

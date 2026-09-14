@@ -81,7 +81,7 @@ RC=/path/to/x86_64-w64-mingw32-windres \
 5. 60fps/90fps에서 포인터 wire rate 120/180Hz와 입력 p50/p95를 측정한다.
 6. 일반 앱과 관리자 앱을 각각 제어해 UIPI 제한이 UI 진단과 일치하는지 확인한다.
 7. 다중 monitor의 네 모서리, 음수 origin, 서로 다른 DPI scaling, 화면 회전에서 pointer 오차를 측정한다.
-8. 5% input datagram loss와 500ms 단절 뒤 stuck key/button이 없어야 하며, 60분 soak에서 handle/memory 증가가 없어야 한다.
+8. 5% input datagram loss와 500ms 단절 뒤 stuck key/button이 없어야 하며, 30분 soak에서 handle/memory 증가가 없어야 한다(2026-09-13 사용자 시간 변경 반영).
 
 현재 저장소에서 달성한 것은 protocol/unit test, USB AOAP framed media/input 소스 경로, GPU texture 입력 소스 경로와 macOS→Windows MSVC 교차 compile까지다. 실제 Windows installer, AOAP 핸드셰이크, WGC frame/GPU MFT identity와 E6/E7 결과는 Windows/폰 물리 장치 실행 뒤에만 달성으로 변경한다.
 

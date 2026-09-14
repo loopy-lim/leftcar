@@ -1,0 +1,57 @@
+[
+  {
+    "name": "valid",
+    "xml": "<project><groupId>org.example</groupId><artifactId>valid</artifactId><version>1</version><licenses><license><name>MIT</name></license></licenses></project>",
+    "result": {
+      "license": "MIT",
+      "licenseSource": "cached-pom",
+      "licenseEvidence": [
+        {
+          "path": "caches/modules-2/files-2.1/org.example/valid/1/hash/valid.pom",
+          "sha256": "59afa859da549a49a797a45aea4b690ea7f2a359e62f4090294de9f5af992815",
+          "coordinate": "org.example:valid:1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "duplicateIdentity",
+    "xml": "<project><groupId>org.example</groupId><groupId>org.wrong</groupId><artifactId>duplicateIdentity</artifactId><version>1</version><licenses><license><name>MIT</name></license></licenses></project>",
+    "result": {
+      "license": "MIT",
+      "licenseSource": "cached-pom",
+      "licenseEvidence": [
+        {
+          "path": "caches/modules-2/files-2.1/org.example/duplicateIdentity/1/hash/duplicateIdentity.pom",
+          "sha256": "c41342e9fa0ab445d8f299ef40f8e030e20b1d2722f078234403f38d866748f9",
+          "coordinate": "org.example:duplicateIdentity:1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "duplicateLicenses",
+    "xml": "<project><groupId>org.example</groupId><artifactId>duplicateLicenses</artifactId><version>1</version><licenses><license><name>MIT</name></license></licenses><licenses><license><name>Apache-2.0</name></license></licenses></project>",
+    "result": {
+      "license": "MIT",
+      "licenseSource": "cached-pom",
+      "licenseEvidence": [
+        {
+          "path": "caches/modules-2/files-2.1/org.example/duplicateLicenses/1/hash/duplicateLicenses.pom",
+          "sha256": "2cfa0c163ef4d71a1864a3d515550f84b7e309ddfee1f9978a34bcacf471eca4",
+          "coordinate": "org.example:duplicateLicenses:1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "malformed",
+    "xml": "<project><groupId>org.example</groupId><artifactId>malformed</artifactId><version>1</version><licenses><license><name>MIT</name></license></licenses>",
+    "result": null
+  },
+  {
+    "name": "dtd",
+    "xml": "<!DOCTYPE project [<!ENTITY license \"MIT\">]><project><groupId>org.example</groupId><artifactId>dtd</artifactId><version>1</version><licenses><license><name>&license;</name></license></licenses></project>",
+    "result": null
+  }
+]

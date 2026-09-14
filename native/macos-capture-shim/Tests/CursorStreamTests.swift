@@ -122,8 +122,10 @@ struct CursorStreamTests {
                      "a redundant enable must not reset the polling interval")
 
 
-        // MediaSealer interop self-test: the wire layout must match
-        // crates/secure-channel exactly — counter u64 BE ‖ tag 16B ‖ ct with
+        // MediaSealer local round trip and key-derivation checks. The actual
+        // Rust/Swift exchange is covered by MediaCryptoInteropTests.
+        // The wire layout must match
+        // crates/secure-channel exactly — counter u64 BE ‖ ct ‖ tag 16B with
         // nonce 00{4} ‖ counter u64 BE — and the directional key derivation
         // must match secure_channel::media_keys byte for byte.
         let key = Data((0..<32).map { UInt8($0) })

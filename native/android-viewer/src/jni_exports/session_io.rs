@@ -158,10 +158,18 @@ pub extern "C" fn leftcar_jni_poll_audio_owned(
         };
         let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
         let audio = control.audio.lock().unwrap();
+        let timeout = std::time::Duration::from_millis(100);
+        #[cfg(test)]
+        let timeout = cursor_export_tests::audio_wait_timeout(timeout);
         let (mut audio, _) = control
             .audio_available
-            .wait_timeout_while(audio, std::time::Duration::from_millis(100), |audio| {
-                audio.is_empty() && !control.stop.load(Ordering::SeqCst)
+            .wait_timeout_while(audio, timeout, |audio| {
+                let waiting = audio.is_empty() && !control.stop.load(Ordering::SeqCst);
+                #[cfg(test)]
+                if waiting {
+                    cursor_export_tests::announce_audio_wait();
+                }
+                waiting
             })
             .unwrap();
         if control.stop.load(Ordering::SeqCst) {
@@ -405,6 +413,68 @@ pub extern "C" fn leftcar_jni_input_release_all(instance_c: *const c_char) -> i3
 mod cursor_export_tests {
     use super::*;
     use std::ffi::CString;
+    use std::sync::mpsc::{channel, sync_channel, SyncSender};
+    use std::time::Duration;
+
+    thread_local! {
+        static AUDIO_WAIT_STARTED: std::cell::RefCell<Option<SyncSender<()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn audio_wait_timeout(default: Duration) -> Duration {
+        AUDIO_WAIT_STARTED.with(|started| {
+            if started.borrow().is_some() {
+                // The test's completion watchdog fires first, so a missing
+                // notification cannot pass by reaching the polling timeout.
+                Duration::from_secs(5)
+            } else {
+                default
+            }
+        })
+    }
+
+    pub(super) fn announce_audio_wait() {
+        AUDIO_WAIT_STARTED.with(|started| {
+            if let Some(started) = started.borrow_mut().take() {
+                // The predicate still holds the audio mutex. The producer
+                // can acquire it only after the real condvar wait releases it.
+                started.send(()).unwrap();
+            }
+        });
+    }
+
+    fn poll_after_audio_wait(
+        instance: &CString,
+        control: &Arc<RendererControl>,
+        on_wait: impl FnOnce(),
+    ) -> (i32, [u8; 128]) {
+        std::thread::scope(|scope| {
+            let (waiting_tx, waiting_rx) = sync_channel(0);
+            let (finished_tx, finished_rx) = channel();
+            scope.spawn(move || {
+                AUDIO_WAIT_STARTED.with(|started| *started.borrow_mut() = Some(waiting_tx));
+                let mut bytes = [0; 128];
+                let count = leftcar_jni_poll_audio_owned(
+                    7081 as *mut c_void,
+                    instance.as_ptr(),
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                );
+                finished_tx.send((count, bytes)).unwrap();
+            });
+            waiting_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("owned audio poll must reach its empty-ring wait");
+            on_wait();
+            let result = finished_rx.recv_timeout(Duration::from_secs(2));
+            if result.is_err() {
+                // Release a waiter after a failing notification assertion.
+                control.audio_available.notify_all();
+            }
+            result.expect("audio/stop notification must wake the owned poll before timeout")
+        })
+    }
 
     /// Each test installs its own registry key: `install_renderer` replaces
     /// the entry for a key, and cargo runs tests in parallel threads.
@@ -498,37 +568,15 @@ mod cursor_export_tests {
         forget_owned_renderer(7081, "task8-fix1-poll", &stopped);
         let live = Arc::new(RendererControl::new_split(5081, 60));
         bind_owned_renderer(7081, "task8-fix1-poll", Arc::clone(&live));
-        std::thread::scope(|scope| {
-            let control = Arc::clone(&live);
-            scope.spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(15));
-                control
-                    .audio
-                    .lock()
-                    .unwrap()
-                    .push(&crate::audio_protocol::encode_audio_packet(
-                        1,
-                        48000,
-                        2,
-                        &[1, 2, 3, 4],
-                    ));
-                control.audio_available.notify_all();
-            });
-            assert_eq!(poll(&mut bytes), 10);
+        let (count, bytes) = poll_after_audio_wait(&instance, &live, || {
+            let packet = crate::audio_protocol::encode_audio_packet(1, 48000, 2, &[1, 2, 3, 4]);
+            assert!(live.audio.lock().unwrap().push(&packet));
+            live.audio_available.notify_all();
         });
-        std::thread::scope(|scope| {
-            let control = Arc::clone(&live);
-            scope.spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(15));
-                control.request_stop(false);
-            });
-            let began = std::time::Instant::now();
-            assert_eq!(poll(&mut bytes), 0);
-            assert!(
-                began.elapsed() < std::time::Duration::from_millis(80),
-                "stop must wake the actual condvar wait"
-            );
-        });
+        assert_eq!(count, 10);
+        assert_eq!(&bytes[..10], &[0xbb, 0x80, 2, 0, 0, 1, 1, 2, 3, 4]);
+        let (count, _) = poll_after_audio_wait(&instance, &live, || live.request_stop(false));
+        assert_eq!(count, 0, "stop must wake the actual condvar wait");
         forget_owned_renderer(7081, "task8-fix1-poll", &live);
     }
 

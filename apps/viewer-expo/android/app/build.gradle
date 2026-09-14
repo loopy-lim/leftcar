@@ -103,13 +103,16 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace 'dev.leftcar.viewer'
+    buildFeatures {
+        aidl true
+    }
     defaultConfig {
         applicationId 'leftcar.ll3.kr' + benchmark.suffix
         manifestPlaceholders = [leftcarScheme: benchmark.scheme, leftcarExpoScheme: benchmark.expoScheme, leftcarAccessoryAction: benchmark.accessory]
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "0.1.5"
+        versionCode 5
+        versionName "0.1.6"
 
         // Leftcar UI는 한국어/영어만 제공한다. 의존성의 미사용 번역 리소스를 제외한다.
         resourceConfigurations += ["ko", "en"]
@@ -188,6 +191,18 @@ tasks.configureEach { if (name == "preReleaseBuild") dependsOn("validateReleaseI
 }
 
 dependencies {
+    constraints {
+        implementation('com.google.code.gson:gson:2.8.9') {
+            because 'CVE-2022-25647 is fixed in 2.8.9; preserve the upstream Java 6/API contract'
+        }
+        // Keep the tcp-socket PEM reader's Java 5-8 artifact family together.
+        // 1.86 includes the upstream security fixes without adopting jdk18on.
+        ['bcprov', 'bcpkix', 'bcutil'].each { module ->
+            implementation("org.bouncycastle:${module}-jdk15to18:1.86") {
+                because 'Bouncy Castle security updates; see docs/research/2026-09-14-dependency-readiness.md'
+            }
+        }
+    }
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
     testImplementation("junit:junit:4.13.2")

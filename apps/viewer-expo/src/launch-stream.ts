@@ -133,7 +133,6 @@ export interface StartStreamArgs {
   encoderExperiment: EncoderExperimentId;
   displayName?: string;
   showFps?: boolean;
-  localCursor?: boolean;
   localAudio?: boolean;
   opusAudio?: boolean;
   balancedPresentation?: boolean;
@@ -411,8 +410,8 @@ export async function startPreparedStream({
       encoderExperiment,
       args.displayName,
       args.showFps ?? false,
-      // 커서 오버레이는 입력 피드백이라 기본(true) — 네이티브 기본값과 정합.
-      args.localCursor ?? true,
+      // LCD1 커서 수신 능력은 항상 켜고, 실제 표시는 입력 소유권이 자동 선택한다.
+      true,
       currentLanguage(),
       // 오디오는 기본 전달(true) — 네이티브 기본값과 정합.
       args.localAudio ?? true,
@@ -693,7 +692,7 @@ export async function reconfigurePreparedStream({
       // plain reconfigures keep the window's existing name.
       accepted.sourceName ?? active.sourceName,
       active.showFps ?? false,
-      active.localCursor ?? true,
+      true,
       currentLanguage(),
       active.localAudio ?? true,
       active.balancedPresentation ?? false,

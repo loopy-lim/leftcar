@@ -14,7 +14,6 @@ pub mod fec;
 pub mod ffi;
 pub mod file_transfer;
 pub mod identity;
-pub mod lock;
 pub mod media_pacing;
 pub mod pairing;
 pub mod settings;
@@ -34,6 +33,26 @@ use tauri::{Manager, WindowEvent};
 /// Preferred control-plane port. If it is already occupied, the Host binds an
 /// OS-assigned port and advertises that actual endpoint through mDNS and QR.
 const PREFERRED_CONTROL_PORT: u16 = 7777;
+
+#[derive(Clone, Copy)]
+enum DashboardPresentation {
+    Hidden,
+    Visible,
+}
+
+fn dock_visibility_for_dashboard(presentation: DashboardPresentation) -> bool {
+    matches!(presentation, DashboardPresentation::Visible)
+}
+
+fn set_dashboard_dock_visibility(app: &tauri::AppHandle, presentation: DashboardPresentation) {
+    let visible = dock_visibility_for_dashboard(presentation);
+    #[cfg(target_os = "macos")]
+    if let Err(error) = app.set_dock_visibility(visible) {
+        eprintln!("Leftcar Host dock visibility update failed: {error}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
+}
 
 #[derive(Clone, Copy)]
 struct ControlEndpoint {
@@ -122,9 +141,6 @@ pub fn run() {
     // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
     server.set_clipboard_share(settings.clipboard_share());
     server.set_settings(settings.clone());
-    // 세션 종료 후 화면 잠금 실행부(설정 lock_on_disconnect가 켜져 있을 때
-    // 마지막 세션 teardown에서 호출된다).
-    server.set_lock_screen(std::sync::Arc::new(lock::lock_workstation));
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -169,7 +185,6 @@ pub fn run() {
             get_file_share,
             set_file_share,
             get_privacy_settings,
-            set_lock_on_disconnect,
             set_privacy_curtain,
             add_share_files,
             list_share_queue,
@@ -211,8 +226,10 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                            if window.show().is_ok() {
+                                set_dashboard_dock_visibility(app, DashboardPresentation::Visible);
+                                let _ = window.set_focus();
+                            }
                         }
                     }
                     "pairing" => show_pairing_window(app),
@@ -225,8 +242,10 @@ pub fn run() {
             // AppKit startups. Show+focus defensively; users reported the
             // app appearing to "not launch" when only the tray existed.
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+                if window.show().is_ok() {
+                    set_dashboard_dock_visibility(app.handle(), DashboardPresentation::Visible);
+                    let _ = window.set_focus();
+                }
             }
 
             Ok(())
@@ -237,7 +256,12 @@ pub fn run() {
                     // Closing the dashboard hides it; the control server, mDNS
                     // advertisement, and active capture sessions keep running.
                     api.prevent_close();
-                    let _ = window.hide();
+                    if window.hide().is_ok() {
+                        set_dashboard_dock_visibility(
+                            window.app_handle(),
+                            DashboardPresentation::Hidden,
+                        );
+                    }
                 }
             } else if window.label() == "pairing" {
                 if let WindowEvent::CloseRequested { .. } = event {
@@ -688,22 +712,8 @@ fn get_file_share(settings: tauri::State<'_, std::sync::Arc<settings::SharedSett
 #[tauri::command]
 fn get_privacy_settings(
     settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-) -> (bool, bool) {
-    (settings.lock_on_disconnect(), settings.privacy_curtain())
-}
-
-#[tauri::command]
-fn set_lock_on_disconnect(
-    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
-    enabled: bool,
-) -> Result<(), String> {
-    settings.set_lock_on_disconnect(enabled)?;
-    audit_state.log(
-        "lock_on_disconnect_changed",
-        serde_json::json!({ "enabled": enabled }),
-    );
-    Ok(())
+) -> bool {
+    settings.privacy_curtain()
 }
 
 #[tauri::command]
@@ -821,6 +831,22 @@ fn local_lan_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{dock_visibility_for_dashboard, DashboardPresentation};
+
+    #[test]
+    fn hidden_dashboard_removes_the_macos_dock_icon() {
+        assert!(!dock_visibility_for_dashboard(
+            DashboardPresentation::Hidden
+        ));
+    }
+
+    #[test]
+    fn visible_dashboard_restores_the_macos_dock_icon() {
+        assert!(dock_visibility_for_dashboard(
+            DashboardPresentation::Visible
+        ));
+    }
+
     #[test]
     fn occupied_control_port_falls_back_to_an_available_port() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();

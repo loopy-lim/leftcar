@@ -18,7 +18,6 @@ import {
   QrCode,
   RefreshCw,
   EyeOff,
-  Lock,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -75,7 +74,7 @@ interface FooterToggleProps {
   offText: string;
 }
 
-/** Footer gate toggle (clipboard share / lock-on-disconnect / curtain). */
+/** Footer gate toggle (clipboard share / privacy curtain). */
 function FooterToggle(props: FooterToggleProps) {
   const Icon = props.icon;
   return (
@@ -398,16 +397,12 @@ interface DashboardFooterProps {
   copiedToast: boolean;
   inputPermission: boolean;
   clipboardShare: boolean;
-  lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   clipboardPending: boolean;
-  lockPending: boolean;
   curtainPending: boolean;
   clipboardError: string | null;
-  lockError: string | null;
   curtainError: string | null;
   retryClipboard: () => void;
-  retryLock: () => void;
   retryCurtain: () => void;
   platform: HostSnapshotView["platform"];
   lastUpdated: Date;
@@ -416,7 +411,6 @@ interface DashboardFooterProps {
   onCopyAddress: () => void;
   onRequestPermission: () => void;
   onToggleClipboardShare: () => void;
-  onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
 }
 
@@ -479,20 +473,6 @@ function DashboardFooter(props: DashboardFooterProps) {
           onRetry={props.retryClipboard}
           retryText={t.common.retry}
           onToggle={props.onToggleClipboardShare}
-          onText={t.host.clipboardShareOn}
-          offText={t.host.clipboardShareOff}
-        />
-        {/* 세션 종료 후 자동 잠금 — 마지막 스트림이 끝나면 화면을 잠근다. */}
-        <FooterToggle
-          icon={Lock}
-          label={t.host.lockOnDisconnectLabel}
-          title={t.host.lockOnDisconnectDesc}
-          active={props.lockOnDisconnect}
-          pending={props.lockPending}
-          error={props.lockError}
-          onRetry={props.retryLock}
-          retryText={t.common.retry}
-          onToggle={props.onToggleLockOnDisconnect}
           onText={t.host.clipboardShareOn}
           offText={t.host.clipboardShareOff}
         />
@@ -1056,14 +1036,12 @@ function Dashboard() {
   // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
   const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
 
-  // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
-  // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
+  // 프라이버시 커튼 — 상태·토글은 Privacy 모듈의 훅이 책임진다
+  // (같은 0600 settings.json, 즉시 효력).
   const {
-    lockOnDisconnect,
     privacyCurtain,
-    toggleLockOnDisconnect,
     togglePrivacyCurtain,
-    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
+    curtainPending, curtainError, retryCurtain,
   } = usePrivacySettings();
 
   useEffect(() => {
@@ -1257,15 +1235,11 @@ function Dashboard() {
         inputPermission={inputPermission}
         clipboardShare={clipboardShare}
         retryClipboard={retryClipboard}
-        retryLock={retryLock}
         retryCurtain={retryCurtain}
         clipboardPending={clipboardPending}
         clipboardError={clipboardError}
-        lockPending={lockPending}
-        lockError={lockError}
         curtainPending={curtainPending}
         curtainError={curtainError}
-        lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
         platform={platform}
         lastUpdated={lastUpdated}
@@ -1274,7 +1248,6 @@ function Dashboard() {
         onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
         onToggleClipboardShare={toggleClipboardShare}
-        onToggleLockOnDisconnect={toggleLockOnDisconnect}
         onTogglePrivacyCurtain={togglePrivacyCurtain}
       />
 

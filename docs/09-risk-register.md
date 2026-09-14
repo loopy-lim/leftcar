@@ -3,6 +3,22 @@
 문서 상태: 활성  
 갱신 규칙: 매 Gate review에서 probability, impact, evidence, owner, next check를 갱신한다.
 
+2026-09-13 갱신: 아래 원래 위험 가설과 현재 구현을 구분한다. [지원·수용 표](completion-and-support.md)가 현재 판정의 진입점이다. 소스 회귀를 통과했다고 물리 위험을 일괄 Closed로 바꾸지 않는다.
+
+| 위험 / 현재 상태 | 담당 | 근거와 다음 확인 |
+| --- | --- | --- |
+| R-001/002/003/011/022: XR 네 창·비초점·자원·열·Hub 수명, Open | 기기 QA | Activity/예약 코드가 있어도 최신 후보의 4창·30분은 별도 |
+| R-007: 원래 transport bake-off 가설, 현재 UDP 기준선 안정화 | 스트리밍/기기 QA | UDP/AOAP/adbTcp를 구분. 실제 미디어 실패를 먼저 해결하고 다른 전송 실험을 성공으로 대체하지 않음 |
+| R-008/012: 앱 창 캡처 위험, 현재 후보 범위 밖 | 제품/캡처 | display-only 후보에서는 앱 창을 보장하지 않음. 디스플레이 교체·승인 철회·안정 ID 회귀는 계속 확인 |
+| R-013: 로컬 감사 metadata, Mitigating | Host 보안 | 저장 sink의 allowlist·회전·권한 회귀와 별개로 기존 로그/수동 진단 export를 검토 |
+| R-015: 범위 팽창, Mitigating | 제품 | 가상 디스플레이 관리는 제거 유지. 이미 있는 오디오·파일·클립보드는 선택 기능으로 별도 수용 |
+| R-016: Rustra/FFI 버전, Mitigating | 빌드/계약 | 잠금 파일·계약·shim·APK 내장 native/JS를 같은 후보로 검증 |
+| R-018/019/020/023/024: Windows·보호 콘텐츠·광학·parser·표시, Open/Mitigating 유지 | 플랫폼/기기 QA | 정확한 target 빌드 뒤 플랫폼·광학·장시간 시험. 숫자 없는 추정으로 종료하지 않음 |
+| 후속 설정/백업/USB 수명 | completion-followup | 회귀 수정 뒤 실기기 저장 복구·케이블 재연결 확인 필요 |
+| 공개 서명·업데이트·공급망 | 릴리스 | 내부 패키지와 배포용 서명을 구분하고 미해결 audit/license/설치 전이를 공개 중단 조건으로 유지 |
+
+후속 코드·문서 작업은 `codex/completion-followup`에서 수행한다. 별도 세션의 PR #5는 main `5a8dde4`로 병합됐고 그 PR의 CI는 통과했다. 이 후속 브랜치의 새 변경에 같은 CI 결과를 재사용하지 않는다. 아래 초기 위험과 미결정 목록은 최초 설계 가설이며, 현재 결정은 이 문서 첫 표와 마지막 절을 따른다.
+
 ## 1. 등급
 
 - 확률: Low, Medium, High
@@ -151,15 +167,11 @@ source identity를 제목/위치 heuristic으로 자동 재연결하면 잘못�
 - decision date:
 ```
 
-## 10. 현재 권장 결정
+## 10. 현재 안정화 결정
 
-조사만으로 권장할 수 있는 것:
-
-- Home Space multi-instance를 먼저 시험한다.
-- TS/Rust 중심과 얇은 Kotlin shim을 유지한다.
-- Rustra는 control plane에 쓴다.
-- 앱 창 캡처를 virtual display보다 먼저 한다.
-- H.264를 baseline으로 한다.
-- transport는 아직 고르지 않는다.
-- 성능 수치는 실기기 전까지 목표로만 표시한다.
-
+- 승인한 디스플레이와 H.264 LAN UDP 단일 화면에서 실제 영상부터 확인한다.
+- Galaxy XR Home Space의 네 창·비초점 갱신·30분 조건을 같은 후보로 검사한다.
+- TypeScript/Rust와 얇은 Kotlin shim, Rustra 제어 계약의 경계를 유지한다.
+- 앱 창 단독 캡처는 후속 목표이며 가상 디스플레이 생성·관리는 복원하지 않는다.
+- AOAP USB와 개발용 adbTcp는 LAN UDP와 구분해서 수용한다. 위 초기 QUIC/WebRTC bake-off 항목을 현재 구현이 미선정이라는 의미로 읽지 않는다.
+- 성능·설치·권한·입력·광학 수치는 해당 패키지의 실기기 결과가 있을 때만 달성으로 표시한다.

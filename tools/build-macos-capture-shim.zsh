@@ -5,7 +5,7 @@ set -euo pipefail
 tool_dir=${0:A:h}
 repo_root=${tool_dir:h}
 shim_root="$repo_root/native/macos-capture-shim"
-mode=${1:?"usage: build-macos-capture-shim.zsh <library|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|retransmit-ring-test|retransmit-policy-test|tile-throughput-probe> <output>"}
+mode=${1:?"usage: build-macos-capture-shim.zsh <library|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|retransmit-ring-test|retransmit-policy-test|media-interop-test|tile-throughput-probe> <output>"}
 output=${2:?"missing output path"}
 
 typeset -a shim_sources frameworks framework_args
@@ -87,6 +87,14 @@ case "$mode" in
       "$shim_root/Tests/CursorStreamTests.swift" \
       -o "$output" \
       "${framework_args[@]}"
+    ;;
+  media-interop-test)
+    # In-memory encryption plus a fixture-only Rust peer; no capture or sockets.
+    /usr/bin/xcrun swiftc -O \
+      -module-cache-path "${TMPDIR:-/tmp}/leftcar-media-interop-module-cache" \
+      "$shim_root/Sources/Transport/MediaSealer.swift" \
+      "$shim_root/Tests/MediaCryptoInteropTests.swift" \
+      -o "$output" -framework Foundation
     ;;
   audio-ownership-test)
     /usr/bin/xcrun swiftc -O \

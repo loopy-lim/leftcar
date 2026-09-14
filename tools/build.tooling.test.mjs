@@ -2,7 +2,14 @@ import { test, expect } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { replaceBundle } from './build.bundle.mjs';
+import { replaceBundle, signingRequirementFromOutputs } from './build.bundle.mjs';
+
+test('codesign requirement is accepted when Bun returns it on stdout', () => {
+  expect(signingRequirementFromOutputs(
+    'designated => identifier "leftcar.ll3.kr" and anchor apple generic\n',
+    'Executable=/Applications/Leftcar Host.app/Contents/MacOS/leftcar-host-desktop\n',
+  )).toBe('designated => identifier "leftcar.ll3.kr" and anchor apple generic');
+});
 
 test('bundle staging failure preserves the previous installed bundle', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'leftcar-bundle-'));

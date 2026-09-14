@@ -356,7 +356,7 @@ describe("startPreparedStream", () => {
     );
   });
 
-  it("forwards the local cursor opt-in and defaults it to false for the native arg count", async () => {
+  it("always enables the native automatic cursor capability", async () => {
     const { control, launcher } = harness();
 
     await startPreparedStream({
@@ -364,7 +364,7 @@ describe("startPreparedStream", () => {
       launcher,
       host: "192.168.0.134",
       advertisedEncoderExperiments,
-      args: { ...args, localCursor: true },
+      args,
     });
 
     expect(launcher.openStream).toHaveBeenCalledWith(

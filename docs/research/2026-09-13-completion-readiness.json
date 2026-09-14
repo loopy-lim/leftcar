@@ -1,0 +1,311 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-09-13T21:39:36.460991+09:00",
+  "purpose": "Read-only completion-readiness investigation. Source and device state were not edited by this audit; only this research report and its evidence were created.",
+  "main": {
+    "root": "/Users/loopy/dev/ll3/leftcar",
+    "commit": "068b6628df5dc57f264446f8ec51215b37c51b6f",
+    "buildInputSha256": "5ab55595ea00462f73290b58ae9659e6417fa65a07dedee116a477763cc0af18",
+    "buildInputCount": 772
+  },
+  "candidate": {
+    "root": "/Users/loopy/dev/ll3/leftcar/.worktrees/audit-improvements",
+    "commit": "a62d90850e03e01ff165f306c7c1a92e36dcd296",
+    "statusPorcelain": "",
+    "buildInputSha256": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+    "buildInputCount": 872,
+    "aheadOfLocalMain": "3",
+    "observedChangeDuringAudit": "Five existing dirty files were committed by concurrent work as a62d908. Their hashes and complete build-input hash remained identical to this audit snapshot."
+  },
+  "toolchain": {
+    "bun": "1.4.1",
+    "node": "22.21.1 via fnm",
+    "rust": "1.95.0"
+  },
+  "checksRunInThisAudit": [
+    {
+      "tree": "main",
+      "command": "bun run typecheck",
+      "exit": 0
+    },
+    {
+      "tree": "main",
+      "command": "bun run test --exclude '**/.worktrees/**'",
+      "exit": 0,
+      "files": 50,
+      "passed": 612
+    },
+    {
+      "tree": "main",
+      "command": "bun run test",
+      "exit": 0,
+      "files": 107,
+      "passed": 1171,
+      "limitation": "Includes 559 tests from the nested audit-improvements worktree. Not the main-only inventory."
+    },
+    {
+      "tree": "main",
+      "command": "bun run test:contract",
+      "exit": 0,
+      "passed": 4,
+      "limitation": "Already included in root unit tests; do not add totals."
+    },
+    {
+      "tree": "main",
+      "command": "bun run test:architecture",
+      "exit": 0
+    },
+    {
+      "tree": "main",
+      "command": "cargo test --workspace --locked",
+      "exit": 0,
+      "passed": 399,
+      "ignored": 1
+    },
+    {
+      "tree": "main",
+      "command": "cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked",
+      "exit": 0,
+      "passed": 172,
+      "hostUnit": 160,
+      "hostIntegration": 12
+    },
+    {
+      "tree": "main",
+      "command": "cargo fmt --all -- --check",
+      "exit": 0
+    },
+    {
+      "tree": "main",
+      "command": "cargo clippy --workspace --tests --locked -- -D warnings",
+      "exit": 0
+    },
+    {
+      "tree": "main",
+      "command": "npx -y react-doctor@latest . --verbose",
+      "exit": 0,
+      "score": 100
+    },
+    {
+      "tree": "candidate",
+      "command": "bun run typecheck",
+      "exit": 0
+    },
+    {
+      "tree": "candidate",
+      "command": "bun run test",
+      "exit": 0,
+      "files": 57,
+      "passed": 559
+    },
+    {
+      "tree": "candidate",
+      "command": "npx -y react-doctor@latest . --verbose",
+      "exit": 0,
+      "score": 100
+    }
+  ],
+  "candidateFullVerificationFromConcurrentWork": {
+    "command": [
+      "bun",
+      "run",
+      "verify",
+      "all"
+    ],
+    "startedUtc": "2026-09-13T12:24:34.338041+00:00",
+    "sourceBefore": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+    "scope": "All automatic repository checks after behavior-preserving simplify; real devices deferred explicitly by user",
+    "endedUtc": "2026-09-13T12:30:01.520691+00:00",
+    "seconds": 327.189,
+    "exit": 0,
+    "sourceAfter": "6b73499bbbd73234fad35652b56d4485e9b82cd8b47bb5e94ed0902748af6dcd",
+    "sourceUnchanged": true,
+    "logSha256": "8a924b5552d30fdef7d5c7fba7f412eb0827e1bd1190215c431b8b049040c333",
+    "changes": [
+      "apps/host-desktop/src/SourceGrantEditor.tsx",
+      "apps/host-desktop/src/paired-device-state.ts",
+      "tools/verify.mjs",
+      "native/macos-capture-shim/Sources/Capture/CaptureStartOptions.swift",
+      "native/macos-capture-shim/Sources/Encoder/EncoderExperimentParsing.swift"
+    ],
+    "counts": {
+      "reactDoctor": 100,
+      "js": 559,
+      "contract": 4,
+      "ui": 78,
+      "uiSuites": 9,
+      "hostUnit": 225,
+      "hostIntegration": 12,
+      "jvm": 118,
+      "jvmSuites": 19
+    },
+    "scopeNotes": [
+      "Fresh full automatic verification at current source; no install or device operations",
+      "Swift full library and adapter binaries compiled; pure split and retransmit policies executed",
+      "JS total includes contract and performance tests; totals are not additive",
+      "Previous package inputs are historical and were not rebuilt or installed after simplify"
+    ]
+  },
+  "logs": {
+    "typecheck": {
+      "path": "artifacts/completion-audit-2026-09-13/typecheck.log",
+      "sha256": "ab85d04819510a85725e0f12b80571c9c71cba8b387b2fb1263da2477d4833e2",
+      "bytes": 262
+    },
+    "vitest": {
+      "path": "artifacts/completion-audit-2026-09-13/vitest.log",
+      "sha256": "d660c064c77db67797ec78c7349e2a5ebf4e16408b57019f2d2f2a5df3c71412",
+      "bytes": 15867
+    },
+    "vitest-root": {
+      "path": "artifacts/completion-audit-2026-09-13/vitest-root.log",
+      "sha256": "6f726ac0bb41ec291f5c51793dfcbbefc920a03dfdf791877bd55ca618793ac6",
+      "bytes": 4373
+    },
+    "contract": {
+      "path": "artifacts/completion-audit-2026-09-13/contract.log",
+      "sha256": "fe45fccebe0a885247e50bd02b166d08faf88e69b8a5118ac9d4181a3c8efb06",
+      "bytes": 481
+    },
+    "architecture": {
+      "path": "artifacts/completion-audit-2026-09-13/architecture.log",
+      "sha256": "1e2ffb06acc59b364f732fb8e7b3a515564ae48dc5e846b552e67a4d1cb05636",
+      "bytes": 79
+    },
+    "cargo": {
+      "path": "artifacts/completion-audit-2026-09-13/cargo.log",
+      "sha256": "f6796d00447c69280d4570cabfc0f12126aaf4c36d87441e8c5ce322afde77d8",
+      "bytes": 39629
+    },
+    "host": {
+      "path": "artifacts/completion-audit-2026-09-13/host.log",
+      "sha256": "afcbd040e14c3a8d952d4ce3c3a5c6ed204b740a9ded1f6bb44c6a168748fc9f",
+      "bytes": 14131
+    },
+    "fmt": {
+      "path": "artifacts/completion-audit-2026-09-13/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "clippy": {
+      "path": "artifacts/completion-audit-2026-09-13/clippy.log",
+      "sha256": "2bc683fb4e4f4f21ee9ee39e2b8ecce2efe20d3b1be57bda5316aa519ab3d30a",
+      "bytes": 72
+    },
+    "react-doctor": {
+      "path": "artifacts/completion-audit-2026-09-13/react-doctor.log",
+      "sha256": "2bb4096ea2468195e4d3f3871070420a16a0637ea825a09eb0ceeeb0ca5f898a",
+      "bytes": 535
+    },
+    "candidate-typecheck": {
+      "path": "artifacts/completion-audit-2026-09-13/candidate-typecheck.log",
+      "sha256": "ab85d04819510a85725e0f12b80571c9c71cba8b387b2fb1263da2477d4833e2",
+      "bytes": 262
+    },
+    "candidate-vitest": {
+      "path": "artifacts/completion-audit-2026-09-13/candidate-vitest.log",
+      "sha256": "d459e11886ef08de41b89db488502c3fd17fc4fe4ce02fd7409fde7f2951e79d",
+      "bytes": 9726
+    },
+    "candidate-react-doctor": {
+      "path": "artifacts/completion-audit-2026-09-13/candidate-react-doctor.log",
+      "sha256": "2d39b140ea5f7c5950fe64de79dd43e8a39bd0202afb70583604dfaf620e103e",
+      "bytes": 335
+    },
+    "current-ci": {
+      "path": "artifacts/completion-audit-2026-09-13/current-ci.json",
+      "sha256": "3a9d9c1c19fa98a19d79b5c45f972f074c94cbe427adcd6a0aa180e5d4633749",
+      "bytes": 790
+    },
+    "current-ci-rust": {
+      "path": "artifacts/completion-audit-2026-09-13/current-ci-rust.log",
+      "sha256": "5983f8150a7ba6573e4974e56a532dcdc154e806f2808a865ec1e7b655e103c7",
+      "bytes": 133623
+    },
+    "current-ci-android": {
+      "path": "artifacts/completion-audit-2026-09-13/current-ci-android.log",
+      "sha256": "0f02d864ff584867a693861e4d5b3416deb6c7a1dcef81bf063d0c7df8d33f9f",
+      "bytes": 67648
+    }
+  },
+  "online": {
+    "lastConfirmedRemoteMain": "27e33e43e6b62e358c97661ea224451f23b0bb29",
+    "localMainAhead": 20,
+    "lastConfirmedLatestRelease": "v0.1.4",
+    "latestReleaseAssets": [
+      "Leftcar-Viewer-0.1.4.apk"
+    ],
+    "lastCompletedRemoteCiUrl": "https://github.com/loopy-lim/leftcar/actions/runs/34309139077",
+    "lastCompletedRemoteCiConclusion": "failure",
+    "latestStateMustBeRefreshedBeforeIntegration": true,
+    "currentPr": {
+      "number": 5,
+      "state": "OPEN",
+      "url": "https://github.com/loopy-lim/leftcar/pull/5",
+      "head": "a62d90850e03e01ff165f306c7c1a92e36dcd296"
+    },
+    "currentCi": {
+      "conclusion": "",
+      "headSha": "a62d90850e03e01ff165f306c7c1a92e36dcd296",
+      "jobs": [
+        {
+          "conclusion": "success",
+          "failedSteps": [],
+          "name": "Device evidence (E5-E7) — pending",
+          "status": "completed"
+        },
+        {
+          "conclusion": "",
+          "failedSteps": [],
+          "name": "Windows Host (WGC, Media Foundation, NSIS)",
+          "status": "in_progress"
+        },
+        {
+          "conclusion": "failure",
+          "failedSteps": [
+            "Host desktop crate tests (standalone workspace)"
+          ],
+          "name": "Rust (fmt, clippy, tests)",
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "failedSteps": [],
+          "name": "TypeScript (typecheck, tests, contract, architecture)",
+          "status": "completed"
+        },
+        {
+          "conclusion": "failure",
+          "failedSteps": [
+            "Gradle JVM unit tests"
+          ],
+          "name": "Android native (aarch64 check)",
+          "status": "completed"
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/loopy-lim/leftcar/actions/runs/34757386802"
+    },
+    "currentCiFailureCauses": {
+      "macOS": "Tauri build script missing native/macos-capture-shim/libleftcar_capture.dylib during Host desktop crate tests",
+      "android": "cargo ndk not installed during Gradle Rustra buildRustAndroid prerequisite"
+    }
+  },
+  "physicalEvidence": {
+    "provenance": "Read existing repository receipt only; did not connect, install, capture or stream in this audit.",
+    "priorCandidateApkSha256": "81e3b41371b180526e24305ebb8764e271e39f3181514a65c40cc020e2839c8b",
+    "latestSourcePackaged": false,
+    "priorCandidateMediaStarted": false,
+    "priorFailure": "UDP reachability proof failed for 127.0.0.1:5001",
+    "successful10MinuteRun": false,
+    "successful30MinuteRun": false,
+    "successful60MinuteRun": false
+  },
+  "limitations": [
+    "Source checks do not prove APK packaging, installation, hardware behavior, streaming, optical latency, public signing or release readiness.",
+    "Current candidate full native/UI/JVM checks are recorded by a concurrent task; this audit freshly ran only candidate TS/unit/React Doctor checks.",
+    "Recorded current-source digest was computed using the candidate sourceSnapshot helper; documentation and known build outputs are excluded by that helper.",
+    "No current candidate hardware or long-run acceptance was performed.",
+    "No push, merge, release, secret registration, network configuration, or device operation was performed by this audit."
+  ]
+}

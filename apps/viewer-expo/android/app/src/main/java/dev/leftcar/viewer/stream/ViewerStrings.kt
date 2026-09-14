@@ -46,6 +46,13 @@ object ViewerStrings {
     val inputChecking: String
         get() = if (en) "Checking remote input status" else "원격 입력 상태 확인 중"
 
+    val keyBridgeUpdateRequired: String
+        get() = if (en) "Update KeyBridge to use the Mac keyboard and mouse handoff."
+        else "Mac 키보드·마우스 전환을 사용하려면 KeyBridge를 업데이트하세요."
+    val keyBridgeUnavailable: String
+        get() = if (en) "Could not hand the keyboard and mouse to the Mac."
+        else "키보드와 마우스를 Mac으로 넘기지 못했습니다."
+
     val gestureHelpDescription: String
         get() = if (en) "Show touch gestures" else "터치 제스처 안내 보기"
 

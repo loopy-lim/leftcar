@@ -1,14 +1,80 @@
-import {summarizeCounterSeries} from './analyze-performance';
+import {parseAndroidLog,summarizeCounterSeries} from './analyze-performance';
 export interface Boundary {startMs:number;endMs:number}
-interface Row {time:number; count:number; tokens:Record<string,string>}
+interface Row {
+ time:number; count:number; tokens:Record<string,string>;
+ format?:'canonical'|'legacy'; lineNumber?:number;
+ legacyCompanion?:{lineNumber:number;timestampMs:number;decoderFrames:number;counterOffset:number;tokens:Record<string,string>;raw:string};
+}
 const tokens=(text:string):Record<string,string>=>Object.fromEntries([...text.matchAll(/\b([\w]+)=([^\s]+)/g)].map(m=>[m[1],m[2]]));
+// Companion matching uses emitter order and an epoch-local counter offset,
+// never a file-wide "canonical exists" filter or nearest timestamp guess.
+function viewerRows(text:string):Row[] {
+ const rows:Row[]=[],pending=new Map<string,Row>(),offsets=new Map<string,number>(),canonicalTimes=new Map<string,number>();
+ for(const [index,line] of text.split(/\r?\n/).entries()) {
+  const emitterMatch=/^[\t ]*\d+(?:\.\d+)?\s+(\d+)\s+(\d+)\s+[VDIWEF]\s+/.exec(line);
+  const emitter=emitterMatch?`${emitterMatch[1]}:${emitterMatch[2]}`:undefined;
+  const prior=emitter?pending.get(emitter):undefined;
+  if(emitter)pending.delete(emitter);else pending.clear();
+  const canonical=line.includes('LeftcarViewerPerf'),legacy=/\bRendered\b/.test(line);
+  if(!canonical&&!legacy)continue;
+  if(canonical&&legacy)throw new Error('Ambiguous Viewer metric');
+  const metricHeader=/^[\t ]*\d+(?:\.\d+)?\s+(?:(\d+)\s+(\d+)\s+)?[VDIWEF]\s+LeftcarNative:\s+(LeftcarViewerPerf|Rendered)\b/.exec(line);
+  if(!metricHeader||(canonical?metricHeader[3]!=='LeftcarViewerPerf':metricHeader[3]!=='Rendered'))throw new Error('Malformed Viewer metric header');
+  const fields:Record<string,string>={};
+  for(const match of line.matchAll(/\b([\w]+)=([^\s]+)/g)) {
+   if(Object.hasOwn(fields,match[1]))throw new Error('Duplicate Viewer metric field');
+   fields[match[1]]=match[2];
+  }
+  const timestamp=/^[\t ]*(\d+(?:\.\d+)?)\s+/.exec(line);
+  const time=timestamp?Number(timestamp[1])*1000:NaN;
+  let count:number;
+  if(canonical) {
+   if(!/^(0|[1-9]\d*)$/.test(fields.released??''))throw new Error('Malformed Viewer counter');
+   count=Number(fields.released);
+  } else {
+   // Reuse the strict legacy parser before deciding that a row is redundant.
+   // In particular malformed Rendered/counter/age fields cannot be skipped.
+   count=parseAndroidLog(line)[0]?.frames??NaN;
+   if(['released','schema','process','stream','incarnation','decoderEpoch','kind'].some(field=>Object.hasOwn(fields,field)))throw new Error('Conflicting legacy Viewer identity/counter');
+  }
+  if(!Number.isFinite(time)||!Number.isSafeInteger(count)||count<0)throw new Error('Malformed Viewer counter');
+  const row:Row={time,count,tokens:fields,format:canonical?'canonical':'legacy',lineNumber:index+1};
+  if(canonical) {
+   // Validate supported canonical identity independently of whether a legacy
+   // companion exists. Split emits no decoderEpoch; single requires it.
+   if(fields.schema==='2'&&['single','split'].includes(fields.kind)) {
+    if(!emitter||fields.process!==metricHeader[1]||!fields.stream||!fields.incarnation)
+     throw new Error('Malformed canonical Viewer identity');
+    if(fields.kind==='single'&&(!/^(0|[1-9]\d*)$/.test(fields.decoderEpoch??'')||!Number.isSafeInteger(Number(fields.decoderEpoch))))
+     throw new Error('Malformed canonical Viewer decoder epoch');
+    const identity=JSON.stringify([fields.process,fields.stream,fields.incarnation]);
+    const previousTime=canonicalTimes.get(identity);
+    if(previousTime!=null&&time<=previousTime)throw new Error('Non-advancing canonical Viewer timestamp');
+    canonicalTimes.set(identity,time);
+   }
+   rows.push(row);
+   if(emitter&&fields.schema==='2'&&fields.kind==='single'&&fields.process===emitterMatch![1]
+      &&fields.stream&&fields.incarnation&&/^(0|[1-9]\d*)$/.test(fields.decoderEpoch??'')
+      &&Number.isSafeInteger(Number(fields.decoderEpoch)))pending.set(emitter,row);
+  } else if(prior&&time>=prior.time) {
+   const key=JSON.stringify([prior.tokens.process,prior.tokens.stream,prior.tokens.incarnation,prior.tokens.decoderEpoch]);
+   const offset=prior.count-count,expected=offsets.get(key);
+   if(offset<0||(expected!=null&&offset!==expected))throw new Error('Inconsistent Viewer companion counter offset');
+   offsets.set(key,offset);
+   prior.legacyCompanion={lineNumber:index+1,timestampMs:time,decoderFrames:count,counterOffset:offset,tokens:fields,raw:line};
+  } else {
+   rows.push(row); // Orphan/historical legacy keeps unknown attribution.
+  }
+ }
+ return rows;
+}
 function partition(rows:Row[], boundary:Boundary, host:boolean) {
  if(!Number.isFinite(boundary.startMs)||!Number.isFinite(boundary.endMs)||boundary.endMs<=boundary.startMs)throw new Error('Actual collection boundaries required');
  const groups=new Map<string,Row[][]>();
  for(const row of rows.sort((a,b)=>a.time-b.time)) {
   if(row.time<boundary.startMs||row.time>boundary.endMs)continue;
   const {process,stream,incarnation,kind}=row.tokens;
-  const key=process&&stream&&incarnation?JSON.stringify([process,stream,incarnation,kind??'single',row.tokens.schema??'legacy']):'unknown';
+  const key=row.format!=='legacy'&&process&&stream&&incarnation?JSON.stringify([process,stream,incarnation,kind??'single',row.tokens.schema??'legacy']):'unknown';
   const segments=groups.get(key)??[[]];let last=segments.at(-1)!;
   if(last.length && (row.count<last.at(-1)!.count || row.time<=last.at(-1)!.time)) {last=[];segments.push(last);}
   last.push(row);groups.set(key,segments);
@@ -16,19 +82,19 @@ function partition(rows:Row[], boundary:Boundary, host:boolean) {
  return [...groups].flatMap(([key,segments])=>segments.map((rows,segment)=>{
   const first=rows[0],last=rows.at(-1)!;
   const coverage={missingHeadMs:first.time-boundary.startMs,missingTailMs:boundary.endMs-last.time};
-  const unsupported=first.tokens.schema!=null&&first.tokens.schema!=='2';
-  const counter=summarizeCounterSeries(unsupported?[]:rows.map(r=>({timestampMs:r.time,frames:r.count})),last.time-first.time);
-  const identity=unsupported?{status:'unsupported-schema' as const,reason:`Unsupported metric schema ${first.tokens.schema}`} : key==='unknown'||first.tokens.schema!=='2'?{status:'unknown' as const,reason:'Historical metric has no stream/incarnation; cannot attribute or aggregate'}:{status:'observed' as const,process:first.tokens.process,stream:first.tokens.stream,incarnation:first.tokens.incarnation};
+  const unsupported=(first.tokens.schema!=null&&first.tokens.schema!=='2')||(!host&&first.format==='canonical'&&!['single','split'].includes(first.tokens.kind));
+  const counter=summarizeCounterSeries(unsupported?[]:rows.map(r=>({timestampMs:r.time,frames:r.count})),last.time-first.time,boundary);
+  const identity=unsupported?{status:'unsupported-schema' as const,reason:`Unsupported metric schema/kind ${first.tokens.schema}/${first.tokens.kind}`} : key==='unknown'||first.tokens.schema!=='2'?{status:'unknown' as const,reason:'Historical metric has no stream/incarnation; cannot attribute or aggregate'}:{status:'observed' as const,process:first.tokens.process,stream:first.tokens.stream,incarnation:first.tokens.incarnation};
   if(unsupported){counter.averageFps=null;counter.errors.push('Unsupported metric schema');}
   return {identity,segment,stage:unsupported?'unknown':host?(first.tokens.encoderMode==='splitVertical'?'paired-encoder-output':'encoder-output'):first.tokens.kind==='split'?'paired-surface-release':'surface-release',counter,coverage,
-   complete:identity.status==='observed'&&segments.length===1&&coverage.missingHeadMs<=1500&&coverage.missingTailMs<=1500&&counter.errors.length===0&&!counter.zeroFpsStallDetected,
-   samples:rows.map(row=>({timestampMs:row.time,...row.tokens})),
+   complete:identity.status==='observed'&&segments.length===1&&coverage.missingHeadMs<=1500&&coverage.missingTailMs<=1500&&counter.errors.length===0&&counter.observationComplete&&!counter.zeroFpsStallDetected,
+   samples:rows.map(row=>({timestampMs:row.time,...row.tokens,...(row.lineNumber==null?{}:{lineNumber:row.lineNumber}),...(row.legacyCompanion?{legacyCompanion:row.legacyCompanion}:{})})),
    latency:unsupported?{status:'unknown',reason:'Unsupported metric schema; raw fields retained'}:host?{basis:'host-monotonic',input:'encode-submission (single) or capture callback (split pair)',output:'encoder-callback',distribution:'rolling native encodeOutputP95Us snapshots; not a combined frame distribution',status:'see raw native fields'}:{basis:'estimated-host-wall-offset',input:'capture-wall-timestamp',output:'latest-PTS-matched-Surface-release-call-return',distribution:'latest-released-output sample only; not every released output',status:rows.some(r=>r.tokens.releaseCaptureAgeMs?.startsWith('Some('))?'observed':'unknown'},
   };
  }));
 }
 export function summarizeMeasurement(hostText:string,androidText:string,bounds:{host:Boundary;android:Boundary}) {
- const host:Row[]=[],android:Row[]=[];
+ const host:Row[]=[],android=viewerRows(androidText);
  for(const [index,line] of hostText.split('\n').entries()) {
   // /usr/bin/log stream --style ndjson emits this command header before its
   // JSON records. Match the collector's exact predicate only at the first line;
@@ -40,13 +106,6 @@ export function summarizeMeasurement(hostText:string,androidText:string,bounds:{
   const fields=tokens(row.eventMessage),time=Date.parse(row.timestamp),count=Number(fields.encoderMode==='splitVertical'?fields.splitPairs:fields.encodeOutputCallbacks);
   if(!Number.isFinite(time)||!Number.isSafeInteger(count)||count<0)throw new Error('Malformed Host counter');
   host.push({time,count,tokens:fields});
- }
- for(const line of androidText.split('\n')) {
-  if(!line.includes('LeftcarViewerPerf')&&!/\bRendered \d+ frames;/.test(line))continue;
-  const fields=tokens(line),time=Number(line.trim().split(/\s+/)[0])*1000;
-  const count=Number(fields.released??/Rendered (\d+) frames;/.exec(line)?.[1]);
-  if(!Number.isFinite(time)||!Number.isSafeInteger(count)||count<0)throw new Error('Malformed Viewer counter');
-  android.push({time,count,tokens:fields});
  }
  const budgets=new Map<string,Map<number,number>>();
  for(const row of host) {

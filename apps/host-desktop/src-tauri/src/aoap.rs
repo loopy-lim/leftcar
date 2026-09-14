@@ -195,9 +195,13 @@ pub struct AccessoryLink {
     workers: Vec<JoinHandle<()>>,
 }
 
+#[path = "aoap_media.rs"]
+mod media;
+pub(crate) use media::{MediaSubscribers, UsbMediaChannel};
+
 struct UsbSession {
     tx: SyncSender<usb_mux::MuxFrame>,
-    media_subscriber: std::sync::Arc<std::sync::Mutex<Option<SyncSender<Vec<u8>>>>>,
+    media_subscriber: MediaSubscribers,
     _workers: Vec<JoinHandle<()>>,
 }
 
@@ -220,19 +224,13 @@ pub fn install_usb_link(link: AccessoryLink) -> Receiver<Vec<u8>> {
         media_rx,
         workers,
     } = link;
-    let subscriber: std::sync::Arc<std::sync::Mutex<Option<SyncSender<Vec<u8>>>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let subscriber = MediaSubscribers::default();
     let dispatch_subscriber = subscriber.clone();
     let media_dispatcher = thread::Builder::new()
         .name("leftcar-aoap-media-dispatch".into())
         .spawn(move || {
             for payload in media_rx {
-                let Some(sender) = dispatch_subscriber.lock().unwrap().as_ref().cloned() else {
-                    continue;
-                };
-                if sender.send(payload).is_err() {
-                    *dispatch_subscriber.lock().unwrap() = None;
-                }
+                dispatch_subscriber.dispatch(payload);
             }
         })
         .expect("AOAP media dispatcher thread");
@@ -249,23 +247,11 @@ pub fn install_usb_link(link: AccessoryLink) -> Receiver<Vec<u8>> {
     control_rx
 }
 
-pub fn take_usb_media_channel() -> Option<(SyncSender<usb_mux::MuxFrame>, Receiver<Vec<u8>>)> {
+pub(crate) fn take_usb_media_channel() -> Option<UsbMediaChannel> {
     let storage = usb_session();
-    let mut session = storage.lock().unwrap();
-    let session = session.as_mut()?;
-    if session.media_subscriber.lock().unwrap().is_some() {
-        return None;
-    }
-    let (sender, receiver) = mpsc::sync_channel(256);
-    *session.media_subscriber.lock().unwrap() = Some(sender);
-    Some((session.tx.clone(), receiver))
-}
-
-pub fn release_usb_media_channel() {
-    let storage = usb_session();
-    if let Some(session) = storage.lock().unwrap().as_mut() {
-        *session.media_subscriber.lock().unwrap() = None;
-    };
+    let session = storage.lock().unwrap();
+    let session = session.as_ref()?;
+    session.media_subscriber.acquire(session.tx.clone())
 }
 
 pub fn usb_control_sender() -> Option<SyncSender<usb_mux::MuxFrame>> {
