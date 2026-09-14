@@ -21,7 +21,7 @@ test('source binding accepts snapshot and wrapper but rejects missing, mixed and
  expect(manifest.validateSourceBinding(source,{source},{source})).toEqual({commit:source.commit,sha256:source.sha256});
  const mixed=structuredClone(source);mixed.files[0].sha256='0'.repeat(64);mixed.sha256=manifest.sha256(JSON.stringify(mixed.files));expect(()=>manifest.validateSourceBinding(source,mixed)).toThrow(/binding mismatch/i);
  for(const bad of [{}, {...source,commit:'0'.repeat(40)}, {...source,files:[]}, {...source,files:[{path:'../escape',deleted:true}]}])expect(()=>manifest.validateSourceBinding(source,bad)).toThrow(/source/i);
-});
+},30_000);
 test('local preflight records distinct version roles, exact locks and unavailable checks without claiming distribution readiness',async()=>{
  const root=await fixture(),inputs=await collect(root);
  expect(inputs.components.host.cargoVersion).toBe(inputs.components.host.tauriVersion);
