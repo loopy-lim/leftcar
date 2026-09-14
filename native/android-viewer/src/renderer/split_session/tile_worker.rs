@@ -198,7 +198,12 @@ fn tile_worker(launch: TileWorkerLaunch) {
         control,
         release_window_on_exit,
     } = launch;
-    let (socket, crypto, mut peer) = match prepared.into_socket_and_media_crypto() {
+    // Split tiles re-request their own IDR on the recovery carrier, so the
+    // pre-claim backlog is intentionally not replayed here; single-session
+    // is the path that drains it.
+    let (socket, crypto, mut peer, _pre_claim_backlog) = match prepared
+        .into_socket_media_crypto_and_backlog()
+    {
         Ok(value) => value,
         Err(_) => {
             let _ = events.send(CoordinatorEvent::Fatal);

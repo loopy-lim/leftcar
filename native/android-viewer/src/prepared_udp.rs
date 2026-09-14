@@ -11,6 +11,7 @@
 
 use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX};
 use crate::net_guard::{hosts_are_valid, peer_allowed};
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +32,17 @@ fn prepared_log(_message: &str) {}
 
 /// Sealed challenge + AEAD overhead; genuine host challenges fit easily.
 const MAX_CHALLENGE_BYTES: usize = 192;
+
+/// Sealed media datagrams run counter(8) + tag(16) + payload, so a full
+/// host fragment fits well under 2 KiB. The old 256 B worker buffer
+/// truncated every early media frame into an unopenable datagram.
+const WORKER_READ_BYTES: usize = 2_048;
+
+/// Early-media backlog bound. The Host's startup IDR burst (~90 datagrams)
+/// rides the prepared→renderer handoff; 512 datagrams cover it plus jitter
+/// many times over while bounding memory under 1 MiB. Overflow drops the
+/// oldest, matching the live-edge policy the renderer applies anyway.
+const PREPARED_BACKLOG_CAP: usize = 512;
 
 /// Recognize a Host `LCH1` reachability challenge from an already-opened
 /// plaintext. Shared by the preflight worker and both renderers so the
@@ -57,6 +69,7 @@ pub struct PreparedUdpReceiver {
     expected_host: String,
     crypto: SharedMediaCrypto,
     peer: Arc<Mutex<Option<SocketAddr>>>,
+    pending: Arc<Mutex<VecDeque<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -76,6 +89,8 @@ impl PreparedUdpReceiver {
         let worker_socket = socket.try_clone()?;
         let peer = Arc::new(Mutex::new(None));
         let worker_peer = Arc::clone(&peer);
+        let pending: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let worker_pending = Arc::clone(&pending);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_host = expected_host.clone();
@@ -84,10 +99,11 @@ impl PreparedUdpReceiver {
         let worker = thread::Builder::new()
             .name(format!("leftcar-prepared-udp-{port}"))
             .spawn(move || {
-                let mut packet = [0u8; 256];
+                let mut packet = [0u8; WORKER_READ_BYTES];
                 prepared_log(&format!(
                     "prepared[{worker_port}]: listener armed, waiting for sealed challenge"
                 ));
+                let mut buffering_logged = false;
                 while !worker_stop.load(Ordering::SeqCst) {
                     match worker_socket.recv_from(&mut packet) {
                         Ok((size, peer))
@@ -95,29 +111,58 @@ impl PreparedUdpReceiver {
                         {
                             // Only a sealed frame that opens under the
                             // session key — and carries the LCH1 prefix —
-                            // is answered. Everything else is dropped
-                            // without parsing.
-                            if let Some(plaintext) =
-                                worker_crypto.open_challenge(&packet[..size])
-                            {
-                                prepared_log(&format!(
-                                    "prepared[{worker_port}]: challenge {size}B opened, echoing"
-                                ));
-                                *worker_peer.lock().unwrap() = Some(peer);
-                                if let Some(reply) = worker_crypto.seal(&plaintext) {
-                                    let _ = worker_socket.send_to(&reply, peer);
+                            // is answered. Everything else is early media
+                            // racing the renderer handoff.
+                            // Classify without consuming the receive window:
+                            // open_challenge advances it, and a frame the
+                            // worker opens is a replay the renderer can
+                            // never accept from the backlog.
+                            match worker_crypto.authenticate_packet(&packet[..size]) {
+                                Some(plaintext)
+                                    if plaintext.starts_with(CHALLENGE_PREFIX) =>
+                                {
+                                    // The echo proves the key handshake to the
+                                    // rest of the session: without this flag the
+                                    // renderer never seeds host_peer, so IDR
+                                    // requests and 1Hz feedback never leave the
+                                    // device and the Host kills the stream as
+                                    // "feedback timeout".
+                                    if let Some(opened) =
+                                        worker_crypto.open_challenge(&packet[..size])
+                                    {
+                                        worker_crypto.establish();
+                                        prepared_log(&format!(
+                                            "prepared[{worker_port}]: challenge {size}B opened, echoing"
+                                        ));
+                                        *worker_peer.lock().unwrap() = Some(peer);
+                                        if let Some(reply) = worker_crypto.seal(&opened) {
+                                            let _ = worker_socket.send_to(&reply, peer);
+                                        }
+                                    }
                                 }
-                            } else {
-                                prepared_log(&format!(
-                                    "prepared[{worker_port}]: sealed frame {size}B FAILED to open (key mismatch?)"
-                                ));
+                                Some(_) => {
+                                    // Real media racing the renderer handoff:
+                                    // buffer the still-sealed datagram so the
+                                    // claim replays it instead of the Host's
+                                    // startup IDR being lost.
+                                    let mut queue = worker_pending.lock().unwrap();
+                                    if !buffering_logged {
+                                        buffering_logged = true;
+                                        prepared_log(&format!(
+                                            "prepared[{worker_port}]: buffering early media before renderer claim"
+                                        ));
+                                    }
+                                    if queue.len() >= PREPARED_BACKLOG_CAP {
+                                        queue.pop_front();
+                                    }
+                                    queue.push_back(packet[..size].to_vec());
+                                }
+                                // Anything else is forged or truncated: drop.
+                                None => {}
                             }
                         }
                         Ok(_) => {
-                            // Media can arrive immediately after the Host's
-                            // proof succeeds. Discard it until the renderer
-                            // claims this same socket; bounded startup keeps
-                            // the handoff shorter than one GOP.
+                            // Datagrams from unexpected peers stay dropped.
                         }
                         Err(error)
                             if error.kind() == io::ErrorKind::WouldBlock
@@ -132,6 +177,7 @@ impl PreparedUdpReceiver {
             expected_host,
             crypto,
             peer,
+            pending,
             stop,
             worker: Some(worker),
         })
@@ -145,14 +191,20 @@ impl PreparedUdpReceiver {
         &self.expected_host
     }
 
-    pub fn into_socket_and_media_crypto(
+    pub fn into_socket_media_crypto_and_backlog(
         mut self,
-    ) -> io::Result<(UdpSocket, SharedMediaCrypto, Option<SocketAddr>)> {
+    ) -> io::Result<(
+        UdpSocket,
+        SharedMediaCrypto,
+        Option<SocketAddr>,
+        VecDeque<Vec<u8>>,
+    )> {
         self.stop_worker();
         let _ = self.socket.set_read_timeout(None);
         let peer = *self.peer.lock().unwrap();
+        let backlog = std::mem::take(&mut *self.pending.lock().unwrap());
         let socket = self.socket.try_clone()?;
-        Ok((socket, Arc::clone(&self.crypto), peer))
+        Ok((socket, Arc::clone(&self.crypto), peer, backlog))
     }
 
     fn stop_worker(&mut self) {
@@ -209,7 +261,7 @@ mod tests {
         let host_rx = secure_channel::DatagramSealer::new(host_keys.c2s);
         assert_eq!(host_rx.open(&response[..size]).unwrap(), challenge);
 
-        // Unauthenticated datagrams are never echoed.
+        // Unauthenticated datagrams are neither echoed nor buffered.
         sender
             .send_to(b"LCH1plaintext-forgery", ("127.0.0.1", port))
             .unwrap();
@@ -217,9 +269,24 @@ mod tests {
         sender.send_to(b"keep-alive", ("127.0.0.1", port)).unwrap();
         assert!(sender.recv_from(&mut noise).is_err());
 
-        let (socket, handed_crypto, peer) = prepared.into_socket_and_media_crypto().unwrap();
+        // Pre-claim media is buffered for the claim instead of dropped — the
+        // Host's startup IDR rides exactly this window. The buffering check
+        // must not consume the receive window: the claim re-opens the frame.
+        sender
+            .send_to(&host_tx.seal(b"early media").unwrap(), ("127.0.0.1", port))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let (socket, handed_crypto, peer, mut backlog) = prepared
+            .into_socket_media_crypto_and_backlog()
+            .unwrap();
         assert!(Arc::ptr_eq(&handed_crypto, &crypto));
         assert_eq!(peer, Some(sender.local_addr().unwrap()));
+        // The echoed challenge marks the handshake complete for the session.
+        assert!(crypto.is_established());
+        assert_eq!(backlog.len(), 1);
+        let early = backlog.pop_front().unwrap();
+        assert_eq!(crypto.open(&early).unwrap(), b"early media");
         socket
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();

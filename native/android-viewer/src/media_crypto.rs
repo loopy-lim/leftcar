@@ -72,6 +72,14 @@ impl MediaSessionCrypto {
         self.rx.open_into(frame).ok()
     }
 
+    /// Non-consuming decrypt for the prepared-listener handoff: returns the
+    /// plaintext WITHOUT advancing the receive window, so the worker can tell
+    /// an LCH1 challenge from early media and the renderer re-opens buffered
+    /// media for real once it claims the socket.
+    pub fn authenticate_packet(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        self.rx.authenticate(frame).ok()
+    }
+
     /// Recognize a sealed host `LCH1` reachability challenge. Returns the
     /// challenge plaintext when `frame` opens and starts with `LCH1`.
     ///

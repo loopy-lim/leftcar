@@ -10,8 +10,7 @@ pub(super) struct MediaBatch {
 pub(super) fn recv_media_batch(
     socket: &std::net::UdpSocket,
     buffers: &mut [[u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE],
-) -> std::io::Result<MediaBatch> {
-    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
+) -> std::io::Result<MediaBatch> {    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
     let mut iovecs: [libc::iovec; MEDIA_BATCH_SIZE] = std::array::from_fn(|index| libc::iovec {
         iov_base: buffers[index].as_mut_ptr().cast(),
         iov_len: crate::media_datagram::MEDIA_BUFFER_BYTES,
@@ -70,6 +69,45 @@ pub(super) fn sockaddr_in_for_addr(addr: std::net::SocketAddr) -> Option<libc::s
         s_addr: u32::from_ne_bytes(addr.ip().octets()),
     };
     Some(raw)
+}
+
+/// Drain the prepared listener's early-media backlog into one batch. Every
+/// entry shares the learned host endpoint; oversized leftovers are dropped
+/// exactly like the socket path would. An empty backlog yields a zero-count
+/// batch so the caller's tick logic still runs.
+pub(super) fn fill_batch_from_backlog(
+    backlog: &mut std::collections::VecDeque<Vec<u8>>,
+    peer: Option<std::net::SocketAddr>,
+    buffers: &mut [[u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE],
+) -> MediaBatch {
+    let mut lengths = [0usize; MEDIA_BATCH_SIZE];
+    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
+    let Some(raw_peer) = peer.and_then(sockaddr_in_for_addr) else {
+        backlog.clear();
+        return MediaBatch {
+            count: 0,
+            lengths,
+            peers,
+        };
+    };
+    let mut count = 0usize;
+    while count < MEDIA_BATCH_SIZE {
+        let Some(packet) = backlog.pop_front() else {
+            break;
+        };
+        if packet.len() > buffers[count].len() {
+            continue;
+        }
+        buffers[count][..packet.len()].copy_from_slice(&packet);
+        lengths[count] = packet.len();
+        peers[count] = raw_peer;
+        count += 1;
+    }
+    MediaBatch {
+        count,
+        lengths,
+        peers,
+    }
 }
 
 /// The learned host endpoint plus the session media crypto. The endpoint is

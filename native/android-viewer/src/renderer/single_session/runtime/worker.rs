@@ -152,12 +152,15 @@ fn run(launch: SingleRendererLaunch) {
     // intentionally independent from Surface creation so Host can finish
     // the TCP reachability proof before the Activity attaches.
     let tcp_bridge = tcp_bridge;
-    let (socket, crypto, prepared_peer) = match prepared_receiver {
-        Some(prepared) => match prepared.into_socket_and_media_crypto() {
-            Ok((socket, crypto, peer)) => {
-                log_info!("claimed prepared UDP listener on port {port}");
+    let (socket, crypto, prepared_peer, mut prepared_backlog) = match prepared_receiver {
+        Some(prepared) => match prepared.into_socket_media_crypto_and_backlog() {
+            Ok((socket, crypto, peer, backlog)) => {
+                log_info!(
+                    "claimed prepared UDP listener on port {port} (backlog {} datagrams)",
+                    backlog.len()
+                );
                 take_media_crypto(port);
-                (socket, crypto, peer)
+                (socket, crypto, peer, backlog)
             }
             Err(error) => {
                 log_info!("FAILED to claim prepared UDP port {port}: {error}");
@@ -176,7 +179,7 @@ fn run(launch: SingleRendererLaunch) {
                 return;
             };
             match std::net::UdpSocket::bind(format!("0.0.0.0:{port}")) {
-                Ok(socket) => (socket, crypto, None),
+                Ok(socket) => (socket, crypto, None, std::collections::VecDeque::new()),
                 Err(e) => {
                     log_info!("FAILED to bind UDP listener on 0.0.0.0:{}: {}", port, e);
                     remove_renderer_if_current(&instance_str, &control_clone);
@@ -295,6 +298,9 @@ fn run(launch: SingleRendererLaunch) {
             fec_groups.clear();
             fec_group_order.clear();
             completed_fec_groups.clear();
+            // Buffered pre-claim media targets the detached Surface era and
+            // the fresh IDR request below replaces it.
+            prepared_backlog.clear();
             last_frame_id = None;
             render_health.rebase(
                 completed_access_units,
@@ -603,6 +609,15 @@ fn run(launch: SingleRendererLaunch) {
                 lengths,
                 peers,
             }
+        } else if !prepared_backlog.is_empty() {
+            // Pre-claim media the prepared listener buffered: drain it in
+            // wire order before touching the socket so the Host's startup
+            // IDR survives the renderer handoff.
+            fill_batch_from_backlog(
+                &mut prepared_backlog,
+                prepared_peer,
+                &mut media_buffers,
+            )
         } else {
             match recv_media_batch(&socket, &mut media_buffers) {
                 Err(ref e)
