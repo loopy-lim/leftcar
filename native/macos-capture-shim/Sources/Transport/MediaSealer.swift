@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 /// Wire format shared with `crates/secure-channel` (Rust) and the Android
-/// viewer: `counter u64 BE ‖ poly1305 tag 16B ‖ ciphertext`. The nonce is
+/// viewer: `counter u64 BE ‖ ciphertext ‖ poly1305 tag 16B`. The nonce is
 /// `00 00 00 00 ‖ counter u64 BE` (12B), so ChaCha20-Poly1305 (CryptoKit
 /// `ChaChaPoly`) interoperates byte-for-byte with the Rust and TS sealers.
 enum MediaWireFormat {
@@ -48,7 +48,7 @@ struct MediaSealer {
         return nonce
     }
 
-    /// `counter ‖ tag ‖ ct` or nil when the plaintext exceeds the datagram cap.
+    /// `counter ‖ ct ‖ tag` or nil when the plaintext exceeds the datagram cap.
     mutating func seal(_ plaintext: Data) -> Data? {
         guard plaintext.count <= MediaWireFormat.maxDatagram else { return nil }
         sendCounter &+= 1
@@ -62,8 +62,8 @@ struct MediaSealer {
         let counterBE = counter.bigEndian
         var frame = Data(capacity: MediaWireFormat.counterLen + MediaWireFormat.tagLen + plaintext.count)
         withUnsafeBytes(of: counterBE) { frame.append(contentsOf: $0) }
-        frame.append(sealedBox.tag)
         frame.append(sealedBox.ciphertext)
+        frame.append(sealedBox.tag)
         return frame
     }
 
@@ -81,13 +81,11 @@ struct MediaSealer {
         if !check(counter: counter) { return nil }
         // Fresh Data copies: Data slices retain a non-zero startIndex, which
         // CryptoKit's SealedBox does not accept and later Collection code
-        // must not assume away. Layout is counter ‖ tag ‖ ct, so the
-        // ciphertext is what follows the counter+tag prefix.
-        let ciphertext = Data(frame.dropFirst(
-            MediaWireFormat.counterLen + MediaWireFormat.tagLen
-        ))
-        let tag = Data(frame.prefix(MediaWireFormat.counterLen + MediaWireFormat.tagLen)
-            .suffix(MediaWireFormat.tagLen))
+        // must not assume away. RustCrypto/Noble append the tag after the
+        // ciphertext; the counter is the only prefix outside their AEAD blob.
+        let ciphertext = Data(frame.dropFirst(MediaWireFormat.counterLen)
+            .dropLast(MediaWireFormat.tagLen))
+        let tag = Data(frame.suffix(MediaWireFormat.tagLen))
         let nonce = Self.nonce(counter: counter)
         let sealedBox: ChaChaPoly.SealedBox
         do {

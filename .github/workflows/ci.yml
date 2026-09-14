@@ -36,6 +36,12 @@ jobs:
         run: bun tools/build.host-macos.integration.mjs
       - name: Build macOS capture resource before Host crate tests
         run: zsh tools/build-macos-capture-shim.zsh library native/macos-capture-shim/libleftcar_capture.dylib
+      - name: Swift and Rust media encryption interoperability
+        run: bun tools/test-media-interop.mjs
+      - name: System audio requires explicit viewer opt-in (no capture)
+        run: |
+          zsh tools/build-macos-capture-shim.zsh audio-ownership-test /tmp/leftcar-audio-ownership-test
+          /tmp/leftcar-audio-ownership-test
       - name: Format
         run: cargo fmt --all -- --check
       - name: Architecture tests (H01)

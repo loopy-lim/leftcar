@@ -419,8 +419,10 @@ stream_task_restore_requires_reauthentication
   카운터는 인스턴스마다 무작위 지점에서 시작해, reconfigure가 세션 키를
   재사용하며 봉인기를 재생성해도 논스가 반복되지 않는다. 호스트 셸
   macOS shim은 CryptoKit ChaChaPoly, Windows·뷰어 네이티브는
-  DatagramSealer로 같은 와이어 레이아웃(`counter‖tag‖ct`)을 쓴다(방향 키
-  도출 고정 벡터로 상호 잠금). LCH1 도달성 증명도 봉인 프레임으로 대체됐고
+  DatagramSealer로 같은 와이어 레이아웃(`counter‖ct‖tag`)을 쓴다. 2026-09-14
+  실제 앱 연결 검사에서 Swift의 잘못된 tag 위치를 발견해 이 배치로 맞췄다.
+  방향 키 도출 벡터에 더해 Swift↔Rust 실제 봉인·복호화와 공통 패킷 벡터를
+  검증한다. LCH1 도달성 증명도 봉인 프레임으로 대체됐고
   토큰 접미사 인증은 제거됐다(평문 미디어 경로 부재 — 구식 shim/뷰어는
   시작 거부). 키 없는 startStream은 실패한다. 세션 내 카운터는 전송 전환과
   무관하게 유지되며, split 4K 타일이 하나의 암호 인스턴스를 공유한다.

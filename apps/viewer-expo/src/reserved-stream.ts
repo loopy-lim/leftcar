@@ -50,8 +50,20 @@ export class ReservedStream {
       .run(this.lease, demand, async () => {
         this.attempted = true;
         this.nativeGeneration = undefined;
+        // TurboModule methods can live on a lazy prototype until first access.
+        // Resolve them explicitly and preserve the native module as receiver.
         const ownedLauncher: StreamLauncher = {
-          ...this.launcher,
+          getDecoderCapabilityHint: this.launcher.getDecoderCapabilityHint?.bind(this.launcher),
+          getLocalIpv4Addresses: this.launcher.getLocalIpv4Addresses?.bind(this.launcher),
+          getStreamGeneration: this.launcher.getStreamGeneration?.bind(this.launcher),
+          closeStream: this.launcher.closeStream?.bind(this.launcher),
+          cancelPreparedStream: this.launcher.cancelPreparedStream.bind(this.launcher),
+          setBalancedPresentation: this.launcher.setBalancedPresentation?.bind(this.launcher),
+          setCursorStream: this.launcher.setCursorStream?.bind(this.launcher),
+          setOpusAudio: this.launcher.setOpusAudio?.bind(this.launcher),
+          setAudioStream: this.launcher.setAudioStream?.bind(this.launcher),
+          setWindowAspectRatio: this.launcher.setWindowAspectRatio?.bind(this.launcher),
+          isXrWindowRatioSupported: this.launcher.isXrWindowRatioSupported?.bind(this.launcher),
           prepareStream: async (...args) => {
             if (!this.isOpen)
               throw new Error("Stream was stopped before preparation");

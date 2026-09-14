@@ -9,7 +9,7 @@
 //! its Surface exists. Sharing one `MediaSessionCrypto` instance keeps the
 //! AEAD counters continuous across the handoff.
 
-use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX};
+use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX, MAX_CHALLENGE_BYTES};
 use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -28,9 +28,6 @@ fn prepared_log(message: &str) {
 
 #[cfg(not(target_os = "android"))]
 fn prepared_log(_message: &str) {}
-
-/// Sealed challenge + AEAD overhead; genuine host challenges fit easily.
-const MAX_CHALLENGE_BYTES: usize = 192;
 
 /// Recognize a Host `LCH1` reachability challenge from an already-opened
 /// plaintext. Shared by the preflight worker and both renderers so the
@@ -109,7 +106,7 @@ impl PreparedUdpReceiver {
                                 }
                             } else {
                                 prepared_log(&format!(
-                                    "prepared[{worker_port}]: sealed frame {size}B FAILED to open (key mismatch?)"
+                                    "prepared[{worker_port}]: ignored {size}B datagram (not an authenticated challenge; media may be truncated before renderer handoff)"
                                 ));
                             }
                         }
@@ -220,6 +217,10 @@ mod tests {
         let (socket, handed_crypto, peer) = prepared.into_socket_and_media_crypto().unwrap();
         assert!(Arc::ptr_eq(&handed_crypto, &crypto));
         assert_eq!(peer, Some(sender.local_addr().unwrap()));
+        assert!(
+            handed_crypto.is_established(),
+            "preflight must hand the renderer a session ready for IDR/input/feedback"
+        );
         socket
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();

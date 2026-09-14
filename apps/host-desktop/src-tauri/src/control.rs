@@ -3065,23 +3065,29 @@ impl Drop for ReconfigureGuard<'_> {
     }
 }
 
+#[derive(Debug)]
+enum ControlLineReadError {
+    TooLong,
+    Io(std::io::Error),
+}
+
 /// 상한 있는 한 줄 읽기(F08). '\n' 전에 `cap`을 넘기면 Err — 호출자는
 /// 연결을 끊는다. tokio Lines는 줄 길이 상한이 없어 인증 전 소켓이라도
 /// '\n' 없는 입력을 무한히 버퍼링할 수 있으므로 fill_buf 루프로 직접 읽는다.
-/// Ok(None)은 소켓 오류·EOF(연결 종료 취급)다.
-async fn read_bounded_line(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+/// Ok(None)은 EOF이며, 소켓 오류와 상한 초과는 구분해 반환한다.
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
     cap: usize,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let mut line: Vec<u8> = Vec::new();
     loop {
-        let available = reader.fill_buf().await.map_err(|_| ())?;
+        let available = reader.fill_buf().await.map_err(ControlLineReadError::Io)?;
         if available.is_empty() {
             return Ok(None);
         }
         if let Some(pos) = available.iter().position(|&byte| byte == b'\n') {
             if line.len() + pos > cap {
-                return Err(());
+                return Err(ControlLineReadError::TooLong);
             }
             line.extend_from_slice(&available[..pos]);
             reader.consume(pos + 1);
@@ -3092,7 +3098,7 @@ async fn read_bounded_line(
             return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
         }
         if line.len() + available.len() > cap {
-            return Err(());
+            return Err(ControlLineReadError::TooLong);
         }
         let buffered = available.len();
         line.extend_from_slice(available);
@@ -3105,7 +3111,7 @@ async fn read_bounded_line(
 async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let cap = if killed.is_some() {
         COMMAND_LINE_LIMIT
     } else {
@@ -3141,9 +3147,16 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     .await
     {
         Ok(Ok(Some(line))) => line,
-        Ok(Err(())) => {
+        Ok(Err(ControlLineReadError::TooLong)) => {
             eprintln!(
                 "control handshake line exceeded {HANDSHAKE_LINE_LIMIT} bytes from {peer}; closing"
+            );
+            return;
+        }
+        Ok(Err(ControlLineReadError::Io(error))) => {
+            eprintln!(
+                "control handshake read failed ({:?}); closing",
+                error.kind()
             );
             return;
         }
@@ -3174,13 +3187,17 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 match read_authed_line(&mut reader, killed.as_ref()).await {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
-                    Err(()) => {
+                    Err(ControlLineReadError::TooLong) => {
                         let cap = if device.is_some() {
                             COMMAND_LINE_LIMIT
                         } else {
                             HANDSHAKE_LINE_LIMIT
                         };
                         eprintln!("control command line exceeded {cap} bytes from {peer}; closing");
+                        break;
+                    }
+                    Err(ControlLineReadError::Io(error)) => {
+                        eprintln!("control command read failed ({:?}); closing", error.kind());
                         break;
                     }
                 }
@@ -7094,6 +7111,20 @@ mod tests {
     }
 
     // -- 인증 전 입력·연결 상한(F08) ------------------------------------------
+
+    #[tokio::test]
+    async fn bounded_line_preserves_socket_error_instead_of_reporting_overflow() {
+        let socket = tokio_test::io::Builder::new()
+            .read(b"partial request")
+            .read_error(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+            .build();
+        let mut reader = BufReader::new(socket);
+        assert!(matches!(
+            read_bounded_line(&mut reader, HANDSHAKE_LINE_LIMIT).await,
+            Err(ControlLineReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::ConnectionReset
+        ));
+    }
 
     #[tokio::test]
     async fn oversized_preauth_line_is_dropped_and_server_stays_responsive() {
