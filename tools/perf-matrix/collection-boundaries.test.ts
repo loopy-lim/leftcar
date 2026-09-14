@@ -4,7 +4,7 @@ const conditions={sourceSha256:'abc',workload:'scroll',transport:'udp',effective
 const identity={pid:'42',startTicks:'123',host:'99 Sat Sep 12 00:00:00 2026 Host'};
 export const receipt=()=>({schema:2,context:{serial:'tablet-a'},conditions,provenance:{sourceManifest:{sha256:'abc'}},boundaries:{start:{hostBeforeMs:999,hostAfterMs:1000,deviceMs:1000},end:{hostBeforeMs:2000,hostAfterMs:2001,deviceMs:2000}},timing:{requestedMs:1000,elapsedMs:1000},processes:{initial:identity,final:{...identity},unchanged:true},interrupted:false,childErrors:[],childOutcomes:[{index:0,code:null,signal:'SIGTERM',expected:true},{index:1,code:null,signal:'SIGTERM',expected:true}],resources:[{sample:'retained'}],rawHashes:{host:'raw-host',android:'raw-android'}});
 const host=[1000,2000].map((t,i)=>JSON.stringify({timestamp:new Date(t).toISOString(),eventMessage:`LeftcarPerf schema=2 process=p stream=s incarnation=i encodeOutputCallbacks=${i*60}`})).join('\n');
-const android=[1,2].map((t,i)=>`${t}.0 I LeftcarNative: LeftcarViewerPerf schema=2 process=p stream=s incarnation=i kind=single released=${i*60}`).join('\n');
+const android=[1,2].map((t,i)=>`${t}.0 42 70 I LeftcarNative: LeftcarViewerPerf schema=2 process=42 stream=s incarnation=i decoderEpoch=0 kind=single released=${i*60}`).join('\n');
 const finish=(r:ReturnType<typeof receipt>)=>finalizeMeasurement(r,host,android);
 test('production finalization admits a complete same-device actual-duration pair',()=>{const r=finish(receipt());expect(r.collection.status).toBe('valid');expect(r.exitCode).toBe(0);expect(compareMeasurements(r,r).comparable).toBe(true);});
 test.each(['interrupted','child','replacement','identity','no-end','duration','clock'] as const)('invalid %s run is retained, unsuccessful and incomparable',kind=>{
@@ -36,7 +36,7 @@ test('unsupported schemas never produce known counter stages or complete through
  for(const stream of [...result.summary.host,...result.summary.android]){expect(stream.identity.status).toBe('unsupported-schema');expect(stream.complete).toBe(false);expect(stream.stage).toBe('unknown');expect(stream.counter.averageFps).toBeNull();}
 });
 test('pair comparison checks actual clock windows, even when nominal and monotonic labels match',()=>{
- const r=receipt(),earlyHost=host.replace(new Date(2000).toISOString(),new Date(1950).toISOString()),earlyAndroid=android.replace('2.0 I','1.95 I');
+ const r=receipt(),earlyHost=host.replace(new Date(2000).toISOString(),new Date(1950).toISOString()),earlyAndroid=android.replace('2.0 42','1.95 42');
  const left=finalizeMeasurement({...r,boundaries:{...r.boundaries,end:{hostBeforeMs:1960,hostAfterMs:1961,deviceMs:1960}}},earlyHost,earlyAndroid),right=finalizeMeasurement({...r,boundaries:{...r.boundaries,end:{hostBeforeMs:2040,hostAfterMs:2041,deviceMs:2040}}},earlyHost,earlyAndroid);
  expect(left.collection.status).toBe('valid');expect(right.collection.status).toBe('valid');expect(compareMeasurements(left,right).differences).toContain('actualDuration');expect(compareMeasurements(left,right).comparable).toBe(false);
 });

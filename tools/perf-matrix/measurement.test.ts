@@ -8,7 +8,7 @@ test('partitions actual streams and reset segments; delayed samples do not move 
  expect(result.host[1].counter.averageFps).toBe(60);expect(result.host[2].counter.averageFps).toBeNull();
 });
 test('legacy identity stays unknown and split pairs are never summed as independent frames',()=>{
- const android=['1.0 I LeftcarNative: LeftcarViewerPerf schema=2 process=p stream=s incarnation=i kind=split released=10 leftReleased=11 rightReleased=12','2.0 I LeftcarNative: LeftcarViewerPerf schema=2 process=p stream=s incarnation=i kind=split released=70 leftReleased=71 rightReleased=72'].join('\n');
+ const android=['1.0 42 70 I LeftcarNative: LeftcarViewerPerf schema=2 process=42 stream=s incarnation=i kind=split released=10 leftReleased=11 rightReleased=12','2.0 42 70 I LeftcarNative: LeftcarViewerPerf schema=2 process=42 stream=s incarnation=i kind=split released=70 leftReleased=71 rightReleased=72'].join('\n');
  const r=summarizeMeasurement(JSON.stringify({timestamp:new Date(1000).toISOString(),eventMessage:'LeftcarPerf captureCallbacks=0 encodeOutputCallbacks=0'}),android,{host:{startMs:1000,endMs:2000},android:{startMs:1000,endMs:2000}});
  expect(r.host[0].identity.status).toBe('unknown');expect(r.android[0].counter.averageFps).toBe(60);expect(r.android[0].stage).toBe('paired-surface-release');expect(r.physicalPresentation.status).toBe('unmeasured');
 });
