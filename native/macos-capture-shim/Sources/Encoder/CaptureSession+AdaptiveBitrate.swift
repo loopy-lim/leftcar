@@ -128,7 +128,7 @@ extension CaptureSession {
         } else {
             stableBitrateWindows += 1
             adaptiveCeilingCleanStreak += 1
-            if stableBitrateWindows >= 8 {
+            if stableBitrateWindows >= 3 {
                 consecutiveCongestedWindows = 0
             }
             let advanced = recoveryRamp.advancedAfterCleanWindow()
@@ -148,7 +148,7 @@ extension CaptureSession {
         let congestionConfirmed = consecutiveCongestedWindows >= 2
         // R5: while the recovery ramp has an accelerated raise pending it
         // takes precedence over the normal ladder for this window.
-        let canRaise = !congested && stableBitrateWindows >= 8 && !rampRaiseEligible
+        let canRaise = !congested && stableBitrateWindows >= 3 && !rampRaiseEligible
         if canRaise {
             stableBitrateWindows = 0
             consecutiveRaiseSteps += 1
@@ -197,8 +197,8 @@ extension CaptureSession {
             } else {
                 minFloor = activeCount > 1 ? 7_000_000 : 8_000_000
                 maxFloor = activeCount > 1 ? 10_000_000 : 12_000_000
-                minCeiling = activeCount > 1 ? 10_000_000 : 12_000_000
-                maxCeiling = activeCount > 1 ? 20_000_000 : 28_000_000
+                minCeiling = activeCount > 1 ? 12_000_000 : 15_000_000
+                maxCeiling = activeCount > 1 ? 30_000_000 : 45_000_000
             }
         } else {
             minFloor = activeCount > 1 ? 3_000_000 : 4_000_000
@@ -305,7 +305,9 @@ extension CaptureSession {
         } else if canRaise {
             // Accelerating recovery: 4% → 8% → 16% per stable window so a
             // ratchet-down to the floor recovers in a few seconds while an
-            // early overshoot is still corrected by the next cut.
+            // early overshoot is still corrected by the next cut. The
+            // three-clean-window ladder above arms this within ~3s of clean
+            // air instead of the old eight.
             let raiseFactor = min(0.04 * pow(2.0, Double(min(consecutiveRaiseSteps - 1, 5))), 0.30)
             let capped = min(effectiveCeiling, Int(Double(current) * (1.0 + raiseFactor)))
             guard capped > current else { return }

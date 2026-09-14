@@ -60,7 +60,7 @@ func videoBitrateBounds(width: UInt32, height: UInt32, activeCount: Int) -> Vide
     }
     return VideoBitrateBounds(
         minimum: activeCount > 1 ? 7_000_000 : 8_000_000,
-        maximum: activeCount > 1 ? 20_000_000 : 28_000_000
+        maximum: activeCount > 1 ? 30_000_000 : 45_000_000
     )
 }
 
@@ -430,16 +430,18 @@ func adaptiveRaiseCeilingAfterCongestion(failingBitrate: Int) -> Int {
     max(1, Int(Double(max(1, failingBitrate)) * 0.90))
 }
 
-/// Relax the congestion-cut ceiling by 10% per 30 consecutive clean windows,
+/// Relax the congestion-cut ceiling by 10% per 8 consecutive clean windows,
 /// never above the policy's global ceiling. An inactive ceiling (0) stays
-/// inactive; the streak accounting belongs to the caller.
+/// inactive; the streak accounting belongs to the caller. The old 30-window
+/// gate kept post-cut quality depressed for half a minute on a link that had
+/// already recovered.
 func nextAdaptiveRaiseCeiling(
     currentCeiling: Int,
     cleanStreak: Int,
     globalCeiling: Int
 ) -> Int {
     guard currentCeiling > 0 else { return 0 }
-    guard cleanStreak >= 30 else { return currentCeiling }
+    guard cleanStreak >= 8 else { return currentCeiling }
     return min(globalCeiling, Int(Double(currentCeiling) * 1.10))
 }
 

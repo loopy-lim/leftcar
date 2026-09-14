@@ -18,7 +18,12 @@ extension CaptureSession {
 
         let activeCount = max(1, withRegistry { $0.count })
         let streamFactor = activeCount > 1 ? (1.0 / Double(activeCount) * 1.3) : 1.0
-        let idealBits = Double(w) * Double(h) * Double(fps) * 0.07 * streamFactor
+        // Parsec-equivalent sharpness on a healthy link starts near the
+        // policy ceiling: 0.13 puts 1440p60 at ~29Mbps and 1080p60 at
+        // ~16Mbps, and the 1Hz ABR cuts fast when the link disagrees. The
+        // old 0.07 started half that and spent the first ~8s ramping while
+        // every frame the user saw was mushy.
+        let idealBits = Double(w) * Double(h) * Double(fps) * 0.13 * streamFactor
         let minRate: Int
         let maxRate: Int
         if contentMode == .video {

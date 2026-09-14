@@ -296,14 +296,14 @@ struct EncodePolicyTests {
         precondition(udpAccessUnitSendDeadlineUs(isKeyframe: false, fps: 1, dataFragmentCount: 1, burstDatagrams: 8) == 2_000_000)
         precondition(udpAccessUnitSendDeadlineUs(isKeyframe: true, fps: 60, dataFragmentCount: 43, burstDatagrams: 4) == 750_000)
         // Congestion-cut memory: a cut from 31Mbps parks the raise ceiling at
-        // 90% of the failing level; 30 clean windows relax it by 10% at a
+        // 90% of the failing level; 8 clean windows relax it by 10% at a
         // time, capped by the policy ceiling.
         precondition(adaptiveRaiseCeilingAfterCongestion(failingBitrate: 31_000_000) == 27_900_000)
         precondition(adaptiveRaiseCeilingAfterCongestion(failingBitrate: 1) == 1)
         precondition(nextAdaptiveRaiseCeiling(currentCeiling: 0, cleanStreak: 100, globalCeiling: 40_000_000) == 0)
-        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 29, globalCeiling: 40_000_000) == 27_900_000)
-        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 30, globalCeiling: 40_000_000) == 30_690_000)
-        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 39_000_000, cleanStreak: 30, globalCeiling: 40_000_000) == 40_000_000)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 7, globalCeiling: 40_000_000) == 27_900_000)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 27_900_000, cleanStreak: 8, globalCeiling: 40_000_000) == 30_690_000)
+        precondition(nextAdaptiveRaiseCeiling(currentCeiling: 39_000_000, cleanStreak: 8, globalCeiling: 40_000_000) == 40_000_000)
         precondition(
             encoderBitrateApplicationRoute(
                 hasSingleSession: true,
