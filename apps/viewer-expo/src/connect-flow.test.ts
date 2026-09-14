@@ -63,8 +63,19 @@ function deferred<T>() {
 function makeClient(
   hostKey: string | null = null,
   request: ControlClient["request"] = vi.fn(async () => ({})) as ControlClient["request"],
-): ControlClient {
-  return { request, close: vi.fn(), hostKey };
+): ControlClient & { emitClosed: () => void } {
+  const closedListeners: (() => void)[] = [];
+  return {
+    request,
+    close: vi.fn(),
+    hostKey,
+    whenClosed(listener: () => void) {
+      closedListeners.push(listener);
+    },
+    emitClosed() {
+      for (const listener of closedListeners) listener();
+    },
+  };
 }
 
 function payload(id: string, host: string, hostKey: string): QrPayload {

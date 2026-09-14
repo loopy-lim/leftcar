@@ -1,4 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useConnectionLost } from "../src/use-connection-lost";
+import type { TranslationSchema } from "../src/i18n";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -252,6 +254,17 @@ export default function Hub() {
     }, [attemptAutoReconnect, checkConnection])
   );
 
+  // 연결 상태 통지: 소켓이 저절로 닫혀도 배지가 즉시 "연결 안 됨"으로 바뀌고,
+  // 저장된 최근 호스트로 조용한 재연결을 시도한다(간격은 게이트가 흡수).
+  useConnectionLost(
+    useCallback((target: RecentHostItem | null) => {
+      setLastHost(target);
+      const automaticSelection = controlClient() ? null : beginHostSelection();
+      if (automaticSelection) void attemptAutoReconnect(target, automaticSelection);
+    }, [attemptAutoReconnect]),
+    checkConnection,
+  );
+
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right", "bottom"]}>
       <ScrollView
@@ -382,47 +395,7 @@ export default function Hub() {
           </View>
         )}
 
-        {/* 3-Step Setup Guide */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.viewer.guideTitle}</Text>
-
-          <View style={styles.stepsContainer}>
-            {/* Step 1 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadge}>
-                <Text style={styles.stepNum}>1</Text>
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step1Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step1Desc}</Text>
-              </View>
-            </View>
-            <View style={styles.stepDivider} />
-
-            {/* Step 2 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadge}>
-                <Text style={styles.stepNum}>2</Text>
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step2Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step2Desc}</Text>
-              </View>
-            </View>
-            <View style={styles.stepDivider} />
-
-            {/* Step 3 */}
-            <View style={styles.stepItem}>
-              <View style={styles.stepBadge}>
-                <Text style={styles.stepNum}>3</Text>
-              </View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepName}>{t.viewer.step3Title}</Text>
-                <Text style={styles.stepText}>{t.viewer.step3Desc}</Text>
-              </View>
-            </View>
-          </View>
-        </View>
+        <SetupGuideCard styles={styles} t={t} />
 
         {/* 2-Column Feature Grid */}
         <View style={styles.featureGrid}>
@@ -443,6 +416,42 @@ export default function Hub() {
         </View>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+
+function SetupGuideCard({
+  styles,
+  t,
+}: {
+  styles: ReturnType<typeof createStyles>;
+  t: TranslationSchema;
+}) {
+  return (
+    <View style={styles.sectionCard}>
+      <Text style={styles.sectionTitle}>{t.viewer.guideTitle}</Text>
+
+      <View style={styles.stepsContainer}>
+        {([
+          [1, t.viewer.step1Title, t.viewer.step1Desc],
+          [2, t.viewer.step2Title, t.viewer.step2Desc],
+          [3, t.viewer.step3Title, t.viewer.step3Desc],
+        ] as const).map(([num, name, desc], index, steps) => (
+          <Fragment key={num}>
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadge}>
+                <Text style={styles.stepNum}>{num}</Text>
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{name}</Text>
+                <Text style={styles.stepText}>{desc}</Text>
+              </View>
+            </View>
+            {index < steps.length - 1 && <View style={styles.stepDivider} />}
+          </Fragment>
+        ))}
+      </View>
+    </View>
   );
 }
 

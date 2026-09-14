@@ -89,6 +89,7 @@ function harness() {
       return { session: 17 };
     }) as ControlClient["request"],
     close: vi.fn(),
+    whenClosed: vi.fn(),
   };
   return { calls, control, launcher, preparedTransports };
 }
@@ -817,6 +818,7 @@ describe("reconfigurePreparedStream", () => {
         };
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     return { order, control, launcher };
   }
@@ -1031,6 +1033,7 @@ describe("reconfigurePreparedStream", () => {
         };
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     const target = { width: 2560, height: 1440, fps: 60 };
     const started = await reconfigurePreparedStream({
@@ -1144,6 +1147,7 @@ describe("reconfigurePreparedStream", () => {
         throw new Error("no such display 5");
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     await expect(
       reconfigurePreparedStream({

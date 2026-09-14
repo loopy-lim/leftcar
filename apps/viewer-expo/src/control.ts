@@ -222,6 +222,9 @@ export interface ControlClient {
   close(): void;
   /** 서버가 서명으로 증명한 호스트 공개키(b64url). 평문(루프백) 모드면 없다. */
   readonly hostKey?: string | null;
+  /** 소켓이 닫히면(오류·상대 종료·close() 모두) 발화한다. 연결 상태를
+   * 진실로 유지하기 위한 통지 — 호출 후 이 클라이언트의 요청은 전부 실패다. */
+  whenClosed(listener: () => void): void;
 }
 
 export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized";
@@ -400,7 +403,18 @@ export function connect(
       }
     });
 
+    // 연결 종료 통지: 소켓이 어떤 이유로든 닫히면(오류·상대 종료·close())
+    // 세션 상태가 죽은 클라이언트를 "연결됨"으로 계속 표시하지 않도록
+    // 등록된 리스너에게 알린다.
+    const closedListeners = new Set<() => void>();
+    const notifyClosed = () => {
+      for (const listener of [...closedListeners]) listener();
+    };
+
     const makeClient = (): ControlClient => ({
+      whenClosed(listener: () => void): void {
+        closedListeners.add(listener);
+      },
       request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T> {
         const issue = (token: string | null) => new Promise<T>((res, rej) => {
           if (terminalError) {
@@ -592,6 +606,7 @@ export function connect(
         h.reject(e);
       }
       pending.clear();
+      notifyClosed();
     });
 
     setTimeout(() => {

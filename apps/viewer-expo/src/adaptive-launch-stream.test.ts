@@ -59,6 +59,7 @@ describe("adaptive stream receipts", () => {
         throw new Error(`unexpected command ${command}`);
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     const started = await startPreparedStream({
       control,
@@ -104,6 +105,7 @@ describe("adaptive stream receipts", () => {
         throw new Error(`unexpected command ${command}`);
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     const result = await reconfigurePreparedStream({
       control,
@@ -182,6 +184,7 @@ describe("reconfigure encoder mode transitions", () => {
     return {
       request: vi.fn(async (_command: string) => accepted) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
   }
 
@@ -376,6 +379,7 @@ describe("reconfigure encoder mode transitions", () => {
         throw new Error("splitVertical not startable");
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     await expect(
       reconfigurePreparedStream({
@@ -403,6 +407,7 @@ describe("reconfigure encoder mode transitions", () => {
         throw new Error("mode rejected");
       }) as ControlClient["request"],
       close: vi.fn(),
+      whenClosed: vi.fn(),
     };
     await expect(
       reconfigurePreparedStream({

@@ -42,6 +42,7 @@ vi.mock("./control", () => {
     connect: vi.fn(async () => ({
       request: requestMock,
       close: closeMock,
+      whenClosed: closeMock,
     })),
     isUnauthorizedError: vi.fn(
       (e: unknown) =>
@@ -100,6 +101,7 @@ function makeQrClient(): ControlClient {
   return {
     request: vi.fn(async () => ({ status: "pending" })) as ControlClient["request"],
     close: vi.fn(),
+    whenClosed: vi.fn(),
     hostKey: HOST_KEY,
   };
 }
@@ -345,6 +347,7 @@ describe("token storage", () => {
     vi.mocked(connect).mockResolvedValueOnce({
       request: requestMock,
       close: closeMock,
+      whenClosed: closeMock,
       hostKey: HOST_KEY,
     });
     const freshPairing = pairWithHostByCode(endpoint.host, endpoint.port, "123456");
@@ -427,6 +430,7 @@ describe("token storage", () => {
     vi.mocked(connect).mockResolvedValueOnce({
       request: requestMock,
       close: closeMock,
+      whenClosed: closeMock,
       hostKey: HOST_KEY,
     });
     let failed = false;
@@ -453,6 +457,7 @@ describe("token storage", () => {
     vi.mocked(connect).mockResolvedValueOnce({
       request: requestMock,
       close: closeMock,
+      whenClosed: closeMock,
       hostKey: HOST_KEY,
     });
 

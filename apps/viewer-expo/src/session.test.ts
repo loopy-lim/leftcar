@@ -95,11 +95,18 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function makeClient(): ControlClient {
+function makeClient(): ControlClient & { emitClosed: () => void } {
+  const closedListeners: (() => void)[] = [];
   return {
     request: vi.fn(async () => ({})) as ControlClient["request"],
     close: vi.fn(),
     hostKey: null,
+    whenClosed(listener: () => void) {
+      closedListeners.push(listener);
+    },
+    emitClosed() {
+      for (const listener of closedListeners) listener();
+    },
   };
 }
 
@@ -260,5 +267,63 @@ describe("control session connect lifecycle", () => {
     expect(clientB.close).not.toHaveBeenCalled();
     expect(session.controlClient()).toBe(clientB);
     expect(session.controlHost()).toBe("10.0.0.2:7778");
+  });
+});
+
+describe("connection-lost invalidation (stale connected badge)", () => {
+  it("a closed socket invalidates the session so the home badge stops claiming connected", async () => {
+    const { connect } = await import("./control");
+    const client = makeClient();
+    vi.mocked(connect).mockResolvedValue(client);
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    expect(session.controlClient()).not.toBeNull();
+
+    // 호스트 재시작·네트워크 전환 등으로 소켓이 닫히면 연결 객체가 남아
+    // "컴퓨터 연결됨" 배지가 거짓말을 하던 회귀를 잠근다.
+    client.emitClosed();
+    expect(session.controlClient()).toBeNull();
+    expect(session.controlHost()).toBe("");
+  });
+
+  it("a stale older socket closing never tears down the newer session", async () => {
+    const { connect } = await import("./control");
+    const clientA = makeClient();
+    const clientB = makeClient();
+    vi.mocked(connect).mockResolvedValueOnce(clientA).mockResolvedValueOnce(clientB);
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    await session.connectHost("10.0.0.2", 7777);
+    expect(session.controlClient()).toBe(clientB);
+
+    clientA.emitClosed();
+    expect(session.controlClient()).toBe(clientB);
+  });
+
+  it("an unexpected close frees the auto-reconnect gate (hasClient false)", async () => {
+    const { connect } = await import("./control");
+    // auto-reconnect는 이 파일에서 목(mock)으로 대체되므로 실물 판정은 importActual로.
+    const { shouldAutoReconnect } = (await vi.importActual(
+      "./auto-reconnect",
+    )) as typeof import("./auto-reconnect");
+    const client = makeClient();
+    vi.mocked(connect).mockResolvedValue(client);
+
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    client.emitClosed();
+
+    expect(
+      shouldAutoReconnect({
+        hasClient: session.controlClient() !== null,
+        hasRecentHost: true,
+        userDisconnected: false,
+        pairingStale: false,
+        lastAttemptAt: null,
+        now: Date.now(),
+      }),
+    ).toBe(true);
   });
 });

@@ -61,7 +61,7 @@ describe("requestWithReconnect 미연결 오류", () => {
   it("binds an unauthorized response to the client and target that issued it", async () => {
     const unauthorized = new Error("unauthorized");
     const context = {
-      client: { request: vi.fn(async () => { throw unauthorized; }), close: vi.fn(), hostKey: null },
+      client: { request: vi.fn(async () => { throw unauthorized; }), close: vi.fn(), whenClosed: vi.fn(), hostKey: null },
       target: { host: "10.0.0.1", port: 7777 },
       selectionGeneration: 7,
       identity: null,

@@ -81,6 +81,20 @@ export function controlClient(): ControlClient | null {
   return client;
 }
 
+/** 연결 상태가 바뀔 때(성립·끊김·해제) 발화한다. 홈 배지가 이 통지로 진실을
+ * 유지한다 — 죽은 연결을 "연결됨"으로 표시하지 않게 하는 계기. 반환값은
+ * 구독 해제 함수다. */
+const connectionListeners = new Set<() => void>();
+
+export function subscribeConnectionChanged(listener: () => void): () => void {
+  connectionListeners.add(listener);
+  return () => connectionListeners.delete(listener);
+}
+
+function notifyConnectionChanged(): void {
+  for (const listener of [...connectionListeners]) listener();
+}
+
 export function controlHost(): string {
   return hostAddr;
 }
@@ -214,6 +228,19 @@ export async function connectHost(
     credential: opened.credential,
   };
   markConnected();
+  // 소켓이 저절로 닫히면(호스트 재시작·네트워크 전환) 죽은 클라이언트를
+  // "연결됨"으로 표시하지 않고 자동 재연결이 동작하도록 상태를 즉시
+  // 무효화한다. 우리가 close()한 경우엔 disconnectHost가 이미 정리했으므로
+  // 이 클라이언트가 아닐 때는 무시한다.
+  c.whenClosed(() => {
+    if (client !== c) return;
+    client = null;
+    hostAddr = "";
+    activeContext = null;
+    reconnectInFlight = null;
+    notifyConnectionChanged();
+  });
+  notifyConnectionChanged();
   return c;
 }
 
@@ -322,5 +349,6 @@ export function disconnectHost(context?: SessionRequestContext): boolean {
   hostTarget = "";
   activeContext = null;
   reconnectInFlight = null;
+  notifyConnectionChanged();
   return true;
 }
