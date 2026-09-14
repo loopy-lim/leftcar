@@ -44,14 +44,22 @@ fn dock_visibility_for_dashboard(presentation: DashboardPresentation) -> bool {
     matches!(presentation, DashboardPresentation::Visible)
 }
 
+#[cfg(target_os = "macos")]
+fn activation_policy_for_dashboard(presentation: DashboardPresentation) -> tauri::ActivationPolicy {
+    if dock_visibility_for_dashboard(presentation) {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    }
+}
+
 fn set_dashboard_dock_visibility(app: &tauri::AppHandle, presentation: DashboardPresentation) {
-    let visible = dock_visibility_for_dashboard(presentation);
     #[cfg(target_os = "macos")]
-    if let Err(error) = app.set_dock_visibility(visible) {
-        eprintln!("Leftcar Host dock visibility update failed: {error}");
+    if let Err(error) = app.set_activation_policy(activation_policy_for_dashboard(presentation)) {
+        eprintln!("Leftcar Host activation policy update failed: {error}");
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (app, visible);
+    let _ = (app, presentation);
 }
 
 #[derive(Clone, Copy)]
@@ -831,7 +839,27 @@ fn local_lan_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dock_visibility_for_dashboard, DashboardPresentation};
+    use super::{
+        activation_policy_for_dashboard, dock_visibility_for_dashboard, DashboardPresentation,
+    };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_dashboard_uses_accessory_activation_policy() {
+        assert!(matches!(
+            activation_policy_for_dashboard(DashboardPresentation::Hidden),
+            tauri::ActivationPolicy::Accessory
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn visible_dashboard_uses_regular_activation_policy() {
+        assert!(matches!(
+            activation_policy_for_dashboard(DashboardPresentation::Visible),
+            tauri::ActivationPolicy::Regular
+        ));
+    }
 
     #[test]
     fn hidden_dashboard_removes_the_macos_dock_icon() {

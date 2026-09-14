@@ -180,11 +180,7 @@ mod tests {
     #[test]
     fn legacy_lock_setting_is_ignored_and_not_persisted() {
         let path = temp_path("legacy-lock");
-        std::fs::write(
-            &path,
-            r#"{"lockOnDisconnect":true,"privacyCurtain":true}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"lockOnDisconnect":true,"privacyCurtain":true}"#).unwrap();
 
         let shared = SharedSettings::load_or_default(Some(path.clone()));
         assert!(shared.privacy_curtain());
