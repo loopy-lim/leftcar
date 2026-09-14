@@ -219,8 +219,11 @@ export function useStreamController(
           updateStreams((previous) => previous.filter((item) => item !== active));
         }).catch((cause) => setStreamError(formatErrorMessage(cause)));
         lastRestartAt.current.delete(active.session);
+        // 알림은 한 채널만: 네이티브 스트림 창이 살아 있으면 창이 종료 사유를
+        // 이미 보여 준다(토스트/HUD). 창이 없을 때만 앱 쪽 Alert가 알린다.
         if (
           hostTermination !== "viewerClosed" &&
+          active.reservation == null &&
           !notifiedTerminations.current.has(active.session)
         ) {
           notifiedTerminations.current.add(active.session);

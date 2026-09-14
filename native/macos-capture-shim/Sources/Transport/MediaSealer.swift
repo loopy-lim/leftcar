@@ -2,9 +2,12 @@ import Foundation
 import CryptoKit
 
 /// Wire format shared with `crates/secure-channel` (Rust) and the Android
-/// viewer: `counter u64 BE ‖ poly1305 tag 16B ‖ ciphertext`. The nonce is
-/// `00 00 00 00 ‖ counter u64 BE` (12B), so ChaCha20-Poly1305 (CryptoKit
-/// `ChaChaPoly`) interoperates byte-for-byte with the Rust and TS sealers.
+/// viewer: `counter u64 BE ‖ ciphertext ‖ poly1305 tag 16B` — the tag sits at
+/// the END, exactly where RustCrypto's `encrypt` and @noble's `chacha20poly1305`
+/// append it. The nonce is `00 00 00 00 ‖ counter u64 BE` (12B), so
+/// ChaCha20-Poly1305 (CryptoKit `ChaChaPoly`) interoperates byte-for-byte with
+/// the Rust and TS sealers. `MediaSealerTests.crossLanguageVector` pins this
+/// layout to a shared fixed vector; moving the tag breaks media on every peer.
 enum MediaWireFormat {
     static let counterLen = 8
     static let tagLen = 16
@@ -30,10 +33,17 @@ struct MediaSealer {
     private var window = [UInt64](repeating: 0, count: Int(MediaWireFormat.replayWindow / 64))
 
     init?(mediaKey: Data) {
+        // 62비트 난수 시작(1 이상) — 인스턴스 쌍당 2^-62로 시작점이 겹친다.
+        self.init(mediaKey: mediaKey, firstCounter: UInt64.random(in: 1..<(1 << 62)))
+    }
+
+    /// 테스트 벡터용: 시작 카운터를 지정한다. 프로덕션 경로는 쓰지 않는다.
+    init?(mediaKey: Data, firstCounter: UInt64) {
         guard mediaKey.count == 32 else { return nil }
         self.key = SymmetricKey(data: mediaKey)
-        // 62비트 난수 시작(1 이상) — 인스턴스 쌍당 2^-62로 시작점이 겹친다.
-        self.sendCounter = UInt64.random(in: 1..<(1 << 62))
+        // seal()이 전송 직전에 1을 더하므로, 첫 프레임 카운터가 firstCounter가
+        // 되게 하려면 그 하나 앞에서 시작한다.
+        self.sendCounter = firstCounter &- 1
     }
 
     /// 12-byte ChaChaPoly nonce: 4 zero bytes then the big-endian counter.
@@ -48,7 +58,7 @@ struct MediaSealer {
         return nonce
     }
 
-    /// `counter ‖ tag ‖ ct` or nil when the plaintext exceeds the datagram cap.
+    /// `counter ‖ ct ‖ tag` or nil when the plaintext exceeds the datagram cap.
     mutating func seal(_ plaintext: Data) -> Data? {
         guard plaintext.count <= MediaWireFormat.maxDatagram else { return nil }
         sendCounter &+= 1
@@ -62,8 +72,8 @@ struct MediaSealer {
         let counterBE = counter.bigEndian
         var frame = Data(capacity: MediaWireFormat.counterLen + MediaWireFormat.tagLen + plaintext.count)
         withUnsafeBytes(of: counterBE) { frame.append(contentsOf: $0) }
-        frame.append(sealedBox.tag)
         frame.append(sealedBox.ciphertext)
+        frame.append(sealedBox.tag)
         return frame
     }
 
@@ -81,13 +91,11 @@ struct MediaSealer {
         if !check(counter: counter) { return nil }
         // Fresh Data copies: Data slices retain a non-zero startIndex, which
         // CryptoKit's SealedBox does not accept and later Collection code
-        // must not assume away. Layout is counter ‖ tag ‖ ct, so the
-        // ciphertext is what follows the counter+tag prefix.
-        let ciphertext = Data(frame.dropFirst(
-            MediaWireFormat.counterLen + MediaWireFormat.tagLen
-        ))
-        let tag = Data(frame.prefix(MediaWireFormat.counterLen + MediaWireFormat.tagLen)
-            .suffix(MediaWireFormat.tagLen))
+        // must not assume away. Layout is counter ‖ ct ‖ tag: the tag is the
+        // trailing 16 bytes and the ciphertext everything between.
+        let tagStart = frame.count - MediaWireFormat.tagLen
+        let ciphertext = Data(frame[MediaWireFormat.counterLen..<tagStart])
+        let tag = Data(frame.suffix(MediaWireFormat.tagLen))
         let nonce = Self.nonce(counter: counter)
         let sealedBox: ChaChaPoly.SealedBox
         do {

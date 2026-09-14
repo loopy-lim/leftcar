@@ -51,6 +51,9 @@ internal class StreamHudController(
     companion object {
         private const val INPUT_STATUS_VISIBLE_MS = 900L
         private const val INPUT_STATUS_FADE_MS = 320L
+        /** 입력이 켜져 있는 동안 유지하는 은은한 배지 투명도 — 꺼짐과 구분되되
+         *  잠금 배너보다 조용한다. */
+        private const val INPUT_ALLOWED_IDLE_ALPHA = 0.38f
         private const val DEBUG_STATS_VISIBLE_MS = 6_000L
         private const val DEBUG_STATS_FADE_MS = 420L
     }
@@ -64,7 +67,8 @@ internal class StreamHudController(
     private var statsPopup: PopupWindow? = null
     private var statsView: TextView? = null
     private var rebindPopup: PopupWindow? = null
-    private var rebindView: TextView? = null
+    private var rebindView: View? = null
+    private var rebindText: TextView? = null
     private var controls: StreamHudControls? = null
     private var keyboardChip: TextView? = null
 
@@ -86,7 +90,7 @@ internal class StreamHudController(
 
     private val fadeInput = Runnable {
         inputView?.animate()
-            ?.alpha(0f)
+            ?.alpha(if (lastInputStatus == 1) INPUT_ALLOWED_IDLE_ALPHA else 0f)
             ?.setDuration(INPUT_STATUS_FADE_MS)
             ?.setInterpolator(AccelerateDecelerateInterpolator())
             ?.start()
@@ -123,9 +127,6 @@ internal class StreamHudController(
     fun show() {
         if (inputPopup != null) return
         showInput()
-        showGestureHelpChip()
-        showKeyboardChip()
-        showExitChip()
         // 진단 표시 설정(showFps)은 FPS 배지와 상세 통계 HUD를 함께 통제한다.
         // 꺼져 있으면 statsView를 만들지 않아 탭/키 입력의 revealStats도 no-op이다.
         if (showDiagnostics) {
@@ -134,9 +135,9 @@ internal class StreamHudController(
         }
     }
 
-    /** IME 표시 실측 상태(렌즈 inset 콜백)를 칩 강조로 반영한다. */
+    /** IME 표시 실측 상태(렌즈 inset 콜백)를 반영한다 (플로팅 칩 제거로 no-op). */
     fun setKeyboardChipActive(active: Boolean) {
-        keyboardChip?.alpha = if (active) 1f else 0.72f
+        // no-op
     }
 
     fun armTerminationPolling() {
@@ -149,16 +150,39 @@ internal class StreamHudController(
     }
 
     fun showRebindIndicator(message: String) {
-        val indicator = rebindView ?: TextView(activity).apply {
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f * panelScale
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = badgeBackground(Color.argb(168, 15, 23, 42))
-            contentDescription = ViewerStrings.rebindDescription
-        }.also { view ->
-            rebindView = view
+        // 정적 텍스트는 멈춤처럼 보인다 — 인디케이터 회전 스피너가 진행 중임을
+        // 즉시 전달한다.
+        val container = rebindView as? LinearLayout
+        if (container == null) {
+            val spinner = android.widget.ProgressBar(activity).apply {
+                isIndeterminate = true
+                val size = dp(16)
+                layoutParams = LinearLayout.LayoutParams(size, size)
+                indeterminateTintList = android.content.res.ColorStateList.valueOf(
+                    Color.argb(224, 255, 255, 255),
+                )
+            }
+            val text = TextView(activity).apply {
+                setTextColor(Color.argb(224, 255, 255, 255))
+                textSize = 12f * panelScale
+                contentDescription = ViewerStrings.rebindDescription
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(8) }
+            }
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(7), dp(12), dp(7))
+                background = badgeBackground(Color.argb(168, 15, 23, 42))
+                addView(spinner)
+                addView(text)
+            }
+            rebindView = row
+            rebindText = text
             rebindPopup = PopupWindow(
-                view,
+                row,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 false,
@@ -170,8 +194,8 @@ internal class StreamHudController(
                 elevation = dp(2).toFloat()
             }
         }
-        indicator.text = message
-        indicator.alpha = 1f
+        rebindText?.text = message
+        rebindView?.alpha = 1f
         activity.window.decorView.post {
             val popup = rebindPopup ?: return@post
             if (!popup.isShowing && !activity.isFinishing && !activity.isDestroyed) {
@@ -246,6 +270,7 @@ internal class StreamHudController(
         inputLabel = null
         statsView = null
         rebindView = null
+        rebindText = null
         persistentFpsOverlay.stop()
     }
 
@@ -294,6 +319,12 @@ internal class StreamHudController(
             handler.removeCallbacks(fadeInput)
             inputView?.animate()?.cancel()
             inputView?.alpha = 1f
+        } else if (status == 1) {
+            // 허용됨: 완전히 사라지지 않고 은은하게 남아 "지금 입력이 살아
+            // 있다"를 스트림 내내 보여 준다. 상호작용 시 revealInput이 강조한다.
+            handler.removeCallbacks(fadeInput)
+            inputView?.animate()?.cancel()
+            inputView?.alpha = INPUT_ALLOWED_IDLE_ALPHA
         } else {
             revealInput()
         }
@@ -332,7 +363,7 @@ internal class StreamHudController(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             false,
         ).apply {
-            isTouchable = true
+            isTouchable = false
             isFocusable = false
             isOutsideTouchable = false
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))

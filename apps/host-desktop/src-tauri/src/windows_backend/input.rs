@@ -14,6 +14,8 @@ pub struct InputInjector {
     pressed_buttons: HashSet<u8>,
     horizontal_remainder: i32,
     vertical_remainder: i32,
+    /// 미매핑 안드로이드 키코드 진단 로그 중복 방지(키코드당 1줄).
+    logged_unmapped: HashSet<u16>,
 }
 
 impl InputInjector {
@@ -24,6 +26,7 @@ impl InputInjector {
             pressed_buttons: HashSet::new(),
             horizontal_remainder: 0,
             vertical_remainder: 0,
+            logged_unmapped: HashSet::new(),
         }
     }
 
@@ -115,6 +118,11 @@ impl InputInjector {
 
     fn key(&mut self, android_key_code: u16, down: bool) -> Result<(), String> {
         let Some(virtual_key) = android_to_virtual_key(android_key_code) else {
+            // 조용히 버리면 뷰어가 원인 없이 "안 쳐진다"를 겪는다 — macOS shim과
+            // 같은 진단 로그를 키코드당 한 번만 남긴다.
+            if self.logged_unmapped.insert(android_key_code) {
+                eprintln!("leftcar: unmapped android keycode {android_key_code} dropped (Windows)");
+            }
             return Ok(());
         };
         send_keyboard(virtual_key, down)?;
@@ -241,11 +249,16 @@ fn android_to_virtual_key(code: u16) -> Option<u16> {
     if (144..=153).contains(&code) {
         return Some(VK_NUMPAD0.0 + code - 144);
     }
+    // Android F13…F20(183…190) → VK_F13…VK_F20(0x7C…0x83, 연속).
+    if (183..=190).contains(&code) {
+        return Some(VK_F13.0 + code - 183);
+    }
     Some(match code {
         19 => VK_UP.0,
         20 => VK_DOWN.0,
         21 => VK_LEFT.0,
         22 => VK_RIGHT.0,
+        23 => VK_RETURN.0,
         55 => VK_OEM_COMMA.0,
         56 => VK_OEM_PERIOD.0,
         57 => VK_MENU.0,
@@ -277,11 +290,13 @@ fn android_to_virtual_key(code: u16) -> Option<u16> {
         122 => VK_HOME.0,
         123 => VK_END.0,
         124 => VK_INSERT.0,
+        143 => VK_NUMLOCK.0,
         154 => VK_DIVIDE.0,
         155 => VK_MULTIPLY.0,
         156 => VK_SUBTRACT.0,
         157 => VK_ADD.0,
         158 => VK_DECIMAL.0,
+        159 => VK_OEM_COMMA.0,
         160 => VK_RETURN.0,
         161 => VK_OEM_PLUS.0,
         _ => return None,

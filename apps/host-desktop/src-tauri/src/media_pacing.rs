@@ -9,6 +9,10 @@ const MAX_BURST_BYTES: usize =
     8 * (crate::wire::MAX_DATAGRAM + secure_channel::COUNTER_LEN + secure_channel::TAG_LEN + 4);
 const WAIT_SLICE: Duration = Duration::from_millis(1);
 const DRAIN_DEADLINE: Duration = Duration::from_secs(1);
+/// 큰 AU(4K IDR 등)가 예산 안에서도 기본 마감 안에 못 끝날 때 마감을 늘리는
+/// 상한. 예산 기반 산정이므로 소켓이 실제로 막힌 경우(확장 마감+기본 여유
+/// 초과)는 여전히 Deadline로 종료된다.
+const MAX_DEADLINE_EXTENSION: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum DrainError {
@@ -40,6 +44,8 @@ pub struct DrainMetrics {
     pub completed_aus: u64,
     pub cancelled_drains: u64,
     pub deadline_drains: u64,
+    /// 예산 산정으로 AU 마감을 늘린 드레인 수 — 정상 예산보다 큰 IDR 등.
+    pub deadline_extensions: u64,
     pub paced_delay_us: u64,
     pub max_au_drain_us: u64,
     pub bursts: u64,
@@ -156,7 +162,26 @@ impl MediaPacer {
             return Err(DrainError::Terminal);
         }
         let started = io.now();
-        let result = self.drain_inner(packets, io, started + DRAIN_DEADLINE);
+        // 정상 예산보다 큰 AU라도 "죽이는" 게 아니라 예산이 말하는 시간만큼
+        // 마감을 늘려 완전히 배출한다(2026-09-14). 마감 사망은 재연결 → 재 IDR
+        // → 또 사망의 고리를 만들었고, 완전한 배출이 버스트 손실보다 낫다.
+        // 확장은 예산 산정 기반 + 상한이므로 막힌 소켓은 그대로 Deadline.
+        let overhead =
+            secure_channel::COUNTER_LEN + secure_channel::TAG_LEN + if self.tcp { 4 } else { 0 };
+        let wire_total: u64 = packets
+            .iter()
+            .map(|packet| (packet.len() + overhead) as u64)
+            .sum();
+        let pacing_estimate =
+            Duration::from_secs_f64(wire_total as f64 / self.bytes_per_second.max(1.0));
+        let extension = pacing_estimate
+            .saturating_sub(DRAIN_DEADLINE)
+            .min(MAX_DEADLINE_EXTENSION);
+        if !extension.is_zero() {
+            self.metrics.deadline_extensions += 1;
+        }
+        let deadline = started + DRAIN_DEADLINE + extension;
+        let result = self.drain_inner(packets, io, deadline);
         if access_unit {
             self.metrics.max_au_drain_us = self
                 .metrics
@@ -400,7 +425,8 @@ mod tests {
             assert_eq!(pacer.drain(&[config], false, &mut io), Err(expected));
             assert!(io.sent.is_empty());
             assert_eq!(pacer.metrics().completed_aus, 0);
-            assert!(io.now <= Duration::from_secs(1));
+            // bitrate=1bps 예산은 마감 확장 상한(4s)까지 늘어나지만 결국 Deadline.
+            assert!(io.now <= Duration::from_secs(5));
         }
     }
 
@@ -575,15 +601,18 @@ mod tests {
         }
     }
     #[test]
-    fn excessive_idr_stops_at_absolute_deadline_without_idr_retry_loop() {
+    fn excessive_idr_drains_within_budget_based_deadline() {
+        // 2MB IDR @4Mbps는 예산 산정(≈4.1s)으로 마감이 늘어나 완전히 배출된다
+        // (2026-09-14 변경 — 마감 사망이 재연결 폭풍을 만들었기 때문). 그래도
+        // 예산 밖 드레인은 여전히 Deadline으로 죽는다(위 bitrate=1 사례).
         let mut io = FakeIo::new(false);
         let mut pacer = MediaPacer::new(4_000_000, 60, false, io.now);
-        assert_eq!(
-            pacer.drain(&au(2_000_000), true, &mut io),
-            Err(DrainError::Deadline)
-        );
-        assert_eq!(io.now, Duration::from_secs(1));
-        assert_eq!(pacer.metrics().completed_aus, 0);
-        assert!(pacer.drain(&au(2_000_000), true, &mut io).is_err());
+        pacer.drain(&au(2_000_000), true, &mut io).unwrap();
+        assert_eq!(pacer.metrics().completed_aus, 1);
+        assert_eq!(pacer.metrics().deadline_extensions, 1);
+        assert!(io.now < Duration::from_secs(6));
+        // 정상 크기 AU는 여전히 즉시 흐른다.
+        pacer.drain(&au(1367), true, &mut io).unwrap();
+        assert_eq!(pacer.metrics().completed_aus, 2);
     }
 }

@@ -1,6 +1,12 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import os
+
+let leftcarInputLogger = Logger(
+    subsystem: "leftcar.ll3.kr",
+    category: "input"
+)
 
 // Mouse events post at the session tap: macOS 26 drops synthesized button
 // and scroll state injected at the HID tap (moves still warp the cursor
@@ -312,14 +318,20 @@ extension CaptureSession {
         if (144...153).contains(code) { return keypad[Int(code - 144)] }
         let functionKeys: [CGKeyCode] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
         if (131...142).contains(code) { return functionKeys[Int(code - 131)] }
+        // Android F13…F20(183…190) → kVK_F13…kVK_F20. F21+는 Mac 가상 키가
+        // 없다(미매핑 로그로 잡힌다).
+        let upperFunctionKeys: [CGKeyCode] = [105, 107, 113, 106, 64, 79, 80, 90]
+        if (183...190).contains(code) { return upperFunctionKeys[Int(code - 183)] }
         return [
             19: 126, 20: 125, 21: 123, 22: 124,
+            23: 36,
             55: 43, 56: 47, 57: 58, 58: 61, 59: 56, 60: 60,
             61: 48, 62: 49, 66: 36, 67: 51, 68: 50, 69: 27,
             70: 24, 71: 33, 72: 30, 73: 42, 74: 41, 75: 39,
             76: 44, 92: 116, 93: 121, 111: 53, 112: 117,
             113: 59, 114: 62, 115: 57, 117: 55, 118: 54,
             122: 115, 123: 119, 124: 114,
+            143: 71, 159: 95,
             154: 75, 155: 67, 156: 78, 157: 69, 158: 65,
             160: 76, 161: 81, 204: 104,
         ][code]
@@ -329,7 +341,17 @@ extension CaptureSession {
         let androidCode = readUInt16BE(message, at: 10)
         // 사용자 리맵이 우선한다(예: Caps Lock 115 → F17 240); 없으면 기본
         // 안드로이드→Mac 키코드 표를 따른다.
-        guard let keyCode = remoteKeyRemap[androidCode] ?? macKeyCode(android: androidCode) else { return }
+        guard let keyCode = remoteKeyRemap[androidCode] ?? macKeyCode(android: androidCode) else {
+            // 조용히 버리면 뷰어가 "눌렀는데 안 쳐진다"를 원인 없이 겪는다.
+            // 키코드당 한 번만 남겨 진단 로그가 스팸이 되지 않게 한다.
+            if !loggedUnmappedKeycodes.contains(androidCode) {
+                loggedUnmappedKeycodes.insert(androidCode)
+                leftcarInputLogger.notice(
+                    "unmapped android keycode \(androidCode, privacy: .public) dropped"
+                )
+            }
+            return
+        }
         let metaState = readUInt32BE(message, at: 14)
         let down = message[18] != 0
         let repeatCount = readUInt16BE(message, at: 19)

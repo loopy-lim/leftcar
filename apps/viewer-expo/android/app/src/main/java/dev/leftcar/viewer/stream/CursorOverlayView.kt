@@ -37,14 +37,17 @@ internal class CursorOverlayView(
 
         /**
          * JNI 폴링 절전(Q9a): cursorState 하나가 전역 라이프사이클 뮤텍스와
-         * Arc 클론을 태우므로 매 디스플레이 프레임 호출은 서멀/전력 낭비다.
-         * 커서가 보이는 동안에는 ~30Hz(60Hz 패널에서 프레임 2개당 1회)로
-         * 폴링해 움직임을 따라가고, 비활성/숨김 상태에서는 ~2Hz(프레임 30개당
-         * 1회)로 낮춘다. inactive→active 전이는 낮은 주기 틱 한 번 안에
-         * 반영된다.
+         * Arc 클론을 태우므로 무조건 매 프레임 호출은 서멀/전력 낭비다.
+         * 커서가 보이는 동안에는 매 디스플레이 프레임(60Hz 패널에서 60Hz)으로
+         * 폴링해 커서가 패널 주사율의 절반으로 그려지는 "딱딱 끊김"을 없앤다
+         * (033f1da의 프레임 2개당 1회 폴링이 이 회귀의 원인이었다).
+         * 숨김 상태에서만 ~2Hz(프레임 30개당 1회)로 낮춘다. inactive→active
+         * 전이는 [nudge]가 로컬 입력 직후 다음 프레임 폴링으로 즉시 잡는다.
          */
-        private const val ACTIVE_POLL_EVERY_N_FRAMES = 2
+        private const val ACTIVE_POLL_EVERY_N_FRAMES = 1
         private const val IDLE_POLL_EVERY_N_FRAMES = 30
+        private const val TAP_ECHO_SIZE_DP = 52
+        private const val TAP_ECHO_DURATION_MS = 220L
     }
 
     private val choreographer = Choreographer.getInstance()
@@ -58,8 +61,9 @@ internal class CursorOverlayView(
     private var sourceWidth = 0
     private var sourceHeight = 0
     private var framesUntilPoll = 0
-    /** 마지막으로 관측한 커서 활성 상태 — 폴링 주기(30Hz/2Hz)를 정한다. */
+    /** 마지막으로 관측한 커서 활성 상태 — 폴링 주기(60Hz/2Hz)를 정한다. */
     private var cursorActive = false
+    private var tapEcho: TapEchoView? = null
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xF0FFFFFF.toInt()
@@ -85,6 +89,32 @@ internal class CursorOverlayView(
     fun setVideoSize(width: Int, height: Int) {
         sourceWidth = width
         sourceHeight = height
+    }
+
+    /**
+     * 로컬 입력 직후 호출 — 다음 Choreographer 프레임에서 즉시 폴링하게 한다.
+     * 유휴(2Hz) 주기 한 바퀴(최대 ~500ms)를 기다리지 않고 커서가 입력 반응을
+     * 바로 따라붙게 하는 것이 목적이다. 메인 스레드 입력 경로에서만 부른다.
+     */
+    fun nudge() {
+        if (running) framesUntilPoll = 0
+    }
+
+    /**
+     * 터치/클릭 즉각 피드백 — 호스트 왕복(LCD1)을 기다리지 않고 터치 지점에
+     * 짧게 퍼지는 물결을 그린다. 원격 커서 표시와 무관하게 입력이 살아 있음을
+     * 첫 프레임 안에 보여 준다. 좌표는 창 원점 기준(rawX/rawY).
+     */
+    fun showTapEcho(rawX: Float, rawY: Float) {
+        if (!running) return
+        val view = tapEcho ?: TapEchoView(activity).also { created ->
+            host.addView(
+                created,
+                FrameLayout.LayoutParams(dp(TAP_ECHO_SIZE_DP), dp(TAP_ECHO_SIZE_DP)),
+            )
+            tapEcho = created
+        }
+        view.reveal(rawX, rawY)
     }
 
     private val frameCallback = object : Choreographer.FrameCallback {
@@ -122,6 +152,7 @@ internal class CursorOverlayView(
         choreographer.removeFrameCallback(frameCallback)
         popup?.dismiss()
         popup = null
+        tapEcho = null
         hide()
     }
 
@@ -228,5 +259,61 @@ internal class CursorOverlayView(
         arrow.close()
         canvas.drawPath(arrow, fillPaint)
         canvas.drawPath(arrow, strokePaint)
+    }
+
+    /**
+     * 탭 에코 — 중심에서 퍼지며 사라지는 원. 팝업 호스트 프레임에 얹히는
+     * 단독 뷰라 스트림 SurfaceView 위에도 그려진다(커서 오버레이와 같은 경로).
+     */
+    private class TapEchoView(context: android.content.Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = resources.displayMetrics.density * 2.5f
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x33FFFFFF
+            style = Paint.Style.FILL
+        }
+        private var progress = 1f
+        private val animator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = TAP_ECHO_DURATION_MS
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener { animation ->
+                progress = animation.animatedValue as Float
+                invalidate()
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    visibility = GONE
+                }
+            })
+        }
+
+        init {
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            visibility = GONE
+        }
+
+        fun reveal(rawX: Float, rawY: Float) {
+            translationX = rawX - layoutParams.width / 2f
+            translationY = rawY - layoutParams.height / 2f
+            progress = 0f
+            visibility = VISIBLE
+            animator.cancel()
+            animator.start()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            if (progress >= 1f) return
+            val cx = width / 2f
+            val cy = height / 2f
+            val radius = width * (0.18f + 0.32f * progress)
+            paint.alpha = ((1f - progress) * 220).toInt()
+            canvas.drawCircle(cx, cy, radius, fillPaint)
+            canvas.drawCircle(cx, cy, radius, paint)
+        }
     }
 }

@@ -86,6 +86,8 @@ final class CaptureSession {
      var lastReliableInputSequence: UInt32 = 0
      var lastPointerInputSequence: UInt32 = 0
      var pressedKeys = Set<CGKeyCode>()
+    /// 미매핑 안드로이드 키코드 진단 로그 1회성 중복 방지(키코드당 1줄).
+     var loggedUnmappedKeycodes = Set<UInt16>()
      var pressedButtons = Set<CGMouseButton>()
      var lastPointerPosition = CGPoint.zero
      var horizontalScrollRemainder: Int32 = 0

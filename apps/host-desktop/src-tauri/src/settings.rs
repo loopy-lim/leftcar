@@ -15,6 +15,27 @@ pub struct HostSettings {
     pub lock_on_disconnect: bool,
     /// 커튼 모드: 스트리밍 중 호스트 물리 화면을 검은 오버레이로 가린다.
     pub privacy_curtain: bool,
+    /// 네이티브 표면(트레이 메뉴 등)의 UI 언어. 웹뷰의 leftcar_lang 설정과
+    /// 같은 값이 되며, 없으면 한국어가 기본이다.
+    pub language: HostLanguage,
+}
+
+/// 호스트 UI 언어. 웹뷰의 `leftcar_lang`(localStorage)과 같은 "ko"/"en" 값을
+/// 공유 settings.json에 남긴다.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostLanguage {
+    #[default]
+    Ko,
+    En,
+}
+
+impl HostLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ko => "ko",
+            Self::En => "en",
+        }
+    }
 }
 
 /// `dirs::data_dir()/leftcar-host/settings.json` (None when the platform has
@@ -53,6 +74,14 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
             .get("privacyCurtain")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        language: match parsed
+            .get("language")
+            .or_else(|| parsed.get("leftcar_lang"))
+            .and_then(|v| v.as_str())
+        {
+            Some("en") => HostLanguage::En,
+            _ => HostLanguage::Ko,
+        },
     }
 }
 
@@ -66,6 +95,7 @@ fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
         "fileShare": settings.file_share,
         "lockOnDisconnect": settings.lock_on_disconnect,
         "privacyCurtain": settings.privacy_curtain,
+        "language": settings.language.as_str(),
     })
     .to_string();
     // 임시 파일에 쓰고 같은 디렉터리의 rename으로 갈아끼운다 — 대상 파일을
@@ -132,6 +162,10 @@ impl SharedSettings {
         self.get().privacy_curtain
     }
 
+    pub fn language(&self) -> HostLanguage {
+        self.get().language
+    }
+
     /// 메모리 값을 바꾸고 디스크에 영속한다. 영속에 실패하면 오류를 반환하고
     /// 메모리 값은 바꾸지 않는다 — 호출자(UI)가 실패를 사용자에게 보여 준다.
     fn update_field(&self, mutate: impl FnOnce(&mut HostSettings)) -> Result<(), String> {
@@ -167,6 +201,12 @@ impl SharedSettings {
     /// 메모리 값은 바꾸지 않는다 — 호출자(UI)가 실패를 사용자에게 보여 준다.
     pub fn set_file_share(&self, enabled: bool) -> Result<(), String> {
         self.update_field(|s| s.file_share = enabled)
+    }
+
+    /// UI 언어 토글 — 웹뷰의 leftcar_lang 값을 네이티브 표면(트레이 등)과
+    /// 공유하기 위해 같은 0600 파일에 남긴다.
+    pub fn set_language(&self, language: HostLanguage) -> Result<(), String> {
+        self.update_field(|s| s.language = language)
     }
 }
 
@@ -204,6 +244,20 @@ mod tests {
         assert!(reloaded.lock_on_disconnect);
         assert!(reloaded.privacy_curtain);
         assert!(!reloaded.file_share, "independent fields must not leak");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn language_persists_and_survives_reload() {
+        let path = temp_path("language");
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        assert_eq!(
+            shared.language(),
+            HostLanguage::Ko,
+            "missing value defaults to Korean"
+        );
+        shared.set_language(HostLanguage::En).unwrap();
+        assert_eq!(load_or_default(Some(&path)).language, HostLanguage::En);
         let _ = std::fs::remove_file(&path);
     }
 

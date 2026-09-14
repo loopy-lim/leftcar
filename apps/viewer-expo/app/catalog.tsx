@@ -3,8 +3,10 @@ import {
   ActivityIndicator,
   FlatList,
   type ListRenderItemInfo,
+  Modal,
   Pressable,
   RefreshControl,
+  ScrollView,
   Switch,
   Text,
   View,
@@ -13,9 +15,8 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, Stack } from "expo-router";
 import type { DisplayInfo } from "../src/control";
-import { DEFAULT_CONTROL_PORT } from "../src/defaults";
 import { controlClient } from "../src/session";
 import {
   getUsbState,
@@ -71,70 +72,27 @@ function DisplayAspectMiniature({
   colors: ThemeTokens;
 }) {
   const aspect = width / Math.max(1, height);
-  let miniW = 32;
-  let miniH = 19;
-  if (aspect >= 2.0) {
-    miniW = 36;
-    miniH = 15;
-  } else if (aspect >= 1.7) {
-    miniW = 34;
-    miniH = 19;
-  } else if (aspect >= 1.4) {
-    miniW = 30;
-    miniH = 20;
-  } else if (aspect >= 1.1) {
-    miniW = 26;
-    miniH = 20;
-  } else {
-    miniW = 18;
-    miniH = 28;
-  }
+  const isWide = aspect > 1.8;
+  const isPortrait = aspect < 1.0;
 
   return (
     <View
       style={{
         width: 44,
-        height: 40,
+        height: 44,
+        borderRadius: 10,
+        backgroundColor: colors.bgSubtle,
+        borderWidth: 1,
+        borderColor: colors.borderSubtle,
         alignItems: "center",
         justifyContent: "center",
         flexShrink: 0,
       }}
     >
-      <View
-        style={{
-          width: miniW,
-          height: miniH,
-          borderWidth: 1.5,
-          borderColor: colors.textPrimary,
-          borderRadius: 3,
-          backgroundColor: colors.bgSubtle,
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <View
-          style={{
-            width: "70%",
-            height: "50%",
-            backgroundColor: colors.borderCard,
-            borderRadius: 1,
-          }}
-        />
-      </View>
-      <View
-        style={{
-          width: 3,
-          height: 3,
-          backgroundColor: colors.textPrimary,
-        }}
-      />
-      <View
-        style={{
-          width: 14,
-          height: 2,
-          backgroundColor: colors.textPrimary,
-          borderRadius: 1,
-        }}
+      <Ionicons
+        name={isPortrait ? "phone-portrait-outline" : isWide ? "tv-outline" : "desktop-outline"}
+        size={22}
+        color={colors.textPrimary}
       />
     </View>
   );
@@ -153,10 +111,6 @@ interface ViewerOptionsCardProps {
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
-  opusAudio: boolean;
-  onToggleOpusAudio: (enabled: boolean) => void;
-  balancedPresentation: boolean;
-  onToggleBalancedPresentation: (enabled: boolean) => void;
   onToggleAudio: (localAudio: boolean) => void;
   clipboardShare: boolean;
   onToggleClipboardShare: (enabled: boolean) => void;
@@ -169,10 +123,6 @@ function ViewerOptionsCard({
   localCursor,
   onToggleCursor,
   localAudio,
-  opusAudio,
-  onToggleOpusAudio,
-  balancedPresentation,
-  onToggleBalancedPresentation,
   onToggleAudio,
   clipboardShare,
   onToggleClipboardShare,
@@ -181,7 +131,7 @@ function ViewerOptionsCard({
   const { t } = useAppLanguage();
   const cardStyle = {
     gap: 10,
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.borderSubtle,
     backgroundColor: colors.bgSurface,
@@ -242,19 +192,6 @@ function ViewerOptionsCard({
           {...switchColor}
         />
       </View>
-      <View style={OPTION_ROW_STYLE}>
-        <Text style={{ flex: 1, color: colors.textPrimary }}>Opus 128 kbps (experimental)</Text>
-        <Switch value={opusAudio} onValueChange={onToggleOpusAudio}
-          accessibilityLabel="Opus 128 kbps experimental" {...switchColor} />
-      </View>
-      <View style={OPTION_ROW_STYLE}>
-        <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
-        </View>
-        <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
-          accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
-      </View>
       {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
@@ -276,9 +213,58 @@ function ViewerOptionsCard({
   );
 }
 
+/**
+ * 전문 토글(인코더/재생 실험) — 고급 설정 안의 한 단계 더 안쪽. 일상 토글과
+ * 분리해 실험 기능이 메인 흐름에 섞이지 않게 한다.
+ */
+function ExpertOptionsCard({
+  opusAudio,
+  onToggleOpusAudio,
+  balancedPresentation,
+  onToggleBalancedPresentation,
+  colors,
+}: {
+  opusAudio: boolean;
+  onToggleOpusAudio: (enabled: boolean) => void;
+  balancedPresentation: boolean;
+  onToggleBalancedPresentation: (enabled: boolean) => void;
+  colors: ThemeTokens;
+}) {
+  const { t } = useAppLanguage();
+  const cardStyle = {
+    gap: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+    backgroundColor: colors.bgSurface,
+    padding: 12,
+  };
+  const switchColor = {
+    trackColor: { false: colors.borderCard, true: colors.btnPrimaryBg },
+    thumbColor: colors.btnPrimaryText,
+  };
+  return (
+    <View style={cardStyle}>
+      <View style={OPTION_ROW_STYLE}>
+        <Text style={{ flex: 1, color: colors.textPrimary }}>{t.viewer.opusToggleLabel}</Text>
+        <Switch value={opusAudio} onValueChange={onToggleOpusAudio}
+          accessibilityLabel={t.viewer.opusToggleLabel} {...switchColor} />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
+          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
+        </View>
+        <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
+          accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
+      </View>
+    </View>
+  );
+}
+
 function EncoderExperimentChoices({ experiments, selected, requiresReconnect, colors, t, onSelect }: { experiments: EncoderExperimentInfo[]; selected: EncoderExperimentId; requiresReconnect: boolean; colors: ThemeTokens; t: ReturnType<typeof useAppLanguage>["t"]; onSelect: (id: EncoderExperimentId) => void }) {
   if (experiments.length <= 1) return null;
-  return <View style={{ gap: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
+  return <View style={{ gap: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
     <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 11, color: colors.textMuted, lineHeight: 15 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
     <View style={{ gap: 8 }}>{experiments.map((experiment) => {
       const isSelected = experiment.id === selected;
@@ -298,19 +284,81 @@ const QUALITY_TAB_KEYS = {
   clarity: { label: "qualityClarityLabel", detail: "qualityClarityDetail" },
 } as const;
 
-function QualityProfileTabs({ profileId, styles, onSelect }: { profileId: ViewerProfileSelection; styles: ReturnType<typeof createCatalogStyles>; onSelect: (id: ViewerProfileSelection) => void }) {
+function QualityProfileTabs({
+  profileId,
+  styles,
+  colors,
+  onSelect,
+}: {
+  profileId: ViewerProfileSelection;
+  styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
+  onSelect: (id: ViewerProfileSelection) => void;
+}) {
   const { t } = useAppLanguage();
-  return <View style={styles.qualitySegmentWrapper}><View style={styles.qualitySegmentTabs}>
-    <Pressable onPress={() => onSelect("auto")} style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected: profileId === "auto" }} accessibilityLabel={t.viewer.qualityAutoA11y}><Text style={[styles.qualityTabLabel, profileId === "auto" && styles.qualityTabLabelActive]}>{t.viewer.qualityAutoLabel}</Text><Text style={[styles.qualityTabDetail, profileId === "auto" && styles.qualityTabDetailActive]}>{t.viewer.qualityAutoDetail}</Text></Pressable>
-    {STREAM_PROFILES.map((p) => {
-      const selected = p.id === profileId;
-      const copy = QUALITY_TAB_KEYS[p.id];
-      const a11yLabel = `${t.viewer[copy.label]}: ${t.viewer[copy.detail]}`;
-      return <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.qualityTab, selected && styles.qualityTabActive]} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={a11yLabel}><Text style={[styles.qualityTabLabel, selected && styles.qualityTabLabelActive]}>{t.viewer[copy.label]}</Text><Text style={[styles.qualityTabDetail, selected && styles.qualityTabDetailActive]}>{t.viewer[copy.detail]}</Text></Pressable>;
-    })}
-  </View></View>;
-}
+  const currentDetail = useMemo(() => {
+    if (profileId === "auto") return t.viewer.qualityAutoDetail;
+    const copy = QUALITY_TAB_KEYS[profileId];
+    return copy ? t.viewer[copy.detail] : "";
+  }, [profileId, t]);
 
+  return (
+    <View style={styles.qualityContainer}>
+      <View style={styles.qualitySegmentWrapper}>
+        <View style={styles.qualitySegmentTabs}>
+          <Pressable
+            onPress={() => onSelect("auto")}
+            style={[styles.qualityTab, profileId === "auto" && styles.qualityTabActive]}
+            accessibilityRole="button"
+            accessibilityState={{ selected: profileId === "auto" }}
+            accessibilityLabel={t.viewer.qualityAutoA11y}
+          >
+            <Text
+              style={[
+                styles.qualityTabLabel,
+                profileId === "auto" && styles.qualityTabLabelActive,
+              ]}
+              numberOfLines={1}
+            >
+              {t.viewer.qualityAutoLabel}
+            </Text>
+          </Pressable>
+          {STREAM_PROFILES.map((p) => {
+            const selected = p.id === profileId;
+            const copy = QUALITY_TAB_KEYS[p.id];
+            const a11yLabel = `${t.viewer[copy.label]}: ${t.viewer[copy.detail]}`;
+            return (
+              <Pressable
+                key={p.id}
+                onPress={() => onSelect(p.id)}
+                style={[styles.qualityTab, selected && styles.qualityTabActive]}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                accessibilityLabel={a11yLabel}
+              >
+                <Text
+                  style={[
+                    styles.qualityTabLabel,
+                    selected && styles.qualityTabLabelActive,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {t.viewer[copy.label]}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+      {currentDetail ? (
+        <View style={styles.qualityHintRow}>
+          <Ionicons name="sparkles-outline" size={12} color={colors.textMuted} />
+          <Text style={styles.qualityHintText}>{currentDetail}</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 interface CatalogHeaderProps {
   error: string | null;
@@ -320,18 +368,27 @@ interface CatalogHeaderProps {
   refreshing: boolean;
   onRefresh: () => void;
   onSelectProfile: (id: ViewerProfileSelection) => void;
+  onOpenSettings: () => void;
+  hasSettingsNotice: boolean;
+  styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
+}
+
+interface CatalogSettingsModalProps {
+  visible: boolean;
+  onClose: () => void;
   showFps: boolean;
   onToggleFps: (showFps: boolean) => void;
   localCursor: boolean;
   onToggleCursor: (localCursor: boolean) => void;
   localAudio: boolean;
+  onToggleAudio: (localAudio: boolean) => void;
+  clipboardShare: boolean;
+  onToggleClipboardShare: (enabled: boolean) => void;
   opusAudio: boolean;
   onToggleOpusAudio: (enabled: boolean) => void;
   balancedPresentation: boolean;
   onToggleBalancedPresentation: (enabled: boolean) => void;
-  onToggleAudio: (localAudio: boolean) => void;
-  clipboardShare: boolean;
-  onToggleClipboardShare: (enabled: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -345,26 +402,21 @@ interface CatalogHeaderProps {
   colors: ThemeTokens;
 }
 
-function CatalogHeader({
-  error,
-  host,
-  loading,
-  profileId,
-  refreshing,
-  onRefresh,
-  onSelectProfile,
+function CatalogSettingsModal({
+  visible,
+  onClose,
   showFps,
   onToggleFps,
   localCursor,
   onToggleCursor,
   localAudio,
+  onToggleAudio,
+  clipboardShare,
+  onToggleClipboardShare,
   opusAudio,
   onToggleOpusAudio,
   balancedPresentation,
   onToggleBalancedPresentation,
-  onToggleAudio,
-  clipboardShare,
-  onToggleClipboardShare,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -376,17 +428,140 @@ function CatalogHeader({
   onApplyUdpStability,
   styles,
   colors,
-}: CatalogHeaderProps) {
+}: CatalogSettingsModalProps) {
   const { t } = useAppLanguage();
-  const refreshDisabled = loading || refreshing;
   const requiresReconnect = encoderExperiments.some(
     (experiment) => experiment.requiresReconnect,
   );
-  const hasViewerOptions = true;
-  const hasAdvancedOptions =
-    hasViewerOptions || encoderExperiments.length > 1 || udpStabilityOptions !== null;
-  const [manuallyToggled, setManuallyToggled] = useState<boolean | null>(null);
-  const showAdvanced = manuallyToggled !== null ? manuallyToggled : udpReconnectRequired;
+  const [expertManuallyToggled, setExpertManuallyToggled] = useState<boolean | null>(null);
+  const showExpert =
+    expertManuallyToggled !== null ? expertManuallyToggled : udpReconnectRequired;
+
+  const handleToggleExpert = useCallback(() => {
+    setExpertManuallyToggled(!showExpert);
+  }, [showExpert]);
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalSheet}>
+          <View style={styles.modalHeader}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Ionicons name="settings-outline" size={18} color={colors.textPrimary} />
+              <Text style={styles.modalTitle}>{t.viewer.settingsTitle}</Text>
+            </View>
+            <Pressable
+              onPress={onClose}
+              style={styles.modalCloseBtn}
+              accessibilityRole="button"
+              accessibilityLabel={t.viewer.settingsModalClose}
+            >
+              <Ionicons name="close" size={20} color={colors.textSecondary} />
+            </Pressable>
+          </View>
+          <ScrollView
+            contentContainerStyle={styles.modalScrollView}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.modalContentGap}>
+              <View style={styles.modalSection}>
+                <Text style={styles.modalSectionTitle}>{t.viewer.sectionViewerOptions}</Text>
+                <ViewerOptionsCard
+                  showFps={showFps}
+                  onToggleFps={onToggleFps}
+                  localCursor={localCursor}
+                  onToggleCursor={onToggleCursor}
+                  localAudio={localAudio}
+                  onToggleAudio={onToggleAudio}
+                  clipboardShare={clipboardShare}
+                  onToggleClipboardShare={onToggleClipboardShare}
+                  colors={colors}
+                />
+              </View>
+
+              <View style={styles.modalSection}>
+                <Text style={styles.modalSectionTitle}>{t.viewer.sectionFileTransfer}</Text>
+                <FileTransferCard colors={colors} />
+              </View>
+
+              <View style={styles.modalSection}>
+                <Text style={styles.modalSectionTitle}>{t.viewer.sectionAdvanced}</Text>
+                <Pressable
+                  style={styles.advancedToggleRow}
+                  onPress={handleToggleExpert}
+                  accessibilityRole="button"
+                  accessibilityLabel={t.viewer.expertSettingsToggle}
+                >
+                  <View style={styles.advancedToggleLeft}>
+                    <Ionicons name="hardware-chip-outline" size={14} color={colors.textMuted} />
+                    <Text style={styles.advancedToggleText}>{t.viewer.expertSettingsToggle}</Text>
+                    {udpReconnectRequired ? <View style={styles.reconnectDot} /> : null}
+                  </View>
+                  <Ionicons
+                    name={showExpert ? "chevron-up" : "chevron-down"}
+                    size={14}
+                    color={colors.textMuted}
+                  />
+                </Pressable>
+
+                {showExpert ? (
+                  <View style={styles.advancedSectionContainer}>
+                    <ExpertOptionsCard
+                      opusAudio={opusAudio}
+                      onToggleOpusAudio={onToggleOpusAudio}
+                      balancedPresentation={balancedPresentation}
+                      onToggleBalancedPresentation={onToggleBalancedPresentation}
+                      colors={colors}
+                    />
+
+                    <EncoderExperimentChoices
+                      experiments={encoderExperiments}
+                      selected={encoderExperiment}
+                      requiresReconnect={requiresReconnect}
+                      colors={colors}
+                      t={t}
+                      onSelect={onSelectEncoderExperiment}
+                    />
+
+                    <UdpStabilityControls
+                      options={udpStabilityOptions}
+                      selection={udpStability}
+                      reconnectRequired={udpReconnectRequired}
+                      reconnecting={udpReconnecting}
+                      onChange={onSelectUdpStability}
+                      onApplyReconnect={onApplyUdpStability}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function CatalogHeader({
+  error,
+  host,
+  loading,
+  profileId,
+  refreshing,
+  onRefresh,
+  onSelectProfile,
+  onOpenSettings,
+  hasSettingsNotice,
+  styles,
+  colors,
+}: CatalogHeaderProps) {
+  const { t } = useAppLanguage();
+  const refreshDisabled = loading || refreshing;
 
   return (
     <View style={styles.headerContainer}>
@@ -395,12 +570,30 @@ function CatalogHeader({
         <View style={styles.hostStripLeft}>
           <View style={styles.dotConnected} />
           <Text style={styles.hostStripText} numberOfLines={1}>
-            {t.viewer.connectedHostLabel} <Text style={styles.hostStripAddr}>{host}</Text>
+            {t.viewer.connectedHostLabel}{" "}
+            <Text style={styles.hostStripAddr}>{host || "—"}</Text>
           </Text>
         </View>
-        <Pressable onPress={navigateToHostPicker} style={styles.btnHostChange}>
-          <Text style={styles.btnHostChangeText}>{t.viewer.btnChangeHost}</Text>
-        </Pressable>
+        <View style={styles.hostStripActions}>
+          <Pressable
+            onPress={onOpenSettings}
+            style={styles.btnHostSettings}
+            accessibilityRole="button"
+            accessibilityLabel={t.viewer.settingsTitle}
+          >
+            <Ionicons name="settings-outline" size={12} color={colors.btnSecondaryText} />
+            <Text style={styles.btnHostSettingsText}>{t.viewer.btnSettings}</Text>
+            {hasSettingsNotice ? <View style={styles.reconnectDot} /> : null}
+          </Pressable>
+          <Pressable
+            onPress={navigateToHostPicker}
+            style={styles.btnHostChange}
+            accessibilityRole="button"
+            accessibilityLabel={t.viewer.btnChangeHost}
+          >
+            <Text style={styles.btnHostChangeText}>{t.viewer.btnChangeHost}</Text>
+          </Pressable>
+        </View>
       </View>
 
       <UsbTransportStatus styles={styles} />
@@ -427,61 +620,7 @@ function CatalogHeader({
         </View>
       ) : null}
 
-      <QualityProfileTabs profileId={profileId} styles={styles} onSelect={onSelectProfile} />
-
-      {/* Collapsible Advanced Settings (Encoder Experiments & UDP Stability) */}
-      {hasAdvancedOptions ? (
-        <Pressable
-          style={styles.advancedToggleRow}
-          onPress={() => setManuallyToggled(!showAdvanced)}
-          accessibilityRole="button"
-          accessibilityLabel={t.viewer.advancedSettingsToggle}
-        >
-          <View style={styles.advancedToggleLeft}>
-            <Ionicons name="options-outline" size={14} color={colors.textMuted} />
-            <Text style={styles.advancedToggleText}>{t.viewer.advancedSettingsToggle}</Text>
-            {udpReconnectRequired ? <View style={styles.reconnectDot} /> : null}
-          </View>
-          <Ionicons
-            name={showAdvanced ? "chevron-up" : "chevron-down"}
-            size={14}
-            color={colors.textMuted}
-          />
-        </Pressable>
-      ) : null}
-
-      {showAdvanced && hasAdvancedOptions ? (
-        <View style={styles.advancedSectionContainer}>
-          <ViewerOptionsCard
-            showFps={showFps}
-            onToggleFps={onToggleFps}
-            localCursor={localCursor}
-            onToggleCursor={onToggleCursor}
-            balancedPresentation={balancedPresentation}
-            onToggleBalancedPresentation={onToggleBalancedPresentation}
-            localAudio={localAudio}
-            opusAudio={opusAudio}
-            onToggleOpusAudio={onToggleOpusAudio}
-            onToggleAudio={onToggleAudio}
-            clipboardShare={clipboardShare}
-            onToggleClipboardShare={onToggleClipboardShare}
-            colors={colors}
-          />
-
-          <FileTransferCard colors={colors} />
-
-          <EncoderExperimentChoices experiments={encoderExperiments} selected={encoderExperiment} requiresReconnect={requiresReconnect} colors={colors} t={t} onSelect={onSelectEncoderExperiment} />
-
-          <UdpStabilityControls
-            options={udpStabilityOptions}
-            selection={udpStability}
-            reconnectRequired={udpReconnectRequired}
-            reconnecting={udpReconnecting}
-            onChange={onSelectUdpStability}
-            onApplyReconnect={onApplyUdpStability}
-          />
-        </View>
-      ) : null}
+      <QualityProfileTabs profileId={profileId} styles={styles} colors={colors} onSelect={onSelectProfile} />
 
       {/* Section Header */}
       <View style={styles.sectionTitleRow}>
@@ -617,9 +756,14 @@ function DisplayListItem({
       <DisplayAspectMiniature width={display.width} height={display.height} colors={colors} />
 
       <View style={styles.displayMain}>
-        <Text style={styles.displayName} numberOfLines={1}>
-          {display.name}
-        </Text>
+        <View style={styles.displayNameRow}>
+          <Text style={styles.displayName} numberOfLines={1}>
+            {display.name}
+          </Text>
+          <View style={styles.displayIndexBadge}>
+            <Text style={styles.displayIndexText}>#{display.index}</Text>
+          </View>
+        </View>
         <View style={styles.chipsRow}>
           <View style={styles.chip}>
             <Text style={styles.chipText}>
@@ -673,14 +817,22 @@ function EmptyDisplayList({
 function ActiveStreamItem({
   stream,
   onStop,
+  onChangeResolution,
   styles,
+  colors,
 }: {
   stream: ActiveStream;
   onStop: (stream: ActiveStream) => void;
+  onChangeResolution: (stream: ActiveStream) => void;
   styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
 }) {
   const { t } = useAppLanguage();
   const handleStop = useCallback(() => onStop(stream), [onStop, stream]);
+  const handleChangeResolution = useCallback(
+    () => onChangeResolution(stream),
+    [onChangeResolution, stream],
+  );
   return (
     <View style={styles.streamCard}>
       <View style={styles.streamInfo}>
@@ -697,64 +849,137 @@ function ActiveStreamItem({
           <Text style={styles.transportBadge}>{transportBadgeLabel(stream.mediaTransport)}</Text>
         </View>
       </View>
-      <Pressable style={styles.stopBtn} onPress={handleStop}>
-        <Text style={styles.stopBtnText}>{t.common.stop}</Text>
-      </Pressable>
+      <View style={styles.streamActions}>
+        <Pressable
+          style={styles.btnChangeResolution}
+          onPress={handleChangeResolution}
+          accessibilityRole="button"
+          accessibilityLabel={t.viewer.changeResolution}
+        >
+          <Ionicons name="resize-outline" size={12} color={colors.btnSecondaryText} />
+          <Text style={styles.btnChangeResolutionText}>{t.viewer.changeResolution}</Text>
+        </Pressable>
+        <Pressable
+          style={styles.stopBtn}
+          onPress={handleStop}
+          accessibilityRole="button"
+          accessibilityLabel={t.common.stop}
+        >
+          <Text style={styles.stopBtnText}>{t.common.stop}</Text>
+        </Pressable>
+      </View>
     </View>
   );
+}
+
+interface ResolutionModalProps {
+  stream: ActiveStream | null;
+  onClose: () => void;
+  resizing: boolean;
+  onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
+  windowRatio: NonNullable<React.ComponentProps<typeof DisplaySizeCard>["windowRatio"]> | null;
+  onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
+  aspectSupported: boolean | null;
+  styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
+}
+
+function ResolutionModal({
+  stream,
+  onClose,
+  resizing,
+  onResizeSession,
+  windowRatio,
+  onSelectWindowRatio,
+  aspectSupported,
+  styles,
+  colors,
+}: ResolutionModalProps) {
+  const { t } = useAppLanguage();
+  if (!stream) return null;
+
+  return (
+    <Modal
+      visible={Boolean(stream)}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalSheet}>
+          <View style={styles.modalHeader}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Ionicons name="resize-outline" size={18} color={colors.textPrimary} />
+              <Text style={styles.modalTitle}>{t.viewer.resolutionSettingsTitle}</Text>
+            </View>
+            <Pressable
+              onPress={onClose}
+              style={styles.modalCloseBtn}
+              accessibilityRole="button"
+              accessibilityLabel={t.viewer.resolutionModalClose}
+            >
+              <Ionicons name="close" size={20} color={colors.textSecondary} />
+            </Pressable>
+          </View>
+          <ScrollView
+            contentContainerStyle={styles.modalScrollView}
+            showsVerticalScrollIndicator={false}
+          >
+            <DisplaySizeCard
+              stream={stream}
+              resizing={resizing}
+              onResizeSession={onResizeSession}
+              windowRatio={windowRatio}
+              onSelectWindowRatio={onSelectWindowRatio}
+              aspectSupported={aspectSupported !== false}
+              colors={colors}
+            />
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+interface CatalogFooterProps {
+  streams: ActiveStream[];
+  onStop: (stream: ActiveStream) => void;
+  onChangeResolution: (stream: ActiveStream) => void;
+  styles: ReturnType<typeof createCatalogStyles>;
+  colors: ThemeTokens;
 }
 
 function CatalogFooter({
   streams,
   onStop,
-  resizingSession,
-  onResizeSession,
-  windowRatios,
-  aspectSupported,
-  onSelectWindowRatio,
+  onChangeResolution,
   styles,
   colors,
-}: {
-  streams: ActiveStream[];
-  onStop: (stream: ActiveStream) => void;
-  resizingSession: number | null;
-  onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
-  windowRatios: Record<
-    number,
-    NonNullable<React.ComponentProps<typeof DisplaySizeCard>["windowRatio"]>
-  >;
-  aspectSupported: boolean | null;
-  onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
-  styles: ReturnType<typeof createCatalogStyles>;
-  colors: ThemeTokens;
-}) {
+}: CatalogFooterProps) {
   const { t } = useAppLanguage();
+
   if (streams.length === 0) return null;
-  // 스트림마다 자신의 크기 카드를 가진다 — 멀티 스트림에서 첫 창만 크기를
-  // 바꿀 수 있던 비대칭을 없앤다.
+
   return (
-    <View style={styles.activeSection}>
-      <View style={styles.activeSectionHeader}>
-        <Text style={styles.activeSectionTitle}>{t.viewer.activeStreamsSection}</Text>
-        <View style={styles.activeCountBadge}>
-          <Text style={styles.activeCountText}>{streams.length}</Text>
+    <View style={styles.footerContainer}>
+      <View style={styles.activeSection}>
+        <View style={styles.activeSectionHeader}>
+          <Text style={styles.activeSectionTitle}>{t.viewer.activeStreamsSection}</Text>
+          <View style={styles.activeCountBadge}>
+            <Text style={styles.activeCountText}>{streams.length}</Text>
+          </View>
         </View>
+        {streams.map((stream) => (
+          <ActiveStreamItem
+            key={stream.session}
+            stream={stream}
+            onStop={onStop}
+            onChangeResolution={onChangeResolution}
+            styles={styles}
+            colors={colors}
+          />
+        ))}
       </View>
-      {streams.map((stream) => (
-        <ActiveStreamItem key={stream.session} stream={stream} onStop={onStop} styles={styles} />
-      ))}
-      {streams.map((stream) => (
-        <DisplaySizeCard
-          key={`size-${stream.session}`}
-          stream={stream}
-          resizing={resizingSession === stream.session}
-          onResizeSession={onResizeSession}
-          windowRatio={windowRatios[stream.session] ?? null}
-          onSelectWindowRatio={onSelectWindowRatio}
-          aspectSupported={aspectSupported !== false}
-          colors={colors}
-        />
-      ))}
     </View>
   );
 }
@@ -762,12 +987,40 @@ function CatalogFooter({
 export default function Catalog() {
   const { colors, isDark } = useAppTheme();
   const { width } = useWindowDimensions();
+  const { t } = useAppLanguage();
   const density = panelDensityScale(width);
   const styles = useMemo(
     () => applyPanelDensity(createCatalogStyles(colors, isDark), density),
     [colors, isDark, density],
   );
   const model = useCatalogModel();
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [resolutionSession, setResolutionSession] = useState<number | null>(null);
+
+  const activeResolutionStream = useMemo(
+    () => model.streams.find((s) => s.session === resolutionSession) ?? null,
+    [model.streams, resolutionSession],
+  );
+
+  const udpReconnectRequired = model.udpSettingsDirty && model.streams.length > 0;
+  const hasSettingsNotice = udpReconnectRequired;
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
+
+  const handleChangeResolution = useCallback((stream: ActiveStream) => {
+    setResolutionSession(stream.session);
+  }, []);
+
+  const handleCloseResolution = useCallback(() => {
+    setResolutionSession(null);
+  }, []);
 
   const renderDisplay = useCallback(
     ({ item }: ListRenderItemInfo<DisplayInfo>) => (
@@ -794,6 +1047,39 @@ export default function Catalog() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
+      <Stack.Screen
+        options={{
+          headerRight: () => (
+            <Pressable
+              onPress={handleOpenSettings}
+              hitSlop={8}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={t.viewer.settingsTitle}
+            >
+              <Ionicons name="settings-outline" size={20} color={colors.textPrimary} />
+              {hasSettingsNotice ? (
+                <View
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    right: 6,
+                    width: 6,
+                    height: 6,
+                    borderRadius: 3,
+                    backgroundColor: colors.brandPrimary,
+                  }}
+                />
+              ) : null}
+            </Pressable>
+          ),
+        }}
+      />
       <FlatList
         style={styles.root}
         contentContainerStyle={styles.content}
@@ -808,33 +1094,14 @@ export default function Catalog() {
         ListHeaderComponent={
           <CatalogHeader
             error={model.visibleError}
-            host={model.host || `localhost:${DEFAULT_CONTROL_PORT}`}
+            host={model.host}
             loading={model.loading}
             profileId={model.profileId}
             refreshing={model.refreshing}
             onRefresh={model.handleRefresh}
             onSelectProfile={model.handleSelectProfile}
-            showFps={model.showFps}
-            onToggleFps={model.handleToggleFps}
-            localCursor={model.localCursor}
-            onToggleCursor={model.handleToggleCursor}
-            balancedPresentation={model.balancedPresentation}
-            onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
-            localAudio={model.localAudio}
-            opusAudio={model.opusAudio}
-            onToggleOpusAudio={model.handleToggleOpusAudio}
-            onToggleAudio={model.handleToggleAudio}
-            clipboardShare={model.clipboardShare}
-            onToggleClipboardShare={model.handleToggleClipboardShare}
-            encoderExperiments={model.selectedEncoderExperiments}
-            encoderExperiment={model.effectiveNextEncoderExperiment}
-            onSelectEncoderExperiment={model.handleSelectEncoderExperiment}
-            udpStabilityOptions={model.udpStabilityOptions}
-            udpStability={model.effectiveUdpStability}
-            udpReconnectRequired={model.udpSettingsDirty && model.streams.length > 0}
-            udpReconnecting={model.udpReconnecting}
-            onSelectUdpStability={model.handleSelectUdpStability}
-            onApplyUdpStability={model.handleApplyUdpStability}
+            onOpenSettings={handleOpenSettings}
+            hasSettingsNotice={hasSettingsNotice}
             styles={styles}
             colors={colors}
           />
@@ -847,15 +1114,51 @@ export default function Catalog() {
           <CatalogFooter
             streams={model.streams}
             onStop={model.stopStream}
-            resizingSession={model.resizingSession}
-            onResizeSession={model.handleResizeSession}
-            windowRatios={model.windowRatios}
-            aspectSupported={model.aspectSupported}
-            onSelectWindowRatio={model.handleSelectWindowAspectRatio}
+            onChangeResolution={handleChangeResolution}
             styles={styles}
             colors={colors}
           />
         }
+      />
+
+      <CatalogSettingsModal
+        visible={settingsOpen}
+        onClose={handleCloseSettings}
+        showFps={model.showFps}
+        onToggleFps={model.handleToggleFps}
+        localCursor={model.localCursor}
+        onToggleCursor={model.handleToggleCursor}
+        localAudio={model.localAudio}
+        onToggleAudio={model.handleToggleAudio}
+        clipboardShare={model.clipboardShare}
+        onToggleClipboardShare={model.handleToggleClipboardShare}
+        opusAudio={model.opusAudio}
+        onToggleOpusAudio={model.handleToggleOpusAudio}
+        balancedPresentation={model.balancedPresentation}
+        onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
+        encoderExperiments={model.selectedEncoderExperiments}
+        encoderExperiment={model.effectiveNextEncoderExperiment}
+        onSelectEncoderExperiment={model.handleSelectEncoderExperiment}
+        udpStabilityOptions={model.udpStabilityOptions}
+        udpStability={model.effectiveUdpStability}
+        udpReconnectRequired={udpReconnectRequired}
+        udpReconnecting={model.udpReconnecting}
+        onSelectUdpStability={model.handleSelectUdpStability}
+        onApplyUdpStability={model.handleApplyUdpStability}
+        styles={styles}
+        colors={colors}
+      />
+
+      <ResolutionModal
+        stream={activeResolutionStream}
+        onClose={handleCloseResolution}
+        resizing={model.resizingSession === activeResolutionStream?.session}
+        onResizeSession={model.handleResizeSession}
+        windowRatio={activeResolutionStream ? (model.windowRatios[activeResolutionStream.session] ?? null) : null}
+        onSelectWindowRatio={model.handleSelectWindowAspectRatio}
+        aspectSupported={model.aspectSupported}
+        styles={styles}
+        colors={colors}
       />
     </SafeAreaView>
   );

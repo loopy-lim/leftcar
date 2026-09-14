@@ -13,24 +13,29 @@
   --border-strong: #a1a1aa;
   --border-focus: #18181b;
 
-  --accent-primary: #09090b;
-  --accent-primary-hover: #27272a;
-  --accent-primary-subtle: #f4f4f5;
-  --accent-primary-border: #e4e4e7;
+  --accent-primary: #2563eb;
+  --accent-primary-hover: #1d4ed8;
+  --accent-primary-subtle: #eff6ff;
+  --accent-primary-border: #bfdbfe;
 
-  --accent-emerald: #18181b;
-  --accent-emerald-hover: #27272a;
-  --accent-emerald-subtle: #f4f4f5;
-  --accent-emerald-border: #d4d4d8;
+  --accent-blue: #2563eb;
+  --accent-blue-hover: #1d4ed8;
+  --accent-blue-subtle: #eff6ff;
+  --accent-blue-border: #bfdbfe;
 
-  --accent-amber: #52525b;
-  --accent-amber-subtle: #f4f4f5;
-  --accent-amber-border: #d4d4d8;
+  --accent-emerald: #059669;
+  --accent-emerald-hover: #047857;
+  --accent-emerald-subtle: #ecfdf5;
+  --accent-emerald-border: #a7f3d0;
 
-  --accent-rose: #18181b;
-  --accent-rose-hover: #27272a;
-  --accent-rose-subtle: #f4f4f5;
-  --accent-rose-border: #d4d4d8;
+  --accent-amber: #d97706;
+  --accent-amber-subtle: #fffbeb;
+  --accent-amber-border: #fde68a;
+
+  --accent-rose: #dc2626;
+  --accent-rose-hover: #b91c1c;
+  --accent-rose-subtle: #fef2f2;
+  --accent-rose-border: #fecaca;
 
   --text-primary: #09090b;
   --text-secondary: #52525b;
@@ -63,24 +68,29 @@
     --border-strong: rgba(255, 255, 255, 0.25);
     --border-focus: rgba(255, 255, 255, 0.6);
 
-    --accent-primary: #fafafa;
-    --accent-primary-hover: #e4e4e7;
-    --accent-primary-subtle: rgba(255, 255, 255, 0.08);
-    --accent-primary-border: rgba(255, 255, 255, 0.16);
+    --accent-primary: #3b82f6;
+    --accent-primary-hover: #2563eb;
+    --accent-primary-subtle: rgba(59, 130, 246, 0.15);
+    --accent-primary-border: rgba(59, 130, 246, 0.3);
 
-    --accent-emerald: #fafafa;
-    --accent-emerald-hover: #e4e4e7;
-    --accent-emerald-subtle: rgba(255, 255, 255, 0.08);
-    --accent-emerald-border: rgba(255, 255, 255, 0.16);
+    --accent-blue: #3b82f6;
+    --accent-blue-hover: #2563eb;
+    --accent-blue-subtle: rgba(59, 130, 246, 0.15);
+    --accent-blue-border: rgba(59, 130, 246, 0.3);
 
-    --accent-amber: #a1a1aa;
-    --accent-amber-subtle: rgba(255, 255, 255, 0.08);
-    --accent-amber-border: rgba(255, 255, 255, 0.16);
+    --accent-emerald: #10b981;
+    --accent-emerald-hover: #059669;
+    --accent-emerald-subtle: rgba(16, 185, 129, 0.14);
+    --accent-emerald-border: rgba(16, 185, 129, 0.3);
 
-    --accent-rose: #fafafa;
-    --accent-rose-hover: #e4e4e7;
-    --accent-rose-subtle: rgba(255, 255, 255, 0.08);
-    --accent-rose-border: rgba(255, 255, 255, 0.16);
+    --accent-amber: #f59e0b;
+    --accent-amber-subtle: rgba(245, 158, 11, 0.14);
+    --accent-amber-border: rgba(245, 158, 11, 0.3);
+
+    --accent-rose: #ef4444;
+    --accent-rose-hover: #dc2626;
+    --accent-rose-subtle: rgba(239, 68, 68, 0.15);
+    --accent-rose-border: rgba(239, 68, 68, 0.3);
 
     --text-primary: #fafafa;
     --text-secondary: #a1a1aa;
@@ -110,24 +120,29 @@
   --border-strong: rgba(255, 255, 255, 0.25);
   --border-focus: rgba(255, 255, 255, 0.6);
 
-  --accent-primary: #fafafa;
-  --accent-primary-hover: #e4e4e7;
-  --accent-primary-subtle: rgba(255, 255, 255, 0.08);
-  --accent-primary-border: rgba(255, 255, 255, 0.16);
+  --accent-primary: #3b82f6;
+  --accent-primary-hover: #2563eb;
+  --accent-primary-subtle: rgba(59, 130, 246, 0.15);
+  --accent-primary-border: rgba(59, 130, 246, 0.3);
 
-  --accent-emerald: #fafafa;
-  --accent-emerald-hover: #e4e4e7;
-  --accent-emerald-subtle: rgba(255, 255, 255, 0.08);
-  --accent-emerald-border: rgba(255, 255, 255, 0.16);
+  --accent-blue: #3b82f6;
+  --accent-blue-hover: #2563eb;
+  --accent-blue-subtle: rgba(59, 130, 246, 0.15);
+  --accent-blue-border: rgba(59, 130, 246, 0.3);
 
-  --accent-amber: #a1a1aa;
-  --accent-amber-subtle: rgba(255, 255, 255, 0.08);
-  --accent-amber-border: rgba(255, 255, 255, 0.16);
+  --accent-emerald: #10b981;
+  --accent-emerald-hover: #059669;
+  --accent-emerald-subtle: rgba(16, 185, 129, 0.14);
+  --accent-emerald-border: rgba(16, 185, 129, 0.3);
 
-  --accent-rose: #fafafa;
-  --accent-rose-hover: #e4e4e7;
-  --accent-rose-subtle: rgba(255, 255, 255, 0.08);
-  --accent-rose-border: rgba(255, 255, 255, 0.16);
+  --accent-amber: #f59e0b;
+  --accent-amber-subtle: rgba(245, 158, 11, 0.14);
+  --accent-amber-border: rgba(245, 158, 11, 0.3);
+
+  --accent-rose: #ef4444;
+  --accent-rose-hover: #dc2626;
+  --accent-rose-subtle: rgba(239, 68, 68, 0.15);
+  --accent-rose-border: rgba(239, 68, 68, 0.3);
 
   --text-primary: #fafafa;
   --text-secondary: #a1a1aa;
@@ -204,8 +219,8 @@ html, body, #root {
   width: 28px;
   height: 28px;
   border-radius: 7px;
-  background: var(--btn-primary-bg);
-  color: var(--btn-primary-text);
+  background: var(--accent-primary);
+  color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -260,9 +275,9 @@ html, body, #root {
 }
 
 .pill-active {
-  background: var(--bg-surface-subtle);
-  border: 1px solid var(--border-card);
-  color: var(--text-primary);
+  background: var(--accent-emerald-subtle);
+  border: 1px solid var(--accent-emerald-border);
+  color: var(--accent-emerald);
 }
 
 .pill-idle {
@@ -313,12 +328,13 @@ html, body, #root {
 }
 
 .banner-warning {
-  border-color: var(--border-strong);
+  background: var(--accent-amber-subtle);
+  border: 1px solid var(--accent-amber-border);
   color: var(--text-primary);
 }
 
 .banner-warning strong {
-  color: var(--text-primary);
+  color: var(--accent-amber);
   font-size: 12px;
 }
 
@@ -329,8 +345,14 @@ html, body, #root {
 }
 
 .banner-danger {
-  border-color: var(--border-strong);
+  background: var(--accent-rose-subtle);
+  border: 1px solid var(--accent-rose-border);
   color: var(--text-primary);
+}
+
+.banner-danger strong {
+  color: var(--accent-rose);
+  font-size: 12px;
 }
 
 .banner-text {
@@ -536,9 +558,9 @@ html, body, #root {
   gap: 5px;
   font-size: 11px;
   font-weight: 700;
-  color: var(--text-primary);
-  background: var(--bg-surface-subtle);
-  border: 1px solid var(--border-card);
+  color: var(--accent-emerald);
+  background: var(--accent-emerald-subtle);
+  border: 1px solid var(--accent-emerald-border);
   padding: 2px 8px;
   border-radius: 12px;
 }
@@ -698,19 +720,19 @@ html, body, #root {
 .signal-bars .bar-3 { height: 11px; }
 
 .signal-bars .bar.active {
-  background-color: var(--text-primary);
+  background-color: var(--accent-emerald);
 }
 
 .font-emerald {
-  color: var(--text-primary);
+  color: var(--accent-emerald);
 }
 
 .font-blue {
-  color: var(--text-primary);
+  color: var(--accent-blue);
 }
 
 .font-rose {
-  color: var(--text-muted);
+  color: var(--accent-rose);
 }
 
 /* Inspector Telemetry Panel */
@@ -1510,23 +1532,79 @@ html, body, #root {
    Footer Status Bar
    ========================================================================= */
 .host-footer {
-  height: 36px;
-  min-height: 36px;
-  padding: 0 18px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   background: var(--bg-surface);
   border-top: 1px solid var(--border-subtle);
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .footer-status-info {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footer-status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.footer-active-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.footer-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--brand);
+  background: var(--brand-glow, rgba(59, 130, 246, 0.1));
+  border: 1px solid var(--brand-border, rgba(59, 130, 246, 0.25));
+  user-select: none;
+}
+
+.footer-settings-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.footer-settings-btn:hover {
+  background-color: var(--bg-surface-subtle);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
 }
 
 .footer-divider {
@@ -1579,3 +1657,168 @@ html, body, #root {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* File Share Card */
+.file-share-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.file-share-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.file-share-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.file-share-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.file-share-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.file-share-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.file-share-error {
+  font-size: 11px;
+  color: var(--status-danger, #ef4444);
+}
+
+.file-share-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+
+.file-share-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-share-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--bg-surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+
+.file-share-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.file-share-item-size {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* =========================================================================
+   Host Settings Modal
+   ========================================================================= */
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 2px;
+}
+
+.settings-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-item-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.settings-item-card:hover {
+  border-color: var(--border-card);
+}
+
+.settings-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-item-icon {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+
+.settings-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-item-desc {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.settings-item-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--danger, #e5484d);
+}
+
+

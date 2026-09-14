@@ -15,6 +15,7 @@ internal class TextInputRelay(
     private val sendBackspace: (Int) -> Unit,
     private val sendForwardDelete: (Int) -> Unit,
     private val sendEnter: () -> Unit,
+    private val sendKey: (Int) -> Unit = {},
 ) {
     companion object {
         /** android.view.KeyEvent 키코드 미러 (JVM 순수 유지를 위한 복사본). */
@@ -22,6 +23,13 @@ internal class TextInputRelay(
         const val KEYCODE_DEL = 67
         const val KEYCODE_FORWARD_DEL = 112
         const val ACTION_DOWN = 0
+
+        /**
+         * IME가 sendKeyEvent로 합성하는 탐색 계열 키 — 화살표·Tab·PgUp/PgDn·
+         * Esc·Home/End. 삭제 3종 외에는 여기서 놓치면 사라지므로 키 쌍으로
+         * 전달한다(DPAD 19-22, TAB 61, PAGE_UP/DOWN 92/93, ESC 111, HOME/END 122/123).
+         */
+        val NAVIGATION_KEYCODES = setOf(19, 20, 21, 22, 61, 92, 93, 111, 122, 123)
 
         /**
          * UDP 컨트롤 버퍼는 512바이트다. 헤더(10B)·토큰·연속 패킷 간격을
@@ -68,13 +76,14 @@ internal class TextInputRelay(
         sendEnter()
     }
 
-    /** sendKeyEvent로 들어오는 하드웨어식 키 이벤트(백스페이스·Enter). */
+    /** sendKeyEvent로 들어오는 하드웨어식 키 이벤트(백스페이스·Enter·탐색키). */
     fun handleKeyCode(keyCode: Int, action: Int) {
         if (action != ACTION_DOWN) return
         when (keyCode) {
             KEYCODE_DEL -> sendBackspace(1)
             KEYCODE_FORWARD_DEL -> sendForwardDelete(1)
             KEYCODE_ENTER -> sendEnter()
+            in NAVIGATION_KEYCODES -> sendKey(keyCode)
         }
     }
 

@@ -72,6 +72,9 @@ pub struct GrantView {
     pub source_ids: Vec<String>,
     pub revision: u64,
     pub review_required: bool,
+    /// Standing remote-input approval for this device. Screen grants and the
+    /// input approval are separate decisions: viewing never implies input.
+    pub input: bool,
     pub persistence_error: Option<String>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -79,6 +82,9 @@ struct Record {
     source_ids: Vec<String>,
     revision: u64,
     reviewed: bool,
+    /// 기기별 상시 원격 입력 승인. 화면 승인과 달리 기본값은 꺼짐이다.
+    #[serde(default)]
+    input: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -156,6 +162,7 @@ impl GrantStore {
             source_ids: record.source_ids,
             revision: record.revision,
             review_required: !record.reviewed,
+            input: record.input,
             persistence_error: self.errors.get(owner).cloned(),
         }
     }
@@ -166,6 +173,17 @@ impl GrantStore {
                 .devices
                 .get(owner)
                 .is_some_and(|r| r.reviewed && r.source_ids.iter().any(|id| id == source))
+    }
+
+    /// 상시 원격 입력 승인 여부. 화면 승인과 같은 재검토 규율을 따른다 —
+    /// Host 재시작 직후(미검토 상태)에는 자동 활성화되지 않는다.
+    pub fn input_allowed(&self, owner: &str) -> bool {
+        !self.closed
+            && self
+                .journal
+                .devices
+                .get(owner)
+                .is_some_and(|r| r.reviewed && r.input)
     }
     pub fn access(&mut self, owner: &str, source: &str) -> Result<CaptureAccess, String> {
         if !self.allows(owner, source) {
@@ -217,6 +235,8 @@ impl GrantStore {
             source_ids: sources,
             revision: old.revision + 1,
             reviewed: true,
+            // 화면 목록 편집은 별개 결정인 입력 승인을 건드리지 않는다.
+            input: old.input,
         };
         self.journal.devices.insert(owner.into(), next);
         let result = self.path.as_ref().map_or(Ok(()), |path| {
@@ -244,6 +264,33 @@ impl GrantStore {
             .iter()
             .flat_map(|owner| self.invalidate(owner))
             .collect()
+    }
+
+    /// 기기별 상시 원격 입력 승인을 저장한다. 소스 목록과 무관한 단독 결정이므로
+    /// 라이브 캡처 리스를 무효화하지 않는다(세션 단위 적용은 호출자가 맡는다).
+    /// 저장 실패 시 되돌려 실패를 반환한다 — 승인의 지속 여부가 불확실하면
+    /// 성공으로 보고하지 않는다.
+    pub fn set_input(&mut self, owner: &str, allowed: bool) -> Result<GrantView, String> {
+        if self.closed {
+            return Err("Host is shutting down".into());
+        }
+        let old = self.journal.devices.get(owner).cloned().unwrap_or_default();
+        let next = Record {
+            source_ids: old.source_ids.clone(),
+            revision: old.revision + 1,
+            reviewed: old.reviewed,
+            input: allowed,
+        };
+        self.journal.devices.insert(owner.into(), next);
+        if let Some(path) = self.path.as_ref() {
+            if let Err(error) = write_journal(self.writer.as_ref(), path, &self.journal) {
+                self.journal.devices.insert(owner.into(), old);
+                self.errors.insert(owner.into(), error.clone());
+                return Err(format!("source_grant_persistence_failed: {error}"));
+            }
+        }
+        self.errors.remove(owner);
+        Ok(self.view(owner))
     }
     /// Only after the admission fence, lease drain and backend retirement.
     pub fn finish_shutdown(&mut self) -> Result<(), String> {

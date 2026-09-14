@@ -27,7 +27,19 @@ export const colors = {
     textMuted: "#71717A",
     textDim: "#A1A1AA",
 
-    statusDot: "#09090B",
+    brandPrimary: "#2563EB",
+    brandHover: "#1D4ED8",
+    brandSubtle: "#EFF6FF",
+
+    statusLive: "#059669",
+    statusLiveSubtle: "#ECFDF5",
+    statusLiveBorder: "#A7F3D0",
+    statusWarning: "#D97706",
+    statusWarningSubtle: "#FFFBEB",
+    statusDanger: "#DC2626",
+    statusDangerSubtle: "#FEF2F2",
+
+    statusDot: "#059669",
     chipBg: "#F4F4F5",
     chipBorder: "#E4E4E7",
     chipText: "#52525B",
@@ -55,7 +67,19 @@ export const colors = {
     textMuted: "#71717A",
     textDim: "#52525B",
 
-    statusDot: "#FAFAFA",
+    brandPrimary: "#3B82F6",
+    brandHover: "#2563EB",
+    brandSubtle: "rgba(59, 130, 246, 0.15)",
+
+    statusLive: "#10B981",
+    statusLiveSubtle: "rgba(16, 185, 129, 0.14)",
+    statusLiveBorder: "rgba(16, 185, 129, 0.3)",
+    statusWarning: "#F59E0B",
+    statusWarningSubtle: "rgba(245, 158, 11, 0.14)",
+    statusDanger: "#EF4444",
+    statusDangerSubtle: "rgba(239, 68, 68, 0.15)",
+
+    statusDot: "#10B981",
     chipBg: "#1E1E24",
     chipBorder: "rgba(255, 255, 255, 0.12)",
     chipText: "#A1A1AA",

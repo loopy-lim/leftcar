@@ -144,7 +144,7 @@ export function UdpStabilityControls({
     <View
       style={{
         gap: 12,
-        borderRadius: 12,
+        borderRadius: 14,
         borderWidth: 1,
         borderColor: colors.borderSubtle,
         backgroundColor: colors.bgSurface,

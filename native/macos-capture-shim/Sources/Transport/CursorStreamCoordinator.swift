@@ -1,13 +1,16 @@
 import Foundation
 import CoreGraphics
 
-/// Polling rate for the LCD1 cursor stream — the same 2x-stream-FPS policy
-/// the viewer's LCI1 pointer plane uses (`InputScheduler::polling_rate_hz`),
-/// clamped to a bounded datagram budget. A zero or tiny FPS falls back to the
-/// 30Hz floor instead of dividing by zero.
+/// Polling rate for the LCD1 cursor stream. The viewer's LCI1 pointer plane
+/// now floors at 120Hz regardless of stream FPS — pointer motion must not
+/// inherit video pacing, or the cursor renders at half the panel rate and
+/// feels steppy. The host cursor stream matches that floor so an input move
+/// observed at the event tap leaves the host within one 120Hz tick, clamped
+/// to a bounded datagram budget. A zero or tiny FPS falls back to the 120Hz
+/// floor instead of dividing by zero.
 func cursorPollingHz(fps: UInt32) -> UInt32 {
     guard fps < 120 else { return 240 }
-    return max(30, min(240, fps &* 2))
+    return max(120, min(240, fps &* 2))
 }
 
 /// LCD1 cursor wire format (sealed at the socket boundary like every host

@@ -19,6 +19,7 @@ import {
   RefreshCw,
   EyeOff,
   Lock,
+  Settings,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -60,43 +61,6 @@ type HostErrorKind =
   | "network"
   | "service"
   | "generic";
-
-interface FooterToggleProps {
-  icon: LucideIcon;
-  label: string;
-  title: string;
-  active: boolean;
-  onToggle: () => void;
-  pending: boolean;
-  error: string | null;
-  onRetry: () => void;
-  retryText: string;
-  onText: string;
-  offText: string;
-}
-
-/** Footer gate toggle (clipboard share / lock-on-disconnect / curtain). */
-function FooterToggle(props: FooterToggleProps) {
-  const Icon = props.icon;
-  return (
-    <span>
-    <button
-      type="button"
-      disabled={props.pending}
-      aria-busy={props.pending}
-      className={controlToggleVariants({ active: props.active })}
-      onClick={props.onToggle}
-      title={props.title}
-      aria-pressed={props.active}
-    >
-      <Icon size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
-      {props.label} <strong>{props.active ? props.onText : props.offText}</strong>
-      {props.pending && " …"}
-    </button>
-    {props.error && <span role="alert">{props.label}: {props.error} <button type="button" disabled={props.pending} onClick={props.onRetry}>{props.retryText}</button></span>}
-    </span>
-  );
-}
 
 interface HostErrorView {
   message: string;
@@ -297,6 +261,7 @@ interface DashboardHeaderProps {
   onHelp: () => void;
   onTheme: () => void;
   onToggleLanguage: () => void;
+  onOpenSettings: () => void;
   onRefresh: () => void;
 }
 
@@ -311,6 +276,7 @@ function DashboardHeader({
   onHelp,
   onTheme,
   onToggleLanguage,
+  onOpenSettings,
   onRefresh,
 }: DashboardHeaderProps) {
   const ThemeIcon = { light: Sun, dark: Moon, system: Laptop }[themeMode];
@@ -379,7 +345,16 @@ function DashboardHeader({
           aria-label={`${t.common.theme}: ${themeLabel}`}
         >
           <ThemeIcon size={15} />
-        </button>        <button
+        </button>
+        <button
+          className={buttonVariants({ variant: "icon" })}
+          onClick={onOpenSettings}
+          title={`${t.host.settingsTitle} (${t.host.shortcutSettings})`}
+          aria-label={t.host.settingsTitle}
+        >
+          <Settings size={15} />
+        </button>
+        <button
           className={buttonVariants({ variant: "icon" })}
           onClick={onRefresh}
           title={`${t.common.refresh} (${t.host.shortcutRefresh})`}
@@ -400,24 +375,11 @@ interface DashboardFooterProps {
   clipboardShare: boolean;
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
-  clipboardPending: boolean;
-  lockPending: boolean;
-  curtainPending: boolean;
-  clipboardError: string | null;
-  lockError: string | null;
-  curtainError: string | null;
-  retryClipboard: () => void;
-  retryLock: () => void;
-  retryCurtain: () => void;
   platform: HostSnapshotView["platform"];
-  lastUpdated: Date;
-  language: SupportedLanguage;
   t: TranslationSchema;
   onCopyAddress: () => void;
   onRequestPermission: () => void;
-  onToggleClipboardShare: () => void;
-  onToggleLockOnDisconnect: () => void;
-  onTogglePrivacyCurtain: () => void;
+  onOpenSettings: () => void;
 }
 
 function DashboardFooter(props: DashboardFooterProps) {
@@ -428,8 +390,8 @@ function DashboardFooter(props: DashboardFooterProps) {
     linux: t.common.myComputer,
   };
   const platformLabel = platformLabels[props.platform];
-
   const addressText = formatHostAddress(props.lanIp, props.controlPort);
+  const hasActivePrivacyFeature = props.clipboardShare || props.lockOnDisconnect || props.privacyCurtain;
 
   return (
     <footer className="host-footer">
@@ -468,54 +430,163 @@ function DashboardFooter(props: DashboardFooterProps) {
             </strong>
           )}
         </button>
-        {/* 클립보드 공유 호스트 게이트(U5) — 세션 입력 토글과 같은 스타일. */}
-        <FooterToggle
-          icon={ClipboardCheck}
-          label={t.host.clipboardShareLabel}
-          title={t.host.clipboardShareDesc}
-          active={props.clipboardShare}
-          pending={props.clipboardPending}
-          error={props.clipboardError}
-          onRetry={props.retryClipboard}
-          retryText={t.common.retry}
-          onToggle={props.onToggleClipboardShare}
-          onText={t.host.clipboardShareOn}
-          offText={t.host.clipboardShareOff}
-        />
-        {/* 세션 종료 후 자동 잠금 — 마지막 스트림이 끝나면 화면을 잠근다. */}
-        <FooterToggle
-          icon={Lock}
-          label={t.host.lockOnDisconnectLabel}
-          title={t.host.lockOnDisconnectDesc}
-          active={props.lockOnDisconnect}
-          pending={props.lockPending}
-          error={props.lockError}
-          onRetry={props.retryLock}
-          retryText={t.common.retry}
-          onToggle={props.onToggleLockOnDisconnect}
-          onText={t.host.clipboardShareOn}
-          offText={t.host.clipboardShareOff}
-        />
-        {/* 프라이버시 커튼 — 스트리밍 중 물리 화면을 검게 가린다(macOS). */}
-        <FooterToggle
-          icon={EyeOff}
-          label={t.host.privacyCurtainLabel}
-          title={t.host.privacyCurtainDesc}
-          active={props.privacyCurtain}
-          pending={props.curtainPending}
-          error={props.curtainError}
-          onRetry={props.retryCurtain}
-          retryText={t.common.retry}
-          onToggle={props.onTogglePrivacyCurtain}
-          onText={t.host.clipboardShareOn}
-          offText={t.host.clipboardShareOff}
-        />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {/* 폴링 타임스탬프는 소음일 뿐이다 — 상태는 배너가 문제일 때만 말한다. */}
+
+      <div className="footer-status-right">
+        {hasActivePrivacyFeature && (
+          <div className="footer-active-tags" aria-label={t.host.privacySection}>
+            {props.clipboardShare && (
+              <span className="footer-tag-pill" title={t.host.clipboardShareDesc}>
+                <ClipboardCheck size={11} /> {t.host.clipboardShareLabel}
+              </span>
+            )}
+            {props.lockOnDisconnect && (
+              <span className="footer-tag-pill" title={t.host.lockOnDisconnectDesc}>
+                <Lock size={11} /> {t.host.lockOnDisconnectLabel}
+              </span>
+            )}
+            {props.privacyCurtain && (
+              <span className="footer-tag-pill" title={t.host.privacyCurtainDesc}>
+                <EyeOff size={11} /> {t.host.privacyCurtainLabel}
+              </span>
+            )}
+          </div>
+        )}
+        <button
+          type="button"
+          className="footer-settings-btn"
+          onClick={props.onOpenSettings}
+          title={`${t.host.settingsTitle} (${t.host.shortcutSettings})`}
+        >
+          <Settings size={12} />
+          <span>{t.common.settings}</span>
+        </button>
         <span className="footer-timestamp">{platformLabel}</span>
       </div>
     </footer>
+  );
+}
+
+interface HostSettingsModalProps {
+  onClose: () => void;
+  t: TranslationSchema;
+  clipboardShare: boolean;
+  lockOnDisconnect: boolean;
+  privacyCurtain: boolean;
+  clipboardPending: boolean;
+  lockPending: boolean;
+  curtainPending: boolean;
+  clipboardError: string | null;
+  lockError: string | null;
+  curtainError: string | null;
+  onToggleClipboardShare: () => void;
+  onToggleLockOnDisconnect: () => void;
+  onTogglePrivacyCurtain: () => void;
+  retryClipboard: () => void;
+  retryLock: () => void;
+  retryCurtain: () => void;
+}
+
+function HostSettingsModal(props: HostSettingsModalProps) {
+  const { t, onClose } = props;
+
+  const settingsItems = [
+    {
+      icon: ClipboardCheck,
+      title: t.host.clipboardShareLabel,
+      desc: t.host.clipboardShareDesc,
+      active: props.clipboardShare,
+      pending: props.clipboardPending,
+      error: props.clipboardError,
+      onToggle: props.onToggleClipboardShare,
+      onRetry: props.retryClipboard,
+    },
+    {
+      icon: Lock,
+      title: t.host.lockOnDisconnectLabel,
+      desc: t.host.lockOnDisconnectDesc,
+      active: props.lockOnDisconnect,
+      pending: props.lockPending,
+      error: props.lockError,
+      onToggle: props.onToggleLockOnDisconnect,
+      onRetry: props.retryLock,
+    },
+    {
+      icon: EyeOff,
+      title: t.host.privacyCurtainLabel,
+      desc: t.host.privacyCurtainDesc,
+      active: props.privacyCurtain,
+      pending: props.curtainPending,
+      error: props.curtainError,
+      onToggle: props.onTogglePrivacyCurtain,
+      onRetry: props.retryCurtain,
+    },
+  ];
+
+  return (
+    <Modal ariaLabel={t.host.settingsTitle} onClose={onClose} closeOnOverlayClick>
+      <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 520 }}>
+        <div className="modal-title-bar">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Settings size={16} />
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>{t.host.settingsTitle}</h3>
+          </div>
+          <button
+            className={buttonVariants({ variant: "close" })}
+            onClick={onClose}
+            aria-label={t.host.settingsModalClose}
+          >
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="modal-scroll-area" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="settings-section">
+            <span className="settings-section-title">{t.host.privacySection}</span>
+            <div className="settings-cards-list">
+              {settingsItems.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div className="settings-item-card" key={item.title}>
+                    <div className="settings-item-info">
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Icon size={15} className="settings-item-icon" />
+                        <span className="settings-item-name">{item.title}</span>
+                      </div>
+                      <p className="settings-item-desc">{item.desc}</p>
+                      {item.error && (
+                        <div className="settings-item-error" role="alert">
+                          <span>{item.error}</span>
+                          <button
+                            type="button"
+                            className={buttonVariants({ variant: "ghost", size: "sm" })}
+                            onClick={item.onRetry}
+                            disabled={item.pending}
+                          >
+                            {t.common.retry}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={item.pending}
+                      aria-busy={item.pending}
+                      className={controlToggleVariants({ active: item.active })}
+                      onClick={item.onToggle}
+                      aria-pressed={item.active}
+                    >
+                      {item.active ? t.host.clipboardShareOn : t.host.clipboardShareOff}
+                      {item.pending && " …"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -850,62 +921,56 @@ function FileShareCard({ t }: { t: TranslationSchema }) {
   };
 
   return (
-    <section
-      className="file-share-card"
-      aria-label={t.host.fileShareSection}
-      style={{
-        border: "1px solid var(--border-subtle, rgba(128,128,128,0.3))",
-        borderRadius: 12,
-        padding: "12px 16px",
-        marginBottom: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <button
-          className={controlToggleVariants({ active: enabled })}
-          disabled={busy}
-          onClick={() => void runShareAction(() => invoke("set_file_share", { enabled: !enabled }))}
-          aria-pressed={enabled}
-        >
-          {enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}
-        </button>
-        <button
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-          disabled={busy}
-          onClick={() => void runShareAction(() => invoke("add_share_files"))}
-        >
-          {t.host.fileShareAdd}
-        </button>
-      </div>
-      <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{t.host.fileShareHint}</span>
-      {actionError && (
-        <span style={{ fontSize: 11, color: "var(--danger, #e5484d)" }} role="alert">{actionError}</span>
-      )}
-      {entries.length === 0 ? (
-        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t.host.fileShareEmpty}</span>
-      ) : (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
-          {entries.map((entry) => (
-            <li
-              key={entry.queueId}
-              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12 }}
+    <section className="file-share-card" aria-label={t.host.fileShareSection}>
+      <div className="file-share-header">
+        <div className="file-share-meta">
+          <span className="file-share-title">{t.host.fileShareSection}</span>
+          <span className="file-share-hint">{t.host.fileShareHint}</span>
+        </div>
+        <div className="file-share-actions">
+          <button
+            className={controlToggleVariants({ active: enabled })}
+            disabled={busy}
+            onClick={() => void runShareAction(() => invoke("set_file_share", { enabled: !enabled }))}
+            aria-pressed={enabled}
+          >
+            {enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}
+          </button>
+          {enabled && (
+            <button
+              className={buttonVariants({ variant: "ghost", size: "sm" })}
+              disabled={busy}
+              onClick={() => void runShareAction(() => invoke("add_share_files"))}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {entry.name} <span style={{ color: "var(--text-dim)" }}>({formatShareFileSize(entry.size)})</span>
-              </span>
-              <button
-                className={buttonVariants({ variant: "close" })}
-                onClick={() => void runShareAction(() => invoke("remove_share_file", { queueId: entry.queueId }))}
-                aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
-              >
-                <X size={13} />
-              </button>
-            </li>
-          ))}
-        </ul>
+              {t.host.fileShareAdd}
+            </button>
+          )}
+        </div>
+      </div>
+      {actionError && (
+        <span className="file-share-error" role="alert">{actionError}</span>
+      )}
+      {enabled && (
+        entries.length === 0 ? (
+          <span className="file-share-empty">{t.host.fileShareEmpty}</span>
+        ) : (
+          <ul className="file-share-list">
+            {entries.map((entry) => (
+              <li key={entry.queueId} className="file-share-list-item">
+                <span className="file-share-item-name">
+                  {entry.name} <span className="file-share-item-size">({formatShareFileSize(entry.size)})</span>
+                </span>
+                <button
+                  className={buttonVariants({ variant: "close" })}
+                  onClick={() => void runShareAction(() => invoke("remove_share_file", { queueId: entry.queueId }))}
+                  aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
+                >
+                  <X size={13} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )
       )}
     </section>
   );
@@ -1005,95 +1070,11 @@ function StreamsListView({
   );
 }
 
-function Dashboard() {
-  const [language, setLanguage] = useState<SupportedLanguage>(() => {
-    const saved = localStorage.getItem("leftcar_lang") as SupportedLanguage | null;
-    if (saved === "ko" || saved === "en") return saved;
-    const navLang = navigator.language?.toLowerCase() || "ko";
-    return navLang.startsWith("en") ? "en" : "ko";
-  });
-
-  useEffect(() => {
-    localStorage.setItem("leftcar_lang", language);
-    document.documentElement.lang = language;
-  }, [language]);
-
-  const toggleLanguage = useCallback(() => {
-    setLanguage((prev) => (prev === "ko" ? "en" : "ko"));
-  }, []);
-
-  const t = getTranslation(language);
-
-  const {
-    sessions,
-    terminationNotice,
-    dismissTerminationNotice,
-    error,
-    inputPermission,
-    screenPermission,
-    platform,
-    controlPort,
-    lanIp,
-    lastUpdated,
-    refresh,
-  } = useHostStatus(t);
+function useSessionActions(t: TranslationSchema, refresh: () => Promise<void>) {
   const [inputActionError, setInputActionError] = useState<string | null>(null);
   const [inputBusy, setInputBusy] = useState<number | "permission" | null>(null);
   const [qualityBusy, setQualityBusy] = useState<number | null>(null);
-  const [showInspector, setShowInspector] = useState(false);
-  const [showPairingModal, setShowPairingModal] = useState(false);
-  const [showHelpModal, setShowHelpModal] = useState(false);
   const [pendingStopSession, setPendingStopSession] = useState<SessionRow | null>(null);
-  const [copiedToast, setCopiedToast] = useState(false);
-  const [theme, setTheme] = useState<ThemeMode>(() => {
-    return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
-  });
-
-  const isStreaming = sessions.length > 0;
-  useIndicatorWindow(isStreaming);
-
-  // 클립보드 공유 호스트 게이트(U5) — 상태·토글은 Privacy 모듈의 훅이
-  // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
-  const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
-
-  // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
-  // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
-  const {
-    lockOnDisconnect,
-    privacyCurtain,
-    toggleLockOnDisconnect,
-    togglePrivacyCurtain,
-    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
-  } = usePrivacySettings();
-
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === "system") {
-      root.removeAttribute("data-theme");
-    } else {
-      root.setAttribute("data-theme", theme);
-    }
-    localStorage.setItem("leftcar_theme", theme);
-  }, [theme]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Esc는 각 모달(네이티브 dialog cancel)이 자기 닫기를 소유한다 — 전역
-      // 핸들러가 닫으면 중첩된 확인 다이얼로그까지 한 번에 걷어진다.
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
-        e.preventDefault();
-        setShowPairingModal((prev) => !prev);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
-        e.preventDefault();
-        setShowHelpModal((prev) => !prev);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
-        e.preventDefault();
-        void refresh();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [refresh]);
 
   const openAccessibilitySettings = async () => {
     try {
@@ -1165,6 +1146,237 @@ function Dashboard() {
       () => setPendingStopSession(null),
     );
 
+  return {
+    inputActionError,
+    setInputActionError,
+    inputBusy,
+    qualityBusy,
+    pendingStopSession,
+    setPendingStopSession,
+    openAccessibilitySettings,
+    requestInputPermission,
+    toggleSessionInput,
+    setSessionQuality,
+    forceStopSession,
+  };
+}
+
+interface DashboardModalsProps {
+  showPairingModal: boolean;
+  showHelpModal: boolean;
+  showSettingsModal: boolean;
+  pendingStopSession: SessionRow | null;
+  inputBusy: number | "permission" | null;
+  language: SupportedLanguage;
+  t: TranslationSchema;
+  clipboardShare: boolean;
+  lockOnDisconnect: boolean;
+  privacyCurtain: boolean;
+  clipboardPending: boolean;
+  lockPending: boolean;
+  curtainPending: boolean;
+  clipboardError: string | null;
+  lockError: string | null;
+  curtainError: string | null;
+  onClosePairing: () => void;
+  onCloseHelp: () => void;
+  onCloseSettings: () => void;
+  onCancelStopSession: () => void;
+  onConfirmStopSession: (session: SessionRow) => void;
+  onToggleClipboardShare: () => void;
+  onToggleLockOnDisconnect: () => void;
+  onTogglePrivacyCurtain: () => void;
+  retryClipboard: () => void;
+  retryLock: () => void;
+  retryCurtain: () => void;
+}
+
+function DashboardModals(props: DashboardModalsProps) {
+  const {
+    showPairingModal,
+    showHelpModal,
+    showSettingsModal,
+    pendingStopSession,
+    inputBusy,
+    language,
+    t,
+    clipboardShare,
+    lockOnDisconnect,
+    privacyCurtain,
+    clipboardPending,
+    lockPending,
+    curtainPending,
+    clipboardError,
+    lockError,
+    curtainError,
+    onClosePairing,
+    onCloseHelp,
+    onCloseSettings,
+    onCancelStopSession,
+    onConfirmStopSession,
+    onToggleClipboardShare,
+    onToggleLockOnDisconnect,
+    onTogglePrivacyCurtain,
+    retryClipboard,
+    retryLock,
+    retryCurtain,
+  } = props;
+
+  return (
+    <>
+      {showPairingModal && (
+        <PairingModal
+          language={language}
+          t={t}
+          onClose={onClosePairing}
+        />
+      )}
+      {showHelpModal && (
+        <TroubleshootingModal
+          t={t}
+          onClose={onCloseHelp}
+        />
+      )}
+      {showSettingsModal && (
+        <HostSettingsModal
+          onClose={onCloseSettings}
+          t={t}
+          clipboardShare={clipboardShare}
+          lockOnDisconnect={lockOnDisconnect}
+          privacyCurtain={privacyCurtain}
+          clipboardPending={clipboardPending}
+          lockPending={lockPending}
+          curtainPending={curtainPending}
+          clipboardError={clipboardError}
+          lockError={lockError}
+          curtainError={curtainError}
+          onToggleClipboardShare={onToggleClipboardShare}
+          onToggleLockOnDisconnect={onToggleLockOnDisconnect}
+          onTogglePrivacyCurtain={onTogglePrivacyCurtain}
+          retryClipboard={retryClipboard}
+          retryLock={retryLock}
+          retryCurtain={retryCurtain}
+        />
+      )}
+      {pendingStopSession && (
+        <StopStreamModal
+          session={pendingStopSession}
+          busy={inputBusy === pendingStopSession.session}
+          t={t}
+          onCancel={onCancelStopSession}
+          onConfirm={() => onConfirmStopSession(pendingStopSession)}
+        />
+      )}
+    </>
+  );
+}
+
+function Dashboard() {
+  const [language, setLanguage] = useState<SupportedLanguage>(() => {
+    const saved = localStorage.getItem("leftcar_lang") as SupportedLanguage | null;
+    if (saved === "ko" || saved === "en") return saved;
+    const navLang = navigator.language?.toLowerCase() || "ko";
+    return navLang.startsWith("en") ? "en" : "ko";
+  });
+
+  useEffect(() => {
+    localStorage.setItem("leftcar_lang", language);
+    document.documentElement.lang = language;
+    // 트레이 메뉴·페어링 창 제목은 Rust가 그리므로 설정 파일에도 반영한다.
+    void invoke("set_language", { language }).catch(() => {});
+  }, [language]);
+
+  const toggleLanguage = useCallback(() => {
+    setLanguage((prev) => (prev === "ko" ? "en" : "ko"));
+  }, []);
+
+  const t = getTranslation(language);
+
+  const {
+    sessions,
+    terminationNotice,
+    dismissTerminationNotice,
+    error,
+    inputPermission,
+    screenPermission,
+    platform,
+    controlPort,
+    lanIp,
+    refresh,
+  } = useHostStatus(t);
+
+  const {
+    inputActionError,
+    setInputActionError,
+    inputBusy,
+    qualityBusy,
+    pendingStopSession,
+    setPendingStopSession,
+    openAccessibilitySettings,
+    requestInputPermission,
+    toggleSessionInput,
+    setSessionQuality,
+    forceStopSession,
+  } = useSessionActions(t, refresh);
+
+  const [showInspector, setShowInspector] = useState(false);
+  const [showPairingModal, setShowPairingModal] = useState(false);
+  const [showHelpModal, setShowHelpModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [copiedToast, setCopiedToast] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
+  });
+
+  const isStreaming = sessions.length > 0;
+  useIndicatorWindow(isStreaming);
+
+  // 클립보드 공유 호스트 게이트(U5) — 상태·토글은 Privacy 모듈의 훅이
+  // 책임진다(0600 settings.json, 즉시 효력, 기본 꺼짐).
+  const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
+
+  // 프라이버시 토글(잠금 on disconnect · 커튼) — 상태·토글은 Privacy 모듈의
+  // 훅이 책임진다(같은 0600 settings.json, 즉시 효력).
+  const {
+    lockOnDisconnect,
+    privacyCurtain,
+    toggleLockOnDisconnect,
+    togglePrivacyCurtain,
+    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
+  } = usePrivacySettings();
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+    localStorage.setItem("leftcar_theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Esc는 각 모달(네이티브 dialog cancel)이 자기 닫기를 소유한다 — 전역
+      // 핸들러가 닫으면 중첩된 확인 다이얼로그까지 한 번에 걷어진다.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setShowPairingModal((prev) => !prev);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        setShowHelpModal((prev) => !prev);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        void refresh();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setShowSettingsModal((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [refresh]);
+
   const copyAddressInfo = () => {
     navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
       () => {
@@ -1202,6 +1414,7 @@ function Dashboard() {
         onHelp={() => setShowHelpModal(true)}
         onTheme={toggleTheme}
         onToggleLanguage={toggleLanguage}
+        onOpenSettings={() => setShowSettingsModal(true)}
         onRefresh={() => void refresh()}
       />
 
@@ -1256,50 +1469,44 @@ function Dashboard() {
         copiedToast={copiedToast}
         inputPermission={inputPermission}
         clipboardShare={clipboardShare}
-        retryClipboard={retryClipboard}
-        retryLock={retryLock}
-        retryCurtain={retryCurtain}
-        clipboardPending={clipboardPending}
-        clipboardError={clipboardError}
-        lockPending={lockPending}
-        lockError={lockError}
-        curtainPending={curtainPending}
-        curtainError={curtainError}
         lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
         platform={platform}
-        lastUpdated={lastUpdated}
-        language={language}
         t={t}
         onCopyAddress={copyAddressInfo}
         onRequestPermission={requestInputPermission}
+        onOpenSettings={() => setShowSettingsModal(true)}
+      />
+
+      <DashboardModals
+        showPairingModal={showPairingModal}
+        showHelpModal={showHelpModal}
+        showSettingsModal={showSettingsModal}
+        pendingStopSession={pendingStopSession}
+        inputBusy={inputBusy}
+        language={language}
+        t={t}
+        clipboardShare={clipboardShare}
+        lockOnDisconnect={lockOnDisconnect}
+        privacyCurtain={privacyCurtain}
+        clipboardPending={clipboardPending}
+        lockPending={lockPending}
+        curtainPending={curtainPending}
+        clipboardError={clipboardError}
+        lockError={lockError}
+        curtainError={curtainError}
+        onClosePairing={() => setShowPairingModal(false)}
+        onCloseHelp={() => setShowHelpModal(false)}
+        onCloseSettings={() => setShowSettingsModal(false)}
+        onCancelStopSession={() => setPendingStopSession(null)}
+        onConfirmStopSession={(session) => void forceStopSession(session)}
         onToggleClipboardShare={toggleClipboardShare}
         onToggleLockOnDisconnect={toggleLockOnDisconnect}
         onTogglePrivacyCurtain={togglePrivacyCurtain}
+        retryClipboard={retryClipboard}
+        retryLock={retryLock}
+        retryCurtain={retryCurtain}
       />
-
-      {showPairingModal && (
-        <PairingModal
-          language={language}
-          t={t}
-          onClose={() => setShowPairingModal(false)}
-        />
-      )}
-      {showHelpModal && (
-        <TroubleshootingModal
-          t={t}
-          onClose={() => setShowHelpModal(false)}
-        />
-      )}
-      {pendingStopSession && (
-        <StopStreamModal
-          session={pendingStopSession}
-          busy={inputBusy === pendingStopSession.session}
-          t={t}
-          onCancel={() => setPendingStopSession(null)}
-          onConfirm={() => void forceStopSession(pendingStopSession)}
-        />
-      )}
     </div>
   );
 }
@@ -1356,7 +1563,7 @@ function SessionCard({
             className={controlToggleVariants({ active: session.inputEnabled })}
             disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy}
             onClick={() => void onToggleInput(session)}
-            title={session.inputEnabled ? t.host.remoteInputAllowed : t.host.remoteInputOff}
+            title={session.inputEnabled ? t.host.remoteInputAllowed : t.host.remoteInputApprovalHint}
           >
             {remoteInputLabel(inputBusy, session.inputEnabled, t)}
           </button>

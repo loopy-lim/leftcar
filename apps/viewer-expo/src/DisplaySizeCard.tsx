@@ -167,7 +167,7 @@ export function DisplaySizeCard({
   const styles = StyleSheet.create({
     card: {
       gap: 10,
-      borderRadius: 12,
+      borderRadius: 14,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
       backgroundColor: colors.bgSurface,

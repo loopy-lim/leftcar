@@ -716,6 +716,16 @@ export default function Pairing() {
           </View>
         )}
         <PairingModeCard mode={mode} cameraState={cameraState} onRequestPermission={() => { void runCameraAction(requestPermission); }} onOpenSettings={openAppSettings} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
+
+        {/* Security / Help Card */}
+        <View style={styles.tipBox}>
+          <View style={styles.tipTitleRow}>
+            <Ionicons name="shield-checkmark-outline" size={15} color={colors.brandPrimary} />
+            <Text style={styles.tipTitle}>{t.viewer.pairingTipTitle}</Text>
+          </View>
+          <Text style={styles.tipText}>• {t.viewer.pairingTipCode}</Text>
+          <Text style={styles.tipText}>• {t.viewer.pairingTipNetwork}</Text>
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -983,6 +993,29 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.btnPrimaryText,
       fontSize: 13,
       fontWeight: "600",
+    },
+    tipBox: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 14,
+      gap: 5,
+    },
+    tipTitleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    tipTitle: {
+      color: colors.textPrimary,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    tipText: {
+      color: colors.textSecondary,
+      fontSize: 11,
+      lineHeight: 16,
     },
     btnPressed: {
       opacity: 0.8,

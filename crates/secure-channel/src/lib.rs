@@ -9,7 +9,10 @@
 //!    윈도우 재생 방지를 쓴다. 암호는 ChaCha20-Poly1305(RFC 8439) 하나 —
 //!    Rust·Swift(CryptoKit)·TS(@noble) 모두 표준 구현으로 상호 운용된다.
 //!
-//! 와이어 레이아웃(봉인 프레임): `counter u64 BE ‖ poly1305 tag 16B ‖ ct`.
+//! 와이어 레이아웃(봉인 프레임): `counter u64 BE ‖ ct ‖ poly1305 tag 16B`
+//! — 태그는 RustCrypto `encrypt`·@noble `chacha20poly1305`가 붙이는 끝자리
+//! 그대로다(Swift `MediaSealer`도 이 순서를 따른다;
+//! `media_sealer_cross_language_vector` 테스트가 언어 간 정합을 고정한다).
 //! nonce는 `00 00 00 00 ‖ counter u64 BE`(12B) — 방향은 아예 다른 키로 분리되므로
 //! 접두어가 필요 없다. 미디어 키는 재구성에서 재사용될 수 있으므로
 //! [DatagramSealer]는 인스턴스마다 카운터를 무작위 지점에서 시작한다.
@@ -635,6 +638,18 @@ mod tests {
         println!("m_s2c      = {}", hex::encode(media.s2c));
     }
 
+    /// Swift MediaSealerTests.swift와 공유하는 미디어 봉인 고정 벡터.
+    /// `cargo test -p secure-channel -- print_media_vector --ignored --nocapture`
+    /// 로 출력한 값을 양쪽에 하드코딩해 프레임 레이아웃(counter ‖ ct ‖ tag)을
+    /// 언어 간에 잠근다.
+    #[test]
+    #[ignore = "vector printer: run with --ignored --nocapture"]
+    fn print_media_vector() {
+        let mut sealer = DatagramSealer::with_counter_start(fixed(0), 0x0102_0304_0506_0708);
+        let frame = sealer.seal(b"leftcar media vector v1").unwrap();
+        println!("media_frame1 = {}", hex::encode(&frame));
+    }
+
     /// Swift MediaSealer.swift가 같은 HKDF 도출을 하는지 잠그는 고정 벡터.
     #[test]
     fn media_keys_match_the_swift_vector() {
@@ -651,6 +666,31 @@ mod tests {
         let again = media_keys(&fixed(0));
         assert_eq!(again.c2s, keys.c2s);
         assert_ne!(keys.c2s, keys.s2c);
+    }
+
+    /// 미디어 프레임 레이아웃 `counter ‖ ct ‖ tag`를 Swift CryptoKit 봉인기와
+    /// 바이트 단위로 고정한다. 태그 위치가 어긋나면 Poly1305 인증이 양방향
+    /// 전부 실패해 미디어·입력이 통째로 죽는다(2026-09-13 리스크 회귀).
+    #[test]
+    fn media_sealer_cross_language_vector() {
+        let start = 0x0102_0304_0506_0708u64;
+        let mut sealer = DatagramSealer::with_counter_start(fixed(0), start);
+        let frame = sealer.seal(b"leftcar media vector v1").unwrap();
+        // 첫 프레임 카운터는 지정 시작값 그대로다.
+        assert_eq!(frame_counter(&frame).unwrap(), start);
+        // 스위프트 벡터 프린터(print_media_vector)로 뽑은 값 —
+        // Tests/MediaSealerTests.swift가 같은 hex를 검사한다.
+        assert_eq!(
+            hex::encode(&frame),
+            "01020304050607088383c38cc6eddabc7dda8cbfebcc513bf6f80b233c3b19da38079749aaf6baa652f6b5c2877468"
+        );
+        // 자기 수신 창은 시작 카운터 아래를 거부하므로 짝을 맞춰 연다.
+        let mut receiver = DatagramSealer::with_counter_start(fixed(0), start);
+        receiver.reset_receive_window();
+        assert_eq!(
+            receiver.open(&frame).unwrap(),
+            b"leftcar media vector v1".to_vec()
+        );
     }
 
     /// 재시작 간 논스 재사용 방지: 같은 키로 새 인스턴스를 만들면 카운터

@@ -187,10 +187,12 @@ struct CursorStreamTests {
         precondition(UInt16(collapsed![10]) << 8 | UInt16(collapsed![11]) == 0,
                      "a zero-extent y axis normalizes to 0")
 
-        // Polling rate mirrors the LCI1 pointer policy, including the floor
-        // and the clamp edges.
-        precondition(cursorPollingHz(fps: 0) == 30, "zero fps must fall back to the 30Hz floor")
-        precondition(cursorPollingHz(fps: 15) == 30, "fps below the floor clamps to 30Hz")
+        // Polling rate mirrors the LCI1 pointer policy, including the 120Hz
+        // floor (pointer motion is decoupled from video FPS) and the clamp
+        // edges.
+        precondition(cursorPollingHz(fps: 0) == 120, "zero fps must fall back to the 120Hz floor")
+        precondition(cursorPollingHz(fps: 15) == 120, "fps below the floor clamps to 120Hz")
+        precondition(cursorPollingHz(fps: 30) == 120, "30fps streams still poll at the 120Hz floor")
         precondition(cursorPollingHz(fps: 60) == 120, "2x fps for ordinary streams")
         precondition(cursorPollingHz(fps: 90) == 180, "2x fps for ordinary streams")
         precondition(cursorPollingHz(fps: 119) == 238, "2x fps just under the clamp edge")

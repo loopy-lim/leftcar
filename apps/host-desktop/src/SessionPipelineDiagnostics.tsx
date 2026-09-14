@@ -1,8 +1,16 @@
 import type { ReactNode } from "react";
+import {
+  cn,
+  getTranslation,
+  interpolate,
+  type SupportedLanguage,
+  type TranslationSchema,
+} from "@leftcar/ui-tokens";
 import { diagnosticValueVariants } from "./diagnosticStyles";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
-import { cn } from "@leftcar/ui-tokens";
 import type { SessionRow } from "./sessionTypes";
+
+type InspectorStrings = TranslationSchema["host"]["inspector"];
 
 function Metric({ label, children, tone }: { label: string; children: ReactNode; tone?: "default" | "warning" }) {
   return (
@@ -17,130 +25,131 @@ function milliseconds(value: number | undefined, fallback: string): string {
   return value === undefined ? fallback : `${(value / 1000).toFixed(1)}ms`;
 }
 
-function SplitDiagnostics({ session, diagnostics }: { session: SessionRow; diagnostics: ReturnType<typeof encoderDiagnosticsView> }) {
+function SplitDiagnostics({ session, diagnostics, t }: { session: SessionRow; diagnostics: ReturnType<typeof encoderDiagnosticsView>; t: InspectorStrings }) {
   if (diagnostics.splitEncode === null) return null;
   const recoveryTone = (session.splitPostEncodeDeltaDrops ?? 0) > 0 || (session.splitWirePairSendFailures ?? 0) > 0 ? "warning" : "default";
   const syncTone = (session.pairSyncTimeouts ?? 0) > 0 ? "warning" : "default";
   return <>
-    <Metric label="타일 출력/표시">{diagnostics.splitEncode} · {diagnostics.splitRender}</Metric>
-    <Metric label="분할 준비 / pair callback p95">{diagnostics.splitLatency}</Metric>
-    <Metric label="분할 flow">{diagnostics.splitFlow}</Metric>
-    <Metric label="분할 복구" tone={recoveryTone}>{diagnostics.splitRecovery}</Metric>
-    <Metric label="타일 동기화" tone={syncTone}>{diagnostics.splitSync} · 수신 손실 {diagnostics.splitLoss}</Metric>
+    <Metric label={t.tileOutputLabel}>{diagnostics.splitEncode} · {diagnostics.splitRender}</Metric>
+    <Metric label={t.splitPreparationLabel}>{diagnostics.splitLatency}</Metric>
+    <Metric label={t.splitFlowLabel}>{diagnostics.splitFlow}</Metric>
+    <Metric label={t.splitRecoveryLabel} tone={recoveryTone}>{diagnostics.splitRecovery}</Metric>
+    <Metric label={t.tileSyncLabel} tone={syncTone}>{diagnostics.splitSync} · {t.receiverLossWord} {diagnostics.splitLoss}</Metric>
   </>;
 }
 
-function PipelineRates({ session, diagnostics }: { session: SessionRow; diagnostics: ReturnType<typeof encoderDiagnosticsView> }) {
+function PipelineRates({ session, diagnostics, t }: { session: SessionRow; diagnostics: ReturnType<typeof encoderDiagnosticsView>; t: InspectorStrings }) {
   return <>
-    <Metric label="단계별 FPS (캡처 / 제출 / 출력)">
-      {session.captureFps ?? "측정 중"} / {session.encodeSubmitFps ?? session.fps} / {session.encodeOutputFps ?? "측정 중"}
+    <Metric label={t.stageFpsLabel}>
+      {session.captureFps ?? t.measuring} / {session.encodeSubmitFps ?? session.fps} / {session.encodeOutputFps ?? t.measuring}
     </Metric>
-    <SplitDiagnostics session={session} diagnostics={diagnostics} />
-    <Metric label="실제 Android 렌더 FPS">
-      {session.renderedFps != null ? `${session.renderedFps} FPS` : "feedback 대기 중"}
+    <SplitDiagnostics session={session} diagnostics={diagnostics} t={t} />
+    <Metric label={t.androidRenderFpsLabel}>
+      {session.renderedFps != null ? `${session.renderedFps} FPS` : t.awaitingFeedback}
     </Metric>
-    <Metric label="인코더 제출 실패 / in-flight">
+    <Metric label={t.encoderSubmitFailuresLabel}>
       {session.encodeSubmitFailures ?? 0} / {session.encodeInFlight ?? 0}
     </Metric>
   </>;
 }
 
-function TimingDiagnostics({ session }: { session: SessionRow }) {
+function TimingDiagnostics({ session, t }: { session: SessionRow; t: InspectorStrings }) {
   return <>
-    <Metric label="인코더 출력 간격 p95">{milliseconds(session.encodeOutputIntervalP95Us, "측정 중")}</Metric>
-    <Metric label="화면 가져오기">{milliseconds(session.captureToEncodeUs, "<2ms")}</Metric>
-    <Metric label="처리 대기">{milliseconds(session.captureQueueWaitUs, "0.1ms")}</Metric>
-    <Metric label="영상 처리">{milliseconds(session.encodeOutputUs, "<2ms")}</Metric>
-    <Metric label="인코더 출력 / 패킷화">
-      {milliseconds(session.encodeOutputP95Us, "측정 중")} / {milliseconds(session.packetizationP95Us, "측정 중")}
+    <Metric label={t.encoderOutputIntervalLabel}>{milliseconds(session.encodeOutputIntervalP95Us, t.measuring)}</Metric>
+    <Metric label={t.captureFetchLabel}>{milliseconds(session.captureToEncodeUs, "<2ms")}</Metric>
+    <Metric label={t.processingWaitLabel}>{milliseconds(session.captureQueueWaitUs, "0.1ms")}</Metric>
+    <Metric label={t.videoProcessingLabel}>{milliseconds(session.encodeOutputUs, "<2ms")}</Metric>
+    <Metric label={t.encoderOutputPacketizationLabel}>
+      {milliseconds(session.encodeOutputP95Us, t.measuring)} / {milliseconds(session.packetizationP95Us, t.measuring)}
     </Metric>
-    <Metric label="네트워크 전송">{milliseconds(session.sendBlockUs, "0.2ms")}</Metric>
+    <Metric label={t.networkSendLabel}>{milliseconds(session.sendBlockUs, "0.2ms")}</Metric>
   </>;
 }
 
-function TailTimingDiagnostics({ session }: { session: SessionRow }) {
+function TailTimingDiagnostics({ session, t }: { session: SessionRow; t: InspectorStrings }) {
   return <>
-    <Metric label="P95 처리 / 전송 지연">
+    <Metric label={t.tailLatencyLabel}>
       {milliseconds(session.captureToEncodeP95Us, "1.2ms")} / {milliseconds(session.sendBlockP95Us, "0.5ms")}
     </Metric>
-    <Metric label="UDP pacing p95">{milliseconds(session.sendPaceP95Us, "측정 중")}</Metric>
+    <Metric label={t.udpPacingLabel}>{milliseconds(session.sendPaceP95Us, t.measuring)}</Metric>
   </>;
 }
 
-function TransportDiagnostics({ session, transportLabel }: { session: SessionRow; transportLabel: string }) {
+function TransportDiagnostics({ session, transportLabel, t }: { session: SessionRow; transportLabel: string; t: InspectorStrings }) {
   return <>
-    <Metric label="실제 전송 경로">{transportLabel}</Metric>
-    <Metric label="UDP 안정성 (모드 / burst / FEC)">
+    <Metric label={t.transportPathLabel}>{transportLabel}</Metric>
+    <Metric label={t.udpStabilityLabel}>
       {session.udpStabilityProfile || "legacy"} / {session.udpBurstDatagrams ?? 8} / {session.udpFecParityShards ?? 2}
-      {session.udpAdaptivePacing ? ` · 자동 (${session.udpBurstReason || "initial"})` : " · 고정"}
+      {session.udpAdaptivePacing ? ` · ${interpolate(t.adaptiveAuto, { reason: session.udpBurstReason || "initial" })}` : ` · ${t.fixedPacing}`}
     </Metric>
-    <Metric label="수신 RTT / 디코더">
-      {session.receiverRttMs != null ? `${session.receiverRttMs}ms` : "측정 중"} / {session.receiverWireMs != null ? `${session.receiverWireMs}ms` : "측정 중"}
+    <Metric label={t.receiverRttLabel}>
+      {session.receiverRttMs != null ? `${session.receiverRttMs}ms` : t.measuring} / {session.receiverWireMs != null ? `${session.receiverWireMs}ms` : t.measuring}
     </Metric>
-    <Metric label="수신 손실 / feedback">
-      {(session.receiverFrameGaps ?? 0) + (session.receiverIncompleteAus ?? 0)} / {session.receiverFeedbackAgeMs != null ? `${session.receiverFeedbackAgeMs}ms 전` : "대기 중"}
+    <Metric label={t.receiverLossFeedbackLabel}>
+      {(session.receiverFrameGaps ?? 0) + (session.receiverIncompleteAus ?? 0)} / {session.receiverFeedbackAgeMs != null ? interpolate(t.msAgo, { ms: session.receiverFeedbackAgeMs }) : t.pendingShort}
     </Metric>
   </>;
 }
 
-function QueueDiagnostics({ session }: { session: SessionRow }) {
+function QueueDiagnostics({ session, t }: { session: SessionRow; t: InspectorStrings }) {
   return <>
-    <Metric label="Host 큐 드롭">
-      일반 {Math.max(0, (session.networkQueueDropped ?? 0) - (session.recoveryFramesDropped ?? 0))} / 복구 {session.recoveryFramesDropped ?? 0} / 캡처 {session.captureQueueDropped ?? 0}
+    <Metric label={t.hostQueueDropsLabel}>
+      {t.dropNormal} {Math.max(0, (session.networkQueueDropped ?? 0) - (session.recoveryFramesDropped ?? 0))} / {t.dropRecovery} {session.recoveryFramesDropped ?? 0} / {t.dropCapture} {session.captureQueueDropped ?? 0}
     </Metric>
-    <Metric label="Host 큐 점유 / oldest">
+    <Metric label={t.hostQueueOccupancyLabel}>
       {session.pendingFrameBytes ?? 0}B / {((session.pendingFrameOldestAgeUs ?? 0) / 1000).toFixed(1)}ms
     </Metric>
-    <Metric label="최근 AU burst">
+    <Metric label={t.recentAuBurstLabel}>
       {session.lastAuBytes !== undefined
-        ? `${(session.lastAuBytes / 1024).toFixed(0)}KB · ${session.lastAuFragments ?? 0} + ${session.lastAuParity ?? 0}개 · ${((session.lastAuSendUs ?? 0) / 1000).toFixed(1)}ms`
-        : "측정 중"}
+        ? `${(session.lastAuBytes / 1024).toFixed(0)}KB · ${session.lastAuFragments ?? 0} + ${interpolate(t.countUnit, { count: session.lastAuParity ?? 0 })} · ${((session.lastAuSendUs ?? 0) / 1000).toFixed(1)}ms`
+        : t.measuring}
       {session.lastAuIsKeyframe ? " · IDR" : ""}
     </Metric>
   </>;
 }
 
-function FecDiagnostics({ session }: { session: SessionRow }) {
+function FecDiagnostics({ session, t }: { session: SessionRow; t: InspectorStrings }) {
   return <>
-    <Metric label="UDP datagram">
-      {session.sentDatagrams ?? 0}개 전송 · 실패 {session.udpSendFailures ?? 0} · parity {session.sentParityDatagrams ?? 0}
+    <Metric label={t.udpDatagramLabel}>
+      {interpolate(t.sentCount, { count: session.sentDatagrams ?? 0 })} · {interpolate(t.failedCount, { count: session.udpSendFailures ?? 0 })} · parity {session.sentParityDatagrams ?? 0}
     </Metric>
-    <Metric label="Viewer FEC 수신 / 복구">
-      data {session.receiverDataDatagrams ?? 0} · parity {session.receiverParityDatagrams ?? 0} · 복원 {session.receiverFecRestoredFragments ?? 0}
+    <Metric label={t.viewerFecLabel}>
+      data {session.receiverDataDatagrams ?? 0} · parity {session.receiverParityDatagrams ?? 0} · {interpolate(t.restoredCount, { count: session.receiverFecRestoredFragments ?? 0 })}
     </Metric>
-    <Metric label="FEC 미복구 / 최대 누락">
-      {session.receiverUnrecoverableFecGroups ?? 0} / {session.receiverMaxMissingDataFragments ?? 0}개
+    <Metric label={t.fecUnrecoveredLabel}>
+      {session.receiverUnrecoverableFecGroups ?? 0} / {interpolate(t.countUnit, { count: session.receiverMaxMissingDataFragments ?? 0 })}
     </Metric>
-    <Metric label="단일 / 다중 프레임 Gap">
+    <Metric label={t.frameGapLabel}>
       {session.receiverOneFrameGapEvents ?? 0} / {session.receiverMultiFrameGapEvents ?? 0}
     </Metric>
   </>;
 }
 
-function RecoveryDiagnostics({ session }: { session: SessionRow }) {
-  return <Metric label="복구 요청 / IDR">
-    {session.recoveryRequestsSuppressed ?? 0} 억제 / {session.recoveryKeyframes ?? 0}회
+function RecoveryDiagnostics({ session, t }: { session: SessionRow; t: InspectorStrings }) {
+  return <Metric label={t.recoveryRequestsLabel}>
+    {interpolate(t.suppressedCount, { count: session.recoveryRequestsSuppressed ?? 0 })} / {interpolate(t.timesCount, { count: session.recoveryKeyframes ?? 0 })}
   </Metric>;
 }
 
-function EncoderTarget({ session }: { session: SessionRow }) {
-  return <Metric label="현재 인코더 목표">
-    {session.currentBitrate !== undefined ? `${(session.currentBitrate / 1_000_000).toFixed(1)}Mbps` : "측정 중"}
+function EncoderTarget({ session, t }: { session: SessionRow; t: InspectorStrings }) {
+  return <Metric label={t.encoderTargetLabel}>
+    {session.currentBitrate !== undefined ? `${(session.currentBitrate / 1_000_000).toFixed(1)}Mbps` : t.measuring}
   </Metric>;
 }
 
-export default function SessionPipelineDiagnostics({ session, transportLabel }: { session: SessionRow; transportLabel: string }) {
-  const diagnostics = encoderDiagnosticsView(session);
+export default function SessionPipelineDiagnostics({ session, transportLabel, language }: { session: SessionRow; transportLabel: string; language: SupportedLanguage }) {
+  const t = getTranslation(language).host.inspector;
+  const diagnostics = encoderDiagnosticsView(session, language);
   return (
     <>
-      <PipelineRates session={session} diagnostics={diagnostics} />
-      <TimingDiagnostics session={session} />
-      <TransportDiagnostics session={session} transportLabel={transportLabel} />
-      <QueueDiagnostics session={session} />
-      <FecDiagnostics session={session} />
-      <RecoveryDiagnostics session={session} />
-      <TailTimingDiagnostics session={session} />
-      <EncoderTarget session={session} />
+      <PipelineRates session={session} diagnostics={diagnostics} t={t} />
+      <TimingDiagnostics session={session} t={t} />
+      <TransportDiagnostics session={session} transportLabel={transportLabel} t={t} />
+      <QueueDiagnostics session={session} t={t} />
+      <FecDiagnostics session={session} t={t} />
+      <RecoveryDiagnostics session={session} t={t} />
+      <TailTimingDiagnostics session={session} t={t} />
+      <EncoderTarget session={session} t={t} />
     </>
   );
 }

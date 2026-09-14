@@ -129,6 +129,24 @@ class TextInputRelayTest {
     }
 
     @Test
+    fun `IME가 합성한 탐색 키는 키 쌍으로 전달된다`() {
+        val keys = mutableListOf<Int>()
+        val relay = TextInputRelay(
+            sendText = {},
+            sendBackspace = {},
+            sendForwardDelete = {},
+            sendEnter = {},
+            sendKey = { keys += it },
+        )
+        relay.handleKeyCode(21, TextInputRelay.ACTION_DOWN) // DPAD_LEFT
+        relay.handleKeyCode(61, TextInputRelay.ACTION_DOWN) // TAB
+        relay.handleKeyCode(123, TextInputRelay.ACTION_DOWN) // MOVE_END
+        relay.handleKeyCode(61, 1) // UP은 무시
+        relay.handleKeyCode(78, TextInputRelay.ACTION_DOWN) // 미매핑 키는 놓아둔다
+        assertEquals(listOf(21, 61, 123), keys)
+    }
+
+    @Test
     fun `편집기 액션은 액션 코드와 무관하게 Enter가 된다`() {
         val recorder = Recorder()
         val relay = relayWith(recorder)

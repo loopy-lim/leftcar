@@ -43,7 +43,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       width: 6,
       height: 6,
       borderRadius: 3,
-      backgroundColor: colors.textPrimary,
+      backgroundColor: colors.statusLive,
       flexShrink: 0,
     },
     hostStripText: {
@@ -75,7 +75,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       backgroundColor: colors.textDim,
     },
     transportDotUsb: {
-      backgroundColor: colors.textPrimary,
+      backgroundColor: colors.brandPrimary,
     },
     transportText: {
       color: colors.textSecondary,
@@ -106,6 +106,27 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       borderRadius: 6,
     },
     btnHostChangeText: {
+      color: colors.btnSecondaryText,
+      fontSize: 11,
+      fontWeight: "600",
+    },
+    hostStripActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    btnHostSettings: {
+      backgroundColor: colors.btnSecondaryBg,
+      borderWidth: 1,
+      borderColor: colors.btnSecondaryBorder,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: 6,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+    },
+    btnHostSettingsText: {
       color: colors.btnSecondaryText,
       fontSize: 11,
       fontWeight: "600",
@@ -161,6 +182,9 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
 
     /* Segmented Quality */
+    qualityContainer: {
+      gap: 6,
+    },
     qualitySegmentWrapper: {
       backgroundColor: colors.bgSurface,
       borderRadius: 10,
@@ -175,7 +199,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     qualityTab: {
       flex: 1,
       paddingVertical: 7,
-      paddingHorizontal: 4,
+      paddingHorizontal: 2,
       borderRadius: 7,
       alignItems: "center",
       justifyContent: "center",
@@ -188,14 +212,14 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     qualityTabLabel: {
       fontSize: 11,
       fontWeight: "600",
-      color: colors.textMuted,
+      color: colors.textSecondary,
     },
     qualityTabLabelActive: {
       color: colors.btnPrimaryText,
       fontWeight: "700",
     },
     qualityTabDetail: {
-      fontSize: 9,
+      fontSize: 10,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
       color: colors.textDim,
@@ -203,6 +227,18 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     qualityTabDetailActive: {
       color: colors.btnPrimaryText,
       opacity: 0.8,
+    },
+    qualityHintRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      paddingHorizontal: 4,
+    },
+    qualityHintText: {
+      fontSize: 11,
+      color: colors.textMuted,
+      lineHeight: 15,
+      flex: 1,
     },
 
     /* Collapsible Advanced Streaming Controls */
@@ -269,10 +305,10 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     /* Display Cards */
     displayCard: {
       backgroundColor: colors.bgSurface,
-      borderRadius: 12,
+      borderRadius: 14,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
-      padding: 12,
+      padding: 14,
       flexDirection: "row",
       alignItems: "center",
       gap: 12,
@@ -280,12 +316,32 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     displayMain: {
       flex: 1,
       minWidth: 0,
-      gap: 3,
+      gap: 4,
+    },
+    displayNameRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
     },
     displayName: {
-      fontSize: 13,
+      fontSize: 14,
       fontWeight: "700",
       color: colors.textPrimary,
+      flex: 1,
+    },
+    displayIndexBadge: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      borderRadius: 4,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+    },
+    displayIndexText: {
+      fontSize: 10,
+      fontWeight: "600",
+      color: colors.textSecondary,
+      fontFamily: "monospace",
     },
     chipsRow: {
       flexDirection: "row",
@@ -294,9 +350,9 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     chip: {
       backgroundColor: colors.bgSubtle,
-      paddingHorizontal: 6,
-      paddingVertical: 1,
-      borderRadius: 4,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: 5,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
     },
@@ -308,9 +364,9 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     openBtn: {
       backgroundColor: colors.btnPrimaryBg,
-      paddingHorizontal: 12,
+      paddingHorizontal: 14,
       paddingVertical: 8,
-      borderRadius: 6,
+      borderRadius: 8,
       alignItems: "center",
       justifyContent: "center",
       flexShrink: 0,
@@ -318,7 +374,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     openBtnText: {
       color: colors.btnPrimaryText,
       fontSize: 12,
-      fontWeight: "600",
+      fontWeight: "700",
     },
 
     /* Empty State */
@@ -358,13 +414,15 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       letterSpacing: 0.04,
     },
     activeCountBadge: {
-      backgroundColor: colors.btnPrimaryBg,
+      backgroundColor: colors.statusLiveSubtle,
+      borderWidth: 1,
+      borderColor: colors.statusLiveBorder,
       paddingHorizontal: 6,
       paddingVertical: 1,
       borderRadius: 10,
     },
     activeCountText: {
-      color: colors.btnPrimaryText,
+      color: colors.statusLive,
       fontSize: 10,
       fontWeight: "700",
       fontFamily: "monospace",
@@ -395,12 +453,45 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       width: 6,
       height: 6,
       borderRadius: 3,
-      backgroundColor: colors.textPrimary,
+      backgroundColor: colors.statusLive,
     },
     streamName: {
-      color: colors.textPrimary,
-      fontSize: 12,
+      fontSize: 13,
       fontWeight: "700",
+      color: colors.textPrimary,
+      flex: 1,
+    },
+    sourceTag: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+      borderRadius: 4,
+    },
+    sourceTagText: {
+      color: colors.textDim,
+      fontSize: 9,
+      fontFamily: "monospace",
+    },
+    streamResolution: {
+      fontSize: 11,
+      fontFamily: "monospace",
+      fontVariant: ["tabular-nums"],
+      color: colors.textSecondary,
+    },
+    streamFps: {
+      fontSize: 11,
+      fontFamily: "monospace",
+      fontVariant: ["tabular-nums"],
+      color: colors.textPrimary,
+      fontWeight: "700",
+    },
+    streamKbps: {
+      fontSize: 11,
+      fontFamily: "monospace",
+      fontVariant: ["tabular-nums"],
+      color: colors.textMuted,
     },
     streamPort: {
       color: colors.textMuted,
@@ -409,14 +500,17 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       fontVariant: ["tabular-nums"],
     },
     transportBadge: {
-      color: colors.textSecondary,
-      fontSize: 10,
+      fontSize: 9,
+      fontFamily: "monospace",
+      color: colors.textDim,
       backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 4,
-      paddingHorizontal: 5,
+      paddingHorizontal: 4,
       paddingVertical: 1,
+      borderRadius: 3,
+    },
+    streamError: {
+      color: colors.textMuted,
+      fontSize: 10,
       overflow: "hidden",
     },
     streamSpecRow: {
@@ -424,8 +518,30 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       alignItems: "center",
       gap: 6,
     },
+    streamActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      flexShrink: 0,
+    },
+    btnChangeResolution: {
+      backgroundColor: colors.btnSecondaryBg,
+      borderWidth: 1,
+      borderColor: colors.btnSecondaryBorder,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: 6,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+    },
+    btnChangeResolutionText: {
+      color: colors.btnSecondaryText,
+      fontSize: 11,
+      fontWeight: "600",
+    },
     stopBtn: {
-      backgroundColor: colors.bgSubtle,
+      backgroundColor: colors.statusDangerSubtle,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
       paddingHorizontal: 8,
@@ -434,13 +550,74 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       flexShrink: 0,
     },
     stopBtnText: {
-      color: colors.textPrimary,
+      color: colors.statusDanger,
       fontSize: 11,
       fontWeight: "600",
+    },
+    footerContainer: {
+      gap: 14,
+      marginTop: 6,
+    },
+    advancedFooterSection: {
+      marginTop: 2,
     },
     itemPressed: {
       opacity: 0.75,
       transform: [{ scale: 0.98 }],
+    },
+
+    /* Modals */
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(0, 0, 0, 0.5)",
+      justifyContent: "flex-end",
+    },
+    modalSheet: {
+      backgroundColor: colors.bgCanvas,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      maxHeight: "88%",
+    },
+    modalHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 16,
+      paddingVertical: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.borderSubtle,
+      backgroundColor: colors.bgSurface,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+    },
+    modalTitle: {
+      fontSize: 15,
+      fontWeight: "700",
+      color: colors.textPrimary,
+    },
+    modalCloseBtn: {
+      padding: 4,
+      borderRadius: 6,
+    },
+    modalScrollView: {
+      paddingHorizontal: 16,
+      paddingTop: 14,
+      paddingBottom: 32,
+    },
+    modalContentGap: {
+      gap: 16,
+    },
+    modalSection: {
+      gap: 8,
+    },
+    modalSectionTitle: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: colors.textMuted,
+      textTransform: "uppercase",
+      letterSpacing: 0.04,
     },
   });
 }

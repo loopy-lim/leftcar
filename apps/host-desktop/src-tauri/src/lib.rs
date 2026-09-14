@@ -173,7 +173,8 @@ pub fn run() {
             set_privacy_curtain,
             add_share_files,
             list_share_queue,
-            remove_share_file
+            remove_share_file,
+            set_language
         ])
         .setup(move |app| {
             // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
@@ -191,12 +192,29 @@ pub fn run() {
             warm_display_catalog(warmup_backend);
             create_indicator_window(app);
 
-            let show_item =
-                MenuItem::with_id(app, "show", "Leftcar Host 열기", true, None::<&str>)?;
+            // 트레이 메뉴는 웹뷰와 별개로 네이티브에서 그려지므로, settings.json에
+            // 영속된 UI 언어(웹뷰의 leftcar_lang과 같은 값)를 기동 시점에 읽어
+            // 라벨을 고른다.
+            let language = app.state::<Arc<settings::SharedSettings>>().language();
+            let (show_label, pairing_label, quit_label, tray_tooltip) = match language {
+                settings::HostLanguage::Ko => (
+                    "Leftcar Host 열기",
+                    "연결 코드 만들기…",
+                    "Leftcar Host 종료",
+                    "Leftcar Host — 백그라운드 실행 중",
+                ),
+                settings::HostLanguage::En => (
+                    "Open Leftcar Host",
+                    "Generate Pairing Code…",
+                    "Quit Leftcar Host",
+                    "Leftcar Host — running in background",
+                ),
+            };
+
+            let show_item = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
             let pairing_item =
-                MenuItem::with_id(app, "pairing", "연결 코드 만들기…", true, None::<&str>)?;
-            let quit_item =
-                MenuItem::with_id(app, "quit", "Leftcar Host 종료", true, None::<&str>)?;
+                MenuItem::with_id(app, "pairing", pairing_label, true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &pairing_item, &quit_item])?;
             let icon = app
                 .default_window_icon()
@@ -207,7 +225,7 @@ pub fn run() {
                 .icon(icon)
                 .icon_as_template(true)
                 .menu(&menu)
-                .tooltip("Leftcar Host — 백그라운드 실행 중")
+                .tooltip(tray_tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -293,12 +311,18 @@ fn show_pairing_window(app: &tauri::AppHandle) {
         let _ = window.set_focus();
         return;
     }
+    // 제목은 웹뷰 대시보드의 연결 코드 모달과 같은 문구를 언어 설정에 따라
+    // 쓴다(ui-tokens host.pairingModalTitle과 대응).
+    let pairing_title = match app.state::<Arc<settings::SharedSettings>>().language() {
+        settings::HostLanguage::Ko => "연결 코드 만들기",
+        settings::HostLanguage::En => "Generate Pairing Code",
+    };
     if let Err(e) = tauri::WebviewWindowBuilder::new(
         app,
         "pairing",
         WebviewUrl::App("index.html#/pairing".into()),
     )
-    .title("연결 코드 만들기")
+    .title(pairing_title)
     .inner_size(420.0, 560.0)
     .resizable(false)
     .build()
@@ -750,11 +774,16 @@ fn set_file_share(
 #[tauri::command]
 async fn add_share_files(
     server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
 ) -> Result<Vec<file_transfer::ShareQueueEntry>, String> {
     let server = server.inner().clone();
+    let dialog_title = match settings.language() {
+        settings::HostLanguage::Ko => "Leftcar — 파일 공유",
+        settings::HostLanguage::En => "Leftcar — File Sharing",
+    };
     let picked = tauri::async_runtime::spawn_blocking(move || {
         rfd::FileDialog::new()
-            .set_title("Leftcar — 파일 공유")
+            .set_title(dialog_title)
             .pick_files()
             .unwrap_or_default()
     })
@@ -784,6 +813,21 @@ fn remove_share_file(
     queue_id: String,
 ) -> bool {
     server.file_transfer_state().remove_share_file(&queue_id)
+}
+
+/// 웹뷰의 언어 토글(leftcar_lang)을 네이티브 표면(트레이 메뉴·파일 대화상자)
+/// 와 공유하기 위해 settings.json에 남긴다. 다음 기동 때 트레이가 이 값을 읽는다.
+#[tauri::command]
+fn set_language(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    language: String,
+) -> Result<(), String> {
+    let parsed = match language.as_str() {
+        "ko" => settings::HostLanguage::Ko,
+        "en" => settings::HostLanguage::En,
+        other => return Err(format!("unsupported language: {other}")),
+    };
+    settings.set_language(parsed)
 }
 
 /// Register `_leftcar._tcp.local.` with the listener's actual control port.

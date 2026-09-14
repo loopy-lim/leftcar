@@ -334,8 +334,12 @@ pub fn normalized_axis(value: f32) -> u16 {
     (value.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
 }
 
+/// 포인터 폴링 상한. 스트림 FPS와 분리돼 120Hz 하한을 지난다(2026-09-14):
+/// 30fps 스트림에서 60Hz로 묶이면 패널(60Hz+)의 절반 속도로 커서가 그려져
+/// "딱딱 끊기는" 조작감의 직접 원인이 된다. 이동 데이터그램은 아주 작아
+/// 예산 부담도 미미하다.
 pub fn polling_rate_hz(stream_fps: u32) -> u32 {
-    stream_fps.saturating_mul(2).clamp(30, 240)
+    stream_fps.saturating_mul(2).clamp(120, 240)
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +405,25 @@ impl InputScheduler {
             self.pending = None;
             self.latest_pointer = None;
             self.pointer_dirty = false;
+        }
+        // 스크롤은 누적 델타다 — 큐 끝이 스크롤이면 합쳐 담는다. 연속 두 손가락
+        // 스크롤(60-120Hz 버스트)이 1개씩 밖에 못 나가는 stop-and-wait 뒤에
+        // 쌓여 256 상한을 넘고 ReleaseAll로 터지는 일("확 덜컹" 끊김)을 막는다.
+        // 합산은 총 스크롤량을 보존하고, 방향이 섞이면 상쇄된다(휠 의미 그대로).
+        if let InputEvent::Scroll {
+            horizontal_milli_lines: horizontal,
+            vertical_milli_lines: vertical,
+        } = event
+        {
+            if let Some(InputEvent::Scroll {
+                horizontal_milli_lines: queued_horizontal,
+                vertical_milli_lines: queued_vertical,
+            }) = self.reliable.back_mut()
+            {
+                *queued_horizontal = queued_horizontal.saturating_add(horizontal);
+                *queued_vertical = queued_vertical.saturating_add(vertical);
+                return;
+            }
         }
         if self.reliable.len() >= MAX_RELIABLE_QUEUE {
             self.reliable.clear();
@@ -482,13 +505,70 @@ mod tests {
     use secure_channel::DatagramSealer;
 
     #[test]
-    fn pointer_rate_is_twice_stream_fps() {
-        assert_eq!(polling_rate_hz(0), 30);
-        assert_eq!(polling_rate_hz(30), 60);
+    fn pointer_rate_has_120hz_floor() {
+        assert_eq!(polling_rate_hz(0), 120);
+        assert_eq!(polling_rate_hz(30), 120);
+        assert_eq!(polling_rate_hz(59), 120);
         assert_eq!(polling_rate_hz(60), 120);
         assert_eq!(polling_rate_hz(90), 180);
         assert_eq!(polling_rate_hz(200), 240);
         assert_eq!(polling_rate_hz(240), 240);
+    }
+
+    #[test]
+    fn scroll_bursts_merge_into_one_queued_delta() {
+        let mut scheduler = InputScheduler::new(60);
+        // 첫 스크롤이 전송 중(pending)이 되고, 이어지는 버스트는 합쳐 담긴다.
+        scheduler.push(InputEvent::Scroll {
+            horizontal_milli_lines: 0,
+            vertical_milli_lines: 40,
+        });
+        let first = scheduler.next_ready(0).unwrap();
+        assert!(matches!(
+            first.event,
+            InputEvent::Scroll {
+                vertical_milli_lines: 40,
+                ..
+            }
+        ));
+        for _ in 0..300 {
+            scheduler.push(InputEvent::Scroll {
+                horizontal_milli_lines: 0,
+                vertical_milli_lines: 60,
+            });
+        }
+        // 300번 밀어도 큐는 합산 1개 — 256 상한의 ReleaseAll 페이로드가
+        // 터지지 않는다.
+        assert!(scheduler.acknowledge(first.sequence));
+        let merged = scheduler.next_ready(0).unwrap();
+        match merged.event {
+            InputEvent::Scroll {
+                vertical_milli_lines,
+                ..
+            } => {
+                assert_eq!(vertical_milli_lines, 18_000);
+            }
+            other => panic!("expected merged scroll, got {other:?}"),
+        }
+        // 방향이 섞이면 상쇄된다(휠 델타의 누적 의미 그대로).
+        scheduler.push(InputEvent::Scroll {
+            horizontal_milli_lines: 0,
+            vertical_milli_lines: 100,
+        });
+        scheduler.push(InputEvent::Scroll {
+            horizontal_milli_lines: 0,
+            vertical_milli_lines: -100,
+        });
+        assert_eq!(scheduler.reliable.len(), 1);
+        match scheduler.reliable.front() {
+            Some(InputEvent::Scroll {
+                vertical_milli_lines,
+                ..
+            }) => {
+                assert_eq!(*vertical_milli_lines, 0);
+            }
+            other => panic!("expected cancelled scroll, got {other:?}"),
+        }
     }
 
     #[test]

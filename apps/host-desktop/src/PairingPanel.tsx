@@ -562,10 +562,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
   return (
     <div className="pairing-wrapper">
       <div className="pairing-guide">
-        <p className="pairing-guide-title">{t.host.pairingModalTitle}</p>
-        <p className="pairing-guide-sub">
-          {t.host.pairingPanelGuide}
-        </p>
+        <p className="pairing-guide-sub">{t.host.pairingPanelGuide}</p>
       </div>
 
       {lanIp && (

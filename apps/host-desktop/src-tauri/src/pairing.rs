@@ -679,6 +679,11 @@ impl PairingServer {
             if let Err(error) = result {
                 outcome.persistence_errors.push(error);
             }
+            // 철회는 상시 원격 입력 승인도 함께 거둔다 — 토큰 없이는 어차피
+            // 인증되지 않지만, 기록에 승인이 남으면 재페어링 혼동을 준다.
+            if let Err(error) = inner.grants.set_input(&owner, false) {
+                outcome.persistence_errors.push(error);
+            }
             inner.token_store.delete(device.credential_key());
             inner.device_generations.remove(&device.device_id);
             outcome.removed_devices.push(RemovedDevice {
@@ -910,6 +915,44 @@ impl PairingServer {
         !inner.shutting_down
             && inner.device_generations.get(&auth.device) == Some(&auth.generation)
             && inner.grants.allows(&auth.owner, source)
+    }
+
+    /// 기기의 상시 원격 입력 승인(다음 세션부터 자동 활성화). 미페어링 기기·
+    /// 종료 중·미검토 기록은 항상 거짓이다.
+    pub(crate) fn device_input_allowed(&self, device_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if inner.shutting_down {
+            return false;
+        }
+        inner
+            .paired
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .map(|d| inner.grants.input_allowed(&d.owner()))
+            .unwrap_or(false)
+    }
+
+    /// 기기별 상시 원격 입력 승인 저장. 세션 단위 적용은 호출자(control)가 맡는다.
+    pub(crate) fn set_device_input(
+        &self,
+        device_id: &str,
+        allowed: bool,
+    ) -> Result<crate::source_grants::GrantView, String> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.shutting_down {
+            return Err("Host is shutting down".into());
+        }
+        let owner = inner
+            .paired
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .map(PairedDevice::owner)
+            .ok_or("no such paired device")?;
+        let result = inner.grants.set_input(&owner, allowed)?;
+        inner.view_revision += 1;
+        let mut view = result;
+        view.state_revision = inner.view_revision;
+        Ok(view)
     }
     #[cfg(test)]
     pub(crate) fn update_source_grants(
@@ -1595,6 +1638,59 @@ mod tests {
         let view = server.begin_pairing("192.168.0.10", 7777);
         assert_eq!(view.code.len(), 6);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn device_input_approval_needs_review_after_restart_and_dies_on_revoke() {
+        let path = temp_store_path("input-approval");
+        let grants_path = path.with_extension("grants");
+        let tokens_path = path.with_extension("tokens");
+        let make_server = || {
+            let server = PairingServer::new(
+                [7u8; 32],
+                Some(path.clone()),
+                Box::new(FileTokenStore::new(Some(tokens_path.clone()))),
+            );
+            server
+                .initialize_source_grants(grants_path.clone())
+                .unwrap();
+            server
+        };
+        {
+            let server = make_server();
+            let view = server.begin_pairing("192.168.0.10", 7777);
+            let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+            let offer_id = payload["id"].as_str().unwrap().to_owned();
+            let secret_b64 = payload["s"].as_str().unwrap().to_owned();
+            server
+                .pair(&offer_id, &secret_b64, &view.code, "viewer-1", "Quest 3")
+                .unwrap();
+            server
+                .update_source_grants("viewer-1", vec!["display:0".into()])
+                .0
+                .unwrap();
+            server.set_device_input("viewer-1", true).unwrap();
+            assert!(server.device_input_allowed("viewer-1"));
+        }
+
+        // 재시작: 입력 승인 기록은 남지만 화면 승인과 같은 재검토 규율을 따른다 —
+        // 운용자가 승인을 다시 저장하기 전에는 자동 활성화되지 않는다.
+        let restarted = make_server();
+        assert_eq!(restarted.list_devices().len(), 1);
+        assert!(!restarted.device_input_allowed("viewer-1"));
+        restarted
+            .update_source_grants("viewer-1", vec!["display:0".into()])
+            .0
+            .unwrap();
+        assert!(restarted.device_input_allowed("viewer-1"));
+
+        // 철회는 상시 입력 승인도 함께 거둔다.
+        restarted.revoke("viewer-1");
+        assert!(!restarted.device_input_allowed("viewer-1"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&grants_path);
+        let _ = std::fs::remove_file(&tokens_path);
     }
 
     #[test]

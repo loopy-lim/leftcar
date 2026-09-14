@@ -464,7 +464,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         pressure: Float = -1f,
     ): Boolean {
         if (remoteInputLocked()) return true
-        return ViewerNative.sendPointer(
+        val sent = ViewerNative.sendPointer(
             instanceId,
             action,
             x,
@@ -475,6 +475,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             verticalScroll,
             pressure,
         ) == 0
+        if (sent) cursorOverlay?.nudge()
+        return sent
     }
 
     private fun sendKeyUnlocked(
@@ -485,12 +487,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         repeat: Int,
     ): Boolean {
         if (remoteInputLocked()) return true
-        return ViewerNative.sendKey(instanceId, keyCode, scanCode, metaState, down, repeat) == 0
+        val sent = ViewerNative.sendKey(instanceId, keyCode, scanCode, metaState, down, repeat) == 0
+        if (sent) cursorOverlay?.nudge()
+        return sent
     }
 
     private fun sendTextUnlocked(text: String) {
         if (remoteInputLocked()) return
         ViewerNative.sendText(instanceId, text.toByteArray(Charsets.UTF_8))
+        cursorOverlay?.nudge()
     }
 
     /** IME 텍스트 계열의 편집 키는 다운/업 페어로 왕복시킨다. */
@@ -513,6 +518,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 repeat(count) { sendKeyPairUnlocked(TextInputRelay.KEYCODE_FORWARD_DEL) }
             },
             sendEnter = { sendKeyPairUnlocked(TextInputRelay.KEYCODE_ENTER) },
+            sendKey = { keyCode -> sendKeyPairUnlocked(keyCode) },
         )
         val lens = TextInputLensView(this, relay).also { view ->
             view.onImeVisibilityChanged = { visible ->
@@ -602,12 +608,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ) {
             hud?.revealInput()
             hud?.revealStats()
+            // 즉각 피드백: 물리 버튼 누름/스타일러스 터치는 호스트 왕복 전에
+            // 로컬 물결로 반응을 보여 준다.
+            if (!remoteInputLocked() &&
+                (event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || touchLike)
+            ) {
+                cursorOverlay?.showTapEcho(event.rawX, event.rawY)
+            }
         }
         // Android normally batches/resamples pointer motion around display
         // frames. A remote-control Surface needs the hardware samples early;
-        // Rust still coalesces them to the bounded 2x-stream-FPS wire target.
+        // Rust still coalesces them to the bounded 120Hz-floor wire target.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
             (event.actionMasked == MotionEvent.ACTION_HOVER_ENTER ||
+                event.actionMasked == MotionEvent.ACTION_HOVER_MOVE ||
+                event.actionMasked == MotionEvent.ACTION_MOVE ||
                 event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS)
         ) {
             view.requestUnbufferedDispatch(event.source)
@@ -675,6 +690,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             hud?.revealInput()
             hud?.revealStats()
+            // 즉각 피드백: 손가락 탭도 첫 프레임 안에 로컬 물결로 확인시킨다.
+            if (!remoteInputLocked()) {
+                cursorOverlay?.showTapEcho(event.rawX, event.rawY)
+            }
         }
         if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
             // Wheel-style scroll events carry axis payloads directly; the
@@ -820,6 +839,57 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         KeyEvent.KEYCODE_APP_SWITCH,
     )
 
+    /**
+     * 하드웨어 자판의 US 기준 글자 — kind-4 물리 키 경로가 그대로 맞는 경우를
+     * 가려내는 기준선. 매핑이 없는 키(기능키 등)는 null.
+     */
+    private val usCharByKeyCode: Map<Int, Int> = buildMap {
+        for (offset in 0..25) put(KeyEvent.KEYCODE_A + offset, 'A'.code + offset)
+        for (offset in 0..9) put(KeyEvent.KEYCODE_0 + offset, '0'.code + offset)
+        put(KeyEvent.KEYCODE_COMMA, ','.code)
+        put(KeyEvent.KEYCODE_PERIOD, '.'.code)
+        put(KeyEvent.KEYCODE_MINUS, '-'.code)
+        put(KeyEvent.KEYCODE_EQUALS, '='.code)
+        put(KeyEvent.KEYCODE_LEFT_BRACKET, '['.code)
+        put(KeyEvent.KEYCODE_RIGHT_BRACKET, ']'.code)
+        put(KeyEvent.KEYCODE_BACKSLASH, '\\'.code)
+        put(KeyEvent.KEYCODE_SEMICOLON, ';'.code)
+        put(KeyEvent.KEYCODE_APOSTROPHE, '\''.code)
+        put(KeyEvent.KEYCODE_SLASH, '/'.code)
+        put(KeyEvent.KEYCODE_GRAVE, '`'.code)
+        put(KeyEvent.KEYCODE_SPACE, ' '.code)
+    }
+
+    /**
+     * 하드웨어 글쇠 중 "US 배치가 아닌 문자"가 나오는 키는 kind-6 텍스트로
+     * 보낸다(예: 태블릿이 한국어 하드웨어 자판이면 A 키가 'ㅁ'로 온다).
+     * 문자를 그대로 타이핑하는 것이 Mac 입력 소스와 무관하게 정확하다.
+     * US 기준 글자와 같은 키는 기존 kind-4 물리 키 경로를 유지한다 —
+     * 키 홀드(게임 이동 등)·수식어 조합·반복 의미가 살아 있어야 하기 때문.
+     * Ctrl/Alt/Meta/Sym/Function 조합과 Shift 조합은 항상 kind-4다.
+     */
+    private fun nonUsPrintableChar(event: KeyEvent): Int? {
+        if (event.action != KeyEvent.ACTION_DOWN) return null
+        val meta = event.metaState
+        val allowedMeta = KeyEvent.META_SHIFT_ON or
+            KeyEvent.META_SHIFT_LEFT_ON or KeyEvent.META_SHIFT_RIGHT_ON or
+            KeyEvent.META_CAPS_LOCK_ON
+        if (meta and allowedMeta.inv() != 0) return null
+        if (meta and (KeyEvent.META_SHIFT_ON or
+                KeyEvent.META_SHIFT_LEFT_ON or KeyEvent.META_SHIFT_RIGHT_ON) != 0
+        ) {
+            return null
+        }
+        val char = event.getUnicodeChar()
+        // 제어 문자(Enter·Tab·Backspace 등)와 C1 제어는 문자가 아니라 키다.
+        if (char < 0x20 || char == 0x7F || char in 0x80..0x9F) return null
+        val baseline = usCharByKeyCode[event.keyCode] ?: return null
+        return if (char != baseline) char else null
+    }
+
+    /** DOWN이 텍스트 경로로 간 키의 UP — 호스트가 이미 down/up을 쳤으니 조용히 소비한다. */
+    private val textPathDownKeyCodes = HashSet<Int>()
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (!isRemoteKey(event.keyCode)) return super.dispatchKeyEvent(event)
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP) {
@@ -828,6 +898,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (event.action == KeyEvent.ACTION_DOWN) {
             hud?.revealInput()
             hud?.revealStats()
+            val char = nonUsPrintableChar(event)
+            if (char != null) {
+                sendTextUnlocked(String(Character.toChars(char)))
+                textPathDownKeyCodes.add(event.keyCode)
+                return true
+            }
+        } else if (textPathDownKeyCodes.remove(event.keyCode)) {
+            return true
         }
         val result = sendKeyUnlocked(
             event.keyCode,

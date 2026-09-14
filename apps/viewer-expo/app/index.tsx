@@ -293,7 +293,10 @@ export default function Hub() {
               </Text>
             </View>
 
-            <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
+            <View style={styles.heroBody}>
+              <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
+              <Text style={styles.heroDesc}>{t.viewer.connectedHeroDesc}</Text>
+            </View>
 
             <View style={styles.heroActionRow}>
               <Pressable
@@ -339,9 +342,12 @@ export default function Hub() {
               </View>
             </View>
 
-            <Text style={styles.heroTitle}>
-              {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyHeroTitle}
-            </Text>
+            <View style={styles.heroBody}>
+              <Text style={styles.heroTitle}>
+                {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyHeroTitle}
+              </Text>
+              <Text style={styles.heroDesc}>{t.viewer.standbyHeroDesc}</Text>
+            </View>
 
             {lastHost && !autoConnecting && (
               <RecentHostQuickConnect item={lastHost} onFinished={checkConnection} />
@@ -375,6 +381,66 @@ export default function Hub() {
             </View>
           </View>
         )}
+
+        {/* 3-Step Setup Guide */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>{t.viewer.guideTitle}</Text>
+
+          <View style={styles.stepsContainer}>
+            {/* Step 1 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadge}>
+                <Text style={styles.stepNum}>1</Text>
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step1Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step1Desc}</Text>
+              </View>
+            </View>
+            <View style={styles.stepDivider} />
+
+            {/* Step 2 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadge}>
+                <Text style={styles.stepNum}>2</Text>
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step2Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step2Desc}</Text>
+              </View>
+            </View>
+            <View style={styles.stepDivider} />
+
+            {/* Step 3 */}
+            <View style={styles.stepItem}>
+              <View style={styles.stepBadge}>
+                <Text style={styles.stepNum}>3</Text>
+              </View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepName}>{t.viewer.step3Title}</Text>
+                <Text style={styles.stepText}>{t.viewer.step3Desc}</Text>
+              </View>
+            </View>
+          </View>
+        </View>
+
+        {/* 2-Column Feature Grid */}
+        <View style={styles.featureGrid}>
+          <View style={styles.featureCard}>
+            <View style={styles.featureIconBox}>
+              <Ionicons name="speedometer-outline" size={16} color={colors.brandPrimary} />
+            </View>
+            <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
+            <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
+          </View>
+          <View style={styles.featureCard}>
+            <View style={styles.featureIconBox}>
+              <Ionicons name="copy-outline" size={16} color={colors.brandPrimary} />
+            </View>
+            <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
+            <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
+          </View>
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -408,7 +474,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       width: 38,
       height: 38,
       borderRadius: 9,
-      backgroundColor: colors.btnPrimaryBg,
+      backgroundColor: colors.brandPrimary,
       alignItems: "center",
       justifyContent: "center",
     },
@@ -466,9 +532,9 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       flexDirection: "row",
       alignItems: "center",
       gap: 6,
-      backgroundColor: colors.bgSubtle,
+      backgroundColor: colors.statusLiveSubtle,
       borderWidth: 1,
-      borderColor: colors.borderCard,
+      borderColor: colors.statusLiveBorder,
       paddingHorizontal: 8,
       paddingVertical: 3,
       borderRadius: 12,
@@ -477,10 +543,10 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       width: 6,
       height: 6,
       borderRadius: 3,
-      backgroundColor: colors.textPrimary,
+      backgroundColor: colors.statusLive,
     },
     badgeSuccessText: {
-      color: colors.textPrimary,
+      color: colors.statusLive,
       fontSize: 11,
       fontWeight: "700",
     },
@@ -514,11 +580,19 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       flex: 1,
       textAlign: "right",
     },
+    heroBody: {
+      gap: 3,
+    },
     heroTitle: {
       fontSize: 15,
       fontWeight: "700",
       color: colors.textPrimary,
       letterSpacing: -0.2,
+    },
+    heroDesc: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      lineHeight: 17,
     },
     heroActionRow: {
       flexDirection: "row",
@@ -527,14 +601,14 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     primaryActionBtn: {
       flex: 1,
-      backgroundColor: colors.btnPrimaryBg,
+      backgroundColor: colors.brandPrimary,
       borderRadius: 8,
       paddingVertical: 10,
       alignItems: "center",
       justifyContent: "center",
     },
     primaryActionText: {
-      color: colors.btnPrimaryText,
+      color: "#FFFFFF",
       fontSize: 12,
       fontWeight: "600",
     },
@@ -555,7 +629,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       fontWeight: "600",
     },
     disconnectActionBtn: {
-      backgroundColor: colors.bgSurface,
+      backgroundColor: colors.statusDangerSubtle,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
       borderRadius: 8,
@@ -565,10 +639,106 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       justifyContent: "center",
     },
     disconnectActionText: {
-      color: colors.textMuted,
+      color: colors.statusDanger,
       fontSize: 12,
       fontWeight: "600",
     },
+
+    /* Setup Guide */
+    sectionCard: {
+      backgroundColor: colors.bgSurface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 16,
+      gap: 12,
+    },
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: colors.textMuted,
+      textTransform: "uppercase",
+      letterSpacing: 0.04,
+    },
+    stepsContainer: {
+      gap: 10,
+    },
+    stepItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    stepBadge: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      backgroundColor: colors.brandSubtle,
+      borderWidth: 1,
+      borderColor: colors.brandPrimary,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    stepNum: {
+      color: colors.brandPrimary,
+      fontSize: 10,
+      fontWeight: "700",
+      fontFamily: "monospace",
+    },
+    stepInfo: {
+      flex: 1,
+      gap: 1,
+    },
+    stepName: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.textPrimary,
+    },
+    stepText: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 15,
+    },
+    stepDivider: {
+      height: 1,
+      backgroundColor: colors.borderSubtle,
+      marginLeft: 34,
+    },
+
+    /* 2-Column Feature Grid */
+    featureGrid: {
+      flexDirection: "row",
+      gap: 10,
+    },
+    featureCard: {
+      flex: 1,
+      backgroundColor: colors.bgSurface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.borderSubtle,
+      padding: 14,
+      gap: 4,
+    },
+    featureIconBox: {
+      width: 28,
+      height: 28,
+      borderRadius: 6,
+      backgroundColor: colors.brandSubtle,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 2,
+    },
+    featureValue: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: colors.textPrimary,
+      fontVariant: ["tabular-nums"],
+    },
+    featureLabel: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 15,
+    },
+
     recentQuickStrip: {
       flexDirection: "row",
       alignItems: "center",

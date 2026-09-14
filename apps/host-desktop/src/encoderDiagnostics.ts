@@ -1,3 +1,9 @@
+import {
+  getTranslation,
+  interpolate,
+  type SupportedLanguage,
+  type TranslationSchema,
+} from "@leftcar/ui-tokens";
 import type { SessionRow } from "./sessionTypes";
 
 export interface EncoderDiagnosticsView {
@@ -13,7 +19,7 @@ export interface EncoderDiagnosticsView {
   pressure: string;
   inFlight: string;
   validOutputFps: string;
-  qualityBasis: "Base QP 기반" | null;
+  qualityBasis: string | null;
   hasEncoderPressure: boolean;
   hasExperimentFallback: boolean;
   splitEncode: string | null;
@@ -25,84 +31,99 @@ export interface EncoderDiagnosticsView {
   splitRecovery: string | null;
 }
 
-const experimentLabels: Record<string, string> = {
-  auto: "자동",
-  rateControl: "레이트 컨트롤",
-  adaptiveQp: "적응형 QP",
-  encoderPool: "인코더 풀",
-  splitVertical: "4K 수직 분할",
-};
+type InspectorStrings = TranslationSchema["host"]["inspector"];
+
+function experimentLabels(t: InspectorStrings): Record<string, string> {
+  return {
+    auto: t.auto,
+    rateControl: t.experimentRateControl,
+    adaptiveQp: t.experimentAdaptiveQp,
+    encoderPool: t.experimentEncoderPool,
+    splitVertical: t.experimentSplitVertical,
+  };
+}
 
 function finiteNumber(value: number | null | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function measuredInteger(value: number | null | undefined): string {
+function measuredInteger(value: number | null | undefined, measuring: string): string {
   const measured = finiteNumber(value);
-  return measured === undefined ? "측정 중" : String(Math.trunc(measured));
+  return measured === undefined ? measuring : String(Math.trunc(measured));
 }
 
-function measuredMilliseconds(value: number | null | undefined): string {
+function measuredMilliseconds(value: number | null | undefined, measuring: string): string {
   const measured = finiteNumber(value);
-  return measured === undefined ? "측정 중" : `${(measured / 1000).toFixed(1)}ms`;
+  return measured === undefined ? measuring : `${(measured / 1000).toFixed(1)}ms`;
 }
 
 function experimentId(value: string | null | undefined): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function experimentLabel(value: string | undefined): string {
-  return value === undefined ? "측정 중" : (experimentLabels[value] ?? value);
+function experimentLabel(
+  value: string | undefined,
+  labels: Record<string, string>,
+  measuring: string,
+): string {
+  return value === undefined ? measuring : (labels[value] ?? value);
 }
 
-function encoderModeLabel(mode: SessionRow["encoderMode"]): string {
+function encoderModeLabel(mode: SessionRow["encoderMode"], t: InspectorStrings): string {
   switch (mode) {
     case "ave":
       return "AVE";
     case "rtvc":
       return "RTVC";
     default:
-      return "미확인";
+      return t.encoderModeUnknown;
   }
 }
 
-function accelerationLabel(accelerated: SessionRow["encoderHardwareAccelerated"]): string {
+function accelerationLabel(
+  accelerated: SessionRow["encoderHardwareAccelerated"],
+  t: InspectorStrings,
+): string {
   switch (accelerated) {
     case true:
-      return "하드웨어";
+      return t.hardware;
     case false:
-      return "소프트웨어";
+      return t.software;
     default:
-      return "가속 확인 중";
+      return t.accelerationChecking;
   }
 }
 
-function qpDetail(session: SessionRow): string {
+function qpDetail(session: SessionRow, t: InspectorStrings): string {
   if (session.baseFrameQp === null) {
-    return "QP 적용 안 됨";
+    return t.qpNotApplied;
   }
 
   const qp = finiteNumber(session.baseFrameQp);
   if (qp === undefined) {
-    return "QP 측정 중";
+    return t.qpMeasuring;
   }
 
   const changes = finiteNumber(session.baseFrameQpChanges);
   return changes === undefined
-    ? `QP ${Math.trunc(qp)} (조정 횟수 측정 중)`
-    : `QP ${Math.trunc(qp)} (${Math.trunc(changes)}회 조정)`;
+    ? interpolate(t.qpAdjustmentsMeasuring, { qp: Math.trunc(qp) })
+    : interpolate(t.qpAdjustments, { qp: Math.trunc(qp), count: Math.trunc(changes) });
 }
 
-export function encoderDiagnosticsView(session: SessionRow): EncoderDiagnosticsView {
+export function encoderDiagnosticsView(
+  session: SessionRow,
+  language: SupportedLanguage = "ko",
+): EncoderDiagnosticsView {
+  const t = getTranslation(language).host.inspector;
   const experimentDiagnosticsAvailable = session.encoderExperimentDiagnosticsAvailable === true;
-  const mode = encoderModeLabel(session.encoderMode);
-  const acceleration = accelerationLabel(session.encoderHardwareAccelerated);
+  const mode = encoderModeLabel(session.encoderMode, t);
+  const acceleration = accelerationLabel(session.encoderHardwareAccelerated, t);
   const unavailable = [
     session.encoderUnsupportedProperties?.length
-      ? `미지원 ${session.encoderUnsupportedProperties.join(", ")}`
+      ? interpolate(t.unsupportedValue, { value: session.encoderUnsupportedProperties.join(", ") })
       : null,
     session.encoderRejectedProperties?.length
-      ? `거부 ${session.encoderRejectedProperties.join(", ")}`
+      ? interpolate(t.rejectedValue, { value: session.encoderRejectedProperties.join(", ") })
       : null,
   ].filter((value): value is string => value !== null).join(" · ");
   const requestedExperiment = experimentDiagnosticsAvailable
@@ -112,8 +133,8 @@ export function encoderDiagnosticsView(session: SessionRow): EncoderDiagnosticsV
     ? experimentId(session.encoderExperimentApplied)
     : undefined;
   const experimentFallback = experimentDiagnosticsAvailable
-    ? (experimentId(session.encoderExperimentFallbackReason) ?? "없음")
-    : "측정 중";
+    ? (experimentId(session.encoderExperimentFallbackReason) ?? t.noneValue)
+    : t.measuring;
   const encoderDrops = experimentDiagnosticsAvailable
     ? finiteNumber(session.encoderFrameDrops)
     : undefined;
@@ -125,44 +146,44 @@ export function encoderDiagnosticsView(session: SessionRow): EncoderDiagnosticsV
 
   return {
     path: `${mode} · ${acceleration}`,
-    identity: session.encoderID || "인코더 ID 확인 중",
-    configuration: `${session.encoderPreset || "preset 확인 중"} · ${session.encoderProfile || "profile 확인 중"}`,
-    applied: session.encoderAppliedProperties?.join(", ") || "없음",
-    unavailable: unavailable || "없음",
+    identity: session.encoderID || t.encoderIdChecking,
+    configuration: `${session.encoderPreset || t.presetChecking} · ${session.encoderProfile || t.profileChecking}`,
+    applied: session.encoderAppliedProperties?.join(", ") || t.noneValue,
+    unavailable: unavailable || t.noneValue,
     fallback: session.encoderFallbackReason ?? null,
-    experiment: experimentLabel(appliedExperiment ?? requestedExperiment),
-    experimentDetail: `요청 ${requestedExperiment ?? "측정 중"} · 적용 ${appliedExperiment ?? "측정 중"} · ${experimentDiagnosticsAvailable ? qpDetail(session) : "QP 측정 중"}`,
+    experiment: experimentLabel(appliedExperiment ?? requestedExperiment, experimentLabels(t), t.measuring),
+    experimentDetail: `${interpolate(t.requestedValue, { value: requestedExperiment ?? t.measuring })} · ${interpolate(t.appliedValue, { value: appliedExperiment ?? t.measuring })} · ${experimentDiagnosticsAvailable ? qpDetail(session, t) : t.qpMeasuring}`,
     experimentFallback,
-    pressure: `드롭 ${measuredInteger(encoderDrops)} · 제출 p95 ${measuredMilliseconds(experimentDiagnosticsAvailable ? session.encodeSubmitCallP95Us : undefined)} · callback p95 ${measuredMilliseconds(experimentDiagnosticsAvailable ? session.encoderCallbackP95Us : undefined)}`,
-    inFlight: `인코더 ${measuredInteger(experimentDiagnosticsAvailable ? session.encodeInFlight : undefined)} · 패킷화 ${measuredInteger(experimentDiagnosticsAvailable ? session.packetizationInFlight : undefined)}`,
+    pressure: `${interpolate(t.dropsCount, { count: measuredInteger(encoderDrops, t.measuring) })} · ${interpolate(t.submitP95Value, { value: measuredMilliseconds(experimentDiagnosticsAvailable ? session.encodeSubmitCallP95Us : undefined, t.measuring) })} · ${interpolate(t.callbackP95Value, { value: measuredMilliseconds(experimentDiagnosticsAvailable ? session.encoderCallbackP95Us : undefined, t.measuring) })}`,
+    inFlight: `${t.encoderWord} ${measuredInteger(experimentDiagnosticsAvailable ? session.encodeInFlight : undefined, t.measuring)} · ${t.packetizationWord} ${measuredInteger(experimentDiagnosticsAvailable ? session.packetizationInFlight : undefined, t.measuring)}`,
     validOutputFps: validOutputFps === undefined
-      ? "측정 중"
+      ? t.measuring
       : `${Math.trunc(validOutputFps)} FPS`,
     qualityBasis: experimentDiagnosticsAvailable && appliedExperiment === "adaptiveQp"
-      ? "Base QP 기반"
+      ? t.baseQpBasis
       : null,
     hasEncoderPressure: encoderDrops !== undefined && encoderDrops > 0,
-    hasExperimentFallback: experimentDiagnosticsAvailable && experimentFallback !== "없음",
+    hasExperimentFallback: experimentDiagnosticsAvailable && experimentFallback !== t.noneValue,
     splitEncode: isSplit
-      ? `L ${measuredInteger(session.leftValidEncodeOutputFps)} / R ${measuredInteger(session.rightValidEncodeOutputFps)} FPS`
+      ? `L ${measuredInteger(session.leftValidEncodeOutputFps, t.measuring)} / R ${measuredInteger(session.rightValidEncodeOutputFps, t.measuring)} FPS`
       : null,
     splitRender: isSplit
-      ? `L ${measuredInteger(session.leftRenderedFps)} / R ${measuredInteger(session.rightRenderedFps)} / 결합 ${measuredInteger(session.joinedRenderedFps)} FPS`
+      ? `L ${measuredInteger(session.leftRenderedFps, t.measuring)} / R ${measuredInteger(session.rightRenderedFps, t.measuring)} / ${t.joinedWord} ${measuredInteger(session.joinedRenderedFps, t.measuring)} FPS`
       : null,
     splitSync: isSplit
-      ? `p95 ${measuredMilliseconds(session.pairReadyDeltaP95Us)} · max ${measuredMilliseconds(session.pairReadyDeltaMaxUs)} · timeout ${measuredInteger(session.pairSyncTimeouts)} · 불일치 ${measuredInteger(session.unmatchedOutputDrops)}`
+      ? `p95 ${measuredMilliseconds(session.pairReadyDeltaP95Us, t.measuring)} · max ${measuredMilliseconds(session.pairReadyDeltaMaxUs, t.measuring)} · timeout ${measuredInteger(session.pairSyncTimeouts, t.measuring)} · ${t.mismatchWord} ${measuredInteger(session.unmatchedOutputDrops, t.measuring)}`
       : null,
     splitLoss: isSplit
-      ? `L ${measuredInteger(session.leftReceiverLoss)} / R ${measuredInteger(session.rightReceiverLoss)}`
+      ? `L ${measuredInteger(session.leftReceiverLoss, t.measuring)} / R ${measuredInteger(session.rightReceiverLoss, t.measuring)}`
       : null,
     splitLatency: isSplit
-      ? `${measuredMilliseconds(session.splitPreparationP95Us)} / ${measuredMilliseconds(session.encodedPairCallbackP95Us)}`
+      ? `${measuredMilliseconds(session.splitPreparationP95Us, t.measuring)} / ${measuredMilliseconds(session.encodedPairCallbackP95Us, t.measuring)}`
       : null,
     splitFlow: isSplit
-      ? `lease ${measuredInteger(session.splitFlowActiveLeases)}/${measuredInteger(session.splitFlowCapacity)} · queue ${measuredInteger(session.splitEncodedQueueDepth)} · oldest ${measuredMilliseconds(session.splitEncodedQueueOldestUs)}`
+      ? `lease ${measuredInteger(session.splitFlowActiveLeases, t.measuring)}/${measuredInteger(session.splitFlowCapacity, t.measuring)} · queue ${measuredInteger(session.splitEncodedQueueDepth, t.measuring)} · oldest ${measuredMilliseconds(session.splitEncodedQueueOldestUs, t.measuring)}`
       : null,
     splitRecovery: isSplit
-      ? `capture ${measuredInteger(session.splitPreEncodeAdmissionDrops)} · boundary ${measuredInteger(session.splitRecoveryBoundaryDiscards)} · post-encode ${measuredInteger(session.splitPostEncodeDeltaDrops)} · wire ${measuredInteger(session.splitWirePairsAttempted)}/${measuredInteger(session.splitWirePairSendFailures)} · gap IDR ${measuredInteger(session.splitKeyframeGapRecoveries)} / delta ${measuredInteger(session.splitDeltaGapRecoveries)}`
+      ? `capture ${measuredInteger(session.splitPreEncodeAdmissionDrops, t.measuring)} · boundary ${measuredInteger(session.splitRecoveryBoundaryDiscards, t.measuring)} · post-encode ${measuredInteger(session.splitPostEncodeDeltaDrops, t.measuring)} · wire ${measuredInteger(session.splitWirePairsAttempted, t.measuring)}/${measuredInteger(session.splitWirePairSendFailures, t.measuring)} · gap IDR ${measuredInteger(session.splitKeyframeGapRecoveries, t.measuring)} / delta ${measuredInteger(session.splitDeltaGapRecoveries, t.measuring)}`
       : null,
   };
 }

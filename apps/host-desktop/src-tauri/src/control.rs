@@ -1784,7 +1784,7 @@ impl ControlServer {
             .enter()
             .ok_or("Host is shutting down")?;
         let _input_change = self.input_changes.lock().unwrap();
-        let (handle, access) = {
+        let (handle, access, device) = {
             let mut state = self.sessions.lock().unwrap();
             let session = state
                 .live
@@ -1802,6 +1802,7 @@ impl ControlServer {
                     .authorization
                     .as_ref()
                     .and_then(|auth| auth.access.clone()),
+                session.device_id.clone(),
             )
         };
         if self.replacement_retired.lock().unwrap().get(&session_id) == Some(&handle) {
@@ -1844,6 +1845,27 @@ impl ControlServer {
             })
             .ok_or_else(|| format!("session {session_id} ended while changing input"))?;
         session.input_enabled = enabled;
+        drop(state);
+        // 세션 토글은 그 기기의 상시 승인이기도 하다 — 다음 연결부터 같은
+        // 선택이 자동으로 적용된다. 저장 실패는 이번 세션 상태를 되돌리지
+        // 않는 대신 감사 로그와 GrantView 오류로 드러난다.
+        if let Some(device) = device.as_deref() {
+            match self.pairing.set_device_input(device, enabled) {
+                Ok(_) => {
+                    self.audit_log(
+                        "input_approval_changed",
+                        json!({ "device": device, "enabled": enabled }),
+                    );
+                }
+                Err(error) => {
+                    eprintln!("leftcar: input approval persistence failed for {device}: {error}");
+                    self.audit_log(
+                        "input_approval_persist_failed",
+                        json!({ "device": device, "enabled": enabled, "error": error }),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2407,7 +2429,14 @@ impl ControlServer {
                 match started {
                     Some((handle, candidate, transport, attempt)) => {
                         let viewer_addr = format!("{candidate}:{}", input.viewer_port);
-                        // Viewing permission never grants remote input.
+                        // 시청 승인은 입력을 주지 않는다(기본 잠금). 다만 운용자가
+                        // 이전에 이 기기의 원격 입력을 허용해 둔 경우(기기별 상시
+                        // 승인)에는 새 세션도 자동으로 켠다 — 매 연결마다 호스트
+                        // 수동 허용을 반복하게 하는 것(f1a846e 이전의 흐름)이
+                        // 아니라, 한 번 허용 + 즉시 철회 가능한 기억이다.
+                        let standing_input = authenticated_device
+                            .as_ref()
+                            .is_some_and(|device| self.pairing.device_input_allowed(device));
                         let input_enabled = false;
                         let session_id = self
                             .pairing
@@ -2441,7 +2470,7 @@ impl ControlServer {
                                             .then(|| plan.udp_stability.clone()),
                                         media_key: plan.media_key,
                                         input_enabled,
-                                        input_rate_hz: input.fps.saturating_mul(2).clamp(30, 240),
+                                        input_rate_hz: input.fps.saturating_mul(2).clamp(120, 240),
                                         terminal_since: None,
                                         terminal_error: None,
                                         backend_released: false,
@@ -2463,6 +2492,31 @@ impl ControlServer {
                         // 띄운다(창이 필터 생성보다 먼저 있어야 캡처에서
                         // 제외된다).
                         self.refresh_curtain();
+                        // 상시 입력 승인 적용: OS 접근성 권한이 없거나 백엔드가
+                        // 거부하면 실패하고 세션은 잠금에 머민다(fail-closed).
+                        let mut input_enabled = false;
+                        if standing_input {
+                            input_enabled = self.backend.set_input_enabled(handle, true).is_ok();
+                            if input_enabled {
+                                let mut st = self.sessions.lock().unwrap();
+                                match st.live.get_mut(&session_id) {
+                                    Some(session) if session.handle == handle => {
+                                        session.input_enabled = true;
+                                    }
+                                    _ => input_enabled = false,
+                                }
+                                drop(st);
+                                if input_enabled {
+                                    self.audit_log(
+                                        "input_auto_enabled",
+                                        json!({
+                                            "session": session_id,
+                                            "device": authenticated_device.clone(),
+                                        }),
+                                    );
+                                }
+                            }
+                        }
                         // 세션 시작 시 입력 중재(U4b): 마지막 세션이 이긴다.
                         // 새 세션의 입력이 실제로 켜졌을 때만 다른 라이브
                         // 세션의 입력을 끊는다 — OS 권한이 없어 입력이 꺼진
@@ -4930,6 +4984,62 @@ mod tests {
         let session = state.live.values().next().unwrap();
         assert!(!session.input_enabled, "{resp}");
         assert!(fake.input_calls.lock().unwrap().is_empty(), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn standing_input_approval_auto_enables_new_sessions() {
+        // 기기별 상시 입력 승인: 운용자가 한 번 허용한 기기는 다음 세션부터
+        // 자동으로 입력이 켜진다. 세션 토글 끄기는 상시 승인도 거둔다.
+        let fake = input_test_backend(true);
+        let pairing = test_pairing();
+        let _ = direct_pair_token(&pairing, "viewer-1");
+        assert!(!pairing.device_input_allowed("viewer-1"));
+        pairing.set_device_input("viewer-1", true).unwrap();
+        assert!(pairing.device_input_allowed("viewer-1"));
+
+        let server = Arc::new(ControlServer::new(
+            fake.clone(),
+            pairing.clone(),
+            test_identity(),
+        ));
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
+                }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        {
+            let state = server.sessions.lock().unwrap();
+            assert_eq!(state.live.len(), 1, "{resp}");
+            assert!(
+                state.live.values().next().unwrap().input_enabled,
+                "the approved device's session must start with input on: {resp}"
+            );
+        }
+        let calls = fake.input_calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|(_, enabled)| *enabled),
+            "backend must be told to enable input: {calls:?}"
+        );
+
+        // 세션 토글 끄기는 상시 승인도 거둔다 — 다음 세션은 다시 잠긴다.
+        let session_id = {
+            let state = server.sessions.lock().unwrap();
+            state.live.keys().next().copied().unwrap()
+        };
+        server.set_session_input(session_id, false).unwrap();
+        assert!(!pairing.device_input_allowed("viewer-1"));
     }
 
     #[tokio::test]

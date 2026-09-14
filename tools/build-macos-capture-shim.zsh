@@ -5,7 +5,7 @@ set -euo pipefail
 tool_dir=${0:A:h}
 repo_root=${tool_dir:h}
 shim_root="$repo_root/native/macos-capture-shim"
-mode=${1:?"usage: build-macos-capture-shim.zsh <library|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|retransmit-ring-test|retransmit-policy-test|tile-throughput-probe> <output>"}
+mode=${1:?"usage: build-macos-capture-shim.zsh <library|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|media-sealer-test|retransmit-ring-test|retransmit-policy-test|tile-throughput-probe> <output>"}
 output=${2:?"missing output path"}
 
 typeset -a shim_sources frameworks framework_args
@@ -94,6 +94,14 @@ case "$mode" in
       "$shim_root/Tests/SystemAudioOwnershipTests.swift" \
       -o "$output" \
       "${framework_args[@]}"
+    ;;
+  media-sealer-test)
+    # Pure crypto: only the sealer itself plus the shared cross-language vector.
+    /usr/bin/xcrun swiftc -O \
+      -module-cache-path "${TMPDIR:-/tmp}/leftcar-media-sealer-module-cache" \
+      "$shim_root/Sources/Transport/MediaSealer.swift" \
+      "$shim_root/Tests/MediaSealerTests.swift" \
+      -o "$output" -framework Foundation -framework CryptoKit
     ;;
   retransmit-policy-test)
     # Allowlisted pure cache, geometry types and in-memory crypto only.
