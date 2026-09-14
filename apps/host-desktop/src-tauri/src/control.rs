@@ -447,6 +447,10 @@ impl ControlServer {
         }
     }
 
+    pub fn backend(&self) -> &SharedBackend {
+        &self.backend
+    }
+
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
     }

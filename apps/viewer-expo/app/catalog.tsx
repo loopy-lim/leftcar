@@ -714,9 +714,13 @@ interface DisplayListItemProps {
   display: DisplayInfo;
   disabled: boolean;
   isLaunching: boolean;
+  isSwitching: boolean;
+  isActive: boolean;
+  hasActiveStream: boolean;
   profileSelection: ViewerProfileSelection;
   streamingPriority: StreamingPriority;
   onOpen: (display: DisplayInfo) => void;
+  onSwitch: (display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
 }
@@ -725,9 +729,13 @@ function DisplayListItem({
   display,
   disabled,
   isLaunching,
+  isSwitching,
+  isActive,
+  hasActiveStream,
   profileSelection,
   streamingPriority,
   onOpen,
+  onSwitch,
   styles,
   colors,
 }: DisplayListItemProps) {
@@ -743,15 +751,28 @@ function DisplayListItem({
     streamingPriority,
     resolveStreamMaximum(display, profileSelection),
   );
-  const handlePress = useCallback(() => onOpen(display), [display, onOpen]);
+  const isBusy = isLaunching || isSwitching;
+  const isItemDisabled = disabled || isBusy || isActive;
+
+  const handlePress = useCallback(() => {
+    if (isItemDisabled) return;
+    if (hasActiveStream) {
+      onSwitch(display);
+    } else {
+      onOpen(display);
+    }
+  }, [display, hasActiveStream, isItemDisabled, onOpen, onSwitch]);
+
+  const monitorLabel = display.index === 0 ? t.viewer.primaryDisplay : t.viewer.secondaryDisplay;
+
   return (
     <Pressable
       style={({ pressed }) => [
         styles.displayCard,
-        pressed && !disabled && styles.itemPressed,
+        pressed && !isItemDisabled && styles.itemPressed,
       ]}
       onPress={handlePress}
-      disabled={disabled}
+      disabled={isItemDisabled}
     >
       <DisplayAspectMiniature width={display.width} height={display.height} colors={colors} />
 
@@ -761,7 +782,9 @@ function DisplayListItem({
             {display.name}
           </Text>
           <View style={styles.displayIndexBadge}>
-            <Text style={styles.displayIndexText}>#{display.index}</Text>
+            <Text style={styles.displayIndexText}>
+              #{display.index} {monitorLabel}
+            </Text>
           </View>
         </View>
         <View style={styles.chipsRow}>
@@ -776,16 +799,28 @@ function DisplayListItem({
         </View>
       </View>
 
-      <View style={[styles.openBtn, isLaunching && styles.btnDisabled]}>
-        {isLaunching ? (
+      {isBusy ? (
+        <View style={[styles.openBtn, styles.btnDisabled]}>
           <ActivityIndicator color={colors.btnPrimaryText} size="small" />
-        ) : (
+        </View>
+      ) : isActive ? (
+        <View style={styles.streamingBadge}>
+          <View style={styles.dotActive} />
+          <Text style={styles.streamingBadgeText}>{t.viewer.currentlyStreaming}</Text>
+        </View>
+      ) : hasActiveStream ? (
+        <View style={styles.btnSwitchDisplay}>
+          <Ionicons name="swap-horizontal" size={12} color={colors.btnSecondaryText} />
+          <Text style={styles.btnSwitchDisplayText}>{t.viewer.switchToDisplay}</Text>
+        </View>
+      ) : (
+        <View style={styles.openBtn}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Text style={styles.openBtnText}>{t.common.open}</Text>
             <Ionicons name="arrow-forward" size={12} color={colors.btnPrimaryText} />
           </View>
-        )}
-      </View>
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -814,19 +849,27 @@ function EmptyDisplayList({
   );
 }
 
-function ActiveStreamItem({
-  stream,
-  onStop,
-  onChangeResolution,
-  styles,
-  colors,
-}: {
+interface ActiveStreamItemProps {
   stream: ActiveStream;
+  displays: DisplayInfo[];
+  switching: boolean;
   onStop: (stream: ActiveStream) => void;
   onChangeResolution: (stream: ActiveStream) => void;
+  onSwitchDisplay: (stream: ActiveStream, display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
-}) {
+}
+
+function ActiveStreamItem({
+  stream,
+  displays,
+  switching,
+  onStop,
+  onChangeResolution,
+  onSwitchDisplay,
+  styles,
+  colors,
+}: ActiveStreamItemProps) {
   const { t } = useAppLanguage();
   const handleStop = useCallback(() => onStop(stream), [onStop, stream]);
   const handleChangeResolution = useCallback(
@@ -835,39 +878,78 @@ function ActiveStreamItem({
   );
   return (
     <View style={styles.streamCard}>
-      <View style={styles.streamInfo}>
-        <View style={styles.streamNameRow}>
-          <View style={styles.dotActive} />
-          <Text style={styles.streamName} numberOfLines={1}>
-            {stream.sourceName}
-          </Text>
+      <View style={styles.streamCardTop}>
+        <View style={styles.streamInfo}>
+          <View style={styles.streamNameRow}>
+            <View style={styles.dotActive} />
+            <Text style={styles.streamName} numberOfLines={1}>
+              {stream.sourceName}
+            </Text>
+          </View>
+          <View style={styles.streamSpecRow}>
+            <Text style={styles.streamPort} numberOfLines={1}>
+              {stream.width} × {stream.height} · {stream.fps} FPS
+            </Text>
+            <Text style={styles.transportBadge}>{transportBadgeLabel(stream.mediaTransport)}</Text>
+          </View>
         </View>
-        <View style={styles.streamSpecRow}>
-          <Text style={styles.streamPort} numberOfLines={1}>
-            {stream.width} × {stream.height} · {stream.fps} FPS
-          </Text>
-          <Text style={styles.transportBadge}>{transportBadgeLabel(stream.mediaTransport)}</Text>
+        <View style={styles.streamActions}>
+          <Pressable
+            style={styles.btnChangeResolution}
+            onPress={handleChangeResolution}
+            accessibilityRole="button"
+            accessibilityLabel={t.viewer.changeResolution}
+          >
+            <Ionicons name="resize-outline" size={12} color={colors.btnSecondaryText} />
+            <Text style={styles.btnChangeResolutionText}>{t.viewer.changeResolution}</Text>
+          </Pressable>
+          <Pressable
+            style={styles.stopBtn}
+            onPress={handleStop}
+            accessibilityRole="button"
+            accessibilityLabel={t.common.stop}
+          >
+            <Text style={styles.stopBtnText}>{t.common.stop}</Text>
+          </Pressable>
         </View>
       </View>
-      <View style={styles.streamActions}>
-        <Pressable
-          style={styles.btnChangeResolution}
-          onPress={handleChangeResolution}
-          accessibilityRole="button"
-          accessibilityLabel={t.viewer.changeResolution}
-        >
-          <Ionicons name="resize-outline" size={12} color={colors.btnSecondaryText} />
-          <Text style={styles.btnChangeResolutionText}>{t.viewer.changeResolution}</Text>
-        </Pressable>
-        <Pressable
-          style={styles.stopBtn}
-          onPress={handleStop}
-          accessibilityRole="button"
-          accessibilityLabel={t.common.stop}
-        >
-          <Text style={styles.stopBtnText}>{t.common.stop}</Text>
-        </Pressable>
-      </View>
+      {displays.length > 1 ? (
+        <View style={styles.displaySwitchBar}>
+          <Text style={styles.displaySwitchLabel}>{t.viewer.switchSourceLabel}:</Text>
+          <View style={styles.displaySwitchChips}>
+            {displays.map((d) => {
+              const isCurrent =
+                d.sourceId && stream.sourceId
+                  ? d.sourceId === stream.sourceId
+                  : d.index === stream.sourceIndex;
+              const monitorLabel = d.index === 0 ? t.viewer.primaryDisplay : t.viewer.secondaryDisplay;
+              return (
+                <Pressable
+                  key={d.index}
+                  style={[
+                    styles.displaySwitchChip,
+                    isCurrent && styles.displaySwitchChipActive,
+                    switching && styles.btnDisabled,
+                  ]}
+                  disabled={isCurrent || switching}
+                  onPress={() => onSwitchDisplay(stream, d)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`#${d.index} ${monitorLabel}`}
+                >
+                  <Text
+                    style={[
+                      styles.displaySwitchText,
+                      isCurrent && styles.displaySwitchTextActive,
+                    ]}
+                  >
+                    #{d.index} {monitorLabel}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -943,16 +1025,22 @@ function ResolutionModal({
 
 interface CatalogFooterProps {
   streams: ActiveStream[];
+  displays: DisplayInfo[];
+  switchingSession: number | null;
   onStop: (stream: ActiveStream) => void;
   onChangeResolution: (stream: ActiveStream) => void;
+  onSwitchDisplay: (stream: ActiveStream, display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
 }
 
 function CatalogFooter({
   streams,
+  displays,
+  switchingSession,
   onStop,
   onChangeResolution,
+  onSwitchDisplay,
   styles,
   colors,
 }: CatalogFooterProps) {
@@ -973,8 +1061,11 @@ function CatalogFooter({
           <ActiveStreamItem
             key={stream.session}
             stream={stream}
+            displays={displays}
+            switching={switchingSession === stream.session}
             onStop={onStop}
             onChangeResolution={onChangeResolution}
+            onSwitchDisplay={onSwitchDisplay}
             styles={styles}
             colors={colors}
           />
@@ -1022,25 +1113,57 @@ export default function Catalog() {
     setResolutionSession(null);
   }, []);
 
+  const activeStream = model.streams[0] ?? null;
+
+  const handleSwitchDisplay = useCallback(
+    (display: DisplayInfo) => {
+      if (!activeStream) return;
+      void model.handleSwitchSessionSource(activeStream, display);
+    },
+    [activeStream, model.handleSwitchSessionSource],
+  );
+
+  const handleSwitchActiveStreamSource = useCallback(
+    (stream: ActiveStream, display: DisplayInfo) => {
+      void model.handleSwitchSessionSource(stream, display);
+    },
+    [model.handleSwitchSessionSource],
+  );
+
   const renderDisplay = useCallback(
-    ({ item }: ListRenderItemInfo<DisplayInfo>) => (
-      <DisplayListItem
-        display={item}
-        disabled={model.launchingIndex !== null}
-        isLaunching={model.launchingIndex === item.index}
-        profileSelection={model.profileId}
-        streamingPriority={model.streamingPriority}
-        onOpen={model.openDisplay}
-        styles={styles}
-        colors={colors}
-      />
-    ),
+    ({ item }: ListRenderItemInfo<DisplayInfo>) => {
+      const isDisplayActive = model.streams.some((s) =>
+        item.sourceId && s.sourceId
+          ? s.sourceId === item.sourceId
+          : s.sourceIndex === item.index,
+      );
+      return (
+        <DisplayListItem
+          display={item}
+          disabled={model.launchingIndex !== null || model.switchingSession !== null}
+          isLaunching={model.launchingIndex === item.index}
+          isSwitching={model.switchingSession !== null}
+          isActive={isDisplayActive}
+          hasActiveStream={activeStream !== null}
+          profileSelection={model.profileId}
+          streamingPriority={model.streamingPriority}
+          onOpen={model.openDisplay}
+          onSwitch={handleSwitchDisplay}
+          styles={styles}
+          colors={colors}
+        />
+      );
+    },
     [
+      activeStream,
       colors,
+      handleSwitchDisplay,
       model.launchingIndex,
       model.openDisplay,
       model.profileId,
+      model.streams,
       model.streamingPriority,
+      model.switchingSession,
       styles,
     ],
   );
@@ -1113,8 +1236,11 @@ export default function Catalog() {
         ListFooterComponent={
           <CatalogFooter
             streams={model.streams}
+            displays={model.displays}
+            switchingSession={model.switchingSession}
             onStop={model.stopStream}
             onChangeResolution={handleChangeResolution}
+            onSwitchDisplay={handleSwitchActiveStreamSource}
             styles={styles}
             colors={colors}
           />

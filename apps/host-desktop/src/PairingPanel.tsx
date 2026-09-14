@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import QRCode from "qrcode";
-import { confirmSourceGrants, getPairedDeviceState, markSourceGrantsUncertain, receivePairedDeviceState, receiveRevokeOutcome, subscribePairedDeviceState, sourceGrantUncertaintyEpoch, type PairedDevice, type PairedDeviceState, type RevokeOutcome } from "./paired-device-state";
-import SourceGrantEditor, { type SourceGrantView } from "./SourceGrantEditor";
+import { getPairedDeviceState, receivePairedDeviceState, receiveRevokeOutcome, subscribePairedDeviceState, type PairedDevice, type PairedDeviceState, type RevokeOutcome } from "./paired-device-state";
 import {
   AlertTriangle,
   Check,
@@ -283,7 +282,6 @@ function PendingApprovalCard({
 }
 
 function PairedDevicesSection({
-  onGrantsSaved,
   devices,
   revoking,
   language,
@@ -291,7 +289,6 @@ function PairedDevicesSection({
   onRevoke,
   onRevokeAll,
 }: {
-  onGrantsSaved: (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => Promise<void>;
   devices: PairedDevice[];
   revoking: string | null;
   language: SupportedLanguage;
@@ -332,7 +329,6 @@ function PairedDevicesSection({
                   {device.name}
                 </span>
                 <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
-                <SourceGrantEditor deviceId={device.device_id} grants={device.source_grants} language={language} onSaved={onGrantsSaved} onFailure={markSourceGrantsUncertain} onSaving={sourceGrantUncertaintyEpoch} />
               </div>
               <button
                 onClick={() => onRevoke(device.device_id)}
@@ -395,11 +391,6 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       // best effort
     }
   }, []);
-
-  const sourceGrantsSaved = useCallback(async (deviceId: string, grants: SourceGrantView, startedAtEpoch?: number) => {
-    confirmSourceGrants(deviceId, grants, startedAtEpoch);
-    await refreshDevices();
-  }, [refreshDevices]);
 
   const startPairing = useCallback(async () => {
     setStarting(true);
@@ -620,7 +611,6 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       />
 
       <PairedDevicesSection
-        onGrantsSaved={sourceGrantsSaved}
         devices={devices}
         revoking={revoking}
         language={language}
