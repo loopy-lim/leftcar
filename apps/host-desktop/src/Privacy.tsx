@@ -139,6 +139,43 @@ export function useClipboardShare() {
 }
 
 /**
+ * 스트리밍 배지("N대 연결 중" 표시) 호스트 훅. 개인 기기 조합에서는
+ * 소음이므로 기본 꺼짐이며, settings.json에 영속된다. Indicator 라우트가
+ * 같은 값을 폴링해 배지 창의 show/hide를 따른다.
+ */
+export function useStreamingBadge() {
+  const [loadAttempt, retryLoad] = useState(0);
+  const badge = useOptimisticToggle("set_streaming_badge", false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (badge.gate.allowsInitialLoad()) badge.setError(null);
+    void invoke<boolean>("get_streaming_badge")
+      .then((enabled) => {
+        if (!cancelled && badge.gate.allowsInitialLoad()) {
+          badge.setValue(enabled);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled && badge.gate.allowsInitialLoad()) {
+          badge.setError(String(cause instanceof Error ? cause.message : cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAttempt, badge.gate, badge.setValue, badge.setError]);
+
+  return {
+    streamingBadge: badge.value,
+    toggleStreamingBadge: badge.toggle,
+    pending: badge.pending,
+    error: badge.error,
+    retryBadge: () => badge.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : badge.toggle(),
+  };
+}
+
+/**
  * 프라이버시 커튼: 모니터를 채우는 검은 오버레이. 이 창은 macOS shim이
  * 캡처 필터에서 제외하므로(제목 "leftcar-curtain") 뷰어에게는 원래 화면이
  * 보인다. 창 자체는 아무 입력도 받지 않는 표시 전용이다.

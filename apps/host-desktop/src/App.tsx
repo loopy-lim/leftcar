@@ -9,6 +9,7 @@ import {
   ChevronUp,
   ClipboardCheck,
   Copy,
+  Eye,
   Globe,
   HelpCircle,
   Info,
@@ -41,7 +42,7 @@ import type { SessionRow } from "./sessionTypes";
 import Modal from "./Modal";
 import PairingPanel from "./PairingPanel";
 import Indicator from "./Indicator";
-import { Curtain, useClipboardShare, usePrivacySettings } from "./Privacy";
+import { Curtain, useClipboardShare, usePrivacySettings, useStreamingBadge } from "./Privacy";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -473,18 +474,23 @@ interface HostSettingsModalProps {
   clipboardShare: boolean;
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
+  streamingBadge: boolean;
   clipboardPending: boolean;
   lockPending: boolean;
   curtainPending: boolean;
+  badgePending: boolean;
   clipboardError: string | null;
   lockError: string | null;
   curtainError: string | null;
+  badgeError: string | null;
   onToggleClipboardShare: () => void;
   onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
+  onToggleStreamingBadge: () => void;
   retryClipboard: () => void;
   retryLock: () => void;
   retryCurtain: () => void;
+  retryBadge: () => void;
 }
 
 function HostSettingsModal(props: HostSettingsModalProps) {
@@ -520,6 +526,16 @@ function HostSettingsModal(props: HostSettingsModalProps) {
       error: props.curtainError,
       onToggle: props.onTogglePrivacyCurtain,
       onRetry: props.retryCurtain,
+    },
+    {
+      icon: Eye,
+      title: t.host.streamingBadgeLabel,
+      desc: t.host.streamingBadgeDesc,
+      active: props.streamingBadge,
+      pending: props.badgePending,
+      error: props.badgeError,
+      onToggle: props.onToggleStreamingBadge,
+      onRetry: props.retryBadge,
     },
   ];
 
@@ -1172,12 +1188,15 @@ interface DashboardModalsProps {
   clipboardShare: boolean;
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
+  streamingBadge: boolean;
   clipboardPending: boolean;
   lockPending: boolean;
   curtainPending: boolean;
+  badgePending: boolean;
   clipboardError: string | null;
   lockError: string | null;
   curtainError: string | null;
+  badgeError: string | null;
   onClosePairing: () => void;
   onCloseHelp: () => void;
   onCloseSettings: () => void;
@@ -1186,9 +1205,11 @@ interface DashboardModalsProps {
   onToggleClipboardShare: () => void;
   onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
+  onToggleStreamingBadge: () => void;
   retryClipboard: () => void;
   retryLock: () => void;
   retryCurtain: () => void;
+  retryBadge: () => void;
 }
 
 function DashboardModals(props: DashboardModalsProps) {
@@ -1203,12 +1224,15 @@ function DashboardModals(props: DashboardModalsProps) {
     clipboardShare,
     lockOnDisconnect,
     privacyCurtain,
+    streamingBadge,
     clipboardPending,
     lockPending,
     curtainPending,
+    badgePending,
     clipboardError,
     lockError,
     curtainError,
+    badgeError,
     onClosePairing,
     onCloseHelp,
     onCloseSettings,
@@ -1217,9 +1241,11 @@ function DashboardModals(props: DashboardModalsProps) {
     onToggleClipboardShare,
     onToggleLockOnDisconnect,
     onTogglePrivacyCurtain,
+    onToggleStreamingBadge,
     retryClipboard,
     retryLock,
     retryCurtain,
+    retryBadge,
   } = props;
 
   return (
@@ -1244,18 +1270,23 @@ function DashboardModals(props: DashboardModalsProps) {
           clipboardShare={clipboardShare}
           lockOnDisconnect={lockOnDisconnect}
           privacyCurtain={privacyCurtain}
+          streamingBadge={streamingBadge}
           clipboardPending={clipboardPending}
           lockPending={lockPending}
           curtainPending={curtainPending}
+          badgePending={badgePending}
           clipboardError={clipboardError}
           lockError={lockError}
           curtainError={curtainError}
+          badgeError={badgeError}
           onToggleClipboardShare={onToggleClipboardShare}
           onToggleLockOnDisconnect={onToggleLockOnDisconnect}
           onTogglePrivacyCurtain={onTogglePrivacyCurtain}
+          onToggleStreamingBadge={onToggleStreamingBadge}
           retryClipboard={retryClipboard}
           retryLock={retryLock}
           retryCurtain={retryCurtain}
+          retryBadge={retryBadge}
         />
       )}
       {pendingStopSession && (
@@ -1344,6 +1375,16 @@ function Dashboard() {
     togglePrivacyCurtain,
     lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
   } = usePrivacySettings();
+
+  // 스트리밍 배지("N대 연결 중") — 개인 기기 조합 기본 꺼짐. Indicator
+  // 라우트가 같은 설정을 폴링해 배지 창의 show/hide를 따른다.
+  const {
+    streamingBadge,
+    toggleStreamingBadge,
+    pending: badgePending,
+    error: badgeError,
+    retryBadge,
+  } = useStreamingBadge();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1489,12 +1530,15 @@ function Dashboard() {
         clipboardShare={clipboardShare}
         lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
+        streamingBadge={streamingBadge}
         clipboardPending={clipboardPending}
         lockPending={lockPending}
         curtainPending={curtainPending}
+        badgePending={badgePending}
         clipboardError={clipboardError}
         lockError={lockError}
         curtainError={curtainError}
+        badgeError={badgeError}
         onClosePairing={() => setShowPairingModal(false)}
         onCloseHelp={() => setShowHelpModal(false)}
         onCloseSettings={() => setShowSettingsModal(false)}
@@ -1503,9 +1547,11 @@ function Dashboard() {
         onToggleClipboardShare={toggleClipboardShare}
         onToggleLockOnDisconnect={toggleLockOnDisconnect}
         onTogglePrivacyCurtain={togglePrivacyCurtain}
+        onToggleStreamingBadge={toggleStreamingBadge}
         retryClipboard={retryClipboard}
         retryLock={retryLock}
         retryCurtain={retryCurtain}
+        retryBadge={retryBadge}
       />
     </div>
   );

@@ -15,6 +15,9 @@ pub struct HostSettings {
     pub lock_on_disconnect: bool,
     /// 커튼 모드: 스트리밍 중 호스트 물리 화면을 검은 오버레이로 가린다.
     pub privacy_curtain: bool,
+    /// 스트리밍 중 데스크탑 우상단에 뜨는 "연결 중" 배지. 개인 기기 조합에서는
+    /// 소음이므로 기본 꺼짐이며, 타인이 보는 환경에서만 켠다.
+    pub streaming_badge: bool,
     /// 네이티브 표면(트레이 메뉴 등)의 UI 언어. 웹뷰의 leftcar_lang 설정과
     /// 같은 값이 되며, 없으면 한국어가 기본이다.
     pub language: HostLanguage,
@@ -74,6 +77,10 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
             .get("privacyCurtain")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        streaming_badge: parsed
+            .get("streamingBadge")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         language: match parsed
             .get("language")
             .or_else(|| parsed.get("leftcar_lang"))
@@ -95,6 +102,7 @@ fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
         "fileShare": settings.file_share,
         "lockOnDisconnect": settings.lock_on_disconnect,
         "privacyCurtain": settings.privacy_curtain,
+        "streamingBadge": settings.streaming_badge,
         "language": settings.language.as_str(),
     })
     .to_string();
@@ -160,6 +168,15 @@ impl SharedSettings {
 
     pub fn privacy_curtain(&self) -> bool {
         self.get().privacy_curtain
+    }
+
+    pub fn streaming_badge(&self) -> bool {
+        self.get().streaming_badge
+    }
+
+    /// 스트리밍 배지 토글 — 다른 게이트 토글과 같은 0600 파일에 영속된다.
+    pub fn set_streaming_badge(&self, enabled: bool) -> Result<(), String> {
+        self.update_field(|s| s.streaming_badge = enabled)
     }
 
     pub fn language(&self) -> HostLanguage {

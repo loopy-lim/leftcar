@@ -27,6 +27,15 @@ export default function Indicator() {
     let cancelled = false;
     const refresh = async () => {
       try {
+        // 배지 스위치가 꺼져 있으면 세션 수와 무관하게 숨긴다 — 개인 기기
+        // 조합의 기본값이며, 설정은 settings.json에 영속된다.
+        const badgeEnabled = await invoke<boolean>("get_streaming_badge");
+        if (cancelled) return;
+        if (!badgeEnabled) {
+          setConnectedCount(0);
+          await indicatorWindow.hide();
+          return;
+        }
         const status = await invoke<{ sessions: SessionRow[] }>("get_status");
         if (cancelled) return;
         const active = (status.sessions ?? []).filter(

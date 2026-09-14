@@ -110,3 +110,56 @@ export function resolveUdpStabilitySelection(
     adaptivePacing,
   };
 }
+
+const UDP_STABILITY_KEY = "leftcar.udpStability";
+
+interface UdpStabilityStore {
+  getItemAsync(key: string): Promise<string | null>;
+  setItemAsync(key: string, value: string): Promise<void>;
+}
+
+function parseUdpStabilitySelection(raw: string | null): UdpStabilitySelection {
+  if (!raw) return { profile: "auto" };
+  try {
+    const parsed = JSON.parse(raw) as Partial<UdpStabilitySelection> | null;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.profile !== "string") {
+      return { profile: "auto" };
+    }
+    const selection: UdpStabilitySelection = {
+      profile: parsed.profile as UdpStabilityProfileId,
+    };
+    if (typeof parsed.burstDatagrams === "number") {
+      selection.burstDatagrams = parsed.burstDatagrams as UdpBurstDatagrams;
+    }
+    if (typeof parsed.fecParityShards === "number") {
+      selection.fecParityShards = parsed.fecParityShards as UdpFecParityShards;
+    }
+    if (typeof parsed.adaptivePacing === "boolean") {
+      selection.adaptivePacing = parsed.adaptivePacing;
+    }
+    return selection;
+  } catch {
+    return { profile: "auto" };
+  }
+}
+
+/**
+ * UDP 안정성 선택을 저장해 다음 세션에서 그대로 쓴다. 호스트가 지원하지
+ * 않는 조합은 effectiveUdpStability의 광고 교집합에서 안전하게 강등된다.
+ */
+export async function readUdpStabilitySelection(
+  store: UdpStabilityStore,
+): Promise<UdpStabilitySelection> {
+  try {
+    return parseUdpStabilitySelection(await store.getItemAsync(UDP_STABILITY_KEY));
+  } catch {
+    return { profile: "auto" };
+  }
+}
+
+export async function writeUdpStabilitySelection(
+  store: UdpStabilityStore,
+  selection: UdpStabilitySelection,
+): Promise<void> {
+  await store.setItemAsync(UDP_STABILITY_KEY, JSON.stringify(selection));
+}

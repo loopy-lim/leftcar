@@ -50,7 +50,9 @@ import {
 } from "./encoder-experiment";
 import {
   availableUdpStabilityOptions,
+  readUdpStabilitySelection,
   resolveUdpStabilitySelection,
+  writeUdpStabilitySelection,
   type UdpStabilitySelection,
 } from "./udp-stability";
 import {
@@ -205,6 +207,27 @@ export function useCatalogModel() {
     if (!preferencesLoaded) return;
     void writeViewerPreferences(SecureStore, preferences).catch(() => undefined);
   }, [preferences, preferencesLoaded]);
+
+  // UDP 안정성 선택도 저장해 다음 세션·카탈로그에서 그대로 쓴다. 호스트가
+  // 지원하지 않는 조합은 effectiveUdpStability의 광고 교집합에서 안전하게
+  // 강등된다. 쓰기는 저장값을 읽은 뒤에만 시작한다(초기값 덮어쓰기 방지 —
+  // viewer-preferences의 loaded 게이트와 같은 패턴).
+  const [udpStabilityLoaded, setUdpStabilityLoaded] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void readUdpStabilitySelection(SecureStore).then((stored) => {
+      if (active) setUdpStability(stored);
+    }).finally(() => {
+      if (active) setUdpStabilityLoaded(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!udpStabilityLoaded) return;
+    void writeUdpStabilitySelection(SecureStore, udpStability).catch(() => undefined);
+  }, [udpStability, udpStabilityLoaded]);
 
   // 클립보드 공유 토글(U5): `leftcar.clipboardShare`(기본 꺼짐)에 저장하고,
   // 켜져 있으면 제어 세션과 함께 폴링 루프를 돌린다. 호스트 게이트도 기본

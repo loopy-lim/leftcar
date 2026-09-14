@@ -174,7 +174,9 @@ pub fn run() {
             add_share_files,
             list_share_queue,
             remove_share_file,
-            set_language
+            set_language,
+            get_streaming_badge,
+            set_streaming_badge
         ])
         .setup(move |app| {
             // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
@@ -668,8 +670,23 @@ fn list_paired_devices(
 
 #[tauri::command]
 fn list_paired_device_state(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
     state: tauri::State<'_, Arc<pairing::PairingServer>>,
 ) -> pairing::PairedDeviceState {
+    let displays = server.backend().list_displays().unwrap_or_default();
+    let display_ids: Vec<String> = displays.into_iter().filter_map(|d| d.source_id).collect();
+    if !display_ids.is_empty() {
+        let devices = state.list_device_views();
+        for device in devices {
+            if device.source_grants.review_required || device.source_grants.source_ids.is_empty() {
+                let _ = server.set_source_grants_for_credential(
+                    &device.device_id,
+                    display_ids.clone(),
+                    Some(&device.source_grants.credential_id),
+                );
+            }
+        }
+    }
     state.list_device_state()
 }
 
@@ -707,6 +724,24 @@ fn set_clipboard_share(
 #[tauri::command]
 fn get_file_share(settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>) -> bool {
     settings.file_share()
+}
+
+#[tauri::command]
+fn get_streaming_badge(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+) -> bool {
+    settings.streaming_badge()
+}
+
+#[tauri::command]
+fn set_streaming_badge(
+    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    // 배지 표시 토글 — 개인 기기 조합 기본 꺼짐, 0600 settings.json에 영속.
+    // Indicator 라우트가 2초 폴링으로 이 값을 따라 show/hide한다.
+    settings.set_streaming_badge(enabled)?;
+    Ok(enabled)
 }
 
 #[tauri::command]
