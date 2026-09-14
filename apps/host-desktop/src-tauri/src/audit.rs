@@ -165,11 +165,10 @@ fn sanitized_fields(
     let source = fields.as_object()?;
     let mut safe = serde_json::Map::new();
     match event {
-        "lock_on_disconnect_changed" | "privacy_curtain_changed" | "file_share_changed" => {
+        "privacy_curtain_changed" | "file_share_changed" => {
             copy_bool(source, &mut safe, "enabled");
         }
         "privacy_curtain" => copy_bool(source, &mut safe, "shown"),
-        "screen_locked" => copy_enum(source, &mut safe, "reason", &["last_session_ended"]),
         "session_started" => {
             copy_u32(source, &mut safe, "session");
             copy_device(source, &mut safe);

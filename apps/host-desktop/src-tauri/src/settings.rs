@@ -10,9 +10,6 @@ use std::sync::{Arc, Mutex};
 pub struct HostSettings {
     pub clipboard_share: bool,
     pub file_share: bool,
-    /// 마지막 스트림 세션이 끝나면 화면을 잠근다(docs/07 §잔여 — 잠금 on
-    /// disconnect).
-    pub lock_on_disconnect: bool,
     /// 커튼 모드: 스트리밍 중 호스트 물리 화면을 검은 오버레이로 가린다.
     pub privacy_curtain: bool,
 }
@@ -45,10 +42,6 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
             .get("fileShare")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        lock_on_disconnect: parsed
-            .get("lockOnDisconnect")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
         privacy_curtain: parsed
             .get("privacyCurtain")
             .and_then(|v| v.as_bool())
@@ -64,7 +57,6 @@ fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
         "v": 1,
         "clipboardShare": settings.clipboard_share,
         "fileShare": settings.file_share,
-        "lockOnDisconnect": settings.lock_on_disconnect,
         "privacyCurtain": settings.privacy_curtain,
     })
     .to_string();
@@ -124,10 +116,6 @@ impl SharedSettings {
         self.get().clipboard_share
     }
 
-    pub fn lock_on_disconnect(&self) -> bool {
-        self.get().lock_on_disconnect
-    }
-
     pub fn privacy_curtain(&self) -> bool {
         self.get().privacy_curtain
     }
@@ -148,10 +136,6 @@ impl SharedSettings {
         }
         *settings = next;
         Ok(())
-    }
-
-    pub fn set_lock_on_disconnect(&self, enabled: bool) -> Result<(), String> {
-        self.update_field(|s| s.lock_on_disconnect = enabled)
     }
 
     pub fn set_privacy_curtain(&self, enabled: bool) -> Result<(), String> {
@@ -190,18 +174,33 @@ mod tests {
         let settings = load_or_default(Some(&path));
         assert!(!settings.file_share);
         assert!(!settings.clipboard_share);
-        assert!(!settings.lock_on_disconnect);
         assert!(!settings.privacy_curtain);
     }
 
     #[test]
-    fn privacy_toggles_persist_and_survive_reload() {
+    fn legacy_lock_setting_is_ignored_and_not_persisted() {
+        let path = temp_path("legacy-lock");
+        std::fs::write(
+            &path,
+            r#"{"lockOnDisconnect":true,"privacyCurtain":true}"#,
+        )
+        .unwrap();
+
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        assert!(shared.privacy_curtain());
+        shared.set_privacy_curtain(true).unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted.contains("lockOnDisconnect"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn privacy_curtain_persists_and_survives_reload() {
         let path = temp_path("privacy");
         let shared = SharedSettings::load_or_default(Some(path.clone()));
-        shared.set_lock_on_disconnect(true).unwrap();
         shared.set_privacy_curtain(true).unwrap();
         let reloaded = load_or_default(Some(&path));
-        assert!(reloaded.lock_on_disconnect);
         assert!(reloaded.privacy_curtain);
         assert!(!reloaded.file_share, "independent fields must not leak");
         let _ = std::fs::remove_file(&path);
@@ -269,8 +268,7 @@ mod tests {
             let shared = shared.clone();
             handles.push(std::thread::spawn(move || {
                 let on = i % 2 == 0;
-                // 네 세터를 모두 두드린다 — 어느 필드 하나 유실되면 안 된다.
-                let _ = shared.set_lock_on_disconnect(on);
+                // 세 세터를 모두 두드린다 — 어느 필드 하나 유실되면 안 된다.
                 let _ = shared.set_privacy_curtain(!on);
                 let _ = shared.set_clipboard_share(on);
                 let _ = shared.set_file_share(!on);

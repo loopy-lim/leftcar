@@ -35,35 +35,29 @@ const assert = require("node:assert/strict");
         console.error(`FAIL ${name}: ${e.message}`);
       }
     };
-    await check("independent initial privacy read", async () => {
-      await page.locator("#lock").click();
+    await check("initial privacy curtain read", async () => {
       await page.evaluate(() =>
-        window.settle("get_privacy_settings", [false, true]),
+        window.settle("get_privacy_settings", true),
       );
       await page.waitForTimeout(30);
-      assert.equal(await page.locator("#lock").textContent(), "true");
       assert.equal(await page.locator("#curtain").textContent(), "true");
     });
     await check(
-      "pending independent setting and actionable save failure",
+      "pending privacy curtain and actionable save failure",
       async () => {
         await page.goto(`file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html`);
-        await page.locator("#lock").click();
-        await page.evaluate(() => window.settle("get_privacy_settings", [false, true]));
+        await page.locator("#curtain-toggle").click();
+        await page.evaluate(() => window.settle("get_privacy_settings", true));
         await page.waitForTimeout(30);
-        const pending = await page.evaluate(() => ({
-          lock: window.settings.lockPending,
-          curtain: window.settings.curtainPending,
-        }));
-        assert.deepEqual(pending, { lock: true, curtain: false });
+        assert.equal(await page.evaluate(() => window.settings.curtainPending), true);
         await page.evaluate(() =>
-          window.settle("set_lock_on_disconnect", "permission denied", true),
+          window.settle("set_privacy_curtain", "permission denied", true),
         );
         await page.waitForTimeout(30);
         const state = await page.evaluate(() => ({
-          value: window.settings.lockOnDisconnect,
-          pending: window.settings.lockPending,
-          error: window.settings.lockError,
+          value: window.settings.privacyCurtain,
+          pending: window.settings.curtainPending,
+          error: window.settings.curtainError,
         }));
         assert.equal(state.value, false);
         assert.equal(state.pending, false);
@@ -107,28 +101,26 @@ const assert = require("node:assert/strict");
         await page.goto(
           `file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html?dashboard`,
         );
-        const lock = page.getByRole("button", { name: /Lock on End/ });
         const curtain = page.getByRole("button", { name: /Privacy Curtain/ });
-        await lock.click();
-        assert.equal(await lock.isDisabled(), true);
-        assert.equal(await lock.getAttribute("aria-busy"), "true");
-        assert.equal(await curtain.isDisabled(), false);
+        await curtain.click();
+        assert.equal(await curtain.isDisabled(), true);
+        assert.equal(await curtain.getAttribute("aria-busy"), "true");
         await page.evaluate(() =>
-          window.settle("set_lock_on_disconnect", "permission denied", true),
+          window.settle("set_privacy_curtain", "permission denied", true),
         );
         await page.waitForTimeout(30);
-        assert.equal(await lock.isDisabled(), false);
+        assert.equal(await curtain.isDisabled(), false);
         assert.match(
           await page.getByRole("alert").textContent(),
           /permission denied/,
         );
         await page.getByRole("button", { name: "Retry", exact: true }).click();
-        assert.equal(await lock.isDisabled(), true);
+        assert.equal(await curtain.isDisabled(), true);
         await page.evaluate(() =>
-          window.settle("set_lock_on_disconnect", null),
+          window.settle("set_privacy_curtain", null),
         );
         await page.waitForTimeout(30);
-        assert.equal(await lock.getAttribute("aria-pressed"), "true");
+        assert.equal(await curtain.getAttribute("aria-pressed"), "true");
         await page.evaluate(() =>
           window.settle("get_clipboard_share", "settings read failed", true),
         );
