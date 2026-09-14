@@ -115,6 +115,9 @@ pub struct PairedDeviceView {
     pub name: String,
     pub paired_at: String,
     pub source_grants: crate::source_grants::GrantView,
+    /// 이 기기의 인증된 제어 연결이 살아 있는지. pairing 서버는 라이브
+    /// 연결을 모르므로 기본 false, 뷰를 조립하는 쪽(control)이 채운다.
+    pub connected: bool,
 }
 
 /// Host-local state order is scoped to this process/profile and includes empty snapshots.
@@ -829,6 +832,7 @@ impl PairingServer {
                         name: device.name.clone(),
                         paired_at: device.paired_at.clone(),
                         source_grants: grants,
+                        connected: false,
                     }
                 })
                 .collect(),

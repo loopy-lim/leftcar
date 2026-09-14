@@ -687,7 +687,15 @@ fn list_paired_device_state(
             }
         }
     }
-    state.list_device_state()
+    let mut state = state.list_device_state();
+    // 뷰어 배지와 같은 사실을 말하게 한다: 인증된 제어 연결이 살아 있는
+    // 기기만 "연결됨"으로 표시한다.
+    let connected: std::collections::HashSet<String> =
+        server.connected_device_ids().into_iter().collect();
+    for device in state.devices.iter_mut() {
+        device.connected = connected.contains(&device.device_id);
+    }
+    state
 }
 
 #[tauri::command]

@@ -901,6 +901,18 @@ impl ControlServer {
         }
     }
 
+    /// 라이브인 인증된 제어 연결의 기기 ID 목록. 대시보드 기기 목록의
+    /// "연결됨" 표시의 근거다 — 뷰어 배지(제어 연결 기준)와 같은 사실을
+    /// 말하게 한다.
+    pub fn connected_device_ids(&self) -> Vec<String> {
+        self.authenticated_conns
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// 해당 장치의 인증 연결을 모두 깨운다. notify_one은 대기자가 없어도
     /// 허가를 남기므로, 디스패치 중이라 다음 읽기 대기로 넘어간 루프도
     /// 즉시 종료된다.
@@ -3874,6 +3886,18 @@ mod tests {
         addr
     }
 
+    async fn spawn_server_with_pairing_and_handle(
+        pairing: std::sync::Arc<crate::pairing::PairingServer>,
+    ) -> (std::sync::Arc<ControlServer>, std::net::SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::sync::Arc::new(ControlServer::new(backend(), pairing, test_identity()));
+        server.set_control_port(addr.port());
+        let run_server = std::sync::Arc::clone(&server);
+        tokio::spawn(async move { run_server.run(listener).await });
+        (server, addr)
+    }
+
     async fn request(
         sock: &mut tokio::net::TcpStream,
         cmd: &str,
@@ -4066,6 +4090,31 @@ mod tests {
             &backend().list_displays().unwrap(),
         );
         token
+    }
+
+    #[tokio::test]
+    async fn authenticated_connection_appears_and_disappears_in_connected_devices() {
+        let pairing = test_pairing();
+        let (server, addr) = spawn_server_with_pairing_and_handle(pairing.clone()).await;
+
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let token = pair_token(&mut sock, &pairing).await;
+        let line = request(&mut sock, "getStatus", "{}", &token).await;
+        assert!(line.contains("\"ok\":true"), "{line}");
+
+        // 인증된 제어 연결이 살아 있는 동안 기기는 "연결됨"이다.
+        let connected = server.connected_device_ids();
+        assert_eq!(connected.len(), 1, "{connected:?}");
+
+        // 소켓이 닫히면 목록에서 사라진다 — 뷰어 배지와 같은 사실을 말하게 한다.
+        drop(sock);
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if server.connected_device_ids().is_empty() {
+                return;
+            }
+        }
+        panic!("closed control connection still listed as connected");
     }
 
     #[tokio::test]

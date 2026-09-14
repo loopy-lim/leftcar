@@ -5,6 +5,8 @@ export interface PairedDevice {
   device_id: string;
   name: string;
   paired_at: string;
+  /** 인증된 제어 연결이 살아 있는지 — 뷰어 배지와 같은 사실이다. */
+  connected: boolean;
 }
 export interface PairedDeviceState {
   revision: number;

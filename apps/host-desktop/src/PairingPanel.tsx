@@ -327,6 +327,28 @@ function PairedDevicesSection({
                     <Smartphone size={15} strokeWidth={2} />
                   )}
                   {device.name}
+                  {device.connected && (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: "#10b981",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: "50%",
+                          background: "#10b981",
+                        }}
+                      />
+                      {t.host.deviceLiveLabel}
+                    </span>
+                  )}
                 </span>
                 <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
               </div>
