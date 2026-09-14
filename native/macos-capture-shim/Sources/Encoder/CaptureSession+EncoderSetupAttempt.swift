@@ -336,7 +336,9 @@ extension CaptureSession {
                 encoderIDStatus: encoderIDStatus,
                 encoderID: selectedEncoderID,
                 expectedEncoderID: requestedEncoderID ?? (
-                    policy.mode == .rtvc ? phaseARTVCH264EncoderID : nil
+                    policy.mode == .rtvc && policy.codec == .h264
+                        ? phaseARTVCH264EncoderID
+                        : nil
                 ),
                 hardwareStatus: hardwareStatus,
                 hardware: selectedHardware

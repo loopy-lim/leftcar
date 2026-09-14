@@ -29,11 +29,17 @@ func encoderSessionVerified(
     hardwareStatus: OSStatus,
     hardware: Bool?
 ) -> Bool {
-    guard policy.codec == .h264,
-          encoderIDStatus == noErr,
-          let expectedEncoderID,
-          encoderID == expectedEncoderID else {
+    // HEVC carries no pinned phase-A encoder ID: a real encoder ID plus a
+    // hardware pass is the whole contract. H.264 keeps the strict contract —
+    // the session must match the pinned RTVC/AVE ID exactly (a nil expected
+    // therefore fails an H.264 session rather than relaxing it).
+    guard encoderIDStatus == noErr, let encoderID else {
         return false
+    }
+    if policy.codec == .h264 {
+        guard let expectedEncoderID, encoderID == expectedEncoderID else {
+            return false
+        }
     }
     return hardwareEncoderVerified(
         queryStatus: hardwareStatus,
@@ -115,13 +121,20 @@ func encoderSessionPolicies(
     contentMode: String
 ) -> [EncoderSessionPolicy] {
     let isUltraHD = max(width, height) >= 3_840 && min(width, height) >= 2_160
+    // HEVC halves the bitrate for the same sharpness (Parsec's recommended
+    // tier); every recent viewer SoC hardware-decodes it. The H.264 entries
+    // keep a silent fallback for a host whose VideoToolbox refuses HEVC.
     if isUltraHD && contentMode.lowercased() == StreamContentMode.video.rawValue {
         return [
+            EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
             EncoderSessionPolicy(mode: .rtvc, codec: .h264),
             EncoderSessionPolicy(mode: .ave, codec: .h264),
         ]
     }
-    return [EncoderSessionPolicy(mode: .rtvc, codec: .h264)]
+    return [
+        EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
+        EncoderSessionPolicy(mode: .rtvc, codec: .h264),
+    ]
 }
 
 func eligibleEncoderSessionPolicies(

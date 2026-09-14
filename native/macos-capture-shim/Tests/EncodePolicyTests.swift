@@ -586,16 +586,23 @@ struct EncodePolicyTests {
         )
         let video4K = encoderSessionPolicies(width: 3_840, height: 2_160, contentMode: "video")
         precondition(video4K == [
+            EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
             EncoderSessionPolicy(mode: .rtvc, codec: .h264),
             EncoderSessionPolicy(mode: .ave, codec: .h264),
         ])
         precondition(
             encoderSessionPolicies(width: 3_840, height: 2_160, contentMode: "interactive")
-                == [EncoderSessionPolicy(mode: .rtvc, codec: .h264)]
+                == [
+                    EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
+                    EncoderSessionPolicy(mode: .rtvc, codec: .h264),
+                ]
         )
         precondition(
             encoderSessionPolicies(width: 2_560, height: 1_440, contentMode: "video")
-                == [EncoderSessionPolicy(mode: .rtvc, codec: .h264)]
+                == [
+                    EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
+                    EncoderSessionPolicy(mode: .rtvc, codec: .h264),
+                ]
         )
         precondition(EncoderExperiment.parse(nil) == .auto)
         precondition(EncoderExperiment.parse("rateControl") == .rateControl)
@@ -844,8 +851,10 @@ struct EncodePolicyTests {
                 hardware: nil
             )
         )
+        // HEVC-first policy: a hardware HEVC RTVC session now verifies — the
+        // old H264-only gate is intentionally reversed.
         precondition(
-            !phaseARTVCH264EncoderVerified(
+            phaseARTVCH264EncoderVerified(
                 policy: EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
                 encoderIDStatus: noErr,
                 encoderID: "com.apple.videotoolbox.videoencoder.hevc.rtvc",
@@ -878,6 +887,28 @@ struct EncodePolicyTests {
                 encoderIDStatus: noErr,
                 encoderID: phaseARTVCH264EncoderID,
                 expectedEncoderID: "com.apple.videotoolbox.videoencoder.ave.avc",
+                hardwareStatus: noErr,
+                hardware: true
+            )
+        )
+        // HEVC has no pinned encoder ID: a real ID plus a hardware pass (the
+        // hardware property itself may be unsupported) verifies the session.
+        precondition(
+            encoderSessionVerified(
+                policy: EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
+                encoderIDStatus: noErr,
+                encoderID: "com.apple.videotoolbox.videoencoder.hevc.rtvc",
+                expectedEncoderID: nil,
+                hardwareStatus: kVTPropertyNotSupportedErr,
+                hardware: nil
+            )
+        )
+        precondition(
+            !encoderSessionVerified(
+                policy: EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
+                encoderIDStatus: noErr,
+                encoderID: nil,
+                expectedEncoderID: nil,
                 hardwareStatus: noErr,
                 hardware: true
             )
@@ -1791,6 +1822,7 @@ struct EncodePolicyTests {
         )
         precondition(
             eligibleEncoderSessionPolicies(video4K, unavailableModes: [.ave]) == [
+                EncoderSessionPolicy(mode: .rtvc, codec: .hevc),
                 EncoderSessionPolicy(mode: .rtvc, codec: .h264),
             ]
         )
