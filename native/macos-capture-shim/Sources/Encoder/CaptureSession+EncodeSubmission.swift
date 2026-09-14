@@ -75,6 +75,8 @@ extension CaptureSession {
         stateLock.lock()
         let auId = nextAuId
         nextAuId &+= 1
+        lastSubmittedPtsValue = pts.value
+        lastSubmittedPtsTimescale = pts.timescale
         captureNsByPts[pts.value] = captured.callbackNs
         captureWallMsByPts[pts.value] = captured.captureWallMs
         encodeAuIdByPts[pts.value] = auId

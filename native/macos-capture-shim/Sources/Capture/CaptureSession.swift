@@ -28,6 +28,14 @@ final class CaptureSession {
     // the paired-IDR carrier so recovery latency is bounded by encode + send
     // instead of waiting unbounded for the next ScreenCaptureKit callback.
      var splitRecoveryCarrier: PendingCaptureFrame?
+    // Single-path twin of `splitRecoveryCarrier`: the newest capture frame,
+    // re-submitted when a viewer IDR arrives while the screen is idle and
+    // forceKeyframe would otherwise wait unbounded for the next
+    // ScreenCaptureKit callback. Cleared with the pending captures.
+     var recoveryCarrier: PendingCaptureFrame?
+     var singleLastCaptureEnqueueNs: UInt64 = 0
+     var lastSubmittedPtsValue: CMTimeValue = 0
+     var lastSubmittedPtsTimescale: CMTimeScale = 0
     // Age of the currently pending split recovery boundary (0 when idle).
      var splitRecoveryGateStartedNs: UInt64 = 0
      var encodeScheduled = false

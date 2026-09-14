@@ -48,6 +48,10 @@ extension CaptureSession {
         pendingCapture = nil
         pendingSplitCaptures.removeAll(keepingCapacity: true)
         splitRecoveryCarrier = nil
+        // A capture restart invalidates the retained frame: the carrier must
+        // never replay pixels from before the restart boundary.
+        recoveryCarrier = nil
+        singleLastCaptureEnqueueNs = 0
     }
 
     /// Must be called with `captureLock` held, immediately after

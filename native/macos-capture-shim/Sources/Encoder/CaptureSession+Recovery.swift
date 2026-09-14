@@ -70,6 +70,56 @@ extension CaptureSession {
 
         if shouldStart || shouldRetry {
             requestRecoveryKeyframe()
+            seedSingleRecoveryCarrierIfIdle()
+        }
+    }
+
+    /// Single-path twin of the split recovery carrier: on an idle screen
+    /// forceKeyframe only fires on the NEXT ScreenCaptureKit callback, which
+    /// may never come — the viewer's IDR request then loops forever while the
+    /// stream sits frozen. When captures have been idle for a while, re-submit
+    /// the retained newest frame as the recovery boundary instead. The replay
+    /// PTS is bumped past the last submission to stay strictly monotonic, and
+    /// the frame keeps no stale wall clock so latency bookkeeping reads it as
+    /// "now".
+    func seedSingleRecoveryCarrierIfIdle() {
+        captureLock.lock()
+        guard requestedEncoderExperiment != .splitVertical else {
+            captureLock.unlock()
+            return
+        }
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let idle = nowNs &- singleLastCaptureEnqueueNs > 250_000_000
+        guard idle, !hasPendingCaptureLocked(), let carrier = recoveryCarrier else {
+            captureLock.unlock()
+            return
+        }
+        var replayPts = CMTime(value: carrier.pts.value + 1, timescale: carrier.pts.timescale)
+        if lastSubmittedPtsTimescale == replayPts.timescale {
+            replayPts = CMTime(
+                value: max(replayPts.value, lastSubmittedPtsValue + 1),
+                timescale: replayPts.timescale
+            )
+        }
+        let replay = PendingCaptureFrame(
+            pixelBuffer: carrier.pixelBuffer,
+            pts: replayPts,
+            duration: carrier.duration,
+            callbackNs: nowNs,
+            captureWallMs: UInt64(Date().timeIntervalSince1970 * 1_000)
+        )
+        pendingCapture = replay
+        let shouldSchedule = !encodeScheduled
+            && encodeInFlight < maxEncodeInFlight
+            && !recoveryEncodeInFlight
+        if shouldSchedule {
+            encodeScheduled = true
+        }
+        captureLock.unlock()
+        if shouldSchedule {
+            encodeQueue.async { [weak self] in
+                self?.drainEncodeQueue()
+            }
         }
     }
 

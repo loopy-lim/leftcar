@@ -91,10 +91,16 @@ extension CaptureSession {
             recoveryEncodeGateStartedNs = 0
         }
         let replaced = enqueuePendingCaptureLocked(frame)
+        singleLastCaptureEnqueueNs = callbackNs
         if requestedEncoderExperiment == .splitVertical {
             // Keep the newest frame as the paired-IDR recovery carrier so a
             // recovery during screen idle can submit immediately.
             splitRecoveryCarrier = frame
+        } else {
+            // Single-path twin: the newest frame is what an idle-screen
+            // recovery replays when forceKeyframe has no next callback to
+            // attach to.
+            recoveryCarrier = frame
         }
         let shouldSchedule = !encodeScheduled
             && encodeInFlight < maxEncodeInFlight
