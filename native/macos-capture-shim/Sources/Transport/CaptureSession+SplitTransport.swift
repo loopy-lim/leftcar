@@ -94,7 +94,12 @@ extension CaptureSession {
               data[3...4] == Data([0x4C, 0x32]) else {
             return nil
         }
-        let maxPayload = udpMediaFragmentPayloadBytes
+        // Reliable USB framing keeps its established fragment width. Both
+        // single and split UDP streams use the actual negotiated destination.
+        let datagramLimit = mediaTransport == .udp
+            ? udpMediaPlaintextLimit(ipv4HostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr))
+            : udpMediaDatagramBytes
+        let maxPayload = datagramLimit - udpMediaFrameHeaderBytes
         let payloadCount = data.count - 21
         let fragmentCount = max(1, (payloadCount + maxPayload - 1) / maxPayload)
         guard fragmentCount <= Int(UInt16.max) else { return nil }
@@ -268,6 +273,7 @@ extension CaptureSession {
         var sentDatagrams = 0
         var sentParity = 0
         var sendSyscallUs: UInt64 = 0
+        var worstDatagramSyscallUs: UInt64 = 0
         var succeeded = true
         var deadlineExceeded = false
         var cancelled = false
@@ -332,9 +338,11 @@ extension CaptureSession {
                     fd: fd,
                     tileSide: transmission.side
                 )
-                sendSyscallUs &+= (
+                let datagramSyscallUs = (
                     DispatchTime.now().uptimeNanoseconds &- syscallStart
                 ) / 1_000
+                sendSyscallUs &+= datagramSyscallUs
+                worstDatagramSyscallUs = max(worstDatagramSyscallUs, datagramSyscallUs)
                 guard sent == transmission.datagram.count else {
                     succeeded = false
                     break sendLoop
@@ -401,8 +409,16 @@ extension CaptureSession {
         }
         bytesSent &+= Int64(sentBytes)
         rateWindowBytes &+= Int64(sentBytes)
-        lastSendBlockUs = sendSyscallUs
-        maxSendBlockUs = max(maxSendBlockUs, sendSyscallUs)
+        // Match the single-stream congestion signal: many quick datagrams
+        // must not count as one blocked syscall. Keep the pair total in the
+        // rolling diagnostics so aggregate transport cost remains visible.
+        lastSendBlockUs = worstDatagramSyscallUs
+        maxSendBlockUs = max(maxSendBlockUs, worstDatagramSyscallUs)
+        if worstDatagramSyscallUs > 8_000 {
+            // See the single-stream sender: jitter-arm the weak-link
+            // recovery ceiling so split IDRs pace gently too.
+            udpLinkDegradedUntilNs = DispatchTime.now().uptimeNanoseconds &+ 10_000_000_000
+        }
         appendRollingSample(sendSyscallUs, to: &sendBlockSamplesUs)
         lastSendPaceUs = sendUs
         maxSendPaceUs = max(maxSendPaceUs, sendUs)

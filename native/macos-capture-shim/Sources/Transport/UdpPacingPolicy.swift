@@ -2,14 +2,19 @@
 /// transports. Keeping it outside EncoderPolicy makes transport burst limits
 /// independently testable without growing the VideoToolbox policy module.
 
-/// Direct-LAN media packets stay below a 1,500-byte Ethernet IP MTU after the
-/// 20-byte IPv4 and 8-byte UDP headers. The previous 1,200-byte QUIC-safe
-/// envelope created hundreds of sendto calls for one 4K recovery frame even
-/// though Leftcar's negotiated direct-LAN path does not traverse the public
-/// Internet.
+/// Direct-LAN plaintext leaves room for the 24-byte AEAD envelope and the
+/// 28-byte IPv4/UDP headers within a 1,500-byte IP MTU.
 let udpMediaDatagramBytes = 1_400
 let udpMediaFrameHeaderBytes = 33
 let udpMediaFragmentPayloadBytes = udpMediaDatagramBytes - udpMediaFrameHeaderBytes
+
+/// Tailscale's 100.64.0.0/10 tunnel has a 1,280-byte MTU even when the peers
+/// connect directly. Keep encrypted IP packets at 1,252 bytes on that route;
+/// packet size does not cap the stream bitrate or change its pacing profile.
+/// The address is in host byte order. Other routes retain the LAN envelope.
+func udpMediaPlaintextLimit(ipv4HostOrder address: UInt32) -> Int {
+    address & 0xffc0_0000 == 0x6440_0000 ? 1_200 : udpMediaDatagramBytes
+}
 
 /// The wall-clock budget for one frame at the requested stream rate. Round up
 /// so a 60fps budget is never reported as shorter than the actual 16.67ms
@@ -54,11 +59,24 @@ func udpPacingRateMultiplier(
 /// Derive a two-frame recovery target from the observed AU while preserving a
 /// 64Mbps burst cap. A 160Mbps split A/B overflowed the MediaCodec input path
 /// even with enlarged receive sockets, so recovery reliability wins here.
+/// A link the ABR has already cut below 6Mbps just proved it cannot absorb a
+/// 24Mbps floor: an IDR burst that size re-congests the link, the recovery AU
+/// is lost behind the overflow, and the receiver requests another IDR — the
+/// recovery storm measured on jittery-Wi-Fi viewers. Below that threshold the
+/// burst ceiling scales with the measured rate (4x, at least 8Mbps) and the
+/// AU simply spreads over a longer budget instead of re-collapsing the link.
+/// `linkDegraded` extends that weak-link ceiling to links that measure fast
+/// but are CURRENTLY collapsing: Wi-Fi jitter episodes sendto 13-80ms while
+/// the ABR target stays high, and a 64Mbps IDR burst into that window loses
+/// the recovery AU itself, feeding the same storm (2026-09-17 tablet: 578
+/// recovery keyframes in one churn hour, repeated 0fps windows).
 func recoveryPacingBitrate(
     targetBitrate: Int,
     bytes: Int,
-    fps: UInt32
+    fps: UInt32,
+    linkDegraded: Bool = false
 ) -> Int {
+    let measured = max(1, targetBitrate)
     let recoveryBudgetUs = max(frameBudgetUs(fps: fps) * 2, 25_000)
     let safeBytes = UInt64(max(1, bytes))
     let requiredBitrate = Int(
@@ -67,8 +85,11 @@ func recoveryPacingBitrate(
             (safeBytes * 8 * 1_000_000 + recoveryBudgetUs - 1) / recoveryBudgetUs
         )
     )
-    let boundedRecoveryBitrate = min(max(24_000_000, requiredBitrate), 64_000_000)
-    return max(max(1, targetBitrate), boundedRecoveryBitrate)
+    let burstCeiling = measured >= 6_000_000 && !linkDegraded
+        ? 64_000_000
+        : max(8_000_000, min(24_000_000, measured * 4))
+    let boundedRecoveryBitrate = min(max(24_000_000, requiredBitrate), burstCeiling)
+    return max(measured, boundedRecoveryBitrate)
 }
 
 func fecParityCount(
@@ -183,7 +204,9 @@ func udpDatagramIntervalUs(
     contentMode: String = StreamContentMode.interactive.rawValue,
     dataFragmentCount: Int = 0,
     selectedParity: Int? = nil,
-    pacingRateMultiplier: Int = 1
+    pacingRateMultiplier: Int = 1,
+    framePacingBitrate: Int? = nil,
+    linkDegraded: Bool = false
 ) -> UInt64 {
     let hasFragmentCount = dataFragmentCount > 0
     let fecScale = hasFragmentCount
@@ -214,7 +237,8 @@ func udpDatagramIntervalUs(
         pacingBitrate = recoveryPacingBitrate(
             targetBitrate: wireTargetBitrate,
             bytes: recoveryBytes,
-            fps: fps
+            fps: fps,
+            linkDegraded: linkDegraded
         )
     } else if shouldUseHighMotionPacing(
         accessUnitBytes: accessUnitBytes,
@@ -232,7 +256,10 @@ func udpDatagramIntervalUs(
         pacingBitrate = wireTargetBitrate
     }
     let safeBytes = UInt64(max(1, bytes))
-    let baseBitrate = UInt64(max(1, pacingBitrate))
+    // A single-stream caller with exact wire bytes supplies a frame budget.
+    // Recovery and callers without that budget retain their established rate.
+    let budgetBitrate = isKeyframe ? 0 : max(0, framePacingBitrate ?? 0)
+    let baseBitrate = UInt64(max(1, max(pacingBitrate, budgetBitrate)))
     let multiplier = UInt64(isKeyframe ? 1 : max(1, pacingRateMultiplier))
     let multiplied = baseBitrate.multipliedReportingOverflow(by: multiplier)
     let safeBitrate = multiplied.overflow ? UInt64.max : multiplied.partialValue

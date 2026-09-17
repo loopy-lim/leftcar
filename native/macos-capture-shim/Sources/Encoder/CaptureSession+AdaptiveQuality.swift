@@ -184,6 +184,10 @@ extension CaptureSession {
             receiverLoss,
             receiverRenderedFps ?? 0
         )
+        // 복구 폭발/렌더 스톨 창의 시청자 신호 처리는 adaptBitrateIfNeeded의
+        // 커밋된 규칙(recoveryBurstGrace·viewerRenderStalled)이 이미 담당한다.
+        // 품질 힌트 경로는 loss를 그대로 본다 — 긴 스톨에서 loss가 품질을
+        // 낮춰 다음 복구 키맵이 작아지는 것이 이 경로의 존재 이유다.
         let next = adaptiveEncoderQualityHint(
             current: current,
             encodeOutputP95Us: encodeP95Us,

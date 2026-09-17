@@ -114,8 +114,8 @@ extension CaptureSession {
         isKeyframe || fragmentCount >= 2
     }
 
-    /// Send one config datagram or one fragmented H.264 AU. Datagram payloads
-    /// stay below 1,200 bytes to avoid IP fragmentation on Wi-Fi and Tailscale.
+    /// Send one config datagram or one fragmented H.264 AU. Video plaintext
+    /// is capped at 1,200 bytes for Tailscale and 1,400 bytes for direct LAN.
     /// On a local queue overflow, recover from a fresh IDR instead of blocking
     /// subsequent video behind a lost packet.
     @discardableResult
@@ -124,7 +124,8 @@ extension CaptureSession {
         isFrame: Bool = false,
         isKeyframe: Bool = false,
         isRecoveryKeyframe: Bool = false,
-        tileSide: TileSide? = nil
+        tileSide: TileSide? = nil,
+        queuedNs: UInt64? = nil
     ) -> Bool {
         stateLock.lock()
         let fd = sock
@@ -150,7 +151,35 @@ extension CaptureSession {
         // 8ms of fast syscalls), so only the per-datagram worst says whether
         // the socket buffer actually blocked the sender.
         var worstDatagramSyscallUs: UInt64 = 0
+        var preparationUs: UInt64 = 0
+        var pacingRequestedUs: UInt64 = 0
+        var pacingWaitUs: UInt64 = 0
+        var pacingOvershootUs: UInt64 = 0
         var ok = true
+        var completed = false
+        defer {
+            if frameTraceEnabled, isFrame, tileSide == nil, frameTraceCount < 36_000,
+               data.count > 21, data[0] == 0x47, data[3] == 0x4c, data[4] == 0x32 {
+                let sample = FrameSendTrace(
+                    traceSession: frameTraceSession,
+                    auID: UInt16(data[1]) | (UInt16(data[2]) << 8),
+                    captureWallMs: FrameSendTrace.wallMs(data, offset: 5),
+                    encodeWallMs: FrameSendTrace.wallMs(data, offset: 13),
+                    sendStartNs: sendStart, sendEndNs: DispatchTime.now().uptimeNanoseconds,
+                    queuedUs: queuedNs.map { sendStart >= $0 ? (sendStart - $0) / 1_000 : 0 },
+                    preparationUs: preparationUs, pacingRequestedUs: pacingRequestedUs,
+                    pacingWaitUs: pacingWaitUs, pacingOvershootUs: pacingOvershootUs,
+                    sendCallUs: sendSyscallUs, bytes: data.count,
+                    datagrams: sentDatagramCount, expectedDatagrams: expectedDatagramCount,
+                    keyframe: isKeyframe, recovery: isRecoveryKeyframe, succeeded: completed
+                )
+                if let json = try? JSONEncoder().encode(sample),
+                   let line = String(data: json, encoding: .utf8) {
+                    NSLog("LeftcarFrameTrace %@", line)
+                    frameTraceCount += 1
+                }
+            }
+        }
         if isFrame {
             // 논리 L2 헤더 검사부터 프래그먼트·FEC 조립까지는 split 전송 경로와
             // 같은 prepareUdpAccessUnit 하나로 수행한다(바이트 동일). 이 함수는
@@ -162,6 +191,7 @@ extension CaptureSession {
                 requestRecoveryKeyframe()
                 return false
             }
+            preparationUs = (DispatchTime.now().uptimeNanoseconds - sendStart) / 1_000
             if isRecoveryKeyframe {
                 observeUdpRecoveryBoundary()
             }
@@ -178,6 +208,15 @@ extension CaptureSession {
             // pacer spreads both ordinary frames and recovery IDRs.
             let transmissions = prepared.datagrams
             expectedDatagramCount = transmissions.count
+            stateLock.lock()
+            let targetBitrate = currentAverageBitrate
+            stateLock.unlock()
+            let framePacingBudget = mediaTransport == .udp && !isKeyframe && tileSide == nil
+                ? UdpFramePacingBudget(
+                    targetBitrate: targetBitrate, payloadBytes: prepared.payloadBytes,
+                    plaintextBytes: transmissions.reduce(0) { $0 + $1.count },
+                    datagramCount: transmissions.count, fps: fps)
+                : nil
             if isKeyframe {
                 NSLog(
                     "Leftcar recovery AU %@: bytes=%d fragments=%d parity=%d transmissions=%d",
@@ -218,8 +257,11 @@ extension CaptureSession {
                 }
                 let burstBytes = range.reduce(into: 0) { total, index in
                     total += transmissions[index].count
+                    if framePacingBudget != nil {
+                        total += UdpFramePacingBudget.datagramOverheadBytes
+                    }
                 }
-                paceUdpDatagram(
+                let pacing = paceUdpDatagram(
                     bytes: burstBytes,
                     isKeyframe: isKeyframe,
                     // Pacing protects the socket regardless of profile. The
@@ -229,8 +271,12 @@ extension CaptureSession {
                     // periods because this value was passed as zero.
                     accessUnitBytes: data.count,
                     dataFragmentCount: fragmentCount,
-                    selectedParity: selectedParity
+                    selectedParity: selectedParity,
+                    framePacingBitrate: framePacingBudget?.bitrate
                 )
+                pacingRequestedUs += pacing.requestedUs
+                pacingWaitUs += pacing.waitedUs
+                pacingOvershootUs += pacing.overshootUs
                 for index in range {
                     let datagram = transmissions[index]
                     let syscallStart = DispatchTime.now().uptimeNanoseconds
@@ -286,6 +332,9 @@ extension CaptureSession {
             networkLock.unlock()
             stateLock.lock()
             framesDropped &+= isFrame ? 1 : 0
+            // A deadline abort or failed sendto is link collapse by
+            // definition; the recovery IDR that follows must pace gently.
+            udpLinkDegradedUntilNs = DispatchTime.now().uptimeNanoseconds &+ 10_000_000_000
             stateLock.unlock()
             if isRecoveryKeyframe {
                 clearRecoveryEncodeGate()
@@ -312,6 +361,11 @@ extension CaptureSession {
         // rolling p95 diagnostics.
         lastSendBlockUs = worstDatagramSyscallUs
         maxSendBlockUs = max(maxSendBlockUs, worstDatagramSyscallUs)
+        if worstDatagramSyscallUs > 8_000 {
+            // Slow-but-successful sendto is the wire-level jitter signature;
+            // arm the weak-link recovery ceiling for the next 10 seconds.
+            udpLinkDegradedUntilNs = DispatchTime.now().uptimeNanoseconds &+ 10_000_000_000
+        }
         appendRollingSample(sendSyscallUs, to: &sendBlockSamplesUs)
         lastSendPaceUs = sendPaceUs
         maxSendPaceUs = max(maxSendPaceUs, sendPaceUs)
@@ -323,6 +377,7 @@ extension CaptureSession {
         if isFrame && isRecoveryKeyframe {
             recoveryKeyframeDidSend()
         }
+        completed = true
         return true
     }
 

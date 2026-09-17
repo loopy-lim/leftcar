@@ -97,7 +97,13 @@ extension CaptureSession {
         let config = SCStreamConfiguration()
         config.width = Int(outWidth)
         config.height = Int(outHeight)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        // Keep the same scheduling margin as CGDisplayStream. An exact
+        // 1/60 minimum can miss slightly early display ticks and settle near
+        // 57fps even though the source display supplies 60 updates/second.
+        config.minimumFrameInterval = CMTime(
+            seconds: captureMinimumFrameTimeSeconds(fps: fps),
+            preferredTimescale: 1_000_000_000
+        )
         // Feed VideoToolbox the native bi-planar 4:2:0 surface so the
         // capture path avoids a BGRA -> YUV conversion per frame.
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange

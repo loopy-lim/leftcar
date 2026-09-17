@@ -22,6 +22,7 @@ extension CaptureSession {
         inputLock.lock()
         let changed = inputEnabled != enabled
         inputEnabled = enabled
+        if !enabled { inputLanguageTransition.cancel() }
         inputLock.unlock()
         if changed && !enabled {
             inputQueue.async { [weak self] in
@@ -175,6 +176,9 @@ extension CaptureSession {
     }
 
      func stopInputReceiver() {
+        inputLock.lock()
+        inputLanguageTransition.cancel()
+        inputLock.unlock()
         inputQueue.sync {
             inputReadSource?.cancel()
             inputReadSource = nil
@@ -183,4 +187,3 @@ extension CaptureSession {
 
     static let tccDeniedHint = "screen-recording permission required (System Settings > Privacy & Security > Screen Recording)"
 }
-

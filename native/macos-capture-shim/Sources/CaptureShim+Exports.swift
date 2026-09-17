@@ -182,6 +182,7 @@ public func leftcarCaptureStopV2(handle: UInt32) -> Int32 {
         setLastError("no such handle \(handle)")
         return 1
     }
+    session.rememberCongestionCeilingForPeer()
     session.stop()
     transferSystemAudioOwnership(afterRemoving: session)
     return 0
@@ -199,6 +200,9 @@ public func leftcarCaptureStopV3(handle: UInt32, reasonCode: Int32) -> Int32 {
         setLastError("no such handle \(handle)")
         return 1
     }
+    // Both branches end the session; either way the peer's learned ceiling
+    // should outlive it so the reconnect does not re-enter the collapse.
+    session.rememberCongestionCeilingForPeer()
     if reasonCode > 0 {
         session.notifyViewerTermination(
             code: UInt8(clamping: reasonCode),

@@ -92,6 +92,8 @@ final class CaptureSession {
      var inputEnabled = false
      var inputBounds: CGRect?
      var lastReliableInputSequence: UInt32 = 0
+     var inputLanguageTransition = InputLanguageTransition()
+     var inputLanguageSelector: (UInt8) -> Bool = selectNativeInputLanguage
      var lastPointerInputSequence: UInt32 = 0
      var pressedKeys = Set<CGKeyCode>()
     /// 미매핑 안드로이드 키코드 진단 로그 1회성 중복 방지(키코드당 1줄).
@@ -168,6 +170,9 @@ final class CaptureSession {
     // most the newest encoded AU plus the latest config packet; an older AU
     // that has not reached the socket is intentionally dropped.
      let networkQueue = DispatchQueue(label: "leftcar.network", qos: .userInteractive)
+     let frameTraceEnabled = ProcessInfo.processInfo.environment["LEFTCAR_FRAME_TRACE"] == "1"
+     let frameTraceSession = UUID().uuidString
+     var frameTraceCount = 0 // Network queue only; capped at ten minutes at 60fps.
      let networkLock = NSLock()
      var pendingConfig: Data?
      var pendingTileConfigs: [TileSide: Data] = [:]
@@ -263,6 +268,11 @@ final class CaptureSession {
      var maxPacketizationQueueWaitUs: UInt64 = 0
      var lastSendBlockUs: UInt64 = 0
      var maxSendBlockUs: UInt64 = 0
+     /// Recovery bursts pace at the weak-link ceiling until this uptime
+     /// deadline passes. Armed by slow sendto/deadline aborts — see
+     /// markUdpLinkDegraded — so an IDR never re-collapses a link that is
+     /// currently jittering even though its measured bitrate stays high.
+     var udpLinkDegradedUntilNs: UInt64 = 0
      var lastSendPaceUs: UInt64 = 0
      var maxSendPaceUs: UInt64 = 0
      var lastCaptureCallbackNs: UInt64?
@@ -338,6 +348,7 @@ final class CaptureSession {
      var receiverRttMs: UInt16 = .max
      var receiverWireMs: UInt16 = .max
      var receiverFeedbackNs: UInt64 = 0
+     var receiverHeartbeatNs: UInt64 = 0
      var receiverRenderedFps: UInt32?
      var lastAdaptedReceiverLoss: UInt64 = 0
     // Latency baseline of the previous adaptation window. A viewer whose

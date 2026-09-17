@@ -26,6 +26,17 @@ extension CaptureSession {
         destination: sockaddr_in?,
         sourceSide: TileSide? = nil
     ) -> ViewerControlDispatch {
+        if message == Data("LCK1".utf8) {
+            stateLock.lock()
+            receiverHeartbeatNs = DispatchTime.now().uptimeNanoseconds
+            stateLock.unlock()
+            armReceiverHealthCheck()
+            return .handled
+        }
+        if message == Data("LCL?".utf8) {
+            _ = sendControlPayload(Data([0x4c, 0x43, 0x4c, 0x31, 1]), fd: fd, destination: destination)
+            return .handled
+        }
         if message == Data("BYE".utf8) {
             print("viewer close signal received for \(targetLabel)")
             requestViewerStop()

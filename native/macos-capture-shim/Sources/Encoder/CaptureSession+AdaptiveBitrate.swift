@@ -96,10 +96,21 @@ extension CaptureSession {
         // link congestion; letting them vote cut the bitrate after every app
         // access even though RTT and loss were clean.
         let viewerRenderStalled = feedbackFresh && receiverRenderedFps == nil
+        // Recovery-adjacent drops must not vote as congestion. Inside the
+        // post-recovery grace the encode gate holds deltas (capture-frame
+        // replacements → captureQueueDropped) and the IDR burst drains for
+        // tens of ms (queue chain discards) — machinery churn, not link
+        // saturation. Letting it vote cut after every recovery, and every cut
+        // lengthened the next recovery's drain at the lower rate: the
+        // measured self-feeding collapse took 28.7Mbps down to the 3Mbps
+        // survival floor on an otherwise idle 2.4Gbps Wi-Fi 6 link and kept
+        // the receiver oscillating 0–56fps (2026-09-17 XR). Genuine sustained
+        // overload with no recovery in flight still votes.
         let ownCongested = !viewerRenderStalled
-            && (newDrops > 0
-                || (!recoveryBurstGrace && lastSendBlockUs > 8_000)
-                || (!recoveryBurstGrace && newReceiverLoss > 0)
+            && (!recoveryBurstGrace
+                && (newDrops > 0
+                    || lastSendBlockUs > 8_000
+                    || newReceiverLoss > 0)
                 || latencyWorsening)
         // R4: a congestion mark broadcast by another session on the shared
         // link contributes exactly ONE vote, weighted like any local detector
@@ -238,7 +249,11 @@ extension CaptureSession {
         let effectiveCeiling = raiseCeiling > 0 ? min(raiseCeiling, ceilingBitrate) : ceilingBitrate
         let target: Int
         if congestionConfirmed {
-            target = max(floorBitrate, Int(Double(current) * 0.80))
+            target = adaptiveCongestionCutTarget(
+                currentBitrate: current,
+                floorBitrate: floorBitrate,
+                activeCount: activeCount
+            )
             stateLock.lock()
             adaptiveRaiseCeilingBitrate = adaptiveRaiseCeilingAfterCongestion(
                 failingBitrate: current
@@ -352,6 +367,23 @@ extension CaptureSession {
             current,
             target,
             congestionConfirmed ? "true" : "false"
+        )
+    }
+}
+
+extension CaptureSession {
+    /// Persist this session's congestion-cut ceiling for the media peer so
+    /// the next session for the same device starts inside it instead of at
+    /// the full w·h·fps ideal. A zero ceiling (no confirmed congestion)
+    /// records nothing — healthy links keep the aggressive ladder start.
+    func rememberCongestionCeilingForPeer() {
+        stateLock.lock()
+        let ceiling = adaptiveRaiseCeilingBitrate
+        stateLock.unlock()
+        rememberPeerCongestionCeiling(
+            addressHostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr),
+            ceiling: ceiling,
+            nowNs: DispatchTime.now().uptimeNanoseconds
         )
     }
 }

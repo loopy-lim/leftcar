@@ -10,6 +10,11 @@ import Security
 import Darwin
 import OSLog
 
+func viewerConnectionAlive(feedback: UInt64, heartbeat: UInt64, now: UInt64) -> Bool {
+    let latest = max(feedback, heartbeat)
+    return latest > 0 && now >= latest && now - latest <= 5_000_000_000
+}
+
 extension CaptureSession {
     func stop() {
         stateLock.lock()
@@ -67,8 +72,8 @@ extension CaptureSession {
         stateLock.unlock()
     }
 
-    /// The viewer sends authenticated LCF1 feedback once per second. When that
-    /// stream goes silent while the session is running, the viewer is gone
+    /// The viewer sends authenticated LCF1 feedback, or LCK1 heartbeats while
+    /// its Surface is hidden. When both go silent, the viewer is gone
     /// (network drop, app kill, device sleep) and the media socket will never
     /// report an error because it is unconnected UDP. Re-check after a grace
     /// period and terminate the session so capture/encode work stops instead
@@ -88,8 +93,8 @@ extension CaptureSession {
             self.healthCheckScheduled = false
             let shouldStop = self.running
                 && !self.stopRequested
-                && (self.receiverFeedbackNs == 0
-                    || (DispatchTime.now().uptimeNanoseconds &- self.receiverFeedbackNs) > 5_000_000_000)
+                && !viewerConnectionAlive(feedback: self.receiverFeedbackNs,
+                    heartbeat: self.receiverHeartbeatNs, now: DispatchTime.now().uptimeNanoseconds)
             let shouldRearm = self.running && !self.stopRequested && !shouldStop
             self.stateLock.unlock()
             if shouldStop {
@@ -99,7 +104,7 @@ extension CaptureSession {
             } else if shouldRearm {
                 // Keep one watchdog alive after healthy feedback. Without
                 // re-arming here, a viewer disappearing just after this check
-                // would never schedule another timeout because no new LCF1
+                // would never schedule another timeout because no new control
                 // datagram exists to call armReceiverHealthCheck().
                 self.armReceiverHealthCheck()
             }

@@ -38,7 +38,16 @@ extension CaptureSession {
             minRate = activeCount > 1 ? 4_000_000 : 6_000_000
             maxRate = activeCount > 1 ? 24_000_000 : 60_000_000
         }
-        let avgBitrate = min(max(idealBits, Double(minRate)), Double(maxRate))
+        var avgBitrate = min(max(idealBits, Double(minRate)), Double(maxRate))
+        // A congestion collapse this peer suffered recently is remembered
+        // across sessions; restart into it at that ceiling and let the raise
+        // ladder climb back instead of re-collapsing at the full ideal.
+        if let rememberedCeiling = peerCongestionStartCeiling(
+            addressHostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr),
+            nowNs: DispatchTime.now().uptimeNanoseconds
+        ), rememberedCeiling < Int(avgBitrate) {
+            avgBitrate = Double(max(rememberedCeiling, minRate))
+        }
 
         stateLock.lock()
         let requestedExperiment = requestedEncoderExperiment

@@ -225,7 +225,8 @@ extension CaptureSession {
                     isFrame: true,
                     isKeyframe: frame.isKeyframe,
                     isRecoveryKeyframe: frame.isRecoveryKeyframe,
-                    tileSide: frame.tileSide
+                    tileSide: frame.tileSide,
+                    queuedNs: frame.queuedNs
                 )
                 networkLock.lock()
                 if frame.isKeyframe {

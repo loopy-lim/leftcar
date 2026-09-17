@@ -22,7 +22,7 @@ extension CaptureSession {
         inputLock.unlock()
         var status = Data("LCS1".utf8)
         status.append(enabled ? 1 : 0)
-        _ = sendControlPayload(status, fd: fd)
+        _ = sendControlPayload(status, fd: fd, destination: targetAddr)
     }
 
      func handleInputMessage(
@@ -74,9 +74,14 @@ extension CaptureSession {
             }
             if enabled { releaseInjectedInput() }
             inputLock.lock()
+            inputLanguageTransition.cancel()
             lastReliableInputSequence = sequence
             inputLock.unlock()
             sendInputAck(sequence: sequence, fd: fd, destination: destination)
+            return
+        }
+        if kind == 7, sequence == last &+ 1 {
+            handleInputLanguage(message, sequence: sequence, fd: fd, destination: destination)
             return
         }
         guard sequence == last &+ 1,
@@ -194,6 +199,12 @@ extension CaptureSession {
         case 1: return .left
         case 2: return .right
         case 4: return .center
+        // Android BUTTON_BACK/FORWARD — the side buttons a five-button mouse
+        // sends as pointer-button masks 8/16. macOS numbers physical buttons
+        // past the middle as 3/4, which browsers and Finder read as
+        // back/forward navigation.
+        case 8: return CGMouseButton(rawValue: 3)
+        case 16: return CGMouseButton(rawValue: 4)
         default: return nil
         }
     }
@@ -307,34 +318,10 @@ extension CaptureSession {
     }
 
      func macKeyCode(android code: UInt16) -> CGKeyCode? {
-        let letters: [CGKeyCode] = [
-            0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46,
-            45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6,
-        ]
-        if (29...54).contains(code) { return letters[Int(code - 29)] }
-        let digits: [CGKeyCode] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25]
-        if (7...16).contains(code) { return digits[Int(code - 7)] }
-        let keypad: [CGKeyCode] = [82, 83, 84, 85, 86, 87, 88, 89, 91, 92]
-        if (144...153).contains(code) { return keypad[Int(code - 144)] }
-        let functionKeys: [CGKeyCode] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
-        if (131...142).contains(code) { return functionKeys[Int(code - 131)] }
-        // Android F13…F20(183…190) → kVK_F13…kVK_F20. F21+는 Mac 가상 키가
-        // 없다(미매핑 로그로 잡힌다).
-        let upperFunctionKeys: [CGKeyCode] = [105, 107, 113, 106, 64, 79, 80, 90]
-        if (183...190).contains(code) { return upperFunctionKeys[Int(code - 183)] }
-        return [
-            19: 126, 20: 125, 21: 123, 22: 124,
-            23: 36,
-            55: 43, 56: 47, 57: 58, 58: 61, 59: 56, 60: 60,
-            61: 48, 62: 49, 66: 36, 67: 51, 68: 50, 69: 27,
-            70: 24, 71: 33, 72: 30, 73: 42, 74: 41, 75: 39,
-            76: 44, 92: 116, 93: 121, 111: 53, 112: 117,
-            113: 59, 114: 62, 115: 57, 117: 55, 118: 54,
-            122: 115, 123: 119, 124: 114,
-            143: 71, 159: 95,
-            154: 75, 155: 67, 156: 78, 157: 69, 158: 65,
-            160: 76, 161: 81, 204: 104,
-        ][code]
+        // 기본표의 단일 소스는 crates/keymap(src/lib.rs)이고 이 파일은
+        // 그 생성물이다 — Windows 호스트도 같은 표를 Rust에서 소비한다.
+        // 사용자 리맵(dev.leftcar.remoteKeyRemap)은 이 표보다 위에서 먼저 적용된다.
+        AndroidKeyMap.mac[code].flatMap(CGKeyCode.init(exactly:))
     }
 
      func injectKey(_ message: Data) {

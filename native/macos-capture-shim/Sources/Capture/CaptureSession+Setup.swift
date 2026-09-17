@@ -137,16 +137,19 @@ extension CaptureSession {
         }
     }
 
+    @discardableResult
      func paceUdpDatagram(
         bytes: Int,
         isKeyframe: Bool = false,
         accessUnitBytes: Int = 0,
         dataFragmentCount: Int = 0,
-        selectedParity: Int? = nil
-    ) {
-        guard mediaTransport == .udp else { return }
+        selectedParity: Int? = nil,
+        framePacingBitrate: Int? = nil
+    ) -> UdpPacingObservation {
+        guard mediaTransport == .udp else { return .zero }
         stateLock.lock()
         let bitrate = max(1, currentAverageBitrate)
+        let linkDegraded = DispatchTime.now().uptimeNanoseconds < udpLinkDegradedUntilNs
         let effectiveBurstDatagrams = motionAdjustedUdpBurstDatagrams(
             base: activeUdpBurstDatagrams,
             mode: adaptiveMotionState.mode(
@@ -170,13 +173,24 @@ extension CaptureSession {
             contentMode: contentMode.rawValue,
             dataFragmentCount: dataFragmentCount,
             selectedParity: selectedParity,
-            pacingRateMultiplier: pacingRateMultiplier
+            pacingRateMultiplier: pacingRateMultiplier,
+            framePacingBitrate: framePacingBitrate,
+            linkDegraded: linkDegraded
         )
         let now = DispatchTime.now().uptimeNanoseconds
         let deadline = max(now, nextUdpSendNs)
         paceNetwork(until: deadline)
         let sentAt = DispatchTime.now().uptimeNanoseconds
-        nextUdpSendNs = max(deadline, sentAt) + intervalUs * 1_000
+        // Wakeup lateness consumes this burst's interval. Charging it again
+        // after every sleep slowly lowers the effective sending rate and
+        // queues otherwise timely frames. The max(now, next) above rebases
+        // after idle/stalls, so missed deadlines cannot build burst credit.
+        nextUdpSendNs = deadline + intervalUs * 1_000
+        return UdpPacingObservation(
+            requestedUs: (deadline - now) / 1_000,
+            waitedUs: (sentAt - now) / 1_000,
+            overshootUs: sentAt > deadline ? (sentAt - deadline) / 1_000 : 0
+        )
     }
 
      func receiveTCPFrame(fd: Int32, timeoutMs: Int32) -> Data? {

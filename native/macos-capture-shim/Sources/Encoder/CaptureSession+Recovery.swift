@@ -24,7 +24,20 @@ extension CaptureSession {
         let now = DispatchTime.now().uptimeNanoseconds
         // Keep one recovery request outstanding. If its keyframe never reaches
         // the viewer, retry after 750ms instead of creating a 5Hz IDR storm.
-        let cooldownElapsed = now &- lastKeyframeRequestNs >= 750_000_000
+        // 250ms 빠른 재시도는 유실 창에서 IDR 폭풍의 밀도만 ~3배로 올려 링크를
+        // 더 포화시키고, 복구 수렴 실패(뷰어 12s 렌더 스톨 → 세션 종료)로 이어질
+        // 수 있다 — 정적 화면 첫 키맵은 캐리어 재제출(위 seedSingleRecovery
+        // CarrierIfIdle)이 담당하므로 재시도는 커밋된 750ms 페이싱을 유지한다.
+        // A failure-scheduled retry keeps the original 750ms arithmetic: it is
+        // fired 750ms after a failed recovery send, matching this cooldown.
+        // The bitrate-scaled 2.5s spacing applies only to fresh viewer honors
+        // — letting it gate the retry too left csdSent=false (every delta
+        // prepare failing) for the whole widened window, a dead-air 0fps
+        // episode instead of the intended bounded blackout.
+        let cooldownNs = scheduledRetry
+            ? 750_000_000
+            : recoveryRequestCooldownNs(currentBitrate: currentAverageBitrate)
+        let cooldownElapsed = now &- lastKeyframeRequestNs >= cooldownNs
         let decision = recoveryKeyframeRequestDecision(
             delayedRetryPending: recoveryDropRetryState.hasPendingRetry,
             scheduledRetry: scheduledRetry,

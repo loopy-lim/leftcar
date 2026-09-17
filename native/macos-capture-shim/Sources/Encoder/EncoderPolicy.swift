@@ -430,6 +430,42 @@ func adaptiveRaiseCeilingAfterCongestion(failingBitrate: Int) -> Int {
     max(1, Int(Double(max(1, failingBitrate)) * 0.90))
 }
 
+/// Congestion cut target. Above the mode floor the cut keeps its established
+/// −20% shape; at the floor it may cut THROUGH to a survival floor instead.
+/// A 1440p session has no resolution fallback below it, and the video-mode
+/// floor (8Mbps single-stream) exceeded what a weak XR-class Wi-Fi link
+/// actually sustains (~3–5Mbps measured 2026-09-17) — pinned at the floor the
+/// queue never drained and the recovery-keyframe storm never ended (rendered
+/// FPS oscillating 0–54 with the bitrate frozen at exactly 8Mbps for hours).
+/// The survival floor trades sharpness for a draining queue; the raise ladder
+/// climbs back once the link proves clean.
+func adaptiveCongestionCutTarget(
+    currentBitrate: Int,
+    floorBitrate: Int,
+    activeCount: Int
+) -> Int {
+    let current = max(1, currentBitrate)
+    let cut = Int(Double(current) * 0.80)
+    let atFloor = Double(current) <= Double(max(1, floorBitrate)) * 1.10
+    if !atFloor {
+        return max(floorBitrate, cut)
+    }
+    let survivalFloor = activeCount > 1 ? 2_000_000 : 3_000_000
+    return max(min(survivalFloor, floorBitrate), cut)
+}
+
+/// Honor-to-honor spacing for viewer-requested recovery keyframes. At a deep
+/// collapse (≤6Mbps) every IDR is a burst the pacer drains for tens of ms
+/// while 60fps deltas queue behind it; honoring the usual ~4/s there
+/// re-jammed the host queue before any delta could resume, which manufactured
+/// the next gap and kept the storm self-sustaining at the survival floor
+/// (2026-09-17 XR trace: rkf ≈1/s, networkQueueDropped climbing at 3Mbps).
+/// 2.5s spacing only applies while recovery keeps failing — one clean IDR
+/// ends the episode and the cadence returns to 750ms.
+func recoveryRequestCooldownNs(currentBitrate: Int) -> UInt64 {
+    currentBitrate <= 6_000_000 ? 2_500_000_000 : 750_000_000
+}
+
 /// Relax the congestion-cut ceiling by 10% per 8 consecutive clean windows,
 /// never above the policy's global ceiling. An inactive ceiling (0) stays
 /// inactive; the streak accounting belongs to the caller. The old 30-window
