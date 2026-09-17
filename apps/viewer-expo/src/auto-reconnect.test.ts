@@ -6,6 +6,7 @@ import {
   noteAutoReconnectAttempt,
   shouldAutoReconnect,
   shouldAutoReconnectFromGate,
+  shouldReconnectRetainedContext,
 } from "./auto-reconnect";
 
 function decision(overrides: Partial<Parameters<typeof shouldAutoReconnect>[0]> = {}) {
@@ -70,5 +71,19 @@ describe("auto-reconnect gate", () => {
     noteAutoReconnectAttempt(300_000);
     expect(shouldAutoReconnectFromGate(false, true, 305_000)).toBe(false);
     expect(shouldAutoReconnectFromGate(false, true, 311_000)).toBe(true);
+  });
+});
+
+describe("shouldReconnectRetainedContext", () => {
+  const context = { target: { host: "100.80.133.120", port: 7777 } };
+  it("reuses the retained context only for the same host and port", () => {
+    expect(shouldReconnectRetainedContext(context, { host: "100.80.133.120", port: 7777 })).toBe(true);
+    expect(shouldReconnectRetainedContext(context, { host: "100.80.133.121", port: 7777 })).toBe(false);
+    expect(shouldReconnectRetainedContext(context, { host: "100.80.133.120", port: 7778 })).toBe(false);
+  });
+  it("falls back to a fresh selection without a retained context or target", () => {
+    expect(shouldReconnectRetainedContext(null, { host: "10.0.0.1", port: 7777 })).toBe(false);
+    expect(shouldReconnectRetainedContext(context, null)).toBe(false);
+    expect(shouldReconnectRetainedContext(null, null)).toBe(false);
   });
 });

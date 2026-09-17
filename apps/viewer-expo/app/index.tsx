@@ -23,7 +23,7 @@ import {
   disconnectHost,
   isHostSelectionCurrent,
   isRequestContextCurrent,
-  type HostSelection,
+  reconnectHost,
   type SessionRequestContext,
 } from "../src/session";
 import {
@@ -31,6 +31,7 @@ import {
   markUserDisconnected,
   noteAutoReconnectAttempt,
   shouldAutoReconnectFromGate,
+  shouldReconnectRetainedContext,
 } from "../src/auto-reconnect";
 import { handleUnauthorized } from "../src/connect-flow";
 import { formatHostEndpoint } from "../src/pairing";
@@ -183,7 +184,7 @@ export default function Hub() {
    * 자동 시도 중 승인 만료(401)를 만났다면(pairingStale) 더 시도하지 않는다.
    */
   const attemptAutoReconnect = useCallback(
-    async (target: RecentHostItem | null, selection: HostSelection) => {
+    async (target: RecentHostItem | null) => {
       const now = Date.now();
       if (
         target === null ||
@@ -195,8 +196,19 @@ export default function Hub() {
       setAutoConnecting(true);
       let context: SessionRequestContext | null = null;
       try {
-        await connectHost(target.host, target.port, { selection });
-        if (!isHostSelectionCurrent(selection)) return;
+        // 같은 호스트 재연결은 남은 컨텍스트로 되살린다(세대 무효화 방지 —
+        // shouldReconnectRetainedContext 주석). 새 대상만 선택 세대를 만든다.
+        const retained = captureRequestContext();
+        const useRetained =
+          retained !== null && isRequestContextCurrent(retained) &&
+          shouldReconnectRetainedContext(retained, target);
+        if (useRetained && retained) {
+          await reconnectHost(retained);
+        } else {
+          const selection = beginHostSelection();
+          await connectHost(target.host, target.port, { selection });
+          if (!isHostSelectionCurrent(selection)) return;
+        }
         context = captureRequestContext();
         if (!context || !isRequestContextCurrent(context)) return;
         try {
@@ -230,13 +242,12 @@ export default function Hub() {
   useFocusEffect(
     useCallback(() => {
       checkConnection();
-      const client = controlClient();
-      const automaticSelection = client ? null : beginHostSelection();
       void getRecentHosts().then((hosts) => {
         const target = hosts[0] ?? null;
         setLastHost(target);
-        if (automaticSelection) void attemptAutoReconnect(target, automaticSelection);
+        if (!controlClient()) void attemptAutoReconnect(target);
       });
+      const client = controlClient();
       if (client) {
         const context = captureRequestContext();
         context?.client.request<CatalogView>("getCatalog").catch((e) => {
@@ -259,8 +270,7 @@ export default function Hub() {
   useConnectionLost(
     useCallback((target: RecentHostItem | null) => {
       setLastHost(target);
-      const automaticSelection = controlClient() ? null : beginHostSelection();
-      if (automaticSelection) void attemptAutoReconnect(target, automaticSelection);
+      if (!controlClient()) void attemptAutoReconnect(target);
     }, [attemptAutoReconnect]),
     checkConnection,
   );
@@ -401,14 +411,14 @@ export default function Hub() {
         <View style={styles.featureGrid}>
           <View style={styles.featureCard}>
             <View style={styles.featureIconBox}>
-              <Ionicons name="speedometer-outline" size={16} color={colors.brandPrimary} />
+              <Ionicons name="speedometer-outline" size={16} color={colors.textPrimary} />
             </View>
             <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
             <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
           </View>
           <View style={styles.featureCard}>
             <View style={styles.featureIconBox}>
-              <Ionicons name="copy-outline" size={16} color={colors.brandPrimary} />
+              <Ionicons name="copy-outline" size={16} color={colors.textPrimary} />
             </View>
             <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
             <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
@@ -480,10 +490,10 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 12,
     },
     logoBadge: {
-      width: 38,
-      height: 38,
-      borderRadius: 9,
-      backgroundColor: colors.brandPrimary,
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      backgroundColor: colors.btnPrimaryBg,
       alignItems: "center",
       justifyContent: "center",
     },
@@ -500,17 +510,18 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     langToggleBtn: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 4,
+      gap: 5,
       backgroundColor: colors.bgSubtle,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
-      paddingHorizontal: 8,
-      paddingVertical: 5,
-      borderRadius: 7,
+      paddingHorizontal: 12,
+      minHeight: 36,
+      borderRadius: 8,
+      justifyContent: "center",
     },
     langToggleText: {
       color: colors.textSecondary,
-      fontSize: 11,
+      fontSize: 13,
       fontWeight: "700",
     },
 
@@ -545,7 +556,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       borderWidth: 1,
       borderColor: colors.statusLiveBorder,
       paddingHorizontal: 8,
-      paddingVertical: 3,
+      paddingVertical: 4,
       borderRadius: 12,
     },
     dotSuccess: {
@@ -556,7 +567,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     badgeSuccessText: {
       color: colors.statusLive,
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: "700",
     },
     badgeStandby: {
@@ -567,7 +578,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       borderWidth: 1,
       borderColor: colors.borderSubtle,
       paddingHorizontal: 8,
-      paddingVertical: 3,
+      paddingVertical: 4,
       borderRadius: 12,
     },
     dotStandby: {
@@ -578,12 +589,12 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     badgeStandbyText: {
       color: colors.textMuted,
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: "600",
     },
     endpointLabel: {
       color: colors.textMuted,
-      fontSize: 12,
+      fontSize: 13,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
       flex: 1,
@@ -593,15 +604,15 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 3,
     },
     heroTitle: {
-      fontSize: 15,
+      fontSize: 16,
       fontWeight: "700",
       color: colors.textPrimary,
       letterSpacing: -0.2,
     },
     heroDesc: {
-      fontSize: 12,
+      fontSize: 13,
       color: colors.textSecondary,
-      lineHeight: 17,
+      lineHeight: 18,
     },
     heroActionRow: {
       flexDirection: "row",
@@ -610,46 +621,50 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     primaryActionBtn: {
       flex: 1,
-      backgroundColor: colors.brandPrimary,
-      borderRadius: 8,
-      paddingVertical: 10,
+      backgroundColor: colors.btnPrimaryBg,
+      borderRadius: 10,
+      minHeight: 44,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
       alignItems: "center",
       justifyContent: "center",
     },
     primaryActionText: {
-      color: "#FFFFFF",
-      fontSize: 12,
+      color: colors.btnPrimaryText,
+      fontSize: 14,
       fontWeight: "600",
     },
     secondaryActionBtn: {
       backgroundColor: colors.btnSecondaryBg,
       borderWidth: 1,
       borderColor: colors.btnSecondaryBorder,
-      borderRadius: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
+      borderRadius: 10,
+      minHeight: 44,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
     },
     secondaryActionText: {
       color: colors.btnSecondaryText,
-      fontSize: 12,
+      fontSize: 14,
       fontWeight: "600",
     },
     disconnectActionBtn: {
       backgroundColor: colors.statusDangerSubtle,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
-      borderRadius: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
+      borderRadius: 10,
+      minHeight: 44,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
       alignItems: "center",
       justifyContent: "center",
     },
     disconnectActionText: {
       color: colors.statusDanger,
-      fontSize: 12,
+      fontSize: 14,
       fontWeight: "600",
     },
 
@@ -663,7 +678,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 12,
     },
     sectionTitle: {
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: "700",
       color: colors.textMuted,
       textTransform: "uppercase",
@@ -678,18 +693,18 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 12,
     },
     stepBadge: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: colors.brandSubtle,
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      backgroundColor: colors.bgSubtle,
       borderWidth: 1,
-      borderColor: colors.brandPrimary,
+      borderColor: colors.borderStrong,
       alignItems: "center",
       justifyContent: "center",
     },
     stepNum: {
-      color: colors.brandPrimary,
-      fontSize: 10,
+      color: colors.textPrimary,
+      fontSize: 12,
       fontWeight: "700",
       fontFamily: "monospace",
     },
@@ -698,19 +713,19 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 1,
     },
     stepName: {
-      fontSize: 13,
+      fontSize: 14,
       fontWeight: "600",
       color: colors.textPrimary,
     },
     stepText: {
-      fontSize: 11,
+      fontSize: 13,
       color: colors.textSecondary,
-      lineHeight: 15,
+      lineHeight: 18,
     },
     stepDivider: {
       height: 1,
       backgroundColor: colors.borderSubtle,
-      marginLeft: 34,
+      marginLeft: 38,
     },
 
     /* 2-Column Feature Grid */
@@ -728,48 +743,48 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 4,
     },
     featureIconBox: {
-      width: 28,
-      height: 28,
-      borderRadius: 6,
-      backgroundColor: colors.brandSubtle,
+      width: 32,
+      height: 32,
+      borderRadius: 8,
+      backgroundColor: colors.bgSubtle,
       alignItems: "center",
       justifyContent: "center",
       marginBottom: 2,
     },
     featureValue: {
-      fontSize: 12,
+      fontSize: 13,
       fontWeight: "700",
       color: colors.textPrimary,
       fontVariant: ["tabular-nums"],
     },
     featureLabel: {
-      fontSize: 11,
+      fontSize: 12,
       color: colors.textSecondary,
-      lineHeight: 15,
+      lineHeight: 16,
     },
 
     recentQuickStrip: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 6,
+      gap: 8,
       backgroundColor: colors.bgSubtle,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
-      borderRadius: 8,
-      paddingHorizontal: 10,
-      paddingVertical: 7,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      minHeight: 44,
     },
     recentQuickColumn: {
       gap: 6,
     },
     recentQuickError: {
-      color: colors.textSecondary,
-      fontSize: 11,
-      lineHeight: 15,
+      color: colors.statusDanger,
+      fontSize: 12,
+      lineHeight: 16,
     },
     recentQuickText: {
       color: colors.textSecondary,
-      fontSize: 11,
+      fontSize: 13,
       flex: 1,
     },
     btnPressed: {

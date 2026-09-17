@@ -108,7 +108,7 @@ android {
         manifestPlaceholders = [leftcarScheme: benchmark.scheme, leftcarExpoScheme: benchmark.expoScheme, leftcarAccessoryAction: benchmark.accessory]
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 14
+        versionCode 15
         versionName "0.1.9"
 
         // Leftcar UI는 한국어/영어만 제공한다. 의존성의 미사용 번역 리소스를 제외한다.

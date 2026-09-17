@@ -33,6 +33,27 @@ export function shouldAutoReconnect(decision: AutoReconnectDecision): boolean {
   return true;
 }
 
+export interface ReconnectRouteTarget {
+  host: string;
+  port: number;
+}
+
+/**
+ * 같은 호스트를 향한 자동 재연결은 beginHostSelection+connectHost 대신 남아
+ * 있는 요청 컨텍스트로 직접 되살린다. 선택 세대를 올리는 경로는 호스트가
+ * 내려 있는 동안 실패하면 세대만 남아 옛 컨텍스트를 영구 무효화한다 —
+ * 이후 카탈로그의 모든 요청(새로고침·다시 시도 포함)이 "selection changed"로
+ * 막혀 앱을 다시 시작하기 전까지 회복되지 않는다(2026-09-17 실측).
+ * 대상이 다르면 기존 선택 경로를 쓴다.
+ */
+export function shouldReconnectRetainedContext(
+  retained: { target: ReconnectRouteTarget } | null,
+  target: ReconnectRouteTarget | null,
+): boolean {
+  if (retained === null || target === null) return false;
+  return retained.target.host === target.host && retained.target.port === target.port;
+}
+
 interface AutoReconnectGate {
   userDisconnected: boolean;
   pairingStale: boolean;
