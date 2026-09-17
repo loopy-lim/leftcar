@@ -251,6 +251,7 @@ describe("resolveStreamMaximum", () => {
 
 it("persists optional balanced presentation and keeps missing invalid values immediate", async () => {
   for(const raw of [null, '{}', '{"balancedPresentation":"true"}']) expect(parseViewerPreferences(raw).balancedPresentation).toBe(false);
+  expect(parseViewerPreferences('{"balancedPresentation":true}').balancedPresentation).toBe(true);
   const store=memoryStore();
   await writeViewerPreferences(store, {...DEFAULT_VIEWER_PREFERENCES,balancedPresentation:true});
   expect((await readViewerPreferences(store)).balancedPresentation).toBe(true);

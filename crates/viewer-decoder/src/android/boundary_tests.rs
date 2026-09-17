@@ -85,6 +85,10 @@ extern "C" fn AMediaCodec_start(_: *mut c_void) -> i32 {
 extern "C" fn AMediaCodec_stop(_: *mut c_void) -> i32 {
     0
 }
+#[no_mangle]
+extern "C" fn AMediaCodec_flush(_: *mut c_void) -> i32 {
+    0
+}
 #[test]
 fn real_constructor_retries_fresh_both_low_only_then_standard() {
     PROBE.with_borrow_mut(|p| {
@@ -164,27 +168,86 @@ extern "C" fn AMediaCodec_releaseOutputBufferAtTime(_: *mut c_void, index: usize
     0
 }
 #[test]
-fn real_output_drain_keeps_latest_pts_and_exact_display_timestamp() {
+fn real_output_drain_paces_one_release_per_vsync_slot() {
     PROBE.with_borrow_mut(|p| *p = Probe::default());
     let mut decoder =
         unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    // A decode burst: three outputs land before any vsync slot passes.
     PROBE.with_borrow_mut(|p| p.outputs.extend([(40, 1234), (41, 5678), (42, 9012)]));
-    decoder.set_output_target(Some(9_876_543_210));
+    let target = 9_876_543_210;
+    decoder.set_output_target(Some(target));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    // Park budget 2 drops the oldest (40); the head (41) takes the vsync slot.
+    assert_eq!(decoder.last_released_pts_us, Some(5678));
+    assert_eq!(decoder.frames_discarded, 1);
+    assert_eq!(decoder.frames_rendered, 1);
+    PROBE.with_borrow(|p| {
+        assert_eq!(
+            p.releases,
+            vec![(40, None, false), (41, Some(target), true)]
+        )
+    });
+
+    // Same vsync slot again: the newest burst frame (42) must hold, not
+    // double-render inside the slot.
+    PROBE.with_borrow_mut(|p| p.outputs.push_back((43, 11111)));
+    assert!(!decoder.pump_latest_output(0).unwrap());
+    PROBE.with_borrow(|p| assert_eq!(p.releases.len(), 2));
+
+    // Next vsync slot releases the held frame in FIFO order.
+    let next_target = target + 13_888_889;
+    decoder.set_output_target(Some(next_target));
     assert!(decoder.pump_latest_output(0).unwrap());
     assert_eq!(decoder.last_released_pts_us, Some(9012));
+    PROBE.with_borrow(|p| {
+        assert_eq!(p.releases.last(), Some(&(42, Some(next_target), true)))
+    });
+
+    // Dropping back to freshness mode collapses the parked tail to the newest
+    // image and renders it immediately.
+    decoder.set_output_target(None);
+    PROBE.with_borrow_mut(|p| p.outputs.push_back((44, 20000)));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    assert_eq!(decoder.last_released_pts_us, Some(20000));
+    PROBE.with_borrow(|p| {
+        assert_eq!(
+            p.releases.last(),
+            Some(&(44, None, true))
+        );
+        assert_eq!(p.releases[3], (43, None, false));
+    });
     assert_eq!(decoder.frames_discarded, 2);
+}
+
+#[test]
+fn real_output_drain_flush_forgets_parked_outputs() {
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let mut decoder =
+        unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    let target = 9_876_543_210;
+    PROBE.with_borrow_mut(|p| p.outputs.extend([(50, 1000), (51, 2000)]));
+    decoder.set_output_target(Some(target));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    // Two outputs fit the park budget: the oldest (50) takes the slot and 51
+    // stays parked for the next one.
+    PROBE.with_borrow(|p| {
+        assert_eq!(p.releases, vec![(50, Some(target), true)])
+    });
+    // A codec flush reclaims parked indices; the next slot must not release
+    // the stale index of the parked 51.
+    decoder.flush().unwrap();
+    let next_target = target + 13_888_889;
+    decoder.set_output_target(Some(next_target));
+    PROBE.with_borrow_mut(|p| p.outputs.push_back((52, 3000)));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    assert_eq!(decoder.last_released_pts_us, Some(3000));
     PROBE.with_borrow(|p| {
         assert_eq!(
             p.releases,
             vec![
-                (40, None, false),
-                (41, None, false),
-                (42, Some(9_876_543_210), true)
+                (50, Some(target), true),
+                (52, Some(next_target), true)
             ]
         )
     });
-    decoder.set_output_target(None);
-    PROBE.with_borrow_mut(|p| p.outputs.push_back((43, 10000)));
-    decoder.pump_latest_output(0).unwrap();
-    PROBE.with_borrow(|p| assert_eq!(p.releases.last(), Some(&(43, None, true))));
 }

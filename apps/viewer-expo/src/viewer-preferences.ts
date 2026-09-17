@@ -39,6 +39,9 @@ export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   // 시스템 소리는 스트리밍과 함께 기본 전달한다. 토글 전 기본 동작과 같다.
   localAudio: true,
   opusAudio: false,
+  // 태블릿 실측(2026-09-17): 메인 스레드 Choreographer가 프레임을 건너뛰는
+  // 동안 릴리스가 ~55fps로 제한돼 즉시 표시보다 손해. Moonlight처럼 전용
+  // 스레드에서 vsync를 먹일 때까지 기본은 즉시 표시로 둔다.
   balancedPresentation: false,
 };
 

@@ -35,7 +35,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
     }
 
-    private var instanceId: String = ""
+    // Read by the display-clock thread inside displayClock's deliver lambda.
+    @Volatile private var instanceId: String = ""
     private var host: String = ""
     private var port: Int = 5000
     private var fps: Int = 60
@@ -44,7 +45,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var sourceHeight: Int = 1080
     private var splitVertical = false
     private var splitDecoderName = ""
-    private var nativeState: Long = 0
+    // Read by the display-clock thread inside displayClock's deliver lambda.
+    @Volatile private var nativeState: Long = 0
     private var released = false
     private var streamSurfaces: StreamSurfaces? = null
     private val surfaceLifecycle = StreamSurfaceLifecycleGate<SurfaceHolder>()
@@ -63,19 +65,51 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var cursorOverlay: CursorOverlayView? = null
     private var audioPlayer: StreamAudioPlayer? = null
     private var localCursorEnabled: Boolean = false
-    private var balancedPresentation: Boolean = false
+    // Read by the display-clock thread inside its deliver lambda.
+    @Volatile private var balancedPresentation: Boolean = false
     private var activityStarted = false
+    // Balanced pacing releases at most one frame per vsync slot, so its
+    // cadence is capped by how fresh the Choreographer samples arrive. A
+    // main-thread Choreographer skips frames under UI load and was measured
+    // capping paced release at ~55fps (2026-09-17); Moonlight runs its pacing
+    // Choreographer on a dedicated thread for exactly this reason.
+    private val displayClockThread by lazy {
+        android.os.HandlerThread(
+            "LeftcarDisplayClock",
+            android.os.Process.THREAD_PRIORITY_DEFAULT + android.os.Process.THREAD_PRIORITY_MORE_FAVORABLE,
+        ).apply { start() }
+    }
+    private val displayClockHandler by lazy { Handler(displayClockThread.looper) }
+    private val displayManager by lazy {
+        getSystemService(DISPLAY_SERVICE) as? android.hardware.display.DisplayManager
+    }
+    // Main-thread snapshot; per-frame refresh reads go through DisplayManager,
+    // which is safe off the main thread unlike View.getDisplay().
+    @Volatile private var displayClockDisplayId: Int = -1
     private val displayClock by lazy {
         DisplayFrameClock(
-            post = { android.view.Choreographer.getInstance().postFrameCallback(it) },
-            remove = { android.view.Choreographer.getInstance().removeFrameCallback(it) },
-            display = { window.decorView.display?.let { it.displayId to it.refreshRate } },
+            post = { callback ->
+                displayClockHandler.post {
+                    android.view.Choreographer.getInstance().postFrameCallback(callback)
+                }
+            },
+            remove = { callback ->
+                displayClockHandler.post {
+                    android.view.Choreographer.getInstance().removeFrameCallback(callback)
+                }
+            },
+            display = {
+                val id = displayClockDisplayId
+                if (id < 0) null
+                else displayManager?.getDisplay(id)?.let { it.displayId to it.refreshRate }
+            },
             deliver = { display, frame, period ->
                 ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, display, frame, period)
             },
         )
     }
     private fun syncPresentation() {
+        displayClockDisplayId = window.decorView.display?.displayId ?: -1
         displayClock.stop()
         ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
         if (balancedPresentation && activityStarted && surfaceLifecycle.isAttached) displayClock.start()
@@ -1415,6 +1449,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         displayClock.stop()
+        displayClockThread.quitSafely()
         android.util.Log.i(
             "LeftcarStream",
             "onDestroy: final release instanceId=$instanceId attached=${surfaceLifecycle.isAttached}",

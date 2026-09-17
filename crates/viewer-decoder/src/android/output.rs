@@ -2,9 +2,16 @@ use super::decoder::{AndroidDecoder, DecoderError};
 use super::ffi::*;
 
 /// Interactive desktop streaming values freshness over displaying every
-/// decoded image. Retaining one ready output bounds the final decoder-to-
-/// Surface queue without dropping compressed reference inputs.
+/// decoded image. In freshness mode (no display target) retaining one ready
+/// output bounds the final decoder-to-Surface queue without dropping
+/// compressed reference inputs.
 pub const MAX_RENDERABLE_OUTPUTS: usize = 1;
+
+/// Balanced display pacing parks up to two ready outputs: one for the
+/// upcoming vsync slot plus one frame of jitter buffer. This mirrors
+/// Moonlight's balanced output queue limit, which trades at most one refresh
+/// interval during bursts for an even one-frame-per-vsync cadence.
+pub const MAX_PARKED_OUTPUTS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyOutput {
@@ -110,6 +117,11 @@ mod tests {
     #[test]
     fn interactive_output_budget_keeps_only_the_latest_surface_frame() {
         assert_eq!(MAX_RENDERABLE_OUTPUTS, 1);
+    }
+
+    #[test]
+    fn paced_output_budget_keeps_one_slot_plus_one_jitter_frame() {
+        assert_eq!(MAX_PARKED_OUTPUTS, 2);
     }
 
     #[test]

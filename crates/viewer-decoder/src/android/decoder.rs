@@ -1,6 +1,7 @@
 use super::ffi::*;
-use super::output::MAX_RENDERABLE_OUTPUTS;
+use super::output::{ReadyOutput, MAX_PARKED_OUTPUTS, MAX_RENDERABLE_OUTPUTS};
 use crate::annex_b::*;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderCandidate<'a> {
@@ -160,6 +161,12 @@ pub struct AndroidDecoder {
     /// Actual last released output PTS; not the currently submitted input.
     pub last_released_pts_us: Option<i64>,
     output_target_ns: Option<i64>,
+    /// Outputs held while balanced pacing waits for the next display vsync
+    /// slot. Bounded by [`MAX_PARKED_OUTPUTS`]; overflow discards the oldest.
+    parked_outputs: VecDeque<ReadyOutput>,
+    /// Vsync target that already received a release. One release per slot
+    /// keeps bursts from double-rendering inside a single vsync period.
+    last_paced_target_ns: Option<i64>,
 }
 
 unsafe impl Send for AndroidDecoder {}
@@ -369,6 +376,8 @@ impl AndroidDecoder {
                 frames_discarded: 0,
                 last_released_pts_us: None,
                 output_target_ns: None,
+                parked_outputs: VecDeque::new(),
+                last_paced_target_ns: None,
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -484,10 +493,18 @@ impl AndroidDecoder {
         Ok(FeedStatus::Queued { rendered: false })
     }
 
-    /// Drain currently ready decoder outputs while preserving only the newest
-    /// image for an interactive desktop Surface. Older decoded images are no
-    /// longer useful for pointer-following latency, but compressed reference
-    /// inputs were still submitted in order so decoder correctness is kept.
+    /// Drain currently ready decoder outputs. Two release policies share the
+    /// decoder-to-Surface queue bound:
+    ///
+    /// * Freshness (no display target): render only the newest image now.
+    ///   Older decoded images are no longer useful for pointer-following
+    ///   latency, but compressed reference inputs were still submitted in
+    ///   order so decoder correctness is kept.
+    /// * Balanced pacing (display target): park ready outputs up to
+    ///   [`MAX_PARKED_OUTPUTS`] and release at most one per vsync slot, so
+    ///   bursty decodes spread one frame per display refresh instead of
+    ///   double-rendering inside a single vsync period. The parked tail is
+    ///   one frame of jitter buffer, matching Moonlight's balanced pacing.
     pub fn set_output_target(&mut self, target_ns: Option<i64>) {
         self.output_target_ns = target_ns;
     }
@@ -521,32 +538,60 @@ impl AndroidDecoder {
                 err => return Err(DecoderError::OpFailed { status: err as i32 }),
             }
         }
-        if ready_count == 0 {
+        for &(idx, pts_us) in &ready[..ready_count] {
+            self.parked_outputs.push_back(ReadyOutput {
+                index: idx,
+                pts_us,
+            });
+        }
+        if self.parked_outputs.is_empty() {
             return Ok(false);
         }
 
-        let discard_count = ready_count.saturating_sub(MAX_RENDERABLE_OUTPUTS);
-        for &(idx, _) in &ready[..discard_count] {
-            let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, idx, false) };
-            if r != AMEDIA_OK {
-                return Err(DecoderError::OpFailed { status: r });
-            }
-            self.frames_discarded += 1;
-        }
-        for &(idx, pts_us) in &ready[discard_count..ready_count] {
-            let r = unsafe {
-                match self.output_target_ns {
-                    Some(target) => AMediaCodec_releaseOutputBufferAtTime(self.codec, idx, target),
-                    None => AMediaCodec_releaseOutputBuffer(self.codec, idx, true),
+        match self.output_target_ns {
+            None => {
+                let budget = MAX_RENDERABLE_OUTPUTS;
+                while self.parked_outputs.len() > budget {
+                    let output = self.parked_outputs.pop_front().expect("length checked");
+                    self.discard_output(output)?;
                 }
-            };
-            if r != AMEDIA_OK {
-                return Err(DecoderError::OpFailed { status: r });
+                // Immediate renders are not bound to a vsync slot; a later
+                // switch back to paced release must not inherit this slot.
+                self.last_paced_target_ns = None;
+                let output = self.parked_outputs.pop_front().expect("budget keeps one");
+                let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, output.index, true) };
+                if r != AMEDIA_OK {
+                    return Err(DecoderError::OpFailed { status: r });
+                }
+                self.frames_rendered += 1;
+                self.last_released_pts_us = Some(output.pts_us);
+                Ok(true)
             }
-            self.frames_rendered += 1;
-            self.last_released_pts_us = Some(pts_us);
+            Some(target) => {
+                while self.parked_outputs.len() > MAX_PARKED_OUTPUTS {
+                    let output = self.parked_outputs.pop_front().expect("length checked");
+                    self.discard_output(output)?;
+                }
+                if self.last_paced_target_ns == Some(target) {
+                    // This vsync slot already received its frame; hold the
+                    // parked tail for the next slot.
+                    return Ok(false);
+                }
+                let output = match self.parked_outputs.pop_front() {
+                    Some(output) => output,
+                    None => return Ok(false),
+                };
+                let r =
+                    unsafe { AMediaCodec_releaseOutputBufferAtTime(self.codec, output.index, target) };
+                if r != AMEDIA_OK {
+                    return Err(DecoderError::OpFailed { status: r });
+                }
+                self.frames_rendered += 1;
+                self.last_released_pts_us = Some(output.pts_us);
+                self.last_paced_target_ns = Some(target);
+                Ok(true)
+            }
         }
-        Ok(true)
     }
 
     /// Dequeue and render any ready output buffers.
@@ -575,8 +620,11 @@ impl AndroidDecoder {
     }
 
     /// Flush for an epoch reset (surface recreate): drop in-flight refs,
-    /// caller feeds a fresh IDR after.
+    /// caller feeds a fresh IDR after. Parked output indices are reclaimed by
+    /// the codec and must never be released afterwards.
     pub fn flush(&mut self) -> Result<(), DecoderError> {
+        self.parked_outputs.clear();
+        self.last_paced_target_ns = None;
         let s = unsafe { AMediaCodec_flush(self.codec) };
         if s != AMEDIA_OK {
             return Err(DecoderError::OpFailed { status: s });
@@ -585,6 +633,8 @@ impl AndroidDecoder {
     }
 
     pub fn stop(&mut self) {
+        self.parked_outputs.clear();
+        self.last_paced_target_ns = None;
         if self.started {
             unsafe {
                 AMediaCodec_stop(self.codec);
