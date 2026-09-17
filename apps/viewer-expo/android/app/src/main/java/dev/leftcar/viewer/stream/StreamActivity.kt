@@ -33,6 +33,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
         private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
+        // A healthy rebind renders its first frame well inside a second; this
+        // budget only fails rebinds whose media never arrived at all.
+        private const val RECOVERY_FLOW_WATCHDOG_MS = 4_000L
     }
 
     // Read by the display-clock thread inside displayClock's deliver lambda.
@@ -122,6 +125,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var terminationHandled = false
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
+    private var recoveryFlowWatchdog: Runnable? = null
     private var xrSession: Session? = null
     private var xrPreferredRatio: Float? = null
     /**
@@ -285,7 +289,42 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // 재시도마다 종료 폴링 재무장과 인디케이터 갱신이 두 번 일어난다.
         if (result != 0) {
             scheduleRenderRecovery()
+        } else {
+            armRecoveryFlowWatchdog(attempt.number)
         }
+    }
+
+    /**
+     * A successful rebind only proves the renderer spawned — not that media
+     * arrived. When the Host session died mid-recovery (observed 2026-09-17:
+     * reason-5 detach, host error, "no session media crypto") the rebinding
+     * succeeds, every recovery flag resets, and the window sits on the last
+     * frozen frame indefinitely. Watch for rendered progress; without it the
+     * retry policy resumes and finally hands the stream to React's reconnect.
+     */
+    private fun armRecoveryFlowWatchdog(attempt: Int) {
+        cancelRecoveryFlowWatchdog()
+        val baseline = ViewerNative.streamStats(instanceId) and ((1L shl 28) - 1)
+        val watchdog = Runnable {
+            recoveryFlowWatchdog = null
+            if (released || isFinishing || isDestroyed) return@Runnable
+            val rendered = ViewerNative.streamStats(instanceId) and ((1L shl 28) - 1)
+            if (rendered > baseline) return@Runnable
+            android.util.Log.w(
+                "LeftcarStream",
+                "local render recovery attempt=$attempt produced no frames; retrying " +
+                    "instanceId=$instanceId port=$port",
+            )
+            hud?.showRebindIndicator(ViewerStrings.rebindReconnecting)
+            scheduleRenderRecovery()
+        }
+        recoveryFlowWatchdog = watchdog
+        recoveryHandler.postDelayed(watchdog, RECOVERY_FLOW_WATCHDOG_MS)
+    }
+
+    private fun cancelRecoveryFlowWatchdog() {
+        recoveryFlowWatchdog?.let(recoveryHandler::removeCallbacks)
+        recoveryFlowWatchdog = null
     }
 
     /**
@@ -342,6 +381,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryRetryRunnable = null
         recoveryRetryPolicy.reset()
         recoveryFallbackEmitted = false
+        cancelRecoveryFlowWatchdog()
     }
 
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
@@ -1462,6 +1502,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         cancelPendingSurfaceAttach()
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
+        cancelRecoveryFlowWatchdog()
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()
