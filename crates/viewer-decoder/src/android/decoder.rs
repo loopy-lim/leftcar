@@ -167,7 +167,19 @@ pub struct AndroidDecoder {
     /// Vsync target that already received a release. One release per slot
     /// keeps bursts from double-rendering inside a single vsync period.
     last_paced_target_ns: Option<i64>,
+    /// Presentation-smoothing hold: the newest frame parked for one frame
+    /// period while its predecessor covers the current vsync (micro-jitter
+    /// smoothing; see PRESENTATION_SMOOTH).
+    smooth_hold_until: Option<(i64, std::time::Instant)>,
+    frame_period_us: u64,
 }
+
+/// Micro-jitter smoothing switch, mirrored to the client so the Viewer UI can
+/// toggle it at runtime (전문 설정). On by default: converting a one-frame
+/// skip into one frame held costs at most a frame period of latency when a
+/// pair arrives together, and the hold disengages the moment arrivals bunch
+/// harder than one frame.
+pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 unsafe impl Send for AndroidDecoder {}
 
@@ -378,6 +390,8 @@ impl AndroidDecoder {
                 output_target_ns: None,
                 parked_outputs: VecDeque::new(),
                 last_paced_target_ns: None,
+                smooth_hold_until: None,
+                frame_period_us: (1_000_000u64).saturating_div(u64::from(fps.max(1))),
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -550,14 +564,75 @@ impl AndroidDecoder {
 
         match self.output_target_ns {
             None => {
-                let budget = MAX_RENDERABLE_OUTPUTS;
-                while self.parked_outputs.len() > budget {
+                // Burst catch-up keeps newest-wins: more than two ready
+                // frames means arrival outran presentation, and the skip is
+                // cheaper than adding latency to everything behind it.
+                while self.parked_outputs.len() > 2 {
                     let output = self.parked_outputs.pop_front().expect("length checked");
                     self.discard_output(output)?;
                 }
-                // Immediate renders are not bound to a vsync slot; a later
-                // switch back to paced release must not inherit this slot.
                 self.last_paced_target_ns = None;
+
+                let now = std::time::Instant::now();
+                if let Some((held_pts, deadline)) = self.smooth_hold_until {
+                    if now < deadline && self.parked_outputs.len() == 1 {
+                        // Still covering the current frame period with the
+                        // predecessor; the held frame releases at the
+                        // deadline (next tick past it).
+                        return Ok(false);
+                    }
+                    if now >= deadline
+                        && self
+                            .parked_outputs
+                            .front()
+                            .is_some_and(|output| output.pts_us == held_pts)
+                    {
+                        let output = self.parked_outputs.pop_front().expect("front checked");
+                        let r = unsafe {
+                            AMediaCodec_releaseOutputBuffer(self.codec, output.index, true)
+                        };
+                        if r != AMEDIA_OK {
+                            return Err(DecoderError::OpFailed { status: r });
+                        }
+                        self.frames_rendered += 1;
+                        self.last_released_pts_us = Some(output.pts_us);
+                        self.smooth_hold_until = None;
+                        return Ok(true);
+                    }
+                    // Either arrivals bunched harder than the one-frame
+                    // jitter the hold targets, or the held frame already
+                    // moved on: drop the hold and fall through to
+                    // newest-wins.
+                    self.smooth_hold_until = None;
+                }
+
+                if self.parked_outputs.len() == 2
+                    && PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let step = self.parked_outputs[1].pts_us.saturating_sub(self.parked_outputs[0].pts_us);
+                    if (4_000..=35_000).contains(&step) {
+                        // One-frame arrival bunch: render the older frame now
+                        // and hold the newer for a frame period, so the
+                        // display cadence stays unbroken instead of skipping
+                        // the older frame entirely.
+                        let older = self.parked_outputs.pop_front().expect("length checked");
+                        let held_pts = self.parked_outputs.front().expect("length checked").pts_us;
+                        let r = unsafe {
+                            AMediaCodec_releaseOutputBuffer(self.codec, older.index, true)
+                        };
+                        if r != AMEDIA_OK {
+                            return Err(DecoderError::OpFailed { status: r });
+                        }
+                        self.frames_rendered += 1;
+                        self.last_released_pts_us = Some(older.pts_us);
+                        self.smooth_hold_until = Some((
+                            held_pts,
+                            now + std::time::Duration::from_micros(self.frame_period_us.max(8_000)),
+                        ));
+                        return Ok(true);
+                    }
+                }
+
                 let output = self.parked_outputs.pop_front().expect("budget keeps one");
                 let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, output.index, true) };
                 if r != AMEDIA_OK {

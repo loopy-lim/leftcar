@@ -95,6 +95,8 @@ export interface StreamLauncher {
    */
   setOpusAudio?(instanceId: string, enabled: boolean): Promise<void>;
   setAudioStream?(instanceId: string, enabled: boolean): Promise<void>;
+  /** 전문 설정의 프레임 스무딩 토글 — 활성 스트림에 즉시 적용(구버전 모듈은 미구현). */
+  setPresentationSmooth?(instanceId: string, enabled: boolean): Promise<void>;
   /**
    * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
    * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
@@ -137,6 +139,7 @@ export interface StartStreamArgs {
   localAudio?: boolean;
   opusAudio?: boolean;
   balancedPresentation?: boolean;
+  presentationSmooth?: boolean;
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
@@ -146,6 +149,7 @@ export interface StartedStream {
   opusAudio?: boolean;
   /** Effective native mode, distinct from the saved preference. */
   balancedPresentation?: boolean;
+  presentationSmooth?: boolean;
   session: number;
   /** 뷰어가 생성한 세션 미디어 키 — 재구성(reconfigure) 시 그대로 재사용된다. */
   mediaKey: string;
@@ -419,9 +423,11 @@ export async function startPreparedStream({
       args.balancedPresentation ?? false,
     );
     await launcher.setOpusAudio?.(`src-${args.viewerPort}`, args.opusAudio ?? false);
+    await launcher.setPresentationSmooth?.(`src-${args.viewerPort}`, args.presentationSmooth ?? true);
     return {
       session,
       opusAudio: Boolean(launcher.setOpusAudio && args.opusAudio),
+      presentationSmooth: Boolean(launcher.setPresentationSmooth),
       balancedPresentation: Boolean(launcher.openStreamWithPresentation && args.balancedPresentation),
       // Optional fields stay undefined when the Host omitted them;
       // JSON drops undefined keys on the wire.
@@ -699,9 +705,11 @@ export async function reconfigurePreparedStream({
       active.balancedPresentation ?? false,
     );
     await launcher.setOpusAudio?.(`src-${active.port}`, active.opusAudio ?? false);
+    await launcher.setPresentationSmooth?.(`src-${active.port}`, active.presentationSmooth ?? true);
     return {
       session: accepted.session,
       opusAudio: Boolean(launcher.setOpusAudio && active.opusAudio),
+      presentationSmooth: Boolean(launcher.setPresentationSmooth),
       balancedPresentation: Boolean(launcher.openStreamWithPresentation && active.balancedPresentation),
       width: accepted.width,
       height: accepted.height,

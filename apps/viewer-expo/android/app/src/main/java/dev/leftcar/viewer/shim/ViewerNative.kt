@@ -114,6 +114,7 @@ object ViewerNative {
         balanced: Boolean,
     ): Int
     external fun displayFrame(state: Long, instanceId: String, balanced: Boolean, displayId: Int, frameNs: Long, periodNs: Long): Int
+    external fun setPresentationSmooth(smooth: Boolean): Int
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
     external fun sendPointer(
@@ -145,6 +146,8 @@ object ViewerNative {
     external fun releaseInput(instanceId: String): Int
     /** -1 waiting/unknown, 0 Host-locked, 1 remote input enabled. */
     external fun inputStatus(instanceId: String): Int
+    /** Reliable native input language, gated by authenticated Host support. */
+    external fun sendInputLanguage(instanceId: String, language: Int): Int
     /**
      * Drain pending host audio PCM into [out]. Blob layout:
      * rate u16 BE | channels u8 | rsv | frames u16 BE | PCM int16 LE.

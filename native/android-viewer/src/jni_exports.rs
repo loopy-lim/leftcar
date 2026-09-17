@@ -358,6 +358,10 @@ pub extern "C" fn leftcar_jni_attach_port_presentation(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
+        if resume_owned_single_renderer(state_key, &instance_str, port, &host, width, height, fps, surface as usize) {
+            log_info!("resumed existing media transport on replacement Surface for {}", instance_str);
+            return LEFTCAR_OK;
+        }
         let tcp_bridge = take_media_bridge(port);
         let Some(control) = spawn_live_stream_renderer(
             instance_str.clone(),
@@ -880,6 +884,20 @@ pub extern "C" fn leftcar_jni_display_frame(
         let mut timeline = control.presentation.lock().unwrap();
         timeline.set_balanced(balanced);
         timeline.update(display, frame_ns, period_ns);
+        LEFTCAR_OK
+    })
+    .unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+/// Client toggle for presentation micro-jitter smoothing (전문 설정).
+/// Process-wide: the decoder pump consults the shared switch per frame, so a
+/// mid-stream flip takes effect on the next pump without touching the
+/// renderer lifecycle.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_set_presentation_smooth(smooth: bool) -> i32 {
+    std::panic::catch_unwind(|| {
+        viewer_decoder::PRESENTATION_SMOOTH.store(smooth, std::sync::atomic::Ordering::Relaxed);
+        log_info!("presentation smoothing set: {smooth}");
         LEFTCAR_OK
     })
     .unwrap_or(LEFTCAR_ERR_PANIC)

@@ -23,6 +23,7 @@ export interface ViewerPreferences {
   localAudio: boolean;
   opusAudio?: boolean;
   balancedPresentation: boolean;
+  presentationSmooth: boolean;
 }
 
 export type ViewerProfileSelection = StreamProfileId | "auto";
@@ -43,6 +44,7 @@ export const DEFAULT_VIEWER_PREFERENCES: ViewerPreferences = {
   // 동안 릴리스가 ~55fps로 제한돼 즉시 표시보다 손해. Moonlight처럼 전용
   // 스레드에서 vsync를 먹일 때까지 기본은 즉시 표시로 둔다.
   balancedPresentation: false,
+  presentationSmooth: true,
 };
 
 export interface ViewerPreferencesStore {
@@ -117,6 +119,7 @@ export function parseViewerPreferences(raw: string | null): ViewerPreferences {
       profileId,
       streamingPriority,
       balancedPresentation: parsed.balancedPresentation === true,
+      presentationSmooth: parsed.presentationSmooth !== false,
       opusAudio: parsed.opusAudio === true,
       showFps: typeof parsed.showFps === "boolean"
         ? parsed.showFps
@@ -157,6 +160,7 @@ export async function writeViewerPreferences(
       localAudio: preferences.localAudio,
       opusAudio: preferences.opusAudio === true,
       balancedPresentation: preferences.balancedPresentation,
+      presentationSmooth: preferences.presentationSmooth,
     }),
   );
 }

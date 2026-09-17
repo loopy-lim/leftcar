@@ -162,10 +162,10 @@ function ViewerOptionsCard({
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
             {t.viewer.cursorOverlayLabel}
           </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }}>
             {t.viewer.cursorOverlayHint}
           </Text>
         </View>
@@ -178,10 +178,10 @@ function ViewerOptionsCard({
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
             {t.viewer.audioToggleLabel}
           </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }}>
             {t.viewer.audioToggleHint}
           </Text>
         </View>
@@ -195,10 +195,10 @@ function ViewerOptionsCard({
       {/* 클립보드 공유 토글(U5) — 호스트 게이트가 기본 꺼짐인 이중 잠금. */}
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
             {t.viewer.clipboardShareLabel}
           </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }}>
             {t.viewer.clipboardShareHint}
           </Text>
         </View>
@@ -222,12 +222,16 @@ function ExpertOptionsCard({
   onToggleOpusAudio,
   balancedPresentation,
   onToggleBalancedPresentation,
+  presentationSmooth,
+  onTogglePresentationSmooth,
   colors,
 }: {
   opusAudio: boolean;
   onToggleOpusAudio: (enabled: boolean) => void;
   balancedPresentation: boolean;
   onToggleBalancedPresentation: (enabled: boolean) => void;
+  presentationSmooth: boolean;
+  onTogglePresentationSmooth: (enabled: boolean) => void;
   colors: ThemeTokens;
 }) {
   const { t } = useAppLanguage();
@@ -252,11 +256,19 @@ function ExpertOptionsCard({
       </View>
       <View style={OPTION_ROW_STYLE}>
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.balancedPresentationLabel}</Text>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }}>{t.viewer.balancedPresentationHint}</Text>
         </View>
         <Switch value={balancedPresentation} onValueChange={onToggleBalancedPresentation}
           accessibilityLabel={t.viewer.balancedPresentationLabel} {...switchColor} />
+      </View>
+      <View style={OPTION_ROW_STYLE}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.presentationSmoothLabel}</Text>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }}>{t.viewer.presentationSmoothHint}</Text>
+        </View>
+        <Switch value={presentationSmooth} onValueChange={onTogglePresentationSmooth}
+          accessibilityLabel={t.viewer.presentationSmoothLabel} {...switchColor} />
       </View>
     </View>
   );
@@ -265,12 +277,12 @@ function ExpertOptionsCard({
 function EncoderExperimentChoices({ experiments, selected, requiresReconnect, colors, t, onSelect }: { experiments: EncoderExperimentInfo[]; selected: EncoderExperimentId; requiresReconnect: boolean; colors: ThemeTokens; t: ReturnType<typeof useAppLanguage>["t"]; onSelect: (id: EncoderExperimentId) => void }) {
   if (experiments.length <= 1) return null;
   return <View style={{ gap: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
-    <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 11, color: colors.textMuted, lineHeight: 15 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
+    <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 12, color: colors.textMuted, lineHeight: 16 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
     <View style={{ gap: 8 }}>{experiments.map((experiment) => {
       const isSelected = experiment.id === selected;
       return <Pressable key={experiment.id} style={{ minHeight: 44, gap: 3, borderRadius: 8, borderWidth: 1, borderColor: isSelected ? colors.btnPrimaryBg : colors.borderSubtle, backgroundColor: isSelected ? colors.btnPrimaryBg : colors.bgSubtle, paddingHorizontal: 12, paddingVertical: 8 }} onPress={() => onSelect(experiment.id)} accessibilityRole="button" accessibilityState={{ selected: isSelected, disabled: false }} accessibilityLabel={`${experiment.label}: ${experiment.hint}`}>
         <Text style={{ fontSize: 13, fontWeight: "700", color: isSelected ? colors.btnPrimaryText : colors.textPrimary }}>{experiment.label}</Text>
-        <Text style={{ fontSize: 11, lineHeight: 15, color: isSelected ? colors.btnPrimaryText : colors.textSecondary, opacity: isSelected ? 0.85 : 1 }}>{experiment.hint}</Text>
+        <Text style={{ fontSize: 12, lineHeight: 16, color: isSelected ? colors.btnPrimaryText : colors.textSecondary, opacity: isSelected ? 0.85 : 1 }}>{experiment.hint}</Text>
       </Pressable>;
     })}</View>
   </View>;
@@ -389,6 +401,8 @@ interface CatalogSettingsModalProps {
   onToggleOpusAudio: (enabled: boolean) => void;
   balancedPresentation: boolean;
   onToggleBalancedPresentation: (enabled: boolean) => void;
+  presentationSmooth: boolean;
+  onTogglePresentationSmooth: (enabled: boolean) => void;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -417,6 +431,8 @@ function CatalogSettingsModal({
   onToggleOpusAudio,
   balancedPresentation,
   onToggleBalancedPresentation,
+  presentationSmooth,
+  onTogglePresentationSmooth,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -516,6 +532,8 @@ function CatalogSettingsModal({
                       onToggleOpusAudio={onToggleOpusAudio}
                       balancedPresentation={balancedPresentation}
                       onToggleBalancedPresentation={onToggleBalancedPresentation}
+                      presentationSmooth={presentationSmooth}
+                      onTogglePresentationSmooth={onTogglePresentationSmooth}
                       colors={colors}
                     />
 
@@ -1262,6 +1280,8 @@ export default function Catalog() {
         onToggleOpusAudio={model.handleToggleOpusAudio}
         balancedPresentation={model.balancedPresentation}
         onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
+        presentationSmooth={model.presentationSmooth}
+        onTogglePresentationSmooth={model.handleTogglePresentationSmooth}
         encoderExperiments={model.selectedEncoderExperiments}
         encoderExperiment={model.effectiveNextEncoderExperiment}
         onSelectEncoderExperiment={model.handleSelectEncoderExperiment}

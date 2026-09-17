@@ -19,6 +19,7 @@ import android.view.WindowInsetsController
 import android.view.View
 import dev.leftcar.viewer.shim.ViewerNative
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.lifecycle.lifecycleScope
 import androidx.xr.runtime.Session
 import androidx.xr.runtime.SessionCreateSuccess
@@ -36,6 +37,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // A healthy rebind renders its first frame well inside a second; this
         // budget only fails rebinds whose media never arrived at all.
         private const val RECOVERY_FLOW_WATCHDOG_MS = 4_000L
+        // Surface attach usually receives video in tens of milliseconds. If no
+        // frames arrive after 2.5s, trigger recovery to avoid a permanent black screen.
+        private const val ATTACH_FLOW_WATCHDOG_MS = 2_500L
     }
 
     // Read by the display-clock thread inside displayClock's deliver lambda.
@@ -48,6 +52,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var sourceHeight: Int = 1080
     private var splitVertical = false
     private var splitDecoderName = ""
+    // Split detach consumes both prepared receivers. A replacement Surface
+    // must wait for React/Host to prepare fresh receivers and session keys.
+    private var splitNeedsPreparation = false
     // Read by the display-clock thread inside displayClock's deliver lambda.
     @Volatile private var nativeState: Long = 0
     private var released = false
@@ -70,7 +77,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var localCursorEnabled: Boolean = false
     // Read by the display-clock thread inside its deliver lambda.
     @Volatile private var balancedPresentation: Boolean = false
+    // Micro-jitter presentation smoothing (전문 설정 토글 → JNI 전역 스위치).
+    @Volatile private var presentationSmooth: Boolean = true
     private var activityStarted = false
+    private val connectionOwner = Any()
     // Balanced pacing releases at most one frame per vsync slot, so its
     // cadence is capped by how fresh the Choreographer samples arrive. A
     // main-thread Choreographer skips frames under UI load and was measured
@@ -199,7 +209,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (terminationHandled) return
         terminationHandled = true
         val message = ViewerStrings.terminationMessage(reason)
-        if (reason == 4) {
+        if (reason == 1 || reason == 4) {
             StreamLauncherModule.emitTermination(port, reason)
         }
         android.util.Log.i("LeftcarStream", "stream termination reason=$reason: $message")
@@ -230,6 +240,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun scheduleRenderRecovery() {
         if (released || isFinishing || isDestroyed) return
+        cancelAttachFlowWatchdog()
         // A split renderer cannot rebind in place: its two UDP listeners are
         // stopped by detach, and the single rebindSurfacePort path would
         // rebuild a single renderer against a split-prepared Host. Split
@@ -257,6 +268,21 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 )
                 StreamLauncherModule.emitTermination(port, 5)
             }
+            if (StreamLauncherModule.activeRegisteredReactContext() == null) {
+                android.util.Log.i(
+                    "LeftcarStream",
+                    "React context unavailable (MainActivity closed); resetting recovery retry policy after delay",
+                )
+                recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+                val selfHeal = Runnable {
+                    recoveryRetryRunnable = null
+                    recoveryFallbackEmitted = false
+                    recoveryRetryPolicy.reset()
+                    scheduleRenderRecovery()
+                }
+                recoveryRetryRunnable = selfHeal
+                recoveryHandler.postDelayed(selfHeal, 5_000L)
+            }
             return
         }
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
@@ -283,7 +309,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         android.util.Log.i(
             "LeftcarStream",
             "local render recovery attempt=${attempt.number} result=$result " +
-                "port=$port source=${sourceWidth}x$sourceHeight fps=$fps",
+                "port=$port source=${sourceWidth}x${sourceHeight} fps=$fps",
         )
         // HUD 통지는 rebindOnSameSurface가 이미 했다 — 여기서 또 부르면
         // 재시도마다 종료 폴링 재무장과 인디케이터 갱신이 두 번 일어난다.
@@ -327,6 +353,39 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryFlowWatchdog = null
     }
 
+    private var attachFlowWatchdog: Runnable? = null
+
+    /**
+     * Initial or resumed surface attach succeeds at the JNI level immediately,
+     * but media packets or the initial IDR can be lost over UDP. If rendered_frames
+     * does not advance within [ATTACH_FLOW_WATCHDOG_MS], trigger recovery to
+     * avoid a permanent black screen.
+     */
+    private fun armAttachFlowWatchdog() {
+        cancelAttachFlowWatchdog()
+        val baseline = ViewerNative.streamStats(instanceId) and ((1L shl 28) - 1)
+        val watchdog = Runnable {
+            attachFlowWatchdog = null
+            if (released || isFinishing || isDestroyed) return@Runnable
+            val rendered = ViewerNative.streamStats(instanceId) and ((1L shl 28) - 1)
+            if (rendered > baseline) return@Runnable
+            android.util.Log.w(
+                "LeftcarStream",
+                "surface attach produced no rendered frames within ${ATTACH_FLOW_WATCHDOG_MS}ms; triggering recovery " +
+                    "instanceId=$instanceId port=$port",
+            )
+            hud?.showRebindIndicator(ViewerStrings.rebindReconnecting)
+            scheduleRenderRecovery()
+        }
+        attachFlowWatchdog = watchdog
+        recoveryHandler.postDelayed(watchdog, ATTACH_FLOW_WATCHDOG_MS)
+    }
+
+    private fun cancelAttachFlowWatchdog() {
+        attachFlowWatchdog?.let(recoveryHandler::removeCallbacks)
+        attachFlowWatchdog = null
+    }
+
     /**
      * Swap the live renderer onto the current Surface and geometry. Shared by
      * the render-recovery retry and the same-window stream intent: both own
@@ -363,6 +422,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             -1
         }
         surfaceLifecycle.confirmAttached(result == 0)
+        inputLanguageMonitor.reset()
         if (result == 0) {
             terminationHandled = false
             recoveryFallbackEmitted = false
@@ -382,6 +442,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryRetryPolicy.reset()
         recoveryFallbackEmitted = false
         cancelRecoveryFlowWatchdog()
+        cancelAttachFlowWatchdog()
     }
 
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
@@ -481,9 +542,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val prefs = getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
         if (!force && prefs.getBoolean(GestureHintOverlay.PREF_SHOWN, false)) return
         gestureHint?.dismiss()
-        gestureHint = GestureHintOverlay(this) {
-            prefs.edit().putBoolean(GestureHintOverlay.PREF_SHOWN, true).apply()
-        }.also { it.show() }
+        // "본 적 있음"은 표시 시점에 기록한다 — 닫힘 시점 저장은 강제 종료로
+        // 유실되면 다음 스트림마다 안내가 다시 떠 원격 입력을 가린다.
+        prefs.edit().putBoolean(GestureHintOverlay.PREF_SHOWN, true).apply()
+        gestureHint = GestureHintOverlay(this) {}.also { it.show() }
     }
 
     private fun lifecycleEvent(code: Int) {
@@ -525,6 +587,18 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      * 않기 위해서다.
      */
     private fun remoteInputLocked(): Boolean = ViewerNative.inputStatus(instanceId) == 0
+
+    private val inputLanguageMonitor by lazy {
+        StreamInputLanguageMonitor(
+            this,
+            active = { !released && hasWindowFocus() && ViewerNative.inputStatus(instanceId) == 1 },
+            send = {
+                val result = ViewerNative.sendInputLanguage(instanceId, it)
+                if (result == 0) android.util.Log.i("LeftcarIme", "queued native input language=$it")
+                result == 0
+            },
+        )
+    }
 
     /** 잠금 중에는 전송하지 않고, 이벤트는 로컬에서 소비한 것으로 처리한다. */
     private fun sendPointerUnlocked(
@@ -667,6 +741,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun forwardPointer(event: MotionEvent, view: View): Boolean {
+        StreamPointerDiagnostics.record(event)
+        if (android.os.Build.VERSION.SDK_INT >= 34 &&
+            event.classification == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE
+        ) {
+            return forwardTouchpadScroll(event, view)
+        }
+        touchpadScrollPosition = null
         // Touchscreen input goes through the gesture machine (tap, drag,
         // two-finger scroll, long-press right click); physical mice and
         // styluses keep the direct event mapping below.
@@ -705,8 +786,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_MOVE -> 1
             MotionEvent.ACTION_BUTTON_PRESS -> 2
             MotionEvent.ACTION_BUTTON_RELEASE -> 3
-            MotionEvent.ACTION_DOWN -> if (touchLike) 2 else return false
-            MotionEvent.ACTION_UP -> if (touchLike) 3 else return false
+            // A mouse also emits touch DOWN/UP around its generic button
+            // events. Consume that touch sequence so ViewGroup keeps routing
+            // drag MOVE samples here; only BUTTON_PRESS/RELEASE send edges.
+            MotionEvent.ACTION_DOWN -> if (touchLike) 2 else return event.isFromSource(InputDevice.SOURCE_MOUSE)
+            MotionEvent.ACTION_UP -> if (touchLike) 3 else return event.isFromSource(InputDevice.SOURCE_MOUSE)
             MotionEvent.ACTION_SCROLL -> 4
             MotionEvent.ACTION_CANCEL -> {
                 ViewerNative.releaseInput(instanceId)
@@ -742,6 +826,53 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
             stylusPressure,
         )
+    }
+
+    private var touchpadScrollPosition: Pair<Float, Float>? = null
+
+    private fun forwardTouchpadScroll(event: MotionEvent, view: View): Boolean {
+        // Android 14+ touchpads send classified MOVE events with pixel
+        // scroll distances, not wheel axes. Consume the entire gesture so
+        // it cannot become cursor movement or a mouse click.
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                touchpadScrollPosition = event.x to event.y
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_HOVER_EXIT -> {
+                touchpadScrollPosition = null
+                return true
+            }
+            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_SCROLL -> Unit
+            else -> return true
+        }
+        var horizontal = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE)
+        var vertical = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE)
+        for (history in 0 until event.historySize) {
+            horizontal += event.getHistoricalAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE, history)
+            vertical += event.getHistoricalAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE, history)
+        }
+        val previous = touchpadScrollPosition
+        touchpadScrollPosition = event.x to event.y
+        // Lenovo's classified fake-finger gestures can omit the distance
+        // axes. Android moves their X/Y in the opposite direction to the
+        // scroll distance. Only this classified gesture gets the fallback;
+        // ordinary cursor movement must never become scrolling. The latest
+        // position includes batched samples, so the endpoint delta counts
+        // each displacement once.
+        if (horizontal == 0f && vertical == 0f && previous != null) {
+            horizontal = previous.first - event.x
+            vertical = previous.second - event.y
+        }
+        if (horizontal != 0f || vertical != 0f) {
+            val (nx, ny) = normalizedPoint(view, event.x, event.y)
+            sendPointerUnlocked(
+                4, nx, ny, 0, 0,
+                horizontal * TouchGestureStateMachine.DEFAULT_LINES_PER_PIXEL,
+                vertical * TouchGestureStateMachine.DEFAULT_LINES_PER_PIXEL,
+            )
+        }
+        return true
     }
 
     private val gestureHandler = Handler(Looper.getMainLooper())
@@ -958,13 +1089,63 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // 제어 문자(Enter·Tab·Backspace 등)와 C1 제어는 문자가 아니라 키다.
         if (char < 0x20 || char == 0x7F || char in 0x80..0x9F) return null
         val baseline = usCharByKeyCode[event.keyCode] ?: return null
-        return if (char != baseline) char else null
+        // Android returns lowercase ASCII without Shift, while the physical
+        // key labels above are uppercase. Both represent the same US key;
+        // routing lowercase through text would synthesize an immediate UP.
+        val keyLabel = if (char in 'a'.code..'z'.code) char - ('a'.code - 'A'.code) else char
+        return if (keyLabel != baseline) char else null
     }
 
     /** DOWN이 텍스트 경로로 간 키의 UP — 호스트가 이미 down/up을 쳤으니 조용히 소비한다. */
     private val textPathDownKeyCodes = HashSet<Int>()
 
+    private var closeConfirmation: android.app.AlertDialog? = null
+    private var windowCloseNotified = false
+
+    private fun notifyWindowClosed() {
+        if (windowCloseNotified || isChangingConfigurations) return
+        windowCloseNotified = true
+        StreamLauncherModule.emitWindowClosed(instanceId, ownershipGeneration, port)
+    }
+
+    private fun confirmWindowClose() {
+        if (isFinishing || isDestroyed || closeConfirmation?.isShowing == true) return
+        ViewerNative.releaseInput(instanceId)
+        android.util.Log.i("LeftcarStream", "window retained: Back confirmation port=$port")
+        closeConfirmation = android.app.AlertDialog.Builder(this)
+            .setTitle(ViewerStrings.closeWindowTitle)
+            .setMessage(ViewerStrings.closeWindowMessage)
+            .setNegativeButton(ViewerStrings.continueViewing) { _, _ -> }
+            .setPositiveButton(ViewerStrings.closeWindow) { _, _ ->
+                android.util.Log.i("LeftcarStream", "window close confirmed port=$port")
+                notifyWindowClosed()
+                finish()
+            }
+            .create().also { dialog ->
+                dialog.setOnDismissListener { closeConfirmation = null }
+                dialog.show()
+                dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).requestFocus()
+            }
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        StreamPointerDiagnostics.recordLanguageKey(event)
+        // Read actual IME state before the next letter joins the reliable queue.
+        val languageSynced = inputLanguageMonitor.refresh()
+        if (languageSynced && event.keyCode == KeyEvent.KEYCODE_LANGUAGE_SWITCH) {
+            return super.dispatchKeyEvent(event)
+        }
+        // Mouse navigation can also arrive as KEYCODE_BACK. Consuming both
+        // halves prevents an ordinary pointer action from closing this task.
+        val isMouseSource = event.isFromSource(InputDevice.SOURCE_MOUSE) ||
+            (event.source and InputDevice.SOURCE_MOUSE != 0) ||
+            (event.device?.let { (it.sources and InputDevice.SOURCE_MOUSE) != 0 } == true)
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && isMouseSource) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                android.util.Log.i("LeftcarStream", "window retained: mouse Back port=$port")
+            }
+            return true
+        }
         if (!isRemoteKey(event.keyCode)) return super.dispatchKeyEvent(event)
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP) {
             return super.dispatchKeyEvent(event)
@@ -993,6 +1174,16 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 이 창은 소프트 입력을 절대 쓰지 않는다(하드웨어 키보드 전용 제품
+        // 정책). 하드웨어 키보드 연결/해제 때 시스템이 소프트 IME를 띄우려
+        // 들면 XR은 이 창을 stopped로 숨겨 surface를 파괴한다(검정화면).
+        window.setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING,
+        )
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = confirmWindowClose()
+        })
         // Saved state holds the effective configuration, including controls
         // received since the original start intent. Never restore a toggle as
         // a fresh stream launch.
@@ -1066,12 +1257,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             showFps,
             ::handleTermination,
             ::markRenderHealthy,
-        ).also { hud ->
-            hud.onGestureHelpTapped = { showGestureHint(true) }
-            hud.onKeyboardToggle = { toggleSoftKeyboard() }
-            // 전체화면에서도 눈에 보이는 종료 경로 — finish()의 onDestroy가
-            // 렌더러 release(BYE)와 창 정리를 맡는다.
-            hud.onExitTapped = { finish() }
+        ).also { _ ->
+            // 칩(제스처 재안내·소프트키보드·✕ 종료)은 제거됐다: 소프트 입력은
+            // 제품 방침상 차단(하드웨어 키보드 전용)이고, 제스처 안내는 창 첫
+            // 진입 시 1회 자동 노출(아래 showGestureHint(false))이 유일한 경로다.
         }
         hud?.show()
         attachTextLens()
@@ -1112,6 +1301,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextShowFps = newIntent.getBooleanExtra("showFps", showFps)
         val nextLocalCursor = newIntent.getBooleanExtra("localCursor", localCursorEnabled)
         val nextBalanced = newIntent.getBooleanExtra("balancedPresentation", balancedPresentation)
+        val nextSmooth = newIntent.getBooleanExtra("presentationSmooth", presentationSmooth)
         val nextLocalAudio = newIntent.getBooleanExtra("localAudio", localAudioEnabled)
         val nextOpusAudio = newIntent.getBooleanExtra("opusAudio", opusAudioRequested)
         val nextWidth = newIntent.getIntExtra("width", sourceWidth)
@@ -1121,7 +1311,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
         val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
         val togglesOnly = (nextLocalCursor != localCursorEnabled ||
-            nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation) && !reconnectRequested &&
+            nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation ||
+            nextSmooth != presentationSmooth) && !reconnectRequested &&
             nextHost == host && nextPort == port && nextFps == fps &&
             nextWidth == sourceWidth && nextHeight == sourceHeight &&
             nextSplitVertical == splitVertical && nextShowFps == showFps
@@ -1153,18 +1344,26 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             localCursorEnabled = nextLocalCursor
             if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
             balancedPresentation = nextBalanced
+            presentationSmooth = nextSmooth
+            ViewerNative.setPresentationSmooth(nextSmooth)
             localAudioEnabled = nextLocalAudio
             opusAudioRequested = nextOpusAudio
             syncAudioStream()
             return
         }
         if (streamConfigurationChanged || reconnectRequested) {
+            splitNeedsPreparation = false
+            terminationHandled = false
+            recoveryFallbackEmitted = false
+            recoveryRetryPolicy.reset()
             host = nextHost
             port = nextPort
             fps = nextFps
             showFps = nextShowFps
             localCursorEnabled = nextLocalCursor
             balancedPresentation = nextBalanced
+            presentationSmooth = nextSmooth
+            ViewerNative.setPresentationSmooth(nextSmooth)
             localAudioEnabled = nextLocalAudio
             opusAudioRequested = nextOpusAudio
             sourceWidth = nextWidth
@@ -1220,6 +1419,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onStart() {
         super.onStart()
+        if (!isFinishing) StreamConnectionOwners.acquire(this, connectionOwner)
         activityStarted = true
         syncPresentation()
         lifecycleEvent(2) // ACTIVITY_START
@@ -1227,12 +1427,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onResume() {
         super.onResume()
+        inputLanguageMonitor.start()
         hud?.show()
         lifecycleEvent(3) // ACTIVITY_RESUME
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        inputLanguageMonitor.reset()
+        if (hasFocus) inputLanguageMonitor.refresh()
         lifecycleEvent(if (hasFocus) 4 else 5) // FOCUS_GAIN / FOCUS_LOSS
         if (hasFocus) {
             streamSurfaces?.requestFocus()
@@ -1318,6 +1521,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         ) {
             return
         }
+        if (splitVertical && splitNeedsPreparation) {
+            hud?.showRebindIndicator(ViewerStrings.rebindReconnectingControl)
+            scheduleRenderRecovery()
+            return
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             surfaces.holders.forEach { holder ->
                 holder.surface.setFrameRate(
@@ -1356,6 +1564,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             )
         }
         surfaceLifecycle.confirmAttached(res == 0)
+        inputLanguageMonitor.reset()
         if (res == 0) {
             // Native attach clears a retained reason for this logical instance
             // before creating the new renderer. Only then may the HUD consume
@@ -1365,6 +1574,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             hud?.clearRebindIndicator()
             enableCursorOverlay()
             syncAudioStream()
+            armAttachFlowWatchdog()
+        } else if (splitVertical) {
+            // A failed split attach can already have consumed one or both
+            // receivers. Repeating JNI attach cannot recreate their keys.
+            splitNeedsPreparation = true
+            hud?.showRebindIndicator(ViewerStrings.rebindReconnectingControl)
+            scheduleRenderRecovery()
         }
         android.util.Log.i(
             "LeftcarStream",
@@ -1428,6 +1644,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         cancelPendingSurfaceAttach()
+        cancelAttachFlowWatchdog()
         displayClock.stop()
         ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
         android.util.Log.i(
@@ -1444,6 +1661,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         when (stop) {
             StreamSurfaceStop.NONE -> {}
             StreamSurfaceStop.DETACH_RENDERER -> {
+                if (splitVertical) splitNeedsPreparation = true
                 val res = ViewerNative.detachSurface(nativeState, instanceId)
                 android.util.Log.i(
                     "LeftcarStream",
@@ -1460,6 +1678,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        inputLanguageMonitor.stop()
         hideTabletCursor()
         ViewerNative.releaseInput(instanceId)
         lifecycleEvent(9) // ACTIVITY_PAUSE
@@ -1488,6 +1707,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        if (isFinishing) notifyWindowClosed()
+        inputLanguageMonitor.stop()
+        closeConfirmation?.dismiss()
+        android.util.Log.i("LeftcarStream", "window destroyed port=$port finishing=$isFinishing configuration=$isChangingConfigurations")
         displayClock.stop()
         displayClockThread.quitSafely()
         android.util.Log.i(
@@ -1503,6 +1726,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
         cancelRecoveryFlowWatchdog()
+        cancelAttachFlowWatchdog()
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()
@@ -1516,6 +1740,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         hud?.stop()
         hud = null
         releaseNetworkLocks()
+        StreamConnectionOwners.release(this, connectionOwner)
         ViewerNative.releaseInput(instanceId)
         super.onDestroy()
         releaseOwnedNativeStream()

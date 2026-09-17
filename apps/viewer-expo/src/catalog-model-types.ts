@@ -34,6 +34,7 @@ export interface ActiveStream {
   /** Requested codec admitted by native module; runtime fallback is separately native. */
   opusAudio?: boolean;
   balancedPresentation?: boolean;
+  presentationSmooth?: boolean;
   mediaTransport: ResolvedTransport;
   viewerIps: string[];
   /** Viewer-generated session media key (base64url). Seals the media path;

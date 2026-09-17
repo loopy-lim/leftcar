@@ -86,7 +86,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        private fun activeRegisteredReactContext(): ReactApplicationContext? =
+        internal fun activeRegisteredReactContext(): ReactApplicationContext? =
             synchronized(reactContextLock) {
                 reactContextReference.get()?.takeIf { it.hasActiveReactInstance() }
             }
@@ -109,7 +109,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         }
 
         fun emitTermination(port: Int, reason: Int) {
-            val context = activeRegisteredReactContext() ?: return
+            val context = activeRegisteredReactContext() ?: run {
+                android.util.Log.w("LeftcarStream", "stream event unavailable: React context port=$port reason=$reason")
+                return
+            }
+            val generation = liveStreams["src-$port"]?.generation
             try {
                 context.runOnNativeModulesQueueThread {
                     if (!isCurrentActiveReactContext(context)) return@runOnNativeModulesQueueThread
@@ -117,6 +121,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                         val payload = Arguments.createMap().apply {
                             putInt("port", port)
                             putInt("reason", reason)
+                            generation?.let { putString("generation", it.toString()) }
                         }
                         context
                             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
@@ -128,6 +133,14 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             } catch (_: IllegalStateException) {
                 // The native-modules queue can disappear during React teardown.
             }
+        }
+
+        fun emitWindowClosed(instanceId: String, generation: Long, port: Int) {
+            // A retired Activity must not close a replacement using this port.
+            val current = liveStreams[instanceId]?.generation
+            android.util.Log.i("LeftcarStream", "window close event port=$port generation=$generation current=$current")
+            if (current != generation) return
+            emitTermination(port, 0)
         }
 
         @JvmStatic
@@ -421,6 +434,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun setBalancedPresentation(instanceId: String, enabled: Boolean, promise: Promise) {
         toggleStreamExtra(instanceId, enabled, "balancedPresentation", "ERR_PRESENTATION_TOGGLE", promise)
+    }
+
+    @ReactMethod
+    fun setPresentationSmooth(instanceId: String, enabled: Boolean, promise: Promise) {
+        toggleStreamExtra(instanceId, enabled, "presentationSmooth", "ERR_SMOOTH_TOGGLE", promise)
     }
 
     @ReactMethod

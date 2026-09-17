@@ -42,6 +42,7 @@ describe("viewer preferences", () => {
       localCursor: true,
       localAudio: true,
       balancedPresentation: false,
+      presentationSmooth: true,
       opusAudio: false,
     });
     expect(parseViewerPreferences('{"profileId":"unknown","showFps":false}')).toEqual({
@@ -51,6 +52,7 @@ describe("viewer preferences", () => {
       localCursor: true,
       localAudio: true,
       balancedPresentation: false,
+      presentationSmooth: true,
       opusAudio: false,
     });
   });
@@ -67,6 +69,7 @@ describe("viewer preferences", () => {
       localCursor: true,
       localAudio: true,
       balancedPresentation: false,
+      presentationSmooth: true,
       opusAudio: false,
     });
     expect(parseViewerPreferences('{"profileId":"latency"}').streamingPriority).toBe(
@@ -107,6 +110,8 @@ describe("viewer preferences", () => {
       localCursor: true,
       localAudio: false,
       balancedPresentation: false,
+      presentationSmooth: true,
+      presentationSmooth: false,
       opusAudio: false,
     };
 

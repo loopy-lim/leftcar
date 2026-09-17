@@ -82,6 +82,7 @@ extern "C" {
         frame_ns: i64,
         period_ns: i64,
     ) -> i32;
+    fn leftcar_jni_set_presentation_smooth(smooth: bool) -> i32;
     fn ANativeWindow_fromSurface(env: *mut JNIEnv, surface: *mut jobject) -> *mut c_void;
     fn leftcar_jni_start() -> *mut c_void;
     fn leftcar_jni_attach(state: *mut c_void, instance: *const c_char, surface: *mut c_void)
@@ -177,6 +178,7 @@ extern "C" {
     fn leftcar_jni_input_text(instance: *const c_char, data: *const u8, len: usize) -> i32;
     fn leftcar_jni_input_release_all(instance: *const c_char) -> i32;
     fn leftcar_jni_input_status(instance: *const c_char) -> i32;
+    fn leftcar_jni_input_language(instance: *const c_char, language: u32) -> i32;
     fn leftcar_jni_poll_audio_owned(
         state: *mut c_void,
         instance: *const c_char,
@@ -406,6 +408,21 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_displayFrame(
                 period_ns,
             )
         }
+    })
+    .unwrap_or(3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_setPresentationSmooth(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    smooth: u8,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 3;
+        }
+        unsafe { leftcar_jni_set_presentation_smooth(smooth != 0) }
     })
     .unwrap_or(3)
 }

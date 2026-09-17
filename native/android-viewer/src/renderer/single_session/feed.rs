@@ -140,9 +140,22 @@ fn record_decoder_output(
     }
 
     if rendered_delta > 0 && dec.frames_rendered / 30 > rendered_before / 30 {
-        log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset", std::process::id(), control.port, control.metric_incarnation, decoder_epoch, control.rendered_frames.load(Ordering::Relaxed).saturating_add(rendered_delta), release_capture_age_ms, dec.last_released_pts_us);
+        // The render thread must never sit inside a logd write: this block
+        // runs every 30 frames (=0.5s at 60fps), and logcat contention here
+        // shows up on the display as a visible ~half-second cadence hitch.
+        // Format on this thread, emit on a throwaway thread.
+        let head = format!(
+            "LeftcarViewerPerf schema=2 process={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset",
+            std::process::id(),
+            control.port,
+            control.metric_incarnation,
+            decoder_epoch,
+            control.rendered_frames.load(Ordering::Relaxed).saturating_add(rendered_delta),
+            release_capture_age_ms,
+            dec.last_released_pts_us
+        );
         let input_rtt = control.input_rtt_ms.load(Ordering::Relaxed);
-        log_info!(
+        let body = format!(
             "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} nacksSent={} nacksHealed={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?} inputRttMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
@@ -171,6 +184,12 @@ fn record_decoder_output(
             wire_age_ms,
             (input_rtt != LATENCY_UNKNOWN).then_some(input_rtt)
         );
+        let _ = std::thread::Builder::new()
+            .name("lc-perflog".into())
+            .spawn(move || {
+                log_info!("{}", head);
+                log_info!("{}", body);
+            });
     }
     control
         .rendered_frames

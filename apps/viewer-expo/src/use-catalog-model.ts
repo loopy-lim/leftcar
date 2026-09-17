@@ -12,7 +12,6 @@ import {
   reconfigurePreparedStream,
   startPreparedStream,
   type StreamLauncher,
-  type StreamControlRequest,
 } from "./launch-stream";
 import { handleUnauthorized } from "./connect-flow";
 import {
@@ -28,12 +27,12 @@ import {
 } from "./window-aspect-ratio";
 import {
   allocPorts,
-  captureRequestContext,
   controlClient,
   controlHost,
   disconnectHost,
   reconnectHost,
   requestContextForError,
+  captureRequestContext,
 } from "./session";
 import {
   STREAM_PROFILES,
@@ -56,10 +55,11 @@ import {
   type UdpStabilitySelection,
 } from "./udp-stability";
 import {
-  catalogDisplayHost,
+  catalogMediaHost,
   catalogErrorMessage,
   isHubDisplay,
   requestWithReconnect,
+  requestForCurrentSelection,
 } from "./catalog-helpers";
 import { resolveStreamResolution } from "./stream-resolution";
 import {
@@ -70,6 +70,7 @@ import {
   requestedDecoderShape,
 } from "./decoder-budget";
 import { ReservedStream, retryAbandonedDecoderCleanup } from "./reserved-stream";
+import { streamSessionStore } from "./stream-session-store";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
   deriveQualityState,
@@ -100,17 +101,6 @@ const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
 function sameStreamLifetime(left: ActiveStream, right: ActiveStream): boolean {
   return left.session === right.session && left.port === right.port &&
     left.startedAt === right.startedAt && left.reservation === right.reservation;
-}
-
-/** Pin the selection, while permitting Task2's reconnect within that selection. */
-function requestForCurrentSelection(): StreamControlRequest {
-  const origin = captureRequestContext();
-  return <T>(command: string, args?: unknown) => {
-    if (!origin || captureRequestContext()?.selectionGeneration !== origin.selectionGeneration) {
-      return Promise.reject(new Error("Host selection changed; this stream operation was cancelled"));
-    }
-    return requestWithReconnect<T>(command, args);
-  };
 }
 
 export function useCatalogModel() {
@@ -236,13 +226,9 @@ export function useCatalogModel() {
   const [clipboardShare, setClipboardShareState] = useState(false);
   // 디코더 어드미션(M4/R8)이 쓰는 라이브 스트림 스냅숏. reconfigure 콜백은
   // useStreamController보다 먼저 정의되므로 ref로 최신 목록을 운반한다.
-  const [ownedReservations] = useState(() => new Set<ReservedStream>());
-  useEffect(() => () => {
-    for (const reservation of ownedReservations) {
-      reservation.abandon();
-    }
-    // The device-wide pool retains unresolved cleanup across remounts.
-  }, [ownedReservations, host]);
+  const sessionStore = streamSessionStore(host);
+  const ownedReservations = sessionStore.pending;
+  useEffect(() => () => sessionStore.detachCatalog(), [sessionStore]);
 
   useEffect(() => {
     let active = true;
@@ -290,8 +276,7 @@ export function useCatalogModel() {
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
   const effectiveCaptureBackend = preferredCaptureBackend(catalogQuery.data, "");
-  const mediaHost =
-    catalogQuery.data?.mediaHost?.trim() || catalogDisplayHost(host);
+  const mediaHost = catalogMediaHost(host, catalogQuery.data?.mediaHost, captureRequestContext()?.client.remoteAddress);
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === preferences.profileId) ??
     STREAM_PROFILES.find((profile) => profile.id === "balanced") ??
@@ -352,6 +337,7 @@ export function useCatalogModel() {
       }
       const reservation = active.reservation;
       if (!reservation) throw new Error("Missing decoder reservation");
+      const request = requestForCurrentSelection(host);
       const demand = reservation.pool.plan({
         split: active.encoderExperiment === "splitVertical" ||
           (active.encoderExperiment === "auto" && is4KResolution(active.activeTarget.width, active.activeTarget.height)),
@@ -359,8 +345,8 @@ export function useCatalogModel() {
       }, reservation.lease);
       if (!demand) throw new LocalizedError("errDecoderCapacity");
       const restored = await reservation.run(demand, async (reservedLauncher) => {
-        const refreshed = await refetchCatalog();
-        const currentCatalog = refreshed.data ?? catalogQuery.data;
+        // Recovery outlives the catalog's QueryObserver and React surface.
+        const currentCatalog = await request<CatalogView>("getCatalog");
         if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
           throw new LocalizedError("errBackendQuery");
         }
@@ -370,16 +356,14 @@ export function useCatalogModel() {
         );
         // Re-resolve from the just-fetched catalog: the media host can differ
         // from the cached `mediaHost` computed at render time.
-        const refreshedMediaHost = currentCatalog.mediaHost?.trim()
-          ? catalogDisplayHost(currentCatalog.mediaHost.trim())
-          : catalogDisplayHost(host);
-        await reservation.controlRequest("stopStream", { session: active.session }).catch(
+        const refreshedMediaHost = catalogMediaHost(host, currentCatalog.mediaHost, captureRequestContext()?.client.remoteAddress);
+        await request("stopStream", { session: active.session }).catch(
           () => undefined,
         );
         const control = controlClient() ?? (await reconnectHost());
         const restarted = await startPreparedStream({
           control,
-          request: reservation.controlRequest,
+          request,
           launcher: reservedLauncher,
           decoderReservation: demand,
           host: refreshedMediaHost,
@@ -403,6 +387,7 @@ export function useCatalogModel() {
             localAudio: active.localAudio ?? preferences.localAudio,
             opusAudio: active.opusAudio ?? preferences.opusAudio,
             balancedPresentation: active.balancedPresentation ?? preferences.balancedPresentation,
+            presentationSmooth: active.presentationSmooth ?? preferences.presentationSmooth,
           },
         });
         return {
@@ -413,18 +398,17 @@ export function useCatalogModel() {
           fps: restarted.fps ?? demand.target.fps,
           qualityState: active.qualityState,
         };
-      });
+      }, request);
       return restored;
     },
     [
-      catalogQuery.data,
       host,
       preferences.showFps,
       preferences.localCursor,
       preferences.localAudio,
       preferences.opusAudio,
       preferences.balancedPresentation,
-      refetchCatalog,
+      preferences.presentationSmooth,
     ],
   );
 
@@ -443,6 +427,7 @@ export function useCatalogModel() {
       }
       const reservation = active.reservation;
       if (!reservation) throw new Error("Missing decoder reservation");
+      const request = requestForCurrentSelection(host);
       const requested = {
         split: resolveReconfigureExperiment(active, target, {
           reconfigureEncoderExperiment: catalogQuery.data?.reconfigureEncoderExperiment === true,
@@ -456,7 +441,7 @@ export function useCatalogModel() {
         const control = controlClient() ?? (await reconnectHost());
         return reconfigurePreparedStream({
           control,
-          request: reservation.controlRequest,
+          request,
           launcher: reservedLauncher,
           host: mediaHost,
           active,
@@ -471,13 +456,13 @@ export function useCatalogModel() {
           advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
 
         });
-      });
+      }, request);
       return {
         ...reconfigured,
         captureBackend: active.captureBackend,
       };
     },
-    [catalogQuery.data, mediaHost],
+    [catalogQuery.data, host, mediaHost],
   );
 
   const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
@@ -550,6 +535,16 @@ export function useCatalogModel() {
       });
     }
   }, [patchStream, streams]);
+
+  const handleTogglePresentationSmooth = useCallback((presentationSmooth: boolean) => {
+    setPreferences((current) => ({ ...current, presentationSmooth }));
+    if (!launcher?.setPresentationSmooth) return;
+    for (const stream of streams) {
+      void launcher
+        .setPresentationSmooth(`src-${stream.port}`, presentationSmooth)
+        .catch(() => {});
+    }
+  }, [streams]);
 
   const applyAudioSetting = useCallback((key: "localAudio" | "opusAudio", enabled: boolean) => {
     setPreferences((current) => ({ ...current, [key]: enabled }));
@@ -677,7 +672,7 @@ export function useCatalogModel() {
         if (!demand) throw new LocalizedError("errDecoderCapacity");
         const launchTarget = demand.target;
         // Reservation is synchronous, before the first native/network await.
-        const reservation = new ReservedStream(port, demand, launcher, client.request.bind(client), deviceDecoderReservations, requestForCurrentSelection());
+        const reservation = new ReservedStream(port, demand, launcher, client.request.bind(client), deviceDecoderReservations, requestForCurrentSelection(host));
         ownedReservations.add(reservation);
         try {
           const { width, height, fps } = launchTarget;
@@ -713,6 +708,7 @@ export function useCatalogModel() {
               localAudio: preferences.localAudio,
               opusAudio: preferences.opusAudio,
             balancedPresentation: preferences.balancedPresentation,
+            presentationSmooth: preferences.presentationSmooth,
             },
           }));
           const acceptedTarget = {
@@ -747,6 +743,7 @@ export function useCatalogModel() {
             localAudio: preferences.localAudio,
             opusAudio: started.opusAudio ?? false,
             balancedPresentation: started.balancedPresentation ?? false,
+            presentationSmooth: started.presentationSmooth ?? true,
             viewerIps: started.viewerIps,
             mediaTransport: started.mediaTransport,
             mediaKey: started.mediaKey,
@@ -791,6 +788,7 @@ export function useCatalogModel() {
       effectiveCaptureBackend,
       encoderExperiment,
       effectiveUdpStability,
+      host,
       mediaHost,
       preferences.profileId,
       preferences.showFps,
@@ -798,6 +796,7 @@ export function useCatalogModel() {
       preferences.localAudio,
       preferences.opusAudio,
       preferences.balancedPresentation,
+      preferences.presentationSmooth,
       selectedProfile,
       ownedReservations,
       streamingPriority,
@@ -970,6 +969,7 @@ export function useCatalogModel() {
     handleToggleCursor,
     handleToggleAudio,
     handleToggleBalancedPresentation,
+    handleTogglePresentationSmooth,
     handleToggleClipboardShare,
     clipboardShare,
     profileId: preferences.profileId,
@@ -980,6 +980,7 @@ export function useCatalogModel() {
     opusAudio: preferences.opusAudio ?? false,
     handleToggleOpusAudio,
     balancedPresentation: preferences.balancedPresentation,
+    presentationSmooth: preferences.presentationSmooth,
     resizingSession,
     switchingSession,
   };
