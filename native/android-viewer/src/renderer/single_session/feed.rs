@@ -16,7 +16,18 @@ pub(super) fn feed_and_render(
     // Do not wait for a hardware codec slot. A missed AU is cheaper than
     // turning a transient decoder backlog into visible interaction latency.
     dec.set_output_target(control.presentation.lock().unwrap().target_now());
-    let result = dec.feed_au_status(&frame.au, pts_us, DECODER_FEED_TIMEOUT_US);
+    let mut result = dec.feed_au_status(&frame.au, pts_us, DECODER_FEED_TIMEOUT_US);
+    if matches!(result, Ok(viewer_decoder::FeedStatus::InputUnavailable)) {
+        // Bursty arrivals can exhaust every hardware input slot for a few
+        // milliseconds while the codec retires outputs. Treating that as a
+        // broken reference chain (flush + epoch reset + IDR request) fed the
+        // recovery storm — each cycle's burst manufactured the next slot
+        // exhaustion (~1.1 requests/s measured on the XR while the decoder
+        // itself released a steady 56fps). One short bounded wait absorbs
+        // the transient; a genuinely saturated codec still reports
+        // InputUnavailable and takes the established recovery path.
+        result = dec.feed_au_status(&frame.au, pts_us, 3_000);
+    }
     let feed_us = started.elapsed().as_micros() as u64;
     stats.max_feed_us = stats.max_feed_us.max(feed_us);
     control.last_feed_us.store(feed_us, Ordering::Relaxed);
@@ -63,13 +74,54 @@ pub(super) fn feed_and_render(
     if let Some(age) = wire_age_ms {
         store_smoothed_latency(&control.wire_to_decoder_ms, age);
     }
+    record_decoder_output(
+        dec,
+        rendered_before,
+        stats,
+        control,
+        (queued == FeedOutcome::Queued).then_some((pts_us, frame.capture_wall_ms)),
+        [capture_age_ms, encode_age_ms, wire_age_ms],
+        feed_us,
+    );
+    queued
+}
+
+/// Poll ready MediaCodec output on every receive-loop tick, including socket
+/// timeouts. Waiting for the next compressed frame adds a whole frame of delay
+/// and lets ordinary network jitter turn two ready outputs into a burst drop.
+pub(super) fn drain_pending_output(
+    dec: &mut viewer_decoder::AndroidDecoder,
+    stats: &mut RendererStats,
+    control: &RendererControl,
+) -> Result<(), viewer_decoder::DecoderError> {
+    let before = dec.frames_rendered;
+    dec.set_output_target(control.presentation.lock().unwrap().target_now());
+    dec.pump_latest_output(0)?;
+    record_decoder_output(dec, before, stats, control, None, [None; 3], 0);
+    Ok(())
+}
+
+fn record_decoder_output(
+    dec: &viewer_decoder::AndroidDecoder,
+    rendered_before: u64,
+    stats: &mut RendererStats,
+    control: &RendererControl,
+    queued_input: Option<(i64, Option<u64>)>,
+    stage_ages: [Option<u64>; 3],
+    feed_us: u64,
+) {
+    stats
+        .pressure
+        .record_decoder_output_discards(dec.frames_discarded);
+    let [capture_age_ms, encode_age_ms, wire_age_ms] = stage_ages;
     let rendered_delta = dec.frames_rendered.saturating_sub(rendered_before);
+    let (pts, capture) = queued_input.unwrap_or((0, None));
     let (output_capture_wall, decoder_epoch) = {
         let mut metadata = control.output_metadata.lock().unwrap();
         let capture = metadata.observe(
-            pts_us,
-            frame.capture_wall_ms,
-            queued == FeedOutcome::Queued,
+            pts,
+            capture,
+            queued_input.is_some(),
             dec.last_released_pts_us,
             rendered_delta,
         );
@@ -91,7 +143,7 @@ pub(super) fn feed_and_render(
         log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset", std::process::id(), control.port, control.metric_incarnation, decoder_epoch, control.rendered_frames.load(Ordering::Relaxed).saturating_add(rendered_delta), release_capture_age_ms, dec.last_released_pts_us);
         let input_rtt = control.input_rtt_ms.load(Ordering::Relaxed);
         log_info!(
-            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?} inputRttMs={:?}",
+            "Rendered {} frames; outputDrops={} staleInputs={} staleInputDrops={} outputBurst={} fecRecovered={} unrecoveredFecGroups={} decoderInputsQueued={} decoderInputDrops={} completedBatch={} liveEdgeBatch={} maxCompletedBatch={} frameGaps={} intentionalLiveEdgeGaps={} recoverySkippedFrames={} nacksSent={} nacksHealed={} feedUs={} maxFeedUs={} captureAgeMs={:?} encodeAgeMs={:?} wireAgeMs={:?} inputRttMs={:?}",
             dec.frames_rendered,
             dec.frames_discarded,
             stats.stale_inputs,
@@ -110,6 +162,8 @@ pub(super) fn feed_and_render(
             stats.frame_gaps,
             stats.intentional_live_edge_gaps,
             stats.recovery_skipped_frames,
+            stats.nacks_sent,
+            stats.nacks_healed,
             feed_us,
             stats.max_feed_us,
             capture_age_ms,
@@ -145,5 +199,4 @@ pub(super) fn feed_and_render(
     control
         .frame_gaps
         .store(stats.frame_gaps, Ordering::Relaxed);
-    queued
 }

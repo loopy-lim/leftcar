@@ -1105,11 +1105,16 @@ impl FrameReassembler {
 /// How long the resequencer holds its reorder window open for a retransmit
 /// after a NACK was sent. 2×RTT covers request + retransmit on the same
 /// link; the floor matches the existing 8ms reorder window, so an unmeasured
-/// RTT changes nothing; the 25ms cap bounds the added freeze latency when
-/// the retransmit never arrives (versus today's 150-400ms gap freeze).
+/// RTT changes nothing. The 120ms cap still bounds the added freeze latency
+/// when the retransmit never arrives (versus today's 150-400ms gap freeze)
+/// while remaining reachable: the previous 25ms cap sat below the measured
+/// RTT of jittery XR-class Wi-Fi (15-96ms), so the one NACK the receiver
+/// managed to send per session could never be answered inside the grace
+/// (2026-09-17 XR trace: "nacks sent=1 healed=0" every session, then the
+/// expiry fell through to the IDR recovery storm).
 pub fn nack_grace_duration(network_rtt_ms: Option<u64>) -> Duration {
     let rtt = network_rtt_ms.unwrap_or(0);
-    Duration::from_millis(rtt.saturating_mul(2).saturating_add(5).clamp(8, 25))
+    Duration::from_millis(rtt.saturating_mul(2).saturating_add(5).clamp(8, 120))
 }
 
 /// Encode one NACK request body (to be AEAD-sealed by the caller like any
@@ -1148,12 +1153,18 @@ pub fn parse_nack_request(body: &[u8]) -> Option<(u16, Vec<u16>)> {
 /// One viewer retransmit request slot. Single attempt per access unit: when
 /// the first grace expires the pre-existing loss path (freeze + gated IDR)
 /// runs unchanged, and a second NACK would only lose the race against that
-/// IDR. `attempted` outlives `armed` so the same hole is never re-requested.
+/// IDR. `attempted` outlives `armed` so the same hole is never re-requested
+/// — except for the whole-AU probe, which is allowed exactly one precise
+/// follow-up once retransmits give the reassembler enough state to name the
+/// still-missing fragments.
 #[derive(Debug, Default)]
 pub struct NackRequester {
     attempted: Option<u16>,
     armed: Option<(u16, Instant)>,
     fragments_requested: usize,
+    /// The last request for `attempted` was a whole-AU probe (the reassembler
+    /// had no state at all). While armed, one precise re-request may follow.
+    probe_outstanding: bool,
 }
 
 impl NackRequester {
@@ -1223,10 +1234,34 @@ pub fn tick_nack_requester(
     }
 
     // 3. Keep the existing hold alive for the hole already asked for. The
-    // stored deadline is absolute, so re-arming cannot creep it forward.
+    //    stored deadline is absolute, so re-arming cannot creep it forward.
+    //    Whole-AU probe follow-up: once the retransmitted fragments give the
+    //    reassembler state, replace the blunt probe with one precise request
+    //    for what is still missing — same deadline, no extension, and silence
+    //    again afterwards.
     if let Some((armed_hole, deadline)) = requester.armed {
         if armed_hole == hole {
             sequencer.hold_reorder_expiry_until(deadline);
+            if requester.probe_outstanding {
+                if let Some(missing) = reassembler.missing_fragment_indexes(armed_hole) {
+                    if !missing.is_empty() && missing.len() <= MAX_NACK_REQUEST_TOTAL {
+                        let mut sent = 0u64;
+                        for chunk in missing.chunks(MAX_NACK_FRAGMENTS) {
+                            if let Some(body) = encode_nack_request(armed_hole, chunk) {
+                                send(&body);
+                                sent += 1;
+                            }
+                        }
+                        requester.probe_outstanding = false;
+                        requester.fragments_requested = missing.len();
+                        return NackTickOutcome {
+                            au_id: Some(armed_hole),
+                            sent_messages: sent,
+                            healed: false,
+                        };
+                    }
+                }
+            }
             return outcome;
         }
     }
@@ -1239,17 +1274,17 @@ pub fn tick_nack_requester(
     requester.attempted = None;
 
     // 5. Arm a new request for the fragments the reassembler is still owed.
-    let Some(missing) = reassembler.missing_fragment_indexes(hole) else {
-        // Nothing retransmittable is known: the AU never started or was
-        // evicted. The existing loss path handles it.
-        sequencer.clear_hold();
-        return outcome;
-    };
-    requester.attempted = Some(hole);
-    if missing.is_empty() || missing.len() > MAX_NACK_REQUEST_TOTAL {
-        sequencer.clear_hold();
-        return outcome;
-    }
+    //    When at least one fragment of the blocked AU arrived, the
+    //    reassembler knows exactly what is missing. When nothing arrived —
+    //    the whole-AU burst case, which is how real Wi-Fi loss shows up at
+    //    interactive bitrates — probe a bounded index range instead of
+    //    skipping straight to freeze + IDR: the host retransmit ring serves
+    //    whatever it still holds for this au_id, and requested indexes past
+    //    the AU's real fragment count are simply counted as missed on the
+    //    host. Expiry still falls through to the unchanged loss path, so the
+    //    worst case costs a couple of control datagrams.
+    let known_missing = reassembler.missing_fragment_indexes(hole);
+    let probe = known_missing.is_none();
     let deadline = sequencer
         .nack_reservation
         .filter(|(id, _)| *id == hole)
@@ -1257,6 +1292,18 @@ pub fn tick_nack_requester(
             now + nack_grace_duration(network_rtt_ms),
             |(_, deadline)| deadline,
         );
+    let missing = match known_missing {
+        Some(missing) if !missing.is_empty() && missing.len() <= MAX_NACK_REQUEST_TOTAL => missing,
+        None => (0..MAX_NACK_REQUEST_TOTAL as u16).collect(),
+        // Already complete, or the damage exceeds what retransmit could
+        // usefully request: the existing loss path handles it.
+        _ => {
+            sequencer.clear_hold();
+            return outcome;
+        }
+    };
+    requester.attempted = Some(hole);
+    requester.probe_outstanding = probe;
     if now >= deadline {
         sequencer.clear_hold();
         return outcome;
@@ -2115,10 +2162,10 @@ mod tests {
         assert_eq!(nack_grace_duration(Some(0)), Duration::from_millis(8));
         assert_eq!(nack_grace_duration(Some(2)), Duration::from_millis(9));
         assert_eq!(nack_grace_duration(Some(5)), Duration::from_millis(15));
-        assert_eq!(nack_grace_duration(Some(100)), Duration::from_millis(25));
+        assert_eq!(nack_grace_duration(Some(100)), Duration::from_millis(120));
         assert_eq!(
             nack_grace_duration(Some(u64::MAX)),
-            Duration::from_millis(25)
+            Duration::from_millis(120)
         );
     }
 
@@ -2233,6 +2280,155 @@ mod tests {
             return Vec::new();
         };
         sequencer.push_reassembled_at(frame, reassembler, now)
+    }
+
+    /// Deliver AU 11 completely (the fixture leaves it half-arrived) so the
+    /// next skipped AU forms a hole with *no* reassembler state at all.
+    fn push_whole_au_hole_fixture(
+        sequencer: &mut CompletedFrameSequencer,
+        reassembler: &mut FrameReassembler,
+        start: Instant,
+    ) {
+        let tail11 = reassembler
+            .push(parse_fragment(&datagram(0, 2, 11, 1, 2, 3, b"a")).unwrap())
+            .unwrap();
+        let delivered = sequencer.push_reassembled_at(tail11, reassembler, start);
+        assert_eq!(
+            delivered.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        let frame14 = reassembler
+            .push(parse_fragment(&datagram(0, 1, 14, 1, 2, 3, b"n")).unwrap())
+            .unwrap();
+        assert!(sequencer.push_reassembled_at(frame14, reassembler, start).is_empty());
+        assert!(sequencer.blocked_hole() == Some(13));
+        assert!(reassembler.missing_fragment_indexes(13).is_none());
+    }
+
+    #[test]
+    fn nack_whole_au_burst_probes_then_requests_precisely() {
+        let mut fixture = NackFixture::new();
+        fixture.sequencer.configure_nack_grace(true, Some(100));
+        push_whole_au_hole_fixture(&mut fixture.sequencer, &mut fixture.reassembler, fixture.start);
+
+        // First tick: no state for AU 13 at all → bounded probe, 2 messages.
+        let mut sent = Vec::new();
+        let mut requester = NackRequester::default();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(2),
+            |body| sent.push(body.to_vec()),
+        );
+        assert_eq!(outcome.sent_messages, 2);
+        assert_eq!(sent.len(), 2);
+        let (au_a, idx_a) = parse_nack_request(&sent[0]).unwrap();
+        let (au_b, idx_b) = parse_nack_request(&sent[1]).unwrap();
+        assert_eq!(au_a, 13);
+        assert_eq!(au_b, 13);
+        assert_eq!(idx_a, (0..20).collect::<Vec<_>>());
+        assert_eq!(idx_b, (20..40).collect::<Vec<_>>());
+
+        // Retransmit of fragment 0 of 3 arrives: state now exists, so the
+        // follow-up tick re-arms precisely for the still-missing fragments.
+        assert!(fixture
+            .reassembler
+            .push(parse_fragment(&datagram(0, 3, 13, 1, 2, 3, b"r")).unwrap())
+            .is_none());
+        sent.clear();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(4),
+            |body| sent.push(body.to_vec()),
+        );
+        assert_eq!(outcome.sent_messages, 1);
+        let (au, idx) = parse_nack_request(&sent[0]).unwrap();
+        assert_eq!(au, 13);
+        assert_eq!(idx, vec![1, 2]);
+
+        // The precise request is the last one for this hole — no spam.
+        sent.clear();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(6),
+            |body| sent.push(body.to_vec()),
+        );
+        assert_eq!(outcome.sent_messages, 0);
+        assert!(sent.is_empty());
+
+        // Remaining retransmits complete the AU inside the grace: 13 and the
+        // queued 14 deliver contiguously — no freeze, no IDR.
+        assert!(fixture
+            .reassembler
+            .push(parse_fragment(&datagram(1, 3, 13, 1, 2, 3, b"s")).unwrap())
+            .is_none());
+        let healed = fixture
+            .reassembler
+            .push(parse_fragment(&datagram(2, 3, 13, 1, 2, 3, b"t")).unwrap())
+            .unwrap();
+        let ready = fixture
+            .sequencer
+            .push_reassembled_at(healed, &fixture.reassembler, fixture.start + Duration::from_millis(8));
+        assert_eq!(
+            ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
+            vec![13, 14]
+        );
+    }
+
+    #[test]
+    fn nack_whole_au_probe_expires_without_spam() {
+        let mut fixture = NackFixture::new();
+        fixture.sequencer.configure_nack_grace(true, Some(100));
+        push_whole_au_hole_fixture(&mut fixture.sequencer, &mut fixture.reassembler, fixture.start);
+
+        let mut requester = NackRequester::default();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(2),
+            |_| {},
+        );
+        assert_eq!(outcome.sent_messages, 2);
+
+        // Nothing arrived. Ticks inside the grace stay silent; past the
+        // deadline the hole hands back to the unchanged loss path and the
+        // requester never fires for this AU again.
+        for offset in [4u64, 60, 119] {
+            let outcome = tick_nack_requester(
+                &mut requester,
+                &mut fixture.sequencer,
+                &fixture.reassembler,
+                false,
+                Some(100),
+                fixture.start + Duration::from_millis(offset),
+                |_| {},
+            );
+            assert_eq!(outcome.sent_messages, 0, "offset={offset}");
+        }
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut fixture.sequencer,
+            &fixture.reassembler,
+            false,
+            Some(100),
+            fixture.start + Duration::from_millis(130),
+            |_| {},
+        );
+        assert_eq!(outcome.sent_messages, 0);
     }
 
     #[test]
@@ -2710,8 +2906,10 @@ mod tests {
 
     #[test]
     fn nack_tick_ignores_holes_without_retransmittable_state() {
-        // AU 11 was never seen at all (no partial state): nothing to request,
-        // so the tick must not send and must leave the existing loss path.
+        // AU 11 was never seen at all (no partial state): the tick probes a
+        // bounded index range once — the host serves whatever its retransmit
+        // ring still holds and counts the rest as missed — and stays silent
+        // on follow-up ticks until the grace expires into the loss path.
         let mut reassembler = FrameReassembler::default();
         let mut sequencer = CompletedFrameSequencer::default();
         sequencer.establish_epoch(10);
@@ -2720,6 +2918,7 @@ mod tests {
             .push(parse_fragment(&datagram(0, 1, 12, 1, 2, 3, b"y")).unwrap())
             .unwrap();
         assert!(sequencer.push_at(frame12, start).is_empty());
+        let mut sent = Vec::new();
         let mut requester = NackRequester::default();
         let outcome = tick_nack_requester(
             &mut requester,
@@ -2728,9 +2927,29 @@ mod tests {
             false,
             Some(3),
             start,
-            |_| panic!("must not request fragments with no partial state"),
+            |body| sent.push(body.to_vec()),
+        );
+        assert_eq!(outcome.sent_messages, 2);
+        let (au_a, idx_a) = parse_nack_request(&sent[0]).unwrap();
+        let (au_b, idx_b) = parse_nack_request(&sent[1]).unwrap();
+        assert_eq!(au_a, 11);
+        assert_eq!(au_b, 11);
+        assert_eq!(idx_a, (0..20).collect::<Vec<_>>());
+        assert_eq!(idx_b, (20..40).collect::<Vec<_>>());
+
+        // Still no state: the armed probe is not renewed.
+        sent.clear();
+        let outcome = tick_nack_requester(
+            &mut requester,
+            &mut sequencer,
+            &reassembler,
+            false,
+            Some(3),
+            start + Duration::from_millis(1),
+            |body| sent.push(body.to_vec()),
         );
         assert_eq!(outcome.sent_messages, 0);
+        assert!(sent.is_empty());
     }
 
     #[test]
