@@ -23,6 +23,9 @@ extension CaptureSession {
             pendingConfig = config
         }
         if let frame {
+            if expireStaleNetworkQueueLocked() {
+                shouldRequestRecoveryAfterUnlock = true
+            }
             if shouldPrioritizeNetworkKeyframe(isKeyframe: isKeyframe) {
                 // A keyframe is an independent decoder boundary. Never make
                 // it wait behind stale deltas that may already have filled
@@ -241,6 +244,53 @@ extension CaptureSession {
                 networkLock.unlock()
             }
         }
+    }
+
+    /// Interactive staleness valve (LEFTCAR_QUEUE_MAX_AGE_MS, default off).
+    /// The queued AUs are one encoded dependency chain, so once the oldest
+    /// unsent frame already exceeds the interactive age budget the whole
+    /// chain is stale: drop it exactly like a depth overflow and let the
+    /// next recovery IDR re-establish a decodable boundary. An already
+    /// queued recovery keyframe is preserved — discarding it would schedule
+    /// a second IDR burst for the same loss episode. Caller holds
+    /// networkLock; lock order matches the overflow path (network → state).
+     func expireStaleNetworkQueueLocked() -> Bool {
+        guard networkQueueMaxAgeNs > 0, !pendingFrames.isEmpty else { return false }
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        guard let oldestQueuedNs = pendingFrames.map(\.queuedNs).min(),
+              networkQueueAgeExpired(
+                oldestQueuedNs: oldestQueuedNs,
+                nowNs: nowNs,
+                limitNs: networkQueueMaxAgeNs
+              ) else {
+            return false
+        }
+        let discarded = pendingFrames.count
+        let queuedKeyframe = pendingFrames.last(where: { $0.isKeyframe })
+        pendingFrames.removeAll(keepingCapacity: true)
+        if let queuedKeyframe {
+            pendingFrames.append(queuedKeyframe)
+        }
+        let dropped = queuedKeyframe != nil ? discarded - 1 : discarded
+        stateLock.lock()
+        framesDropped &+= Int64(dropped)
+        networkQueueDropped &+= Int64(dropped)
+        networkQueueAgeDropped &+= Int64(dropped)
+        if queuedKeyframe != nil
+            || networkKeyframeInFlight
+            || networkRecoveryBoundary.awaitingKeyframe {
+            recoveryFramesDropped &+= Int64(dropped)
+        }
+        stateLock.unlock()
+        if shouldStartNetworkRecovery(
+            awaitingKeyframe: networkRecoveryBoundary.awaitingKeyframe,
+            keyframeInFlight: networkKeyframeInFlight,
+            keyframeQueued: queuedKeyframe != nil
+        ) {
+            networkRecoveryBoundary.establishAwaitingKeyframe()
+            return true
+        }
+        return false
     }
 
     /// Consume nonce-authenticated viewer-to-host datagrams on a dedicated

@@ -319,16 +319,46 @@ pub struct StatsInfo {
     pub encode_submit_failures: i64,
     #[serde(default)]
     pub encode_in_flight: u32,
+    /// Configured single-encoder in-flight cap after the
+    /// LEFTCAR_MAX_ENCODE_IN_FLIGHT experiment override and clamp. Exported
+    /// so an A/B receipt records the cap the run actually used.
+    #[serde(default)]
+    pub encoder_max_in_flight_limit: u32,
+    /// Capture-stall watchdog restarts (silent capture-stream deaths repaired
+    /// in place). Sustained growth means the display pipeline keeps dying.
+    #[serde(default)]
+    pub capture_watchdog_restarts: i64,
     pub dropped: i64,
     pub network_dropped: i64,
     #[serde(default)]
     pub network_queue_dropped: i64,
+    /// Subset of networkQueueDropped dropped by the LEFTCAR_QUEUE_MAX_AGE_MS
+    /// staleness valve. Zero while the valve is disabled.
+    #[serde(default)]
+    pub network_queue_age_dropped: i64,
+    /// Configured interactive age budget for the UDP network queue in
+    /// milliseconds; zero means the valve is disabled and the queue only
+    /// recovers through depth overflow.
+    #[serde(default)]
+    pub network_queue_max_age_ms: u32,
     #[serde(default)]
     pub recovery_frames_dropped: i64,
     #[serde(default)]
     pub udp_send_failures: i64,
     #[serde(default)]
     pub udp_send_retries: i64,
+    /// SO_SNDBUF actually applied to the media socket after the
+    /// LEFTCAR_SO_SNDBUF_BYTES override and clamp.
+    #[serde(default)]
+    pub udp_send_buffer_bytes: u32,
+    /// Frames admitted through each encoder input surface path, proving
+    /// which path every submitted frame actually took.
+    #[serde(default)]
+    pub input_frames_direct: i64,
+    #[serde(default)]
+    pub input_frames_pixel_transfer: i64,
+    #[serde(default)]
+    pub input_frames_cpu_copy: i64,
     #[serde(default)]
     pub recovery_keyframes: i64,
     #[serde(default)]
@@ -412,6 +442,13 @@ pub struct StatsInfo {
     pub send_block_p95_us: u64,
     #[serde(default)]
     pub send_pace_p95_us: u64,
+    /// Encoder input preparation percentiles over the rolling window. The
+    /// P50 separates a steady per-frame copy cost from the tail that the
+    /// P95 reports (P0-2 in the 2026-09-17 plan).
+    #[serde(default)]
+    pub input_preparation_p50_us: u64,
+    #[serde(default)]
+    pub input_preparation_p95_us: u64,
     /// Latest encoded access-unit shape. These values make a motion-induced
     /// burst visible without requiring a packet capture.
     #[serde(default)]

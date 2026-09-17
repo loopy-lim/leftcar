@@ -342,8 +342,11 @@ extension CaptureSession {
         // Keep only a short kernel burst behind the app's latest-frame queue.
         // A multi-megabyte buffer can preserve stale video through Wi-Fi
         // scheduling pauses even though userspace keeps only one frame.
-        var sendBuffer: Int32 = 512 * 1024
+        // LEFTCAR_SO_SNDBUF_BYTES narrows the buffer for the interactive A/B;
+        // the resolver clamps to the planned 64KiB–2MiB range.
+        var sendBuffer = Int32(clamping: resolvedUdpSendBufferBytes(override: udpSendBufferOverrideBytes))
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size))
+        appliedUdpSendBufferBytes = sendBuffer
         // AF41 is a best-effort Wi-Fi/WMM hint for interactive video.
         var videoTos: Int32 = 0x88
         _ = setsockopt(sock, IPPROTO_IP, IP_TOS, &videoTos, socklen_t(MemoryLayout<Int32>.size))

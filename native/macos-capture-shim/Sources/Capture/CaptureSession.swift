@@ -44,7 +44,10 @@ final class CaptureSession {
     // resolution-aware number of hardware encode submissions in flight and
     // retain only the newest frame while those slots are occupied.
      var configuredEncodeInFlightLimit: Int {
-        encoderLatencyPolicy(width: outWidth, height: outHeight).maxEncodeInFlight
+        resolvedEncodeInFlightLimit(
+            policyLimit: encoderLatencyPolicy(width: outWidth, height: outHeight).maxEncodeInFlight,
+            override: encodeInFlightLimitOverride
+        )
     }
     // AVE allocates its resources on the first real frame because the optional
     // prepare call malfunctions on the target Mac. Keep startup serial until
@@ -171,6 +174,17 @@ final class CaptureSession {
     // that has not reached the socket is intentionally dropped.
      let networkQueue = DispatchQueue(label: "leftcar.network", qos: .userInteractive)
      let frameTraceEnabled = ProcessInfo.processInfo.environment["LEFTCAR_FRAME_TRACE"] == "1"
+    // Interactive pacing experiment switches (2026-09-17 plan). Each one
+    // defaults to the shipped behavior so an A/B run changes exactly one
+    // variable, and the effective values are exported through statsJSON for
+    // run provenance.
+     let encodeInFlightLimitOverride = ProcessInfo.processInfo.environment["LEFTCAR_MAX_ENCODE_IN_FLIGHT"].flatMap(Int.init)
+     let udpSendBufferOverrideBytes = ProcessInfo.processInfo.environment["LEFTCAR_SO_SNDBUF_BYTES"].flatMap(Int.init)
+     let networkQueueMaxAgeNs: UInt64 = {
+        guard let ms = ProcessInfo.processInfo.environment["LEFTCAR_QUEUE_MAX_AGE_MS"].flatMap(Int.init),
+              ms > 0 else { return 0 }
+        return UInt64(ms) * 1_000_000
+    }()
      let frameTraceSession = UUID().uuidString
      var frameTraceCount = 0 // Network queue only; capped at ten minutes at 60fps.
      let networkLock = NSLock()
@@ -211,6 +225,9 @@ final class CaptureSession {
      var framesEncoded: Int64 = 0
      var framesDropped: Int64 = 0
      var networkQueueDropped: Int64 = 0
+    // Subset of networkQueueDropped attributed to the LEFTCAR_QUEUE_MAX_AGE_MS
+    // staleness valve, so an age-limit A/B reads its own cost directly.
+     var networkQueueAgeDropped: Int64 = 0
      var sentDatagrams: Int64 = 0
      var sentParityDatagrams: Int64 = 0
      var captureCallbacks: Int64 = 0
@@ -237,6 +254,10 @@ final class CaptureSession {
      var recoveryFramesDropped: Int64 = 0
      var udpSendFailures: Int64 = 0
      var udpSendRetries: Int64 = 0
+    // SO_SNDBUF actually applied to the media socket (LEFTCAR_SO_SNDBUF_BYTES
+    // override after the policy clamp). Write-once at socket setup; exported
+    // so an A/B receipt records the real kernel buffer, not the request.
+     var appliedUdpSendBufferBytes: Int32 = Int32(resolvedUdpSendBufferBytes(override: nil))
     // Selective retransmission (NAK/RTX). The ring holds pre-seal DATA
     // fragment envelopes for viewer-requested re-send; the counters (stateLock)
     // count fragments served from the ring vs. already evicted, and are
@@ -254,6 +275,12 @@ final class CaptureSession {
      var maxCaptureQueueWaitUs: UInt64 = 0
      var lastInputPreparationUs: UInt64 = 0
      var maxInputPreparationUs: UInt64 = 0
+    // Frames admitted through each encoder input surface path. The session
+    // setup report names the policy once; these counters prove which path
+    // every submitted frame actually took (P0-2 in the 2026-09-17 plan).
+     var inputFramesDirect: Int64 = 0
+     var inputFramesPixelTransfer: Int64 = 0
+     var inputFramesCpuCopy: Int64 = 0
      var lastEncodeSubmitCallUs: UInt64 = 0
      var maxEncodeSubmitCallUs: UInt64 = 0
      var lastEncoderCallbackUs: UInt64 = 0
@@ -408,6 +435,17 @@ final class CaptureSession {
     // pure (RecoveryRampState in EncoderPolicy.swift). Guarded by stateLock.
      var recoveryRamp = RecoveryRampState()
      var healthCheckScheduled = false
+    // Capture-stall watchdog (2026-09-18): ScreenCaptureKit/CGDisplayStream
+    // can silently stop delivering while the session still looks alive, and
+    // the encoder watchdog never sees it because nothing reaches VideoToolbox
+    // either. Detection rides `lastCaptureCallbackNs`; recovery restarts the
+    // capture stream in place from the retained start parameters, bounded by
+    // captureStallMaxRestarts before the normal stop path runs. All fields
+    // guarded by stateLock.
+     var captureHealthCheckScheduled = false
+     var captureWatchdogRestarts: Int64 = 0
+     var restartFilter: SCContentFilter?
+     var restartDisplayID: CGDirectDisplayID?
     // Single-session VideoToolbox submissions stay owned by this ledger until
     // callback, synchronous submit failure, or watchdog reclaim wins the slot.
     // These fields and the watchdog counters are protected by stateLock.

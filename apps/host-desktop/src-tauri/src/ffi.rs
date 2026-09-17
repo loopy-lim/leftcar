@@ -318,12 +318,20 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         encode_output_callbacks: v["encodeOutputCallbacks"].as_i64().unwrap_or(0),
         encode_submit_failures: v["encodeSubmitFailures"].as_i64().unwrap_or(0),
         encode_in_flight: bounded_u32(&v, "encodeInFlight"),
+        encoder_max_in_flight_limit: bounded_u32(&v, "encoderMaxInFlightLimit"),
+        capture_watchdog_restarts: v["captureWatchdogRestarts"].as_i64().unwrap_or(0),
         dropped: v["dropped"].as_i64().unwrap_or(0),
         network_dropped: v["networkDropped"].as_i64().unwrap_or(0),
         network_queue_dropped: v["networkQueueDropped"].as_i64().unwrap_or(0),
+        network_queue_age_dropped: v["networkQueueAgeDropped"].as_i64().unwrap_or(0),
+        network_queue_max_age_ms: bounded_u32(&v, "networkQueueMaxAgeMs"),
         recovery_frames_dropped: v["recoveryFramesDropped"].as_i64().unwrap_or(0),
         udp_send_failures: v["udpSendFailures"].as_i64().unwrap_or(0),
         udp_send_retries: v["udpSendRetries"].as_i64().unwrap_or(0),
+        udp_send_buffer_bytes: bounded_u32(&v, "udpSendBufferBytes"),
+        input_frames_direct: v["inputFramesDirect"].as_i64().unwrap_or(0),
+        input_frames_pixel_transfer: v["inputFramesPixelTransfer"].as_i64().unwrap_or(0),
+        input_frames_cpu_copy: v["inputFramesCpuCopy"].as_i64().unwrap_or(0),
         recovery_keyframes: v["recoveryKeyframes"].as_i64().unwrap_or(0),
         recovery_requests_suppressed: v["recoveryRequestsSuppressed"].as_i64().unwrap_or(0),
         capture_queue_dropped: v["captureQueueDropped"].as_i64().unwrap_or(0),
@@ -382,6 +390,8 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         encode_output_interval_p95_us: v["encodeOutputIntervalP95Us"].as_u64().unwrap_or(0),
         send_block_p95_us: v["sendBlockP95Us"].as_u64().unwrap_or(0),
         send_pace_p95_us: v["sendPaceP95Us"].as_u64().unwrap_or(0),
+        input_preparation_p50_us: v["inputPreparationP50Us"].as_u64().unwrap_or(0),
+        input_preparation_p95_us: v["inputPreparationP95Us"].as_u64().unwrap_or(0),
         last_au_bytes: v["lastAuBytes"].as_u64().unwrap_or(0),
         last_au_fragments: bounded_u32(&v, "lastAuFragments"),
         last_au_parity: bounded_u32(&v, "lastAuParity"),
@@ -794,6 +804,46 @@ mod tests {
             let stats = parse_stats_json(payload).unwrap();
             assert_eq!(stats.split_capture_queue_oldest_us, expected, "{payload}");
         }
+    }
+
+    #[test]
+    fn parse_stats_json_maps_interactive_pacing_experiment_fields() {
+        let stats = parse_stats_json(
+            r#"{
+  "state":"running",
+  "encoderMaxInFlightLimit":2,
+  "networkQueueAgeDropped":41,
+  "networkQueueMaxAgeMs":33,
+  "udpSendBufferBytes":262144,
+  "inputFramesDirect":12,
+  "inputFramesPixelTransfer":3,
+  "inputFramesCpuCopy":4,
+  "inputPreparationP50Us":180,
+  "inputPreparationP95Us":900
+}"#,
+        )
+        .unwrap();
+        assert_eq!(stats.encoder_max_in_flight_limit, 2);
+        assert_eq!(stats.capture_watchdog_restarts, 0);
+        assert_eq!(stats.network_queue_age_dropped, 41);
+        assert_eq!(stats.network_queue_max_age_ms, 33);
+        assert_eq!(stats.udp_send_buffer_bytes, 262_144);
+        assert_eq!(stats.input_frames_direct, 12);
+        assert_eq!(stats.input_frames_pixel_transfer, 3);
+        assert_eq!(stats.input_frames_cpu_copy, 4);
+        assert_eq!(stats.input_preparation_p50_us, 180);
+        assert_eq!(stats.input_preparation_p95_us, 900);
+
+        // A shim that predates the 2026-09-17 switches still parses; every
+        // new field defaults to its disabled/measured-zero value.
+        let legacy = parse_stats_json(r#"{"state":"running"}"#).unwrap();
+        assert_eq!(legacy.encoder_max_in_flight_limit, 0);
+        assert_eq!(legacy.capture_watchdog_restarts, 0);
+        assert_eq!(legacy.network_queue_age_dropped, 0);
+        assert_eq!(legacy.network_queue_max_age_ms, 0);
+        assert_eq!(legacy.udp_send_buffer_bytes, 0);
+        assert_eq!(legacy.input_frames_cpu_copy, 0);
+        assert_eq!(legacy.input_preparation_p50_us, 0);
     }
 
     #[test]

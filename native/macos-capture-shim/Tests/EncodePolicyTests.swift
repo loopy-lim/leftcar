@@ -1315,6 +1315,28 @@ struct EncodePolicyTests {
                 encodeInFlight: 1,
                 oldestSubmissionNs: 2_700_000_000,
                 generation: 12
+            ) == .restart(generation: 12)
+        )
+        restartBudget.recordRestart(at: 3_000_000_000, generation: 12)
+        precondition(
+            restartBudget.evaluate(
+                nowNs: 4_000_000_000,
+                captureCallbackNs: 4_000_000_000,
+                lastValidOutputNs: nil,
+                encodeInFlight: 1,
+                oldestSubmissionNs: 3_700_000_000,
+                generation: 13
+            ) == .restart(generation: 13)
+        )
+        restartBudget.recordRestart(at: 4_000_000_000, generation: 13)
+        precondition(
+            restartBudget.evaluate(
+                nowNs: 5_000_000_000,
+                captureCallbackNs: 5_000_000_000,
+                lastValidOutputNs: nil,
+                encodeInFlight: 1,
+                oldestSubmissionNs: 4_700_000_000,
+                generation: 14
             ) == .terminate
         )
 
@@ -2526,5 +2548,43 @@ struct EncodePolicyTests {
         precondition(datagram[8] == 2 && datagram[9] == 0)
         precondition(datagram[10] == 0 && datagram[11] == 1) // 1 frame
         precondition(datagram.suffix(4) == Data(pcm))
+
+        // Interactive pacing experiment switches (2026-09-17 plan): absent
+        // overrides keep the shipped defaults, present ones clamp to the
+        // planned experiment range on both sides.
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: nil) == 3)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 2, override: nil) == 2)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: 1) == 1)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: 2) == 2)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: 3) == 3)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: 0) == 1)
+        precondition(resolvedEncodeInFlightLimit(policyLimit: 3, override: 9) == 5)
+
+        precondition(resolvedUdpSendBufferBytes(override: nil) == 512 * 1024)
+        precondition(resolvedUdpSendBufferBytes(override: 64 * 1024) == 64 * 1024)
+        precondition(resolvedUdpSendBufferBytes(override: 256 * 1024) == 256 * 1024)
+        precondition(resolvedUdpSendBufferBytes(override: 1024) == 64 * 1024)
+        precondition(resolvedUdpSendBufferBytes(override: 64 * 1024 * 1024) == 2 * 1024 * 1024)
+
+        // Age valve: disabled at zero, boundary-inclusive at the limit,
+        // tolerant of a wrapped or zero timestamp.
+        precondition(networkQueueAgeExpired(oldestQueuedNs: 0, nowNs: 1_000, limitNs: 0) == false)
+        precondition(networkQueueAgeExpired(oldestQueuedNs: 1_000, nowNs: 1_000, limitNs: 33_333_000) == false)
+        precondition(networkQueueAgeExpired(oldestQueuedNs: 1_000, nowNs: 1_000 + 16_666_000, limitNs: 33_333_000) == false)
+        precondition(networkQueueAgeExpired(oldestQueuedNs: 1_000, nowNs: 1_000 + 33_333_000, limitNs: 33_333_000) == true)
+        precondition(networkQueueAgeExpired(oldestQueuedNs: 1_000, nowNs: 500, limitNs: 33_333_000) == false)
+
+        // Capture-stall watchdog: live session with silent capture restarts
+        // in place up to the budget, then hands the session to the stop path.
+        let twoSix = UInt64(2_500_000_000)
+        precondition(captureStallAction(lastCallbackNs: 0, nowNs: 1_000, running: true, stopRequested: false, restarts: 0, maxRestarts: 3, stallThresholdNs: twoSix) == .monitor)
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000 + twoSix - 1, running: true, stopRequested: false, restarts: 0, maxRestarts: 3, stallThresholdNs: twoSix) == .monitor)
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000 + twoSix, running: true, stopRequested: false, restarts: 0, maxRestarts: 3, stallThresholdNs: twoSix) == .restart)
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000 + twoSix, running: true, stopRequested: false, restarts: 3, maxRestarts: 3, stallThresholdNs: twoSix) == .exhausted)
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000 + twoSix * 5, running: false, stopRequested: false, restarts: 0, maxRestarts: 3, stallThresholdNs: twoSix) == .idle)
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000 + twoSix * 5, running: true, stopRequested: true, restarts: 0, maxRestarts: 3, stallThresholdNs: twoSix) == .idle)
+        // A timestamp that has not moved past the threshold never restarts,
+        // even at absurd restart counts.
+        precondition(captureStallAction(lastCallbackNs: 1_000, nowNs: 1_000, running: true, stopRequested: false, restarts: 9, maxRestarts: 3, stallThresholdNs: twoSix) == .monitor)
     }
 }

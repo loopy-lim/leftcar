@@ -20,6 +20,9 @@ extension CaptureSession {
         let experiment = appliedEncoderExperimentValue
         stateLock.unlock()
         guard let mode else {
+            stateLock.lock()
+            inputFramesDirect &+= 1
+            stateLock.unlock()
             return (source, noErr)
         }
         let inputPolicy = encoderInputSurfacePolicy(
@@ -30,6 +33,13 @@ extension CaptureSession {
             captureBackend: backend.rawValue,
             aveRetryStagingEnabled: aveRetryStagingEnabled
         )
+        stateLock.lock()
+        switch inputPolicy {
+        case .direct: inputFramesDirect &+= 1
+        case .pixelTransfer: inputFramesPixelTransfer &+= 1
+        case .cpuCopy: inputFramesCpuCopy &+= 1
+        }
+        stateLock.unlock()
         guard inputPolicy != .direct else { return (source, noErr) }
 
         if experiment == .encoderPool {

@@ -18,6 +18,10 @@ extension CaptureSession {
         captureLock.lock()
         let currentEncodeInFlight = encodeInFlight
         let currentMaxEncodeInFlight = maxEncodeInFlight
+        let reportedEncoderMaxInFlightLimit = configuredEncodeInFlightLimit
+        let reportedUdpSendBufferBytes = appliedUdpSendBufferBytes
+        let reportedNetworkQueueMaxAgeMs = networkQueueMaxAgeNs == 0
+            ? 0 : Int(networkQueueMaxAgeNs / 1_000_000)
         let reportedSplitFlowActiveLeases = splitFlowState.activeCount
         let reportedSplitFlowCapacity = splitFlowState.capacity
         let splitCaptureQueueDepth = pendingSplitCaptures.count
@@ -90,6 +94,11 @@ extension CaptureSession {
         let maxAuFragments = maxAuFragments
         let udpSendFailures = udpSendFailures
         let udpSendRetries = udpSendRetries
+        let inputFramesDirect = inputFramesDirect
+        let inputFramesPixelTransfer = inputFramesPixelTransfer
+        let inputFramesCpuCopy = inputFramesCpuCopy
+        let networkQueueAgeDropped = networkQueueAgeDropped
+        let reportedCaptureWatchdogRestarts = captureWatchdogRestarts
         let nacksServed = nacksServed
         let nacksMissed = nacksMissed
         let recoveryKeyframes = recoveryKeyframes
@@ -157,6 +166,10 @@ extension CaptureSession {
         let captureToEncodeP95Us = percentile95(captureToEncodeSamplesUs)
         let captureQueueWaitP95Us = percentile95(captureQueueWaitSamplesUs)
         let inputPreparationP95Us = percentile95(inputPreparationSamplesUs)
+        let inputPreparationP50Us = percentile(
+            inputPreparationSamplesUs,
+            quantile: 0.50
+        )
         let encodeSubmitCallP50Us = percentile(
             encodeSubmitCallSamplesUs,
             quantile: 0.50
@@ -342,9 +355,12 @@ extension CaptureSession {
             "dropped": framesDropped,
             "networkDropped": networkDropped,
             "networkQueueDropped": networkQueueDropped,
+            "networkQueueAgeDropped": networkQueueAgeDropped,
+            "networkQueueMaxAgeMs": reportedNetworkQueueMaxAgeMs,
             "recoveryFramesDropped": recoveryFramesDropped,
             "udpSendFailures": udpSendFailures,
             "udpSendRetries": udpSendRetries,
+            "udpSendBufferBytes": reportedUdpSendBufferBytes,
             "nacksServed": nacksServed,
             "nacksMissed": nacksMissed,
             "recoveryKeyframes": recoveryKeyframes,
@@ -362,6 +378,8 @@ extension CaptureSession {
             "encodeOutputCallbacks": encodeOutputCallbacks,
             "encodeSubmitFailures": encodeSubmitFailures,
             "encodeInFlight": currentEncodeInFlight,
+            "encoderMaxInFlightLimit": reportedEncoderMaxInFlightLimit,
+            "captureWatchdogRestarts": reportedCaptureWatchdogRestarts,
             "encoderWatchdogRestarts": reportedEncoderWatchdogRestarts,
             "encoderWatchdogTerminations": reportedEncoderWatchdogTerminations,
             "encoderLateCallbacks": reportedEncoderLateCallbacks,
@@ -414,6 +432,7 @@ extension CaptureSession {
             "captureToEncodeP95Us": captureToEncodeP95Us,
             "captureQueueWaitP95Us": captureQueueWaitP95Us,
             "inputPreparationP95Us": inputPreparationP95Us,
+            "inputPreparationP50Us": inputPreparationP50Us,
             "encodeOutputP95Us": encodeOutputP95Us,
             "packetizationP95Us": packetizationP95Us,
             "packetizationQueueWaitP95Us": packetizationQueueWaitP95Us,
@@ -436,6 +455,9 @@ extension CaptureSession {
             "maxCaptureQueueWaitUs": maxCaptureQueueWaitUs,
             "inputPreparationUs": inputPreparationUs,
             "maxInputPreparationUs": maxInputPreparationUs,
+            "inputFramesDirect": inputFramesDirect,
+            "inputFramesPixelTransfer": inputFramesPixelTransfer,
+            "inputFramesCpuCopy": inputFramesCpuCopy,
             "encodeSubmitCallUs": encodeSubmitCallUs,
             "maxEncodeSubmitCallUs": maxEncodeSubmitCallUs,
             "encoderCallbackUs": encoderCallbackUs,

@@ -597,8 +597,83 @@ func manualQualityHintFromSliderPercent(_ percent: Int32) -> Float? {
     return percent == 0 ? nil : Float(percent) / 100.0
 }
 
+enum CaptureStallAction: Equatable {
+    case idle
+    case monitor
+    case restart
+    case exhausted
+}
+
+/// Capture-health watchdog decision. Capture callbacks arrive every ~16ms
+/// while the display pipeline lives (duplicate frames included), so a
+/// multi-second silence means the capture stream is gone while the session
+/// still looks alive — VideoToolbox and the network idle behind it and the
+/// viewer freezes on the last delivered frame. Restart the stream in place
+/// up to `maxRestarts` times; once exhausted, hand the session to the normal
+/// stop path so the viewer's own recovery takes over.
+func captureStallAction(
+    lastCallbackNs: UInt64,
+    nowNs: UInt64,
+    running: Bool,
+    stopRequested: Bool,
+    restarts: Int64,
+    maxRestarts: Int64,
+    stallThresholdNs: UInt64
+) -> CaptureStallAction {
+    guard running, !stopRequested else { return .idle }
+    guard lastCallbackNs != 0,
+          nowNs >= lastCallbackNs,
+          nowNs &- lastCallbackNs >= stallThresholdNs else {
+        return .monitor
+    }
+    return restarts < maxRestarts ? .restart : .exhausted
+
+}
+
+/// Silence threshold for [`captureStallAction`]. Three-plus seconds without
+/// a callback cannot be a scheduler hiccup: even an idle display produces
+/// duplicate-frame callbacks at the configured rate.
+var captureStallThresholdNs: UInt64 { 2_500_000_000 }
+
+/// In-place restart budget before the session is handed to the stop path.
+var captureStallMaxRestarts: Int64 { 3 }
+
 func encodeInFlightLimit(width: UInt32, height: UInt32) -> Int {
     encoderLatencyPolicy(width: width, height: height).maxEncodeInFlight
+}
+
+/// Interactive A/B override for the single-encoder in-flight cap
+/// (LEFTCAR_MAX_ENCODE_IN_FLIGHT). Absent keeps the resolution-derived
+/// policy value; the clamp bounds the experiment to the 1...5 range the
+/// split pipeline has already exercised so a stray value cannot turn the
+/// encoder queue back into an unbounded latency buffer.
+func resolvedEncodeInFlightLimit(policyLimit: Int, override: Int?) -> Int {
+    guard let override else { return policyLimit }
+    return min(max(override, 1), 5)
+}
+
+/// Interactive staleness valve for the UDP network queue
+/// (LEFTCAR_QUEUE_MAX_AGE_MS). Zero disables the valve and the queue then
+/// recovers only through the existing depth overflow. Age is measured from
+/// enqueue, matching `pendingFrameOldestAgeUs`, so both gauges describe the
+/// same quantity in experiments.
+func networkQueueAgeExpired(
+    oldestQueuedNs: UInt64,
+    nowNs: UInt64,
+    limitNs: UInt64
+) -> Bool {
+    guard limitNs > 0, oldestQueuedNs != 0 else { return false }
+    return nowNs >= oldestQueuedNs && nowNs &- oldestQueuedNs >= limitNs
+}
+
+/// SO_SNDBUF experiment override (LEFTCAR_SO_SNDBUF_BYTES). The 512KiB
+/// default keeps only a short kernel burst behind the app queue; the clamp
+/// spans the planned 64KiB–2MiB A/B range so a stray value cannot create a
+/// multi-second kernel queue of stale video.
+func resolvedUdpSendBufferBytes(override: Int?) -> Int {
+    let fallback = 512 * 1024
+    guard let override else { return fallback }
+    return min(max(override, 64 * 1024), 2 * 1024 * 1024)
 }
 
 func shouldStartNetworkRecovery(
