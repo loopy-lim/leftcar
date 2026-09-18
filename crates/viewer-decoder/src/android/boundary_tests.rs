@@ -191,6 +191,41 @@ fn smoothing_park_absorbs_burst_without_dropping_frames() {
 }
 
 #[test]
+fn smoothing_depth_adapts_to_burst_demand() {
+    // 수요 수위(HWM) 기반 적응: 첫 버스트(7프레임)는 깊이 2를 넘어 일부
+    // 즉시 렌더로 소화되지만 프레임은 하나도 버려지지 않고, 기록된 수요
+    // 7에 맞춰 다음 펌프의 park 깊이가 8로 늘어난다.
+    let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    PRESENTATION_SMOOTH.store(true, std::sync::atomic::Ordering::Relaxed);
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let mut decoder =
+        unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    // 첫 버스트: 7프레임 동시 도착.
+    PROBE.with_borrow_mut(|p| {
+        let batch: Vec<(usize, i64)> = (0..7).map(|i| (40 + i, 1000 + i as i64)).collect();
+        p.outputs.extend(batch);
+    });
+    let target = 9_876_543_210;
+    decoder.set_output_target(Some(target));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    assert_eq!(decoder.frames_discarded, 0, "버스트에도 폐기 0");
+    let rendered_first = decoder.frames_rendered;
+    assert!(rendered_first >= 1);
+
+    // 두 번째 버스트: 같은 크기. 깊이는 HWM 7+1=8로 늘어났다.
+    PROBE.with_borrow_mut(|p| {
+        let batch: Vec<(usize, i64)> = (0..7).map(|i| (60 + i, 2000 + i as i64)).collect();
+        p.outputs.extend(batch);
+    });
+    let next = target + 8_333_333;
+    decoder.set_output_target(Some(next));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    // 두 버스트 모두 폐기 없이 소화.
+    assert_eq!(decoder.frames_discarded, 0);
+    PRESENTATION_SMOOTH.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
 fn real_output_drain_paces_one_release_per_vsync_slot() {
     // 프레임 스무딩 OFF: park 한도 2 계약(최신 우선, 초과분 폐기) 고정.
     let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());

@@ -167,6 +167,13 @@ pub struct AndroidDecoder {
     /// Vsync target that already received a release. One release per slot
     /// keeps bursts from double-rendering inside a single vsync period.
     last_paced_target_ns: Option<i64>,
+    /// Adaptive park depth driver: high-water mark of the parked queue,
+    /// sampled before trimming. Direct demand signal — a stall-then-burst
+    /// transit pattern parks N frames once, and the buffer deepens to N+1
+    /// for the next burst. Pre-hold by construction, so it cannot chase its
+    /// own latency (the release-age feedback failure mode).
+    park_demand_window: std::collections::VecDeque<usize>,
+    adaptive_park_cap: usize,
 }
 
 /// Micro-jitter smoothing switch, mirrored to the client so the Viewer UI can
@@ -176,9 +183,13 @@ pub struct AndroidDecoder {
 /// harder than one frame.
 pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// 프레임 스무딩(적응 지터 버퍼) 모드의 park 한도(프레임 수). 5프레임 ≈
-/// 83ms@60fps — 도착 뭉침 흡수 상한이자 코덱 출력 버퍼 안전선.
-pub const SMOOTH_PARK_CAP: usize = 5;
+/// 프레임 스무딩(적응 지터 버퍼) park 깊이 하한/상한(프레임 수). 도착
+/// 지터 p95에 맞춰 그 사이에서 자동 조절한다(상한 10프레임 ≈ 166ms@60fps
+/// — 실측 버스트 117-133ms를 흡수하고도 여유).
+pub const SMOOTH_PARK_MIN: usize = 2;
+pub const SMOOTH_PARK_MAX: usize = 10;
+/// park 수요 수위 관측 창(펌프 횟수).
+const ARRIVAL_JITTER_WINDOW: usize = 128;
 
 /// Release-age p95 the adaptive jitter buffer steers toward (45ms).
 pub const PRESENTATION_AGE_TARGET_US: u64 = 45_000;
@@ -394,6 +405,8 @@ impl AndroidDecoder {
                 output_target_ns: None,
                 parked_outputs: VecDeque::new(),
                 last_paced_target_ns: None,
+                park_demand_window: std::collections::VecDeque::new(),
+                adaptive_park_cap: SMOOTH_PARK_MIN,
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -561,6 +574,14 @@ impl AndroidDecoder {
                 arrived_at_ns: crate::android::output::monotonic_now_ns(),
             });
         }
+        // 트림 전 수요 수위를 기록해 다음 버스트의 park 깊이를 정한다.
+        self.park_demand_window.push_back(self.parked_outputs.len());
+        while self.park_demand_window.len() > ARRIVAL_JITTER_WINDOW {
+            self.park_demand_window.pop_front();
+        }
+        if let Some(&peak) = self.park_demand_window.iter().max() {
+            self.adaptive_park_cap = (peak + 1).clamp(SMOOTH_PARK_MIN, SMOOTH_PARK_MAX);
+        }
         if self.parked_outputs.is_empty() {
             return Ok(false);
         }
@@ -584,11 +605,11 @@ impl AndroidDecoder {
                 Ok(true)
             }
             Some(target) => {
-                // 프레임 스무딩(적응 지터 버퍼): 도착이 뭉치는 전송 지터를
-                // 최대 5프레임(≈83ms@60fps)까지 park로 흡수해 표시 캔버스가
-                // 끊기지 않게 한다. 초과분은 라이브 엣지 스킵으로 폴백.
+                // 프레임 스무딩(적응 지터 버퍼): 도착 지터 p95에 맞춰
+                // 2~10프레임(33~166ms)까지 park 깊이를 자동 조절해 도착
+                // 뭉침을 흡수한다. 초과분은 즉시 렌더로 소화(폐기 없음).
                 let park_cap = if PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
-                    SMOOTH_PARK_CAP
+                    self.adaptive_park_cap
                 } else {
                     MAX_PARKED_OUTPUTS
                 };
