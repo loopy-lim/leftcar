@@ -92,6 +92,8 @@ extension CaptureSession {
         let lastAuIsKeyframe = lastAuIsKeyframe
         let maxAuBytes = maxAuBytes
         let maxAuFragments = maxAuFragments
+        let auBytesSamples = auBytesSamples
+        let keyframeAuBytesSamples = keyframeAuBytesSamples
         let udpSendFailures = udpSendFailures
         let udpSendRetries = udpSendRetries
         let inputFramesDirect = inputFramesDirect
@@ -447,6 +449,13 @@ extension CaptureSession {
             "lastAuIsKeyframe": lastAuIsKeyframe,
             "maxAuBytes": maxAuBytes,
             "maxAuFragments": maxAuFragments,
+            "auBytesP50": percentile(auBytesSamples, quantile: 0.5),
+            "auBytesP95": percentile95(auBytesSamples),
+            "auBytesP99": percentile(auBytesSamples, quantile: 0.99),
+            "idrBytesP50": percentile(keyframeAuBytesSamples, quantile: 0.5),
+            "idrBytesP95": percentile95(keyframeAuBytesSamples),
+            "idrBytesP99": percentile(keyframeAuBytesSamples, quantile: 0.99),
+            "dataRateLimitWindowMs": UInt32(configuredDataRateLimitWindowSeconds() * 1000),
             "sentDatagrams": sentDatagrams,
             "sentParityDatagrams": sentParityDatagrams,
             "captureToEncodeUs": captureToEncodeUs,

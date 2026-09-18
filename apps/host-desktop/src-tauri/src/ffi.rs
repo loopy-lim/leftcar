@@ -57,7 +57,7 @@ pub struct FfiBackend {
 unsafe impl Send for FfiBackend {}
 unsafe impl Sync for FfiBackend {}
 
-fn dylib_candidates() -> Vec<PathBuf> {
+pub(crate) fn dylib_candidates() -> Vec<PathBuf> {
     if let Ok(env) = std::env::var("LEFTCAR_CAPTURE_DYLIB") {
         // An explicit override is authoritative. Falling back to a bundled
         // or checkout-relative dylib here makes missing-path tests pass or
@@ -401,6 +401,15 @@ fn parse_stats_json(json: &str) -> Result<StatsInfo, String> {
         last_au_is_keyframe: v["lastAuIsKeyframe"].as_bool().unwrap_or(false),
         max_au_bytes: v["maxAuBytes"].as_u64().unwrap_or(0),
         max_au_fragments: bounded_u32(&v, "maxAuFragments"),
+        au_bytes_p50: v["auBytesP50"].as_u64().unwrap_or(0),
+        au_bytes_p95: v["auBytesP95"].as_u64().unwrap_or(0),
+        au_bytes_p99: v["auBytesP99"].as_u64().unwrap_or(0),
+        idr_bytes_p50: v["idrBytesP50"].as_u64().unwrap_or(0),
+        idr_bytes_p95: v["idrBytesP95"].as_u64().unwrap_or(0),
+        idr_bytes_p99: v["idrBytesP99"].as_u64().unwrap_or(0),
+        nacks_served: v["nacksServed"].as_i64().unwrap_or(0),
+        nacks_missed: v["nacksMissed"].as_i64().unwrap_or(0),
+        data_rate_limit_window_ms: bounded_u32(&v, "dataRateLimitWindowMs"),
         sent_datagrams: v["sentDatagrams"].as_i64().unwrap_or(0),
         sent_parity_datagrams: v["sentParityDatagrams"].as_i64().unwrap_or(0),
         receiver_frame_gaps: v["receiverFrameGaps"].as_i64().unwrap_or(0),

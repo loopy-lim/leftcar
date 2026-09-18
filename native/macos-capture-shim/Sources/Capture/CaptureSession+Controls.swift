@@ -131,11 +131,13 @@ extension CaptureSession {
                     value: targetBitrate as CFNumber
                 )
                 if bitrateStatus == noErr {
-                    let hardLimitBytes = vtHardLimitBytes(bitrate: targetBitrate)
                     _ = VTSessionSetProperty(
                         compressionSession,
                         key: kVTCompressionPropertyKey_DataRateLimits,
-                        value: [hardLimitBytes, 1] as CFArray
+                        value: dataRateLimitValues(
+                            bitrate: targetBitrate,
+                            windowSeconds: configuredDataRateLimitWindowSeconds()
+                        ) as CFArray
                     )
                 }
             }

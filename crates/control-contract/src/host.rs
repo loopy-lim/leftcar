@@ -226,6 +226,11 @@ pub struct CatalogView {
     /// back to the control address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_host: Option<String>,
+    /// Optional public WAN IP:port mapped via UPnP/NAT-PMP.
+    /// When present, remote viewers outside the local LAN can target this
+    /// endpoint directly for high-speed P2P streaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_media_endpoint: Option<String>,
     pub displays: Vec<DisplayInfo>,
     #[serde(default)]
     pub encoder_experiments: Vec<EncoderExperimentInfo>,
@@ -469,6 +474,33 @@ pub struct StatsInfo {
     pub max_au_bytes: u64,
     #[serde(default)]
     pub max_au_fragments: u32,
+    /// Rolling byte-size distribution of sent access units (p50/p95/p99,
+    /// 300-sample window) and the same distribution restricted to keyframe
+    /// (recovery IDR) AUs. Makes a per-frame burst measurable without a
+    /// packet capture; the scalars above only record the last and largest AU.
+    #[serde(default)]
+    pub au_bytes_p50: u64,
+    #[serde(default)]
+    pub au_bytes_p95: u64,
+    #[serde(default)]
+    pub au_bytes_p99: u64,
+    #[serde(default)]
+    pub idr_bytes_p50: u64,
+    #[serde(default)]
+    pub idr_bytes_p95: u64,
+    #[serde(default)]
+    pub idr_bytes_p99: u64,
+    /// Viewer NACK fragments served from the retransmit ring vs. missed
+    /// (already evicted). The shim published these before; they were dropped
+    /// at this schema boundary until now.
+    #[serde(default)]
+    pub nacks_served: i64,
+    #[serde(default)]
+    pub nacks_missed: i64,
+    /// DataRateLimits burst window in effect, in milliseconds
+    /// (LEFTCAR_DRL_WINDOW_SECONDS; 1000 is the historical one-second window).
+    #[serde(default)]
+    pub data_rate_limit_window_ms: u32,
     #[serde(default)]
     pub sent_datagrams: i64,
     #[serde(default)]
@@ -854,6 +886,21 @@ pub struct StartStreamInput {
     /// the plaintext media path no longer exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_key: Option<String>,
+    /// 뷰어 자체 패널 메트릭(선택, 물리 픽셀). 호스트는 기기별 최근값만
+    /// 캐시한다 — 확장 디스플레이 기본 모드 도출에만 쓰이고, 자동 리사이즈
+    /// 같은 부작용은 없다(생성은 호스트 UI의 명시적 동작). 구버전 뷰어는
+    /// 이 필드를 생략한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_display: Option<ViewerDisplayMetricsMsg>,
+}
+
+/// 뷰어가 보고한 자기 화면의 물리 메트릭(startStream 첨부).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerDisplayMetricsMsg {
+    pub physical_width: u32,
+    pub physical_height: u32,
+    pub density_dpi: u32,
 }
 
 /// Decode and validate a viewer-supplied media key. Exactly 32 bytes of
@@ -1110,6 +1157,7 @@ mod stream_control_tests {
                 hint: "hardware H.264".into(),
             }],
             media_host: Some("192.168.0.134".into()),
+            public_media_endpoint: None,
             displays: Vec::new(),
             encoder_experiments: Vec::new(),
             reconfigure_encoder_experiment: None,
@@ -1132,6 +1180,7 @@ mod stream_control_tests {
             platform: "macos".into(),
             capture_backends: Vec::new(),
             media_host: None,
+            public_media_endpoint: None,
             displays: Vec::new(),
             encoder_experiments: phase_a_encoder_experiments(),
             reconfigure_encoder_experiment: None,

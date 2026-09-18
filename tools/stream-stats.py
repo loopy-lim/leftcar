@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import json
+import math
 import signal
 import socket
 import subprocess
@@ -125,7 +126,9 @@ def main():
 
     log = open(args.log, "a") if args.log else None
     trackers = {}
-    deadline = time.time() + args.duration if args.duration else None
+    if not math.isfinite(args.interval) or args.interval <= 0 or args.interval > 60 or (args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0)):
+        parser.error("interval must be 0..60 seconds and duration must be positive")
+    deadline = time.monotonic() + args.duration if args.duration else None
     stopped = False
 
     def stop(_sig, _frame):
@@ -136,16 +139,22 @@ def main():
     signal.signal(signal.SIGTERM, stop)
 
     print(f"polling {args.host}:{args.port} every {args.interval}s — Ctrl-C to stop")
-    while not stopped and (deadline is None or time.time() < deadline):
+    while not stopped and (deadline is None or time.monotonic() < deadline):
         try:
             status = get_status(args.host, args.port, token)
         except (OSError, RuntimeError, ValueError) as error:
+            if log:
+                # Preserve failed acquisition attempts so a quiet tail cannot
+                # masquerade as a shorter successful run. No credential data.
+                log.write(json.dumps({"time": time.time(), "monotonicTime": time.monotonic(),
+                                      "pollError": type(error).__name__}) + "\n")
+                log.flush()
             print(f"{time.strftime('%H:%M:%S')} host unreachable: {error}")
             time.sleep(args.interval)
             continue
         now = time.time()
         if log:
-            log.write(json.dumps({"time": now, **status}, ensure_ascii=False) + "\n")
+            log.write(json.dumps({"time": now, "monotonicTime": time.monotonic(), **status}, ensure_ascii=False) + "\n")
             log.flush()
         line = time.strftime("%H:%M:%S")
         for view in status.get("sessions", []):
@@ -166,6 +175,10 @@ def main():
                 f" gaps={view.get('receiverFrameGaps', 0)}"
                 f" recov={view.get('recoveryKeyframes', 0)}"
                 f" idrRes={view.get('receiverPairedIdrResumes', 0)}"
+                f" auP95={view.get('auBytesP95', 0) // 1024}K"
+                f" idrP95={view.get('idrBytesP95', 0) // 1024}K"
+                f" nack={view.get('nacksServed', 0)}/{view.get('nacksMissed', 0)}"
+                f" drlW={view.get('dataRateLimitWindowMs', 0)}ms"
                 f" wire={split_wire if split_wire is not None else '-'}"
                 f" age={capture_age if capture_age is not None else '-'}"
                 f" inRtt={input_rtt if input_rtt is not None else '-'}"

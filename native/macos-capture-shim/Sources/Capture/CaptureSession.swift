@@ -247,6 +247,11 @@ final class CaptureSession {
      var lastAuIsKeyframe = false
      var maxAuBytes: UInt64 = 0
      var maxAuFragments: UInt32 = 0
+    // Rolling byte-size distribution of sent access units (all frames, and
+    // keyframe-only) — the per-frame burst evidence the last/max scalars
+    // cannot show. Exported as auBytesP*/idrBytesP* percentiles.
+     var auBytesSamples: [UInt64] = []
+     var keyframeAuBytesSamples: [UInt64] = []
     // Frames discarded while waiting for the next independently decodable
     // IDR are expected recovery behavior, not evidence that the sender is
     // congested. Keep them in user-facing drop telemetry, but exclude them

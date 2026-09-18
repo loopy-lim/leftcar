@@ -2566,6 +2566,44 @@ struct EncodePolicyTests {
         precondition(resolvedUdpSendBufferBytes(override: 1024) == 64 * 1024)
         precondition(resolvedUdpSendBufferBytes(override: 64 * 1024 * 1024) == 2 * 1024 * 1024)
 
+        // DataRateLimits burst-window switch: absent keeps the historical
+        // 1s window, present clamps into 0.05–1.0s, and the byte limit
+        // scales with the window at the same per-second headroom.
+        precondition(resolvedDataRateLimitWindowSeconds(override: nil) == 1.0)
+        precondition(resolvedDataRateLimitWindowSeconds(override: 0.25) == 0.25)
+        precondition(resolvedDataRateLimitWindowSeconds(override: 0.01) == 0.05)
+        precondition(resolvedDataRateLimitWindowSeconds(override: 5) == 1.0)
+        precondition(resolvedDataRateLimitWindowSeconds(override: 0) == 1.0)
+        precondition(resolvedDataRateLimitWindowSeconds(override: -1) == 1.0)
+        precondition(
+            dataRateLimitValues(bitrate: 60_000_000, windowSeconds: 1.0)
+                == [9_375_000.0, 1.0]
+        )
+        precondition(
+            dataRateLimitValues(bitrate: 60_000_000, windowSeconds: 0.25)
+                == [2_343_750.0, 0.25]
+        )
+        precondition(
+            dataRateLimitValues(bitrate: 1_000, windowSeconds: 0.05) == [8.0, 0.05]
+        )
+
+        // Byte-size distributions reuse the rolling-sample percentile core
+        // the timing metrics already use.
+        var byteSamples: [UInt64] = []
+        appendRollingSample(100, to: &byteSamples)
+        appendRollingSample(200, to: &byteSamples)
+        appendRollingSample(300, to: &byteSamples)
+        precondition(percentile(byteSamples, quantile: 0.5) == 200)
+        precondition(percentile(byteSamples, quantile: 0.99) == 300)
+        precondition(percentile95(byteSamples) == 300)
+        precondition(percentile([], quantile: 0.95) == 0)
+
+        // Retransmit-ring store side must match the NAK lookup side: single
+        // sessions send without a tile side but are always looked up as .left.
+        precondition(retransmitStoreSide(nil) == .left)
+        precondition(retransmitStoreSide(.left) == .left)
+        precondition(retransmitStoreSide(.right) == .right)
+
         // Age valve: disabled at zero, boundary-inclusive at the limit,
         // tolerant of a wrapped or zero timestamp.
         precondition(networkQueueAgeExpired(oldestQueuedNs: 0, nowNs: 1_000, limitNs: 0) == false)

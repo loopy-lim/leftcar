@@ -343,11 +343,13 @@ extension CaptureSession {
                 value: target as CFNumber
             )
             if status == noErr {
-                let hardLimitBytes = vtHardLimitBytes(bitrate: target)
                 _ = VTSessionSetProperty(
                     singleSession,
                     key: kVTCompressionPropertyKey_DataRateLimits,
-                    value: [hardLimitBytes, 1] as CFArray
+                    value: dataRateLimitValues(
+                        bitrate: target,
+                        windowSeconds: configuredDataRateLimitWindowSeconds()
+                    ) as CFArray
                 )
                 applied = true
             } else {

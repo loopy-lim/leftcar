@@ -1,5 +1,13 @@
 import Foundation
 
+/// 단일(비분할) 세션은 tileSide 없이 전송된다. NAK 조회(handleViewerNack)는
+/// 비분할 세션을 항상 .left로 찾으므로 저장도 같은 키로 정규화해야 한다 —
+/// 그렇지 않으면 모든 재전송 요청이 구조적으로 영원히 미스한다. nil 고립
+/// 키는 링 내부의 세션 모드 전환 격리용으로만 남긴다.
+func retransmitStoreSide(_ tileSide: TileSide?) -> TileSide {
+    tileSide ?? .left
+}
+
 /// One process-wide owner for plaintext RTX payloads across every capture
 /// session and side. Defaults are initial safety budgets, not measured optima.
 /// Byte limits count retained Data envelope lengths, not process RSS or
@@ -151,7 +159,6 @@ final class MediaRetransmitRing {
         // modes during a session. Per-session ownership never aliases.
         side.map { $0 == .left ? 0 : 1 } ?? 2
     }
-
     func store(_ envelope: Data, side: TileSide?) {
         let start = envelope.startIndex
         guard envelope.count > 7, envelope[start] == 0x47 else { return }

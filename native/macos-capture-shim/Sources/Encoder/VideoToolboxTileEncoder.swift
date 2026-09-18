@@ -107,6 +107,17 @@ func vtHardLimitBytes(bitrate: Int) -> Int {
     max(1, Int(Double(bitrate) / 8.0 * 1.25))
 }
 
+/// DataRateLimits [bytes, seconds] 쌍 — 실험 윈도(LEFTCAR_DRL_WINDOW_SECONDS)
+/// 가 설정과 런타임 갱신 경로 전부에서 같은 스케일로 적용되게 한곳에 모은다.
+/// 윈도가 줄면 바이트 상한도 같은 비율로 스케일해 초당 125% 헤드룸을 유지한다.
+func dataRateLimitValues(bitrate: Int, windowSeconds: Double) -> [Double] {
+    let bytes = max(
+        1,
+        (Double(vtHardLimitBytes(bitrate: bitrate)) * windowSeconds).rounded()
+    )
+    return [bytes, windowSeconds]
+}
+
 final class VideoToolboxTileEncoder {
     let side: TileSide
     let encoderID: String
@@ -219,12 +230,14 @@ final class VideoToolboxTileEncoder {
                 ),
                 "AverageBitRate"
             )
-            let hardLimitBytes = vtHardLimitBytes(bitrate: max(1_000_000, bitrate))
             try Self.require(
                 VTSessionSetProperty(
                     compressionSession,
                     key: kVTCompressionPropertyKey_DataRateLimits,
-                    value: [hardLimitBytes, 1] as CFArray
+                    value: dataRateLimitValues(
+                        bitrate: max(1_000_000, bitrate),
+                        windowSeconds: configuredDataRateLimitWindowSeconds()
+                    ) as CFArray
                 ),
                 "DataRateLimits"
             )
@@ -385,11 +398,13 @@ final class VideoToolboxTileEncoder {
             key: kVTCompressionPropertyKey_AverageBitRate,
             value: bounded as CFNumber
         )
-        let hardLimitBytes = vtHardLimitBytes(bitrate: bounded)
         let rateStatus = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [hardLimitBytes, 1] as CFArray
+            value: dataRateLimitValues(
+                bitrate: bounded,
+                windowSeconds: configuredDataRateLimitWindowSeconds()
+            ) as CFArray
         )
         return bitrateStatus == noErr && rateStatus == noErr
     }

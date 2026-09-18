@@ -254,13 +254,16 @@ extension CaptureSession {
                 NSLog("Leftcar average bitrate rejected: status=%d", averageBitrateStatus)
             }
             // DataRateLimits is expressed as [bytes, seconds], while
-            // AverageBitRate is expressed in bits per second. Keep a small
-            // 1-second headroom without allowing multi-second bursts.
-            let hardLimitBytes = vtHardLimitBytes(bitrate: Int(avgBitrate))
+            // AverageBitRate is expressed in bits per second. The window
+            // (LEFTCAR_DRL_WINDOW_SECONDS, default 1s) keeps the per-second
+            // headroom while capping how long a burst may stretch.
             let dataRateStatus = VTSessionSetProperty(
                 s,
                 key: kVTCompressionPropertyKey_DataRateLimits,
-                value: [hardLimitBytes, 1] as CFArray
+                value: dataRateLimitValues(
+                    bitrate: Int(avgBitrate),
+                    windowSeconds: configuredDataRateLimitWindowSeconds()
+                ) as CFArray
             )
             if dataRateStatus != noErr {
                 NSLog("Leftcar data rate limit rejected: status=%d", dataRateStatus)

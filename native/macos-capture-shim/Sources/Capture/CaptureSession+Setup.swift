@@ -110,7 +110,10 @@ extension CaptureSession {
         // pass the ring's marker filter — parity, config, audio, and control
         // never retransmit. On the TCP transport the ring is harmless (TCP
         // does not lose datagrams) and the NAK reply re-seals over TCP.
-        retransmitRing.store(data, side: tileSide)
+        // Single-session datagrams carry no tile side, but NAK lookup always
+        // uses .left for non-split sessions — store under the same key or
+        // every retransmit request misses forever.
+        retransmitRing.store(data, side: retransmitStoreSide(tileSide))
         if mediaTransport.usesTCP {
             let sent = sendTCPFrame(data, fd: fd)
             if sent == data.count { return sent }

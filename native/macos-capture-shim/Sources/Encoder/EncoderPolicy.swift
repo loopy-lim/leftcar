@@ -676,6 +676,26 @@ func resolvedUdpSendBufferBytes(override: Int?) -> Int {
     return min(max(override, 64 * 1024), 2 * 1024 * 1024)
 }
 
+/// DataRateLimits burst-window override (LEFTCAR_DRL_WINDOW_SECONDS, in
+/// seconds). The historical 1-second window lets a full second of encoded
+/// bytes land as one send burst; shorter windows cap scene-change AU bursts
+/// the way NVENC's single-frame VBV does, at the cost of a harder ceiling
+/// for large recovery keyframes. Clamped to the 0.05–1.0s experiment range.
+func resolvedDataRateLimitWindowSeconds(override: Double?) -> Double {
+    guard let override, override > 0 else { return 1.0 }
+    return min(max(override, 0.05), 1.0)
+}
+
+/// Window the running environment resolves to. The environment cannot
+/// change mid-process, so every read — encoder setup, runtime bitrate
+/// updates, status export — observes the same experiment value.
+func configuredDataRateLimitWindowSeconds() -> Double {
+    resolvedDataRateLimitWindowSeconds(
+        override: ProcessInfo.processInfo.environment["LEFTCAR_DRL_WINDOW_SECONDS"]
+            .flatMap(Double.init)
+    )
+}
+
 func shouldStartNetworkRecovery(
     awaitingKeyframe: Bool,
     keyframeInFlight: Bool,

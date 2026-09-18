@@ -118,9 +118,18 @@ extension CaptureSession {
     }
 
      func recordAccessUnitShape(bytes: UInt64, isKeyframe: Bool, sendUs: UInt64) {
-        guard !isKeyframe else { return }
         let nowNs = DispatchTime.now().uptimeNanoseconds
         stateLock.lock()
+        appendRollingSample(bytes, to: &auBytesSamples)
+        if isKeyframe {
+            appendRollingSample(bytes, to: &keyframeAuBytesSamples)
+        }
+        // Keyframe size feeds the byte distributions above; motion policy
+        // stays delta-only so a recovery IDR cannot register as high motion.
+        guard !isKeyframe else {
+            stateLock.unlock()
+            return
+        }
         let sample = Double(bytes)
         recentAuBytesEwma = recentAuBytesEwma == 0
             ? sample
@@ -228,11 +237,13 @@ extension CaptureSession {
                 value: targetBitrate as CFNumber
             )
             if bitrateStatus == noErr {
-                let hardLimitBytes = vtHardLimitBytes(bitrate: targetBitrate)
                 _ = VTSessionSetProperty(
                     session,
                     key: kVTCompressionPropertyKey_DataRateLimits,
-                    value: [hardLimitBytes, 1] as CFArray
+                    value: dataRateLimitValues(
+                        bitrate: targetBitrate,
+                        windowSeconds: configuredDataRateLimitWindowSeconds()
+                    ) as CFArray
                 )
             }
         }
