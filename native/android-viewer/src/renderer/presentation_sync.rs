@@ -446,6 +446,7 @@ mod tests {
             output: ReadyOutput {
                 index: pts_us as usize,
                 pts_us,
+                arrived_at_ns: 0,
             },
             pts_us,
         }
@@ -712,6 +713,7 @@ mod display_tests {
                 output: viewer_decoder::ReadyOutput {
                     index: pts as usize,
                     pts_us: pts,
+                    arrived_at_ns: 0,
                 },
             };
             pair.push_ready(TileSide::Left, ready(1), origin + 123);
@@ -747,6 +749,7 @@ mod balanced_ownership_tests {
             output: ReadyOutput {
                 index: pts as usize,
                 pts_us: pts,
+                arrived_at_ns: 0,
             },
         }
     }

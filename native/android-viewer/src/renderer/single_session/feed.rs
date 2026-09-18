@@ -102,7 +102,7 @@ pub(super) fn drain_pending_output(
 }
 
 fn record_decoder_output(
-    dec: &viewer_decoder::AndroidDecoder,
+    dec: &mut viewer_decoder::AndroidDecoder,
     rendered_before: u64,
     stats: &mut RendererStats,
     control: &RendererControl,
@@ -132,6 +132,10 @@ fn record_decoder_output(
     if rendered_delta > 0 {
         if let Some(age) = release_capture_age_ms {
             store_smoothed_latency(&control.capture_to_surface_release_ms, age);
+            // 적응형 지터 버퍼: 릴리스 나이 p95에 맞춰 표시 지연을 자동
+            // 조절한다(0~66ms). 스무딩 OFF면 지연은 0으로 되돌아간다.
+            let delay_us = dec.push_release_age_ms(age.min(u32::MAX as u64) as u32);
+            dec.set_presentation_delay_us(delay_us);
         } else {
             control
                 .capture_to_surface_release_ms

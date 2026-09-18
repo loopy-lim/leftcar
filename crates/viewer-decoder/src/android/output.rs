@@ -13,10 +13,28 @@ pub const MAX_RENDERABLE_OUTPUTS: usize = 1;
 /// interval during bursts for an even one-frame-per-vsync cadence.
 pub const MAX_PARKED_OUTPUTS: usize = 2;
 
+/// CLOCK_MONOTONIC reader shared by the presentation jitter buffer. libc is
+/// already a dependency (media NDK bindings); macOS host tests resolve the
+/// same symbol.
+pub fn monotonic_now_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as u64).saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyOutput {
     pub index: usize,
     pub pts_us: i64,
+    /// Decode-pump dequeue instant (presentation smoothing uses it as the
+    /// jitter-buffer release key). Zero instant when constructed by tests.
+    pub arrived_at_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +86,7 @@ impl AndroidDecoder {
                     return Ok(Some(ReadyOutput {
                         index: value as usize,
                         pts_us: info.presentation_time_us,
+                        arrived_at_ns: crate::android::output::monotonic_now_ns(),
                     }));
                 }
                 error => {

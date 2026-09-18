@@ -170,8 +170,12 @@ pub struct AndroidDecoder {
     /// Presentation-smoothing hold: the newest frame parked for one frame
     /// period while its predecessor covers the current vsync (micro-jitter
     /// smoothing; see PRESENTATION_SMOOTH).
-    smooth_hold_until: Option<(i64, std::time::Instant)>,
+    /// Adaptive jitter-buffer delay applied in freshness mode when
+    /// PRESENTATION_SMOOTH is on. Driven by release-age feedback; 0 = the
+    /// latency-first newest-wins pump.
+    presentation_delay_us: u64,
     frame_period_us: u64,
+    release_age_window_ms: std::collections::VecDeque<u32>,
 }
 
 /// Micro-jitter smoothing switch, mirrored to the client so the Viewer UI can
@@ -180,6 +184,11 @@ pub struct AndroidDecoder {
 /// pair arrives together, and the hold disengages the moment arrivals bunch
 /// harder than one frame.
 pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Release-age p95 the adaptive jitter buffer steers toward (45ms).
+pub const PRESENTATION_AGE_TARGET_US: u64 = 45_000;
+/// Adaptive jitter-buffer ceiling (4 frames at 60fps ≈ 66ms).
+pub const PRESENTATION_DELAY_MAX_US: u64 = 66_000;
 
 unsafe impl Send for AndroidDecoder {}
 
@@ -390,8 +399,9 @@ impl AndroidDecoder {
                 output_target_ns: None,
                 parked_outputs: VecDeque::new(),
                 last_paced_target_ns: None,
-                smooth_hold_until: None,
                 frame_period_us: (1_000_000u64).saturating_div(u64::from(fps.max(1))),
+                presentation_delay_us: 0,
+                release_age_window_ms: std::collections::VecDeque::new(),
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -523,6 +533,37 @@ impl AndroidDecoder {
         self.output_target_ns = target_ns;
     }
 
+    /// Record one capture-to-release age sample and return the updated
+    /// adaptive jitter-buffer delay. The controller steers the release-age
+    /// p95 toward [`PRESENTATION_AGE_TARGET_US`]: positive error grows the
+    /// hold (at most +8.3ms per sample, ≈250ms/s), negative error shrinks it
+    /// so a calm link returns to the latency-first zero buffer.
+    /// Override the adaptive delay from the client toggle path.
+    pub fn set_presentation_delay_us(&mut self, delay_us: u64) {
+        self.presentation_delay_us = delay_us;
+    }
+
+    pub fn push_release_age_ms(&mut self, age_ms: u32) -> u64 {
+        if !PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
+            self.presentation_delay_us = 0;
+            self.release_age_window_ms.clear();
+            return 0;
+        }
+        self.release_age_window_ms.push_back(age_ms);
+        while self.release_age_window_ms.len() > 64 {
+            self.release_age_window_ms.pop_front();
+        }
+        let mut sorted: Vec<u32> = self.release_age_window_ms.iter().copied().collect();
+        sorted.sort_unstable();
+        let p95_idx = ((sorted.len() as f64) * 0.95) as usize;
+        let p95_us = u64::from(sorted[p95_idx.min(sorted.len() - 1)]);
+        let err = p95_us as i64 - PRESENTATION_AGE_TARGET_US as i64;
+        let step = err.clamp(-8_333, 8_333);
+        let next = (self.presentation_delay_us as i64 + step).clamp(0, PRESENTATION_DELAY_MAX_US as i64) as u64;
+        self.presentation_delay_us = next;
+        next
+    }
+
     pub fn pump_latest_output(&mut self, timeout_us: i64) -> Result<bool, DecoderError> {
         let mut ready = [(0usize, 0i64); 64];
         let mut ready_count = 0usize;
@@ -556,6 +597,7 @@ impl AndroidDecoder {
             self.parked_outputs.push_back(ReadyOutput {
                 index: idx,
                 pts_us,
+                arrived_at_ns: crate::android::output::monotonic_now_ns(),
             });
         }
         if self.parked_outputs.is_empty() {
@@ -564,72 +606,43 @@ impl AndroidDecoder {
 
         match self.output_target_ns {
             None => {
-                // Burst catch-up keeps newest-wins: more than two ready
-                // frames means arrival outran presentation, and the skip is
-                // cheaper than adding latency to everything behind it.
-                while self.parked_outputs.len() > 2 {
-                    let output = self.parked_outputs.pop_front().expect("length checked");
-                    self.discard_output(output)?;
-                }
                 self.last_paced_target_ns = None;
+                let now_ns = crate::android::output::monotonic_now_ns();
+                let smoothing = PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
+                let delay_ns = if smoothing {
+                    self.presentation_delay_us.saturating_mul(1_000)
+                } else {
+                    0
+                };
 
-                let now = std::time::Instant::now();
-                if let Some((held_pts, deadline)) = self.smooth_hold_until {
-                    if now < deadline && self.parked_outputs.len() == 1 {
-                        // Still covering the current frame period with the
-                        // predecessor; the held frame releases at the
-                        // deadline (next tick past it).
-                        return Ok(false);
+                if delay_ns == 0 {
+                    // Latency-first freshness: keep the newest, discard the
+                    // rest. Any transit burst shows up as a skipped frame.
+                    while self.parked_outputs.len() > MAX_RENDERABLE_OUTPUTS {
+                        let output = self.parked_outputs.pop_front().expect("length checked");
+                        self.discard_output(output)?;
                     }
-                    if now >= deadline
-                        && self
-                            .parked_outputs
-                            .front()
-                            .is_some_and(|output| output.pts_us == held_pts)
-                    {
-                        let output = self.parked_outputs.pop_front().expect("front checked");
-                        let r = unsafe {
-                            AMediaCodec_releaseOutputBuffer(self.codec, output.index, true)
-                        };
-                        if r != AMEDIA_OK {
-                            return Err(DecoderError::OpFailed { status: r });
-                        }
-                        self.frames_rendered += 1;
-                        self.last_released_pts_us = Some(output.pts_us);
-                        self.smooth_hold_until = None;
-                        return Ok(true);
+                } else {
+                    // Adaptive jitter buffer: hold decoded frames briefly so
+                    // late-arriving frames display late instead of being
+                    // skipped. Depth is bounded by the delay; overrun falls
+                    // back to live-edge skipping.
+                    let period_ns = self.frame_period_us.max(4_000).saturating_mul(1_000);
+                    let buffer_len = 1 + (delay_ns / period_ns) as usize;
+                    while self.parked_outputs.len() > buffer_len + 1 {
+                        let output = self.parked_outputs.pop_front().expect("length checked");
+                        self.discard_output(output)?;
                     }
-                    // Either arrivals bunched harder than the one-frame
-                    // jitter the hold targets, or the held frame already
-                    // moved on: drop the hold and fall through to
-                    // newest-wins.
-                    self.smooth_hold_until = None;
-                }
-
-                if self.parked_outputs.len() == 2
-                    && PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    let step = self.parked_outputs[1].pts_us.saturating_sub(self.parked_outputs[0].pts_us);
-                    if (4_000..=35_000).contains(&step) {
-                        // One-frame arrival bunch: render the older frame now
-                        // and hold the newer for a frame period, so the
-                        // display cadence stays unbroken instead of skipping
-                        // the older frame entirely.
-                        let older = self.parked_outputs.pop_front().expect("length checked");
-                        let held_pts = self.parked_outputs.front().expect("length checked").pts_us;
-                        let r = unsafe {
-                            AMediaCodec_releaseOutputBuffer(self.codec, older.index, true)
-                        };
-                        if r != AMEDIA_OK {
-                            return Err(DecoderError::OpFailed { status: r });
+                    match self.parked_outputs.front() {
+                        None => return Ok(false),
+                        Some(front) => {
+                            let due = front.arrived_at_ns.saturating_add(delay_ns);
+                            if now_ns < due {
+                                // The predecessor still covers the current
+                                // frame period inside the jitter buffer.
+                                return Ok(false);
+                            }
                         }
-                        self.frames_rendered += 1;
-                        self.last_released_pts_us = Some(older.pts_us);
-                        self.smooth_hold_until = Some((
-                            held_pts,
-                            now + std::time::Duration::from_micros(self.frame_period_us.max(8_000)),
-                        ));
-                        return Ok(true);
                     }
                 }
 
