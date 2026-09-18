@@ -109,6 +109,11 @@ export interface StreamLauncher {
    * 기존처럼 비율 행을 보여 준다.
    */
   isXrWindowRatioSupported?(): Promise<boolean>;
+  /**
+   * 뷰어 자체 패널의 물리 메트릭. 확장 디스플레이 기본 모드 도출에 쓰인다.
+   * 구버전 네이티브 모듈엔 없을 수 있고, 호출부는 그 경우 필드를 생략한다.
+   */
+  getDisplayMetrics?(): Promise<ViewerDisplayMetrics>;
 }
 
 /** Negotiate the additive native method; old modules keep their exact arity. */
@@ -120,6 +125,30 @@ async function openConfiguredStream(launcher: StreamLauncher,
   } else {
     const [port,host,width,height,fps,encoder,display,showFps,cursor,language,audio] = args;
     await launcher.openStream(port,host,width,height,fps,encoder,display,showFps,cursor,language,audio);
+  }
+}
+
+/** 뷰어 자체 패널의 물리 메트릭(네이티브 getDisplayMetrics 응답). */
+export interface ViewerDisplayMetrics {
+  physicalWidth: number;
+  physicalHeight: number;
+  densityDpi: number;
+}
+
+/** 패널 메트릭을 읽는다. 네이티브 모듈이 없거나(구버전 APK) 유효하지
+ * 않으면 undefined — startStream에서 필드 생략으로 이어진다. */
+export async function readViewerDisplayMetrics(
+  launcher: StreamLauncher | undefined,
+): Promise<ViewerDisplayMetrics | undefined> {
+  if (!launcher?.getDisplayMetrics) return undefined;
+  try {
+    const metrics = await launcher.getDisplayMetrics();
+    if (!metrics?.physicalWidth || !metrics?.physicalHeight || !metrics?.densityDpi) {
+      return undefined;
+    }
+    return metrics;
+  } catch {
+    return undefined;
   }
 }
 
@@ -143,6 +172,9 @@ export interface StartStreamArgs {
   contentMode?: StreamContentMode;
   viewerIps?: string[];
   udpStability?: UdpStabilitySelection;
+  /** 뷰어 자체 패널 메트릭 — 호스트가 기기별로 기억하고 확장 디스플레이
+   * 기본 모드 도출에만 쓴다. 생략해도 스트림은 동일하다. */
+  viewerDisplay?: ViewerDisplayMetrics;
 }
 
 export interface StartedStream {

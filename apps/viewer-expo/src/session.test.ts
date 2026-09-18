@@ -271,6 +271,42 @@ describe("control session connect lifecycle", () => {
 });
 
 describe("connection-lost invalidation (stale connected badge)", () => {
+  it("retains the selected target for a native window after transport loss and watches replacement sockets", async () => {
+    const { connect } = await import("./control");
+    const first = makeClient();
+    const second = makeClient();
+    const third = makeClient();
+    vi.mocked(connect).mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third);
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    const origin = session.captureRequestContext();
+    first.emitClosed();
+    expect(session.controlClient()).toBeNull();
+    expect(session.controlHost()).toBe("");
+    expect(session.captureRequestContext()).toBe(origin);
+    await expect(session.reconnectHost()).resolves.toBe(second);
+    expect(session.controlHost()).toBe("10.0.0.1:7777");
+    first.emitClosed();
+    expect(session.controlClient()).toBe(second);
+    second.emitClosed();
+    expect(session.controlClient()).toBeNull();
+    await expect(session.reconnectHost()).resolves.toBe(third);
+  });
+
+  it.each(["disconnect", "select"])("transport-loss recovery cannot undo an explicit %s", async (action) => {
+    const { connect } = await import("./control");
+    const first = makeClient();
+    vi.mocked(connect).mockResolvedValueOnce(first);
+    const session = await import("./session");
+    await session.connectHost("10.0.0.1", 7777);
+    const origin = session.captureRequestContext();
+    first.emitClosed();
+    if (action === "disconnect") session.disconnectHost();
+    else session.beginHostSelection();
+    await expect(session.reconnectHost(origin)).rejects.toMatchObject({ name: "AbortError" });
+    expect(session.controlClient()).toBeNull();
+  });
+
   it("a closed socket invalidates the session so the home badge stops claiming connected", async () => {
     const { connect } = await import("./control");
     const client = makeClient();

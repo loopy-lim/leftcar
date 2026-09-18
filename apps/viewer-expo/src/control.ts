@@ -57,6 +57,7 @@ export interface CatalogView {
   platform: "macos" | "windows" | "linux" | string;
   captureBackends: CaptureBackendInfo[];
   mediaHost?: string | null;
+  publicMediaEndpoint?: string | null;
   displays: DisplayInfo[];
   encoderExperiments?: unknown;
   udpStabilityCapabilities?: unknown;
@@ -218,6 +219,8 @@ export interface ReconfigureStreamOutput {
 }
 
 export interface ControlClient {
+  /** Numeric peer from the connected socket, including MagicDNS resolution. */
+  readonly remoteAddress?: string;
   request<T>(command: string, args?: unknown, onWritten?: () => void): Promise<T>;
   close(): void;
   /** 서버가 서명으로 증명한 호스트 공개키(b64url). 평문(루프백) 모드면 없다. */
@@ -487,6 +490,7 @@ export function connect(
         socket.destroy();
       },
       hostKey: clientHostKey,
+      remoteAddress: socket.remoteAddress,
     });
 
     /** 한 줄의 평문 JSON을 응답 매칭으로 처리한다. */

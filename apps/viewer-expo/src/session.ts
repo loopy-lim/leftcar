@@ -111,8 +111,20 @@ export function captureRequestContext(): SessionRequestContext | null {
 
 export function isRequestContextCurrent(context: SessionRequestContext): boolean {
   return activeContext === context &&
-    client === context.client &&
+    (client === context.client || client === null) &&
     connectGeneration === context.selectionGeneration;
+}
+
+function watchControlClose(socket: ControlClient): void {
+  socket.whenClosed(() => {
+    if (client !== socket) return;
+    client = null;
+    hostAddr = "";
+    // Transport loss is not a user selection change. Native windows retain
+    // the verified target/selection so they can reconnect without MainActivity.
+    // Explicit disconnect and new selections still invalidate this context.
+    notifyConnectionChanged();
+  });
 }
 
 export function bindRequestContext(error: unknown, context: SessionRequestContext): void {
@@ -215,7 +227,7 @@ export async function connectHost(
   }
   // Keep the previous connection alive until the replacement succeeds, then
   // release it so switching between multiple computers does not leak sockets.
-  if (client && client !== c) client.close();
+  const previous = client;
   client = c;
   hostAddr = `${host}:${port}`;
   hostTarget = host;
@@ -227,19 +239,13 @@ export async function connectHost(
     identity: opened.identity,
     credential: opened.credential,
   };
+  if (previous && previous !== c) previous.close();
   markConnected();
   // 소켓이 저절로 닫히면(호스트 재시작·네트워크 전환) 죽은 클라이언트를
   // "연결됨"으로 표시하지 않고 자동 재연결이 동작하도록 상태를 즉시
   // 무효화한다. 우리가 close()한 경우엔 disconnectHost가 이미 정리했으므로
   // 이 클라이언트가 아닐 때는 무시한다.
-  c.whenClosed(() => {
-    if (client !== c) return;
-    client = null;
-    hostAddr = "";
-    activeContext = null;
-    reconnectInFlight = null;
-    notifyConnectionChanged();
-  });
+  watchControlClose(c);
   notifyConnectionChanged();
   return c;
 }
@@ -262,8 +268,8 @@ export async function reconnectHost(
       c.close();
       throw abortError();
     }
-    if (previous && previous !== c) previous.close();
     client = c;
+    hostAddr = `${origin.target.host}:${origin.target.port}`;
     activeContext = {
       client: c,
       target: origin.target,
@@ -271,7 +277,10 @@ export async function reconnectHost(
       identity: opened.identity,
       credential: opened.credential,
     };
+    if (previous && previous !== c) previous.close();
+    watchControlClose(c);
     markConnected();
+    notifyConnectionChanged();
     return c;
   })();
   reconnectInFlight = { generation: origin.selectionGeneration, promise };

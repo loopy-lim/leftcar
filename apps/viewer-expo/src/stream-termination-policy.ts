@@ -1,10 +1,11 @@
 import type { ActiveStream } from "./catalog-model-types";
 
-export type LocalStreamTerminationReason = 4 | 5;
+export type LocalStreamTerminationReason = 1 | 4 | 5;
 
 export interface StreamTerminationEvent {
   port: number;
-  reason: LocalStreamTerminationReason;
+  reason: LocalStreamTerminationReason | 0;
+  generation?: string;
 }
 
 export interface StreamTerminationSubscription {
@@ -18,13 +19,13 @@ export interface RestartRequest {
 
 export type HostTerminationDisposition =
   | "viewerClosed"
-  | "feedbackTimeout"
   | "hostStopped"
   | null;
 
 export function classifyHostTermination(message: string): HostTerminationDisposition {
   if (message.trim().toLowerCase() === "viewer closed stream") return "viewerClosed";
-  if (message.includes("feedback timeout")) return "feedbackTimeout";
+  // Feedback loss belongs to the existing unhealthy-session restart path.
+  // Treating it as terminal would close the retained native window first.
   if (message.includes("host operator stopped")) return "hostStopped";
   return null;
 }
@@ -38,7 +39,7 @@ function isLocalStreamTerminationEvent(
     typeof port === "number" &&
     Number.isFinite(port) &&
     Number.isInteger(port) &&
-    (reason === 4 || reason === 5)
+    (reason === 1 || reason === 4 || reason === 5)
   );
 }
 

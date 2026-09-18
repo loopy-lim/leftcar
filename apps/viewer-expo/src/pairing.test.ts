@@ -195,13 +195,17 @@ describe("host endpoint", () => {
     expect(parseHostEndpoint("192.168.0.134:0")).toBeNull();
   });
 
-  it("accepts private and Tailscale targets but rejects public internet hosts", () => {
+  it("accepts private, Tailscale, and public unicast IPv4 targets but rejects invalid hosts", () => {
     expect(isTrustedHost("10.0.0.5")).toBe(true);
     expect(isTrustedHost("100.100.20.30")).toBe(true);
     expect(isTrustedHost("my-mac.example.ts.net")).toBe(true);
-    expect(isTrustedHost("8.8.8.8")).toBe(false);
+    expect(isTrustedHost("8.8.8.8")).toBe(true);
+    expect(isTrustedHost("1.217.35.59")).toBe(true);
     expect(isTrustedHost("example.com")).toBe(false);
-    expect(parseHostEndpoint("8.8.8.8:7777")).toBeNull();
+    expect(isTrustedHost("0.0.0.0")).toBe(false);
+    expect(isTrustedHost("224.0.0.1")).toBe(false);
+    expect(isTrustedHost("255.255.255.255")).toBe(false);
+    expect(parseHostEndpoint("8.8.8.8:7777")).toEqual({ host: "8.8.8.8", port: 7777 });
   });
 });
 

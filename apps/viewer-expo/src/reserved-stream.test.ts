@@ -56,6 +56,78 @@ function io() {
   return { launcher, control, calls };
 }
 describe("reserved production launch lifecycle", () => {
+  it("closes the replacement through the selection that successfully restored it", async () => {
+    const { launcher } = io();
+    const stopped: number[] = [];
+    let originalSelectionActive = true;
+    const original = async <T>(): Promise<T> => {
+      if (!originalSelectionActive) throw new Error("Host selection changed");
+      return undefined as T;
+    };
+    const restored = async <T>(_command: string, payload?: unknown): Promise<T> => {
+      stopped.push((payload as { session: number }).session);
+      return undefined as T;
+    };
+    const reservation = new ReservedStream(5003, { split: false, target }, launcher,
+      original, new DecoderReservations({ maxInstances: 1 }));
+    const started = { session: 20, ...target, mediaKey: "fixture", viewerIps: [],
+      mediaTransport: "udp" as const, encoderExperiment: "auto" as const };
+    await reservation.run({ split: false, target }, async () => started);
+    originalSelectionActive = false;
+    await reservation.run({ split: false, target }, async () => ({ ...started, session: 21 }), restored);
+    await reservation.close();
+    expect(stopped).toEqual([21]);
+  });
+
+  it("stops a recovered session through the current control connection", async () => {
+    const { launcher } = io();
+    const stopped: number[] = [];
+    const obsolete = async () => { throw new Error("control connection closed"); };
+    const current = async <T>(command: string, payload?: unknown): Promise<T> => {
+      if (command === "stopStream") stopped.push((payload as { session: number }).session);
+      return undefined as T;
+    };
+    const reservation = new ReservedStream(5003, { split: false, target }, launcher,
+      obsolete, new DecoderReservations({ maxInstances: 1 }), current);
+    await reservation.run({ split: false, target }, async () => ({ session: 18, ...target, mediaKey: "fixture", viewerIps: [],
+      mediaTransport: "udp" as const, encoderExperiment: "auto" as const }));
+    await reservation.close();
+    expect(stopped).toEqual([18]);
+  });
+
+  it("uses the original Host for cleanup when selection has changed", async () => {
+    const { launcher } = io();
+    const stopped: number[] = [];
+    const original = async <T>(_command: string, payload?: unknown): Promise<T> => {
+      stopped.push((payload as { session: number }).session);
+      return undefined as T;
+    };
+    const changedSelection = async () => { throw new Error("Host selection changed"); };
+    const reservation = new ReservedStream(5003, { split: false, target }, launcher,
+      original, new DecoderReservations({ maxInstances: 1 }), changedSelection);
+    await reservation.run({ split: false, target }, async () => ({ session: 18, ...target, mediaKey: "fixture", viewerIps: [],
+      mediaTransport: "udp" as const, encoderExperiment: "auto" as const }));
+    await reservation.close();
+    expect(stopped).toEqual([18]);
+  });
+
+  it("retains native methods that are not enumerable and preserves the actual preparation failure", async () => {
+    const calls: string[] = [];
+    class NativeLauncher implements StreamLauncher {
+      async getLocalIpv4Addresses() { calls.push("addresses"); return ["192.168.0.19"]; }
+      async prepareStream() { throw new Error("receiver unavailable"); }
+      async openStream() { return "src-5003"; }
+      async cancelPreparedStream() { calls.push("cancel"); }
+    }
+    const { control } = io();
+    const reservation = new ReservedStream(5003, { split: false, target }, new NativeLauncher(),
+      control.request.bind(control), new DecoderReservations({ maxInstances: 1 }));
+    await expect(reservation.run({ split: false, target }, (owned) => startPreparedStream({
+      launcher: owned, control, host: "127.0.0.1", advertisedEncoderExperiments: [], args,
+    }))).rejects.toThrow("receiver unavailable");
+    expect(calls).toEqual(["addresses", "cancel"]);
+  });
+
   it.each(["legacy", "presentation"] as const)("cancel during %s native open counts resources until late completion and cleanup acknowledge", async (method) => {
     const pool = new DecoderReservations({ maxInstances: 1 });
     const { launcher, control, calls } = io();

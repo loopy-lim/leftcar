@@ -1,10 +1,18 @@
 import { useColorScheme } from "react-native";
-import { colors, type ThemeMode, type ThemeTokens } from "@leftcar/ui-tokens";
+import {
+  colors,
+  typography,
+  spacing,
+  radii,
+  hitTargets,
+  type ThemeMode,
+  type ThemeTokens,
+} from "@leftcar/ui-tokens";
 
 /**
  * Leftcar Viewer - Theme access & hooks
  */
-export { colors, type ThemeMode, type ThemeTokens };
+export { colors, typography, spacing, radii, hitTargets, type ThemeMode, type ThemeTokens };
 
 export function useAppTheme(): {
   mode: ThemeMode;

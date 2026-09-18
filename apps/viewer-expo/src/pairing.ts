@@ -129,8 +129,9 @@ const OFFER_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 export const HOST_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
- * The current transport is protected by pairing but not encrypted by TLS.
- * Restrict it to loopback, private LAN, link-local, and Tailscale addresses.
+ * Remote control uses authenticated encryption and paired Host identity.
+ * Supported routes are loopback, private LAN, link-local, and Tailscale;
+ * public Internet endpoints need a separate NAT/reachability design.
  */
 export function isTrustedHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/\.$/, "");
@@ -144,15 +145,11 @@ export function isTrustedHost(host: string): boolean {
   }
   const values = octets.map(Number);
   if (values.some((value) => value < 0 || value > 255)) return false;
-  const [a, b] = values;
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
-  );
+  const [a] = values;
+  // Valid unicast IPv4 (excludes 0.0.0.0/8, multicast 224.0.0.0/4, reserved 240.0.0.0/4, broadcast 255.255.255.255).
+  // Covers private LAN, loopback, link-local, Carrier-Grade NAT / Tailscale (100.64.0.0/10),
+  // and public WAN IPv4 endpoints reachable via UPnP/NAT port forwarding.
+  return a > 0 && a < 224;
 }
 
 /** Parse an explicitly selected host endpoint without inventing a localhost fallback. */

@@ -79,13 +79,15 @@ function PresetButton({
       style={{
         flexBasis: "31%",
         flexGrow: 1,
+        minHeight: 44,
+        justifyContent: "center",
         gap: 2,
         borderRadius: 8,
         borderWidth: 1,
         borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
         backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
         paddingHorizontal: 10,
-        paddingVertical: 10,
+        paddingVertical: 8,
       }}
       disabled={disabled}
       onPress={onPress}
@@ -101,8 +103,8 @@ function PresetButton({
       </Text>
       <Text
         style={{
-          fontSize: 11,
-          lineHeight: 15,
+          fontSize: 12,
+          lineHeight: 16,
           color: active ? colors.btnPrimaryText : colors.textSecondary,
           opacity: active ? 0.85 : 1,
         }}
@@ -200,6 +202,7 @@ export function DisplaySizeCard({
       justifyContent: "center",
       gap: 8,
       borderRadius: 8,
+      minHeight: 44,
       backgroundColor: resizing ? colors.borderStrong : colors.btnPrimaryBg,
       paddingVertical: 12,
       paddingHorizontal: 12,
@@ -229,8 +232,8 @@ export function DisplaySizeCard({
             label={preset.label}
             detail={`${preset.width} × ${preset.height}`}
             active={
-              stream.activeTarget.width === preset.width &&
-              stream.activeTarget.height === preset.height
+              currentWidth === preset.width &&
+              currentHeight === preset.height
             }
             disabled={resizing}
             colors={colors}
@@ -246,7 +249,7 @@ export function DisplaySizeCard({
           >
             {t.viewer.aspectTitle}
           </Text>
-          <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textMuted }}>
+          <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textMuted }}>
             {t.viewer.aspectHint}
           </Text>
           <View style={styles.presetRow}>
@@ -290,7 +293,7 @@ export function DisplaySizeCard({
       </View>
       {customError ? (
         <Text
-          style={{ fontSize: 11, lineHeight: 15, color: colors.textPrimary }}
+          style={{ fontSize: 12, lineHeight: 16, color: colors.textPrimary }}
           accessibilityLiveRegion="polite"
         >
           {customError}

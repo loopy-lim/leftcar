@@ -25,6 +25,7 @@ export class ReservedStream {
   readonly lease: DecoderLease;
   private latest?: StartedStream;
   private nativeGeneration?: string;
+  private latestControlRequest?: StreamControlRequest;
   private attempted = false;
   private preparedExperiment: EncoderExperimentId = "auto";
   constructor(
@@ -42,16 +43,18 @@ export class ReservedStream {
     return this.pool.isOpen(this.lease);
   }
 
+  get generation(): string | undefined { return this.nativeGeneration; }
+
   run<T extends StartedStream>(
     demand: DecoderDemand,
     work: (launcher: StreamLauncher) => Promise<T>,
+    controlRequest: StreamControlRequest = this.controlRequest,
   ): Promise<T> {
     return this.pool
       .run(this.lease, demand, async () => {
         this.attempted = true;
         this.nativeGeneration = undefined;
-        const ownedLauncher: StreamLauncher = {
-          ...this.launcher,
+        const guarded: Partial<StreamLauncher> = {
           prepareStream: async (...args) => {
             if (!this.isOpen)
               throw new Error("Stream was stopped before preparation");
@@ -72,8 +75,24 @@ export class ReservedStream {
             return this.launcher.openStream(...args);
           },
         };
+        // NativeModules methods need not be enumerable. Spreading the module
+        // can silently drop cancelPreparedStream and replace a real recovery
+        // error with "undefined is not a function" during cleanup.
+        const ownedLauncher = new Proxy(this.launcher, {
+          get(target, key) {
+            if (Object.prototype.hasOwnProperty.call(guarded, key)) {
+              return Reflect.get(guarded, key);
+            }
+            const value = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
         const started = await work(ownedLauncher);
         this.latest = started;
+        // A retained native window can be restored after the same Host is
+        // selected again. Its new session belongs to that successful request,
+        // while the original launch route correctly remains cancelled.
+        this.latestControlRequest = controlRequest;
         if (this.launcher.getStreamGeneration) {
           this.nativeGeneration = await this.launcher.getStreamGeneration(
             `src-${this.port}`,
@@ -108,10 +127,19 @@ export class ReservedStream {
   async close(): Promise<void> {
     await this.pool.close(this.lease, async () => {
       // Host status is best effort; native acknowledgment owns slot release.
-      if (this.latest)
-        await this.request("stopStream", {
-          session: this.latest.session,
-        }).catch(() => undefined);
+      if (this.latest) {
+        const args = { session: this.latest.session };
+        // Recovery may replace the control socket while this reservation
+        // remains alive. Prefer its selection-fenced, reconnecting route.
+        // If the user selected another Host, only the original client may
+        // receive cleanup; never send this session id to the newly selected one.
+        const request = this.latestControlRequest ?? this.controlRequest;
+        await request("stopStream", args).catch(async (error) => {
+          console.warn("[leftcar] Host stop request failed", error instanceof Error ? error.message : String(error));
+          if (request !== this.request)
+            await this.request("stopStream", args).catch(() => undefined);
+        });
+      }
       if (this.launcher.getStreamGeneration && this.launcher.closeStream) {
         const generation =
           this.nativeGeneration ??

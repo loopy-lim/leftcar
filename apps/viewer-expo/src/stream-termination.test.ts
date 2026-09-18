@@ -41,7 +41,6 @@ describe("stream termination recovery selection", () => {
       { port: "5001", reason: 4 },
       { port: 5001.5, reason: 4 },
       { port: Number.POSITIVE_INFINITY, reason: 4 },
-      { port: 5001, reason: 1 },
       { port: 5001, reason: 3 },
       { port: 5001, reason: 6 },
       { port: 5001, reason: "4" },
@@ -70,6 +69,11 @@ describe("stream termination recovery selection", () => {
         new Set(),
       ),
     ).toEqual(streams[1]);
+  });
+
+  it("retains the source for recovery after a receiver feedback timeout", () => {
+    expect(selectRecoverableStream(streams, { port: 5001, reason: 1 }, new Set())).toEqual(streams[0]);
+    expect(classifyHostTermination("receiver feedback timeout")).toBeNull();
   });
 
   it("rejects a duplicate termination while that session is reconnecting", () => {

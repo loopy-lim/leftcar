@@ -183,6 +183,7 @@ describe("startPreparedStream", () => {
       ).resolves.toEqual({
         session: 17,
         balancedPresentation: false,
+        presentationSmooth: false,
       opusAudio: false,
         viewerIps: ["192.168.0.42"],
         mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
@@ -216,6 +217,7 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       balancedPresentation: false,
+      presentationSmooth: false,
       opusAudio: false,
       viewerIps: ["192.168.0.42"],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
@@ -467,6 +469,7 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       balancedPresentation: false,
+      presentationSmooth: false,
       opusAudio: false,
       viewerIps: [],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
@@ -520,6 +523,7 @@ describe("startPreparedStream", () => {
     ).resolves.toEqual({
       session: 17,
       balancedPresentation: false,
+      presentationSmooth: false,
       opusAudio: false,
       viewerIps: ["192.168.0.42"],
       mediaKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",

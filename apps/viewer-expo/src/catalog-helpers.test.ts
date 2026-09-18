@@ -9,12 +9,46 @@ vi.mock("react-native-tcp-socket", () => ({
 vi.mock("./session", () => ({
   bindRequestContext: vi.fn(),
   captureRequestContext: vi.fn(() => null),
+  controlHost: vi.fn(() => "10.0.0.1:7777"),
   reconnectHost: vi.fn(),
+  isRequestContextCurrent: vi.fn(() => true),
 }));
 
-import { catalogErrorMessage, requestWithReconnect } from "./catalog-helpers";
-import { bindRequestContext, captureRequestContext } from "./session";
+import { catalogErrorMessage, catalogMediaHost, requestWithReconnect, requestForCurrentSelection } from "./catalog-helpers";
+import { bindRequestContext, captureRequestContext, controlHost, isRequestContextCurrent } from "./session";
 import { setCurrentLanguage } from "./language-store";
+
+describe("catalog media route", () => {
+  it("uses the connected numeric peer for MagicDNS and VPN-routed LAN control", () => {
+    expect(catalogMediaHost("mac.tailnet.ts.net:7777", "192.168.0.134", "100.80.133.120")).toBe("100.80.133.120");
+    expect(catalogMediaHost("192.168.0.134:7777", "192.168.0.134", "100.80.133.120")).toBe("100.80.133.120");
+  });
+  it.each(["100.80.133.120:7777", "100.64.0.1:7777", "100.127.255.254:7777", "mac.tailnet.ts.net:7777", "MAC.TAILNET.TS.NET.:7777"])(
+    "keeps the selected Tailscale endpoint %s instead of the advertised LAN address", (endpoint) => {
+      expect(catalogMediaHost(endpoint, "192.168.0.134")).toBe(endpoint.split(":")[0]);
+    },
+  );
+  it.each(["192.168.0.134:7777", "127.0.0.1:7777", "mac.local:7777"])(
+    "preserves the advertised media route for %s", (endpoint) => {
+      expect(catalogMediaHost(endpoint, "192.168.0.134")).toBe("192.168.0.134");
+    },
+  );
+  it("preserves local route over publicMediaEndpoint when connected on LAN", () => {
+    expect(catalogMediaHost("192.168.0.134:7777", "192.168.0.134", undefined, "1.217.35.59:5001")).toBe("192.168.0.134");
+  });
+  it.each(["1.217.35.59:7777", "100.128.0.1:7777", "custom.host.com:7777"])(
+    "keeps public WAN route %s instead of unreachable internal LAN advertisedHost", (endpoint) => {
+      expect(catalogMediaHost(endpoint, "192.168.0.134")).toBe(endpoint.split(":")[0]);
+    },
+  );
+  it("uses publicMediaEndpoint for public WAN connections", () => {
+    expect(catalogMediaHost("1.217.35.59:7777", "192.168.0.134", undefined, "1.217.35.59:5001")).toBe("1.217.35.59");
+    expect(catalogMediaHost("myhost.ddns.net:7777", "192.168.0.134", undefined, "1.217.35.59:5001")).toBe("1.217.35.59");
+  });
+  it("falls back to the control endpoint without an advertised address", () => {
+    expect(catalogMediaHost("192.168.0.134:7777", " ")).toBe("192.168.0.134");
+  });
+});
 
 describe("catalogErrorMessage 언어 전환", () => {
   it("SCShareableContent 지연 안내를 현재 언어로 내린다", () => {
@@ -80,4 +114,36 @@ it("source permission denial gives an actionable Host review and retry message",
   expect(catalogErrorMessage(new Error("source_access_denied"))).toBe("Host에서 이 기기의 화면 접근을 허용한 뒤 목록을 새로 고치세요.");
   setCurrentLanguage("en");
   expect(catalogErrorMessage(new Error("source_refresh_required"))).toContain("refresh the list");
+});
+
+it("a retained window starts a fresh operation after reconnecting to the same Host, while old operations stay cancelled", async () => {
+  let requests = 0;
+  const client = { request: async <T>() => { requests += 1; return "accepted" as T; }, close: vi.fn(), whenClosed: vi.fn(), hostKey: null };
+  const context = { client, target: { host: "10.0.0.1", port: 7777 }, selectionGeneration: 10,
+    identity: null, credential: null };
+  vi.mocked(controlHost).mockReturnValue("10.0.0.1:7777");
+  vi.mocked(captureRequestContext).mockReturnValue(context);
+  const pending = requestForCurrentSelection("10.0.0.1:7777");
+  vi.mocked(captureRequestContext).mockReturnValue({ ...context, selectionGeneration: 11 });
+  await expect(pending("startStream")).rejects.toThrow("selection changed");
+  await expect(requestForCurrentSelection("10.0.0.1:7777")("startStream")).resolves.toBe("accepted");
+  const retained = requestForCurrentSelection("10.0.0.1:7777");
+  vi.mocked(controlHost).mockReturnValue("10.0.0.2:7777");
+  vi.mocked(captureRequestContext).mockReturnValue({ ...context, target: {host: "10.0.0.2", port: 7777}, selectionGeneration: 12 });
+  await expect(retained("startStream")).rejects.toThrow("selection changed");
+  await expect(requestForCurrentSelection("10.0.0.1:7777")("startStream")).rejects.toThrow("selection changed");
+  expect(requests).toBe(1);
+});
+
+it("a retained window uses its selected target while the connected badge is cleared", async () => {
+  let requests = 0;
+  const request = async <T>() => { requests += 1; return "accepted" as T; };
+  const context = { client: { request, close: vi.fn(), whenClosed: vi.fn(), hostKey: null },
+    target: {host: "10.0.0.1", port: 7777}, selectionGeneration: 13, identity: null, credential: null };
+  vi.mocked(controlHost).mockReturnValue("");
+  vi.mocked(captureRequestContext).mockReturnValue(context);
+  await expect(requestForCurrentSelection("10.0.0.1:7777")("getCatalog")).resolves.toBe("accepted");
+  vi.mocked(isRequestContextCurrent).mockReturnValueOnce(false);
+  await expect(requestForCurrentSelection("10.0.0.1:7777")("startStream")).rejects.toThrow("selection changed");
+  expect(requests).toBe(1);
 });

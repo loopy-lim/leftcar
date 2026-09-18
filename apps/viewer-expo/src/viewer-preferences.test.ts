@@ -110,7 +110,6 @@ describe("viewer preferences", () => {
       localCursor: true,
       localAudio: false,
       balancedPresentation: false,
-      presentationSmooth: true,
       presentationSmooth: false,
       opusAudio: false,
     };

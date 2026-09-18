@@ -8,6 +8,7 @@ import { currentTranslation } from "./language-store";
 import { interpolate } from "@leftcar/ui-tokens";
 import {
   isStreamPrepareError,
+  readViewerDisplayMetrics,
   resolveReconfigureExperiment,
   reconfigurePreparedStream,
   startPreparedStream,
@@ -276,7 +277,12 @@ export function useCatalogModel() {
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
   const effectiveCaptureBackend = preferredCaptureBackend(catalogQuery.data, "");
-  const mediaHost = catalogMediaHost(host, catalogQuery.data?.mediaHost, captureRequestContext()?.client.remoteAddress);
+  const mediaHost = catalogMediaHost(
+    host,
+    catalogQuery.data?.mediaHost,
+    captureRequestContext()?.client.remoteAddress,
+    catalogQuery.data?.publicMediaEndpoint,
+  );
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === preferences.profileId) ??
     STREAM_PROFILES.find((profile) => profile.id === "balanced") ??
@@ -337,7 +343,16 @@ export function useCatalogModel() {
       }
       const reservation = active.reservation;
       if (!reservation) throw new Error("Missing decoder reservation");
-      const request = requestForCurrentSelection(host);
+      // 복구는 카탈로그가 언마운트된 뒤에도 호출된다. 전송 끊김은
+      // controlHost()를 비우지만 원래 선택 대상(activeContext)은 유지된다 —
+      // 선택 변경이 아니므로 렌더 시점 host가 비었으면 유지된 대상으로
+      // 핀한다. 그렇지 않으면 모든 요청이 "Host selection changed"로
+      // 거절되어 재연결 자체가 불가능해진다.
+      const retained = captureRequestContext();
+      const retainedHost = retained
+        ? `${retained.target.host}:${retained.target.port}`
+        : "";
+      const request = requestForCurrentSelection(host || retainedHost);
       const demand = reservation.pool.plan({
         split: active.encoderExperiment === "splitVertical" ||
           (active.encoderExperiment === "auto" && is4KResolution(active.activeTarget.width, active.activeTarget.height)),
@@ -356,11 +371,17 @@ export function useCatalogModel() {
         );
         // Re-resolve from the just-fetched catalog: the media host can differ
         // from the cached `mediaHost` computed at render time.
-        const refreshedMediaHost = catalogMediaHost(host, currentCatalog.mediaHost, captureRequestContext()?.client.remoteAddress);
+        const refreshedMediaHost = catalogMediaHost(
+          host || retainedHost,
+          currentCatalog.mediaHost,
+          captureRequestContext()?.client.remoteAddress,
+          currentCatalog.publicMediaEndpoint,
+        );
         await request("stopStream", { session: active.session }).catch(
           () => undefined,
         );
         const control = controlClient() ?? (await reconnectHost());
+        const viewerMetrics = await readViewerDisplayMetrics(launcher);
         const restarted = await startPreparedStream({
           control,
           request,
@@ -382,6 +403,7 @@ export function useCatalogModel() {
             encoderExperiment: active.encoderExperiment,
             contentMode: active.contentMode,
             udpStability: active.udpStability,
+            viewerDisplay: viewerMetrics,
             showFps: active.showFps ?? preferences.showFps,
             localCursor: active.localCursor ?? preferences.localCursor,
             localAudio: active.localAudio ?? preferences.localAudio,
@@ -427,7 +449,14 @@ export function useCatalogModel() {
       }
       const reservation = active.reservation;
       if (!reservation) throw new Error("Missing decoder reservation");
-      const request = requestForCurrentSelection(host);
+      // 재구성(reconfigure)도 전송 끊김 후 유지된 대상으로 핀한다 — 위
+      // 복구 경로와 같은 이유다(전송 손실은 선택 변경이 아니다).
+      const retainedForReconfigure = captureRequestContext();
+      const request = requestForCurrentSelection(
+        host || (retainedForReconfigure
+          ? `${retainedForReconfigure.target.host}:${retainedForReconfigure.target.port}`
+          : ""),
+      );
       const requested = {
         split: resolveReconfigureExperiment(active, target, {
           reconfigureEncoderExperiment: catalogQuery.data?.reconfigureEncoderExperiment === true,
@@ -676,6 +705,7 @@ export function useCatalogModel() {
         ownedReservations.add(reservation);
         try {
           const { width, height, fps } = launchTarget;
+          const viewerMetrics = await readViewerDisplayMetrics(launcher);
           const sourceTarget = {
             width: maximumTarget.width,
             height: maximumTarget.height,
@@ -703,6 +733,7 @@ export function useCatalogModel() {
               displayName: display.name,
               contentMode: displayProfile.contentMode,
               udpStability: effectiveUdpStability,
+              viewerDisplay: viewerMetrics,
               showFps: preferences.showFps,
               localCursor: preferences.localCursor,
               localAudio: preferences.localAudio,

@@ -7,6 +7,7 @@ import { setCurrentLanguage } from "./language-store";
 type PendingWrite = { payload: string; cb?: (e: Error | null) => void };
 
 interface FakeSocket {
+  remoteAddress: string;
   on(event: string, handler: (...args: unknown[]) => void): void;
   write(payload: string, _enc: string, cb?: (e: Error | null) => void): void;
   destroy(): void;
@@ -19,6 +20,7 @@ const sockets: FakeSocket[] = [];
 function makeSocket(): FakeSocket {
   const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
   const s: FakeSocket = {
+    remoteAddress: "127.0.0.1",
     on(event, handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -85,6 +87,12 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+it("retains the socket's numeric peer for native media admission after DNS resolution", async () => {
+  const client = await connect("localhost");
+  expect(client.remoteAddress).toBe("127.0.0.1");
+  client.close();
 });
 
 // 포맷 문구는 테스트에서 한국어로 고정한다.

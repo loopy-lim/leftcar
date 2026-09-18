@@ -171,12 +171,12 @@ export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
 
       {busy ? <ActivityIndicator size="small" color={colors.textPrimary} /> : null}
       {status ? (
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textSecondary }} numberOfLines={2}>
+        <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }} numberOfLines={2}>
           {status}
         </Text>
       ) : null}
       {error ? (
-        <Text style={{ fontSize: 11, lineHeight: 15, color: colors.textPrimary }} role="alert">
+        <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textPrimary }} role="alert">
           {error}
         </Text>
       ) : null}
@@ -198,7 +198,7 @@ export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
               <Text style={{ fontSize: 12, color: colors.textPrimary, flexShrink: 1 }} numberOfLines={1}>
                 {entry.name}
               </Text>
-              <Text style={{ fontSize: 11, color: colors.textMuted }}>
+              <Text style={{ fontSize: 12, color: colors.textMuted }}>
                 {formatFileBytes(entry.size)}
               </Text>
             </Pressable>
