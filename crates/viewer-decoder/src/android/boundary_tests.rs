@@ -16,6 +16,8 @@ struct Probe {
     releases: Vec<(usize, Option<i64>, bool)>,
 }
 thread_local! { static PROBE: RefCell<Probe> = RefCell::new(Probe::default()); }
+// PRESENTATION_SMOOTH is process-global; pacing tests must not interleave.
+static SMOOTH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[no_mangle]
 extern "C" fn AMediaCodec_createCodecByName(_: *const c_char) -> *mut c_void {
     PROBE.with_borrow_mut(|p| {
@@ -168,7 +170,31 @@ extern "C" fn AMediaCodec_releaseOutputBufferAtTime(_: *mut c_void, index: usize
     0
 }
 #[test]
+fn smoothing_park_absorbs_burst_without_dropping_frames() {
+    let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // 프레임 스무딩(적응 지터 버퍼) ON: 도착 뭉침을 park가 흡수하고 첫
+    // 프레임부터 순서대로 vsync 슬롯에 릴리스한다(드롭 0).
+    PRESENTATION_SMOOTH.store(true, std::sync::atomic::Ordering::Relaxed);
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let mut decoder =
+        unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    PROBE.with_borrow_mut(|p| p.outputs.extend([(40, 1234), (41, 5678), (42, 9012)]));
+    let target = 9_876_543_210;
+    decoder.set_output_target(Some(target));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    // park 한도 5 ≥ 3: 어떤 프레임도 폐기되지 않고, 맨 앞 프레임이 슬롯을
+    // 받는다.
+    assert_eq!(decoder.last_released_pts_us, Some(1234));
+    assert_eq!(decoder.frames_discarded, 0);
+    assert_eq!(decoder.frames_rendered, 1);
+    PRESENTATION_SMOOTH.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
 fn real_output_drain_paces_one_release_per_vsync_slot() {
+    // 프레임 스무딩 OFF: park 한도 2 계약(최신 우선, 초과분 폐기) 고정.
+    let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    PRESENTATION_SMOOTH.store(false, std::sync::atomic::Ordering::Relaxed);
     PROBE.with_borrow_mut(|p| *p = Probe::default());
     let mut decoder =
         unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();

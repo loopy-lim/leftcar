@@ -34,6 +34,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
         private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
+        private const val KEY_PRESENTATION_SMOOTH = "presentationSmooth"
         // A healthy rebind renders its first frame well inside a second; this
         // budget only fails rebinds whose media never arrived at all.
         private const val RECOVERY_FLOW_WATCHDOG_MS = 4_000L
@@ -117,15 +118,19 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 else displayManager?.getDisplay(id)?.let { it.displayId to it.refreshRate }
             },
             deliver = { display, frame, period ->
-                ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, display, frame, period)
+                val rc = ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation || presentationSmooth, display, frame, period)
+                if (rc != 0) android.util.Log.w("LeftcarStream", "displayFrame rc=$rc display=$display")
             },
         )
     }
     private fun syncPresentation() {
         displayClockDisplayId = window.decorView.display?.displayId ?: -1
         displayClock.stop()
-        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
-        if (balancedPresentation && activityStarted && surfaceLifecycle.isAttached) displayClock.start()
+        val paced = balancedPresentation || presentationSmooth
+        val rc = ViewerNative.displayFrame(nativeState, instanceId, paced, -1, 0, 0)
+        val started = paced && activityStarted && surfaceLifecycle.isAttached
+        if (started) displayClock.start()
+        android.util.Log.i("LeftcarStream", "syncPresentation paced=$paced smooth=$presentationSmooth attach=${surfaceLifecycle.isAttached} started=$started displayFrameRc=$rc")
     }
 
     private var localAudioEnabled: Boolean = true
@@ -1235,6 +1240,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         balancedPresentation = savedInstanceState?.takeIf { it.containsKey(KEY_BALANCED_PRESENTATION) }
             ?.getBoolean(KEY_BALANCED_PRESENTATION)
             ?: (intent?.getBooleanExtra(KEY_BALANCED_PRESENTATION, false) ?: false)
+        presentationSmooth = savedInstanceState?.takeIf { it.containsKey(KEY_PRESENTATION_SMOOTH) }
+            ?.getBoolean(KEY_PRESENTATION_SMOOTH)
+            ?: (intent?.getBooleanExtra(KEY_PRESENTATION_SMOOTH, true) ?: true)
+        // 프레임 스무딩도 vsync 시계를 필요로 한다 — 전역 스위치와 동기화.
+        ViewerNative.setPresentationSmooth(presentationSmooth)
         // JS가 전달한 언어가 있으면 저장해 두고, 창 재생성 시에도 유지한다.
         intent?.getStringExtra("language")?.let { stored ->
             ViewerStrings.applyLanguage(stored)
@@ -1290,6 +1300,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         super.onSaveInstanceState(outState)
         outState.putFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio)
         outState.putBoolean(KEY_BALANCED_PRESENTATION, balancedPresentation)
+        outState.putBoolean(KEY_PRESENTATION_SMOOTH, presentationSmooth)
         outState.putBundle("effectiveStreamConfiguration", intent.extras?.let(::Bundle))
     }
 
@@ -1462,7 +1473,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Retire this hierarchy's callback even if replacement attach is delayed
         // or fails. Only successful attach may start the next clock epoch.
         displayClock.stop()
-        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
+        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation || presentationSmooth, -1, 0, 0)
         // Stop the renderer still bound to the replaced hierarchy BEFORE the
         // swap: the old SurfaceViews' late destroys then own nothing, so their
         // arrival order — interleaved with the new holders' creates or after
@@ -1646,7 +1657,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         cancelPendingSurfaceAttach()
         cancelAttachFlowWatchdog()
         displayClock.stop()
-        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation, -1, 0, 0)
+        ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation || presentationSmooth, -1, 0, 0)
         android.util.Log.i(
             "LeftcarStream",
             "surfaceDestroyed: stop=$stop generation=${surfaceLifecycle.currentGeneration} " +

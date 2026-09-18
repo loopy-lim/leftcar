@@ -167,15 +167,6 @@ pub struct AndroidDecoder {
     /// Vsync target that already received a release. One release per slot
     /// keeps bursts from double-rendering inside a single vsync period.
     last_paced_target_ns: Option<i64>,
-    /// Presentation-smoothing hold: the newest frame parked for one frame
-    /// period while its predecessor covers the current vsync (micro-jitter
-    /// smoothing; see PRESENTATION_SMOOTH).
-    /// Adaptive jitter-buffer delay applied in freshness mode when
-    /// PRESENTATION_SMOOTH is on. Driven by release-age feedback; 0 = the
-    /// latency-first newest-wins pump.
-    presentation_delay_us: u64,
-    frame_period_us: u64,
-    release_age_window_ms: std::collections::VecDeque<u32>,
 }
 
 /// Micro-jitter smoothing switch, mirrored to the client so the Viewer UI can
@@ -184,6 +175,10 @@ pub struct AndroidDecoder {
 /// pair arrives together, and the hold disengages the moment arrivals bunch
 /// harder than one frame.
 pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 프레임 스무딩(적응 지터 버퍼) 모드의 park 한도(프레임 수). 5프레임 ≈
+/// 83ms@60fps — 도착 뭉침 흡수 상한이자 코덱 출력 버퍼 안전선.
+pub const SMOOTH_PARK_CAP: usize = 5;
 
 /// Release-age p95 the adaptive jitter buffer steers toward (45ms).
 pub const PRESENTATION_AGE_TARGET_US: u64 = 45_000;
@@ -399,9 +394,6 @@ impl AndroidDecoder {
                 output_target_ns: None,
                 parked_outputs: VecDeque::new(),
                 last_paced_target_ns: None,
-                frame_period_us: (1_000_000u64).saturating_div(u64::from(fps.max(1))),
-                presentation_delay_us: 0,
-                release_age_window_ms: std::collections::VecDeque::new(),
             });
         }
         Err(last_error.unwrap_or(DecoderError::CreateFailed {
@@ -533,37 +525,6 @@ impl AndroidDecoder {
         self.output_target_ns = target_ns;
     }
 
-    /// Record one capture-to-release age sample and return the updated
-    /// adaptive jitter-buffer delay. The controller steers the release-age
-    /// p95 toward [`PRESENTATION_AGE_TARGET_US`]: positive error grows the
-    /// hold (at most +8.3ms per sample, ≈250ms/s), negative error shrinks it
-    /// so a calm link returns to the latency-first zero buffer.
-    /// Override the adaptive delay from the client toggle path.
-    pub fn set_presentation_delay_us(&mut self, delay_us: u64) {
-        self.presentation_delay_us = delay_us;
-    }
-
-    pub fn push_release_age_ms(&mut self, age_ms: u32) -> u64 {
-        if !PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
-            self.presentation_delay_us = 0;
-            self.release_age_window_ms.clear();
-            return 0;
-        }
-        self.release_age_window_ms.push_back(age_ms);
-        while self.release_age_window_ms.len() > 64 {
-            self.release_age_window_ms.pop_front();
-        }
-        let mut sorted: Vec<u32> = self.release_age_window_ms.iter().copied().collect();
-        sorted.sort_unstable();
-        let p95_idx = ((sorted.len() as f64) * 0.95) as usize;
-        let p95_us = u64::from(sorted[p95_idx.min(sorted.len() - 1)]);
-        let err = p95_us as i64 - PRESENTATION_AGE_TARGET_US as i64;
-        let step = err.clamp(-8_333, 8_333);
-        let next = (self.presentation_delay_us as i64 + step).clamp(0, PRESENTATION_DELAY_MAX_US as i64) as u64;
-        self.presentation_delay_us = next;
-        next
-    }
-
     pub fn pump_latest_output(&mut self, timeout_us: i64) -> Result<bool, DecoderError> {
         let mut ready = [(0usize, 0i64); 64];
         let mut ready_count = 0usize;
@@ -607,45 +568,12 @@ impl AndroidDecoder {
         match self.output_target_ns {
             None => {
                 self.last_paced_target_ns = None;
-                let now_ns = crate::android::output::monotonic_now_ns();
-                let smoothing = PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
-                let delay_ns = if smoothing {
-                    self.presentation_delay_us.saturating_mul(1_000)
-                } else {
-                    0
-                };
-
-                if delay_ns == 0 {
-                    // Latency-first freshness: keep the newest, discard the
-                    // rest. Any transit burst shows up as a skipped frame.
-                    while self.parked_outputs.len() > MAX_RENDERABLE_OUTPUTS {
-                        let output = self.parked_outputs.pop_front().expect("length checked");
-                        self.discard_output(output)?;
-                    }
-                } else {
-                    // Adaptive jitter buffer: hold decoded frames briefly so
-                    // late-arriving frames display late instead of being
-                    // skipped. Depth is bounded by the delay; overrun falls
-                    // back to live-edge skipping.
-                    let period_ns = self.frame_period_us.max(4_000).saturating_mul(1_000);
-                    let buffer_len = 1 + (delay_ns / period_ns) as usize;
-                    while self.parked_outputs.len() > buffer_len + 1 {
-                        let output = self.parked_outputs.pop_front().expect("length checked");
-                        self.discard_output(output)?;
-                    }
-                    match self.parked_outputs.front() {
-                        None => return Ok(false),
-                        Some(front) => {
-                            let due = front.arrived_at_ns.saturating_add(delay_ns);
-                            if now_ns < due {
-                                // The predecessor still covers the current
-                                // frame period inside the jitter buffer.
-                                return Ok(false);
-                            }
-                        }
-                    }
+                // Latency-first freshness: keep the newest, discard the rest.
+                // Any transit burst shows up as a skipped frame.
+                while self.parked_outputs.len() > MAX_RENDERABLE_OUTPUTS {
+                    let output = self.parked_outputs.pop_front().expect("length checked");
+                    self.discard_output(output)?;
                 }
-
                 let output = self.parked_outputs.pop_front().expect("budget keeps one");
                 let r = unsafe { AMediaCodec_releaseOutputBuffer(self.codec, output.index, true) };
                 if r != AMEDIA_OK {
@@ -656,9 +584,31 @@ impl AndroidDecoder {
                 Ok(true)
             }
             Some(target) => {
-                while self.parked_outputs.len() > MAX_PARKED_OUTPUTS {
+                // 프레임 스무딩(적응 지터 버퍼): 도착이 뭉치는 전송 지터를
+                // 최대 5프레임(≈83ms@60fps)까지 park로 흡수해 표시 캔버스가
+                // 끊기지 않게 한다. 초과분은 라이브 엣지 스킵으로 폴백.
+                let park_cap = if PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
+                    SMOOTH_PARK_CAP
+                } else {
+                    MAX_PARKED_OUTPUTS
+                };
+                while self.parked_outputs.len() > park_cap {
                     let output = self.parked_outputs.pop_front().expect("length checked");
-                    self.discard_output(output)?;
+                    if PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
+                        // 스무딩 모드의 초과분은 폐기하지 않고 즉시 렌더로
+                        // 소화한다 — 버스트가 park 상한(≈83ms)을 넘어도
+                        // 프레임은 손실되지 않고, 뭉침만 앞당겨 표시된다.
+                        let r = unsafe {
+                            AMediaCodec_releaseOutputBuffer(self.codec, output.index, true)
+                        };
+                        if r != AMEDIA_OK {
+                            return Err(DecoderError::OpFailed { status: r });
+                        }
+                        self.frames_rendered += 1;
+                        self.last_released_pts_us = Some(output.pts_us);
+                    } else {
+                        self.discard_output(output)?;
+                    }
                 }
                 if self.last_paced_target_ns == Some(target) {
                     // This vsync slot already received its frame; hold the
