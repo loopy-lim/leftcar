@@ -69,6 +69,11 @@ impl Authorization {
     pub(crate) fn device_id(&self) -> &str {
         &self.device
     }
+
+    /// 그랜트 저장소의 소유자 키(자격 증명 해시).
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.owner
+    }
 }
 
 type GrantUpdate = (
@@ -1677,15 +1682,10 @@ mod tests {
             assert!(server.device_input_allowed("viewer-1"));
         }
 
-        // 재시작: 입력 승인 기록은 남지만 화면 승인과 같은 재검토 규율을 따른다 —
-        // 운용자가 승인을 다시 저장하기 전에는 자동 활성화되지 않는다.
+        // 재시작: 입력 승인도 화면 승인과 같이 영구 유지된다(2026-09-19 제품
+        // 결정 — 한 번 승인된 기기는 계속 사용한다). 철회(revoke) 시 거둔다.
         let restarted = make_server();
         assert_eq!(restarted.list_devices().len(), 1);
-        assert!(!restarted.device_input_allowed("viewer-1"));
-        restarted
-            .update_source_grants("viewer-1", vec!["display:0".into()])
-            .0
-            .unwrap();
         assert!(restarted.device_input_allowed("viewer-1"));
 
         // 철회는 상시 입력 승인도 함께 거둔다.

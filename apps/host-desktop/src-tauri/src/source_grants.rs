@@ -1,5 +1,8 @@
-//! Durable Host-owned display grants. A clean journal can be reused only after
-//! durably publishing dirty=true; uncertain exits always require Host review.
+//! Durable Host-owned display grants. Grants persist across Host restarts —
+//! including unclean ones (2026-09-19 product decision: 한 번 승인된 기기는
+//! 계속 사용한다). The dirty=true journal published at open remains as the
+//! durability probe: a Host that cannot durably write state must not admit
+//! sessions whose later approvals would be equally uncertain.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -134,11 +137,12 @@ impl GrantStore {
             Some(journal) if journal.version == 1 => journal,
             _ => Journal::default(),
         };
-        if journal.dirty {
-            for record in journal.devices.values_mut() {
-                record.reviewed = false;
-            }
-        }
+        // 승인(reviewed)은 호스트 재시작·비정상 종료와 무관하게 유지된다
+        // (2026-09-19 제품 결정: 한 번 승인된 기기는 계속 사용). 재검토는
+        // 기기 레코드가 없거나 Host UI에서 소스/입력을 바꿀 때만 다시 요구된다.
+        // dirty 게시는 리셋용이 아니라 개시 시점 저장 가능성 확인이다 — 이
+        // 쓰기가 실패하면 이후 승인 변경도 durable하지 않으므로 개봉 자체를
+        // 실패시켰다(아래 write_journal).
         journal.dirty = true;
         // Failure here must prevent all admission, even if an old clean file
         // still exists. No effective permission has been published yet.
@@ -175,8 +179,8 @@ impl GrantStore {
                 .is_some_and(|r| r.reviewed && r.source_ids.iter().any(|id| id == source))
     }
 
-    /// 상시 원격 입력 승인 여부. 화면 승인과 같은 재검토 규율을 따른다 —
-    /// Host 재시작 직후(미검토 상태)에는 자동 활성화되지 않는다.
+    /// 상시 원격 입력 승인 여부. 승인은 호스트 재시작과 무관하게 유지된다
+    /// (2026-09-19 제품 결정) — 거부(input=false)도 마찬가지로 유지된다.
     pub fn input_allowed(&self, owner: &str) -> bool {
         !self.closed
             && self
@@ -448,7 +452,7 @@ mod tests {
         (root, path)
     }
     #[test]
-    fn task10_clean_restart_reuses_grants_but_dirty_restart_requires_review() {
+    fn task10_restart_reuses_grants_even_after_unclean_exit() {
         let (root, path) = temp();
         let mut store = GrantStore::open(Some(path.clone())).unwrap();
         assert!(!store.allows("a", "display-a"));
@@ -461,9 +465,11 @@ mod tests {
         assert!(store.allows("a", "display-a"));
         assert!(!store.allows("a-new-credential", "display-a"));
         drop(store);
+        // 비정상 종료(finish_shutdown 없이 다시 열기)여도 승인은 유지된다 —
+        // 2026-09-19 제품 결정: 한 번 승인된 기기는 계속 사용한다.
         let store = GrantStore::open(Some(path)).unwrap();
-        assert!(!store.allows("a", "display-a"));
-        assert!(store.view("a").review_required);
+        assert!(store.allows("a", "display-a"));
+        assert!(!store.view("a").review_required);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -504,8 +510,22 @@ mod tests {
                     store.finish_shutdown().unwrap();
                 }
                 drop(store);
-                let restarted = GrantStore::open(Some(path)).unwrap();
-                assert!(!restarted.allows("a", "display-a"));
+                let restarted = GrantStore::open(Some(path.clone())).unwrap();
+                // 새 정책에는 전면 리셋이 없다 — 크래시 후 결과는 "마지막으로
+                // 내구화된 저널"이 무엇인지로 결정된다. 제거 쓰기가 실패한
+                // 내구 지점에 따라 저널은 이전 승인(record 유지)이거나 이미
+                // 부분 확정된 차단(sources 비움)이다. 둘 다 마지막 확정 상태를
+                // 따른다. 정상 종료는 메모리 차단을 내구화하므로 거부 유지.
+                let durable: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(&path).unwrap(),
+                )
+                .unwrap();
+                let record = &durable["devices"]["a"];
+                let durable_granted = record["reviewed"].as_bool().unwrap_or(false)
+                    && record["source_ids"]
+                        .as_array()
+                        .is_some_and(|ids| !ids.is_empty());
+                assert_eq!(restarted.allows("a", "display-a"), durable_granted);
                 std::fs::remove_dir_all(root).unwrap();
             }
         }

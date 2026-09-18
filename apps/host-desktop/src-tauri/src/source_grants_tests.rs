@@ -448,13 +448,27 @@ fn task10_actual_profile_startup_clean_shutdown_and_failed_removal_preserve_cred
                 drop(owner);
                 let (owner, pairing, server, _) = boot();
                 let auth = pairing.authenticate(&token).unwrap();
+                // 2026-09-19 정책(승인 영구 유지): 제거가 내구화되지 못하면
+                // "마지막으로 내구화된 상태"가 복원된다. 정상 종료는 메모리
+                // 차단(제거 미확정)을 내구화해 거부를 유지하고, 크래시는
+                // 직전 저널(승인)을 살린다. 즉시 차단은 실패 세션에서 이미
+                // 적용됐고(io.stopped), Host UI에서 다시 제거할 수 있다.
+                let (expected_displays, stream_ok) = if clean_shutdown {
+                    (json!([]), false)
+                } else {
+                    (
+                        json!([{"sourceId": "test:display:a", "index": 0,
+                                "name": "Display a", "width": 1920, "height": 1080}]),
+                        true,
+                    )
+                };
                 assert_eq!(
                     call(&server, &auth, "getCatalog", json!({})).await["result"]["displays"],
-                    json!([])
+                    expected_displays
                 );
                 assert_eq!(
                     call(&server, &auth, "startStream", start("a", 5001)).await["ok"],
-                    false
+                    stream_ok
                 );
                 drop(server);
                 drop(pairing);
