@@ -30,8 +30,12 @@ import kotlinx.coroutines.Job
 
 class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
-        private const val TABLET_CURSOR_IDLE_TIMEOUT_MS = 1_500L
         private const val SURFACE_ATTACH_DEBOUNCE_MS = 300L
+        // 제어·미디어 끊김 복구 중 React 복원을 다시 깨우는 주기. RN 타이머는
+        // StreamActivity 포그라운드에서 멈추므로 네이티브가 시계 역할을 한다.
+        private const val TERMINATION_REEMIT_INTERVAL_MS = 10_000L
+        private const val SYSTEM_BARS_REVEAL_THROTTLE_MS = 3_000L
+        private const val SYSTEM_BARS_DWELL_MS = 600L
         private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
         private const val KEY_PRESENTATION_SMOOTH = "presentationSmooth"
@@ -64,9 +68,14 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val surfaceHandler = Handler(Looper.getMainLooper())
     private val recoveryHandler = Handler(Looper.getMainLooper())
     private val recoveryRetryPolicy = StreamRecoveryRetryPolicy()
+    private var reemitTerminationRunnable: Runnable? = null
     private var surfaceChangeCount = 0
     private var pendingSurfaceAttach: Runnable? = null
     private val tabletCursorHandler = Handler(Looper.getMainLooper())
+    private var lastSystemBarsRevealAt = 0L
+    private var lastPointerInBottomZone = false
+    private var systemBarsInteractive = false
+    private var bottomZoneDwellRunnable: Runnable? = null
     private val hideTabletCursorRunnable = Runnable {
         streamSurfaces?.left?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
         streamSurfaces?.right?.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
@@ -234,6 +243,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 recoveryRetryPolicy.reset()
                 recoveryFallbackEmitted = false
                 hud?.showRebindIndicator(ViewerStrings.rebindReconnectingControl)
+                startTerminationReemit(reason)
             }
             return
         }
@@ -241,6 +251,31 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         finish()
         android.widget.Toast.makeText(applicationContext, message, android.widget.Toast.LENGTH_LONG)
             .show()
+    }
+
+    /**
+     * React 복원은 단발 종료 이벤트에 의존하는데, 호스트가 내려가 있는 동안에는
+     * 첫 restore가 반드시 실패하고 RN 타이머(setTimeout)는 StreamActivity
+     * 포그라운드에서 멈춰 JS 측 재시도가 발화하지 않는다. 복구가 끝날 때까지
+     * 같은 종료 이벤트를 주기적으로 재발행해 React 복원을 다시 깨운다 —
+     * rebind 성공(rebindOnSameSurface·markRenderHealthy)이 이 루프를 지운다.
+     */
+    private fun startTerminationReemit(reason: Int) {
+        cancelTerminationReemit()
+        val runnable = object : Runnable {
+            override fun run() {
+                if (released || isFinishing || isDestroyed || !terminationHandled) return
+                StreamLauncherModule.emitTermination(port, reason)
+                recoveryHandler.postDelayed(this, TERMINATION_REEMIT_INTERVAL_MS)
+            }
+        }
+        recoveryHandler.postDelayed(runnable, TERMINATION_REEMIT_INTERVAL_MS)
+        reemitTerminationRunnable = runnable
+    }
+
+    private fun cancelTerminationReemit() {
+        reemitTerminationRunnable?.let(recoveryHandler::removeCallbacks)
+        reemitTerminationRunnable = null
     }
 
     private fun scheduleRenderRecovery() {
@@ -432,6 +467,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             terminationHandled = false
             recoveryFallbackEmitted = false
             recoveryRetryPolicy.reset()
+            cancelTerminationReemit()
             // A rebind builds a fresh renderer session, so the host opt-in
             // (LCDON) must ride again with the new control channel.
             enableCursorOverlay()
@@ -448,6 +484,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         recoveryFallbackEmitted = false
         cancelRecoveryFlowWatchdog()
         cancelAttachFlowWatchdog()
+        cancelTerminationReemit()
     }
 
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
@@ -731,17 +768,61 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
             return
         }
-        if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT ||
-            event.actionMasked == MotionEvent.ACTION_CANCEL
-        ) {
-            hideTabletCursor()
-            return
-        }
-        view.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_ARROW)
+        // 스트림 창 안에서는 안드로이드 시스템 화살표를 끈다 — 커서 표시는
+        // LCD1 오버레이가 담당하고, 오버레이가 꺼진 상태(줌·로컬 커서 끔·
+        // 분할·구호스트)에서는 LCDOFF 뒤 호스트가 영상에 심는 실제 커서가
+        // 남는다. 화살표를 보여주면 어느 상태든 이중 커서가 된다. 아이콘은
+        // 이 창의 뷰에만 걸리므로 창 밖 시스템 동작은 그대로다.
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
-        tabletCursorHandler.postDelayed(
-            hideTabletCursorRunnable,
-            TABLET_CURSOR_IDLE_TIMEOUT_MS,
+        view.pointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
+        // 하단 가장자리: 진입 즉시 트랜지언트 바(보이기만), 600ms 거주하면
+        // 인터랙티브 바로 전환 — 트랜지언트 바는 터치를 받지 않아 트레이를
+        // 눌러도 홈·최근 앱이 동작하지 않기 때문이다. 벗어나면 다시 숨긴다.
+        val inBottomZone = event.y >= view.height - (24 * resources.displayMetrics.density).toInt()
+        if (inBottomZone) {
+            revealSystemBarsTransiently(view)
+            if (!lastPointerInBottomZone) scheduleSystemBarsDwell(view)
+        } else if (lastPointerInBottomZone) {
+            cancelSystemBarsDwell()
+            if (systemBarsInteractive) collapseSystemBars(view)
+        }
+        lastPointerInBottomZone = inBottomZone
+    }
+
+    private fun scheduleSystemBarsDwell(view: View) {
+        bottomZoneDwellRunnable?.let(tabletCursorHandler::removeCallbacks)
+        val runnable = Runnable {
+            if (lastPointerInBottomZone && !released && !isFinishing) {
+                view.windowInsetsController?.let { controller ->
+                    controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_DEFAULT
+                    controller.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                    systemBarsInteractive = true
+                }
+            }
+        }
+        bottomZoneDwellRunnable = runnable
+        tabletCursorHandler.postDelayed(runnable, SYSTEM_BARS_DWELL_MS)
+    }
+
+    private fun cancelSystemBarsDwell() {
+        bottomZoneDwellRunnable?.let(tabletCursorHandler::removeCallbacks)
+        bottomZoneDwellRunnable = null
+    }
+
+    private fun collapseSystemBars(view: View) {
+        view.windowInsetsController?.let { controller ->
+            controller.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+        }
+    }
+
+    private fun revealSystemBarsTransiently(view: View) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSystemBarsRevealAt < SYSTEM_BARS_REVEAL_THROTTLE_MS) return
+        lastSystemBarsRevealAt = now
+        view.windowInsetsController?.show(
+            WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
         )
     }
 
