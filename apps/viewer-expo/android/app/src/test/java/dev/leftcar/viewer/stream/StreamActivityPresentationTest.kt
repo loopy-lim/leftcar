@@ -124,7 +124,9 @@ class StreamActivityPresentationTest {
             controller.newIntent(controlIntent().putExtra("balancedPresentation", balanced))
             controller.newIntent(controlIntent().putExtra("localCursor", false))
             controller.newIntent(controlIntent().putExtra("localAudio", false))
-            controller.newIntent(controlIntent().putExtra("xrWindowRatio", 1.5f))
+            controller.newIntent(
+                controlIntent().putExtra("windowWidthPx", 1942).putExtra("windowHeightPx", 1092),
+            )
             val saved = Bundle()
             controller.saveInstanceState(saved)
             assertTrue(saved.containsKey("balancedPresentation"))
@@ -133,6 +135,8 @@ class StreamActivityPresentationTest {
             controller.destroy()
             val recreated = Robolectric.buildActivity(StreamActivity::class.java, partialIntent).create(saved)
             assertEquals(balanced, ReflectionHelpers.getField<Boolean>(recreated.get(), "balancedPresentation"))
+            assertEquals(1942, ReflectionHelpers.getField<Int>(recreated.get(), "windowWidthPx"))
+            assertEquals(1092, ReflectionHelpers.getField<Int>(recreated.get(), "windowHeightPx"))
             recreated.destroy()
         }
     }
@@ -145,7 +149,9 @@ class StreamActivityPresentationTest {
             .putExtra("ownershipGeneration", 17L)
         val controller = Robolectric.buildActivity(StreamActivity::class.java, start).create()
         controller.newIntent(controlIntent().putExtra("balancedPresentation", false))
-        controller.newIntent(controlIntent().putExtra("xrWindowRatio", 1.5f))
+        controller.newIntent(
+            controlIntent().putExtra("windowWidthPx", 1942).putExtra("windowHeightPx", 1092),
+        )
         val saved = Bundle()
         controller.saveInstanceState(saved)
         val recreatedIntent = controller.get().intent

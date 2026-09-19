@@ -32,6 +32,7 @@ import {
   subscribeStreamTermination,
   type RestartRequest,
 } from "./stream-termination";
+import { subscribeWindowSizeChanged } from "./stream-window-size";
 import {
   getUsbState,
   resolveTransport,
@@ -150,6 +151,19 @@ export function useStreamController(
     // The store keeps this subscription until its last native window closes.
     // MainActivity unmount is not a stream lifetime boundary.
   }, [host, restoreStream, store]);
+
+  useEffect(() => {
+    // XR 창 크기 유지(2026-09-20): 네이티브 창이 핸들 리사이즈 최종 크기를
+    // 보고하면 같은 호스트에 setWindowSize로 저장한다. 실패해도 스트림은
+    // 영향받지 않는다 — 다음 창이 시스템 기본 크기로 열릴 뿐이다.
+    const request = requestForCurrentSelection(host);
+    const subscription = subscribeWindowSizeChanged(({ widthPx, heightPx }) => {
+      void request("setWindowSize", { widthPx, heightPx }).catch((error: unknown) => {
+        console.warn("[leftcar] window size report failed", error);
+      });
+    });
+    return () => subscription.remove();
+  }, [host]);
 
   useEffect(() => {
     reconfigureStreamRef.current = reconfigureStream;

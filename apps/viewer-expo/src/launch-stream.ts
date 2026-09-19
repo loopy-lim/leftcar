@@ -68,6 +68,9 @@ export interface StreamLauncher {
     localCursor?: boolean,
     language?: string,
     localAudio?: boolean,
+    /** 호스트가 기억한 창 크기(px). 0이면 저장된 값이 없다(XR 창 크기 유지). */
+    windowWidthPx?: number,
+    windowHeightPx?: number,
   ): Promise<string>;
   openStreamWithPresentation?(
     port: number,
@@ -82,6 +85,8 @@ export interface StreamLauncher {
     language?: string,
     localAudio?: boolean,
     balancedPresentation?: boolean,
+    windowWidthPx?: number,
+    windowHeightPx?: number,
   ): Promise<string>;
   cancelPreparedStream(
     port: number,
@@ -98,18 +103,6 @@ export interface StreamLauncher {
   /** 전문 설정의 프레임 스무딩 토글 — 활성 스트림에 즉시 적용(구버전 모듈은 미구현). */
   setPresentationSmooth?(instanceId: string, enabled: boolean): Promise<void>;
   /**
-   * XR 창 비율 프리셋을 활성 스트림 창에 적용한다. 컴퓨터 화면 해상도는
-   * 변경하지 않는다. 네이티브 모듈이 없거나 XR이 아닌 기기에서는 실패하며,
-   * 호출부는 best-effort로 이를 무시한다.
-   */
-  setWindowAspectRatio?(instanceId: string, ratio: number): Promise<void>;
-  /**
-   * XR 창 비율 프리셋 지원 여부. StreamActivity의 XR 검사와 같은 시스템
-   * 피처를 본다. 구버전 네이티브 모듈엔 없을 수 있고, 호출부는 그 경우
-   * 기존처럼 비율 행을 보여 준다.
-   */
-  isXrWindowRatioSupported?(): Promise<boolean>;
-  /**
    * 뷰어 자체 패널의 물리 메트릭. 확장 디스플레이 기본 모드 도출에 쓰인다.
    * 구버전 네이티브 모듈엔 없을 수 있고, 호출부는 그 경우 필드를 생략한다.
    */
@@ -123,8 +116,8 @@ async function openConfiguredStream(launcher: StreamLauncher,
   if (launcher.openStreamWithPresentation) {
     await launcher.openStreamWithPresentation(...args);
   } else {
-    const [port,host,width,height,fps,encoder,display,showFps,cursor,language,audio] = args;
-    await launcher.openStream(port,host,width,height,fps,encoder,display,showFps,cursor,language,audio);
+    const [port,host,width,height,fps,encoder,display,showFps,cursor,language,audio,,windowWidthPx,windowHeightPx] = args;
+    await launcher.openStream(port,host,width,height,fps,encoder,display,showFps,cursor,language,audio,windowWidthPx ?? 0,windowHeightPx ?? 0);
   }
 }
 
@@ -175,6 +168,9 @@ export interface StartStreamArgs {
   /** 뷰어 자체 패널 메트릭 — 호스트가 기기별로 기억하고 확장 디스플레이
    * 기본 모드 도출에만 쓴다. 생략해도 스트림은 동일하다. */
   viewerDisplay?: ViewerDisplayMetrics;
+  /** 호스트가 기억한 이 기기의 마지막 창 크기(px). 0 = 저장된 값 없음. */
+  windowWidthPx?: number;
+  windowHeightPx?: number;
 }
 
 export interface StartedStream {
@@ -453,6 +449,8 @@ export async function startPreparedStream({
       // 오디오는 기본 전달(true) — 네이티브 기본값과 정합.
       args.localAudio ?? true,
       args.balancedPresentation ?? false,
+      args.windowWidthPx ?? 0,
+      args.windowHeightPx ?? 0,
     );
     await launcher.setOpusAudio?.(`src-${args.viewerPort}`, args.opusAudio ?? false);
     await launcher.setPresentationSmooth?.(`src-${args.viewerPort}`, args.presentationSmooth ?? true);

@@ -22,6 +22,7 @@ pub mod source_grants;
 mod state_profile;
 pub mod upnp;
 pub mod virtual_display;
+pub mod window_metrics;
 #[cfg(target_os = "windows")]
 pub mod windows_backend;
 pub mod wire;
@@ -127,6 +128,11 @@ pub fn run() {
         identity.clone(),
     ));
     server.set_audit(audit.clone());
+    // 기기별 스트림 창 크기(XR 창 크기 유지). 미관 값이라 저장소 개봉 실패가
+    // 기능을 막지 않는다 — 메모리 전용으로 낮춘다.
+    server.set_window_metrics(Arc::new(window_metrics::WindowMetricsStore::open(
+        profile.file("window_metrics.json"),
+    )));
     // 클립보드 동기화 호스트 게이트(U5): 같은 0600 settings.json에서 읽고,
     // 손상 시 기본 꺼짐으로 되돌아간다. 토글은 즉시 효력을 가진다.
     server.set_clipboard_share(settings.clipboard_share());

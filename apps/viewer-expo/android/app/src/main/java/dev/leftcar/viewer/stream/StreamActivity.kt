@@ -36,9 +36,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TERMINATION_REEMIT_INTERVAL_MS = 10_000L
         private const val SYSTEM_BARS_REVEAL_THROTTLE_MS = 3_000L
         private const val SYSTEM_BARS_DWELL_MS = 600L
-        private const val KEY_XR_WINDOW_RATIO = "xrWindowRatio"
+        private const val KEY_WINDOW_WIDTH_PX = "windowWidthPx"
+        private const val KEY_WINDOW_HEIGHT_PX = "windowHeightPx"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
         private const val KEY_PRESENTATION_SMOOTH = "presentationSmooth"
+        // XR 핸들 리사이즈가 멈춘 뒤 최종 크기를 호스트에 기억시키는 간격.
+        private const val WINDOW_SIZE_REPORT_DEBOUNCE_MS = 1_500L
         // A healthy rebind renders its first frame well inside a second; this
         // budget only fails rebinds whose media never arrived at all.
         private const val RECOVERY_FLOW_WATCHDOG_MS = 4_000L
@@ -152,20 +155,23 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var xrSession: Session? = null
     private var xrPreferredRatio: Float? = null
     /**
-     * 사용자가 선택한 창 비율 오버라이드(0 = 미지정 → 소스 비율 사용).
-     * 멤버 변수로 유지되어 config-change/rotation에서 그대로 살아남고,
-     * 프로세스 사망 시에는 onSaveInstanceState로 복원된다.
+     * 호스트가 기억한 이 기기의 마지막 창 크기(px). 0이면 저장된 값이 없다는
+     * 뜻이고 소스 비율 힌트만 적용한다. 액티비티 재생성 시 스트림 인텐트의
+     * 병합된 extra(effectiveStreamConfiguration)에서 복원된다.
      */
-    private var xrWindowRatio: Float = 0f
+    private var windowWidthPx: Int = 0
+    private var windowHeightPx: Int = 0
+    /** 마지막으로 적용·보고한 창 크기 — 적용 에코의 재보고를 막는다. */
+    private var lastWindowSizeReported: Pair<Int, Int>? = null
+    private var windowSizeReportRunnable: Runnable? = null
     private var ownershipGeneration: Long = 0L
     private var xrRatioGeneration = 0L
     private var xrCreationInFlight: Job? = null
 
-    private fun applyXrPreferredAspectRatio(force: Boolean = false, ratioOverride: Float? = null) {
+    private fun applyXrPreferredAspectRatio(force: Boolean = false) {
         if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
-        val sourceRatio =
+        val ratio =
             sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
-        val ratio = ratioOverride ?: sourceRatio
         if (!force && xrPreferredRatio == ratio) return
         val generation = ++xrRatioGeneration
         val existing = xrSession
@@ -187,7 +193,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             xrSession = created.session
             if (generation != xrRatioGeneration) {
                 // 생성 도중 더 새 비율 요청이 들어왔으면 최신 상태로 다시 적용.
-                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
+                applyXrPreferredAspectRatio(force = true)
                 return@launch
             }
             runCatching { setXrRatio(created.session, ratio) }
@@ -203,15 +209,65 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * 런타임 비율 프리셋 적용 진입점. 활성 Session이 있으면 즉시
-     * setPreferredAspectRatio를 다시 호출하고, 없으면 값을 저장해 다음 Session
-     * 생성 시 사용한다. applyXrPreferredAspectRatio가 아직 XR 기기 검사를
-     * 수행하므로 비 XR 기기에서는 no-op으로 끝난다.
+     * 창 크기 유지(2026-09-20). 호스트가 기억한 절대 픽셀 크기가 있으면
+     * 플랫폼 확장 API로 그대로 요청하고, 없거나 거절되면 기존처럼 소스 비율만
+     * 힌트한다. 창 크기가 비율을 포함하므로 비율 프리셋은 폐기했다.
      */
-    fun applyWindowAspectRatio(ratio: Float) {
-        xrWindowRatio = normalizedAspectRatio(sourceWidth, sourceHeight, ratio)
-        if (xrWindowRatio == xrPreferredRatio) return
-        applyXrPreferredAspectRatio(ratioOverride = xrWindowRatio)
+    private fun applyXrWindowSizeOrRatio() {
+        if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
+        val width = windowWidthPx
+        if (width > 0) {
+            val height = windowHeightPx.takeIf { it > 0 }
+                ?: (width.toLong() * sourceHeight.coerceAtLeast(1) / sourceWidth.coerceAtLeast(1))
+                    .toInt()
+                    .coerceAtLeast(1)
+            // 시스템이 방금 요청한 크기를 에코로 재보고하지 않게 선점한다.
+            // 시스템이 클램프해 실측이 달라지면 onConfigurationChanged가
+            // 실측을 보고하고, 호스트는 실측을 기억한다.
+            lastWindowSizeReported = width to height
+            val accepted = XrMainWindowSizer.setMainWindowSize(this, width, height) { code ->
+                when (code) {
+                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_SUCCESS,
+                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_SUCCESS_NOT_VISIBLE,
+                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_IGNORED_ALREADY_APPLIED,
+                    -> Unit
+                    else -> {
+                        android.util.Log.w(
+                            "LeftcarStream",
+                            "window size ${width}x$height rejected ($code); falling back to ratio hint",
+                        )
+                        runOnUiThread { applyXrPreferredAspectRatio(force = true) }
+                    }
+                }
+            }
+            if (accepted) return
+        }
+        applyXrPreferredAspectRatio(force = true)
+    }
+
+    /**
+     * XR 시스템 핸들 리사이즈를 호스트에 기억시킨다. 크기 변화가 잠잠해지면
+     * 최종 크기를 RN 이벤트로 내보내고, RN이 setWindowSize 제어 명령으로
+     * 호스트에 저장한다. 자신이 방금 적용한 크기는 재보고하지 않는다.
+     */
+    private fun scheduleWindowSizeReport() {
+        if (!XrMainWindowSizer.isSupported(this)) return
+        windowSizeReportRunnable?.let(surfaceHandler::removeCallbacks)
+        val runnable = Runnable {
+            windowSizeReportRunnable = null
+            if (released || isFinishing || isDestroyed) return@Runnable
+            val width = window.decorView.width
+            val height = window.decorView.height
+            if (width <= 0 || height <= 0) return@Runnable
+            if (lastWindowSizeReported?.let { it.first == width && it.second == height } == true) {
+                return@Runnable
+            }
+            lastWindowSizeReported = width to height
+            android.util.Log.i("LeftcarStream", "window size report ${width}x$height port=$port")
+            StreamLauncherModule.emitWindowSizeChanged(port, width, height)
+        }
+        windowSizeReportRunnable = runnable
+        surfaceHandler.postDelayed(runnable, WINDOW_SIZE_REPORT_DEBOUNCE_MS)
     }
 
     /**
@@ -1253,9 +1309,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
         ownershipGeneration = intent?.getLongExtra("ownershipGeneration", 0L) ?: 0L
-        // Process-death 이후에도 사용자가 고른 창 비율을 복원한다.
-        xrWindowRatio =
-            savedInstanceState?.getFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio) ?: xrWindowRatio
+        // 호스트가 기억한 창 크기. 재생성 시에는 setIntent로 병합된 실행
+        // 인텐트(effectiveStreamConfiguration)에서 같은 값이 온다.
+        windowWidthPx = intent?.getIntExtra(KEY_WINDOW_WIDTH_PX, 0) ?: 0
+        windowHeightPx = intent?.getIntExtra(KEY_WINDOW_HEIGHT_PX, 0) ?: 0
 
         splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
         splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
@@ -1338,16 +1395,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         audioPlayer = StreamAudioPlayer(instanceId, { bytes -> ViewerNative.pollAudioOwned(nativeState, instanceId, bytes) },
             onCodecFallback = { ViewerNative.setAudioOwned(nativeState, instanceId, localAudioEnabled, false) }, signaledPoll = true).also { if (localAudioEnabled) it.start() }
         lifecycleEvent(1) // ACTIVITY_CREATE
-        applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
+        applyXrWindowSizeOrRatio()
     }
-
-    /** The user-chosen window ratio, when one differs from the source ratio. */
-    private fun requestedRatioOverride(): Float? =
-        xrWindowRatio.takeIf { it > 0f }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putFloat(KEY_XR_WINDOW_RATIO, xrWindowRatio)
         outState.putBoolean(KEY_BALANCED_PRESENTATION, balancedPresentation)
         outState.putBoolean(KEY_PRESENTATION_SMOOTH, presentationSmooth)
         outState.putBundle("effectiveStreamConfiguration", intent.extras?.let(::Bundle))
@@ -1369,7 +1421,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val nextSplitVertical = newIntent.getBooleanExtra("splitVertical", splitVertical)
         val reconnectRequested = newIntent.getBooleanExtra("reconnect", false)
         val sourceRatioChanged = !sameAspectRatio(nextWidth, nextHeight, sourceWidth, sourceHeight)
-        val ratioChangeRequested = newIntent.hasExtra(KEY_XR_WINDOW_RATIO)
         val togglesOnly = (nextLocalCursor != localCursorEnabled ||
             nextLocalAudio != localAudioEnabled || nextOpusAudio != opusAudioRequested || nextBalanced != balancedPresentation ||
             nextSmooth != presentationSmooth) && !reconnectRequested &&
@@ -1395,11 +1446,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             newIntent.extras?.let { putExtras(it) }
             putExtra("reconnect", false)
         })
-        if (ratioChangeRequested) {
-            // 비율 프리셋만 바꾸는 호출: 소스 해상도는 그대로 둔다. 값은
-            // 다음 setIntent 이전 스트림 재구성에도 유지된다.
-            applyWindowAspectRatio(newIntent.getFloatExtra(KEY_XR_WINDOW_RATIO, xrWindowRatio))
-        }
+        // 재구성 인텐트가 창 크기를 갱신했으면 멤버도 맞춘다(부분 extra는
+        // 기존 값 유지 — reconnect 인텐트는 창 크기를 싣지 않는다).
+        newIntent.getIntExtra(KEY_WINDOW_WIDTH_PX, 0).takeIf { it > 0 }?.let { windowWidthPx = it }
+        newIntent.getIntExtra(KEY_WINDOW_HEIGHT_PX, 0).takeIf { it > 0 }?.let { windowHeightPx = it }
         if (togglesOnly) {
             localCursorEnabled = nextLocalCursor
             if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
@@ -1432,8 +1482,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
             streamSurfaces?.updateVideoSize(sourceWidth, sourceHeight)
             if (sourceRatioChanged) {
-                xrPreferredRatio = null
-                applyXrPreferredAspectRatio(force = true, ratioOverride = requestedRatioOverride())
+                // 소스 비율이 바뀌면 저장된 폭에 대한 높이도 다시 계산한다.
+                applyXrWindowSizeOrRatio()
             }
             if (!localCursorEnabled) disableCursorOverlay()
             when (
@@ -1753,6 +1803,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         super.onConfigurationChanged(newConfig)
         android.util.Log.i("LeftcarStream", "onConfigurationChanged: orientation=${newConfig.orientation}")
         lifecycleEvent(11) // CONFIGURATION_CHANGE
+        // 창 크기 변화(XR 핸들 리사이즈 포함)가 잠잠해지면 호스트에 기억시킨다.
+        scheduleWindowSizeReport()
     }
 
     private fun releaseOwnedNativeStream() {
@@ -1780,6 +1832,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         surfaceLifecycle.invalidate()
         cancelPendingSurfaceAttach()
+        windowSizeReportRunnable?.let(surfaceHandler::removeCallbacks)
+        windowSizeReportRunnable = null
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
         cancelRecoveryFlowWatchdog()

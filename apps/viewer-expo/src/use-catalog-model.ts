@@ -23,10 +23,6 @@ import {
   type DisplayInfo,
 } from "./control";
 import {
-  WINDOW_ASPECT_RATIO_PRESETS,
-  type WindowAspectRatioPresetId,
-} from "./window-aspect-ratio";
-import {
   allocPorts,
   controlClient,
   controlHost,
@@ -113,32 +109,6 @@ export function useCatalogModel() {
   // 소스 전환(R7 cheap display switch) 중인 세션 — 창을 재열지 않고 같은
   // reconfigure 경로로 다른 디스플레이로 옮길 때 진행 표시에 쓴다.
   const [switchingSession, setSwitchingSession] = useState<number | null>(null);
-  // 스트림 세션별 XR 창 비율 선택 — 멀티 스트림에서 카드가 각자 활성
-  // 상태를 표시할 수 있게 한다.
-  const [windowRatios, setWindowRatios] = useState<
-    Record<number, WindowAspectRatioPresetId>
-  >({});
-  // null = 프로브 불가(구버전 네이티브) — 기존처럼 비율 행을 보여 준다.
-  const [aspectSupported, setAspectSupported] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (!launcher?.isXrWindowRatioSupported) {
-      setAspectSupported(null);
-      return;
-    }
-    let active = true;
-    launcher
-      .isXrWindowRatioSupported()
-      .then((supported) => {
-        if (active) setAspectSupported(Boolean(supported));
-      })
-      .catch(() => {
-        if (active) setAspectSupported(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
   useEffect(() => {
     // Until this device-wide probe settles the pool admits one instance only.
     // Keep launch reservation synchronous so unmount/selection cleanup cannot
@@ -610,37 +580,6 @@ export function useCatalogModel() {
     [],
   );
 
-  /**
-   * XR 창 비율 프리셋 선택. 네이티브 setWindowAspectRatio가 활성
-   * StreamActivity에 비율을 전달하고, 컴퓨터 화면 해상도는 그대로 둔다.
-   * 선택은 세션별로 기록한다. 비-XR 기기에서 네이티브 호출이 실패하면
-   * 조용히 이전 선택으로 되돌리고, 프로브가 지원 불가를 알리면 카드가
-   * 비율 행 자체를 숨긴다 — 눌렸다가 튕기는 버튼을 남기지 않는다.
-   */
-  const handleSelectWindowAspectRatio = useCallback(
-    (presetId: WindowAspectRatioPresetId, stream: ActiveStream) => {
-      const preset = WINDOW_ASPECT_RATIO_PRESETS.find((c) => c.id === presetId);
-      if (!preset) return;
-      if (!launcher?.setWindowAspectRatio) {
-        setWindowRatios((current) => ({ ...current, [stream.session]: presetId }));
-        return;
-      }
-      const previous = windowRatios[stream.session] ?? null;
-      setWindowRatios((current) => ({ ...current, [stream.session]: presetId }));
-      launcher
-        .setWindowAspectRatio(`src-${stream.port}`, preset.ratio)
-        .catch(() =>
-          setWindowRatios((current) => {
-            const next = { ...current };
-            if (previous === null) delete next[stream.session];
-            else next[stream.session] = previous;
-            return next;
-          }),
-        );
-    },
-    [windowRatios],
-  );
-
   const handleSelectUdpStability = useCallback(
     (selection: UdpStabilitySelection) => {
       setUdpStability(selection);
@@ -734,6 +673,9 @@ export function useCatalogModel() {
               contentMode: displayProfile.contentMode,
               udpStability: effectiveUdpStability,
               viewerDisplay: viewerMetrics,
+              // 호스트가 기억한 마지막 창 크기 — 새 창이 같은 크기로 열린다.
+              windowWidthPx: catalogQuery.data?.windowSize?.widthPx ?? 0,
+              windowHeightPx: catalogQuery.data?.windowSize?.heightPx ?? 0,
               showFps: preferences.showFps,
               localCursor: preferences.localCursor,
               localAudio: preferences.localAudio,
@@ -816,6 +758,7 @@ export function useCatalogModel() {
       addStream,
       advertisedEncoderExperiments,
       catalogQuery.data?.udpStabilityCapabilities,
+      catalogQuery.data?.windowSize,
       effectiveCaptureBackend,
       encoderExperiment,
       effectiveUdpStability,
@@ -979,10 +922,7 @@ export function useCatalogModel() {
     handleSelectEncoderExperiment,
     handleSelectProfile,
     handleSelectUdpStability,
-    handleSelectWindowAspectRatio,
     handleSwitchSessionSource,
-    windowRatios,
-    aspectSupported,
     host,
     launchingIndex,
     loading,

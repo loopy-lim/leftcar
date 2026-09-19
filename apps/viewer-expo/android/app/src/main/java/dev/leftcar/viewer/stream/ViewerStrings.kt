@@ -81,8 +81,6 @@ object ViewerStrings {
         else "미디어 수신 포트를 준비하지 못했습니다."
     val streamNotActive: String
         get() = if (en) "Could not find the stream window." else "화면 공유 창을 찾을 수 없습니다."
-    val invalidRatio: String
-        get() = if (en) "Invalid aspect ratio value." else "비율 값이 올바르지 않습니다."
     val prepareCancelFailed: String
         get() = if (en) "Failed to release the media receive port."
         else "미디어 수신 포트 정리에 실패했습니다."

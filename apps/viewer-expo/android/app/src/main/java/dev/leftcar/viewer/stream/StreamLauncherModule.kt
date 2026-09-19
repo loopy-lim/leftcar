@@ -167,6 +167,40 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             emitTermination(port, 0)
         }
 
+        /**
+         * 활성 StreamActivity가 XR 핸들 리사이즈를 마쳤다고 알린다. RN은 이 값을
+         * setWindowSize 제어 명령으로 호스트에 저장하고, 다음 스트림 창이 같은
+         * 크기로 열린다(2026-09-20 창 크기 유지).
+         */
+        fun emitWindowSizeChanged(port: Int, widthPx: Int, heightPx: Int) {
+            val context = activeRegisteredReactContext() ?: run {
+                android.util.Log.w(
+                    "LeftcarStream",
+                    "stream event unavailable: React context port=$port (window size)",
+                )
+                return
+            }
+            try {
+                context.runOnNativeModulesQueueThread {
+                    if (!isCurrentActiveReactContext(context)) return@runOnNativeModulesQueueThread
+                    try {
+                        val payload = Arguments.createMap().apply {
+                            putInt("port", port)
+                            putInt("widthPx", widthPx)
+                            putInt("heightPx", heightPx)
+                        }
+                        context
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                            .emit("leftcarWindowSizeChanged", payload)
+                    } catch (_: IllegalStateException) {
+                        // React may invalidate after the queue check; do not emit.
+                    }
+                }
+            } catch (_: IllegalStateException) {
+                // The native-modules queue can disappear during React teardown.
+            }
+        }
+
         @JvmStatic
         fun forgetStream(instanceId: String, generation: Long) {
             val current = liveStreams[instanceId]
@@ -352,9 +386,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         localCursor: Boolean?,
         language: String?,
         localAudio: Boolean?,
+        windowWidthPx: Int,
+        windowHeightPx: Int,
         promise: Promise,
     ) {
-        openStreamInternal(port, host, width, height, fps, encoderExperiment, displayName, showFps, localCursor, language, localAudio, false, promise)
+        openStreamInternal(port, host, width, height, fps, encoderExperiment, displayName, showFps, localCursor, language, localAudio, false, windowWidthPx, windowHeightPx, promise)
     }
 
     @ReactMethod
@@ -371,9 +407,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         language: String?,
         localAudio: Boolean?,
         balancedPresentation: Boolean?,
+        windowWidthPx: Int,
+        windowHeightPx: Int,
         promise: Promise,
     ) {
-        openStreamInternal(port, host, width, height, fps, encoderExperiment, displayName, showFps, localCursor, language, localAudio, balancedPresentation, promise)
+        openStreamInternal(port, host, width, height, fps, encoderExperiment, displayName, showFps, localCursor, language, localAudio, balancedPresentation, windowWidthPx, windowHeightPx, promise)
     }
 
     private fun openStreamInternal(
@@ -389,6 +427,8 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         language: String?,
         localAudio: Boolean?,
         balancedPresentation: Boolean?,
+        windowWidthPx: Int,
+        windowHeightPx: Int,
         promise: Promise,
     ) {
         reactApplicationContext.runOnUiQueueThread {
@@ -436,6 +476,10 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
                     putExtra("localAudio", localAudio ?: true)
                     putExtra("balancedPresentation", balancedPresentation ?: false)
                     putExtra("language", language ?: "ko")
+                    // 호스트가 기억한 마지막 창 크기(px). 0이면 저장된 값이
+                    // 없으므로 Activity가 소스 비율 힌트로 폴백한다.
+                    putExtra("windowWidthPx", windowWidthPx)
+                    putExtra("windowHeightPx", windowHeightPx)
                     // A recovery reuses the existing document task and port. The
                     // Activity keeps its Surface and swaps only the native
                     // renderer when this intent is delivered via onNewIntent.
@@ -529,49 +573,6 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         } catch (t: Throwable) {
             promise.reject(errorTag, t.message, t)
         }
-    }
-
-    /**
-     * 활성 StreamActivity 창에 XR 비율 프리셋을 전달한다. 컴퓨터 화면
-     * 해상도는 변경하지 않는다 — 이 값은 SpatialWindow 비율에만 쓰인다.
-     * XR이 아닌 기기에서는 Activity의 XR 검사가 no-op으로 처리한다.
-     */
-    @ReactMethod
-    fun setWindowAspectRatio(instanceId: String, ratio: Double, promise: Promise) {
-        val target = liveStreams[instanceId]
-        if (target == null) {
-            promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
-            return
-        }
-        if (!ratio.isFinite()) {
-            promise.reject("ERR_WINDOW_ASPECT_RATIO", ViewerStrings.invalidRatio)
-            return
-        }
-        try {
-            launchStreamIntent(instanceId, target) { intent ->
-                intent.putExtra("xrWindowRatio", ratio.toFloat())
-            }
-            promise.resolve(null)
-        } catch (t: Throwable) {
-            promise.reject("ERR_WINDOW_ASPECT_RATIO", t.message, t)
-        }
-    }
-
-    /**
-     * 이 기기가 XR 창 비율 프리셋을 지원하는지 — StreamActivity가 쓰는 것과
-     * 같은 시스템 피처를 본다. 비-XR 기기 카탈로그에서 비율 프리셋 행을
-     * 숨기기 위한 정적 프로브다.
-     */
-    @ReactMethod
-    fun isXrWindowRatioSupported(promise: Promise) {
-        promise.resolve(
-            try {
-                reactApplicationContext.packageManager
-                    .hasSystemFeature("android.software.xr.api.spatial")
-            } catch (t: Throwable) {
-                false
-            },
-        )
     }
 
     private fun launchStreamIntent(

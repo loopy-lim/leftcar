@@ -380,6 +380,10 @@ pub struct ControlServer {
     /// 클립보드 접근 백엔드(선택 — set_clipboard로 플러그인 구현을 주입;
     /// 미주입 시 pbcopy/pbpaste 폴백).
     clipboard: std::sync::OnceLock<std::sync::Arc<dyn ClipboardBackend>>,
+    /// 기기별 스트림 창 크기 영속 저장(선택 — set_window_metrics로 주입;
+    /// 미주입 시 getCatalog가 windowSize를 생략한다).
+    window_metrics:
+        std::sync::OnceLock<std::sync::Arc<crate::window_metrics::WindowMetricsStore>>,
     /// 파일 공유 게이트(선택 — set_settings으로 주입; 없으면 꺼짐).
     settings: std::sync::OnceLock<std::sync::Arc<crate::settings::SharedSettings>>,
     /// 파일 전송 청크 상태와 호스트 공유 대기열. Tauri UI 명령도 같은
@@ -437,6 +441,7 @@ impl ControlServer {
             clipboard_share: AtomicBool::new(false),
             clipboard_revision_cache: Mutex::new(None),
             clipboard: std::sync::OnceLock::new(),
+            window_metrics: std::sync::OnceLock::new(),
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
             authenticated_conns: Mutex::new(HashMap::new()),
@@ -643,6 +648,13 @@ impl ControlServer {
 
     pub fn set_settings(&self, settings: std::sync::Arc<crate::settings::SharedSettings>) {
         let _ = self.settings.set(settings);
+    }
+
+    pub fn set_window_metrics(
+        &self,
+        store: std::sync::Arc<crate::window_metrics::WindowMetricsStore>,
+    ) {
+        let _ = self.window_metrics.set(store);
     }
 
     /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
@@ -2347,6 +2359,11 @@ impl ControlServer {
                             .is_ok_and(|address| address.is_private())
                     }),
                     public_media_endpoint: self.public_media_endpoint(),
+                    window_size: request_authorization.and_then(|auth| {
+                        self.window_metrics
+                            .get()
+                            .and_then(|store| store.get(auth.owner_id()))
+                    }),
                     displays,
                     encoder_experiments,
                     reconfigure_encoder_experiment: Some(true),
@@ -2746,6 +2763,7 @@ impl ControlServer {
                 }
             }
             "getStatus" => ok(self.scoped_snapshot(authenticated_device)),
+            "setWindowSize" => self.handle_set_window_size(args, request_authorization),
             "setClipboard" => self.handle_set_clipboard(args, authenticated_device),
             "getClipboard" => self.handle_get_clipboard(args, authenticated_device),
             // -- 파일 전송 v1 (docs/07 §20) --------------------------------
@@ -2964,6 +2982,40 @@ impl ControlServer {
     /// 이미 끝난 상태이고, 여기서 호스트 게이트를 추가로 요구한다 — 토글이
     /// 닫혀 있으면 모든 클립보드 명령을 거부한다(뷰어 측 게이트는 없다).
     /// 텍스트는 절대 감사 로그에 쓰지 않는다 — 접근 메타데이터만 남긴다.
+    /// `setWindowSize` — 뷰어가 사용자가 조정한 스트림 창의 절대 픽셀 크기를
+    /// 보고한다(2026-09-20 XR 창 크기 유지). 기기(owner)별로 영속되고,
+    /// 같은 기기의 다음 getCatalog가 windowSize로 되돌려준다. 루프 방지:
+    /// 뷰어는 자신이 적용한 크기는 재보고하지 않는다.
+    fn handle_set_window_size(
+        &self,
+        args: serde_json::Value,
+        authorization: Option<&crate::pairing::Authorization>,
+    ) -> serde_json::Value {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SetWindowSizeArgs {
+            width_px: u32,
+            height_px: u32,
+        }
+        let input: SetWindowSizeArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(e) => return err(&format!("bad args: {e}")),
+        };
+        let Some(owner) = authorization.map(|auth| auth.owner_id()) else {
+            return err("unauthorized");
+        };
+        let Some(size) = crate::window_metrics::validated(input.width_px, input.height_px) else {
+            return err("window size out of range");
+        };
+        let Some(store) = self.window_metrics.get() else {
+            return err("window metrics store unavailable");
+        };
+        match store.set(owner, size) {
+            Ok(()) => ok(json!({})),
+            Err(e) => err(&e),
+        }
+    }
+
     fn handle_set_clipboard(
         &self,
         args: serde_json::Value,

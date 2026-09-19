@@ -274,6 +274,8 @@ describe("startPreparedStream", () => {
       true,
       "ko",
       true,
+    0,
+      0,
     );
   });
 
@@ -330,6 +332,8 @@ describe("startPreparedStream", () => {
       true,
       "ko",
       true,
+      0,
+      0,
     );
   });
 
@@ -356,6 +360,8 @@ describe("startPreparedStream", () => {
       true,
       "ko",
       true,
+    0,
+      0,
     );
   });
 
@@ -382,6 +388,8 @@ describe("startPreparedStream", () => {
       true,
       "ko",
       true,
+    0,
+      0,
     );
   });
 
@@ -408,6 +416,8 @@ describe("startPreparedStream", () => {
       true,
       "ko",
       false,
+    0,
+      0,
     );
   });
 
@@ -1069,6 +1079,8 @@ describe("reconfigurePreparedStream", () => {
       true,
       "ko",
       true,
+    0,
+      0,
     );
     expect(started.sourceIndex).toBe(2);
     expect(started.sourceName).toBe("Side Display");
@@ -1103,6 +1115,8 @@ describe("reconfigurePreparedStream", () => {
       true,
       "ko",
       true,
+      0,
+      0,
     );
   });
 
@@ -1195,10 +1209,12 @@ describe("isStreamPrepareError", () => {
 });
 
 describe("presentation method negotiation", () => {
-  it("keeps the old native eleven-argument contract and reports immediate fallback", async () => {
+  it("keeps the window-size argument contract and reports immediate fallback", async () => {
     const {control,launcher}=harness();
     const result=await startPreparedStream({control,launcher,host:"192.168.0.134",advertisedEncoderExperiments,args:{...args,balancedPresentation:true}});
-    expect(vi.mocked(launcher.openStream).mock.calls[0]).toHaveLength(11);
+    expect(vi.mocked(launcher.openStream).mock.calls[0]).toHaveLength(13);
+    expect(vi.mocked(launcher.openStream).mock.calls[0][11]).toBe(0);
+    expect(vi.mocked(launcher.openStream).mock.calls[0][12]).toBe(0);
     expect(result.balancedPresentation).toBe(false);
     const request=vi.mocked(control.request).mock.calls.find(([command])=>command==="startStream")?.[1];
     expect(request).not.toHaveProperty("balancedPresentation");
@@ -1209,7 +1225,9 @@ describe("presentation method negotiation", () => {
     const result=await startPreparedStream({control,launcher,host:"192.168.0.134",advertisedEncoderExperiments,args:{...args,balancedPresentation:true}});
     expect(result.balancedPresentation).toBe(true);
     expect(launcher.openStream).not.toHaveBeenCalled();
-    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0]).toHaveLength(12);
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0]).toHaveLength(14);
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0][12]).toBe(0);
+    expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0][13]).toBe(0);
     expect(vi.mocked(launcher.openStreamWithPresentation).mock.calls[0][11]).toBe(true);
     const accepted={session:31,width:3840,height:2160,fps:60,qualityState:"native" as const};
     const reconfigure={...control,request:vi.fn(async()=>accepted) as ControlClient["request"]};
@@ -1222,6 +1240,6 @@ describe("presentation method negotiation", () => {
     delete launcher.openStreamWithPresentation;
     const legacy=await reconfigurePreparedStream({control:reconfigure,launcher,host:"192.168.0.134",active,target:accepted,qualityState:"native"});
     expect(legacy.balancedPresentation).toBe(false);
-    expect(vi.mocked(launcher.openStream).mock.calls.at(-1)).toHaveLength(11);
+    expect(vi.mocked(launcher.openStream).mock.calls.at(-1)).toHaveLength(13);
   });
 });

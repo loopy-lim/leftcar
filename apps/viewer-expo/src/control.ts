@@ -73,6 +73,11 @@ export interface CatalogView {
    * this flag; viewers must keep using stop+start to change sources.
    */
   reconfigureSource?: boolean;
+  /**
+   * 이 기기가 마지막으로 보고한 스트림 창 크기(px). 다음 창을 같은 크기로
+   * 여는 데 쓰인다(XR 창 크기 유지). 구버전 호스트는 필드를 생략한다.
+   */
+  windowSize?: { widthPx: number; heightPx: number } | null;
 };
 
 export interface CaptureBackendInfo {

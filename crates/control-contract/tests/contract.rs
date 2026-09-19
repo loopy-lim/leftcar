@@ -269,6 +269,7 @@ fn catalog_advertises_phase_a_encoder_experiments() {
         reconfigure_encoder_experiment: None,
         reconfigure_source: None,
         udp_stability_capabilities: Some(udp_capabilities()),
+        window_size: None,
     };
     let advertised: Vec<_> = catalog
         .encoder_experiments
@@ -299,6 +300,7 @@ fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
         udp_stability_capabilities: None,
         reconfigure_encoder_experiment: Some(true),
         reconfigure_source: Some(true),
+        window_size: None,
     };
     let encoded = serde_json::to_string(&new_catalog).unwrap();
     assert!(
@@ -368,6 +370,7 @@ fn reconfigure_source_contract_keeps_old_peers_compatible() {
         udp_stability_capabilities: None,
         reconfigure_encoder_experiment: None,
         reconfigure_source: Some(true),
+        window_size: None,
     };
     let encoded = serde_json::to_string(&new_catalog).unwrap();
     assert!(encoded.contains("\"reconfigureSource\":true"), "{encoded}");

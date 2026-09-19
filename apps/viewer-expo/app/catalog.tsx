@@ -292,6 +292,7 @@ const QUALITY_TAB_KEYS = {
   auto: { label: "qualityAutoLabel", detail: "qualityAutoDetail" },
   latency: { label: "qualityLatencyLabel", detail: "qualityLatencyDetail" },
   video: { label: "qualityVideoLabel", detail: "qualityVideoDetail" },
+  smooth: { label: "qualitySmoothLabel", detail: "qualitySmoothDetail" },
   balanced: { label: "qualityBalancedLabel", detail: "qualityBalancedDetail" },
   clarity: { label: "qualityClarityLabel", detail: "qualityClarityDetail" },
 } as const;
@@ -977,9 +978,6 @@ interface ResolutionModalProps {
   onClose: () => void;
   resizing: boolean;
   onResizeSession: React.ComponentProps<typeof DisplaySizeCard>["onResizeSession"];
-  windowRatio: NonNullable<React.ComponentProps<typeof DisplaySizeCard>["windowRatio"]> | null;
-  onSelectWindowRatio: React.ComponentProps<typeof DisplaySizeCard>["onSelectWindowRatio"];
-  aspectSupported: boolean | null;
   styles: ReturnType<typeof createCatalogStyles>;
   colors: ThemeTokens;
 }
@@ -989,9 +987,6 @@ function ResolutionModal({
   onClose,
   resizing,
   onResizeSession,
-  windowRatio,
-  onSelectWindowRatio,
-  aspectSupported,
   styles,
   colors,
 }: ResolutionModalProps) {
@@ -1029,9 +1024,6 @@ function ResolutionModal({
               stream={stream}
               resizing={resizing}
               onResizeSession={onResizeSession}
-              windowRatio={windowRatio}
-              onSelectWindowRatio={onSelectWindowRatio}
-              aspectSupported={aspectSupported !== false}
               colors={colors}
             />
           </ScrollView>
@@ -1300,9 +1292,6 @@ export default function Catalog() {
         onClose={handleCloseResolution}
         resizing={model.resizingSession === activeResolutionStream?.session}
         onResizeSession={model.handleResizeSession}
-        windowRatio={activeResolutionStream ? (model.windowRatios[activeResolutionStream.session] ?? null) : null}
-        onSelectWindowRatio={model.handleSelectWindowAspectRatio}
-        aspectSupported={model.aspectSupported}
         styles={styles}
         colors={colors}
       />

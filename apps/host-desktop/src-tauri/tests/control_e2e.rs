@@ -266,6 +266,56 @@ async fn pair_over_socket(
     token
 }
 
+/// setWindowSize는 기기(owner)별로 영속되고, 같은 기기의 getCatalog만
+/// windowSize를 다시 본다(2026-09-20 XR 창 크기 유지).
+#[tokio::test]
+async fn set_window_size_is_scoped_per_device_and_echoed_in_catalog() {
+    let (addr, p, server) = spawn_test_server().await;
+    server.set_window_metrics(Arc::new(
+        leftcar_host_desktop::window_metrics::WindowMetricsStore::open(None),
+    ));
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let token = pair_over_socket(&mut sock, &p, &server, "viewer-1").await;
+
+    let resp = send_request(
+        &mut sock,
+        "setWindowSize",
+        r#"{"widthPx":1942,"heightPx":1092}"#,
+        &token,
+    )
+    .await;
+    assert!(resp.contains("\"ok\":true"), "{resp}");
+
+    let catalog = send_request(&mut sock, "getCatalog", "{}", &token).await;
+    let v: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+    assert_eq!(v["result"]["windowSize"]["widthPx"], 1942);
+    assert_eq!(v["result"]["windowSize"]["heightPx"], 1092);
+
+    // 창 크기는 기기별 자산 — 다른 기기는 그 값을 보지 못한다.
+    let mut sock_b = TcpStream::connect(addr).await.unwrap();
+    let token_b = pair_over_socket(&mut sock_b, &p, &server, "viewer-2").await;
+    let catalog_b = send_request(&mut sock_b, "getCatalog", "{}", &token_b).await;
+    let vb: serde_json::Value = serde_json::from_str(&catalog_b).unwrap();
+    assert!(vb["result"].get("windowSize").is_none(), "{catalog_b}");
+
+    // 저장소가 주입되지 않은 서버는 필드를 생략한다(구버전 응답 호환).
+    let (addr2, p2, server2) = spawn_test_server().await;
+    let mut sock2 = TcpStream::connect(addr2).await.unwrap();
+    let token2 = pair_over_socket(&mut sock2, &p2, &server2, "viewer-3").await;
+    let catalog2 = send_request(&mut sock2, "getCatalog", "{}", &token2).await;
+    assert!(!catalog2.contains("windowSize"), "{catalog2}");
+
+    // 상식 범위 밖 값은 거부한다.
+    let bad = send_request(
+        &mut sock,
+        "setWindowSize",
+        r#"{"widthPx":99999,"heightPx":1092}"#,
+        &token,
+    )
+    .await;
+    assert!(bad.contains("\"ok\":false"), "{bad}");
+}
+
 #[tokio::test]
 async fn test_catalog_query() {
     let (addr, p, server) = spawn_test_server().await;

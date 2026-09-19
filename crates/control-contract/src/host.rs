@@ -231,6 +231,12 @@ pub struct CatalogView {
     /// endpoint directly for high-speed P2P streaming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_media_endpoint: Option<String>,
+    /// The calling device's last reported stream window size in pixels
+    /// (setWindowSize). Viewers restore their spatial window to it on the
+    /// next launch. Older hosts omit this field, so viewers keep system
+    /// defaults when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<WindowSizeView>,
     pub displays: Vec<DisplayInfo>,
     #[serde(default)]
     pub encoder_experiments: Vec<EncoderExperimentInfo>,
@@ -257,6 +263,16 @@ pub struct CaptureBackendInfo {
     pub id: String,
     pub label: String,
     pub hint: String,
+}
+
+/// Absolute stream window size in device pixels, as reported by a viewer
+/// after the user resizes it. The host stores one value per paired device
+/// and echoes it back in CatalogView.window_size.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSizeView {
+    pub width_px: u32,
+    pub height_px: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1163,6 +1179,7 @@ mod stream_control_tests {
             reconfigure_encoder_experiment: None,
             reconfigure_source: None,
             udp_stability_capabilities: None,
+        window_size: None,
         };
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(json.contains("\"platform\":\"windows\""));
@@ -1186,6 +1203,7 @@ mod stream_control_tests {
             reconfigure_encoder_experiment: None,
             reconfigure_source: None,
             udp_stability_capabilities: None,
+        window_size: None,
         };
         assert!(catalog
             .encoder_experiments
