@@ -176,6 +176,102 @@ export function useStreamingBadge() {
 }
 
 /**
+ * 실험 스위치(페이싱 A/B 노브) 훅. 설정 모달의 실험 섹션이 쓴다. 저장은
+ * 전체 객체 하나로 보내고(부분 갱신 경로 없음 — 마지막 저장이 이긴다), 호스트는
+ * 저장과 함께 프로세스 환경변수를 다시 심으므로 다음 스트림부터 적용된다.
+ * `null`은 미설정(shim 기본값)이다.
+ */
+export interface ViewerExperiments {
+  maxEncodeInFlight: number | null;
+  queueMaxAgeMs: number | null;
+  sndbufBytes: number | null;
+  drlWindowMs: number | null;
+  pacingBudgetPct: number | null;
+  frameTrace: boolean;
+}
+
+export function useExperiments() {
+  const [experiments, setExperiments] = useState<ViewerExperiments | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<ViewerExperiments>("get_experiments")
+      .then((loaded) => {
+        if (!cancelled) setExperiments(loaded);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(String(cause instanceof Error ? cause.message : cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAttempt]);
+
+  const save = useCallback(async (next: ViewerExperiments) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const stored = await invoke<ViewerExperiments>("set_experiments", {
+        experiment: next,
+      });
+      setExperiments(stored);
+    } catch (cause: unknown) {
+      setError(String(cause instanceof Error ? cause.message : cause));
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  return {
+    experiments,
+    error,
+    saving,
+    retry: () => setLoadAttempt((attempt) => attempt + 1),
+    save,
+  };
+}
+
+/**
+ * 외부 접속(WAN) 허용 훅. UPnP 포트 매핑의 등록·제거는 호스트 명령이
+ * 백그라운드에서 즉시 실행하며, 값은 같은 0600 settings.json에 영속된다.
+ * 소유자 결정(2026-09-19)에 따라 기본 켜짐이다.
+ */
+export function useWanAccess() {
+  const [loadAttempt, retryLoad] = useState(0);
+  const wan = useOptimisticToggle("set_wan_access", true);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (wan.gate.allowsInitialLoad()) wan.setError(null);
+    void invoke<boolean>("get_wan_access")
+      .then((enabled) => {
+        if (!cancelled && wan.gate.allowsInitialLoad()) {
+          wan.setValue(enabled);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled && wan.gate.allowsInitialLoad()) {
+          wan.setError(String(cause instanceof Error ? cause.message : cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAttempt, wan.gate, wan.setValue, wan.setError]);
+
+  return {
+    wanAccess: wan.value,
+    toggleWanAccess: wan.toggle,
+    pending: wan.pending,
+    error: wan.error,
+    retryWan: () => wan.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : wan.toggle(),
+  };
+}
+
+/**
  * 프라이버시 커튼: 모니터를 채우는 검은 오버레이. 이 창은 macOS shim이
  * 캡처 필터에서 제외하므로(제목 "leftcar-curtain") 뷰어에게는 원래 화면이
  * 보인다. 창 자체는 아무 입력도 받지 않는 표시 전용이다.

@@ -1,4 +1,13 @@
-import type { SourceGrantView } from "./SourceGrantEditor";
+export interface SourceGrantView {
+  credentialId: string;
+  stateRevision: number;
+  sourceIds: string[];
+  revision: number;
+  reviewRequired: boolean;
+  /** 이 기기의 상시 원격 입력 승인. 화면 승인과 별개 결정이다. */
+  input: boolean;
+  persistenceError?: string | null;
+}
 
 export interface PairedDevice {
   source_grants: SourceGrantView;

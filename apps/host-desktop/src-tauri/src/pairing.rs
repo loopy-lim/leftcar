@@ -555,8 +555,10 @@ impl PairingServer {
     }
 
     /// Mac 사용자가 승인 카드에서 [허용]을 눌렀다. 대기 요청을 실제 페어링으로
-    /// 바꾸고 토큰을 완료 레코드에 올려 뷰어 폴링이 픽업하게 한다.
-    pub fn approve_pending(&self, offer_id: &str) -> Result<(), PairingServerError> {
+    /// 바꾸고 토큰을 완료 레코드에 올려 뷰어 폴링이 픽업하게 한다. 성공 시
+    /// 승인된 기기의 ID를 돌려준다 — 화면 승인(기본 전체 허용)은 이 기기 한 대에만
+    /// 적용된다.
+    pub fn approve_pending(&self, offer_id: &str) -> Result<String, PairingServerError> {
         let mut inner = self.inner.lock().unwrap();
         prune_stale_requests(&mut inner);
         let request = inner
@@ -593,7 +595,7 @@ impl PairingServer {
                 // 승인으로 offer는 소진됐다 — 이후 픽업은 completed 레코드로만
                 // 이뤄지고, 소진된 offer에 새 대기 요청이 붙는 일은 없다.
                 inner.live_offers.remove(offer_id);
-                Ok(())
+                Ok(request.device_id)
             }
             Err(_) => Err(PairingServerError::PairingFailed),
         }
@@ -2065,7 +2067,7 @@ mod tests {
                         server.pair(id, secret, "", "viewer-1", "Replacement"),
                         Err(PairingServerError::Pending)
                     ));
-                    server.approve_pending(id)
+                    server.approve_pending(id).map(|_| ())
                 } else {
                     server
                         .pair_by_code(&view.code, "viewer-1", "Replacement")

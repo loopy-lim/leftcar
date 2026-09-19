@@ -42,7 +42,8 @@ import type { SessionRow } from "./sessionTypes";
 import Modal from "./Modal";
 import PairingPanel from "./PairingPanel";
 import Indicator from "./Indicator";
-import { Curtain, useClipboardShare, usePrivacySettings, useStreamingBadge } from "./Privacy";
+import { Curtain, useClipboardShare, usePrivacySettings, useStreamingBadge, useWanAccess } from "./Privacy";
+import { ExperimentsSection } from "./ExperimentsSection";
 import {
   createTerminationNotice,
   isTerminalSession,
@@ -334,10 +335,10 @@ function DashboardHeader({
           onClick={onToggleLanguage}
           title={t.common.toggleLanguage}
           aria-label={t.common.toggleLanguage}
-          style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 6px" }}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "0 8px", width: "auto" }}
         >
           <Globe size={13} />
-          <span style={{ fontSize: 11, fontWeight: 700 }}>{language === "ko" ? "EN" : "한국어"}</span>
+          <span style={{ fontSize: 12, fontWeight: 700 }}>{language === "ko" ? "EN" : "한국어"}</span>
         </button>
         <button
           className={buttonVariants({ variant: "icon" })}
@@ -475,22 +476,27 @@ interface HostSettingsModalProps {
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
+  wanAccess: boolean;
   clipboardPending: boolean;
   lockPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
+  wanPending: boolean;
   clipboardError: string | null;
   lockError: string | null;
   curtainError: string | null;
   badgeError: string | null;
+  wanError: string | null;
   onToggleClipboardShare: () => void;
   onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
   onToggleStreamingBadge: () => void;
+  onToggleWanAccess: () => void;
   retryClipboard: () => void;
   retryLock: () => void;
   retryCurtain: () => void;
   retryBadge: () => void;
+  retryWan: () => void;
 }
 
 function HostSettingsModal(props: HostSettingsModalProps) {
@@ -537,14 +543,38 @@ function HostSettingsModal(props: HostSettingsModalProps) {
       onToggle: props.onToggleStreamingBadge,
       onRetry: props.retryBadge,
     },
+    {
+      icon: Globe,
+      title: t.host.wanAccessLabel,
+      desc: t.host.wanAccessDesc,
+      active: props.wanAccess,
+      pending: props.wanPending,
+      error: props.wanError,
+      onToggle: props.onToggleWanAccess,
+      onRetry: props.retryWan,
+    },
   ];
 
   return (
     <Modal ariaLabel={t.host.settingsTitle} onClose={onClose} closeOnOverlayClick>
       <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 520 }}>
         <div className="modal-title-bar">
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Settings size={16} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 7,
+                background: "var(--bg-surface-subtle)",
+                border: "1px solid var(--border-subtle)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-primary)",
+              }}
+            >
+              <Settings size={15} />
+            </div>
             <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>{t.host.settingsTitle}</h3>
           </div>
           <button
@@ -559,19 +589,38 @@ function HostSettingsModal(props: HostSettingsModalProps) {
         <div className="modal-scroll-area" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
           <div className="settings-section">
             <span className="settings-section-title">{t.host.privacySection}</span>
-            <div className="settings-cards-list">
+            <div className="settings-group-container">
               {settingsItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <div className="settings-item-card" key={item.title}>
+                  <div
+                    className="settings-item-row"
+                    key={item.title}
+                    role="button"
+                    tabIndex={item.pending ? -1 : 0}
+                    aria-disabled={item.pending}
+                    onClick={() => {
+                      if (!item.pending) item.onToggle();
+                    }}
+                    onKeyDown={(e) => {
+                      if ((e.key === "Enter" || e.key === " ") && !item.pending) {
+                        e.preventDefault();
+                        item.onToggle();
+                      }
+                    }}
+                  >
+                    <div className="settings-item-icon-box">
+                      <Icon size={16} />
+                    </div>
                     <div className="settings-item-info">
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <Icon size={15} className="settings-item-icon" />
-                        <span className="settings-item-name">{item.title}</span>
-                      </div>
+                      <span className="settings-item-name">{item.title}</span>
                       <p className="settings-item-desc">{item.desc}</p>
                       {item.error && (
-                        <div className="settings-item-error" role="alert">
+                        <div
+                          className="settings-item-error"
+                          role="alert"
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <span>{item.error}</span>
                           <button
                             type="button"
@@ -588,18 +637,35 @@ function HostSettingsModal(props: HostSettingsModalProps) {
                       type="button"
                       disabled={item.pending}
                       aria-busy={item.pending}
-                      className={controlToggleVariants({ active: item.active })}
-                      onClick={item.onToggle}
+                      aria-label={`${item.title} ${item.active ? t.host.clipboardShareOn : t.host.clipboardShareOff}`}
+                      className={`ui-switch ${item.active ? "switch-active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        item.onToggle();
+                      }}
                       aria-pressed={item.active}
                     >
-                      {item.active ? t.host.clipboardShareOn : t.host.clipboardShareOff}
-                      {item.pending && " …"}
+                      <span className="ui-switch-thumb" />
                     </button>
                   </div>
                 );
               })}
             </div>
           </div>
+          <ExperimentsSection t={t} />
+        </div>
+        <div
+          style={{
+            padding: "0 18px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          <ShieldCheck size={14} style={{ flexShrink: 0 }} />
+          <span>{t.host.settingsTitle} · {t.host.autoCleanupPolicy}</span>
         </div>
       </div>
     </Modal>
@@ -637,7 +703,7 @@ function TroubleshootingModal({
                 <Icon size={16} />
                 <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>{title}</span>
               </div>
-              <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
                 {desc}
               </p>
             </div>
@@ -659,10 +725,37 @@ function PairingModal({
 }) {
   return (
     <Modal ariaLabel={t.host.pairingModalTitle} onClose={onClose} closeOnOverlayClick>
-      <div className="modal-window" onClick={(event) => event.stopPropagation()}>
+      <div
+        className="modal-window modal-wide"
+        onClick={(event) => event.stopPropagation()}
+        style={{ maxWidth: 620 }}
+      >
         <div className="modal-title-bar">
-          <h3>{t.host.pairingModalTitle}</h3>
-          <button className={buttonVariants({ variant: "close" })} onClick={onClose} aria-label={t.host.pairingModalCloseAria}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 7,
+                background: "var(--bg-surface-subtle)",
+                border: "1px solid var(--border-subtle)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-primary)",
+              }}
+            >
+              <QrCode size={15} />
+            </div>
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>
+              {t.host.pairingModalTitle}
+            </h3>
+          </div>
+          <button
+            className={buttonVariants({ variant: "close" })}
+            onClick={onClose}
+            aria-label={t.host.pairingModalCloseAria}
+          >
             <X size={15} />
           </button>
         </div>
@@ -943,14 +1036,17 @@ function FileShareCard({ t }: { t: TranslationSchema }) {
           <span className="file-share-title">{t.host.fileShareSection}</span>
           <span className="file-share-hint">{t.host.fileShareHint}</span>
         </div>
-        <div className="file-share-actions">
+        <div className="file-share-actions" style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button
-            className={controlToggleVariants({ active: enabled })}
+            type="button"
+            role="switch"
+            className={`ui-switch ${enabled ? "switch-active" : ""}`}
             disabled={busy}
+            aria-label={`${t.host.fileShareSection} ${enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}`}
             onClick={() => void runShareAction(() => invoke("set_file_share", { enabled: !enabled }))}
-            aria-pressed={enabled}
+            aria-checked={enabled}
           >
-            {enabled ? t.host.fileShareToggleOn : t.host.fileShareToggleOff}
+            <span className="ui-switch-thumb" />
           </button>
           {enabled && (
             <button
@@ -988,6 +1084,207 @@ function FileShareCard({ t }: { t: TranslationSchema }) {
           </ul>
         )
       )}
+    </section>
+  );
+}
+
+/** 확장 디스플레이 상태(Tauri virtual_display_status 응답). */
+interface VirtualDisplaySuggested {
+  width: number;
+  height: number;
+  scale: number;
+  source: "viewerMetrics" | "fallback";
+}
+
+interface VirtualDisplayLive {
+  displayId: number;
+  sourceId?: string | null;
+  name: string;
+  logicalWidth: number;
+  logicalHeight: number;
+  scale: number;
+  backingWidth: number;
+  backingHeight: number;
+  modeVerified: boolean;
+}
+
+interface VirtualDisplayStatus {
+  supported: boolean;
+  reason?: string | null;
+  live?: VirtualDisplayLive | null;
+  suggested?: VirtualDisplaySuggested | null;
+  removalPending: boolean;
+}
+
+const EXT_DISPLAY_PRESETS: ReadonlyArray<{ width: number; height: number; scale: number }> = [
+  { width: 1280, height: 800, scale: 2 },
+  { width: 1440, height: 900, scale: 2 },
+  { width: 1600, height: 1000, scale: 2 },
+  { width: 2560, height: 1600, scale: 1 },
+];
+
+function extDisplayPresetLabel(preset: { width: number; height: number; scale: number }): string {
+  return `${preset.width}×${preset.height} (${preset.width * preset.scale}×${preset.height * preset.scale})`;
+}
+
+function extDisplayUnavailableText(
+  status: VirtualDisplayStatus | null,
+  t: TranslationSchema,
+): string | null {
+  if (!status || status.supported) return null;
+  switch (status.reason) {
+    case "unsupported-classes":
+      return t.host.extDisplayReasonUnsupportedClasses;
+    case "no-gui-session":
+      return t.host.extDisplayReasonNoGuiSession;
+    case "no-active-display":
+      return t.host.extDisplayReasonNoActiveDisplay;
+    default:
+      return t.host.extDisplayUnavailable;
+  }
+}
+
+/** 생성 모드 선택 + 만들기 버튼(카드에서 분리해 복잡도를 낮춘다). */
+function ExtendedDisplayCreateControls({
+  t,
+  suggested,
+  busy,
+  onCreate,
+}: {
+  t: TranslationSchema;
+  suggested: VirtualDisplaySuggested | null;
+  busy: boolean;
+  onCreate: (choice: string) => void;
+}) {
+  const [modeChoice, setModeChoice] = useState<string>("");
+  const suggestedLabel =
+    suggested &&
+    `${suggested.width}×${suggested.height} (${suggested.width * suggested.scale}×${suggested.height * suggested.scale})`;
+  return (
+    <>
+      <select
+        className="ext-display-mode-select"
+        aria-label={t.host.extDisplayModeAria}
+        value={modeChoice || suggestedLabel || ""}
+        disabled={busy}
+        onChange={(event) => {
+          setModeChoice(event.target.value);
+          onCreate(event.target.value);
+        }}
+      >
+        {suggestedLabel && (
+          <option value={suggestedLabel}>
+            {suggestedLabel} ·{" "}
+            {suggested?.source === "viewerMetrics"
+              ? t.host.extDisplaySuggestedViewer
+              : t.host.extDisplaySuggestedFallback}
+          </option>
+        )}
+        {EXT_DISPLAY_PRESETS.map((preset) => {
+          const label = extDisplayPresetLabel(preset);
+          if (label === suggestedLabel) return null;
+          return <option key={label} value={label}>{label}</option>;
+        })}
+      </select>
+      <button
+        className={buttonVariants({ variant: "ghost", size: "sm" })}
+        disabled={busy}
+        onClick={() => onCreate(modeChoice || suggestedLabel || "")}
+        aria-label={t.host.extDisplayCreate}
+      >
+        {t.host.extDisplayCreate}
+      </button>
+    </>
+  );
+}
+
+function ExtendedDisplayCard({ t }: { t: TranslationSchema }) {
+  const [status, setStatus] = useState<VirtualDisplayStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await invoke<VirtualDisplayStatus>("virtual_display_status"));
+    } catch {
+      // 대시보드 상단 배너가 이미 서비스 오류를 표시한다 — 카드는 조용히 유지.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const runAction = async (action: () => Promise<unknown>, errorText: string) => {
+    setBusy(true);
+    try {
+      await action();
+      setActionError(null);
+      await refresh();
+    } catch {
+      setActionError(errorText);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const live = status?.live ?? null;
+  const unavailableReason = extDisplayUnavailableText(status, t);
+
+  const createWithChoice = (choice: string) => {
+    const preset = EXT_DISPLAY_PRESETS.find(
+      (candidate) => extDisplayPresetLabel(candidate) === choice,
+    );
+    if (!preset) return;
+    void runAction(
+      () =>
+        invoke("virtual_display_create", {
+          width: preset.width,
+          height: preset.height,
+          scale: preset.scale,
+        }),
+      t.host.extDisplayCreateError,
+    );
+  };
+
+  return (
+    <section className="file-share-card" aria-label={t.host.extDisplaySection}>
+      <div className="file-share-header">
+        <div className="file-share-meta">
+          <span className="file-share-title">{t.host.extDisplaySection}</span>
+          <span className="file-share-hint">{t.host.extDisplayHint}</span>
+        </div>
+        {!unavailableReason && (
+          <div className="file-share-actions" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {live ? (
+              <button
+                className={buttonVariants({ variant: "ghost", size: "sm" })}
+                disabled={busy || status?.removalPending}
+                onClick={() => void runAction(() => invoke("virtual_display_remove"), t.host.extDisplayRemoveError)}
+                aria-label={t.host.extDisplayRemove}
+              >
+                {status?.removalPending ? t.host.extDisplayRemoving : t.host.extDisplayRemove}
+              </button>
+            ) : (
+              <ExtendedDisplayCreateControls
+                t={t}
+                suggested={status?.suggested ?? null}
+                busy={busy}
+                onCreate={createWithChoice}
+              />
+            )}
+          </div>
+        )}
+      </div>
+      {actionError && <span className="file-share-error" role="alert">{actionError}</span>}
+      {unavailableReason ? (
+        <span className="file-share-empty">{unavailableReason}</span>
+      ) : live ? (
+        <span className="ext-display-status">
+          {live.name} · {live.logicalWidth}×{live.logicalHeight} ({live.backingWidth}×
+          {live.backingHeight}){live.modeVerified ? "" : " · HiDPI 미확인"}
+        </span>
+      ) : null}
     </section>
   );
 }
@@ -1189,14 +1486,17 @@ interface DashboardModalsProps {
   lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
+  wanAccess: boolean;
   clipboardPending: boolean;
   lockPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
+  wanPending: boolean;
   clipboardError: string | null;
   lockError: string | null;
   curtainError: string | null;
   badgeError: string | null;
+  wanError: string | null;
   onClosePairing: () => void;
   onCloseHelp: () => void;
   onCloseSettings: () => void;
@@ -1206,10 +1506,12 @@ interface DashboardModalsProps {
   onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
   onToggleStreamingBadge: () => void;
+  onToggleWanAccess: () => void;
   retryClipboard: () => void;
   retryLock: () => void;
   retryCurtain: () => void;
   retryBadge: () => void;
+  retryWan: () => void;
 }
 
 function DashboardModals(props: DashboardModalsProps) {
@@ -1225,14 +1527,17 @@ function DashboardModals(props: DashboardModalsProps) {
     lockOnDisconnect,
     privacyCurtain,
     streamingBadge,
+    wanAccess,
     clipboardPending,
     lockPending,
     curtainPending,
     badgePending,
+    wanPending,
     clipboardError,
     lockError,
     curtainError,
     badgeError,
+    wanError,
     onClosePairing,
     onCloseHelp,
     onCloseSettings,
@@ -1242,10 +1547,12 @@ function DashboardModals(props: DashboardModalsProps) {
     onToggleLockOnDisconnect,
     onTogglePrivacyCurtain,
     onToggleStreamingBadge,
+    onToggleWanAccess,
     retryClipboard,
     retryLock,
     retryCurtain,
     retryBadge,
+    retryWan,
   } = props;
 
   return (
@@ -1271,22 +1578,27 @@ function DashboardModals(props: DashboardModalsProps) {
           lockOnDisconnect={lockOnDisconnect}
           privacyCurtain={privacyCurtain}
           streamingBadge={streamingBadge}
+          wanAccess={wanAccess}
           clipboardPending={clipboardPending}
           lockPending={lockPending}
           curtainPending={curtainPending}
           badgePending={badgePending}
+          wanPending={wanPending}
           clipboardError={clipboardError}
           lockError={lockError}
           curtainError={curtainError}
           badgeError={badgeError}
+          wanError={wanError}
           onToggleClipboardShare={onToggleClipboardShare}
           onToggleLockOnDisconnect={onToggleLockOnDisconnect}
           onTogglePrivacyCurtain={onTogglePrivacyCurtain}
           onToggleStreamingBadge={onToggleStreamingBadge}
+          onToggleWanAccess={onToggleWanAccess}
           retryClipboard={retryClipboard}
           retryLock={retryLock}
           retryCurtain={retryCurtain}
           retryBadge={retryBadge}
+          retryWan={retryWan}
         />
       )}
       {pendingStopSession && (
@@ -1386,6 +1698,15 @@ function Dashboard() {
     retryBadge,
   } = useStreamingBadge();
 
+  // 외부 접속(WAN) 허용 — UPnP 포트 매핑의 등록·제거는 호스트가 즉시 실행한다.
+  const {
+    wanAccess,
+    toggleWanAccess,
+    pending: wanPending,
+    error: wanError,
+    retryWan,
+  } = useWanAccess();
+
   useEffect(() => {
     const root = document.documentElement;
     if (theme === "system") {
@@ -1482,6 +1803,7 @@ function Dashboard() {
         />
 
         <FileShareCard t={t} />
+        <ExtendedDisplayCard t={t} />
 
         {isStreaming ? (
           <StreamsListView
@@ -1535,6 +1857,9 @@ function Dashboard() {
         lockPending={lockPending}
         curtainPending={curtainPending}
         badgePending={badgePending}
+        wanAccess={wanAccess}
+        wanPending={wanPending}
+        wanError={wanError}
         clipboardError={clipboardError}
         lockError={lockError}
         curtainError={curtainError}
@@ -1548,10 +1873,12 @@ function Dashboard() {
         onToggleLockOnDisconnect={toggleLockOnDisconnect}
         onTogglePrivacyCurtain={togglePrivacyCurtain}
         onToggleStreamingBadge={toggleStreamingBadge}
+        onToggleWanAccess={toggleWanAccess}
         retryClipboard={retryClipboard}
         retryLock={retryLock}
         retryCurtain={retryCurtain}
         retryBadge={retryBadge}
+        retryWan={retryWan}
       />
     </div>
   );
@@ -1668,7 +1995,7 @@ function SessionCard({
           <Info size={12} />
           <span>{t.host.autoCleanupPolicy}</span>
         </div>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-dim)" }}>
           {sessionStateLabel(session.state, t, true)}
         </span>
       </div>

@@ -1,12 +1,44 @@
 //! 호스트 설정 영속화(파일 공유 게이트 등). `data_dir/leftcar-host/settings.json`
-//! (0600)에 저장하며, 없으면 기본값(모두 꺼짐)으로 만든다. 파일이 깨졌다면
+//! (0600)에 저장하며, 없으면 기본값으로 만든다. 파일이 깨졌다면
 //! 기본값으로 되돌린다 — 승인 토글은 안전 쪽으로 실패해야 한다.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// 승인 토글 성격의 호스트 설정. 모두 기본 꺼짐이다.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// 실험 스위치(2026-09-17 인터랙티브 페이싱 계획의 A/B 노브). `None`은
+/// 미설정이고 shim의 기본 동작을 그대로 쓴다. 호스트가 시작 때 프로세스
+/// 환경변수로 주입하고 shim은 스트림 시작마다 읽으므로([`experiment_env_vars`]),
+/// 변경은 다음 스트림부터 적용된다. 범위 제한은 shim이 최종 클램프하지만
+/// UI도 같은 범위만 입력받는다(EncoderPolicy.swift·UdpFramePacingBudget.swift).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ExperimentSettings {
+    /// 인코더 in-flight 상한(1–5). 미설정=해상도 유도 정책값.
+    #[serde(rename = "maxEncodeInFlight", skip_serializing_if = "Option::is_none")]
+    pub max_encode_in_flight: Option<u32>,
+    /// UDP 큐 최대 나이 valve(ms). 0/미설정=끔.
+    #[serde(rename = "queueMaxAgeMs", skip_serializing_if = "Option::is_none")]
+    pub queue_max_age_ms: Option<u32>,
+    /// 미디어 소켓 SO_SNDBUF(64KiB–2MiB). 미설정=512KiB.
+    #[serde(rename = "sndbufBytes", skip_serializing_if = "Option::is_none")]
+    pub sndbuf_bytes: Option<u32>,
+    /// DataRateLimits 버스트 윈도(50–1000ms). 미설정=1000ms(1초). 초 단위
+    /// 환경변수 형식(예: 0.25)으로 변환해 주입한다.
+    #[serde(rename = "drlWindowMs", skip_serializing_if = "Option::is_none")]
+    pub drl_window_ms: Option<u32>,
+    /// 프레임 페이싱 예산 비율(30–100%). 미설정=80%.
+    #[serde(rename = "pacingBudgetPct", skip_serializing_if = "Option::is_none")]
+    pub pacing_budget_pct: Option<u32>,
+    /// 프레임별 전송 trace(FRAME_TRACE). 진단용 로그라 기본 끔.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub frame_trace: bool,
+}
+
+/// 승인 토글 성격의 호스트 설정. 개인정보·캡처에 닿는 토글은 모두 기본
+/// 꺼짐이다. 유일한 예외가 `wan_access`(외부 접속 허용)다 — 소유자 결정
+/// (2026-09-19)에 따라 기본 켜짐이며, 라우터 포트 매핑은 UPnP로 등록되고
+/// 종료 때 제거되며 토글로 즉시 끌 수 있다.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostSettings {
     pub clipboard_share: bool,
     pub file_share: bool,
@@ -18,9 +50,30 @@ pub struct HostSettings {
     /// 스트리밍 중 데스크탑 우상단에 뜨는 "연결 중" 배지. 개인 기기 조합에서는
     /// 소음이므로 기본 꺼짐이며, 타인이 보는 환경에서만 켠다.
     pub streaming_badge: bool,
-    /// 네이티브 표면(트레이 메뉴 등)의 UI 언어. 웹뷰의 leftcar_lang 설정과
+    /// 외부 접속 허용: UPnP로 컨트롤(TCP)·미디어(UDP) 포트를 라우터에 매핑하고
+    /// 공개 엔드포인트를 뷰어에 광고한다. 꺼지면 매핑을 즉시 제거하고 LAN
+    /// 직접 연결만 남는다.
+    pub wan_access: bool,
+    /// 네이티브 표면(트레이 메뉴 등)의 UI 언어. 웹뷰의 `leftcar_lang` 설정과
     /// 같은 값이 되며, 없으면 한국어가 기본이다.
     pub language: HostLanguage,
+    /// 실험 스위치 — 기본은 전부 미설정이다.
+    pub experiment: ExperimentSettings,
+}
+
+impl Default for HostSettings {
+    fn default() -> Self {
+        Self {
+            clipboard_share: false,
+            file_share: false,
+            lock_on_disconnect: false,
+            privacy_curtain: false,
+            streaming_badge: false,
+            wan_access: true,
+            language: HostLanguage::default(),
+            experiment: ExperimentSettings::default(),
+        }
+    }
 }
 
 /// 호스트 UI 언어. 웹뷰의 `leftcar_lang`(localStorage)과 같은 "ko"/"en" 값을
@@ -81,6 +134,40 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
             .get("streamingBadge")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        wan_access: parsed
+            .get("wanAccess")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        experiment: parsed
+            .get("experiment")
+            .and_then(|v| v.as_object())
+            .map(|experiment| ExperimentSettings {
+                max_encode_in_flight: experiment
+                    .get("maxEncodeInFlight")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                queue_max_age_ms: experiment
+                    .get("queueMaxAgeMs")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                sndbuf_bytes: experiment
+                    .get("sndbufBytes")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                drl_window_ms: experiment
+                    .get("drlWindowMs")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                pacing_budget_pct: experiment
+                    .get("pacingBudgetPct")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                frame_trace: experiment
+                    .get("frameTrace")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+            .unwrap_or_default(),
         language: match parsed
             .get("language")
             .or_else(|| parsed.get("leftcar_lang"))
@@ -103,7 +190,16 @@ fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
         "lockOnDisconnect": settings.lock_on_disconnect,
         "privacyCurtain": settings.privacy_curtain,
         "streamingBadge": settings.streaming_badge,
+        "wanAccess": settings.wan_access,
         "language": settings.language.as_str(),
+        "experiment": {
+            "maxEncodeInFlight": settings.experiment.max_encode_in_flight,
+            "queueMaxAgeMs": settings.experiment.queue_max_age_ms,
+            "sndbufBytes": settings.experiment.sndbuf_bytes,
+            "drlWindowMs": settings.experiment.drl_window_ms,
+            "pacingBudgetPct": settings.experiment.pacing_budget_pct,
+            "frameTrace": settings.experiment.frame_trace,
+        },
     })
     .to_string();
     // 임시 파일에 쓰고 같은 디렉터리의 rename으로 갈아끼운다 — 대상 파일을
@@ -127,6 +223,65 @@ fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
     #[cfg(not(unix))]
     std::fs::write(&tmp, body).map_err(|e| format!("write: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))
+}
+
+/// 실험 스위치의 허용 범위(shim 클램프와 같은 값). 범위 밖 저장은 UI 오류다.
+fn validate_experiment(experiment: &ExperimentSettings) -> Result<(), String> {
+    let check = |name: &str,
+                 value: Option<u32>,
+                 range: std::ops::RangeInclusive<u32>|
+     -> Result<(), String> {
+        if let Some(value) = value {
+            if !range.contains(&value) {
+                return Err(format!(
+                    "{name} out of range {value} (allowed {}..={})",
+                    range.start(),
+                    range.end()
+                ));
+            }
+        }
+        Ok(())
+    };
+    check("maxEncodeInFlight", experiment.max_encode_in_flight, 1..=5)?;
+    check("queueMaxAgeMs", experiment.queue_max_age_ms, 0..=120_000)?;
+    check("sndbufBytes", experiment.sndbuf_bytes, 64 * 1024..=2 * 1024 * 1024)?;
+    check("drlWindowMs", experiment.drl_window_ms, 50..=1000)?;
+    check("pacingBudgetPct", experiment.pacing_budget_pct, 30..=100)?;
+    Ok(())
+}
+
+/// 실험 설정을 shim 환경변수 쌍으로 변환한다. 값이 있는 것만 내보내고, 없으면
+/// shim 기본값이 그대로 쓰인다. 문자열 형식은 shim 파서(Int/Double init,
+/// FRAME_TRACE는 "1" 비교)와 정확히 맞춘다. shim은 스트림 시작마다 읽으므로
+/// 주입은 앱 시작 때와 설정 변경 때 하면 충분하다.
+pub fn experiment_env_vars(
+    experiment: &ExperimentSettings,
+) -> Vec<(&'static str, String)> {
+    let mut vars = Vec::new();
+    if let Some(limit) = experiment.max_encode_in_flight {
+        vars.push(("LEFTCAR_MAX_ENCODE_IN_FLIGHT", limit.to_string()));
+    }
+    if let Some(ms) = experiment.queue_max_age_ms {
+        if ms > 0 {
+            vars.push(("LEFTCAR_QUEUE_MAX_AGE_MS", ms.to_string()));
+        }
+    }
+    if let Some(bytes) = experiment.sndbuf_bytes {
+        vars.push(("LEFTCAR_SO_SNDBUF_BYTES", bytes.to_string()));
+    }
+    if let Some(ms) = experiment.drl_window_ms {
+        vars.push((
+            "LEFTCAR_DRL_WINDOW_SECONDS",
+            format!("{}", f64::from(ms) / 1000.0),
+        ));
+    }
+    if let Some(pct) = experiment.pacing_budget_pct {
+        vars.push(("LEFTCAR_PACING_BUDGET_PCT", pct.to_string()));
+    }
+    if experiment.frame_trace {
+        vars.push(("LEFTCAR_FRAME_TRACE", "1".to_string()));
+    }
+    vars
 }
 
 /// 프로세스 전역에서 공유되는 설정값(메모리 상태 + 영속 경로). ControlServer의
@@ -174,9 +329,31 @@ impl SharedSettings {
         self.get().streaming_badge
     }
 
+    pub fn wan_access(&self) -> bool {
+        self.get().wan_access
+    }
+
+    /// 외부 접속 토글 — 다른 게이트 토글과 같은 0600 파일에 영속된다. 매핑의
+    /// 등록·제거는 호출자(upnp 명령)가 즉시 실행한다.
+    pub fn set_wan_access(&self, enabled: bool) -> Result<(), String> {
+        self.update_field(|s| s.wan_access = enabled)
+    }
+
     /// 스트리밍 배지 토글 — 다른 게이트 토글과 같은 0600 파일에 영속된다.
     pub fn set_streaming_badge(&self, enabled: bool) -> Result<(), String> {
         self.update_field(|s| s.streaming_badge = enabled)
+    }
+
+    pub fn experiment(&self) -> ExperimentSettings {
+        self.get().experiment
+    }
+
+    /// 실험 스위치 저장. 범위 밖 값은 저장하기 전에 거부한다 — shim도 클램프
+    /// 하지만, UI 입력 오류를 저장 시점에 드러내는 쪽이 실험 기록을 신뢰할 수
+    /// 있다. 적용 시점은 다음 스트림 시작이다(세션 시작마다 환경변수를 읽음).
+    pub fn set_experiment(&self, experiment: ExperimentSettings) -> Result<(), String> {
+        validate_experiment(&experiment)?;
+        self.update_field(|s| s.experiment = experiment)
     }
 
     pub fn language(&self) -> HostLanguage {
@@ -242,13 +419,108 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_defaults_to_all_off() {
+    fn missing_file_defaults_with_wan_access_on() {
         let path = temp_path("missing");
         let settings = load_or_default(Some(&path));
         assert!(!settings.file_share);
         assert!(!settings.clipboard_share);
         assert!(!settings.lock_on_disconnect);
         assert!(!settings.privacy_curtain);
+        // 유일한 기본 켜짐: 외부 접속 허용(소유자 결정, 2026-09-19).
+        assert!(settings.wan_access);
+    }
+
+    #[test]
+    fn wan_access_toggle_persists_and_survives_reload() {
+        let path = temp_path("wan");
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        assert!(shared.wan_access());
+        shared.set_wan_access(false).unwrap();
+        assert!(!shared.wan_access());
+        let reloaded = load_or_default(Some(&path));
+        assert!(!reloaded.wan_access);
+        // 다른 필드는 따라 바뀌지 않는다.
+        assert!(!reloaded.file_share);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn experiment_settings_roundtrip_and_env_format() {
+        let path = temp_path("experiment");
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        // 기본은 전부 미설정 — 환경변수도 하나도 내보내지 않는다.
+        assert_eq!(experiment_env_vars(&shared.experiment()), vec![]);
+        shared
+            .set_experiment(ExperimentSettings {
+                max_encode_in_flight: Some(2),
+                queue_max_age_ms: Some(33),
+                sndbuf_bytes: Some(1024 * 1024),
+                drl_window_ms: Some(250),
+                pacing_budget_pct: Some(90),
+                frame_trace: true,
+            })
+            .unwrap();
+        let vars = experiment_env_vars(&shared.experiment());
+        assert_eq!(
+            vars,
+            vec![
+                ("LEFTCAR_MAX_ENCODE_IN_FLIGHT", "2".to_string()),
+                ("LEFTCAR_QUEUE_MAX_AGE_MS", "33".to_string()),
+                ("LEFTCAR_SO_SNDBUF_BYTES", (1024 * 1024).to_string()),
+                ("LEFTCAR_DRL_WINDOW_SECONDS", "0.25".to_string()),
+                ("LEFTCAR_PACING_BUDGET_PCT", "90".to_string()),
+                ("LEFTCAR_FRAME_TRACE", "1".to_string()),
+            ]
+        );
+        let reloaded = load_or_default(Some(&path));
+        assert_eq!(reloaded.experiment, shared.experiment());
+        // 0 밸브는 끔과 같다 — 환경변수를 만들지 않는다.
+        shared
+            .set_experiment(ExperimentSettings {
+                queue_max_age_ms: Some(0),
+                ..shared.experiment()
+            })
+            .unwrap();
+        assert!(
+            !experiment_env_vars(&shared.experiment())
+                .iter()
+                .any(|(key, _)| *key == "LEFTCAR_QUEUE_MAX_AGE_MS")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn experiment_settings_reject_out_of_range_values() {
+        let shared = SharedSettings::in_memory();
+        let base = ExperimentSettings::default();
+        let mut bad = base;
+        bad.max_encode_in_flight = Some(6);
+        assert!(shared.set_experiment(bad).is_err());
+        let mut bad = base;
+        bad.drl_window_ms = Some(2000);
+        assert!(shared.set_experiment(bad).is_err());
+        let mut bad = base;
+        bad.pacing_budget_pct = Some(10);
+        assert!(shared.set_experiment(bad).is_err());
+        let mut bad = base;
+        bad.sndbuf_bytes = Some(1024);
+        assert!(shared.set_experiment(bad).is_err());
+        // 거부된 값은 메모리에 반영되지 않는다.
+        assert_eq!(shared.experiment(), base);
+    }
+
+    #[test]
+    fn legacy_settings_file_without_experiment_block_stays_default() {
+        let path = temp_path("legacy-experiment");
+        std::fs::write(
+            &path,
+            r#"{"v":1,"clipboardShare":true,"wanAccess":false,"language":"en"}"#,
+        )
+        .unwrap();
+        let settings = load_or_default(Some(&path));
+        assert!(settings.clipboard_share);
+        assert_eq!(settings.experiment, ExperimentSettings::default());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

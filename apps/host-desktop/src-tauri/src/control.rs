@@ -13,7 +13,7 @@ use crate::backend::SharedBackend;
 use control_contract::host::{
     decode_media_key, CatalogView, EncoderExperiment, EncoderExperimentInfo,
     ReconfigureStreamInput, ReconfigureStreamOutput, SessionView, StartStreamInput,
-    StartStreamOutput, StatusView,
+    StartStreamOutput, StatusView, ViewerDisplayMetricsMsg,
 };
 use control_contract::udp_stability::{
     host_udp_stability_capabilities, resolve_udp_stability, AppliedUdpStability,
@@ -404,6 +404,11 @@ pub struct ControlServer {
     /// 동시 연결 상한 허가(F08). accept 루프가 연결 작업 하나당 하나씩
     /// 집고, 작업이 끝나면 반납된다.
     conn_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// 기기(owner)별 최근 뷰어 패널 메트릭(startStream viewerDisplay 선택
+    /// 필드). 확장 디스플레이 기본 모드 도출에만 쓰인다.
+    viewer_metrics: Mutex<HashMap<String, (std::time::Instant, ViewerDisplayMetricsMsg)>>,
+    /// UPnP/NAT-PMP를 통해 매핑된 외부 공인 미디어 엔드포인트(e.g. "1.217.35.59:5001").
+    public_media_endpoint: Mutex<Option<String>>,
 }
 
 struct State {
@@ -444,6 +449,8 @@ impl ControlServer {
             replacement_retired: Mutex::new(HashMap::new()),
             pending_retirements: Mutex::new(HashMap::new()),
             conn_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS)),
+            viewer_metrics: Mutex::new(HashMap::new()),
+            public_media_endpoint: Mutex::new(None),
         }
     }
 
@@ -453,6 +460,33 @@ impl ControlServer {
 
     pub fn set_control_port(&self, port: u16) {
         self.control_port.store(port, Ordering::Release);
+    }
+
+    pub fn set_public_media_endpoint(&self, endpoint: Option<String>) {
+        *self.public_media_endpoint.lock().unwrap() = endpoint;
+    }
+
+    pub fn public_media_endpoint(&self) -> Option<String> {
+        self.public_media_endpoint.lock().unwrap().clone()
+    }
+
+    /// 뷰어가 startStream에 실어 보낸 자기 패널 메트릭을 기기별로 기억한다.
+    pub fn note_viewer_metrics(&self, owner: &str, metrics: ViewerDisplayMetricsMsg) {
+        self.viewer_metrics
+            .lock()
+            .unwrap()
+            .insert(owner.to_owned(), (std::time::Instant::now(), metrics));
+    }
+
+    /// 가장 최근에 보고한 기기의 메트릭(없으면 None). 확장 디스플레이 기본
+    /// 모드 도출용 최신값 프리뷰다.
+    pub fn latest_viewer_metrics(&self) -> Option<ViewerDisplayMetricsMsg> {
+        self.viewer_metrics
+            .lock()
+            .unwrap()
+            .values()
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, metrics)| metrics.clone())
     }
 
     /// 화면 잠금 실행부 주입(lib.rs setup). 테스트는 카운터를 넣는다.
@@ -988,7 +1022,23 @@ impl ControlServer {
             .get(&session_id)
             .is_some_and(|s| s.input_enabled);
         let input_enabled = match recovered {
-            Ok(handle) if current_input => self.backend.set_input_enabled(handle, true).is_ok(),
+            Ok(handle) if current_input => match self.backend.set_input_enabled(handle, true) {
+                Ok(()) => true,
+                Err(error) => {
+                    // 실패를 조용히 묻히면 운영자는 세션이 왜 잠겼는지 모른다
+                    // (보통 OS 접근성 권한 상실). 감사 로그로만 남긴다.
+                    self.audit_log(
+                        "input_auto_enable_failed",
+                        json!({
+                            "session": session_id,
+                            "device": previous.device_id,
+                            "context": "recovery",
+                            "error": error,
+                        }),
+                    );
+                    false
+                }
+            },
             _ => false,
         };
         let committed = self
@@ -1440,20 +1490,35 @@ impl ControlServer {
         };
 
         let _input_change = self.input_changes.lock().unwrap();
-        let input_enabled = !source_changed
-            && self
-                .sessions
-                .lock()
-                .unwrap()
-                .live
-                .get(&input.session)
-                .is_some_and(|s| {
-                    s.input_enabled && s.lifecycle.accepts(previous.operation, s.backend_released)
-                })
-            && self
-                .backend
-                .set_input_enabled(replacement_handle, true)
-                .is_ok();
+        let previous_input = self
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get(&input.session)
+            .is_some_and(|s| {
+                s.input_enabled && s.lifecycle.accepts(previous.operation, s.backend_released)
+            });
+        let input_enabled = if !source_changed && previous_input {
+            match self.backend.set_input_enabled(replacement_handle, true) {
+                Ok(()) => true,
+                Err(error) => {
+                    // 복구 경로와 같은 이유: 실패 묻힘은 운영자에게 보이지 않는다.
+                    self.audit_log(
+                        "input_auto_enable_failed",
+                        json!({
+                            "session": input.session,
+                            "device": previous.device_id,
+                            "context": "replacement",
+                            "error": error,
+                        }),
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
 
         let committed = self
             .pairing
@@ -2281,6 +2346,7 @@ impl ControlServer {
                             .parse::<std::net::Ipv4Addr>()
                             .is_ok_and(|address| address.is_private())
                     }),
+                    public_media_endpoint: self.public_media_endpoint(),
                     displays,
                     encoder_experiments,
                     reconfigure_encoder_experiment: Some(true),
@@ -2322,6 +2388,13 @@ impl ControlServer {
                     Ok(auth) => Some(auth),
                     Err(error) => return err(&error),
                 };
+                // 뷰어 패널 메트릭(있으면)을 기기별로 기억한다 — 확장
+                // 디스플레이 기본 모드 도출용이고 다른 부작용은 없다.
+                if let Some(metrics) = &input.viewer_display {
+                    if let Some(auth) = authorization.as_ref() {
+                        self.note_viewer_metrics(auth.owner_id(), metrics.clone());
+                    }
+                }
                 let plan = match self.plan_start(&input).await {
                     Ok(plan) => plan,
                     Err(error) => return err(&error),
@@ -2334,12 +2407,10 @@ impl ControlServer {
                     return err("source_access_denied");
                 }
 
-                // A non-bypassable VPN can route a local control connection
-                // through a LAN subnet router, so its TCP peer is not always
-                // the viewer's physical Wi-Fi address. Consider claimed
-                // addresses only when they are private and either on the
-                // peer's /24 or the authenticated control peer is a tailnet
-                // CGNAT address. USB is deliberately different: adb forward
+                // Only use claimed LAN addresses on the control peer's /24.
+                // A tailnet connection must keep its authenticated peer route:
+                // the viewer's advertised LAN may be unreachable or overlap
+                // with an unrelated network. USB is different: adb forward
                 // terminates on the Host, so the only valid media peer is the
                 // Host loopback address.
                 let usb_control = viewer_ip == "usb";
@@ -3592,8 +3663,7 @@ fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
     let candidate_octets = candidate.octets();
     let peer_octets = peer.octets();
     let same_private_subnet = peer.is_private() && candidate_octets[..3] == peer_octets[..3];
-    let tailnet_peer = peer_octets[0] == 100 && (peer_octets[1] & 0b1100_0000) == 64;
-    candidate.is_private() && (same_private_subnet || tailnet_peer)
+    candidate.is_private() && same_private_subnet
 }
 
 async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
@@ -4311,7 +4381,7 @@ mod tests {
     #[test]
     fn media_candidate_must_be_private_and_on_the_control_peers_lan() {
         assert!(same_private_lan_candidate("192.168.0.18", "192.168.0.170"));
-        assert!(same_private_lan_candidate("192.168.0.18", "100.80.133.120"));
+        assert!(!same_private_lan_candidate("192.168.0.18", "100.80.133.120"));
         assert!(!same_private_lan_candidate("192.168.1.18", "192.168.0.170"));
         assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
         assert!(!same_private_lan_candidate("192.168.0.18", "100.128.0.1"));
