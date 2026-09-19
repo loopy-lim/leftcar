@@ -20,13 +20,6 @@ import android.view.View
 import dev.leftcar.viewer.shim.ViewerNative
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
-import androidx.lifecycle.lifecycleScope
-import androidx.xr.runtime.Session
-import androidx.xr.runtime.SessionCreateSuccess
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Job
 
 class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
@@ -36,8 +29,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TERMINATION_REEMIT_INTERVAL_MS = 10_000L
         private const val SYSTEM_BARS_REVEAL_THROTTLE_MS = 3_000L
         private const val SYSTEM_BARS_DWELL_MS = 600L
-        private const val KEY_WINDOW_WIDTH_PX = "windowWidthPx"
-        private const val KEY_WINDOW_HEIGHT_PX = "windowHeightPx"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
         private const val KEY_PRESENTATION_SMOOTH = "presentationSmooth"
         // A healthy rebind renders its first frame well inside a second; this
@@ -150,127 +141,49 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var recoveryRetryRunnable: Runnable? = null
     private var recoveryFallbackEmitted = false
     private var recoveryFlowWatchdog: Runnable? = null
-    private var xrSession: Session? = null
-    private var xrPreferredRatio: Float? = null
-    /**
-     * 호스트가 기억한 이 기기의 마지막 창 크기(px). 0이면 저장된 값이 없다는
-     * 뜻이고 소스 비율 힌트만 적용한다. 액티비티 재생성 시 스트림 인텐트의
-     * 병합된 extra(effectiveStreamConfiguration)에서 복원된다.
-     */
-    private var windowWidthPx: Int = 0
-    private var windowHeightPx: Int = 0
-    /**
-     * 창 크기 고정(2026-09-20): 호스트가 현재 들고 있는 크기 — 적용 요청값 또는
-     * "이 크기 기억" 칩으로 저장된 값. 현재 창 크기가 이 값과 다르면 칩이
-     * 나타나고, 눌러야만 저장된다. 자동 보고는 없다 — 잠깐의 리사이즈나 시스템
-     * 재배치가 저장값을 덮어쓰는 드리프트가 이렇게 원천 차단된다.
-     */
-    private var hostWindowSize: Pair<Int, Int>? = null
     private var ownershipGeneration: Long = 0L
-    private var xrRatioGeneration = 0L
-    private var xrCreationInFlight: Job? = null
-
-    private fun applyXrPreferredAspectRatio(force: Boolean = false) {
-        if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
-        val ratio =
-            sourceWidth.toFloat().coerceAtLeast(1f) / sourceHeight.coerceAtLeast(1).toFloat()
-        if (!force && xrPreferredRatio == ratio) return
-        val generation = ++xrRatioGeneration
-        val existing = xrSession
-        if (existing != null) {
-            runCatching { setXrRatio(existing, ratio) }
-                .onSuccess { xrPreferredRatio = ratio }
-                .onFailure { android.util.Log.i("LeftcarStream", "XR preferred ratio unavailable; keeping system panel size", it) }
-            return
-        }
-        if (xrCreationInFlight?.isActive == true) return
-        xrCreationInFlight = lifecycleScope.launch {
-            val created = runCatching {
-                withContext(Dispatchers.IO) {
-                    Session.create(this@StreamActivity, Dispatchers.Default, this@StreamActivity)
-                }
-            }.onFailure {
-                android.util.Log.i("LeftcarStream", "XR session unavailable; using normal Android window", it)
-            }.getOrNull() as? SessionCreateSuccess ?: return@launch
-            xrSession = created.session
-            if (generation != xrRatioGeneration) {
-                // 생성 도중 더 새 비율 요청이 들어왔으면 최신 상태로 다시 적용.
-                applyXrPreferredAspectRatio(force = true)
-                return@launch
-            }
-            runCatching { setXrRatio(created.session, ratio) }
-                .onSuccess { xrPreferredRatio = ratio }
-                .onFailure { android.util.Log.i("LeftcarStream", "XR preferred ratio rejected; keeping system panel size", it) }
-        }
-    }
-
-    private fun setXrRatio(session: Session, ratio: Float) {
-        // Keep the XR path optional at runtime: the AndroidX API is present in
-        // the APK, while non-XR devices simply never create a Session.
-        SpatialWindowBridge.setPreferredAspectRatio(session, this, ratio)
-    }
+    /**
+     * 스트림 배율(2026-09-20). XR 패널 크기가 시스템에 의해 리셋되는 것은
+     * 우리가 제어할 수 없으므로, 창이 어떤 크기로 열려도 내용을 확대해 쓰는
+     * 방식으로 대체했다. HUD "배율" 칩으로 순환 선택하면 여기 저장되고 이후
+     * 모든 창(재생성 포함)에 자동 적용된다. 핀치줌과 같은 상태 기계를 쓰므로
+     * 원격 입력 좌표의 줌 역변환이 그대로 유효하다.
+     */
+    private var savedZoom: Float = 1f
 
     /**
-     * 창 크기 유지(2026-09-20). 호스트가 기억한 절대 픽셀 크기가 있으면
-     * 플랫폼 확장 API로 그대로 요청하고, 없거나 거절되면 기존처럼 소스 비율만
-     * 힌트한다. 창 크기가 비율을 포함하므로 비율 프리셋은 폐기했다.
+     * 저장된 배율을 절대값으로 설정한다. 핀치줌과 같은 상태 기계를 쓰므로
+     * 현재 배율 대비 상대 인자로 환산해 한 번에 목표 배율로 간다. 뷰 크기가
+     * 0이면(아직 레이아웃 전) 아무 것도 하지 않는다 — 호출부가 레이아웃
+     * 이후로 미뤄야 한다.
      */
-    private fun applyXrWindowSizeOrRatio() {
-        if (!packageManager.hasSystemFeature("android.software.xr.api.spatial")) return
-        val width = windowWidthPx
-        if (width > 0) {
-            val height = windowHeightPx.takeIf { it > 0 }
-                ?: (width.toLong() * sourceHeight.coerceAtLeast(1) / sourceWidth.coerceAtLeast(1))
-                    .toInt()
-                    .coerceAtLeast(1)
-            hostWindowSize = width to height
-            val accepted = XrMainWindowSizer.setMainWindowSize(this, width, height) { code ->
-                when (code) {
-                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_SUCCESS,
-                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_SUCCESS_NOT_VISIBLE,
-                    com.android.extensions.xr.XrExtensionResult.XR_RESULT_IGNORED_ALREADY_APPLIED,
-                    -> Unit
-                    else -> {
-                        android.util.Log.w(
-                            "LeftcarStream",
-                            "window size ${width}x$height rejected ($code); falling back to ratio hint",
-                        )
-                        runOnUiThread { applyXrPreferredAspectRatio(force = true) }
-                    }
-                }
-            }
-            if (accepted) return
+    private fun setStreamZoom(target: Float) {
+        val view = streamSurfaces?.left ?: return
+        val width = view.width
+        val height = view.height
+        if (width <= 0 || height <= 0) return
+        if (target <= 1f) {
+            streamZoom.reset()
+        } else {
+            streamZoom.applyScale(target / streamZoom.scale, width / 2f, height / 2f, width, height)
         }
-        applyXrPreferredAspectRatio(force = true)
+        applyZoomToSurfaces()
     }
 
-    /**
-     * 창 크기가 호스트가 기억한 값과 달라졌는지 따라가 칩을 갱신한다. 자동
-     * 저장은 없다 — 저장은 오직 "이 크기 기억" 칩을 누를 때만 일어난다.
-     */
-    private fun updateRememberSizeChip() {
-        if (!XrMainWindowSizer.isSupported(this)) return
-        if (released || isFinishing || isDestroyed) return
-        val width = window.decorView.width
-        val height = window.decorView.height
-        if (width <= 0 || height <= 0) return
-        val changed = hostWindowSize?.let { it.first != width || it.second != height } ?: true
-        if (changed) hud?.showRememberSizeChip { rememberWindowSize() }
-        else hud?.hideRememberSizeChip()
+    /** 칩이 순환한 다음 배율을 저장하고 즉시 적용한다. */
+    private fun onZoomChipStepped(zoom: Float) {
+        savedZoom = zoom
+        getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+            .edit().putFloat("streamZoom", zoom).apply()
+        android.util.Log.i("LeftcarStream", "zoom set $zoom port=$port")
+        streamSurfaces?.left?.post { setStreamZoom(savedZoom) }
     }
 
-    /** 칩을 눌렀을 때 현재 창 크기를 호스트에 저장한다. 이후 열리는 창은
-     * 이 크기로 고정된다(다음 창부터 인텐트 extra로 재적용). */
-    private fun rememberWindowSize() {
-        val width = window.decorView.width
-        val height = window.decorView.height
-        if (width <= 0 || height <= 0) return
-        hostWindowSize = width to height
-        android.util.Log.i("LeftcarStream", "window size remembered ${width}x$height port=$port")
-        StreamLauncherModule.emitWindowSizeChanged(port, width, height)
-        hud?.hideRememberSizeChip()
-        android.widget.Toast.makeText(this, ViewerStrings.rememberSizeDone, android.widget.Toast.LENGTH_SHORT)
-            .show()
+    private fun applySavedZoom() {
+        if (savedZoom > 1f) {
+            android.util.Log.i("LeftcarStream", "zoom restore $savedZoom port=$port")
+            streamSurfaces?.left?.post { setStreamZoom(savedZoom) }
+        }
     }
 
     /**
@@ -1312,10 +1225,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         sourceWidth = intent?.getIntExtra("width", 1920) ?: 1920
         sourceHeight = intent?.getIntExtra("height", 1080) ?: 1080
         ownershipGeneration = intent?.getLongExtra("ownershipGeneration", 0L) ?: 0L
-        // 호스트가 기억한 창 크기. 재생성 시에는 setIntent로 병합된 실행
-        // 인텐트(effectiveStreamConfiguration)에서 같은 값이 온다.
-        windowWidthPx = intent?.getIntExtra(KEY_WINDOW_WIDTH_PX, 0) ?: 0
-        windowHeightPx = intent?.getIntExtra(KEY_WINDOW_HEIGHT_PX, 0) ?: 0
 
         splitVertical = intent?.getBooleanExtra("splitVertical", false) ?: false
         splitDecoderName = intent?.getStringExtra("splitDecoderName") ?: ""
@@ -1383,7 +1292,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         hud?.show()
         // 첫 레이아웃 이후 저장되지 않은 크기(저장값 없음 포함)면 칩을 보인다.
-        window.decorView.post { updateRememberSizeChip() }
+        window.decorView.post { applySavedZoom() }
         attachTextLens()
         showGestureHint(false)
         surfaces.requestFocus()
@@ -1399,8 +1308,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // stale chunks.
         audioPlayer = StreamAudioPlayer(instanceId, { bytes -> ViewerNative.pollAudioOwned(nativeState, instanceId, bytes) },
             onCodecFallback = { ViewerNative.setAudioOwned(nativeState, instanceId, localAudioEnabled, false) }, signaledPoll = true).also { if (localAudioEnabled) it.start() }
+        savedZoom = getSharedPreferences("leftcar_viewer", MODE_PRIVATE)
+            .getFloat("streamZoom", 1f)
+        if (XrMainWindowSizer.isSupported(this)) {
+            // XR에서는 패널 크기를 우리가 신뢰할 수 없으므로 배율 칩이 유일한
+            // 확대 수단이다. 태블릿은 기존 핀치줌을 그대로 쓴다.
+            hud?.showZoomChip(savedZoom, ::onZoomChipStepped)
+        }
         lifecycleEvent(1) // ACTIVITY_CREATE
-        applyXrWindowSizeOrRatio()
+        window.decorView.post { applySavedZoom() }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1451,10 +1367,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             newIntent.extras?.let { putExtras(it) }
             putExtra("reconnect", false)
         })
-        // 재구성 인텐트가 창 크기를 갱신했으면 멤버도 맞춘다(부분 extra는
-        // 기존 값 유지 — reconnect 인텐트는 창 크기를 싣지 않는다).
-        newIntent.getIntExtra(KEY_WINDOW_WIDTH_PX, 0).takeIf { it > 0 }?.let { windowWidthPx = it }
-        newIntent.getIntExtra(KEY_WINDOW_HEIGHT_PX, 0).takeIf { it > 0 }?.let { windowHeightPx = it }
         if (togglesOnly) {
             localCursorEnabled = nextLocalCursor
             if (localCursorEnabled) enableCursorOverlay() else disableCursorOverlay()
@@ -1486,10 +1398,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             splitVertical = nextSplitVertical
             splitDecoderName = newIntent.getStringExtra("splitDecoderName") ?: splitDecoderName
             streamSurfaces?.updateVideoSize(sourceWidth, sourceHeight)
-            if (sourceRatioChanged) {
-                // 소스 비율이 바뀌면 저장된 폭에 대한 높이도 다시 계산한다.
-                applyXrWindowSizeOrRatio()
-            }
+
             if (!localCursorEnabled) disableCursorOverlay()
             when (
                 decideSurfaceTransition(
@@ -1602,6 +1511,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         // 남은 줌으로 두면 toContent가 낡은 변환으로 탭을 역산해 원격 입력이
         // 엉뚱한 곳에 찍힌다. 커서 오버레이는 attach 직후 다시 켜진다.
         streamZoom.reset()
+        window.decorView.post { applySavedZoom() }
         // Retired holders are forgotten here; their destroys are inert.
         surfaceLifecycle.hierarchySwapped(next.holders)
         cancelPendingSurfaceAttach()
@@ -1808,8 +1718,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         super.onConfigurationChanged(newConfig)
         android.util.Log.i("LeftcarStream", "onConfigurationChanged: orientation=${newConfig.orientation}")
         lifecycleEvent(11) // CONFIGURATION_CHANGE
-        // 크기가 저장값과 달라졌으면 "이 크기 기억" 칩을 갱신한다(자동 저장 없음).
-        updateRememberSizeChip()
+        // 리레이아웃 후 저장 배율을 다시 맞춘다(수동 핀치가 있으면 그 값이
+        // 기준이 되므로 건드리지 않는다).
+        window.decorView.post { applySavedZoom() }
     }
 
     private fun releaseOwnedNativeStream() {

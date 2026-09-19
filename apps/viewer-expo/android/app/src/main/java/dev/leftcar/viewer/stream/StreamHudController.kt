@@ -56,6 +56,14 @@ internal class StreamHudController(
         private const val INPUT_ALLOWED_IDLE_ALPHA = 0.38f
         private const val DEBUG_STATS_VISIBLE_MS = 6_000L
         private const val DEBUG_STATS_FADE_MS = 420L
+
+        /** 배율 칩이 순환하는 단계 — 3배(텍스트 판독용)까지 다녀오면 1배로 돌아온다. */
+        private val ZOOM_STEPS = floatArrayOf(1f, 1.25f, 1.5f, 2f, 3f)
+
+        fun nextZoomStep(current: Float): Float {
+            val index = ZOOM_STEPS.indexOfFirst { it > current + 0.01f }
+            return if (index >= 0) ZOOM_STEPS[index] else ZOOM_STEPS[0]
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -69,8 +77,10 @@ internal class StreamHudController(
     private var rebindPopup: PopupWindow? = null
     private var rebindView: View? = null
     private var rebindText: TextView? = null
-    private var rememberChipPopup: PopupWindow? = null
-    private var rememberChipText: TextView? = null
+    private var zoomChipPopup: PopupWindow? = null
+    private var zoomChipText: TextView? = null
+    private var onZoomStepped: ((Float) -> Unit)? = null
+    private var currentZoom = 1f
     private var controls: StreamHudControls? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
@@ -215,31 +225,37 @@ internal class StreamHudController(
     }
 
     /**
-     * "이 크기 기억" 칩 — 창 크기가 호스트 저장값과 달라졌을 때만 입력 배지
-     * 아래에 나타난다. 유일하게 터치를 받는 HUD 요소라 자체 팝업으로 띄운다;
-     * 누르면 [onRemember]로 현재 크기를 저장하고 사라진다.
+     * "배율" 칩 — XR에서 패널 크기가 시스템에 의해 리셋되므로, 내용 확대는
+     * 이 칩으로 한다. 탭할 때마다 배율 단계를 순환하고 [onStep]으로 다음
+     * 배율을 전달한다(호출부가 저장·적용을 담당). 유일하게 터치를 받는 HUD
+     * 요소라 자체 팝업으로 띄운다.
      */
-    fun showRememberSizeChip(onRemember: () -> Unit) {
-        rememberChipText?.let { existing ->
-            existing.alpha = 1f
+    fun showZoomChip(initialZoom: Float, onStep: (Float) -> Unit) {
+        onZoomStepped = onStep
+        if (zoomChipText != null) {
+            zoomChipText?.text = zoomLabel(initialZoom)
+            zoomChipText?.alpha = 1f
             return
         }
+        currentZoom = initialZoom
         val chip = TextView(activity).apply {
-            text = ViewerStrings.rememberSize
-            contentDescription = ViewerStrings.rememberSize
+            text = zoomLabel(initialZoom)
+            contentDescription = zoomLabel(initialZoom)
             setTextColor(Color.argb(232, 255, 255, 255))
             textSize = 11f * panelScale
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = badgeBackground(Color.argb(178, 15, 23, 42))
             elevation = dp(3).toFloat()
-            // 이 팝업은 터치를 받는다 — 배지와 달리 눌러야 하는 버튼이다.
             setOnClickListener {
-                it.isEnabled = false
-                onRemember()
+                val next = nextZoomStep(currentZoom)
+                currentZoom = next
+                text = zoomLabel(next)
+                contentDescription = zoomLabel(next)
+                onZoomStepped?.invoke(next)
             }
         }
-        rememberChipText = chip
-        rememberChipPopup = PopupWindow(
+        zoomChipText = chip
+        zoomChipPopup = PopupWindow(
             chip,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -251,7 +267,7 @@ internal class StreamHudController(
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(3).toFloat()
         }
-        val popup = rememberChipPopup ?: return
+        val popup = zoomChipPopup ?: return
         activity.window.decorView.post {
             if (!popup.isShowing && !activity.isFinishing && !activity.isDestroyed) {
                 popup.showAtLocation(
@@ -265,11 +281,17 @@ internal class StreamHudController(
         }
     }
 
-    fun hideRememberSizeChip() {
-        rememberChipPopup?.dismiss()
-        rememberChipPopup = null
-        rememberChipText = null
+    fun hideZoomChip() {
+        zoomChipPopup?.dismiss()
+        zoomChipPopup = null
+        zoomChipText = null
+        onZoomStepped = null
     }
+
+    private fun zoomLabel(zoom: Float): String =
+        String.format(ViewerStrings.zoomChip, zoom)
+
+
 
     fun revealInput() {
         val badge = inputView ?: return
@@ -307,9 +329,10 @@ internal class StreamHudController(
         inputPopup = null
         statsPopup = null
         rebindPopup = null
-        rememberChipPopup?.dismiss()
-        rememberChipPopup = null
-        rememberChipText = null
+        zoomChipPopup?.dismiss()
+        zoomChipPopup = null
+        zoomChipText = null
+        onZoomStepped = null
         controls = null
         inputView = null
         inputIcon = null
