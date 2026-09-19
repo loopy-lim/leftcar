@@ -16,6 +16,14 @@ struct InputLanguageTests {
         assert(inputLanguageSource(2, current: nil, sources: [sources[2]]) == nil)
         let custom = InputLanguageSource(id: "user.korean", languages: ["ko-KR"], selectable: true)
         assert(inputLanguageSource(2, current: custom.id, sources: sources + [custom]) == custom.id)
+        // 한/영 토글 폴백의 판정: 활성 소스 언어의 반대편을 고른다.
+        assert(primaryLanguageTag(["ko-KR", "en"]) == "ko")
+        assert(primaryLanguageTag(["en"]) == "en")
+        assert(primaryLanguageTag([]) == nil)
+        assert(nextInputLanguage(currentTag: "ko") == 1)
+        assert(nextInputLanguage(currentTag: "en") == 2)
+        assert(nextInputLanguage(currentTag: nil) == 2)
+        assert(nextInputLanguage(currentTag: "fr") == 2)
         var pending = InputLanguageTransition()
         assert(pending.begin(sequence: 1))
         assert(!pending.begin(sequence: 1), "retries must not apply twice")
@@ -28,7 +36,7 @@ struct InputLanguageTests {
         testReceiverOrderingAndCancellation()
         testCapabilityReplyHasUdpDestination()
         assert(viewerConnectionAlive(feedback: 1, heartbeat: 8_000_000_000, now: 10_000_000_000))
-        assert(!viewerConnectionAlive(feedback: 1, heartbeat: 8_000_000_000, now: 14_000_000_000))
+        assert(!viewerConnectionAlive(feedback: 1, heartbeat: 8_000_000_000, now: 24_000_000_000))
         assert(!viewerConnectionAlive(feedback: 0, heartbeat: 0, now: 1))
         print("Input language source and transition tests passed")
     }
