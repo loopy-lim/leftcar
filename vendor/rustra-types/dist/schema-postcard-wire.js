@@ -124,14 +124,8 @@ function concatBytes(arrays) {
     }
     return result;
 }
-function utf8Encode(s) {
-    return encodeUtf8(s);
-}
-function utf8Decode(bytes) {
-    return decodeUtf8(bytes);
-}
 function encString(s) {
-    const bytes = utf8Encode(s);
+    const bytes = encodeUtf8(s);
     return concatBytes([encVarint(bytes.length), bytes]);
 }
 function decString(buf, offset) {
@@ -139,7 +133,7 @@ function decString(buf, offset) {
     const start = offset + len.bytesRead;
     const end = start + len.value;
     return {
-        value: utf8Decode(buf.slice(start, end)),
+        value: decodeUtf8(buf.slice(start, end)),
         bytesRead: len.bytesRead + len.value,
     };
 }

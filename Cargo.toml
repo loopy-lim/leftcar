@@ -11,6 +11,7 @@ members = [
     "crates/usb-mux",
     "crates/control-contract",
     "crates/secure-channel",
+    "crates/keymap",
     "tools/architecture-check",
     "native/android-viewer",
     "native/leftcar-rustra",

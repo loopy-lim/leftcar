@@ -24,7 +24,13 @@ import { RustraCommandError, RustraErrorCode } from './errors.js';
 import { decodeUtf8, encodeUtf8 } from './utf8.js';
 /** 모양 불일치는 JSON 포인터 경로로 밝힌다(loud 계약). */
 function unexpectedShape(path, expected, actual) {
-    const shown = actual === null ? 'null' : Array.isArray(actual) ? 'array' : typeof actual;
+    let shown;
+    if (actual === null)
+        shown = 'null';
+    else if (Array.isArray(actual))
+        shown = 'array';
+    else
+        shown = typeof actual;
     throw new RustraCommandError(RustraErrorCode.InspectorUnexpectedShape, `snapshot '${path}' must be ${expected}, got ${shown}`);
 }
 function expectString(path, value) {

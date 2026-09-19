@@ -1,7 +1,7 @@
 // ── T2-2: 스키마→postcard 코덱 인터프리터 ────────────────────
 //
 // live_schema 의 inputSchema/outputSchema(JSON Schema 노드)로부터 런타임에
-// RkyvV2Codec 을 생성한다 — 코드젠(@rustra/cli)이 하는 일을 스키마 인터프리터로
+// FrameCodec 을 생성한다 — 코드젠(@rustra/cli)이 하는 일을 스키마 인터프리터로
 // 재현해, **동적 명령**(register/replace)도 postcard fast-path 를 쓸 수 있게 한다.
 //
 // 와이어 패리티 계약:

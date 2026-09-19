@@ -21,6 +21,26 @@ function rejectConflictingRegistration(initializer, options) {
         `single-engine: reuse the existing one (reload), or configure() an explicit ` +
         `engine to take over the slot. Multi-engine is not supported.`);
 }
+/** Opaque identity of the current global registration, stable across lazy setup. */
+export function getEngineRegistrationToken() {
+    return runtime.engineRegistration;
+}
+function claimRegistration() {
+    const token = Symbol('engine registration');
+    runtime.engineRegistration = token;
+    const isCurrent = () => runtime.engineRegistration === token;
+    return Object.assign(() => {
+        if (!isCurrent())
+            return;
+        runtime.engine = null;
+        runtime.engineInitializer = undefined;
+        runtime.engineInitialization = undefined;
+        runtime.engineInitializerConsumed = false;
+        runtime.engineOwnerId = undefined;
+        runtime.engineRegistration = undefined;
+        resetConfiguredRoutes();
+    }, { isCurrent });
+}
 export function configure(engine, options) {
     runtime.engine = engine;
     runtime.engineInitializer = undefined;
@@ -28,6 +48,7 @@ export function configure(engine, options) {
     runtime.engineInitializerConsumed = false;
     runtime.engineOwnerId = options?.ownerId;
     resetConfiguredRoutes();
+    return claimRegistration();
 }
 export function configureLazy(initializer, options) {
     rejectConflictingRegistration(initializer, options);
@@ -37,6 +58,7 @@ export function configureLazy(initializer, options) {
     runtime.engineInitializerConsumed = false;
     runtime.engineOwnerId = options?.ownerId;
     resetConfiguredRoutes();
+    return claimRegistration();
 }
 export function isLazyConfigured() {
     return runtime.engineInitializer !== undefined;
@@ -59,7 +81,11 @@ export function ensureConfigured() {
             .then((engine) => {
             if (runtime.engineGeneration !== generation || runtime.engineInitializer !== initializer)
                 return runtime.engine ?? ensureConfigured();
-            configure(engine);
+            // Installing a lazy result preserves its registration's release authority.
+            runtime.engine = engine;
+            runtime.engineInitializer = undefined;
+            runtime.engineInitialization = undefined;
+            resetConfiguredRoutes();
             return engine;
         })
             .catch((error) => {
@@ -79,23 +105,22 @@ export function resolveCommandId(commandFn) {
         return commandFn.name;
     throw new Error('Command function must have a commandId or name property (use generated commands or pass a named function)');
 }
+function lazyRetryOrLoudReject(retry) {
+    if (isLazyConfigured())
+        return ensureConfigured().then(retry);
+    return Promise.reject(new RustraCommandError(RustraErrorCode.TransportUnavailable, 'Rustra not configured. Call configure(engine) first.'));
+}
 export function invoke(command, args, options) {
     const engine = runtime.engine;
-    if (!engine) {
-        if (isLazyConfigured())
-            return ensureConfigured().then(() => invoke(command, args, options));
-        return Promise.reject(new RustraCommandError(RustraErrorCode.TransportUnavailable, 'Rustra not configured. Call configure(engine) first.'));
-    }
+    if (!engine)
+        return lazyRetryOrLoudReject(() => invoke(command, args, options));
     return invokeWithTimeout(engine, command, args, options);
 }
 /** @internal — codegen import contract; see note atop global-fields.ts. */
 export function invokeGenerated(commandId, command, args, options) {
     const engine = runtime.engine;
-    if (!engine) {
-        if (isLazyConfigured())
-            return ensureConfigured().then(() => invokeGenerated(commandId, command, args, options));
-        return Promise.reject(new RustraCommandError(RustraErrorCode.TransportUnavailable, 'Rustra not configured. Call configure(engine) first.'));
-    }
+    if (!engine)
+        return lazyRetryOrLoudReject(() => invokeGenerated(commandId, command, args, options));
     const syncInvoke = engine[invokeByIdSync];
     if (options === undefined && syncInvoke) {
         try {

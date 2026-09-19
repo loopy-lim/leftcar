@@ -10,14 +10,14 @@ export type LiveSchemaEntry = {
      */
     definitions?: Record<string, ComplexSchema>;
 };
-/** createRkyvV2Engine 이 요구하는 네이티브 인터페이스 (invokeRkyvV2 + live schema). */
-export type RkyvV2SchemaNative = {
+/** createFrameEngine 이 요구하는 네이티브 인터페이스 (invokeFrame + live schema). */
+export type FrameSchemaNative = {
     /**
      * 응답은 소유 ArrayBuffer 또는 재사용 버퍼의 뷰(ArrayBufferView)다. 뷰는
      * 이 호출의 디코드가 끝날 때까지만 유효하다(다음 invoke 가 덮어쓴다) —
      * dispatch 는 응답을 동기로 즉시 디코드하므로 안전하다.
      */
-    invokeRkyvV2(payload: ArrayBuffer): ArrayBuffer | ArrayBufferView;
+    invokeFrame(payload: ArrayBuffer): ArrayBuffer | ArrayBufferView;
     getSchema?(): ArrayBuffer;
     /**
      * (T0-3) 현재 스키마 세대 — `rustra_ffi_schema_generation` 과 대응.
@@ -61,7 +61,7 @@ export type RkyvV2SchemaNative = {
     /**
      * (T1) 취소 전파 가능한 비동기 invoke — invocation id 를 반환하고, 결과는 콜백으로.
      *
-     * **호스트 구현 계약**: payload 는 `invokeRkyvV2` 와 동일한 rkyv V2 요청
+     * **호스트 구현 계약**: payload 는 `invokeFrame` 와 동일한 Frame 요청
      * 프레임(정적 postcard 또는 Tier 3 JSON-in-binary)이고, 응답도 동일한 응답
      * 프레임을 `onDone` 으로 전달한다. 반환된 invocation id 로 `invokeCancel` 을
      * 호출하면 Rust 측 취소 체크포인트까지 전파된다. 이 모듈(native adapter)을
@@ -89,7 +89,7 @@ export declare function parseLiveSchemaDocument(native: {
 }): LiveSchemaDocument;
 /**
  * 네이티브 getSchema() 로부터 현재 명령 스키마를 조회한다 (정적 + 동적 명령 포함).
- * 동적 명령의 commandId/타입을 알아내 rkyvV2 Tier 3 fallback 에 사용된다.
+ * 동적 명령의 commandId/타입을 알아내 frame Tier 3 fallback 에 사용된다.
  * getSchema 미노출 네이티브에서는 schema.unavailable 에러를 던진다.
  */
 export declare function getLiveSchema(native: {

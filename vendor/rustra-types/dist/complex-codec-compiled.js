@@ -131,23 +131,26 @@ function compileVariant(variant, definitions, refs, depth) {
     // 값을 선취하지 못게 한다.
     const exactTag = tag ?? singleEnumTag(variant);
     const singleKey = properties && Object.keys(properties).length === 1 ? Object.keys(properties)[0] : null;
-    const matcher = exactTag
-        ? { kind: 'discriminator', key: exactTag.key, value: exactTag.value }
-        : singleKey
-            ? { kind: 'singleProperty', key: singleKey }
-            : variant.const !== undefined
-                ? { kind: 'constEq', value: variant.const }
-                : variant.enum?.length === 1
-                    ? { kind: 'enumSingle', value: variant.enum[0] }
-                    : variant.type === 'string'
-                        ? { kind: 'anyString' }
-                        : variant.type === 'object'
-                            ? { kind: 'anyObject' }
-                            : { kind: 'never' };
+    let matcher;
+    if (exactTag)
+        matcher = { kind: 'discriminator', key: exactTag.key, value: exactTag.value };
+    else if (singleKey)
+        matcher = { kind: 'singleProperty', key: singleKey };
+    else if (variant.const !== undefined)
+        matcher = { kind: 'constEq', value: variant.const };
+    else if (variant.enum?.length === 1)
+        matcher = { kind: 'enumSingle', value: variant.enum[0] };
+    else if (variant.type === 'string')
+        matcher = { kind: 'anyString' };
+    else if (variant.type === 'object')
+        matcher = { kind: 'anyObject' };
+    else
+        matcher = { kind: 'never' };
     // encodeVariant/decodeVariant 순서: discriminator(tag+object) → 단일 프로퍼티
     // → const/enum → 폴스루.
-    const body = tag && variant.type === 'object'
-        ? {
+    let body;
+    if (tag && variant.type === 'object') {
+        body = {
             kind: 'tagged',
             skipKey: tag.key,
             node: {
@@ -158,18 +161,24 @@ function compileVariant(variant, definitions, refs, depth) {
                     required: requiredSet.has(key),
                 })),
             },
-        }
-        : properties && singleKey
-            ? {
-                kind: 'unwrapSingle',
-                key: singleKey,
-                node: compileNode(properties[singleKey], definitions, refs, depth + 1),
-            }
-            : variant.const !== undefined
-                ? { kind: 'constValue', value: variant.const }
-                : variant.enum
-                    ? { kind: 'enumFirst', value: variant.enum[0] }
-                    : { kind: 'node', node: compileNode(variant, definitions, refs, depth + 1) };
+        };
+    }
+    else if (properties && singleKey) {
+        body = {
+            kind: 'unwrapSingle',
+            key: singleKey,
+            node: compileNode(properties[singleKey], definitions, refs, depth + 1),
+        };
+    }
+    else if (variant.const !== undefined) {
+        body = { kind: 'constValue', value: variant.const };
+    }
+    else if (variant.enum) {
+        body = { kind: 'enumFirst', value: variant.enum[0] };
+    }
+    else {
+        body = { kind: 'node', node: compileNode(variant, definitions, refs, depth + 1) };
+    }
     return { tag, matcher, body };
 }
 //# sourceMappingURL=complex-codec-compiled.js.map

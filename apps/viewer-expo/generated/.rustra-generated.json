@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "schemaHash": "be754a50f3177d068356707641c86b80ebcaf7d08930823fe7afc46cc354cf37",
-  "generatorVersion": "0.9.0",
+  "generatorVersion": "0.10.0",
   "files": [
     {
       "path": "../modules/rustra-bridge/android/build-rust-android.sh",
@@ -33,7 +33,7 @@
     },
     {
       "path": "../modules/rustra-bridge/generated/rustra-generated-codecs.hpp",
-      "sha256": "0aa9c0a4c5852ff55358267ae9f65e855b0af47438a72ae891b67b57a7b421a7"
+      "sha256": "d901bf617faebfde8609d5c28150086929aa3d419f29b7468307c3401344dfa8"
     },
     {
       "path": "../modules/rustra-bridge/ios/build-rust-ios.sh",
@@ -49,7 +49,7 @@
     },
     {
       "path": "../modules/rustra-bridge/package.json",
-      "sha256": "47eea6fbe9c913d32b6f68790a8861f114194080bfcf07af70577a6c725bcfdd"
+      "sha256": "70aff97f3cd65f1f1d8b11cac8549e9081d9c45a2cbb75cf41956a08be97b5c9"
     },
     {
       "path": "../modules/rustra-bridge/react-native.config.js",
@@ -72,16 +72,16 @@
       "sha256": "c271bd53d55c83b422726617fd89279b260063664c45a96d5a879a8849bd273d"
     },
     {
+      "path": "frame-codecs.ts",
+      "sha256": "57bc25a00697f97c65901a70e2df3fa0a9e11948acf3d6cf4a18b12afff5126d"
+    },
+    {
+      "path": "frame-registry.ts",
+      "sha256": "a11d09a3a84bc4a9a39ee7ee441c6fa7ca38d64a4e94cf007a862d615dc22adb"
+    },
+    {
       "path": "react-native.ts",
-      "sha256": "ab71eed28455e6acb0c2a169782122e0708435743d97d648247cb13df4c181a6"
-    },
-    {
-      "path": "rkyv-codecs.ts",
-      "sha256": "2a9e1e11569e05fca8679037943b73fa275f0fca8989906f7c1f33e2bcd270f8"
-    },
-    {
-      "path": "rkyv-registry.ts",
-      "sha256": "33e0f1548fd0670ab50b8fa94d28727cfa9fde5d118c68a7d703e6410435119d"
+      "sha256": "82dba0c52d0d216c32194413ae473d8260f38e462cc93a2dee4565244ab7fbc8"
     },
     {
       "path": "types.ts",

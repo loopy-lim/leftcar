@@ -7,7 +7,7 @@
 // ────────────────────────────────────────────────────────────
 // C++ postcard codec for the RN JSI fast path (B1).
 // C++는 postcard subset과 Set을 제외한 complex subset을 직접 인코딩/디코딩한다.
-// Set을 포함한 complex 명령은 JS codec이 invokeRkyvV2로 전달하고, 동적 명령은
+// Set을 포함한 complex 명령은 JS codec이 invokeFrame로 전달하고, 동적 명령은
 // JS Tier 3 fallback을 사용한다.
 #pragma once
 

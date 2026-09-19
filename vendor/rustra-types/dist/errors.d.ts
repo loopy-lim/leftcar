@@ -28,7 +28,7 @@ export declare class CancelledError extends RustraCommandError {
 /**
  * Rust `RustraError::Display` 포맷(`"{code}: {message}"`)의 평탄화된 문자열을
  * [`RustraCommandError`]로 파싱한다. JSON fallback 경로(네이티브 모듈)에서 사용 —
- * rkyv V2 경로(Node/Tauri)는 구조화된 `{code, message}` 객체를 받으므로 불필요.
+ * Frame 경로(Node/Tauri)는 구조화된 `{code, message}` 객체를 받으므로 불필요.
  *
  * `": "` 앞이 dot-notation 코드 토큰(`command.not_found`, `internal`,
  * `math.divide_by_zero` 등 — 소문자/숫자/`.`/`_` 만)이면 code/message 를 분리하고,

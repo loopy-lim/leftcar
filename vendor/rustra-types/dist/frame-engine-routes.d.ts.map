@@ -1,0 +1,1 @@
+{"version":3,"file":"frame-engine-routes.d.ts","sourceRoot":"","sources":["../src/frame-engine-routes.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,iBAAiB,EAAE,kBAAkB,EAAE,MAAM,2BAA2B,CAAC;AAEvF,wBAAgB,uBAAuB,CACrC,OAAO,EAAE,kBAAkB,EAC3B,YAAY,EAAE,CAAC,CAAC,EAAE,SAAS,EAAE,MAAM,EAAE,OAAO,EAAE,MAAM,EAAE,IAAI,CAAC,EAAE,OAAO,KAAK,CAAC,GACzE,iBAAiB,CAmFnB"}

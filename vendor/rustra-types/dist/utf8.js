@@ -75,7 +75,13 @@ export function decodeUtf8(input, start = 0, end = input instanceof Uint8Array ?
             index += 1;
             continue;
         }
-        const width = first >= 0xf0 ? 4 : first >= 0xe0 ? 3 : first >= 0xc2 ? 2 : 0;
+        let width = 0;
+        if (first >= 0xf0)
+            width = 4;
+        else if (first >= 0xe0)
+            width = 3;
+        else if (first >= 0xc2)
+            width = 2;
         if (width === 0 || index + width > end) {
             output += '\ufffd';
             index += 1;
@@ -91,7 +97,11 @@ export function decodeUtf8(input, start = 0, end = input instanceof Uint8Array ?
             }
             point = (point << 6) | (next & 0x3f);
         }
-        const minimum = width === 2 ? 0x80 : width === 3 ? 0x800 : 0x10000;
+        let minimum = 0x10000;
+        if (width === 2)
+            minimum = 0x80;
+        else if (width === 3)
+            minimum = 0x800;
         if (!valid || point < minimum || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) {
             output += '\ufffd';
             index += 1;

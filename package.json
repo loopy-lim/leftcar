@@ -34,5 +34,8 @@
     "vitest": "^2.1.0",
     "playwright-core": "1.63.0",
     "semver": "7.8.5"
+  },
+  "patchedDependencies": {
+    "react-native-tcp-socket@6.4.2": "patches/react-native-tcp-socket@6.4.2.patch"
   }
 }

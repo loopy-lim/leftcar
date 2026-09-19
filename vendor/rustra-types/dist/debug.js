@@ -49,14 +49,15 @@ export function resetDebugEnvForTests() {
 }
 /** Emit diagnostics only when explicitly enabled; secrets are never logged by default. */
 export function debugRustra(event) {
-    if (!isRustraDebugEnabled() && !configuredSink)
+    const enabled = isRustraDebugEnabled();
+    if (!enabled && !configuredSink)
         return;
     const safeEvent = {
         ...event,
         value: event.value === undefined ? undefined : snapshot(event.value),
     };
     configuredSink?.(safeEvent);
-    if (isRustraDebugEnabled()) {
+    if (enabled) {
         const logger = typeof console.debug === 'function' ? console.debug : console.log;
         logger('[rustra:debug]', safeEvent);
     }
@@ -83,7 +84,7 @@ export function debugWire(direction, transport, command, bytes, error) {
  * dumpWire 누락 경로 제거).
  */
 export function traceWire(direction, command, bytes) {
-    debugWire(direction, 'rkyv', command, bytes);
+    debugWire(direction, 'frame', command, bytes);
     dumpWire(direction, bytes);
 }
 function snapshot(value, depth = 0, budget = { remaining: 2048 }) {

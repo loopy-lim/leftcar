@@ -9,7 +9,7 @@
 import { createRustraBootstrap } from '@rustra/react-native';
 import { installRustraJSI, getRustraNative } from "@rustra/generated-react-native";
 import { GENERATED_CONTRACT_HASH, SCHEMA_VERSION } from './contract.js';
-import { rkyvV2Registry } from './rkyv-registry.js';
+import { frameRegistry } from './frame-registry.js';
 
 export * from './commands.js';
 export { subscribeEvent } from '@rustra/react-native';
@@ -17,7 +17,8 @@ export { subscribeEvent } from '@rustra/react-native';
 export const rustra = createRustraBootstrap({
   install: installRustraJSI,
   getNative: getRustraNative,
-  rkyvV2Codecs: rkyvV2Registry,
+  frameCodecs: frameRegistry,
   contractHash: GENERATED_CONTRACT_HASH,
+  contractVerification: 'strict',
   schemaVersion: SCHEMA_VERSION,
 });

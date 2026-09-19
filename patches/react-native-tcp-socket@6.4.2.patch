@@ -1,0 +1,19 @@
+diff --git a/android/src/main/java/com/asterinet/react/tcpsocket/TcpSocketModule.java b/android/src/main/java/com/asterinet/react/tcpsocket/TcpSocketModule.java
+index 121edb47dbecb4ca2a044722b2ad5a71d50c1fa7..d869fa1191fdbfcf3316083a0e10a03e001b1bf0 100644
+--- a/android/src/main/java/com/asterinet/react/tcpsocket/TcpSocketModule.java
++++ b/android/src/main/java/com/asterinet/react/tcpsocket/TcpSocketModule.java
+@@ -140,8 +140,12 @@ public class TcpSocketModule extends ReactContextBaseJavaModule {
+         executorService.execute(new Runnable() {
+             @Override
+             public void run() {
+-                TcpSocketClient socketClient = getTcpClient(cId);
+-                socketClient.destroy();
++                // A failed connect or a queued close can have no client left.
++                // Cleanup must not throw on the executor and kill the app.
++                TcpSocket socket = socketMap.get(cId);
++                if (socket instanceof TcpSocketClient) {
++                    ((TcpSocketClient) socket).destroy();
++                }
+             }
+         });
+     }

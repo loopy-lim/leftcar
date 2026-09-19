@@ -82,10 +82,7 @@ function compileNode(schema, definitions, depth) {
         if (schema.format === 'uint64') {
             return {
                 encode: (v) => encVarint64(v),
-                decode: (buf, offset) => {
-                    const v = decVarint64(buf, offset);
-                    return { value: v.value, bytesRead: v.bytesRead };
-                },
+                decode: (buf, offset) => decVarint64(buf, offset),
             };
         }
         if (schema.format === 'int64') {
@@ -101,44 +98,29 @@ function compileNode(schema, definitions, depth) {
         if (unsigned) {
             return {
                 encode: (v) => encVarint(v),
-                decode: (buf, offset) => {
-                    const v = decVarint(buf, offset);
-                    return { value: v.value, bytesRead: v.bytesRead };
-                },
+                decode: (buf, offset) => decVarint(buf, offset),
             };
         }
         return {
             encode: (v) => encZigzagVarint(v),
-            decode: (buf, offset) => {
-                const v = decZigzagVarint(buf, offset);
-                return { value: v.value, bytesRead: v.bytesRead };
-            },
+            decode: (buf, offset) => decZigzagVarint(buf, offset),
         };
     }
     if (schema.type === 'number') {
         return schema.format === 'float'
             ? {
                 encode: (v) => encF32(v),
-                decode: (buf, offset) => {
-                    const v = decF32(buf, offset);
-                    return { value: v.value, bytesRead: v.bytesRead };
-                },
+                decode: (buf, offset) => decF32(buf, offset),
             }
             : {
                 encode: (v) => encF64(v),
-                decode: (buf, offset) => {
-                    const v = decF64(buf, offset);
-                    return { value: v.value, bytesRead: v.bytesRead };
-                },
+                decode: (buf, offset) => decF64(buf, offset),
             };
     }
     if (schema.type === 'string') {
         return {
             encode: (v) => encString(v),
-            decode: (buf, offset) => {
-                const v = decString(buf, offset);
-                return { value: v.value, bytesRead: v.bytesRead };
-            },
+            decode: (buf, offset) => decString(buf, offset),
         };
     }
     // Option<T> — type:["T","null"] 또는 anyOf:[T, null].
@@ -312,5 +294,5 @@ function compileStruct(schema, definitions, depth) {
     };
 }
 export { compileNode };
-// ── RkyvV2Codec 조립 ────────────────────────────────────────
+// ── FrameCodec 조립 ────────────────────────────────────────
 //# sourceMappingURL=schema-postcard-node.js.map

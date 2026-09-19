@@ -1,7 +1,7 @@
 /** Opt-in runtime diagnostics for transport and wire debugging. */
 export type RustraDebugEvent = {
     direction: 'request' | 'response' | 'error';
-    transport: 'json' | 'rkyv' | 'typed';
+    transport: 'json' | 'frame' | 'typed';
     command: string;
     bytes?: string;
     byteLength?: number;

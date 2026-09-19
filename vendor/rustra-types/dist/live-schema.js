@@ -34,7 +34,7 @@ export function parseLiveSchemaDocument(native) {
 }
 /**
  * 네이티브 getSchema() 로부터 현재 명령 스키마를 조회한다 (정적 + 동적 명령 포함).
- * 동적 명령의 commandId/타입을 알아내 rkyvV2 Tier 3 fallback 에 사용된다.
+ * 동적 명령의 commandId/타입을 알아내 frame Tier 3 fallback 에 사용된다.
  * getSchema 미노출 네이티브에서는 schema.unavailable 에러를 던진다.
  */
 export function getLiveSchema(native) {

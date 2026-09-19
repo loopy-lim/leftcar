@@ -4,8 +4,14 @@ export type ConfigureOptions = {
     /** 등록 주체(호스트/어댑터) 식별자 — 경쟁 등록 거부 시 양쪽 주체를 보고한다. */
     ownerId?: string;
 };
-export declare function configure(engine: EngineClient, options?: ConfigureOptions): void;
-export declare function configureLazy(initializer: () => EngineClient | Promise<EngineClient>, options?: ConfigureOptions): void;
+/** Releases only this registration, even after lazy initialization or replacement. */
+export type EngineRegistration = (() => void) & {
+    isCurrent(): boolean;
+};
+/** Opaque identity of the current global registration, stable across lazy setup. */
+export declare function getEngineRegistrationToken(): symbol | undefined;
+export declare function configure(engine: EngineClient, options?: ConfigureOptions): EngineRegistration;
+export declare function configureLazy(initializer: () => EngineClient | Promise<EngineClient>, options?: ConfigureOptions): EngineRegistration;
 export declare function isLazyConfigured(): boolean;
 export declare function ensureConfigured(): Promise<EngineClient>;
 export declare function resolveCommandId(commandFn: (...args: never[]) => unknown): string;

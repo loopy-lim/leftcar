@@ -485,6 +485,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "keymap"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "leftcar-rustra"
 version = "0.1.0"
 dependencies = [
@@ -723,8 +730,8 @@ dependencies = [
 
 [[package]]
 name = "rustra"
-version = "0.9.0"
-source = "git+https://github.com/loopy-lim/rustra?rev=643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0#643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0"
+version = "0.10.2"
+source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
 dependencies = [
  "hex",
  "postcard",
@@ -738,8 +745,8 @@ dependencies = [
 
 [[package]]
 name = "rustra-macros"
-version = "0.9.0"
-source = "git+https://github.com/loopy-lim/rustra?rev=643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0#643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0"
+version = "0.10.2"
+source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -749,8 +756,8 @@ dependencies = [
 
 [[package]]
 name = "rustra-naming"
-version = "0.9.0"
-source = "git+https://github.com/loopy-lim/rustra?rev=643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0#643a1ffad45fc9b1bda29f9d6a9188bab8cc86a0"
+version = "0.10.2"
+source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
 
 [[package]]
 name = "rustversion"

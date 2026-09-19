@@ -12,7 +12,11 @@ export function invokeBatch(entries) {
         return Promise.reject(new Error('Configured engine does not support invokeBatch.'));
     const timeout = entries.reduce((min, entry) => {
         const ms = entry.options?.timeoutMs;
-        return ms === undefined ? min : min === undefined || ms < min ? ms : min;
+        if (ms === undefined)
+            return min;
+        if (min === undefined || ms < min)
+            return ms;
+        return min;
     }, undefined);
     if (timeout === undefined) {
         try {
