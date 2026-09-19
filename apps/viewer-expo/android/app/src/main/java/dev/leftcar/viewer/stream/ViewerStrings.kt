@@ -81,8 +81,6 @@ object ViewerStrings {
         else "미디어 수신 포트를 준비하지 못했습니다."
     val streamNotActive: String
         get() = if (en) "Could not find the stream window." else "화면 공유 창을 찾을 수 없습니다."
-    val zoomChip: String
-        get() = if (en) "Zoom %.2f\u00d7" else "배율 %.2f\u00d7"
     val prepareCancelFailed: String
         get() = if (en) "Failed to release the media receive port."
         else "미디어 수신 포트 정리에 실패했습니다."
