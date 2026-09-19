@@ -158,11 +158,17 @@ pub struct AndroidDecoder {
     height: i32,
     pub frames_rendered: u64,
     pub frames_discarded: u64,
+    /// 나이 드레인으로 즉시 소화된 프레임 수(상한 초과분 제외 — park 나이가
+    /// 예산을 넘어 앞당겨 렌더된 횟수). 잔여 지연 회수 관측용.
+    pub park_drained_frames: u64,
     /// Actual last released output PTS; not the currently submitted input.
     pub last_released_pts_us: Option<i64>,
     output_target_ns: Option<i64>,
     /// Outputs held while balanced pacing waits for the next display vsync
-    /// slot. Bounded by [`MAX_PARKED_OUTPUTS`]; overflow discards the oldest.
+    /// slot. Smoothing mode bounds this by the adaptive park cap
+    /// ([`SMOOTH_PARK_MIN`]..=[`SMOOTH_PARK_MAX`]); otherwise by
+    /// [`MAX_PARKED_OUTPUTS`]. Excess — and, in smoothing mode, frames
+    /// parked longer than the age budget — releases immediately.
     parked_outputs: VecDeque<ReadyOutput>,
     /// Vsync target that already received a release. One release per slot
     /// keeps bursts from double-rendering inside a single vsync period.
@@ -195,6 +201,35 @@ const ARRIVAL_JITTER_WINDOW: usize = 128;
 pub const PRESENTATION_AGE_TARGET_US: u64 = 45_000;
 /// Adaptive jitter-buffer ceiling (4 frames at 60fps ≈ 66ms).
 pub const PRESENTATION_DELAY_MAX_US: u64 = 66_000;
+
+/// 나이 드레인 예산(ns). 스무딩이 켜지면 park 나이 목표(45ms), 꺼지면
+/// 무제한 — 기존 동작(드레인 없음)을 그대로 유지한다.
+pub(super) fn park_drain_budget_ns(smoothing: bool) -> u64 {
+    if smoothing {
+        PRESENTATION_AGE_TARGET_US.saturating_mul(1_000)
+    } else {
+        u64::MAX
+    }
+}
+
+/// 즉시 소화할 park 프레임 수(순수 함수 — boundary 테스트 대상). park 상한
+/// 초과분과, 나이 예산을 넘어 맨앞부터 막힌 초를 합친다. FIFO 도착 순서를
+/// 전제하므로 예산 안쪽 프레임을 만나면 멈춘다.
+pub(super) fn immediate_release_count(
+    ages_ns: &[u64],
+    park_cap: usize,
+    drain_budget_ns: u64,
+) -> usize {
+    let mut count = ages_ns.len().saturating_sub(park_cap);
+    for &age in ages_ns.iter().take(park_cap) {
+        if age > drain_budget_ns {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count.min(ages_ns.len())
+}
 
 unsafe impl Send for AndroidDecoder {}
 
@@ -401,6 +436,7 @@ impl AndroidDecoder {
                 height: sh as i32,
                 frames_rendered: 0,
                 frames_discarded: 0,
+                park_drained_frames: 0,
                 last_released_pts_us: None,
                 output_target_ns: None,
                 parked_outputs: VecDeque::new(),
@@ -608,17 +644,40 @@ impl AndroidDecoder {
                 // 프레임 스무딩(적응 지터 버퍼): 도착 지터 p95에 맞춰
                 // 2~10프레임(33~166ms)까지 park 깊이를 자동 조절해 도착
                 // 뭉침을 흡수한다. 초과분은 즉시 렌더로 소화(폐기 없음).
-                let park_cap = if PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
+                let smoothing = PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
+                let park_cap = if smoothing {
                     self.adaptive_park_cap
                 } else {
                     MAX_PARKED_OUTPUTS
                 };
-                while self.parked_outputs.len() > park_cap {
-                    let output = self.parked_outputs.pop_front().expect("length checked");
-                    if PRESENTATION_SMOOTH.load(std::sync::atomic::Ordering::Relaxed) {
-                        // 스무딩 모드의 초과분은 폐기하지 않고 즉시 렌더로
-                        // 소화한다 — 버스트가 park 상한(≈83ms)을 넘어도
-                        // 프레임은 손실되지 않고, 뭉침만 앞당겨 표시된다.
+                // 나이 드레인: 상한 이내라도 park에 나이 예산(45ms)보다
+                // 오래 머문 프레임은 다음 vsync를 기다리지 않고 즉시 소화한다
+                // — 버스트가 지나간 뒤 깊은 park가 잔여 지연(100–166ms)으로
+                // 굳는 것을 막고, 코덱 출력 버퍼를 예산 안에 돌려줘 깊은
+                // park의 디코더 후면 압박도 함께 묶인다.
+                let drain_budget_ns = park_drain_budget_ns(smoothing);
+                let now_ns = super::output::monotonic_now_ns();
+                let immediate = {
+                    let excess = self.parked_outputs.len().saturating_sub(park_cap);
+                    let ages: Vec<u64> = self
+                        .parked_outputs
+                        .iter()
+                        .map(|output| now_ns.saturating_sub(output.arrived_at_ns))
+                        .collect();
+                    let count = immediate_release_count(&ages, park_cap, drain_budget_ns);
+                    self.park_drained_frames += u64::try_from(count - excess).unwrap_or(0);
+                    count
+                };
+                for _ in 0..immediate {
+                    let output = match self.parked_outputs.pop_front() {
+                        Some(output) => output,
+                        None => break,
+                    };
+                    if smoothing {
+                        // 스무딩 모드의 초과분·노쇠분은 폐기하지 않고 즉시
+                        // 렌더로 소화한다 — 버스트가 park 상한(≈166ms)을
+                        // 넘거나 예산을 초과해도 프레임은 손실되지 않고,
+                        // 뭉침만 앞당겨 표시된다.
                         let r = unsafe {
                             AMediaCodec_releaseOutputBuffer(self.codec, output.index, true)
                         };

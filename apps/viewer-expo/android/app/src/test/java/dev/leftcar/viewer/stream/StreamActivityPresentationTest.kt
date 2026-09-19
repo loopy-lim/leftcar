@@ -224,6 +224,12 @@ class StreamActivityPresentationTest {
         ReflectionHelpers.callInstanceMethod<Void>(activity, "attachStableSurfaces", from(Int::class.javaPrimitiveType, gate.currentGeneration))
         assertEquals(postsAfterSwap, posted.size)
         assertFalse(gate.isAttached)
+        // Split attach may consume both prepared receivers even on failure.
+        // The Host retry must prepare a new transport before the next attach.
+        controller.newIntent(controlIntent().putExtra("splitVertical", true)
+            .putExtra("splitDecoderName", "c2.qti.avc.decoder").putExtra("reconnect", true))
+        ReflectionHelpers.getField<StreamSurfaces>(activity, "streamSurfaces")
+            .holders.forEach(activity::surfaceCreated)
         PresentationNativeShadow.attachResult = 0
         ReflectionHelpers.callInstanceMethod<Void>(activity, "attachStableSurfaces", from(Int::class.javaPrimitiveType, gate.currentGeneration))
         assertTrue(gate.isAttached)
@@ -257,13 +263,29 @@ class ValidSurfaceShadow {
 class PresentationNativeShadow {
     companion object {
         var nextState = 0L
+        var inputEnabled = 0
+        val pointerActions = mutableListOf<Pair<Int, Int>>()
+        val pointerButtons = mutableListOf<Triple<Int, Int, Int>>()
+        val scrollDeltas = mutableListOf<Pair<Float, Float>>()
+        val keyEvents = mutableListOf<Triple<Int, Boolean, Int>>()
+        val textEvents = mutableListOf<String>()
         val releases = java.util.concurrent.CopyOnWriteArrayList<Long>()
         var attachResult = 0
+        var splitAttachCalls = 0
         val samples = mutableListOf<Triple<Int, Long, Long>>()
         @JvmStatic @Implementation fun __staticInitializer__() {
             ReflectionHelpers.setStaticField(ViewerNative::class.java, "INSTANCE", ReflectionHelpers.callConstructor(ViewerNative::class.java))
         }
     }
+    @Implementation fun inputStatus(instance: String): Int = inputEnabled
+    @Implementation fun sendPointer(instance: String, action: Int, x: Float, y: Float, buttons: Int, button: Int, horizontal: Float, vertical: Float, pressure: Float): Int {
+        pointerActions += action to buttons
+        pointerButtons += Triple(action, button, buttons)
+        if (action == 4) scrollDeltas += horizontal to vertical
+        return 0
+    }
+    @Implementation fun sendKey(instance: String, code: Int, scan: Int, meta: Int, down: Boolean, repeat: Int): Int { keyEvents += Triple(code, down, repeat); return 0 }
+    @Implementation fun sendText(instance: String, text: ByteArray): Int { textEvents += text.toString(Charsets.UTF_8); return 0 }
     @Implementation fun start(): Long = ++nextState
     @Implementation fun release(state: Long, instance: String): Int { releases += state; return 0 }
     @Implementation fun pollAudio(instance: String, bytes: ByteArray): Int = 0
@@ -271,5 +293,8 @@ class PresentationNativeShadow {
         samples += Triple(display, frame, period)
         return 0
     }
-    @Implementation fun attachSplitSurfacesWithPresentation(state: Long, instance: String, left: Surface, right: Surface, port: Int, host: String, width: Int, height: Int, fps: Int, decoder: String, balanced: Boolean): Int = attachResult
+    @Implementation fun attachSplitSurfacesWithPresentation(state: Long, instance: String, left: Surface, right: Surface, port: Int, host: String, width: Int, height: Int, fps: Int, decoder: String, balanced: Boolean): Int {
+        splitAttachCalls++
+        return attachResult
+    }
 }

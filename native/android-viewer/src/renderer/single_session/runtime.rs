@@ -58,6 +58,9 @@ pub(crate) fn spawn_live_stream_renderer(
     let prepared_receiver = take_prepared_receiver(port, &paired_host);
 
     let control = Arc::new(RendererControl {
+        single_surface: Mutex::new(Some(SingleSurface {
+            host: paired_host.clone(), width, height, fps, window: surface_window as usize,
+        })),
         metric_incarnation: crate::renderer::metric_identity(),
         output_metadata: Mutex::new(Default::default()),
         presentation: Mutex::new(crate::renderer::DisplayTimeline::new(balanced)),
@@ -67,6 +70,7 @@ pub(crate) fn spawn_live_stream_renderer(
         audio: Mutex::new(crate::audio_protocol::AudioRing::default()),
         audio_available: std::sync::Condvar::new(),
         input_enabled: AtomicI8::new(-1),
+        input_language_supported: AtomicBool::new(false),
         rendered_frames: AtomicU64::new(0),
         stale_outputs: AtomicU64::new(0),
         stale_input_drops: AtomicU64::new(0),

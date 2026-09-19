@@ -343,9 +343,6 @@ fn tile_worker(launch: TileWorkerLaunch) {
                     per_tile_idr_resumes: stats.per_tile_idr_resumes.load(Ordering::Relaxed),
                 };
                 if periodic {
-                    if side == TileSide::Left {
-                        log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} kind=split released={} leftReleased={} rightReleased={} outputStage=paired-surface-release releaseCaptureAgeMs=None", std::process::id(), control.port, control.metric_incarnation, joined, stats.left_rendered.load(Ordering::Relaxed), stats.right_rendered.load(Ordering::Relaxed));
-                    }
                     log_info!(
                         "split {:?} stats renderedFps={} joinedFps={} rendered={} joined={} gaps={} inputDrops={} incomplete={} pairP95Us={} pairMaxUs={} pairTimeouts={} unmatched={} pairedResumes={} perTileResumes={} idrTransmitAttempts={} idrUnsent={} idrStaleCancelled={} nacksSent={} nacksHealed={}",
                         side,
@@ -426,6 +423,9 @@ fn tile_worker(launch: TileWorkerLaunch) {
                 // the right tile must not double the command stream. A
                 // first-loss immediate send does not repeat the command.
                 if periodic && side == TileSide::Left {
+                    if !control.input_language_supported.load(Ordering::SeqCst) {
+                        send_authenticated(&socket, peer, b"LCL?", &crypto);
+                    }
                     send_authenticated(
                         &socket,
                         peer,
@@ -465,6 +465,8 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 pts_us: output.pts_us,
                                 generation,
                                 succeeded: false,
+                                capture_wall_ms: None,
+                                target_ns,
                             });
                             let _ = events.send(CoordinatorEvent::Fatal);
                         } else {
@@ -472,7 +474,7 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             // Release submitted to MediaCodec: closes the local
                             // ready -> release (pair wait + dispatch) and
                             // receive -> release segments for this pts.
-                            telemetry.note_released(output.pts_us, monotonic_ns());
+                            let capture_wall_ms = telemetry.note_released(output.pts_us, monotonic_ns());
                             match side {
                                 TileSide::Left => {
                                     stats.left_rendered.store(rendered, Ordering::Relaxed)
@@ -486,6 +488,8 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 pts_us: output.pts_us,
                                 generation,
                                 succeeded: true,
+                                capture_wall_ms,
+                                target_ns,
                             });
                         }
                     }
@@ -705,11 +709,16 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 continue;
                             }
                             if let Some(reason) = parse_termination(packet) {
+                                // Lifecycle termination is independent of optional input capability.
                                 let code = reason.code();
                                 control
                                     .termination_reason
                                     .store(i8::try_from(code).unwrap_or(-1), Ordering::SeqCst);
                                 let _ = events.send(CoordinatorEvent::Fatal);
+                                continue;
+                            }
+                            if let Some(supported) = crate::input_protocol::parse_input_language_capability(packet) {
+                                control.input_language_supported.store(supported, Ordering::SeqCst);
                                 continue;
                             }
                         }

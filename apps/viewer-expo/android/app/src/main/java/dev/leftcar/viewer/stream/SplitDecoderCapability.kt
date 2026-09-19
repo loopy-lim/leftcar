@@ -12,6 +12,12 @@ internal fun conservativeDecoderHint(name: String, instances: Int?, pixelRate: D
 
 internal object SplitDecoderCapability {
     private const val MIME_AVC = "video/avc"
+    // NDK decoder names report the underlying component. Pass that same
+    // identity through qualification and creation so a platform alias is not
+    // mistaken for an unexpected decoder by the strict native check.
+    private fun codecName(info: MediaCodecInfo): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) info.canonicalName else info.name
+
     private fun codecs(): List<MediaCodecInfo> = runCatching {
         MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter {
             !it.isEncoder && isHardwareCodec(it) && it.supportedTypes.any { type -> type.equals(MIME_AVC, true) }
@@ -23,12 +29,12 @@ internal object SplitDecoderCapability {
     fun findQualifiedCodecName(): String? = codecs().firstOrNull { info -> runCatching {
         val caps = info.getCapabilitiesForType(MIME_AVC)
         caps.maxSupportedInstances >= 2 && caps.videoCapabilities?.areSizeAndRateSupported(1_920, 2_160, 60.0) == true
-    }.getOrDefault(false) }?.name
+    }.getOrDefault(false) }?.let(::codecName)
 
     fun readHint(): DecoderCapabilityHint? {
         val all = codecs()
         val preferred = findQualifiedCodecName()
-        val info = all.firstOrNull { it.name == preferred } ?: all.firstOrNull() ?: return null
+        val info = all.firstOrNull { codecName(it) == preferred } ?: all.firstOrNull() ?: return null
         val caps = runCatching { info.getCapabilitiesForType(MIME_AVC) }.getOrNull()
         val instances = runCatching { caps?.maxSupportedInstances }.getOrNull()
         // This is a declared single-codec size/rate ceiling. Do not multiply by
@@ -38,7 +44,7 @@ internal object SplitDecoderCapability {
             val height = if (video.isSizeSupported(1_920, 2_160)) 2_160 else 1_080
             video.getSupportedFrameRatesFor(1_920, height).upper * 1_920 * height
         }.getOrNull()
-        return conservativeDecoderHint(info.name, instances, pixelRate)
+        return conservativeDecoderHint(codecName(info), instances, pixelRate)
     }
 
     private fun isHardwareCodec(info: MediaCodecInfo): Boolean {

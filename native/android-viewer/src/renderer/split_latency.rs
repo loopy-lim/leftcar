@@ -309,6 +309,7 @@ pub struct TileLatencyTelemetry {
     /// signal and must not change meaning from this path.
     pub frozen_inputs: u64,
     traces: FrameTraceStore,
+    output_metadata: super::output_metadata::OutputMetadata,
     episode: GapEpisodeTracker,
 }
 
@@ -321,6 +322,10 @@ impl TileLatencyTelemetry {
         if let Some(feed_us) = self.traces.note_queued(id, pts_us, now_ns) {
             self.recv_to_feed_us.record(feed_us);
         }
+    }
+
+    pub fn note_capture(&mut self, pts_us: i64, capture_wall_ms: Option<u64>) {
+        self.output_metadata.observe(pts_us, capture_wall_ms, true, None, 0);
     }
 
     /// Records feed -> ready. When this output is the first one after a
@@ -339,7 +344,7 @@ impl TileLatencyTelemetry {
         Some(durations)
     }
 
-    pub fn note_released(&mut self, pts_us: i64, now_ns: i64) {
+    pub fn note_released(&mut self, pts_us: i64, now_ns: i64) -> Option<u64> {
         let (recv_us, ready_us) = self.traces.note_released(pts_us, now_ns);
         if let Some(recv_us) = recv_us {
             self.recv_to_release_us.record(recv_us);
@@ -347,10 +352,12 @@ impl TileLatencyTelemetry {
         if let Some(ready_us) = ready_us {
             self.ready_to_release_us.record(ready_us);
         }
+        self.output_metadata.observe(0, None, false, Some(pts_us), 1)
     }
 
     pub fn note_discarded(&mut self, pts_us: i64) {
         self.traces.note_discarded(pts_us);
+        self.output_metadata.observe(0, None, false, Some(pts_us), 1);
     }
 
     pub fn note_frozen_input(&mut self) {
@@ -381,6 +388,7 @@ impl TileLatencyTelemetry {
             self.gap_episodes_aborted += 1;
         }
         self.traces.clear();
+        self.output_metadata.reset();
         aborted
     }
 }
@@ -391,6 +399,23 @@ mod tests {
 
     const US: i64 = 1_000;
     const MS: i64 = 1_000 * US;
+
+    #[test]
+    fn capture_timestamp_follows_released_pts_and_does_not_survive_discard_or_flush() {
+        let mut telemetry = TileLatencyTelemetry::default();
+        telemetry.note_capture(10, Some(100));
+        telemetry.note_capture(20, Some(200));
+        assert_eq!(telemetry.note_released(10, MS), Some(100));
+        telemetry.note_discarded(20);
+        assert_eq!(telemetry.note_released(20, 2 * MS), None);
+        telemetry.note_capture(30, Some(300));
+        telemetry.reset_for_recovery();
+        assert_eq!(telemetry.note_released(30, 3 * MS), None);
+        telemetry.note_capture(30, Some(400));
+        assert_eq!(telemetry.note_released(30, 4 * MS), Some(400));
+        telemetry.note_capture(40, None);
+        assert_eq!(telemetry.note_released(40, 5 * MS), None);
+    }
 
     #[test]
     fn latency_series_reports_count_total_max_and_recent_window_p95() {

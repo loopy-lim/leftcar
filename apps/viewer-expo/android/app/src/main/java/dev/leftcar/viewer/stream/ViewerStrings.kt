@@ -19,7 +19,6 @@ object ViewerStrings {
     private val en: Boolean get() = language == "en"
 
     val gestureHintTitle: String get() = if (en) "Touch Gestures" else "터치 제스처"
-    val gestureHintConfirm: String get() = if (en) "Got it" else "확인"
 
     val rebindReconnecting: String
         get() = if (en) "Reconnecting this window" else "화면을 같은 창에서 다시 연결하는 중"
@@ -46,20 +45,15 @@ object ViewerStrings {
     val inputChecking: String
         get() = if (en) "Checking remote input status" else "원격 입력 상태 확인 중"
 
-    val gestureHelpDescription: String
-        get() = if (en) "Show touch gestures" else "터치 제스처 안내 보기"
-
-    val keyboardToggleDescription: String
-        get() = if (en) "Toggle the on-screen keyboard for typing on the computer"
-        else "컴퓨터로 타이핑할 소프트키보드 켜기/끄기"
-
     val statsDescription: String
         get() = if (en) "Stream details" else "화면 공유 상세 정보"
 
-    val exitStreamDescription: String
-        get() = if (en) "End screen sharing" else "화면 공유 종료"
+    val closeWindowTitle: String get() = if (en) "Close this screen?" else "이 화면을 닫을까요?"
+    val closeWindowMessage: String get() = if (en) "Only this screen's stream will end." else "이 창의 화면 공유만 종료됩니다."
+    val continueViewing: String get() = if (en) "Keep viewing" else "계속 보기"
+    val closeWindow: String get() = if (en) "Close screen" else "화면 닫기"
 
-    /** 전체화면 종료 토스트 — 같은 창 재연결(4·5)은 인디케이터가 맡으므로 오지 않는다. */
+    /** Recoverable failures retain the window and use the reconnect indicator. */
     fun terminationMessage(reason: Int): String = when (reason) {
         1 -> if (en) "The connection to the computer was lost, so screen sharing ended."
         else "컴퓨터와의 연결이 끊어져 화면 공유를 종료했습니다."

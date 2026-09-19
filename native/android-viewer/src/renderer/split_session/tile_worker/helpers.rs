@@ -345,6 +345,7 @@ pub(super) fn process_frame(
             *input_pressure_started_ns = None;
             let queued_ns = monotonic_ns();
             telemetry.note_queued(frame.id, pts_us, queued_ns);
+            telemetry.note_capture(pts_us, frame.capture_wall_ms);
             // Clock-corrected end-to-end ages, mirroring the single-session
             // feed math: capture->decoder-feed and host-send->decoder-feed,
             // EWMA'd into the shared RendererControl the HUD and the LCF1

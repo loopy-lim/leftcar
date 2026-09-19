@@ -14,8 +14,9 @@ import android.widget.TextView
 /**
  * 첫 스트림 창에서 한 번만 보여 주는 제스처 안내. 영상 SurfaceView가
  * setZOrderOnTop이라 Activity 뷰 계층 위로 그릴 수 없어 HUD 배지와 같은
- * PopupWindow로 띄운다. 닫힐 때 [onDismissed]가 호출되므로 호출자가
- * "다시 보지 않기" 플래그를 저장하면 된다. 문구는 [ViewerStrings] 언어를 따른다.
+ * PopupWindow로 띄운다. 팝업은 입력을 전혀 받지 않고 8초 뒤 스스로 닫힌다 —
+ * 원격 클릭을 삼키는 안내 창은 스트림이 먹통인 것처럼 보이므로(2026-09-17
+ * XR 사고). 닫힐 때 [onDismissed]가 호출된다. 문구는 [ViewerStrings] 언어를 따른다.
  */
 internal class GestureHintOverlay(
     private val activity: Activity,
@@ -30,16 +31,9 @@ internal class GestureHintOverlay(
     fun show() {
         if (popup != null || activity.isFinishing || activity.isDestroyed) return
         val panelScale = StreamPanelDensity.scaleOf(activity)
-        val confirmButton = TextView(activity).apply {
-            text = ViewerStrings.gestureHintConfirm
-            setTextColor(Color.argb(255, 140, 188, 255))
-            textSize = 13f * panelScale
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(10), 0, 0)
-        }
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(14))
+            setPadding(dp(20), dp(16), dp(20), dp(16))
             background = cardBackground()
         }
         TextView(activity).apply {
@@ -57,7 +51,6 @@ internal class GestureHintOverlay(
                 setPadding(0, dp(3), 0, dp(3))
             }.also(content::addView)
         }
-        content.addView(confirmButton)
 
         val window = PopupWindow(
             content,
@@ -66,22 +59,32 @@ internal class GestureHintOverlay(
             false,
         ).apply {
             isFocusable = false
-            isOutsideTouchable = true
+            // 안내가 떠 있는 동안 원격 클릭을 팝업이 삼키면 스트림이 먹통처럼
+            // 보인다(2026-09-17 XR 사고). 외부 터치를 받지 않게 두고, 아래
+            // 자동 닫힘으로만 정리한다.
+            isOutsideTouchable = false
+            isTouchable = false
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(6).toFloat()
             setOnDismissListener {
                 popup = null
+                autoDismissHandler?.removeCallbacksAndMessages(null)
                 onDismissed()
             }
         }
-        confirmButton.setOnClickListener { window.dismiss() }
         popup = window
         activity.window.decorView.post {
             if (!activity.isFinishing && !activity.isDestroyed && !window.isShowing) {
                 window.showAtLocation(activity.window.decorView, Gravity.CENTER, 0, 0)
+                // 입력을 받지 않는 안내는 스스로 닫혀야 한다. 8초 뒤 사라진다.
+                autoDismissHandler = android.os.Handler(android.os.Looper.getMainLooper()).also { handler ->
+                    handler.postDelayed({ window.dismiss() }, 8_000L)
+                }
             }
         }
     }
+
+    private var autoDismissHandler: android.os.Handler? = null
 
     fun dismiss() {
         popup?.dismiss()

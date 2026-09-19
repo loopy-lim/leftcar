@@ -17,7 +17,7 @@ import org.robolectric.util.ReflectionHelpers
 class SplitDecoderCapabilityTest {
     @Before fun reset() { ShadowMediaCodecList.reset() }
 
-    private fun codec(name: String, instances: Int, level: Int = MediaCodecInfo.CodecProfileLevel.AVCLevel52, hardware: Boolean = true) {
+    private fun codec(name: String, instances: Int, level: Int = MediaCodecInfo.CodecProfileLevel.AVCLevel52, hardware: Boolean = true, canonicalName: String = name) {
         val profile = MediaCodecInfo.CodecProfileLevel().apply {
             this.profile = MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
             this.level = level
@@ -26,9 +26,11 @@ class SplitDecoderCapabilityTest {
             .setMediaFormat(MediaFormat.createVideoFormat("video/avc", 1920, 2160))
             .setProfileLevels(arrayOf(profile)).setColorFormats(intArrayOf(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)).build()
         ReflectionHelpers.setField(caps, "mMaxSupportedInstances", instances)
-        ShadowMediaCodecList.addCodec(MediaCodecInfoBuilder.newBuilder().setName(name)
+        val info = MediaCodecInfoBuilder.newBuilder().setName(name)
             .setIsEncoder(false).setIsVendor(true).setIsHardwareAccelerated(hardware)
-            .setIsSoftwareOnly(!hardware).setCapabilities(caps).build())
+            .setIsSoftwareOnly(!hardware).setCapabilities(caps).build()
+        ReflectionHelpers.setField(info, "mCanonicalName", canonicalName)
+        ShadowMediaCodecList.addCodec(info)
     }
 
     @Test fun `real codec list absence and software-only entries cannot qualify split`() {
@@ -51,5 +53,14 @@ class SplitDecoderCapabilityTest {
         codec("c2.vendor.avc.decoder", 99, level = MediaCodecInfo.CodecProfileLevel.AVCLevel1)
         assertEquals(4, SplitDecoderCapability.readHint()!!.maxInstances)
         assertNull(SplitDecoderCapability.findQualifiedCodecName())
+    }
+
+    @Test fun `hardware alias selection hands the canonical codec name to the strict native decoder`() {
+        val canonical = "c2.qti.avc.decoder.low_latency"
+        codec("OMX.qcom.video.decoder.avc.low_latency", 2, canonicalName = canonical)
+        codec(canonical, 2)
+        assertEquals(canonical, SplitDecoderCapability.findQualifiedCodecName())
+        assertEquals(canonical, SplitDecoderCapability.readHint()!!.codecName)
+        assertEquals(2, SplitDecoderCapability.readHint()!!.maxInstances)
     }
 }

@@ -36,7 +36,7 @@ class StreamRecoveryRetryPolicyTest {
     fun hostUnreachableAndRenderStalledKeepTheExistingWindowAlive() {
         assertTrue(isSameWindowRecoveryReason(4))
         assertTrue(isSameWindowRecoveryReason(5))
-        assertFalse(isSameWindowRecoveryReason(1))
+        assertTrue(isSameWindowRecoveryReason(1))
         assertFalse(isSameWindowRecoveryReason(3))
     }
 }

@@ -192,6 +192,10 @@ pub(super) fn consume_viewer_response(
         apply_cursor_sample(control, sample);
         return true;
     }
+    if let Some(supported) = crate::input_protocol::parse_input_language_capability(packet) {
+        control.input_language_supported.store(supported, Ordering::SeqCst);
+        return true;
+    }
     false
 }
 

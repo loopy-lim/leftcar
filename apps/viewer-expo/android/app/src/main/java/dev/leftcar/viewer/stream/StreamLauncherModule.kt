@@ -4,10 +4,13 @@ import android.content.Intent
 import android.content.Context
 import android.app.ActivityOptions
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.util.DisplayMetrics
+import android.view.Display
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -38,6 +41,27 @@ internal fun isCurrentActiveTerminationContext(
     queuedContext: Any?,
     active: Boolean,
 ): Boolean = active && registeredContext === queuedContext
+
+/** 뷰어 패널의 물리 메트릭(getDisplayMetrics 응답 몸통). */
+internal data class PhysicalDisplayMetrics(
+    val physicalWidth: Int,
+    val physicalHeight: Int,
+    val densityDpi: Int,
+)
+
+/** 패널 디스플레이의 real metrics에서 메트릭을 뽑는다. 0 값은 무효로 취급해
+ * 호출부가 필드를 생략할 수 있게 한다. real metrics는 회전에 따라 폭·높이가
+ * 바뀐다 — 호스트 매칭은 장변을 폭으로 정규화하므로 그대로 보고한다. */
+internal fun physicalDisplayMetricsFrom(metrics: DisplayMetrics): PhysicalDisplayMetrics? {
+    if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0 || metrics.densityDpi <= 0) {
+        return null
+    }
+    return PhysicalDisplayMetrics(
+        physicalWidth = metrics.widthPixels,
+        physicalHeight = metrics.heightPixels,
+        densityDpi = metrics.densityDpi,
+    )
+}
 
 /**
  * Opens one OS window (task) per unique stream: RN calls
@@ -207,6 +231,31 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             it.maxInstancePixelRate?.let { rate -> result.putDouble("maxInstancePixelRate", rate) }
         }
         promise.resolve(result)
+    }
+
+    /** 뷰어 자체 패널의 물리 메트릭. 확장 디스플레이 기본 모드 도출에
+     * 쓰인다(docs/2026-09-18-extended-display-design.md §4.5). 창이 아닌
+     * 실제 패널의 real metrics라 freeform·XR 창 크기와 무관하다. */
+    @ReactMethod
+    fun getDisplayMetrics(promise: Promise) {
+        runCatching {
+            val displayManager =
+                reactApplicationContext.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val display = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+            val metrics = DisplayMetrics()
+            if (display != null) {
+                display.getRealMetrics(metrics)
+            } else {
+                metrics.setTo(reactApplicationContext.resources.displayMetrics)
+            }
+            val payload = physicalDisplayMetricsFrom(metrics)
+            val result = com.facebook.react.bridge.Arguments.createMap()
+            // 무효 메트릭은 0으로 resolve한다 — JS가 검증해 필드를 생략한다.
+            result.putInt("physicalWidth", payload?.physicalWidth ?: 0)
+            result.putInt("physicalHeight", payload?.physicalHeight ?: 0)
+            result.putInt("densityDpi", payload?.densityDpi ?: 0)
+            promise.resolve(result)
+        }.onFailure { promise.reject("ERR_DISPLAY_METRICS", it) }
     }
 
     @ReactMethod

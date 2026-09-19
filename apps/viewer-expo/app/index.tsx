@@ -125,30 +125,21 @@ function RecentHostQuickConnect({
         onPress={() => void handleConnect()}
         disabled={connecting}
         style={({ pressed }) => [
-          styles.recentQuickStrip,
+          styles.primaryActionBtn,
+          { flexDirection: "row", gap: 8, marginTop: 4 },
           pressed && !connecting && styles.btnPressed,
         ]}
         accessibilityRole="button"
-        accessibilityLabel={`${t.viewer.recentHostsTitle}: ${item.name || item.host}`}
+        accessibilityLabel={`${t.viewer.btnOpenScreen}: ${item.name || item.host}`}
       >
         {connecting ? (
-          <ActivityIndicator size="small" color={colors.textSecondary} />
+          <ActivityIndicator size="small" color={colors.btnPrimaryText} />
         ) : (
-          <Ionicons name="time-outline" size={13} color={colors.textSecondary} />
+          <Ionicons name="play" size={15} color={colors.btnPrimaryText} />
         )}
-        <Text style={styles.recentQuickText} numberOfLines={1}>
-          {connecting ? (
-            t.viewer.connectingToHost
-          ) : (
-            <>
-              {t.viewer.recentHostsTitle}:{" "}
-              <Text style={{ fontWeight: "700", color: colors.textPrimary }}>
-                {item.name || item.host}
-              </Text>
-            </>
-          )}
+        <Text style={styles.primaryActionText}>
+          {connecting ? t.viewer.connectingToHost : t.viewer.btnOpenScreen}
         </Text>
-        <Ionicons name="chevron-forward" size={13} color={colors.textDim} />
       </Pressable>
       {error ? <Text style={styles.recentQuickError}>{error}</Text> : null}
     </View>
@@ -305,127 +296,248 @@ export default function Hub() {
 
         {/* Hero Connection Card */}
         {isConnected ? (
-          <View style={styles.heroCardConnected}>
-            <View style={styles.cardTopRow}>
-              <View style={styles.badgeSuccess}>
-                <View style={styles.dotSuccess} />
-                <Text style={styles.badgeSuccessText}>{t.viewer.connectedBadge}</Text>
-              </View>
-              <Text style={styles.endpointLabel} numberOfLines={1}>
-                {hostAddr}
-              </Text>
-            </View>
-
-            <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
-              <Text style={styles.heroDesc}>{t.viewer.connectedHeroDesc}</Text>
-            </View>
-
-            <View style={styles.heroActionRow}>
-              <Pressable
-                onPress={openCatalog}
-                style={({ pressed }) => [
-                  styles.primaryActionBtn,
-                  pressed && styles.btnPressed,
-                ]}
-              >
-                <Text style={styles.primaryActionText}>{t.viewer.btnViewDisplays}</Text>
-              </Pressable>
-              <Pressable
-                onPress={openHostPicker}
-                style={({ pressed }) => [
-                  styles.secondaryActionBtn,
-                  pressed && styles.btnPressed,
-                ]}
-              >
-                <Text style={styles.secondaryActionText}>{t.viewer.btnChangeHost}</Text>
-              </Pressable>
-              <Pressable
-                onPress={handleDisconnect}
-                style={({ pressed }) => [
-                  styles.disconnectActionBtn,
-                  pressed && styles.btnPressed,
-                ]}
-              >
-                <Text style={styles.disconnectActionText}>{t.common.disconnect}</Text>
-              </Pressable>
-            </View>
-          </View>
+          <ConnectedHeroCard
+            hostAddr={hostAddr}
+            styles={styles}
+            t={t}
+            onOpenCatalog={openCatalog}
+            onOpenHostPicker={openHostPicker}
+            onDisconnect={handleDisconnect}
+          />
         ) : (
-          <View style={styles.heroCardStandby}>
-            <View style={styles.cardTopRow}>
-              <View style={styles.badgeStandby}>
-                {autoConnecting ? null : <View style={styles.dotStandby} />}
-                {autoConnecting ? (
-                  <ActivityIndicator size="small" color={colors.textSecondary} />
-                ) : null}
-                <Text style={styles.badgeStandbyText}>
-                  {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyBadge}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.heroBody}>
-              <Text style={styles.heroTitle}>
-                {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyHeroTitle}
-              </Text>
-              <Text style={styles.heroDesc}>{t.viewer.standbyHeroDesc}</Text>
-            </View>
-
-            {lastHost && !autoConnecting && (
-              <RecentHostQuickConnect item={lastHost} onFinished={checkConnection} />
-            )}
-
-            <View style={styles.heroActionRow}>
-              <Pressable
-                onPress={openHostPicker}
-                style={({ pressed }) => [
-                  styles.primaryActionBtn,
-                  pressed && styles.btnPressed,
-                ]}
-              >
-                <Text style={styles.primaryActionText}>{t.viewer.btnFindHost}</Text>
-              </Pressable>
-              <Pressable
-                onPress={openPairing}
-                style={({ pressed }) => [
-                  styles.secondaryActionBtn,
-                  pressed && styles.btnPressed,
-                ]}
-              >
-                <Ionicons
-                  name="qr-code-outline"
-                  size={14}
-                  color={colors.textPrimary}
-                  style={{ marginRight: 4 }}
-                />
-                <Text style={styles.secondaryActionText}>{t.viewer.btnQrConnect}</Text>
-              </Pressable>
-            </View>
-          </View>
+          <StandbyHeroCard
+            lastHost={lastHost}
+            autoConnecting={autoConnecting}
+            colors={colors}
+            styles={styles}
+            t={t}
+            onCheckConnection={checkConnection}
+            onOpenHostPicker={openHostPicker}
+            onOpenPairing={openPairing}
+          />
         )}
 
         <SetupGuideCard styles={styles} t={t} />
-
-        {/* 2-Column Feature Grid */}
-        <View style={styles.featureGrid}>
-          <View style={styles.featureCard}>
-            <View style={styles.featureIconBox}>
-              <Ionicons name="speedometer-outline" size={16} color={colors.textPrimary} />
-            </View>
-            <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
-            <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
-          </View>
-          <View style={styles.featureCard}>
-            <View style={styles.featureIconBox}>
-              <Ionicons name="copy-outline" size={16} color={colors.textPrimary} />
-            </View>
-            <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
-            <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
-          </View>
-        </View>
+        <FeatureCardsGrid styles={styles} colors={colors} t={t} />
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function ConnectedHeroCard({
+  hostAddr,
+  styles,
+  t,
+  onOpenCatalog,
+  onOpenHostPicker,
+  onDisconnect,
+}: {
+  hostAddr: string;
+  styles: ReturnType<typeof createStyles>;
+  t: TranslationSchema;
+  onOpenCatalog: () => void;
+  onOpenHostPicker: () => void;
+  onDisconnect: () => void;
+}) {
+  return (
+    <View style={styles.heroCardConnected}>
+      <View style={styles.cardTopRow}>
+        <View style={styles.badgeSuccess}>
+          <View style={styles.dotSuccess} />
+          <Text style={styles.badgeSuccessText}>{t.viewer.connectedBadge}</Text>
+        </View>
+        <Text style={styles.endpointLabel} numberOfLines={1}>
+          {hostAddr}
+        </Text>
+      </View>
+
+      <View style={styles.heroBody}>
+        <Text style={styles.heroTitle}>{t.viewer.connectedHeroTitle}</Text>
+        <Text style={styles.heroDesc}>{t.viewer.connectedHeroDesc}</Text>
+      </View>
+
+      <View style={styles.heroActionRow}>
+        <Pressable
+          onPress={onOpenCatalog}
+          style={({ pressed }) => [
+            styles.primaryActionBtn,
+            pressed && styles.btnPressed,
+          ]}
+        >
+          <Text style={styles.primaryActionText}>{t.viewer.btnViewDisplays}</Text>
+        </Pressable>
+        <Pressable
+          onPress={onOpenHostPicker}
+          style={({ pressed }) => [
+            styles.secondaryActionBtn,
+            pressed && styles.btnPressed,
+          ]}
+        >
+          <Text style={styles.secondaryActionText}>{t.viewer.btnChangeHost}</Text>
+        </Pressable>
+        <Pressable
+          onPress={onDisconnect}
+          style={({ pressed }) => [
+            styles.disconnectActionBtn,
+            pressed && styles.btnPressed,
+          ]}
+        >
+          <Text style={styles.disconnectActionText}>{t.common.disconnect}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function StandbyHeroCard({
+  lastHost,
+  autoConnecting,
+  colors,
+  styles,
+  t,
+  onCheckConnection,
+  onOpenHostPicker,
+  onOpenPairing,
+}: {
+  lastHost: RecentHostItem | null;
+  autoConnecting: boolean;
+  colors: ThemeTokens;
+  styles: ReturnType<typeof createStyles>;
+  t: TranslationSchema;
+  onCheckConnection: () => void;
+  onOpenHostPicker: () => void;
+  onOpenPairing: () => void;
+}) {
+  if (lastHost && !autoConnecting) {
+    return (
+      <View style={styles.heroCardStandby}>
+        <View style={styles.cardTopRow}>
+          <View style={styles.badgeSuccess}>
+            <View style={styles.dotSuccess} />
+            <Text style={styles.badgeSuccessText}>{t.viewer.quickConnectAvailable}</Text>
+          </View>
+          <Text style={styles.endpointLabel} numberOfLines={1}>
+            {lastHost.name || t.viewer.quickConnectTitle}
+          </Text>
+        </View>
+
+        <View style={styles.heroBody}>
+          <Text style={styles.heroTitle}>
+            {lastHost.name || t.viewer.quickConnectTitle}
+          </Text>
+          <Text style={styles.heroDesc}>{t.host.remoteReadyDesc}</Text>
+        </View>
+
+        <RecentHostQuickConnect item={lastHost} onFinished={onCheckConnection} />
+
+        <View style={styles.heroActionRow}>
+          <Pressable
+            onPress={onOpenHostPicker}
+            style={({ pressed }) => [
+              styles.secondaryActionBtn,
+              { flex: 1 },
+              pressed && styles.btnPressed,
+            ]}
+          >
+            <Text style={styles.secondaryActionText}>{t.viewer.btnConnectOther}</Text>
+          </Pressable>
+          <Pressable
+            onPress={onOpenPairing}
+            style={({ pressed }) => [
+              styles.secondaryActionBtn,
+              pressed && styles.btnPressed,
+            ]}
+          >
+            <Ionicons
+              name="qr-code-outline"
+              size={14}
+              color={colors.textPrimary}
+              style={{ marginRight: 4 }}
+            />
+            <Text style={styles.secondaryActionText}>{t.viewer.btnQrConnect}</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.heroCardStandby}>
+      <View style={styles.cardTopRow}>
+        <View style={styles.badgeStandby}>
+          {autoConnecting ? null : <View style={styles.dotStandby} />}
+          {autoConnecting ? (
+            <ActivityIndicator size="small" color={colors.textSecondary} />
+          ) : null}
+          <Text style={styles.badgeStandbyText}>
+            {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyBadge}
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.heroBody}>
+        <Text style={styles.heroTitle}>
+          {autoConnecting ? t.viewer.connectingToHost : t.viewer.standbyHeroTitle}
+        </Text>
+        <Text style={styles.heroDesc}>{t.viewer.standbyHeroDesc}</Text>
+      </View>
+
+      <View style={styles.heroActionRow}>
+        <Pressable
+          onPress={onOpenHostPicker}
+          style={({ pressed }) => [
+            styles.primaryActionBtn,
+            pressed && styles.btnPressed,
+          ]}
+        >
+          <Text style={styles.primaryActionText}>{t.viewer.btnFindHost}</Text>
+        </Pressable>
+        <Pressable
+          onPress={onOpenPairing}
+          style={({ pressed }) => [
+            styles.secondaryActionBtn,
+            pressed && styles.btnPressed,
+          ]}
+        >
+          <Ionicons
+            name="qr-code-outline"
+            size={14}
+            color={colors.textPrimary}
+            style={{ marginRight: 4 }}
+          />
+          <Text style={styles.secondaryActionText}>{t.viewer.btnQrConnect}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function FeatureCardsGrid({
+  styles,
+  colors,
+  t,
+}: {
+  styles: ReturnType<typeof createStyles>;
+  colors: ThemeTokens;
+  t: TranslationSchema;
+}) {
+  return (
+    <View style={styles.featureGrid}>
+      <View style={styles.featureCard}>
+        <View style={styles.featureIconBox}>
+          <Ionicons name="speedometer-outline" size={16} color={colors.textPrimary} />
+        </View>
+        <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
+        <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
+      </View>
+      <View style={styles.featureCard}>
+        <View style={styles.featureIconBox}>
+          <Ionicons name="copy-outline" size={16} color={colors.textPrimary} />
+        </View>
+        <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
+        <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
+      </View>
+    </View>
   );
 }
 

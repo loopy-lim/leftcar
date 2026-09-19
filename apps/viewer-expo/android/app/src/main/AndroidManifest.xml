@@ -4,6 +4,8 @@
        hasSystemFeature 프로브가 담당한다. -->
   <uses-feature android:name="android.software.xr.api.spatial" android:required="false"/>
   <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
@@ -25,7 +27,7 @@
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS" android:value="0"/>
     <property android:name="android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI" android:value="true"/>
-    <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="portrait">
+    <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="portrait">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LAUNCHER"/>
@@ -44,11 +46,18 @@
         android:name="${leftcarAccessoryAction}"
         android:resource="@xml/accessory_filter" />
     </activity>
-    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths">
+    <activity android:name=".stream.StreamActivity" android:exported="false" android:launchMode="standard" android:documentLaunchMode="intoExisting" android:taskAffinity="" android:resizeableActivity="true" android:excludeFromRecents="false" android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|assetsPaths">
       <!-- Android XR uses the managed home-space 2D panel; the system owns
            spatial placement while ActivityOptions supplies an initial ratio
            where the window manager supports launch bounds. -->
       <property android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE" android:value="XR_ACTIVITY_START_MODE_HOME_SPACE" />
+      <!-- 소프트 입력은 제품 정책상 이 창에서 절대 쓰지 않는다(하드웨어
+           키보드 전용). 하드웨어 키보드 연결/해제 때 시스템이 소프트 IME를
+           띄우면 XR은 스트림 창을 stopped로 숨겨 surface가 파괴된다 —
+           2026-09-17 "키보드 연결하면 검정화면"의 원인. navigation은 블루투스
+           키보드 연결/해제 때 arrow→DPAD 전환으로 함께 바뀐다 — 목록에
+           없으면 액티비티가 재생성돼 2026-09-19 XR "앱이 꺼짐"의 원인. -->
     </activity>
+    <service android:name=".stream.StreamConnectionService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
   </application>
 </manifest>

@@ -1,7 +1,7 @@
 //! Bounded metadata owned by one renderer decoder lifetime. Latest released
 //! PTS is a sample of the last output, not a distribution of every drain output.
 use std::collections::VecDeque;
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct OutputMetadata {
     epoch: u64,
     inputs: VecDeque<(i64, Option<u64>)>,
@@ -19,7 +19,7 @@ impl OutputMetadata {
         released: Option<i64>,
         released_count: u64,
     ) -> Option<u64> {
-        if self.inputs.back().is_some_and(|(last, _)| pts <= *last) {
+        if queued && self.inputs.back().is_some_and(|(last, _)| pts <= *last) {
             self.reset();
         }
         if queued {
@@ -49,6 +49,15 @@ impl OutputMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_output_keeps_capture_metadata_without_a_new_input() {
+        let mut map = OutputMetadata::default();
+        map.observe(10, Some(100), true, None, 0);
+        map.observe(20, Some(200), true, None, 0);
+        assert_eq!(map.observe(0, None, false, Some(10), 1), Some(100));
+        assert_eq!(map.observe(0, None, false, Some(20), 1), Some(200));
+        assert_eq!(map.epoch(), 0);
+    }
     #[test]
     fn output_joins_older_pts_even_when_current_input_is_rejected() {
         let mut map = OutputMetadata::default();

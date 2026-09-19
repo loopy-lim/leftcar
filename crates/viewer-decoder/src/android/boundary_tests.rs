@@ -312,3 +312,52 @@ fn real_output_drain_flush_forgets_parked_outputs() {
         )
     });
 }
+
+#[test]
+fn age_drain_counts_excess_plus_front_frames_beyond_budget() {
+    use crate::android::decoder::{immediate_release_count, park_drain_budget_ns};
+    // 상한 초과분: cap 2에 5개면 3개 즉시 소화.
+    assert_eq!(immediate_release_count(&[0, 0, 0, 0, 0], 2, 45_000_000), 3);
+    // 나이 예산 초과: 맨앞부터 예산을 넘는 만큼만 추가된다.
+    assert_eq!(
+        immediate_release_count(&[50_000_000, 46_000_000, 10_000], 4, 45_000_000),
+        2
+    );
+    // 전부 예산 안쪽이면 드레인 없음.
+    assert_eq!(immediate_release_count(&[10_000, 20_000], 2, 45_000_000), 0);
+    // FIFO 전제: 예산 초과가 맨앞이 아니면 세지 않는다.
+    assert_eq!(
+        immediate_release_count(&[10_000, 90_000_000], 4, 45_000_000),
+        0
+    );
+    // 상한이 크면 초과분도 없다.
+    assert_eq!(immediate_release_count(&[0, 0], 4, 45_000_000), 0);
+    // 스무딩 off 예산은 무제한 — 기존 동작 보존.
+    assert_eq!(park_drain_budget_ns(true), 45_000_000);
+    assert_eq!(park_drain_budget_ns(false), u64::MAX);
+    assert_eq!(
+        immediate_release_count(&[u64::MAX], 4, park_drain_budget_ns(false)),
+        0
+    );
+}
+
+#[test]
+fn fresh_park_arrivals_are_never_age_drained() {
+    // 방금 도착한 프레임은 나이 0에 수렴하므로 드레인이 발화하지 않는다 —
+    // 기존 케이던스(슬롯당 1 릴리스)가 그대로 유지된다는 회귀 핀.
+    let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    PRESENTATION_SMOOTH.store(true, std::sync::atomic::Ordering::Relaxed);
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let mut decoder =
+        unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    PROBE.with_borrow_mut(|p| p.outputs.extend([(60, 1000), (61, 2000), (62, 3000)]));
+    let target = 9_876_543_210;
+    decoder.set_output_target(Some(target));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    // 수요 HWM이 3→cap 4로 맞춰주므로 초과분도 없고, 나이 예산도 안 지났다:
+    // 슬롯 릴리스 1회뿐이다.
+    assert_eq!(decoder.last_released_pts_us, Some(1000));
+    assert_eq!(decoder.frames_rendered, 1);
+    assert_eq!(decoder.park_drained_frames, 0);
+    PRESENTATION_SMOOTH.store(false, std::sync::atomic::Ordering::Relaxed);
+}

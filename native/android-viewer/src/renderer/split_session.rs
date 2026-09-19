@@ -11,7 +11,7 @@ use crate::prepared_udp::PreparedUdpReceiver;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod tile_worker;
 
@@ -202,6 +202,8 @@ enum CoordinatorEvent {
         pts_us: i64,
         generation: u64,
         succeeded: bool,
+        capture_wall_ms: Option<u64>,
+        target_ns: i64,
     },
     Fatal,
     /// Truthful per-request report from a tile worker, stamped with the
@@ -294,6 +296,7 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
             let mut coordinator = PairPresentationCoordinator::new(fps);
             let mut release_acknowledgements = PairReleaseAcknowledgements::default();
             let mut presentation_generation = 0u64;
+            let mut last_performance_log = Instant::now();
             let mut recovery = SplitRecoveryGate::default();
             let mut dispatch_ledger = DispatchLedger::new();
             let mut ready_at: HashMap<(TileSide, i64), i64> = HashMap::new();
@@ -627,6 +630,8 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                     pts_us,
                                     generation,
                                     succeeded,
+                                    capture_wall_ms,
+                                    target_ns,
                                 } => {
                                     if generation == presentation_generation
                                         && release_acknowledgements.record(side, pts_us, succeeded)
@@ -635,6 +640,24 @@ pub(crate) fn spawn(launch: SplitRendererLaunch) -> Result<(), String> {
                                             stats.joined_rendered.fetch_add(1, Ordering::Relaxed)
                                                 + 1;
                                         control.record_split_joined_frames(joined);
+                                        // Both tiles acknowledged the same PTS. Measure the
+                                        // capture age at the scheduled release deadline (or
+                                        // now if late), never at decoder feed. This remains
+                                        // a software presentation boundary, not panel light.
+                                        let age = stats.host_clock_offset().and_then(|offset| {
+                                            super::clock_corrected_age_ms(capture_wall_ms, offset)
+                                        }).map(|age| {
+                                            let pending_ns = target_ns.saturating_sub(monotonic_ns()).max(0) as u64;
+                                            age.saturating_add(pending_ns.div_ceil(1_000_000))
+                                        });
+                                        control.capture_to_surface_release_ms.store(
+                                            age.unwrap_or(super::LATENCY_MEASUREMENT_UNKNOWN),
+                                            Ordering::Relaxed,
+                                        );
+                                        if last_performance_log.elapsed() >= Duration::from_millis(500) {
+                                            log_info!("LeftcarViewerPerf schema=2 process={} stream={} incarnation={} kind=split released={} leftReleased={} rightReleased={} outputStage=scheduled-paired-surface-release releaseCaptureAgeMs={:?} outputPtsUs={} clockBasis=estimated-host-wall-offset", std::process::id(), control.port, control.metric_incarnation, joined, stats.left_rendered.load(Ordering::Relaxed), stats.right_rendered.load(Ordering::Relaxed), age, pts_us);
+                                            last_performance_log = Instant::now();
+                                        }
                                     }
                                 }
                                 CoordinatorEvent::Fatal => control.request_stop(false),

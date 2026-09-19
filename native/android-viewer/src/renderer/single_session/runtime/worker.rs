@@ -56,6 +56,9 @@ fn sync_audio_stream(
     // attempt is recorded to avoid a busy retry loop, and the 1s cadence
     // heals a datagram lost after send_to succeeds.
     let _ = send_viewer_command(socket, peer, audio_stream_command(requested), crypto);
+    if !control.input_language_supported.load(Ordering::SeqCst) {
+        let _ = send_viewer_command(socket, peer, b"LCL?", crypto);
+    }
     if requested {
         let _ = send_viewer_command(
             socket,
@@ -137,7 +140,7 @@ impl RenderHealthRuntime<'_> {
 fn run(launch: SingleRendererLaunch) {
     let SingleRendererLaunch {
         instance_str,
-        window_handle,
+        mut window_handle,
         port,
         expected_host,
         width,
@@ -308,9 +311,25 @@ fn run(launch: SingleRendererLaunch) {
             );
             *input_endpoint.lock().unwrap() = None;
             control_clone.suspended.store(true, Ordering::SeqCst);
+            let mut heartbeat_attempt = None;
             while control_clone.suspend.load(Ordering::SeqCst)
                 && !control_clone.stop.load(Ordering::SeqCst)
             {
+                if let Some(peer) = host_peer {
+                    if crate::input_protocol::heartbeat_due(&mut heartbeat_attempt, monotonic_us()) {
+                        let _ = send_viewer_command(&control_socket, peer, crate::input_protocol::HEARTBEAT_MAGIC, &crypto);
+                    }
+                    // Focus release must still retry and receive its ACK while
+                    // decoding is suspended, so held keys cannot survive a hide.
+                    flush_input(&control_socket, peer, &crypto, &control_clone);
+                }
+                for _ in 0..4 {
+                    let Ok((size, source)) = control_socket.recv_from(&mut buf) else { break; };
+                    if !peer_allowed(Some(source), &expected_host) { continue; }
+                    crate::renderer::control_ingress::consume_control_datagram(&crypto, &mut buf[..size], |packet| {
+                        consume_viewer_response(packet, &mut control_health, &control_clone, &mut renderer_stats)
+                    });
+                }
                 if let Some(bridge) = tcp_bridge.as_ref() {
                     bridge.drain_media();
                 }
@@ -320,12 +339,19 @@ fn run(launch: SingleRendererLaunch) {
                         let packet = &buf[..received];
                         // Open before parsing: only a datagram sealed with
                         // the session key can be a host challenge.
-                        if let Some(plaintext) = crypto.open_challenge(packet) {
-                            crypto.establish();
-                            *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
-                            control_clone.input.lock().unwrap().reset_session();
-                            if let Some(reply) = crypto.seal(&plaintext) {
-                                let _ = socket.send_to(&reply, peer);
+                        // Video is disposable while hidden. Small sealed
+                        // control packets still deliver Host termination/state.
+                        if received <= 192 {
+                            if let Some(plaintext) = crypto.open(packet).or_else(|| crypto.open_challenge(packet)) {
+                                if crate::prepared_udp::is_challenge(&plaintext) {
+                                    crypto.establish();
+                                    control_clone.input.lock().unwrap().reset_session();
+                                    if let Some(reply) = crypto.seal(&plaintext) {
+                                        let _ = socket.send_to(&reply, peer);
+                                    }
+                                } else {
+                                    consume_viewer_response(&plaintext, &mut control_health, &control_clone, &mut renderer_stats);
+                                }
                             }
                         }
                         // Video/config packets are intentionally discarded
@@ -343,15 +369,31 @@ fn run(launch: SingleRendererLaunch) {
                 }
             }
             control_clone.suspended.store(false, Ordering::SeqCst);
+            if control_clone.stop.load(Ordering::SeqCst) { break; }
+            control_clone
+                .resize_recovery_suppressed_until_us
+                .store(0, Ordering::Relaxed);
+            recovery_gate = RecoveryRequestGate::default();
+            window_handle = control_clone.single_surface.lock().unwrap()
+                .as_ref().map_or(window_handle, |surface| surface.window);
+            control_health = ControlHealthState::default();
+            last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
+            last_feedback_rendered_frames = control_clone.rendered_frames.load(Ordering::Relaxed);
+            render_health.rebase(completed_access_units, last_feedback_rendered_frames);
             if let Some(peer) = host_peer {
                 *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
-                request_idr_debounced(
-                    &control_socket,
-                    peer,
-                    &crypto,
-                    &mut recovery_gate,
-                    &control_clone,
-                );
+                if crypto.is_established() {
+                    request_idr(&control_socket, peer, &crypto);
+                    let _ = recovery_gate.should_request(std::time::Instant::now());
+                } else {
+                    request_idr_debounced(
+                        &control_socket,
+                        peer,
+                        &crypto,
+                        &mut recovery_gate,
+                        &control_clone,
+                    );
+                }
                 sync_cursor_stream(
                     &control_clone,
                     &control_socket,
@@ -368,6 +410,13 @@ fn run(launch: SingleRendererLaunch) {
                 );
             }
             continue;
+        }
+
+        if let Some(Err(error)) = decoder.as_mut().map(|decoder| {
+            drain_pending_output(decoder, &mut renderer_stats, &control_clone)
+        }) {
+            log_info!("decoder output poll failed: {error}");
+            resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe, &control_clone);
         }
 
         // A request suppressed by live resize must not be lost forever.
@@ -470,11 +519,15 @@ fn run(launch: SingleRendererLaunch) {
                 |control_health| loop {
                     match control_socket.recv_from(&mut control_buf) {
                         Ok((received, source)) if source == peer => {
-                            let _ = consume_viewer_response(
-                                &control_buf[..received],
-                                control_health,
-                                &control_clone,
-                                &mut renderer_stats,
+                            let _ = crate::renderer::control_ingress::consume_control_datagram(
+                                &crypto,
+                                &mut control_buf[..received],
+                                |packet| consume_viewer_response(
+                                    packet,
+                                    control_health,
+                                    &control_clone,
+                                    &mut renderer_stats,
+                                ),
                             );
                         }
                         Ok((_received, source)) => {
@@ -779,13 +832,12 @@ fn run(launch: SingleRendererLaunch) {
                         log_info!("UDP reachability challenge verified for {peer}");
                     }
                 }
-                request_idr_debounced(
-                    &control_socket,
-                    peer,
-                    &crypto,
-                    &mut recovery_gate,
-                    &control_clone,
-                );
+                control_clone
+                    .resize_recovery_suppressed_until_us
+                    .store(0, Ordering::Relaxed);
+                recovery_gate = RecoveryRequestGate::default();
+                request_idr(&control_socket, peer, &crypto);
+                let _ = recovery_gate.should_request(std::time::Instant::now());
                 cursor_delivery.reset();
                 sync_cursor_stream(
                     &control_clone,

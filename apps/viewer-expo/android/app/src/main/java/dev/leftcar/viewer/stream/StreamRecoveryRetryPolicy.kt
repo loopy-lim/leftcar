@@ -10,7 +10,7 @@ internal data class RebindRetryAttempt(
  * Host-unreachable is recovered by React/Host, while render-stalled is first
  * retried directly by the native renderer.
  */
-internal fun isSameWindowRecoveryReason(reason: Int): Boolean = reason == 4 || reason == 5
+internal fun isSameWindowRecoveryReason(reason: Int): Boolean = reason == 1 || reason == 4 || reason == 5
 
 /**
  * Short, bounded same-window recovery attempts. A successful rebind resets

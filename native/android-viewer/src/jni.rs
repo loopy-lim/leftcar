@@ -66,7 +66,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
+pub(crate) struct SingleSurface {
+    pub(crate) host: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: u32,
+    pub(crate) window: usize,
+}
+
 pub(crate) struct RendererControl {
+    pub(crate) single_surface: Mutex<Option<SingleSurface>>,
     pub(crate) metric_incarnation: String,
     pub(crate) output_metadata: Mutex<crate::renderer::output_metadata::OutputMetadata>,
     pub(crate) presentation: Mutex<crate::renderer::DisplayTimeline>,
@@ -79,6 +88,7 @@ pub(crate) struct RendererControl {
     pub(crate) audio_available: std::sync::Condvar,
     // -1 = waiting for authenticated Host state, 0 = locked, 1 = enabled.
     pub(crate) input_enabled: AtomicI8,
+    pub(crate) input_language_supported: AtomicBool,
     pub(crate) rendered_frames: AtomicU64,
     pub(crate) stale_outputs: AtomicU64,
     pub(crate) stale_input_drops: AtomicU64,
@@ -153,6 +163,7 @@ impl RendererControl {
 
     pub(crate) fn new_split(port: u16, fps: u32) -> Self {
         Self {
+            single_surface: Mutex::new(None),
             metric_incarnation: crate::renderer::metric_identity(),
             output_metadata: Mutex::new(Default::default()),
             presentation: Mutex::new(crate::renderer::DisplayTimeline::default()),
@@ -162,6 +173,7 @@ impl RendererControl {
             audio: Mutex::new(AudioRing::default()),
             audio_available: std::sync::Condvar::new(),
             input_enabled: AtomicI8::new(-1),
+            input_language_supported: AtomicBool::new(false),
             rendered_frames: AtomicU64::new(0),
             stale_outputs: AtomicU64::new(0),
             stale_input_drops: AtomicU64::new(0),
@@ -587,6 +599,31 @@ pub(crate) fn detach_owned_renderer(state: usize, instance: &str) -> bool {
     control.suspended.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst)
 }
 
+/// A returning Surface belongs to the same Activity and stream. Preserve its
+/// socket, AEAD replay window, and reliable-input sequence; only replace the
+/// native window after the decoder has acknowledged suspension.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resume_owned_single_renderer(
+    state: usize, instance: &str, port: u16, host: &str,
+    width: u32, height: u32, fps: u32, window: usize,
+) -> bool {
+    let Some(control) = owned_renderer(state, instance) else { return false; };
+    if control.is_split() || control.port != port || window == 0
+        || control.stop.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst)
+        || !control.suspend.load(Ordering::SeqCst) || !control.suspended.load(Ordering::SeqCst)
+        || !active_renderer(instance).is_some_and(|active| Arc::ptr_eq(&active, &control))
+        // A newly prepared session must use its new media key and handshake.
+        || media_crypto_for(port).is_some() { return false; }
+    let mut target = control.single_surface.lock().unwrap();
+    let Some(target) = target.as_mut() else { return false; };
+    if target.host != host || target.width != width || target.height != height || target.fps != fps {
+        return false;
+    }
+    target.window = window;
+    control.suspend.store(false, Ordering::SeqCst);
+    true
+}
+
 pub(crate) fn finished_owned_renderer(
     state: usize,
     instance: &str,
@@ -857,6 +894,34 @@ pub(crate) fn restore_prepared_receiver(port: u16, receiver: PreparedUdpReceiver
 #[cfg(test)]
 mod renderer_lifecycle_tests {
     use super::*;
+    use crate::input_protocol::InputEvent;
+
+    #[test]
+    fn surface_return_reuses_the_owned_transport_without_resetting_reliable_input() {
+        let name = "single-surface-resume-test";
+        let mut control = RendererControl::new_split(52_301, 60);
+        control.split = false;
+        *control.single_surface.lock().unwrap() = Some(SingleSurface {
+            host: "100.80.133.120".into(), width: 2560, height: 1440, fps: 60, window: 42,
+        });
+        let control = Arc::new(control);
+        control.suspend.store(true, Ordering::SeqCst);
+        control.suspended.store(true, Ordering::SeqCst);
+        control.input.lock().unwrap().push(InputEvent::InputLanguage { language: 2 });
+        let pending = control.input.lock().unwrap().next_ready(1).unwrap();
+        install_renderer(name, Arc::clone(&control));
+        bind_owned_renderer(902, name, Arc::clone(&control));
+        assert!(!resume_owned_single_renderer(901, name, 52_301, "100.80.133.120", 2560, 1440, 60, 43));
+        assert!(!resume_owned_single_renderer(902, name, 52_301, "192.168.0.1", 2560, 1440, 60, 43));
+        assert!(!resume_owned_single_renderer(902, name, 52_301, "100.80.133.120", 3840, 2160, 60, 43));
+        assert!(resume_owned_single_renderer(902, name, 52_301, "100.80.133.120", 2560, 1440, 60, 43));
+        assert!(!control.suspend.load(Ordering::SeqCst));
+        assert_eq!(control.single_surface.lock().unwrap().as_ref().unwrap().window, 43);
+        assert_eq!(control.input.lock().unwrap().next_ready(20_001).unwrap(), pending);
+        remove_renderer_if_current(name, &control);
+        forget_owned_renderer(902, name, &control);
+        clear_cached_termination(name);
+    }
     #[test]
     fn decoder_cleanup_timeout_is_not_acknowledged() {
         let control = RendererControl::new_split(57000, 60);

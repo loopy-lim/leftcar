@@ -70,16 +70,6 @@ internal class StreamHudController(
     private var rebindView: View? = null
     private var rebindText: TextView? = null
     private var controls: StreamHudControls? = null
-    private var keyboardChip: TextView? = null
-
-    /** 제스처 안내는 첫 창에서 1회만 자동 노출되므로, 이 칩이 유일한 재열람 경로다. */
-    var onGestureHelpTapped: (() -> Unit)? = null
-
-    /** "ABC" 칩 탭 → Activity가 IME를 토글한다. */
-    var onKeyboardToggle: (() -> Unit)? = null
-
-    /** "✕" 칩 탭 → Activity가 스트림 창을 닫는다(전체화면의 눈에 보이는 출구). */
-    var onExitTapped: (() -> Unit)? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -133,11 +123,6 @@ internal class StreamHudController(
             showStats()
             persistentFpsOverlay.show()
         }
-    }
-
-    /** IME 표시 실측 상태(렌즈 inset 콜백)를 반영한다 (플로팅 칩 제거로 no-op). */
-    fun setKeyboardChipActive(active: Boolean) {
-        // no-op
     }
 
     fun armTerminationPolling() {
@@ -264,7 +249,6 @@ internal class StreamHudController(
         statsPopup = null
         rebindPopup = null
         controls = null
-        keyboardChip = null
         inputView = null
         inputIcon = null
         inputLabel = null
@@ -384,18 +368,6 @@ internal class StreamHudController(
         }
     }
 
-    private fun showGestureHelpChip() {
-        controls?.addChip("?", ViewerStrings.gestureHelpDescription) { onGestureHelpTapped?.invoke() }
-    }
-
-    private fun showKeyboardChip() {
-        keyboardChip = controls?.addChip("ABC", ViewerStrings.keyboardToggleDescription) { onKeyboardToggle?.invoke() }
-    }
-
-    private fun showExitChip() {
-        controls?.addChip("✕", ViewerStrings.exitStreamDescription) { onExitTapped?.invoke() }
-    }
-
     private fun updateStats(packed: Long, latency: Long, surfaceReleaseLatency: Int) {
         val stats = statsView ?: return
         if (packed == -1L) {
@@ -496,30 +468,5 @@ internal class StreamHudControls(context: android.content.Context, private val s
     val view = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.END
-    }
-
-    fun addChip(text: String, description: String, onTap: () -> Unit): TextView {
-        val chip = TextView(view.context).apply {
-            this.text = text
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 12f * scale
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(2), dp(8), dp(2))
-            minimumWidth = dp(48)
-            minimumHeight = dp(48)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.argb(118, 15, 23, 42))
-                setStroke(dp(1), Color.argb(36, 255, 255, 255))
-            }
-            alpha = 0.72f
-            contentDescription = description
-            setOnClickListener { onTap() }
-        }
-        view.addView(chip, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = if (view.childCount == 0) 0 else dp(8) })
-        return chip
     }
 }
