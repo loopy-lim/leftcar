@@ -667,12 +667,19 @@ impl CaptureBackend for FfiBackend {
     fn stop(&self, handle: u32) -> Result<(), String> {
         let lib = self.lib()?;
         unsafe {
-            // v3 sends an LCT1 termination notice so a live viewer closes its
-            // window immediately; older shims fall back to the silent v2 stop.
+            // `stop` is the no-reason retirement (viewer-requested stopStream,
+            // terminal/stale cleanup): the peer already knows the stream is
+            // ending, so stay silent. A notice here is addressed to the same
+            // media port a stop→restart flow re-prepares, and the rebuilt
+            // stream consumes the stale LCT1 and dies (2026-09-19 XR
+            // split→single flip). Host-initiated ends that must close a live
+            // viewer go through stop_with_reason with an explicit LCT1 code;
+            // v3 with reasonCode 0 stops silently, older shims fall back to
+            // the silent v2 stop.
             if let Ok(f) =
                 lib.get::<unsafe extern "C" fn(u32, i32) -> i32>(b"leftcar_capture_stop_v3")
             {
-                let rc = f(handle, 3);
+                let rc = f(handle, 0);
                 if rc != 0 {
                     return Err(format!("stop({handle}) rc={rc}"));
                 }

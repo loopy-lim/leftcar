@@ -48,7 +48,8 @@ extension CaptureSession {
             validOutputFps: validOutputFps,
             submitP95Us: percentile95(adaptiveQpWindowSubmitSamplesUs),
             callbackP95Us: percentile95(adaptiveQpWindowCallbackSamplesUs),
-            networkOldestAgeUs: networkOldestAgeUs
+            networkOldestAgeUs: networkOldestAgeUs,
+            targetFps: fps
         )
         if next != previousQp {
             baseFrameQpChanges &+= 1

@@ -614,28 +614,32 @@ struct EncodePolicyTests {
             adaptiveQpWindowIsPressured(
                 encoderDrops: 1,
                 validOutputFps: 60,
-                submitP95Us: 10_000
+                submitP95Us: 10_000,
+                targetFps: 60
             )
         )
         precondition(
             adaptiveQpWindowIsPressured(
                 encoderDrops: 0,
                 validOutputFps: 54,
-                submitP95Us: 10_000
+                submitP95Us: 10_000,
+                targetFps: 60
             )
         )
         precondition(
             adaptiveQpWindowIsPressured(
                 encoderDrops: 0,
                 validOutputFps: 60,
-                submitP95Us: 16_668
+                submitP95Us: 16_668,
+                targetFps: 60
             )
         )
         precondition(
             !adaptiveQpWindowIsPressured(
                 encoderDrops: 0,
                 validOutputFps: 60,
-                submitP95Us: 16_000
+                submitP95Us: 16_000,
+                targetFps: 60
             )
         )
         precondition(
@@ -643,7 +647,8 @@ struct EncodePolicyTests {
                 encoderDrops: 0,
                 validOutputFps: 59,
                 callbackP95Us: 18_500,
-                networkOldestAgeUs: 16_667
+                networkOldestAgeUs: 16_667,
+                targetFps: 60
             )
         )
         precondition(
@@ -651,7 +656,52 @@ struct EncodePolicyTests {
                 encoderDrops: 0,
                 validOutputFps: 59,
                 callbackP95Us: 18_501,
-                networkOldestAgeUs: 16_667
+                networkOldestAgeUs: 16_667,
+                targetFps: 60
+            )
+        )
+        // 타겟 상대화가 60에서 기존 상수와 동일함을 넘어, 90에서도 코스가
+        // 맞는지 핀한다 — 프레임 예산 11_112µs, 압박 하한 82fps, 안정 하한 88fps.
+        precondition(
+            !adaptiveQpWindowIsPressured(
+                encoderDrops: 0,
+                validOutputFps: 85,
+                submitP95Us: 11_000,
+                targetFps: 90
+            )
+        )
+        precondition(
+            adaptiveQpWindowIsPressured(
+                encoderDrops: 0,
+                validOutputFps: 81,
+                submitP95Us: 11_000,
+                targetFps: 90
+            )
+        )
+        precondition(
+            adaptiveQpWindowIsPressured(
+                encoderDrops: 0,
+                validOutputFps: 90,
+                submitP95Us: 11_113,
+                targetFps: 90
+            )
+        )
+        precondition(
+            adaptiveQpStableWindowIsReady(
+                encoderDrops: 0,
+                validOutputFps: 88,
+                callbackP95Us: 12_334,
+                networkOldestAgeUs: 11_112,
+                targetFps: 90
+            )
+        )
+        precondition(
+            !adaptiveQpStableWindowIsReady(
+                encoderDrops: 0,
+                validOutputFps: 87,
+                callbackP95Us: 12_334,
+                networkOldestAgeUs: 11_112,
+                targetFps: 90
             )
         )
 
@@ -682,7 +732,8 @@ struct EncodePolicyTests {
                 validOutputFps: 60,
                 submitP95Us: 10_000,
                 callbackP95Us: 10_000,
-                networkOldestAgeUs: 1_000
+                networkOldestAgeUs: 1_000,
+                targetFps: 60
             ) == 34
         )
         precondition(
@@ -691,7 +742,8 @@ struct EncodePolicyTests {
                 validOutputFps: 60,
                 submitP95Us: 10_000,
                 callbackP95Us: 10_000,
-                networkOldestAgeUs: 1_000
+                networkOldestAgeUs: 1_000,
+                targetFps: 60
             ) == 34
         )
         precondition(
@@ -700,7 +752,8 @@ struct EncodePolicyTests {
                 validOutputFps: 59,
                 submitP95Us: 10_000,
                 callbackP95Us: 18_500,
-                networkOldestAgeUs: 16_667
+                networkOldestAgeUs: 16_667,
+                targetFps: 60
             ) == 34
         )
         precondition(
@@ -709,7 +762,8 @@ struct EncodePolicyTests {
                 validOutputFps: 59,
                 submitP95Us: 10_000,
                 callbackP95Us: 18_500,
-                networkOldestAgeUs: 16_667
+                networkOldestAgeUs: 16_667,
+                targetFps: 60
             ) == 33
         )
         precondition(adaptiveController.applyManualSlider(percent: 25) == 42)

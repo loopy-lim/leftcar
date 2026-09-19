@@ -280,17 +280,26 @@ extension CaptureSession {
     /// -dict 115 240`. Synthetic CGEvents bypass Karabiner/hidutil device
     /// remaps, so this lookup is the one place a viewer key can be re-bound
     /// on the host side. Missing/invalid entries are ignored.
+    ///
+    /// 키 입력마다 NSGlobalDomain을 다시 파싱하면 입력 120Hz에서 파싱 비용이
+    /// 반복되므로 5초 TTL로 캐시한다 — defaults write는 최대 5초 뒤 반영된다.
+    /// 읽기는 injectKey의 직렬 inputQueue에서만 일어난다.
     var remoteKeyRemap: [UInt16: CGKeyCode] {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let (table, readAt) = cachedRemoteKeyRemap,
+           now &- readAt < 5_000_000_000 {
+            return table
+        }
         let domain = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
-        guard let table = domain?["dev.leftcar.remoteKeyRemap"] as? [String: Any] else {
-            return [:]
-        }
         var remap: [UInt16: CGKeyCode] = [:]
-        for (rawKey, rawValue) in table {
-            guard let key = UInt16(rawKey),
-                  let target = remapTarget(rawValue) else { continue }
-            remap[key] = target
+        if let table = domain?["dev.leftcar.remoteKeyRemap"] as? [String: Any] {
+            for (rawKey, rawValue) in table {
+                guard let key = UInt16(rawKey),
+                      let target = remapTarget(rawValue) else { continue }
+                remap[key] = target
+            }
         }
+        cachedRemoteKeyRemap = (remap, now)
         return remap
     }
 
@@ -326,6 +335,13 @@ extension CaptureSession {
 
      func injectKey(_ message: Data) {
         let androidCode = readUInt16BE(message, at: 10)
+        // 한/영 키(204): 기본표 매핑이 없고(일본어 가나 키였던 잘못된 값 제거)
+        // kind-7 동기화가 막혀 있으면 이 키가 그대로 중계된다 — 활성 입력
+        // 소스를 토글하는 폴백으로 처리한다. 사용자 리맽이 있으면 그것이 우선.
+        if androidCode == 204, remoteKeyRemap[androidCode] == nil {
+            toggleInputLanguage()
+            return
+        }
         // 사용자 리맵이 우선한다(예: Caps Lock 115 → F17 240); 없으면 기본
         // 안드로이드→Mac 키코드 표를 따른다.
         guard let keyCode = remoteKeyRemap[androidCode] ?? macKeyCode(android: androidCode) else {

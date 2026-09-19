@@ -23,6 +23,18 @@ func inputLanguageSource(_ language: UInt8, current: String?, sources: [InputLan
     return matches.first?.id
 }
 
+/// 입력 소스 언어 목록의 대표 서브태그("ko-KR" → "ko"). 판정만 하고 선택은 하지 않는다.
+func primaryLanguageTag(_ languages: [String]) -> String? {
+    guard let first = languages.first else { return nil }
+    return first.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init)
+}
+
+/// 한/영 토글의 목표 언어: 현재 한국어면 영어(1), 그 외(영어·미확인 포함)면
+/// 한국어(2). 이 호스트의 기본 사용자는 한국어 입력 소스를 갖고 있다는 전제다.
+func nextInputLanguage(currentTag: String?) -> UInt8 {
+    currentTag == "ko" ? 1 : 2
+}
+
 /// Protected by CaptureSession.inputLock. A generation invalidates work already
 /// dispatched to the main queue when focus is released or the session stops.
 struct InputLanguageTransition {

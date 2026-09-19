@@ -8,12 +8,21 @@ let udpMediaDatagramBytes = 1_400
 let udpMediaFrameHeaderBytes = 33
 let udpMediaFragmentPayloadBytes = udpMediaDatagramBytes - udpMediaFrameHeaderBytes
 
-/// Tailscale's 100.64.0.0/10 tunnel has a 1,280-byte MTU even when the peers
-/// connect directly. Keep encrypted IP packets at 1,252 bytes on that route;
-/// packet size does not cap the stream bitrate or change its pacing profile.
-/// The address is in host byte order. Other routes retain the LAN envelope.
+/// Local LAN (RFC 1918, loopback, link-local) routes use the full 1,400-byte datagram
+/// envelope fitting within standard 1,500-byte Ethernet MTUs.
+/// WAN and tunnel routes (such as Tailscale 100.64.0.0/10, cellular LTE/5G, and public Internet)
+/// clamp encrypted IP packets to 1,200 bytes to avoid path MTU packet fragmentation
+/// across cellular GTP tunnels, PPPoE, and VPN encapsulations.
+/// The address is in host byte order.
 func udpMediaPlaintextLimit(ipv4HostOrder address: UInt32) -> Int {
-    address & 0xffc0_0000 == 0x6440_0000 ? 1_200 : udpMediaDatagramBytes
+    let isLoopback = (address & 0xff00_0000) == 0x7f00_0000 // 127.0.0.0/8
+    let isPrivate10 = (address & 0xff00_0000) == 0x0a00_0000 // 10.0.0.0/8
+    let isPrivate172 = (address & 0xfff0_0000) == 0xac10_0000 // 172.16.0.0/12
+    let isPrivate192 = (address & 0xffff_0000) == 0xc0a8_0000 // 192.168.0.0/16
+    let isLinkLocal = (address & 0xffff_0000) == 0xa9fe_0000 // 169.254.0.0/16
+
+    let isLocalLan = isLoopback || isPrivate10 || isPrivate172 || isPrivate192 || isLinkLocal
+    return isLocalLan ? udpMediaDatagramBytes : 1_200
 }
 
 /// The wall-clock budget for one frame at the requested stream rate. Round up

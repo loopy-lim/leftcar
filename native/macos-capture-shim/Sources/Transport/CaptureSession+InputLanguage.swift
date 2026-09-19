@@ -26,7 +26,32 @@ func selectNativeInputLanguage(_ language: UInt8) -> Bool {
     return TISSelectInputSource(list[index]) == noErr
 }
 
+/// 현재(활성) 입력 소스의 언어 태그 목록. 메인 스레드 전용 — TIS가 그렇다.
+private func currentInputSourceLanguages() -> [String] {
+    dispatchPrecondition(condition: .onQueue(.main))
+    let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+    return inputSourceProperty(current, kTISPropertyInputSourceLanguages) ?? []
+}
+
 extension CaptureSession {
+    /// 한/영 하드웨어 키(204)의 폴백: kind-7 언어 동기화 없이 그대로 중계된
+    /// LANGUAGE_SWITCH를 활성 입력 소스 전환으로 바꾼다. 기본표의 104 매핑
+    /// (kVK_JIS_Kana)은 한국어 소스에서 아무 일도 하지 않으므로 그 자리를
+    /// 대신한다. kind-7 동기화가 살아 있는 세션에서는 뷰어가 이 키를 소비해
+    /// 여기까지 오지 않는다.
+    func toggleInputLanguage() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sourceAuthorization?.begin() ?? true else { return }
+            defer { self.sourceAuthorization?.end() }
+            guard self.inputEnabled else { return }
+            let tag = primaryLanguageTag(currentInputSourceLanguages())
+            let applied = self.inputLanguageSelector(nextInputLanguage(currentTag: tag))
+            leftcarInputLogger.info(
+                "language toggle from=\(tag ?? "none", privacy: .public) applied=\(applied)"
+            )
+        }
+    }
+
     func handleInputLanguage(_ message: Data, sequence: UInt32, fd: Int32, destination: sockaddr_in?) {
         guard message.count == 11, message[10] == 1 || message[10] == 2 else { return }
         inputLock.lock()

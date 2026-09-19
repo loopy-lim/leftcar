@@ -172,6 +172,15 @@ func nativePixelSize(
         currentMode: currentMode,
         candidates: matchingModes + [appKitMode].compactMap { $0 }
     )
+    // 방금 만든 가상 디스플레이는 모드 조회가 비어 있을 수 있다(등록 직후
+    // 경쟁). 브리지가 아는 backing 크기로 폴백한다 — 없으면 그대로 둔다.
+    if selected.width > 0 && selected.height > 0 {
+        return (selected.width, selected.height)
+    }
+    if let sourceId = stableDisplaySourceID(displayID),
+       let override = virtualDisplayOverride(forSourceId: sourceId) {
+        return (Int(override.backingWidth), Int(override.backingHeight))
+    }
     return (selected.width, selected.height)
 }
 
@@ -205,12 +214,19 @@ func coreGraphicsCatalogJSON() -> String? {
     guard !sortedIDs.isEmpty else {
         return nil
     }
+    // 살아 있는 Leftcar 가상 디스플레이는 이름 오버라이드로 식별한다.
+    // 물리 디스플레이와 구분되지 않으면 뷰어가 "Display N"으로만 보게 된다.
+    let overrides = currentVirtualDisplayOverrides()
     let entries: [[String: Any]] = sortedIDs.enumerated().map { index, displayID in
         let pixelSize = nativePixelSize(for: displayID)
+        let sourceId = stableDisplaySourceID(displayID)
+        let name = sourceId.flatMap { sourceId in
+            overrides.first { $0.sourceId == sourceId }?.name
+        } ?? "Display \(index)"
         return [
             "index": index,
-            "sourceId": stableDisplaySourceID(displayID) as Any? ?? NSNull(),
-            "name": "Display \(index)",
+            "sourceId": sourceId as Any? ?? NSNull(),
+            "name": name,
             "width": pixelSize.width,
             "height": pixelSize.height,
         ]

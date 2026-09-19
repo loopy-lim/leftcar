@@ -27,6 +27,7 @@ extension CaptureSession {
         }
         stateLock.unlock()
         armFirstFrameWatchdog()
+        armCaptureHealthCheck()
         // Start the viewer watchdog even before the first LCF1 packet. A
         // viewer can disappear immediately after the UDP reachability proof;
         // waiting for feedback to arm this timer would leak that session.
@@ -80,6 +81,10 @@ extension CaptureSession {
             inputBounds = filter.contentRect
         }
         inputLock.unlock()
+        stateLock.lock()
+        restartFilter = filter
+        restartDisplayID = nil
+        stateLock.unlock()
         guard beginCapture() else {
             setLastError("media socket closed before capture start")
             return false
@@ -201,6 +206,10 @@ extension CaptureSession {
         inputLock.lock()
         inputBounds = CGDisplayBounds(displayID)
         inputLock.unlock()
+        stateLock.lock()
+        restartDisplayID = displayID
+        restartFilter = nil
+        stateLock.unlock()
         guard beginCapture() else {
             setLastError("media socket closed before capture start")
             return false
@@ -285,6 +294,101 @@ extension CaptureSession {
         }
         captureDidStart()
         return true
+    }
+
+    // MARK: - Capture-stall watchdog
+
+    /// Arm the capture-stall check. Called from `captureDidStart` so every
+    /// start — including a watchdog-driven restart — re-enters monitoring.
+     func armCaptureHealthCheck() {
+        stateLock.lock()
+        guard running, !stopRequested, !captureHealthCheckScheduled else {
+            stateLock.unlock()
+            return
+        }
+        captureHealthCheckScheduled = true
+        stateLock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.captureHealthCheckTick()
+        }
+    }
+
+     private func captureHealthCheckTick() {
+        stateLock.lock()
+        captureHealthCheckScheduled = false
+        let runningNow = running
+        let stopping = stopRequested
+        let last = lastCaptureCallbackNs ?? 0
+        let restarts = captureWatchdogRestarts
+        stateLock.unlock()
+        let action = captureStallAction(
+            lastCallbackNs: last,
+            nowNs: DispatchTime.now().uptimeNanoseconds,
+            running: runningNow,
+            stopRequested: stopping,
+            restarts: restarts,
+            maxRestarts: captureStallMaxRestarts,
+            stallThresholdNs: captureStallThresholdNs
+        )
+        switch action {
+        case .idle:
+            // Stopping or never started: the stop path owns teardown.
+            return
+        case .monitor:
+            break
+        case .restart:
+            stateLock.lock()
+            captureWatchdogRestarts &+= 1
+            lastCaptureCallbackNs = DispatchTime.now().uptimeNanoseconds
+            stateLock.unlock()
+            restartCaptureStream()
+        case .exhausted:
+            let reason = "capture stalled; \(captureStallMaxRestarts) restart attempts exhausted"
+            NSLog("Leftcar %@", reason)
+            markStopped(reason)
+            return
+        }
+        armCaptureHealthCheck()
+    }
+
+    /// Stop the live capture stream and rebuild it from the parameters the
+    /// start path retained. VideoToolbox, the network queue, and the control
+    /// plane are untouched — only the frame source bounces, so the viewer
+    /// sees at most a momentary pause instead of a silent permanent freeze.
+     func restartCaptureStream() {
+        stateLock.lock()
+        let filter = restartFilter
+        let displayID = restartDisplayID
+        let oldStream = stream
+        let oldCG = cgStream
+        let api = cgStreamAPI
+        stream = nil
+        streamHandler = nil
+        cgStream = nil
+        cgStreamAPI = nil
+        stateLock.unlock()
+        NSLog("Leftcar capture watchdog: no capture callbacks for %.1fs; restarting capture stream", Double(captureStallThresholdNs) / 1_000_000_000)
+        // 재시작 후 첫 프레임을 IDR로 싣는다 — 공백 동안 뷰어가 참조 프레임을
+        // 잃었을 수 있고, 뷰어가 손실을 알아채 회복을 요청하기 전에 디코드
+        // 연속성을 회복하는 쪽이 싸다. 재시작이 실패하면 세션이 곧 종료되므로
+        // 남는 플래그는 무해하다.
+        stateLock.lock()
+        forceKeyframe = true
+        stateLock.unlock()
+        if let oldStream {
+            oldStream.stopCapture(completionHandler: nil)
+        }
+        if let oldCG, let api {
+            _ = api.stop(oldCG)
+        }
+        if let filter {
+            _ = setupScreenCaptureKit(filter: filter)
+        } else if let displayID {
+            _ = setupCGDisplayStream(displayID: displayID)
+        } else {
+            NSLog("Leftcar capture watchdog: no retained capture parameters; cannot restart")
+            markStopped("capture stalled; no restart parameters retained")
+        }
     }
 }
 

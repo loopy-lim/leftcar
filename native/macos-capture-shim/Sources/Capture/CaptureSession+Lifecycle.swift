@@ -12,7 +12,7 @@ import OSLog
 
 func viewerConnectionAlive(feedback: UInt64, heartbeat: UInt64, now: UInt64) -> Bool {
     let latest = max(feedback, heartbeat)
-    return latest > 0 && now >= latest && now - latest <= 5_000_000_000
+    return latest > 0 && now >= latest && now - latest <= 15_000_000_000
 }
 
 extension CaptureSession {

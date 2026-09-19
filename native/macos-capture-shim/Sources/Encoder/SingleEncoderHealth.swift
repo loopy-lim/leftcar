@@ -10,7 +10,7 @@ struct SingleEncoderHealthState {
     static let stallBudgetNs: UInt64 = 250_000_000
     static let restartCooldownNs: UInt64 = 1_000_000_000
     static let restartWindowNs: UInt64 = 10_000_000_000
-    static let maximumRestarts = 2
+    static let maximumRestarts = 4
 
     private var lastObservedCaptureCallbackNs: UInt64?
     private var latestValidOutputNs: UInt64?

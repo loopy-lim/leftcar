@@ -101,6 +101,10 @@ final class CaptureSession {
      var pressedKeys = Set<CGKeyCode>()
     /// 미매핑 안드로이드 키코드 진단 로그 1회성 중복 방지(키코드당 1줄).
      var loggedUnmappedKeycodes = Set<UInt16>()
+    /// remoteKeyRemap 표의 단기 캐시(표, 읽은 시각 uptimeNs). 키 입력마다
+    /// NSGlobalDomain을 다시 파싱하지 않게 한다. injectKey의 직렬 큐에서만
+    /// 접근하므로 잠금이 없다.
+     var cachedRemoteKeyRemap: ([UInt16: CGKeyCode], UInt64)?
      var pressedButtons = Set<CGMouseButton>()
      var lastPointerPosition = CGPoint.zero
      var horizontalScrollRemainder: Int32 = 0
