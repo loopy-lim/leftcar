@@ -38,3 +38,6 @@ apps/viewer-expo/modules/rustra-bridge/android/src/main/cpp/libs/
 
 # loop-me local agent state
 .loop/
+
+# python bytecode 캐시 — 측정 스크립트 실행 부산물
+__pycache__/

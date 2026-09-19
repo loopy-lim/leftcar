@@ -65,7 +65,7 @@ bun run release:manifest -- verify /absolute/path/build-manifest.json
 
 ```bash
 bun run rustra:generate                                   # packages/control-generated (+ 스키마)
-cd apps/viewer-expo && bunx --package @rustra/cli@0.9.0 rustra codegen --config rustra.json
+cd apps/viewer-expo && bunx --package @rustra/cli@0.10.0 rustra codegen --config rustra.json
 ```
 
 - CLI 버전은 Rust crate 핀(docs/10-references.md)과 같은 라인으로 맞춘다.

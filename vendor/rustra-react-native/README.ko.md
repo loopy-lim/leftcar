@@ -112,7 +112,9 @@ dev에서는 앱 재빌드·리마운트 없이 Rust 코어 dylib를 스왑할 �
   `RUSTRA_HOT_CORE_DIR`(RN)은 디렉터이고, Tauri 쪽 `RUSTRA_HOT_CORE`는 파일 경로로
   서로 다른 변수입니다.
 - Android: 폴링 디렉터는 `<filesDir>/rustra/hot`이며 생성된 JNI glue가 같은 폴링을
-  켭니다.
+  켭니다 — **debuggable 빌드 한정**. 템플릿은 `ApplicationInfo.FLAG_DEBUGGABLE`
+  검사 안에서만 `nativeConfigureHotCore`를 호출하므로 릴리스 빌드는 감시 스레드를
+  아예 띄우지 않습니다(appdata `dlopen` 표면도 생기지 않음 — 게이트는 설계상 조용합니다).
 - 전달: dylib를 제자리 덮어쓰지 마세요. 임시 파일로 push/copy한 뒤 rename으로
   제자리에 넣어야 합니다(CLI 발행도 그렇게 합니다). 프로세스가 매핑한 dylib를 같은
   경로로 덮어쓰면 프로세스가 죽습니다 — iOS/macOS는 SIGKILL(코드 서명 변조),
@@ -122,6 +124,12 @@ dev에서는 앱 재빌드·리마운트 없이 Rust 코어 dylib를 스왑할 �
 재등록됩니다. 구 코어는 의도적으로 unload하지 않습니다. dev에서
 `getRustraNative().hotCoreStatus()`가 마지막 스왑의 구/신 계약 해시(또는 마지막 오류)를
 돌려주고 기본 정적 빌드에서는 `null`입니다.
+
+스왑 폴링에는 재시도 상한이 있습니다 — 같은 아티팩트 바이트(sha256)가 5회 연속 실패하면
+그 바이트는 포이즌되어 새 바이트가 발행될 때까지 건너뜁니다(새 바이트는 항상 새 재시도
+창을 얻고, Rust 측 감시자 `spawn_dylib_watch`도 같은 바이트별 상한을 적용합니다).
+마지막 실패는 `hotCoreStatus().error`로 계속 관측됩니다. 채널 핸들은 그 핸들을 발급한
+코어로 라우팅되므로, 스왑 이후 채널 호출이 잘못된 코어에 닿을 수 없습니다.
 
 ## 저수준 API
 

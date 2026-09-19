@@ -44,7 +44,7 @@ if (import.meta.main) {
     const readRequirement = path => {
       const p = Bun.spawnSync(['/usr/bin/codesign', '-d', '-r-', path]);
       if (p.exitCode) throw new Error('Cannot read signing requirement');
-      const line = p.stderr.toString().match(/^designated => .+$/m)?.[0];
+      const line = `${p.stdout.toString()}\n${p.stderr.toString()}`.match(/^designated => .+$/m)?.[0];
       if (!line) throw new Error('Missing designated signing requirement');
       return line;
     };

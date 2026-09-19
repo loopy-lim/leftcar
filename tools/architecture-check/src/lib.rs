@@ -134,6 +134,8 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("usb-mux", &[]),
         // 세션 암호 프리미티브 — fec-core와 같은 무의존 하위 계층.
         ("secure-channel", &[]),
+        // 안드로이드 키코드 기본표(단일 소스) — 데이터 전용 무의존 하위 계층.
+        ("keymap", &[]),
         ("media-model", &["domain"]),
         ("control-contract", &["domain", "media-model"]),
         ("session", &["domain"]),
@@ -159,6 +161,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "control-contract",
                 "domain",
                 "fec-core",
+                "keymap",
                 "secure-channel",
                 "session",
                 "usb-mux",

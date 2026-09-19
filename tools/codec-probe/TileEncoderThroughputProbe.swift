@@ -10,11 +10,19 @@ private final class ProbeCounters: @unchecked Sendable {
     private var dropped = [TileSide: Int]()
     private var failed = [TileSide: Int]()
     private var callbackLatencyUs = [TileSide: [UInt64]]()
+    private var validCallbackLatencyUs = [TileSide: [UInt64]]()
+    private var submitCallUs = [TileSide: [UInt64]]()
     private var validCallbackNs = [TileSide: [UInt64]]()
 
     func recordSubmission(side: TileSide) {
         lock.lock()
         accepted[side, default: 0] += 1
+        lock.unlock()
+    }
+
+    func recordSubmitCall(side: TileSide, durationUs: UInt64) {
+        lock.lock()
+        submitCallUs[side, default: []].append(durationUs)
         lock.unlock()
     }
 
@@ -29,6 +37,7 @@ private final class ProbeCounters: @unchecked Sendable {
         switch result {
         case .success:
             valid[side, default: 0] += 1
+            validCallbackLatencyUs[side, default: []].append((nowNs - submittedNs) / 1_000)
             validCallbackNs[side, default: []].append(nowNs)
         case .failure(.dropped):
             dropped[side, default: 0] += 1
@@ -47,6 +56,12 @@ private final class ProbeCounters: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let samples = callbackLatencyUs[side, default: []].sorted()
+        let validSamples = validCallbackLatencyUs[side, default: []].sorted()
+        let submitSamples = submitCallUs[side, default: []].sorted()
+        func p95(_ values: [UInt64]) -> Any {
+            guard !values.isEmpty else { return NSNull() }
+            return values[min(values.count - 1, Int(ceil(Double(values.count) * 0.95)) - 1)]
+        }
         func percentileIndex(_ percentile: Double) -> Int {
             samples.isEmpty
                 ? 0
@@ -63,6 +78,7 @@ private final class ProbeCounters: @unchecked Sendable {
         let callbackP95Us: UInt64 = samples.isEmpty ? 0 : samples[percentileIndex(0.95)]
         let callbackP99Us: UInt64 = samples.isEmpty ? 0 : samples[percentileIndex(0.99)]
         let callbackMaxUs: UInt64 = samples.last ?? 0
+        let submitCallMaxUs: UInt64 = submitSamples.last ?? 0
         return [
             "accepted": accepted[side, default: 0],
             "valid": validCount,
@@ -75,6 +91,11 @@ private final class ProbeCounters: @unchecked Sendable {
             "callbackP95Us": callbackP95Us,
             "callbackP99Us": callbackP99Us,
             "callbackMaxUs": callbackMaxUs,
+            "callbackLatencyIncludesDroppedFrames": true,
+            "validCallbackP95Us": p95(validSamples),
+            "validCallbackLatencySamples": validSamples.count,
+            "submitCallP95Us": p95(submitSamples),
+            "submitCallMaxUs": submitCallMaxUs,
         ]
     }
 }
@@ -103,12 +124,12 @@ private enum ProbePattern: String {
     case noise
 }
 
-private func makeFrame(seed: UInt8, pattern: ProbePattern) -> CVPixelBuffer {
+private func makeFrame(seed: UInt8, pattern: ProbePattern, width: Int, height: Int) -> CVPixelBuffer {
     let attributes: [String: Any] = [
         kCVPixelBufferPixelFormatTypeKey as String:
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-        kCVPixelBufferWidthKey as String: 1_920,
-        kCVPixelBufferHeightKey as String: 2_160,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
         kCVPixelBufferMetalCompatibilityKey as String: true,
         kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
     ]
@@ -116,8 +137,8 @@ private func makeFrame(seed: UInt8, pattern: ProbePattern) -> CVPixelBuffer {
     precondition(
         CVPixelBufferCreate(
             kCFAllocatorDefault,
-            1_920,
-            2_160,
+            width,
+            height,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             attributes as CFDictionary,
             &pixelBuffer
@@ -138,9 +159,9 @@ private func makeFrame(seed: UInt8, pattern: ProbePattern) -> CVPixelBuffer {
 
     let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!
     let lumaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
-    for row in 0..<2_160 {
+    for row in 0..<height {
         let bytes = luma.advanced(by: row * lumaStride).assumingMemoryBound(to: UInt8.self)
-        for column in 0..<1_920 {
+        for column in 0..<width {
             switch pattern {
             case .noise:
                 bytes[column] = nextByte(in: 16...235)
@@ -155,9 +176,9 @@ private func makeFrame(seed: UInt8, pattern: ProbePattern) -> CVPixelBuffer {
 
     let chroma = CVPixelBufferGetBaseAddressOfPlane(buffer, 1)!
     let chromaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
-    for row in 0..<1_080 {
+    for row in 0..<(height / 2) {
         let bytes = chroma.advanced(by: row * chromaStride).assumingMemoryBound(to: UInt8.self)
-        for column in 0..<1_920 {
+        for column in 0..<width {
             switch pattern {
             case .noise:
                 bytes[column] = nextByte(in: 16...240)
@@ -191,7 +212,7 @@ private struct TileEncoderThroughputProbe {
         let validModes = ["single", "dual", "singleAve", "mixed", "dualAve"]
         guard validModes.contains(mode) else {
             fputs(
-                "usage: TileEncoderThroughputProbe <single|dual|singleAve|mixed|dualAve> [seconds] [moving|noise]\n",
+                "usage: TileEncoderThroughputProbe <single|dual|singleAve|mixed|dualAve> [seconds] [moving|noise] [in-flight: 1...8] [4k-tile|1440p]\n",
                 stderr
             )
             exit(2)
@@ -202,11 +223,25 @@ private struct TileEncoderThroughputProbe {
         let pattern = CommandLine.arguments.count > 3
             ? ProbePattern(rawValue: CommandLine.arguments[3]) ?? .moving
             : .moving
+        let maximumInFlight = CommandLine.arguments.count > 4
+            ? Int(CommandLine.arguments[4]) ?? 0
+            : 5
+        guard (1...8).contains(maximumInFlight) else {
+            fputs("in-flight must be an integer from 1 through 8\n", stderr)
+            exit(2)
+        }
         let sides: [TileSide] = mode == "dual" || mode == "mixed" || mode == "dualAve"
             ? [.left, .right]
             : [.left]
+        let geometry = CommandLine.arguments.count > 5 ? CommandLine.arguments[5] : "4k-tile"
+        guard geometry == "4k-tile" || (geometry == "1440p" && sides.count == 1) else {
+            fputs("geometry must be 4k-tile, or 1440p with a single encoder\n", stderr)
+            exit(2)
+        }
+        let width = geometry == "1440p" ? 2560 : 1920
+        let height = geometry == "1440p" ? 1440 : 2160
         let frames = (0..<8).map {
-            makeFrame(seed: UInt8($0 * 29), pattern: pattern)
+            makeFrame(seed: UInt8($0 * 29), pattern: pattern, width: width, height: height)
         }
         let encoders = try Dictionary(
             uniqueKeysWithValues: sides.map { side in
@@ -218,6 +253,8 @@ private struct TileEncoderThroughputProbe {
                     side,
                     try VideoToolboxTileEncoder(
                         side: side,
+                        width: Int32(width),
+                        height: Int32(height),
                         bitrate: 30_000_000,
                         backend: backend
                     )
@@ -225,7 +262,7 @@ private struct TileEncoderThroughputProbe {
             }
         )
         let counters = ProbeCounters()
-        let slots = DispatchSemaphore(value: 5)
+        let slots = DispatchSemaphore(value: maximumInFlight)
         let callbacks = DispatchGroup()
         var admissionDrops = 0
         let framePeriodNs: UInt64 = 1_000_000_000 / 60
@@ -260,6 +297,10 @@ private struct TileEncoderThroughputProbe {
                     callbacks.leave()
                     pair.complete()
                 }
+                counters.recordSubmitCall(
+                    side: side,
+                    durationUs: (DispatchTime.now().uptimeNanoseconds - submittedNs) / 1_000
+                )
             }
         }
 
@@ -271,6 +312,12 @@ private struct TileEncoderThroughputProbe {
         var report: [String: Any] = [
             "mode": mode,
             "pattern": pattern.rawValue,
+            "maximumInFlight": maximumInFlight,
+            "geometry": geometry,
+            "tileWidth": width,
+            "tileHeight": height,
+            "bitratePerTile": 30_000_000,
+            "measurementBoundary": "Synthetic preallocated NV12 frames to encoder callback; excludes capture, network, decoder and display",
             "targetFps": 60,
             "targetFrames": targetFrames,
             "elapsedSeconds": elapsedSeconds,

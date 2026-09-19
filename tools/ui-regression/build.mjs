@@ -1,10 +1,25 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 const outdir = process.env.UI_TEST_DIR ?? "/tmp/leftcar-task4-ui";
 await mkdir(outdir, { recursive: true });
+const reactPath = resolve(import.meta.dir, "../../node_modules/.bun/react@19.2.3/node_modules/react");
+const reactDomPath = resolve(import.meta.dir, "../../node_modules/.bun/react-dom@19.2.3+83d5fd7b249dbeef/node_modules/react-dom");
+const reactPlugin = {
+  name: "react-singleton",
+  setup(build) {
+    build.onResolve({ filter: /^react$/ }, () => ({ path: `${reactPath}/index.js` }));
+    build.onResolve({ filter: /^react\/jsx-runtime$/ }, () => ({ path: `${reactPath}/jsx-runtime.js` }));
+    build.onResolve({ filter: /^react\/jsx-dev-runtime$/ }, () => ({ path: `${reactPath}/jsx-dev-runtime.js` }));
+    build.onResolve({ filter: /^react-dom$/ }, () => ({ path: `${reactDomPath}/index.js` }));
+    build.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: `${reactDomPath}/client.js` }));
+  },
+};
+
 const result = await Bun.build({
   entrypoints: [`${import.meta.dir}/entry.jsx`],
   outdir,
   target: "browser",
+  plugins: [reactPlugin],
 });
 if (!result.success) throw new Error(result.logs.join("\n"));
 await writeFile(
@@ -41,11 +56,11 @@ await writeFile(
   '<!doctype html><html><head><meta charset="utf-8"><title>Isolated catalog lifecycle</title></head><body><div id="root"></div><script src="catalog.js"></script></body></html>',
 );
 
-const grants = await Bun.build({ entrypoints: [`${import.meta.dir}/source-grants.jsx`], outdir, target: "browser" });
+const grants = await Bun.build({ entrypoints: [`${import.meta.dir}/source-grants.jsx`], outdir, target: "browser", plugins: [reactPlugin] });
 if (!grants.success) throw new Error(grants.logs.join("\n"));
 await writeFile(`${outdir}/source-grants.html`, '<!doctype html><html><head><meta charset="utf-8"><title>Isolated Host source approval</title></head><body><div id="root"></div><script src="source-grants.js"></script></body></html>');
 
-const pairingGrants = await Bun.build({entrypoints:[`${import.meta.dir}/pairing-grants.jsx`],outdir,target:"browser"});
+const pairingGrants = await Bun.build({entrypoints:[`${import.meta.dir}/pairing-grants.jsx`],outdir,target:"browser", plugins: [reactPlugin]});
 if(!pairingGrants.success)throw new Error(pairingGrants.logs.join("\n"));
 await writeFile(`${outdir}/pairing-grants.html`,'<!doctype html><html><head><meta charset="utf-8"><title>Isolated actual pairing parent</title></head><body><div id="root"></div><script src="pairing-grants.js"></script></body></html>');
 const camera=await Bun.build({entrypoints:[`${import.meta.dir}/camera.jsx`],outdir,target:'browser',format:'iife',plugins:[{name:'camera-os-only',setup(build){
