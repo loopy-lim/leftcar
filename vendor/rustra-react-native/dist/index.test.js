@@ -57,7 +57,7 @@ test('React Native bootstrap installs and configures once across concurrent read
             await Promise.resolve();
         },
         getNative: () => native,
-        rkyvV2Codecs: new Map(),
+        frameCodecs: new Map(),
     });
     const [left, right] = await Promise.all([bootstrap.ready(), bootstrap.ready()]);
     assert.equal(installs, 1);
@@ -69,7 +69,7 @@ test('React Native bootstrap adds native-to-Rust remediation to install failures
             throw new Error('ERR_NO_BRIDGE');
         },
         getNative: () => ({}),
-        rkyvV2Codecs: new Map(),
+        frameCodecs: new Map(),
     });
     await assert.rejects(bootstrap.ready(), (error) => error instanceof Error &&
         /ERR_NO_BRIDGE/.test(error.message) &&
@@ -382,7 +382,7 @@ test('createFastEngine forwards maxPayloadBytes to the core pre-check', async ()
     // maxPayloadBytes: 8 → 인코딩 후 8B 초과면 payload.too_large 로 네이티브 호출 없이 reject.
     const native = {
         invoke: () => new ArrayBuffer(0),
-        invokeRkyvV2: () => {
+        invokeFrame: () => {
             throw new Error('native must not be called for an over-limit payload');
         },
     };
@@ -392,7 +392,7 @@ test('createFastEngine forwards maxPayloadBytes to the core pre-check', async ()
         decode: () => ({ ok: true, result: {} }),
     };
     const engine = createFastEngine(native, {
-        rkyvV2Codecs: new Map([['big', codec]]),
+        frameCodecs: new Map([['big', codec]]),
         maxPayloadBytes: 8,
     });
     await assert.rejects(engine.invoke('big', {}), (err) => err instanceof RustraCommandError && err.code === 'payload.too_large');
@@ -401,11 +401,11 @@ test('createFastEngine forwards schemaVersion/onSchemaStale (stale warning path)
     const stale = [];
     const native = {
         invoke: () => new ArrayBuffer(0),
-        invokeRkyvV2: () => new ArrayBuffer(8),
+        invokeFrame: () => new ArrayBuffer(8),
         getSchema: () => encoder.encode(JSON.stringify({ schemaVersion: 1, commands: [] })).buffer,
     };
     const engine = createFastEngine(native, {
-        rkyvV2Codecs: new Map(),
+        frameCodecs: new Map(),
         schemaVersion: 4,
         onSchemaStale: (info) => stale.push(info),
     });
@@ -413,15 +413,39 @@ test('createFastEngine forwards schemaVersion/onSchemaStale (stale warning path)
     assert.ok(engine, 'engine is created');
     assert.deepEqual(stale, [{ nativeVersion: 1, jsVersion: 4 }]);
 });
+test('createFastEngine forwards contractVerification (warn accepts hash mismatch)', () => {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args);
+    try {
+        const native = {
+            invoke: () => new ArrayBuffer(0),
+            invokeFrame: () => new ArrayBuffer(0),
+            getContractHash: () => encoder.encode('native-hash-AAAA').buffer,
+        };
+        // 'warn' — 불일치해도 엔진은 생성된다(degraded). 포워딩이 끊기면 strict
+        // 기본으로 되돌아가 throw 하므로 생성 성공 자체가 전달 증거다.
+        const engine = createFastEngine(native, {
+            frameCodecs: new Map(),
+            contractHash: 'different-hash-BBBB',
+            contractVerification: 'warn',
+        });
+        assert.ok(engine, 'engine is created in warn mode');
+        assert.ok(warnings.length > 0, 'mismatch surfaces as console.warn');
+    }
+    finally {
+        console.warn = originalWarn;
+    }
+});
 test('createFastEngine forwards onContractMismatch (degraded mode entry)', () => {
     const mismatches = [];
     const native = {
         invoke: () => new ArrayBuffer(0),
-        invokeRkyvV2: () => new ArrayBuffer(0),
+        invokeFrame: () => new ArrayBuffer(0),
         getContractHash: () => encoder.encode('native-hash-AAAA').buffer,
     };
     const engine = createFastEngine(native, {
-        rkyvV2Codecs: new Map(),
+        frameCodecs: new Map(),
         contractHash: 'different-hash-BBBB',
         onContractMismatch: (info) => mismatches.push(info),
     });
@@ -445,7 +469,7 @@ function makeAsyncNative() {
         invoke(_payload) {
             return new ArrayBuffer(0);
         },
-        invokeRkyvV2(_payload) {
+        invokeFrame(_payload) {
             return new ArrayBuffer(0);
         },
         invokeTypedAsync(_name, _args, onSuccess, onError) {
@@ -464,7 +488,7 @@ function makeAsyncNative() {
 }
 test('async engine without signal resolves via invokeTypedAsync (T1 baseline)', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const p = engine.invoke('heavy', { n: 1 });
     h.state.resolveNow(); // 네이티브 콜백 도착
     const out = await p;
@@ -474,25 +498,25 @@ test('async engine without signal resolves via invokeTypedAsync (T1 baseline)', 
 test('async engine exposes Promise-based invokeBatch with stable order', async () => {
     const native = {
         invoke: () => new ArrayBuffer(0),
-        invokeRkyvV2: () => new ArrayBuffer(0),
+        invokeFrame: () => new ArrayBuffer(0),
         invokeTypedAsync(name, _args, onSuccess) {
             onSuccess(name === 'first' ? 1 : 2);
             return 0;
         },
     };
-    const engine = createAsyncEngine(native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(native, { frameCodecs: new Map() });
     assert.deepEqual(await engine.invokeBatch([{ command: 'first' }, { command: 'second' }]), [1, 2]);
 });
 test('createAsyncEngine reports when it falls back to the synchronous engine', () => {
     const native = {
         invoke: () => new ArrayBuffer(0),
-        invokeRkyvV2: () => new ArrayBuffer(0),
+        invokeFrame: () => new ArrayBuffer(0),
     };
     const warnings = [];
     const originalWarn = console.warn;
     console.warn = (...args) => warnings.push(args);
     try {
-        createAsyncEngine(native, { rkyvV2Codecs: new Map() });
+        createAsyncEngine(native, { frameCodecs: new Map() });
     }
     finally {
         console.warn = originalWarn;
@@ -501,7 +525,7 @@ test('createAsyncEngine reports when it falls back to the synchronous engine', (
 });
 test('async engine without signal rejects via invokeTypedAsync error callback (T1 baseline)', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const p = engine.invoke('heavy', { n: 1 });
     h.state.rejectNow('math.divide_by_zero: nope');
     await assert.rejects(p, (err) => {
@@ -512,7 +536,7 @@ test('async engine without signal rejects via invokeTypedAsync error callback (T
 });
 test('pre-aborted signal rejects cancelled without calling invokeTypedAsync (T1)', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const ac = new AbortController();
     ac.abort();
     await assert.rejects(engine.invoke('heavy', { n: 1 }, { signal: ac.signal }), (err) => {
@@ -526,7 +550,7 @@ test('pre-aborted signal rejects cancelled without calling invokeTypedAsync (T1)
 });
 test('abort mid-flight rejects cancelled; late native resolve is ignored (T1)', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const ac = new AbortController();
     const p = engine.invoke('heavy', { n: 1 }, { signal: ac.signal });
     assert.equal(h.state.calls, 1, 'native must have been dispatched before abort');
@@ -554,7 +578,7 @@ function makePropagatingAsyncNative() {
         invoke(_payload) {
             return new ArrayBuffer(0);
         },
-        invokeRkyvV2(_payload) {
+        invokeFrame(_payload) {
             return new ArrayBuffer(0);
         },
         invokeTypedAsync(_name, _args, onSuccess, onError) {
@@ -572,7 +596,7 @@ function makePropagatingAsyncNative() {
 }
 test('abort mid-flight propagates: invokeCancel(id) is called (follow-up 3)', async () => {
     const h = makePropagatingAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const ac = new AbortController();
     const p = engine.invoke('heavy', { n: 1 }, { signal: ac.signal });
     assert.equal(h.state.lastId, 7, 'native issued an invocation id');
@@ -590,7 +614,7 @@ test('abort mid-flight propagates: invokeCancel(id) is called (follow-up 3)', as
 });
 test('abort mid-flight propagates and late native error is ignored (follow-up 3)', async () => {
     const h = makePropagatingAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const ac = new AbortController();
     const p = engine.invoke('heavy', { n: 1 }, { signal: ac.signal });
     ac.abort();
@@ -613,7 +637,7 @@ test('signal path without invokeCancel falls back to shallow cancel (follow-up 3
         },
     };
     delete native.invokeCancel; // 미노출 시뮬레이션
-    const engine = createAsyncEngine(native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(native, { frameCodecs: new Map() });
     const ac = new AbortController();
     const p = engine.invoke('heavy', { n: 1 }, { signal: ac.signal });
     ac.abort();
@@ -626,7 +650,7 @@ test('signal path without invokeCancel falls back to shallow cancel (follow-up 3
 });
 test('new native without abort resolves normally through the id path (follow-up 3)', async () => {
     const h = makePropagatingAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const p = engine.invoke('heavy', { n: 1 });
     h.state.resolveNow({ value: 42 });
     const out = await p;
@@ -635,7 +659,7 @@ test('new native without abort resolves normally through the id path (follow-up 
 });
 test('async engine applies timeoutMs and ignores a late native callback', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const promise = engine.invoke('slow', undefined, { timeoutMs: 10 });
     await assert.rejects(promise, (error) => error instanceof RustraCommandError && error.code === 'transport.timeout');
     h.state.resolveNow();
@@ -654,7 +678,7 @@ function makeByIdAsyncNative() {
         invoke(_payload) {
             return new ArrayBuffer(0);
         },
-        invokeRkyvV2(_payload) {
+        invokeFrame(_payload) {
             return new ArrayBuffer(0);
         },
         invokeTypedAsyncById(cmdId, _args, onSuccess, onError) {
@@ -675,7 +699,7 @@ function makeByIdAsyncNative() {
 test('async engine routes static commands through invokeTypedAsyncById (G2)', async () => {
     const h = makeByIdAsyncNative();
     const registry = new Map([['heavy', { commandId: 5 }]]);
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: registry });
+    const engine = createAsyncEngine(h.native, { frameCodecs: registry });
     const p = engine.invoke('heavy', { n: 1 });
     h.state.resolveNow();
     const out = await p;
@@ -687,7 +711,7 @@ test('async engine falls back to the name path for commands outside the registry
     // registry 밖 = 동적 명령 — C++ 코덱 테이블에 없으므로 byId 로 진입하면 안 된다.
     const h = makeByIdAsyncNative();
     const engine = createAsyncEngine(h.native, {
-        rkyvV2Codecs: new Map([['heavy', { commandId: 5 }]]),
+        frameCodecs: new Map([['heavy', { commandId: 5 }]]),
     });
     const p = engine.invoke('dynamicCmd', { n: 1 });
     h.state.resolveNow();
@@ -700,7 +724,7 @@ test('async engine without invokeTypedAsyncById keeps the name path (G2 compat)'
     // 구형 네이티브 — byId 미노출 시 기존 이름 진입 유지.
     const h = makeAsyncNative();
     const engine = createAsyncEngine(h.native, {
-        rkyvV2Codecs: new Map([['heavy', { commandId: 5 }]]),
+        frameCodecs: new Map([['heavy', { commandId: 5 }]]),
     });
     const p = engine.invoke('heavy', { n: 1 });
     h.state.resolveNow();
@@ -730,7 +754,7 @@ test('JSON adapter pre-abort rejects with CancelledError instance', async () => 
 });
 test('async engine pre-abort rejects with CancelledError instance (matches mid-flight)', async () => {
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     const ac = new AbortController();
     ac.abort();
     await assert.rejects(engine.invoke('heavy', { n: 1 }, { signal: ac.signal }), (err) => {
@@ -747,7 +771,7 @@ test('async engine pre-abort rejects with CancelledError instance (matches mid-f
 // → 'shallow' / invokeBatch ✅ per-entry Promise fallback → 'per-entry' /
 // 이벤트 ❌ JSON adapter → 'none' / 채널 ✅ JSI handle + close() → true /
 // timeoutMs ⚠️ 동기 native 호출은 호출 중 선점 불가 → false.
-// RN rkyv V2 매핑: 취소 ⚠️ 조건부 전파(invokeAsync/invokeCancel 확인 시 Rust
+// RN Frame 매핑: 취소 ⚠️ 조건부 전파(invokeAsync/invokeCancel 확인 시 Rust
 // 체크포인트까지) → 'cooperative' / 배치 ✅ 정적 명령 단일 횡단 →
 // 'single-crossing' / 이벤트 ✅ → 'push' / 채널 ✅ → true / timeoutMs ✅ → true.
 test('A02: createReactNativeEngine exposes supports matching the compatibility matrix', async () => {
@@ -764,7 +788,7 @@ test('A02: createAsyncEngine exposes cooperative cancellation supports', async (
     // 리뷰 정정 — async invokeBatch 는 항목별 Promise.all 폴백이므로 sync 엔진의
     // `single-crossing` 셀을 상속하지 않는다: batch 는 `per-entry` 재정의.
     const h = makeAsyncNative();
-    const engine = createAsyncEngine(h.native, { rkyvV2Codecs: new Map() });
+    const engine = createAsyncEngine(h.native, { frameCodecs: new Map() });
     assert.deepEqual(engine.supports, {
         cancellation: 'cooperative',
         batch: 'per-entry',
@@ -789,7 +813,7 @@ test('A05: createRustraBootstrap exposes the lifecycle state surface', async () 
                 await Promise.resolve();
             },
             getNative: () => native,
-            rkyvV2Codecs: new Map(),
+            frameCodecs: new Map(),
         });
         assert.equal(bootstrap.state, 'initializing');
         await bootstrap.ready();
@@ -808,7 +832,7 @@ test('A05: ready after dispose rejects loudly (react-native)', async () => {
         const bootstrap = createRustraBootstrap({
             install: async () => { },
             getNative: () => ({}),
-            rkyvV2Codecs: new Map(),
+            frameCodecs: new Map(),
         });
         bootstrap.dispose();
         await assert.rejects(bootstrap.ready(), (error) => error instanceof Error && /disposed/.test(error.message));
@@ -824,7 +848,7 @@ test('A05: dispose is idempotent — second dispose is a no-op (react-native)', 
         const bootstrap = createRustraBootstrap({
             install: async () => { },
             getNative: () => ({}),
-            rkyvV2Codecs: new Map(),
+            frameCodecs: new Map(),
         });
         bootstrap.dispose();
         bootstrap.dispose(); // no-op — must not throw
@@ -846,7 +870,7 @@ test('A05: concurrent ready calls share one initialization promise (react-native
                 await Promise.resolve();
             },
             getNative: () => native,
-            rkyvV2Codecs: new Map(),
+            frameCodecs: new Map(),
         });
         const [a, b] = await Promise.all([bootstrap.ready(), bootstrap.ready()]);
         assert.equal(a, b, 'concurrent ready must share the same engine instance');

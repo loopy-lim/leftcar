@@ -116,7 +116,10 @@ just an atomic table replacement — JS bindings stay untouched.
   contract: `RUSTRA_HOT_CORE_DIR` (RN) is a directory, while the Tauri-side
   `RUSTRA_HOT_CORE` is a file path — they are different variables.
 - Android: the polling directory is `<filesDir>/rustra/hot`; the generated JNI glue
-  enables the same polling there.
+  enables the same polling there — **debuggable builds only**. The template calls
+  `nativeConfigureHotCore` inside an `ApplicationInfo.FLAG_DEBUGGABLE` check, so a
+  release build never starts the watch thread (and never gains an appdata `dlopen`
+  surface — the gate is silent by design).
 - Delivery: never overwrite the dylib in place. Push or copy it as a temp file and
   rename it into place (the CLI publish already does this). Overwriting a dylib that a
   process has mapped kills the process — SIGKILL on iOS/macOS (code signature tamper),
@@ -126,6 +129,13 @@ Each swap drops in-process core state (channels, event context) and re-registers
 event sink on the new core; old cores are intentionally never unloaded. `getRustraNative().hotCoreStatus()`
 returns the last swap's old/new contract hashes (or the last error) in dev, and `null`
 in the default static build.
+
+Swap polling has a retry cap: artifact bytes (sha256) that fail 5 swaps in a row are
+poisoned and skipped until new bytes are published — new bytes always get a fresh
+retry window, and the Rust-side watcher (`spawn_dylib_watch`) enforces the same
+per-bytes limit. The last failure stays observable through `hotCoreStatus().error`.
+Channel handles are routed through the core that issued them, so a channel call can
+never land on the wrong core after a swap.
 
 ## Low-level API
 

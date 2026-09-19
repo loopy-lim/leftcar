@@ -1,6 +1,6 @@
 // rustra-codec.hpp — 순수 C++ postcard wire codec (JSI 무의존).
 //
-// Rust(rkyv V2 typed postcard handler) 와 바이트-동일한 postcard 인코딩/디코딩을
+// Rust(Frame typed postcard handler) 와 바이트-동일한 postcard 인코딩/디코딩을
 // 제공한다. codegen 이 생성하는 per-command codec(rustra-generated-codecs.cpp)이
 // 이 Reader/Writer 를 사용해 JSI Value <-> postcard 바이트 변환을 수행한다.
 //

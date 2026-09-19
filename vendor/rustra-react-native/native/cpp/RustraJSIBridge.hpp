@@ -21,7 +21,7 @@ extern "C" {
     const uint8_t* payload, size_t payload_len, size_t* out_len);
   uint8_t* rustra_ffi_invoke_postcard(
     const uint8_t* payload, size_t payload_len, size_t* out_len);
-  uint8_t* rustra_ffi_invoke_rkyv_v2(
+  uint8_t* rustra_ffi_invoke_frame(
     const uint8_t* payload, size_t payload_len, size_t* out_len);
   void rustra_ffi_free(uint8_t* ptr, size_t len);
   uint32_t rustra_ffi_invoke_buffer(
@@ -52,7 +52,7 @@ extern "C" {
   uint32_t rustra_ffi_channel_create(
     rustra_channel_callback_t callback, void* user_data);
   int32_t rustra_ffi_channel_send(uint32_t handle, const char* payload);
-  // 바이너리 채널 — 페이로드가 임의 바이트(rkyv V2 프레임 등). JSON 채널과
+  // 바이너리 채널 — 페이로드가 임의 바이트(Frame 프레임 등). JSON 채널과
   // 동일 핸들 공간/수명 계약, 한 핸들은 한 경로로만 동작한다.
   typedef void (*rustra_channel_bytes_callback_t)(
     void* user_data, uint32_t handle, const uint8_t* payload, size_t payload_len);
@@ -69,7 +69,7 @@ extern "C" {
   // invocation_id 로 진행 중 async 호출을 협력적 취소한다.
   bool rustra_ffi_invoke_cancel(uint64_t invocation_id);
 
-  // ── rkyv V2 async caller-buffer (F3) ─────────────────────
+  // ── Frame async caller-buffer (F3) ─────────────────────
   // Generic async entry. 성공 응답은 호스트 버퍼(buf/capacity)에 직접 기록되고
   // 콜백은 (user_data, resp, resp_len, owned) 로 1회 호출된다:
   //   owned=0 — resp 는 호스트가 넘긴 buf (호스트 해제 없음)
@@ -79,16 +79,16 @@ extern "C" {
   // 폴백한다 — 핸들러는 항상 정확히 1회 실행된다.
   typedef void (*rustra_async_into_callback_t)(
     void* user_data, uint8_t* resp, size_t resp_len, uint8_t owned);
-  void rustra_ffi_invoke_rkyv_v2_async_into(
+  void rustra_ffi_invoke_frame_async_into(
     const uint8_t* payload, size_t payload_len,
     uint8_t* buf, size_t capacity, void* user_data,
     rustra_async_into_callback_t on_complete, uint64_t* invocation_id);
 
-  // ── (Tier 1) rkyv V2 caller-buffer — malloc→memcpy→free 사이클 제거 ──
+  // ── (Tier 1) Frame caller-buffer — malloc→memcpy→free 사이클 제거 ──
   // buf=null → size-probe(0 반환, 필요 크기는 *out_len). buf≠null → 직접 기록,
   // 반환값은 기록한 바이트 수. capacity 부족 시 SIZE_MAX 반환(재probe 신호).
   // probe→write 2단계 사이 핸들러는 코어 probe 캐시로 1회만 실행된다.
-  size_t rustra_ffi_invoke_rkyv_v2_into(
+  size_t rustra_ffi_invoke_frame_into(
     const uint8_t* payload, size_t payload_len,
     uint8_t* buf, size_t capacity, size_t* out_len);
 
@@ -129,7 +129,7 @@ struct CoreTable {
   uint8_t* (*invoke)(const uint8_t* payload, size_t payload_len, size_t* out_len);
   uint8_t* (*invoke_json)(const uint8_t* payload, size_t payload_len, size_t* out_len);
   uint8_t* (*invoke_postcard)(const uint8_t* payload, size_t payload_len, size_t* out_len);
-  uint8_t* (*invoke_rkyv_v2)(const uint8_t* payload, size_t payload_len, size_t* out_len);
+  uint8_t* (*invoke_frame)(const uint8_t* payload, size_t payload_len, size_t* out_len);
   void (*free)(uint8_t* ptr, size_t len);
   uint32_t (*invoke_buffer)(uint16_t command_id, const uint8_t* payload,
                             size_t payload_len, uint8_t** out_ptr, size_t* out_len);
@@ -148,11 +148,11 @@ struct CoreTable {
   void (*mobile_init)(void);
   // ── Cancellation / async / raw / schema ──
   bool (*invoke_cancel)(uint64_t invocation_id);
-  void (*invoke_rkyv_v2_async_into)(const uint8_t* payload, size_t payload_len,
+  void (*invoke_frame_async_into)(const uint8_t* payload, size_t payload_len,
                                     uint8_t* buf, size_t capacity, void* user_data,
                                     rustra_async_into_callback_t on_complete,
                                     uint64_t* invocation_id);
-  size_t (*invoke_rkyv_v2_into)(const uint8_t* payload, size_t payload_len,
+  size_t (*invoke_frame_into)(const uint8_t* payload, size_t payload_len,
                                 uint8_t* buf, size_t capacity, size_t* out_len);
   uint32_t (*invoke_raw)(uint16_t command_id, const uint64_t* slots, size_t slot_count,
                          uint64_t* out_slot, uint8_t* err_buf, size_t err_buf_cap,
@@ -423,7 +423,7 @@ enum class TypedInvokeStatus {
   /// 성공 — value 에 디코딩된 출력이 담긴다.
   Ok,
   /// 정적 코덱 미보유 명령 — value 는 undefined. 호출자는 JS 엔진과 동일하게
-  /// invokeRkyvV2(Tier 2/3) 폴백을 선택할 수 있다.
+  /// invokeFrame(Tier 2/3) 폴백을 선택할 수 있다.
   NoStaticCodec,
   /// Rust 명령 에러 — value 는 { code: string, message: string } 객체,
   /// message 필드는 "code: message" 결합 텍스트.

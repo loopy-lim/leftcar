@@ -1,4 +1,4 @@
-import { CancelledError, configureLazy, createRkyvV2Engine, decodeUtf8, disposedBootstrapError, encodeUtf8, ensureConfigured, exactArrayBuffer, invokeWithTimeout, parseRustraErrorString, raceAbort, } from '@rustra/types';
+import { CancelledError, configureLazy, createFrameEngine, decodeUtf8, disposedBootstrapError, encodeUtf8, ensureConfigured, exactArrayBuffer, invokeWithTimeout, parseRustraErrorString, raceAbort, } from '@rustra/types';
 /**
  * RN JSON 어댑터의 기술적 지표(A02) — compatibility-matrix.md 의 RN
  * `createReactNativeEngine` 열 셀을 그대로 옮긴 것: in-flight 취소는 얕은
@@ -14,13 +14,13 @@ export const REACT_NATIVE_JSON_ENGINE_SUPPORTS = {
     timeoutPreemption: false,
 };
 /**
- * RN rkyv V2 엔진의 기술적 지표(A02) — compatibility-matrix.md 의 RN
- * `createRkyvV2Engine` 열 셀을 그대로 옮긴 것: 취소는 조건부 전파(JS 코덱 +
+ * RN Frame 엔진의 기술적 지표(A02) — compatibility-matrix.md 의 RN
+ * `createFrameEngine` 열 셀을 그대로 옮긴 것: 취소는 조건부 전파(JS 코덱 +
  * invokeAsync/invokeCancel 확인 시 Rust 체크포인트까지 — 정적 typed 경로는
  * 얕은 취소 폴백), 배치는 정적 명령 단일 횡단(signal 항목은 항목별 라우팅),
  * 이벤트 푸시(CallInvoker 자동 drain), 채널 JSI handle, timeoutMs 레이스 있음.
  */
-export const REACT_NATIVE_RKYV_V2_ENGINE_SUPPORTS = {
+export const REACT_NATIVE_FRAME_ENGINE_SUPPORTS = {
     cancellation: 'cooperative',
     batch: 'single-crossing',
     events: 'push',
@@ -102,13 +102,14 @@ export function getRustraNative() {
 export function createFastEngine(native, options) {
     const engineOptions = {
         contractHash: options.contractHash,
+        contractVerification: options.contractVerification,
         onContractMismatch: options.onContractMismatch,
         schemaVersion: options.schemaVersion,
         onSchemaStale: options.onSchemaStale,
         maxPayloadBytes: options.maxPayloadBytes,
     };
-    const engine = createRkyvV2Engine(native, options.rkyvV2Codecs, engineOptions);
-    engine.supports = { ...REACT_NATIVE_RKYV_V2_ENGINE_SUPPORTS };
+    const engine = createFrameEngine(native, options.frameCodecs, engineOptions);
+    engine.supports = { ...REACT_NATIVE_FRAME_ENGINE_SUPPORTS };
     return engine;
 }
 //# sourceMappingURL=react-native-core.js.map

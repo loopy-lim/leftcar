@@ -18,7 +18,7 @@ export declare function createChannel(callback: (payload: unknown) => void, nati
     close(): boolean;
 };
 /**
- * 바이너리 채널 생성 — 콜백은 rkyv V2 프레임 등 임의 바이트(ArrayBuffer)를
+ * 바이너리 채널 생성 — 콜백은 Frame 프레임 등 임의 바이트(ArrayBuffer)를
  * 받는다. JSON 경로(`createChannel`)와 동일한 핸들/close 계약, 한 핸들은 한
  * 경로로만 동작한다. 네이티브가 `createChannelBytes` 를 노출하지 않으면
  * `channel.unavailable` 로 loud-fail 한다.

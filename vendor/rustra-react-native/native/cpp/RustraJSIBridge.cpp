@@ -55,7 +55,7 @@ const CoreTable kStaticCoreTable = {
     rustra_ffi_invoke,
     rustra_ffi_invoke_json,
     rustra_ffi_invoke_postcard,
-    rustra_ffi_invoke_rkyv_v2,
+    rustra_ffi_invoke_frame,
     rustra_ffi_free,
     rustra_ffi_invoke_buffer,
     rustra_ffi_has_buffer,
@@ -69,8 +69,8 @@ const CoreTable kStaticCoreTable = {
     rustra_ffi_channel_drop,
     rustra_mobile_init,
     rustra_ffi_invoke_cancel,
-    rustra_ffi_invoke_rkyv_v2_async_into,
-    rustra_ffi_invoke_rkyv_v2_into,
+    rustra_ffi_invoke_frame_async_into,
+    rustra_ffi_invoke_frame_into,
     rustra_ffi_invoke_raw,
     rustra_ffi_has_raw,
     rustra_ffi_get_schema,
@@ -239,11 +239,11 @@ static std::pair<const uint8_t*, size_t> extractByteBuffer(
   return extractBytes(rt, value);
 }
 
-// ── rkyv V2 에러 와이어 파싱 ────────────────────────────────
+// ── Frame 에러 와이어 파싱 ────────────────────────────────
 // 에러 프레임: [ok:0][pad to @8][err_len u16 LE @8][postcard{code,message} @10]
 // postcard 파싱 실패 시 원시 바이트로 폴백한다(계약: 실패해도 throw 아님).
 // malformed(out_len < 10) 검사는 호출부에서 이미 완료했음을 전제로 한다.
-static std::string parseRkyvV2ErrorBody(const uint8_t* resp, size_t out_len) {
+static std::string parseFrameErrorBody(const uint8_t* resp, size_t out_len) {
   uint16_t errLen = (uint16_t)resp[8] | ((uint16_t)resp[9] << 8);
   size_t avail = out_len > 10 ? out_len - 10 : 0;
   size_t bodyLen = errLen <= avail ? errLen : avail;
@@ -288,7 +288,7 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
 
   // 1단계: 스택 버퍼로 바로 dispatch+write. 대부분의 응답은 여기서 끝나
   // size-probe를 위한 두 번째 FFI 횡단과 thread_local 캐시 왕복이 없다.
-  size_t n = core->invoke_rkyv_v2_into(
+  size_t n = core->invoke_frame_into(
     reqData, reqSize, stackBuf, kStackCap, &out_len);
   if (n != SIZE_MAX && n > 0) {
     resp = stackBuf;
@@ -298,7 +298,7 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
   // 정확한 크기로 한 번만 재시도하므로 비멱등 핸들러는 재실행되지 않는다.
   if (!resp && n == SIZE_MAX && out_len > kStackCap) {
     largeBuf.resize(out_len);
-    n = core->invoke_rkyv_v2_into(
+    n = core->invoke_frame_into(
       reqData, reqSize, largeBuf.data(), largeBuf.size(), &out_len);
     if (n != SIZE_MAX && n > 0) {
       resp = largeBuf.data();
@@ -307,17 +307,17 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
   if (!resp) {
     std::string nullSuffix(tailSuffix);
     if (batchItemName) nullSuffix = " (batch item " + *batchItemName + ")";
-    throw JSError(rt, "RustraJSI: invokeRkyvV2 returned null" + nullSuffix);
+    throw JSError(rt, "RustraJSI: invokeFrame returned null" + nullSuffix);
   }
   if (out_len < 1) {
-    throw JSError(rt, std::string("RustraJSI: empty rkyv v2 response") + tailSuffix);
+    throw JSError(rt, std::string("RustraJSI: empty frame response") + tailSuffix);
   }
   if (resp[0] == 0) {
     // 에러 와이어: [ok:0][pad to @8][err_len u16 LE @8][err @10]
     if (out_len < 10) {
       throw JSError(rt, std::string("RustraJSI: malformed error response") + tailSuffix);
     }
-    std::string errStr = parseRkyvV2ErrorBody(resp, out_len);
+    std::string errStr = parseFrameErrorBody(resp, out_len);
     throw JSError(rt, errStr);
   }
 
@@ -334,7 +334,7 @@ static Value typedInvokeTail(Runtime& rt, const uint8_t* reqData, size_t reqSize
 // 헤더 선언 참고(TypedInvokeStatus 계약). HostFunction(invokeTyped/invokeTypedById)
 // 도 같은 경로를 쓴다 — 이 구현이 단일 소스다. 예외 기반 tail(typedInvokeTail)을
 // 감싸 status 로 변환한다: Rust 명령 에러 와이어는 "code: message" 문자열로
-// 조립되므로(parseRkyvV2ErrorBody) 첫 ':' 기준으로 구조를 복원한다. code 에는
+// 조립되므로(parseFrameErrorBody) 첫 ':' 기준으로 구조를 복원한다. code 에는
 // ':' 가 올 수 없으므로(에러 코드 문자집합 계약) 첫 콜론 분리는 비모호하다.
 namespace {
 
@@ -899,16 +899,16 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   };
 
-  // ── Generic FFI paths (default, json, postcard, rkyv V2) — magic 헤더
+  // ── Generic FFI paths (default, json, postcard, Frame) — magic 헤더
   //    레이아웃이므로 free 로 해제 짝. ─────────────────────
   makeInvoke("invoke",            &CoreTable::invoke,          "Rust returned null");
   makeInvoke("invokeJson",        &CoreTable::invoke_json,     "Rust json returned null");
   makeInvoke("invokePostcardFFI", &CoreTable::invoke_postcard, "Rust postcard FFI returned null");
-  // rkyv V2 는 코어 제네릭 심볼 직결이며 legacy ifdef 밖에 둔다 — 엔진 tier2/3
+  // Frame 는 코어 제네릭 심볼 직결이며 legacy ifdef 밖에 둔다 — 엔진 tier2/3
   // 폴백이 모든 빌드(legacy-OFF 포함)에서 이 함수를 요구한다(RustraNative
   // non-optional). 응답은 코어 FFI 레이아웃(8B magic 헤더)이므로 free 짝은
   // rustra_ffi_free (과거 double-free 크래시의 free-짝 계약 유지).
-  makeInvoke("invokeRkyvV2",      &CoreTable::invoke_rkyv_v2,  "Rust rkyv v2 returned null");
+  makeInvoke("invokeFrame",      &CoreTable::invoke_frame,  "Rust frame returned null");
 
   // noop: returns input bytes unchanged
   {
@@ -1050,7 +1050,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
       CachedFunction{std::move(propNameId), std::move(hostFn)});
   }
   {
-    // 바이너리 채널 — 콜백이 ArrayBuffer(복사본)를 받는다. rkyv V2 프레임 등
+    // 바이너리 채널 — 콜백이 ArrayBuffer(복사본)를 받는다. Frame 프레임 등
     // 임의 바이트를 JSON 직렬화 없이 흘리는 TurboModule 상호운용 경로.
     auto dispatcher = getChannelDispatcher();
     auto propNameId = PropNameID::forAscii(rt, "createChannelBytes");
@@ -1168,7 +1168,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
   }
 
   // invokeTyped(name, args): 정적 명령 전용 postcard fast path.
-  // 흐름: encode_by_name → invoke_rkyv_v2 FFI → decode_by_name.
+  // 흐름: encode_by_name → invoke_frame FFI → decode_by_name.
   // Rust 에러면 JSError throw, 성공이면 디코딩된 JS 객체 반환.
   {
     auto propNameId = PropNameID::forAscii(rt, "invokeTyped");
@@ -1233,7 +1233,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
   // rustra_ffi_invoke_raw 를 부르고 결과 슬롯을 그대로 JS number 로 감싼다.
   // 코어가 UINT32_MAX 를 돌려주면(비대상 명령) 특수 값 RUSTRA_RAW_FALLBACK
   // (NaN 페이로드)을 반환해 JS 엔진이 invokeTypedById 로 폴백하게 한다.
-  // 에러(1)는 기존 rkyv V2 에러 와이어를 파싱해 JSError 로 정규화한다.
+  // 에러(1)는 기존 Frame 에러 와이어를 파싱해 JSError 로 정규화한다.
   {
     auto propNameId = PropNameID::forAscii(rt, "invokeTypedRaw");
     auto hostFn = Function::createFromHostFunction(
@@ -1267,9 +1267,9 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         }
         if (code != 0) {
           // 에러 와이어([ok:0][pad][err_len u16 @8][postcard @10]) 파싱 —
-          // typedInvokeTail 과 동일한 parseRkyvV2ErrorBody 재사용.
+          // typedInvokeTail 과 동일한 parseFrameErrorBody 재사용.
           if (errLen >= 10) {
-            throw JSError(rt, parseRkyvV2ErrorBody(errBuf, errLen));
+            throw JSError(rt, parseFrameErrorBody(errBuf, errLen));
           }
           throw JSError(rt, "RustraJSI: invokeTypedRaw failed");
         }
@@ -1457,7 +1457,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         const CoreTable* dispatchCore = core::currentCoreTable();
         ctx->dispatchCore = dispatchCore;
         uint64_t invocationId = 0;
-        dispatchCore->invoke_rkyv_v2_async_into(
+        dispatchCore->invoke_frame_async_into(
           req.data(), req.size(),
           ctx->frameBuffer.data(), ctx->frameBuffer.size(),
           holder,
@@ -1531,7 +1531,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
                 if (!deliver || !onSuccess || !onError) return;
                 const size_t out_len = resp_len;
                 if (out_len < 1) {
-                  onError->call(rt, "RustraJSI: empty rkyv v2 async response");
+                  onError->call(rt, "RustraJSI: empty frame async response");
                   return;
                 }
                 if (resp[0] == 0) {
@@ -1543,7 +1543,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
                   // postcard {code, message} → "code: message" 문자열 (RustraError
                   // Display 형태) — JS parseRustraErrorString 가 코드를 복구한다.
                   // 파싱 실패 시 원시 바이트 폴백(onError 누락 없음).
-                  onError->call(rt, parseRkyvV2ErrorBody(resp, out_len));
+                  onError->call(rt, parseFrameErrorBody(resp, out_len));
                   return;
                 }
                 if (out_len < 8) {
@@ -1629,7 +1629,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
         const CoreTable* dispatchCore = core::currentCoreTable();
         ctx->dispatchCore = dispatchCore;
         uint64_t invocationId = 0;
-        dispatchCore->invoke_rkyv_v2_async_into(
+        dispatchCore->invoke_frame_async_into(
           req.data(), req.size(),
           ctx->frameBuffer.data(), ctx->frameBuffer.size(),
           holder,
@@ -1679,7 +1679,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
                 if (!deliver || !onSuccess || !onError) return;
                 const size_t out_len = resp_len;
                 if (out_len < 1) {
-                  onError->call(rt, "RustraJSI: empty rkyv v2 async response");
+                  onError->call(rt, "RustraJSI: empty frame async response");
                   return;
                 }
                 if (resp[0] == 0) {
@@ -1687,7 +1687,7 @@ RustraHostObject::RustraHostObject(Runtime& rt) {
                     onError->call(rt, "RustraJSI: malformed async error response");
                     return;
                   }
-                  onError->call(rt, parseRkyvV2ErrorBody(resp, out_len));
+                  onError->call(rt, parseFrameErrorBody(resp, out_len));
                   return;
                 }
                 if (out_len < 8) {
@@ -1821,7 +1821,7 @@ void installRustraJSIWithInvoker(Runtime& rt,
   getChannelDispatcher()->setCallInvoker(std::move(typeErasedCallInvoker));
 
   // 평탄화(Nitro 방식): 모든 호스트 함수를 일반 JS 객체의 프로퍼티로 설치
-  // 시점에 박는다. 이후 native.invokeRkyvV2(...) 조회가 HostObject get 콜백
+  // 시점에 박는다. 이후 native.invokeFrame(...) 조회가 HostObject get 콜백
   // (엔트리당 compare 가상 호출, 최대 22회) 대신 엔진의 인라인 프로퍼티
   // 로드가 된다. 동작 불변: 프로퍼티 목록과 각 함수는 기존과 동일하며,
   // unknown 프로퍼티 조회는 HostObject 의 undefined 반환과 마찬가지로
@@ -2204,7 +2204,7 @@ int pollHotCoreOnce() {
     RUSTRA_BIND(invoke, "rustra_ffi_invoke");
     RUSTRA_BIND(invoke_json, "rustra_ffi_invoke_json");
     RUSTRA_BIND(invoke_postcard, "rustra_ffi_invoke_postcard");
-    RUSTRA_BIND(invoke_rkyv_v2, "rustra_ffi_invoke_rkyv_v2");
+    RUSTRA_BIND(invoke_frame, "rustra_ffi_invoke_frame");
     RUSTRA_BIND(free, "rustra_ffi_free");
     RUSTRA_BIND(invoke_buffer, "rustra_ffi_invoke_buffer");
     RUSTRA_BIND(has_buffer, "rustra_ffi_has_buffer");
@@ -2218,8 +2218,8 @@ int pollHotCoreOnce() {
     RUSTRA_BIND(channel_drop, "rustra_ffi_channel_drop");
     RUSTRA_BIND(mobile_init, "rustra_mobile_init");
     RUSTRA_BIND(invoke_cancel, "rustra_ffi_invoke_cancel");
-    RUSTRA_BIND(invoke_rkyv_v2_async_into, "rustra_ffi_invoke_rkyv_v2_async_into");
-    RUSTRA_BIND(invoke_rkyv_v2_into, "rustra_ffi_invoke_rkyv_v2_into");
+    RUSTRA_BIND(invoke_frame_async_into, "rustra_ffi_invoke_frame_async_into");
+    RUSTRA_BIND(invoke_frame_into, "rustra_ffi_invoke_frame_into");
     RUSTRA_BIND(invoke_raw, "rustra_ffi_invoke_raw");
     RUSTRA_BIND(has_raw, "rustra_ffi_has_raw");
     RUSTRA_BIND(get_schema, "rustra_ffi_get_schema");

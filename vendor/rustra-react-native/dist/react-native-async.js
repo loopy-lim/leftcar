@@ -1,5 +1,5 @@
 import { CancelledError, invokeCallbackWithAbort, invokeWithTimeoutHandledSignal, parseRustraErrorString, } from '@rustra/types';
-import { createFastEngine, REACT_NATIVE_RKYV_V2_ENGINE_SUPPORTS, } from './react-native-core.js';
+import { createFastEngine, REACT_NATIVE_FRAME_ENGINE_SUPPORTS, } from './react-native-core.js';
 export function createAsyncEngine(native, options) {
     const syncEngine = createFastEngine(native, options);
     if (typeof native.invokeTypedAsync !== 'function') {
@@ -14,7 +14,7 @@ export function createAsyncEngine(native, options) {
     const staticIds = new Map();
     if (hasByIdPath) {
         // Array.from — Expo 의 ES5 타겟에서 Map 순회는 downlevelIteration 이 필요하다.
-        for (const [name, codec] of Array.from(options.rkyvV2Codecs)) {
+        for (const [name, codec] of Array.from(options.frameCodecs)) {
             staticIds.set(name, codec.commandId);
         }
     }
@@ -36,12 +36,12 @@ export function createAsyncEngine(native, options) {
         },
     };
     const engine = {
-        // A02 — async 엔진은 sync rkyv V2 엔진의 지표를 상속하되 배치만 재정의한다:
+        // A02 — async 엔진은 sync Frame 엔진의 지표를 상속하되 배치만 재정의한다:
         // 아래 invokeBatch 는 항목별 Promise.all 폴백이므로 `single-crossing` 이
         // 아니다(리뷰 정정). 취소는 invokeCancel 노출 시 전파 — 존재는 위 transport
         // 경로가 판별하므로 `cooperative` 상속이 참이다. syncEngine.supports 는
         // 옵셔널이라 스프레드 대신 상수에 재정의를 얹어 완전한 EngineSupports 를 만든다.
-        supports: { ...REACT_NATIVE_RKYV_V2_ENGINE_SUPPORTS, batch: 'per-entry' },
+        supports: { ...REACT_NATIVE_FRAME_ENGINE_SUPPORTS, batch: 'per-entry' },
         invoke(command, args, invokeOptions) {
             return invokeWithTimeoutHandledSignal(transport, command, args, invokeOptions);
         },
