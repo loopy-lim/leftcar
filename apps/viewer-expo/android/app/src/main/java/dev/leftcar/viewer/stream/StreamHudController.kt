@@ -69,6 +69,8 @@ internal class StreamHudController(
     private var rebindPopup: PopupWindow? = null
     private var rebindView: View? = null
     private var rebindText: TextView? = null
+    private var rememberChipPopup: PopupWindow? = null
+    private var rememberChipText: TextView? = null
     private var controls: StreamHudControls? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
@@ -212,6 +214,63 @@ internal class StreamHudController(
         handler.post(poll)
     }
 
+    /**
+     * "이 크기 기억" 칩 — 창 크기가 호스트 저장값과 달라졌을 때만 입력 배지
+     * 아래에 나타난다. 유일하게 터치를 받는 HUD 요소라 자체 팝업으로 띄운다;
+     * 누르면 [onRemember]로 현재 크기를 저장하고 사라진다.
+     */
+    fun showRememberSizeChip(onRemember: () -> Unit) {
+        rememberChipText?.let { existing ->
+            existing.alpha = 1f
+            return
+        }
+        val chip = TextView(activity).apply {
+            text = ViewerStrings.rememberSize
+            contentDescription = ViewerStrings.rememberSize
+            setTextColor(Color.argb(232, 255, 255, 255))
+            textSize = 11f * panelScale
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = badgeBackground(Color.argb(178, 15, 23, 42))
+            elevation = dp(3).toFloat()
+            // 이 팝업은 터치를 받는다 — 배지와 달리 눌러야 하는 버튼이다.
+            setOnClickListener {
+                it.isEnabled = false
+                onRemember()
+            }
+        }
+        rememberChipText = chip
+        rememberChipPopup = PopupWindow(
+            chip,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            false,
+        ).apply {
+            isTouchable = true
+            isFocusable = false
+            isOutsideTouchable = false
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            elevation = dp(3).toFloat()
+        }
+        val popup = rememberChipPopup ?: return
+        activity.window.decorView.post {
+            if (!popup.isShowing && !activity.isFinishing && !activity.isDestroyed) {
+                popup.showAtLocation(
+                    activity.window.decorView,
+                    Gravity.TOP or Gravity.END,
+                    dp(12),
+                    // 입력 배지(상단 12dp + ~30dp) 바로 아래 줄.
+                    dp(52),
+                )
+            }
+        }
+    }
+
+    fun hideRememberSizeChip() {
+        rememberChipPopup?.dismiss()
+        rememberChipPopup = null
+        rememberChipText = null
+    }
+
     fun revealInput() {
         val badge = inputView ?: return
         handler.removeCallbacks(fadeInput)
@@ -248,6 +307,9 @@ internal class StreamHudController(
         inputPopup = null
         statsPopup = null
         rebindPopup = null
+        rememberChipPopup?.dismiss()
+        rememberChipPopup = null
+        rememberChipText = null
         controls = null
         inputView = null
         inputIcon = null

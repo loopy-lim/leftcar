@@ -40,8 +40,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val KEY_WINDOW_HEIGHT_PX = "windowHeightPx"
         private const val KEY_BALANCED_PRESENTATION = "balancedPresentation"
         private const val KEY_PRESENTATION_SMOOTH = "presentationSmooth"
-        // XR 핸들 리사이즈가 멈춘 뒤 최종 크기를 호스트에 기억시키는 간격.
-        private const val WINDOW_SIZE_REPORT_DEBOUNCE_MS = 1_500L
         // A healthy rebind renders its first frame well inside a second; this
         // budget only fails rebinds whose media never arrived at all.
         private const val RECOVERY_FLOW_WATCHDOG_MS = 4_000L
@@ -161,9 +159,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
      */
     private var windowWidthPx: Int = 0
     private var windowHeightPx: Int = 0
-    /** 마지막으로 적용·보고한 창 크기 — 적용 에코의 재보고를 막는다. */
-    private var lastWindowSizeReported: Pair<Int, Int>? = null
-    private var windowSizeReportRunnable: Runnable? = null
+    /**
+     * 창 크기 고정(2026-09-20): 호스트가 현재 들고 있는 크기 — 적용 요청값 또는
+     * "이 크기 기억" 칩으로 저장된 값. 현재 창 크기가 이 값과 다르면 칩이
+     * 나타나고, 눌러야만 저장된다. 자동 보고는 없다 — 잠깐의 리사이즈나 시스템
+     * 재배치가 저장값을 덮어쓰는 드리프트가 이렇게 원천 차단된다.
+     */
+    private var hostWindowSize: Pair<Int, Int>? = null
     private var ownershipGeneration: Long = 0L
     private var xrRatioGeneration = 0L
     private var xrCreationInFlight: Job? = null
@@ -221,10 +223,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 ?: (width.toLong() * sourceHeight.coerceAtLeast(1) / sourceWidth.coerceAtLeast(1))
                     .toInt()
                     .coerceAtLeast(1)
-            // 시스템이 방금 요청한 크기를 에코로 재보고하지 않게 선점한다.
-            // 시스템이 클램프해 실측이 달라지면 onConfigurationChanged가
-            // 실측을 보고하고, 호스트는 실측을 기억한다.
-            lastWindowSizeReported = width to height
+            hostWindowSize = width to height
             val accepted = XrMainWindowSizer.setMainWindowSize(this, width, height) { code ->
                 when (code) {
                     com.android.extensions.xr.XrExtensionResult.XR_RESULT_SUCCESS,
@@ -246,28 +245,32 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * XR 시스템 핸들 리사이즈를 호스트에 기억시킨다. 크기 변화가 잠잠해지면
-     * 최종 크기를 RN 이벤트로 내보내고, RN이 setWindowSize 제어 명령으로
-     * 호스트에 저장한다. 자신이 방금 적용한 크기는 재보고하지 않는다.
+     * 창 크기가 호스트가 기억한 값과 달라졌는지 따라가 칩을 갱신한다. 자동
+     * 저장은 없다 — 저장은 오직 "이 크기 기억" 칩을 누를 때만 일어난다.
      */
-    private fun scheduleWindowSizeReport() {
+    private fun updateRememberSizeChip() {
         if (!XrMainWindowSizer.isSupported(this)) return
-        windowSizeReportRunnable?.let(surfaceHandler::removeCallbacks)
-        val runnable = Runnable {
-            windowSizeReportRunnable = null
-            if (released || isFinishing || isDestroyed) return@Runnable
-            val width = window.decorView.width
-            val height = window.decorView.height
-            if (width <= 0 || height <= 0) return@Runnable
-            if (lastWindowSizeReported?.let { it.first == width && it.second == height } == true) {
-                return@Runnable
-            }
-            lastWindowSizeReported = width to height
-            android.util.Log.i("LeftcarStream", "window size report ${width}x$height port=$port")
-            StreamLauncherModule.emitWindowSizeChanged(port, width, height)
-        }
-        windowSizeReportRunnable = runnable
-        surfaceHandler.postDelayed(runnable, WINDOW_SIZE_REPORT_DEBOUNCE_MS)
+        if (released || isFinishing || isDestroyed) return
+        val width = window.decorView.width
+        val height = window.decorView.height
+        if (width <= 0 || height <= 0) return
+        val changed = hostWindowSize?.let { it.first != width || it.second != height } ?: true
+        if (changed) hud?.showRememberSizeChip { rememberWindowSize() }
+        else hud?.hideRememberSizeChip()
+    }
+
+    /** 칩을 눌렀을 때 현재 창 크기를 호스트에 저장한다. 이후 열리는 창은
+     * 이 크기로 고정된다(다음 창부터 인텐트 extra로 재적용). */
+    private fun rememberWindowSize() {
+        val width = window.decorView.width
+        val height = window.decorView.height
+        if (width <= 0 || height <= 0) return
+        hostWindowSize = width to height
+        android.util.Log.i("LeftcarStream", "window size remembered ${width}x$height port=$port")
+        StreamLauncherModule.emitWindowSizeChanged(port, width, height)
+        hud?.hideRememberSizeChip()
+        android.widget.Toast.makeText(this, ViewerStrings.rememberSizeDone, android.widget.Toast.LENGTH_SHORT)
+            .show()
     }
 
     /**
@@ -1379,6 +1382,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             // 진입 시 1회 자동 노출(아래 showGestureHint(false))이 유일한 경로다.
         }
         hud?.show()
+        // 첫 레이아웃 이후 저장되지 않은 크기(저장값 없음 포함)면 칩을 보인다.
+        window.decorView.post { updateRememberSizeChip() }
         attachTextLens()
         showGestureHint(false)
         surfaces.requestFocus()
@@ -1803,8 +1808,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         super.onConfigurationChanged(newConfig)
         android.util.Log.i("LeftcarStream", "onConfigurationChanged: orientation=${newConfig.orientation}")
         lifecycleEvent(11) // CONFIGURATION_CHANGE
-        // 창 크기 변화(XR 핸들 리사이즈 포함)가 잠잠해지면 호스트에 기억시킨다.
-        scheduleWindowSizeReport()
+        // 크기가 저장값과 달라졌으면 "이 크기 기억" 칩을 갱신한다(자동 저장 없음).
+        updateRememberSizeChip()
     }
 
     private fun releaseOwnedNativeStream() {
@@ -1832,8 +1837,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         surfaceLifecycle.invalidate()
         cancelPendingSurfaceAttach()
-        windowSizeReportRunnable?.let(surfaceHandler::removeCallbacks)
-        windowSizeReportRunnable = null
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
         recoveryRetryRunnable = null
         cancelRecoveryFlowWatchdog()
