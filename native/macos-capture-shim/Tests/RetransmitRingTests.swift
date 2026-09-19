@@ -69,16 +69,18 @@ struct RetransmitRingTests {
             require(ring.lookup(auID: 7, fragmentIndex: 1, side: nil) == nil)
         }
 
-        // Oldest-AU FIFO eviction keeps the most recent 8 au ids per side.
+        // Oldest-AU FIFO eviction keeps the most recent maxAccessUnitsPerSide
+        // au ids per side. Depth never binds before the 250ms age budget.
         do {
             let ring = MediaRetransmitRing()
-            for au in UInt16(0)...UInt16(9) {
-                ring.store(envelope(auID: au, fragmentIndex: 0), side: nil)
+            let stored = MediaRetransmitRing.maxAccessUnitsPerSide + 2
+            for offset in 0..<stored {
+                ring.store(envelope(auID: UInt16(offset), fragmentIndex: 0), side: nil)
             }
             require(ring.lookup(auID: 0, fragmentIndex: 0, side: nil) == nil)
             require(ring.lookup(auID: 1, fragmentIndex: 0, side: nil) == nil)
             require(ring.lookup(auID: 2, fragmentIndex: 0, side: nil) != nil)
-            require(ring.lookup(auID: 9, fragmentIndex: 0, side: nil) != nil)
+            require(ring.lookup(auID: UInt16(stored - 1), fragmentIndex: 0, side: nil) != nil)
         }
 
         // Byte budgets reject the entire oversized generation, including
@@ -195,7 +197,7 @@ struct RetransmitRingTests {
             require(ring.lookup(auID: 65535, fragmentIndex: 0, side: nil) != nil)
             ring.store(envelope(auID: 65500, fragmentIndex: 0), side: nil)
             require(ring.lookup(auID: 65500, fragmentIndex: 0, side: nil) == nil)
-            require(budget.statistics().retainedAccessUnits == 8)
+            require(budget.statistics().retainedAccessUnits == MediaRetransmitRing.maxAccessUnitsPerSide)
         }
 
         // Existing session owners concurrently store fragments and inspect

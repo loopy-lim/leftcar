@@ -17,44 +17,86 @@ class PersistentFpsOverlayTest {
     }
 
     @Test
-    fun renderedFrameDeltaUsesElapsedSampleTime() {
-        val previous = RenderedFpsSample(frames = 100L, sampledAtMs = 1_000L, displayedFps = null)
+    fun windowShorterThanMinimumHoldsThePreviousDisplay() {
+        val seeded = nextRenderedFpsSample(null, renderedFrames = 100L, nowMs = 1_000L)
 
-        val sample = nextRenderedFpsSample(previous, renderedFrames = 110L, nowMs = 1_250L)
+        val sample = nextRenderedFpsSample(seeded, renderedFrames = 110L, nowMs = 1_250L)
 
-        assertEquals(40.0, sample.displayedFps!!, 0.001)
-        assertEquals("40 FPS", persistentFpsText(sample.displayedFps))
+        assertNull(sample.displayedFps)
     }
 
     @Test
-    fun counterResetShowsUnknownUntilANewDeltaExists() {
-        val previous = RenderedFpsSample(frames = 110L, sampledAtMs = 1_250L, displayedFps = 40.0)
+    fun windowIntegratesTotalFramesOverTheAnchorSpan() {
+        var sample = nextRenderedFpsSample(null, renderedFrames = 100L, nowMs = 1_000L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 110L, nowMs = 1_250L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 121L, nowMs = 1_500L)
 
-        val reset = nextRenderedFpsSample(previous, renderedFrames = 3L, nowMs = 1_500L)
-        val resumed = nextRenderedFpsSample(reset, renderedFrames = 13L, nowMs = 1_750L)
+        // 500ms 창 동안 +21프레임 = 42fps
+        assertEquals(42.0, sample.displayedFps!!, 0.001)
+        assertEquals("42 FPS", persistentFpsText(sample.displayedFps))
+    }
+
+    @Test
+    fun rawSampleIsCappedAt240() {
+        var sample = nextRenderedFpsSample(null, renderedFrames = 100L, nowMs = 1_000L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 400L, nowMs = 1_250L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 1_300L, nowMs = 1_500L)
+
+        // 500ms 창 동안 +1,200프레임 → 상한 240fps
+        assertEquals(240.0, sample.displayedFps!!, 0.001)
+    }
+
+    @Test
+    fun counterResetShowsUnknownUntilTheWindowRebuilds() {
+        val seeded = nextRenderedFpsSample(null, renderedFrames = 100L, nowMs = 1_000L)
+        val live = nextRenderedFpsSample(seeded, renderedFrames = 110L, nowMs = 1_250L)
+        val live2 = nextRenderedFpsSample(live, renderedFrames = 121L, nowMs = 1_500L)
+        assertEquals(42.0, live2.displayedFps!!, 0.001)
+
+        val reset = nextRenderedFpsSample(live2, renderedFrames = 3L, nowMs = 1_750L)
+        val resumed1 = nextRenderedFpsSample(reset, renderedFrames = 13L, nowMs = 2_000L)
+        val resumed2 = nextRenderedFpsSample(resumed1, renderedFrames = 23L, nowMs = 2_250L)
 
         assertNull(reset.displayedFps)
         assertEquals("-- FPS", persistentFpsText(reset.displayedFps))
-        assertEquals(40.0, resumed.displayedFps!!, 0.001)
+        assertNull(resumed1.displayedFps)
+        assertEquals(40.0, resumed2.displayedFps!!, 0.001)
     }
 
     @Test
-    fun smoothingKeepsExistingBoundedFormula() {
-        val previous = RenderedFpsSample(frames = 100L, sampledAtMs = 1_000L, displayedFps = 40.0)
+    fun fullyStalledWindowDisplaysZeroInsteadOfHoldingTheStaleRate() {
+        var sample = nextRenderedFpsSample(null, renderedFrames = 100L, nowMs = 1_000L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 100L, nowMs = 1_250L)
+        sample = nextRenderedFpsSample(sample, renderedFrames = 100L, nowMs = 1_500L)
 
-        val sample = nextRenderedFpsSample(previous, renderedFrames = 200L, nowMs = 1_250L)
-
-        // The 400 FPS raw sample is capped at 240 before 0.65/0.35 smoothing.
-        assertEquals(110.0, sample.displayedFps!!, 0.001)
+        assertEquals(0.0, sample.displayedFps!!, 0.001)
+        assertEquals("0 FPS", persistentFpsText(sample.displayedFps))
     }
 
     @Test
-    fun zeroFpsRetainsTheExistingInitialSampleBehavior() {
-        val previous = RenderedFpsSample(frames = 100L, sampledAtMs = 1_000L, displayedFps = 0.0)
+    fun deadTickDilutesInsideTheWindowAndExitsWithoutEmaStickiness() {
+        var sample = nextRenderedFpsSample(null, renderedFrames = 0L, nowMs = 0L)
+        var frames = 0L
+        fun tick(nowMs: Long, delta: Long) {
+            frames += delta
+            sample = nextRenderedFpsSample(sample, renderedFrames = frames, nowMs = nowMs)
+        }
+        for (offset in 1..8) tick(offset * 250L, 14L)
+        assertEquals(56.0, sample.displayedFps!!, 0.001)
 
-        val sample = nextRenderedFpsSample(previous, renderedFrames = 110L, nowMs = 1_250L)
+        // 죽은 틱 하나: EMA(0.35 가중)라면 즉시 ~36까지 떨어졌다. 창 적분은
+        // 창 안에서 희석될 뿐이다.
+        tick(2_250L, 0L)
+        tick(2_500L, 14L)
+        assertEquals(48.0, sample.displayedFps!!, 0.001)
 
-        assertEquals(40.0, sample.displayedFps!!, 0.001)
+        // 죽은 틱이 창에서 나가면 정상 속도로 완전히 복귀한다.
+        tick(2_750L, 14L)
+        tick(3_000L, 14L)
+        tick(3_250L, 14L)
+        tick(3_500L, 14L)
+        tick(3_750L, 14L)
+        assertEquals(56.0, sample.displayedFps!!, 0.001)
     }
 
     @Test

@@ -22,6 +22,13 @@ export const STREAM_PROFILES = [
     contentMode: "video",
   },
   {
+    id: "smooth",
+    maxWidth: 2560,
+    maxHeight: 1440,
+    fps: 60,
+    contentMode: "video",
+  },
+  {
     id: "balanced",
     maxWidth: 2560,
     maxHeight: 1440,

@@ -257,6 +257,7 @@ describe("streamingPriorityFromProfileId", () => {
   it("maps legacy clarity-intent profiles to clarity", () => {
     expect(streamingPriorityFromProfileId("clarity")).toBe("clarity");
     expect(streamingPriorityFromProfileId("video")).toBe("clarity");
+    expect(streamingPriorityFromProfileId("smooth")).toBe("clarity");
   });
 
   it("maps legacy responsiveness-intent profiles to responsive", () => {

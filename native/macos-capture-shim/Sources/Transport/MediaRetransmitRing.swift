@@ -126,15 +126,21 @@ fileprivate final class RetransmitAccessUnit {
 /// Whole AU removal invalidates every cached fragment and all subsequent stores
 /// of that generation. Each side retains one UInt16 high watermark until
 /// session destruction. Removal releases the AU record from its side map;
-/// there are <=256 active records globally and <=8 per side, with <=3 small
-/// side maps per session. No tombstone set grows with evictions or idle time.
+/// there are <=256 active records globally and <=maxAccessUnitsPerSide per
+/// side, with <=3 small side maps per session. No tombstone set grows with
+/// evictions or idle time.
 /// Missing older IDs are never readmitted. Forward serial deltas 1..<32768
 /// admit new AUs, including 65535->0. Same-ID reuse after a full advancing wrap
 /// is valid. A session reset must construct a new ring; idle time alone never
 /// revives a rejected generation. As on the wire, delays spanning a full UInt16
 /// cycle cannot be distinguished without a protocol generation field.
 final class MediaRetransmitRing {
-    static let maxAccessUnitsPerSide = 8
+    /// Per-side capacity is deliberately larger than any grace window so the
+    /// budget's 250ms max-age expiry, not FIFO depth, is the binding retention
+    /// limit: 32 AUs covers 266ms at 120fps (XR) and 533ms at 60fps. At 8 AUs
+    /// a 120fps session could only serve NACKs for the newest 66ms — shorter
+    /// than the viewer's 8..120ms grace clamp.
+    static let maxAccessUnitsPerSide = 32
     // Packetizer's direct-LAN plaintext limit is udpMediaDatagramBytes=1400.
     // Enforce it here too, making missedRequestedBytesUpperBound truthful even
     // for callers outside that packetizer (oversized envelopes are rejected).

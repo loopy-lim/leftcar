@@ -15,28 +15,47 @@ import android.widget.PopupWindow
 import android.widget.TextView
 import kotlin.math.roundToInt
 
-internal data class RenderedFpsSample(
+internal data class RenderedFpsPoint(
     val frames: Long,
     val sampledAtMs: Long,
+)
+
+internal data class RenderedFpsSample(
+    val history: List<RenderedFpsPoint>,
     val displayedFps: Double?,
 )
 
+/** 윈도우 길이 상한(포인트 수). 250ms 폴링 기준 최대 ~1.75s 창. */
+internal const val FPS_WINDOW_POINTS = 8
+/** 이보다 짧은 창은 노이스라 값들을 갱신하지 않고 직전 표시를 유지한다. */
+internal const val FPS_WINDOW_MIN_MS = 500L
+
+/**
+ * EMA(0.65/0.35)를 1.5초 창 적분 평균으로 교체했다. EMA는 프레임 카운터가
+ * 한 틱 멈추면 0 샘플이 35% 가중으로 박혀 실측 p50(57) 대비 40까지 억제됐고
+ * 회복에도 수 틱이 걸렸다. 창 적분은 창 안의 총 프레임 수를 그대로 나누므로
+ * 죽은 틱이 창을 벗어나면 즉시 실제 속도로 돌아온다. 최소 창(500ms) 미만에서는
+ * 직전 값을 유지해 인접 정수 경계에서의 흔들림(케이던스 플러터)을 없앤다.
+ */
 internal fun nextRenderedFpsSample(
     previous: RenderedFpsSample?,
     renderedFrames: Long,
     nowMs: Long,
 ): RenderedFpsSample {
-    if (previous == null || renderedFrames < previous.frames || nowMs <= previous.sampledAtMs) {
-        return RenderedFpsSample(renderedFrames, nowMs, null)
+    val newest = previous?.history?.lastOrNull()
+    if (previous == null || newest == null || renderedFrames < newest.frames || nowMs <= newest.sampledAtMs) {
+        return RenderedFpsSample(listOf(RenderedFpsPoint(renderedFrames, nowMs)), null)
     }
-    val elapsedMs = (nowMs - previous.sampledAtMs).coerceAtLeast(1L)
-    val sampledFps = ((renderedFrames - previous.frames) * 1_000.0 / elapsedMs)
-        .coerceIn(0.0, 240.0)
-    val displayedFps = previous.displayedFps
-        ?.takeIf { it != 0.0 }
-        ?.let { it * 0.65 + sampledFps * 0.35 }
-        ?: sampledFps
-    return RenderedFpsSample(renderedFrames, nowMs, displayedFps)
+    val history = (previous.history + RenderedFpsPoint(renderedFrames, nowMs))
+        .takeLast(FPS_WINDOW_POINTS)
+    val anchor = history.first()
+    val elapsedMs = (nowMs - anchor.sampledAtMs).coerceAtLeast(1L)
+    val displayedFps = if (elapsedMs >= FPS_WINDOW_MIN_MS) {
+        ((renderedFrames - anchor.frames) * 1_000.0 / elapsedMs).coerceIn(0.0, 240.0)
+    } else {
+        previous.displayedFps
+    }
+    return RenderedFpsSample(history, displayedFps)
 }
 
 internal data class PersistentFpsOverlayPolicy(
@@ -126,10 +145,13 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
 
     fun update(displayedFps: Double?) {
         this.displayedFps = displayedFps
-        textView?.apply {
-            text = persistentFpsText(displayedFps)
-            contentDescription = persistentFpsContentDescription(displayedFps)
-        }
+        val view = textView ?: return
+        val nextText = persistentFpsText(displayedFps)
+        // 표시 값이 실제로 바뀔 때만 다시 그린다 — 250ms 폴링마다 동일 문자열을
+        // set하지 않아 배지 레이아웃 패스와 깜빡임을 줄인다.
+        if (view.text.toString() == nextText) return
+        view.text = nextText
+        view.contentDescription = persistentFpsContentDescription(displayedFps)
     }
 
     fun stop() {

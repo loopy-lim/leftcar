@@ -21,6 +21,16 @@ describe("stream profiles", () => {
     });
   });
 
+  it("keeps the motion-first 1440p profile on the video content mode", () => {
+    expect(STREAM_PROFILES.find((profile) => profile.id === "smooth")).toMatchObject({
+      id: "smooth",
+      maxWidth: 2560,
+      maxHeight: 1440,
+      fps: 60,
+      contentMode: "video",
+    });
+  });
+
   it("marks 1440p60 as the measurable fallback baseline", () => {
     expect(STREAM_PROFILES.find((profile) => profile.id === "balanced")).toMatchObject({
       id: "balanced",

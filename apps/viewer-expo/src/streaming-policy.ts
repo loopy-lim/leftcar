@@ -97,14 +97,15 @@ export function resolveInitialStreamTarget(
 
 /**
  * Legacy profile intent expressed as a streaming priority. Clarity-oriented
- * legacy profiles (`clarity`, `video`) map to `clarity`; responsiveness- and
- * balance-oriented ones (`latency`, `balanced`, `auto`) map to `responsive`.
- * The legacy identifiers themselves remain valid selections.
+ * legacy profiles (`clarity`, `video`, `smooth`) map to `clarity`;
+ * responsiveness- and balance-oriented ones (`latency`, `balanced`, `auto`)
+ * map to `responsive`. The legacy identifiers themselves remain valid
+ * selections.
  */
 export function streamingPriorityFromProfileId(
   profileId: StreamProfileId | "auto",
 ): StreamingPriority {
-  return profileId === "clarity" || profileId === "video"
+  return profileId === "clarity" || profileId === "video" || profileId === "smooth"
     ? "clarity"
     : "responsive";
 }
