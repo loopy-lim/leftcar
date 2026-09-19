@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import QRCode from "qrcode";
-import { getPairedDeviceState, receivePairedDeviceState, receiveRevokeOutcome, subscribePairedDeviceState, type PairedDevice, type PairedDeviceState, type RevokeOutcome } from "./paired-device-state";
+import {
+  getPairedDeviceState,
+  confirmSourceGrants,
+  receivePairedDeviceState,
+  receiveRevokeOutcome,
+  subscribePairedDeviceState,
+  type PairedDevice,
+  type PairedDeviceState,
+  type RevokeOutcome,
+  type SourceGrantView,
+} from "./paired-device-state";
 import {
   AlertTriangle,
   Check,
-  Clock,
   Copy,
-  KeyRound,
-  QrCode,
-  RefreshCw,
   ShieldCheck,
-  Smartphone,
-  Laptop,
 } from "lucide-react";
 import { bannerAlertVariants, buttonVariants } from "./lib/variants";
 import { formatHostAddress } from "./hostState";
@@ -22,41 +26,14 @@ import {
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
+import PairingQrCard, { type ActivePairingSession } from "./pairing/PairingQrCard";
+import PendingApprovalSection, { type PendingPairingView } from "./pairing/PendingApprovalSection";
+import PairedDeviceRow from "./pairing/PairedDeviceRow";
 
 interface PairingSessionView {
   qr_payload: string;
   code: string;
   expires_in_secs: number;
-}
-interface PendingPairingView {
-  offer_id: string;
-  device_name: string;
-  requested_at: string;
-}
-
-
-interface ActiveSession {
-  qrDataUrl: string;
-  code: string;
-  expiresAt: number;
-}
-
-function formatPairedAt(pairedAt: string, language: SupportedLanguage): string {
-  const secs = Number(pairedAt.replace(/^unix:/, ""));
-  if (!Number.isFinite(secs) || secs <= 0) return pairedAt;
-  return new Date(secs * 1000).toLocaleString(language === "ko" ? "ko-KR" : "en-US", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatCountdown(remainingMs: number): string {
-  const total = Math.max(0, Math.ceil(remainingMs / 1000));
-  const mm = String(Math.floor(total / 60)).padStart(2, "0");
-  const ss = String(total % 60).padStart(2, "0");
-  return `${mm}:${ss}`;
 }
 
 function connectionErrorMessage(cause: unknown, t: TranslationSchema): string {
@@ -70,7 +47,7 @@ function connectionErrorMessage(cause: unknown, t: TranslationSchema): string {
   return t.host.connectionCheckError;
 }
 
-function PairingIpBanner({
+function PairingNetworkCard({
   lanIp,
   controlPort,
   copiedIp,
@@ -83,200 +60,100 @@ function PairingIpBanner({
   t: TranslationSchema;
   onCopyIp: () => void;
 }) {
-  return (
-    <div className="pairing-ip-banner">
-      <div className="pairing-ip-info">
-        <span className="pairing-ip-label">{t.host.computerAddressLabel}</span>
-        <span className="pairing-ip-value">{lanIp}:{controlPort}</span>
-      </div>
-      <button
-        type="button"
-        className={buttonVariants({ variant: "ghost", size: "sm" })}
-        onClick={onCopyIp}
-        title={t.host.computerAddressLabel}
-      >
-        {copiedIp ? (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontWeight: 600 }}>
-            <Check size={13} /> {t.host.copied}
-          </span>
-        ) : (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-            <Copy size={13} /> {t.host.copyAddress}
-          </span>
-        )}
-      </button>
-    </div>
-  );
-}
-
-interface PairingQrCardProps {
-  session: ActiveSession | null;
-  expired: boolean;
-  starting: boolean;
-  remainingMs: number;
-  progressPercent: number;
-  copiedCode: boolean;
-  t: TranslationSchema;
-  onStartPairing: () => void;
-  onCancelPairing: () => void;
-  onCopyCode: () => void;
-}
-
-function PairingQrCard({
-  session,
-  expired,
-  starting,
-  remainingMs,
-  progressPercent,
-  copiedCode,
-  t,
-  onStartPairing,
-  onCancelPairing,
-  onCopyCode,
-}: PairingQrCardProps) {
-  if (!session) {
-    return (
-      <div className="pairing-qr-card">
-        <div className="pairing-idle-state">
-          <div className="idle-icon-box">
-            <QrCode size={22} strokeWidth={2} />
-          </div>
-          <p className="idle-title">{t.host.btnPair}</p>
-          <p className="idle-sub">{t.host.idleHint}</p>
-          <button onClick={onStartPairing} className={buttonVariants({ variant: "primary", size: "lg" })} disabled={starting}>
-            <KeyRound size={15} />
-            {starting ? "…" : t.host.btnCreatePairing}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (expired) {
-    return (
-      <div className="pairing-qr-card">
-        <div className="pairing-idle-state">
-          <div className="idle-icon-box">
-            <Clock size={22} strokeWidth={2} />
-          </div>
-          <p className="idle-title">{t.host.pairingExpiredTitle}</p>
-          <p className="idle-sub">{t.host.pairingExpiredSub}</p>
-          <button onClick={onStartPairing} className={buttonVariants({ variant: "primary" })} disabled={starting}>
-            <RefreshCw size={14} />
-            {starting ? "…" : t.host.regenerateCode}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
-    <div className="pairing-qr-card">
-      <div className="pairing-active-state">
-        <div className="qr-image-frame">
-          <img
-            src={session.qrDataUrl}
-            alt="QR Code"
-            width={190}
-            height={190}
-            className="qr-img"
+    <div
+      className="pairing-status-card"
+      style={{
+        background: "var(--bg-surface-subtle)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 12,
+        padding: "14px 16px",
+        marginBottom: 16,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: "var(--color-emerald-500, #10b981)",
+              boxShadow: "0 0 8px rgba(16, 185, 129, 0.4)",
+              display: "inline-block",
+            }}
           />
+          <strong style={{ fontSize: 13, color: "var(--text-primary)" }}>
+            {t.host.remoteReady}
+          </strong>
         </div>
-        <div className="code-display-box">
-          <span className="code-label">{t.host.pairingCodeLabel}</span>
-          <span className="code-value">{session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}</span>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((prev) => !prev)}
+          style={{
+            background: "none",
+            border: "none",
+            fontSize: 12,
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "2px 6px",
+          }}
+        >
+          {t.host.advancedNetworkToggle}
+          <span style={{ transform: showAdvanced ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+            ⌄
+          </span>
+        </button>
+      </div>
+
+      <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.4 }}>
+        {t.host.remoteReadyDesc}
+      </p>
+
+      {showAdvanced && (
+        <div
+          style={{
+            marginTop: 4,
+            paddingTop: 10,
+            borderTop: "1px dashed var(--border-subtle)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "var(--text-secondary)" }}>
+            {t.host.localLanAddress}:{" "}
+            <code style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+              {lanIp}:{controlPort}
+            </code>
+          </span>
           <button
             type="button"
-            className="clickable-chip"
-            onClick={onCopyCode}
-            title={t.host.pairingCodeLabel}
-            style={{ marginLeft: 4 }}
+            className={buttonVariants({ variant: "ghost", size: "sm" })}
+            onClick={onCopyIp}
+            title={t.host.computerAddressLabel}
           >
-            {copiedCode ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 600 }}>
+            {copiedIp ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 600 }}>
                 <Check size={13} /> {t.host.copied}
               </span>
             ) : (
-              <Copy size={13} style={{ opacity: 0.8 }} />
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <Copy size={13} /> {t.host.copyAddress}
+              </span>
             )}
           </button>
         </div>
-        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>{t.host.pairingQrScanHint}</p>
-        <div className="countdown-container">
-          <div className="countdown-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <Clock size={12} /> {t.host.remainingTime} {formatCountdown(remainingMs)}
-          </div>
-          <div className="time-decay-track" aria-hidden="true">
-            <div className="time-decay-bar" style={{ width: `${progressPercent}%` }} />
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-          <button onClick={onStartPairing} className={buttonVariants({ variant: "ghost", size: "sm" })} title={t.host.pairingNewCode}>
-            <RefreshCw size={12} /> {t.host.pairingNewCode}
-          </button>
-          <button onClick={onCancelPairing} className={buttonVariants({ variant: "ghost", size: "sm" })}>
-            {t.host.pairingCancel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PendingApprovalCard({
-  requests,
-  busyId,
-  onApprove,
-  onDeny,
-  t,
-}: {
-  requests: PendingPairingView[];
-  busyId: string | null;
-  onApprove: (offerId: string) => void;
-  onDeny: (offerId: string) => void;
-  t: TranslationSchema;
-}) {
-  if (requests.length === 0) return null;
-  return (
-    <div className="paired-devices-section" role="alert">
-      <div className="section-title-row">
-        <div className="section-title-left">
-          <Smartphone size={15} />
-          <h4>{t.host.pairApprovalCardTitle}</h4>
-          <span className="count-pill">{requests.length}</span>
-        </div>
-      </div>
-      <p style={{ margin: "4px 0 8px", fontSize: 12, opacity: 0.75 }}>
-        {t.host.pairApprovalCardHint}
-      </p>
-      <div className="device-rows-container">
-        {requests.map((request) => (
-          <div key={request.offer_id} className="device-row-item">
-            <div className="device-row-main">
-              <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                <Smartphone size={15} strokeWidth={2} />
-                {request.device_name}
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
-                onClick={() => onApprove(request.offer_id)}
-                className={buttonVariants({ variant: "primary", size: "sm" })}
-                disabled={busyId !== null}
-              >
-                <Check size={13} /> {t.host.pairApprovalAllow}
-              </button>
-              <button
-                onClick={() => onDeny(request.offer_id)}
-                className="btn-danger-outline btn-sm"
-                disabled={busyId !== null}
-              >
-                {t.host.pairApprovalDeny}
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+      )}
     </div>
   );
 }
@@ -284,17 +161,21 @@ function PendingApprovalCard({
 function PairedDevicesSection({
   devices,
   revoking,
+  approvingScreens,
   language,
   t,
   onRevoke,
   onRevokeAll,
+  onApproveScreens,
 }: {
   devices: PairedDevice[];
   revoking: string | null;
+  approvingScreens: string | null;
   language: SupportedLanguage;
   t: TranslationSchema;
   onRevoke: (id: string) => void;
   onRevokeAll: () => void;
+  onApproveScreens: (device: PairedDevice) => void;
 }) {
   return (
     <div className="paired-devices-section">
@@ -306,8 +187,9 @@ function PairedDevicesSection({
         </div>
         {devices.length > 0 && (
           <button
+            type="button"
             onClick={onRevokeAll}
-            className="btn-danger-outline btn-sm"
+            className={buttonVariants({ variant: "outlineDanger", size: "sm" })}
             disabled={revoking !== null}
           >
             {t.host.revokeAll}
@@ -318,49 +200,16 @@ function PairedDevicesSection({
       {devices.length > 0 ? (
         <div className="device-rows-container">
           {devices.map((device) => (
-            <div key={device.source_grants.credentialId} className="device-row-item">
-              <div className="device-row-main">
-                <span className="device-row-name" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                  {device.name.toLowerCase().includes("pc") || device.name.toLowerCase().includes("mac") ? (
-                    <Laptop size={15} strokeWidth={2} />
-                  ) : (
-                    <Smartphone size={15} strokeWidth={2} />
-                  )}
-                  {device.name}
-                  {device.connected && (
-                    <span
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 4,
-                        fontSize: 10,
-                        fontWeight: 700,
-                        color: "#10b981",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: "50%",
-                          background: "#10b981",
-                        }}
-                      />
-                      {t.host.deviceLiveLabel}
-                    </span>
-                  )}
-                </span>
-                <span className="device-row-date">{formatPairedAt(device.paired_at, language)}</span>
-              </div>
-              <button
-                onClick={() => onRevoke(device.device_id)}
-                className="btn-danger-outline"
-                disabled={revoking === device.device_id}
-                title={t.host.revoke}
-              >
-                {t.host.revoke}
-              </button>
-            </div>
+            <PairedDeviceRow
+              key={device.source_grants.credentialId}
+              device={device}
+              language={language}
+              t={t}
+              revoking={revoking}
+              approvingScreens={approvingScreens}
+              onRevoke={onRevoke}
+              onApproveScreens={onApproveScreens}
+            />
           ))}
         </div>
       ) : (
@@ -376,7 +225,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
   const language = propLanguage || (localStorage.getItem("leftcar_lang") as SupportedLanguage) || "ko";
   const t = getTranslation(language);
 
-  const [session, setSession] = useState<ActiveSession | null>(null);
+  const [session, setSession] = useState<ActivePairingSession | null>(null);
   const [starting, setStarting] = useState(false);
   const pairedState = useSyncExternalStore(subscribePairedDeviceState, getPairedDeviceState);
   const devices = pairedState.devices;
@@ -384,7 +233,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
-  // 삭제는 보안상 되돌릴 수 없다 — 실행 전 한 번 확인한다.
+  const [approvingScreens, setApprovingScreens] = useState<string | null>(null);
   const [revokeConfirm, setRevokeConfirm] = useState<RevokeConfirm | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedIp, setCopiedIp] = useState(false);
@@ -451,7 +300,6 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   const copyCode = useCallback(() => {
     if (!session) return;
-    // 복사 성공을 확인한 뒤 표시한다 — 실패를 "복사됨"으로 속이지 않는다.
     navigator.clipboard.writeText(session.code).then(
       () => {
         setCopiedCode(true);
@@ -501,6 +349,33 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
     }
   }, [refreshDevices, t]);
 
+  // 승인 때 화면 목록이 비어 있었던 기기(화면기록 권한 전 페어링 등)를 위한
+  // 수동 화면 허용 — "승인 대기"가 뜬 그 자리에서 결정한다.
+  const approveScreens = useCallback(
+    async (device: PairedDevice) => {
+      setApprovingScreens(device.device_id);
+      setError(null);
+      try {
+        const displays = await invoke<{ sourceId: string | null }[]>("list_host_sources");
+        const sourceIds = displays
+          .map((display) => display.sourceId)
+          .filter((sourceId): sourceId is string => sourceId !== null);
+        const grants = await invoke<SourceGrantView>("set_source_grants", {
+          deviceId: device.device_id,
+          sourceIds,
+          credentialId: device.source_grants.credentialId,
+        });
+        confirmSourceGrants(device.device_id, grants);
+        await refreshDevices();
+      } catch (e) {
+        setError(connectionErrorMessage(e, t));
+      } finally {
+        setApprovingScreens(null);
+      }
+    },
+    [refreshDevices, t],
+  );
+
   const refreshPending = useCallback(async () => {
     try {
       setPendingRequests(await invoke<PendingPairingView[]>("list_pending_pairings"));
@@ -516,8 +391,6 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         await invoke(command, { offerId });
         setPendingRequests((current) => current.filter((request) => request.offer_id !== offerId));
       } catch (e) {
-        // 승인/거절 실패를 조용히 넘기면 요청이 사라진 것처럼 보인다 — 행을
-        // 남겨 다시 누를 수 있게 하고 오류는 기존 배너로 알린다.
         setError(connectionErrorMessage(e, t));
       } finally {
         setDecidingId(null);
@@ -555,8 +428,6 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
 
   useEffect(
     () => () => {
-      // Closing this screen invalidates any QR that may still be visible in a
-      // screenshot or camera preview.
       void invoke("cancel_pairing");
     },
     [],
@@ -579,7 +450,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       </div>
 
       {lanIp && (
-        <PairingIpBanner
+        <PairingNetworkCard
           lanIp={lanIp}
           controlPort={controlPort}
           copiedIp={copiedIp}
@@ -611,7 +482,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
         />
       )}
 
-      <PendingApprovalCard
+      <PendingApprovalSection
         requests={pendingRequests}
         busyId={decidingId}
         onApprove={(offerId) => void approveRequest(offerId)}
@@ -635,6 +506,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
       <PairedDevicesSection
         devices={devices}
         revoking={revoking}
+        approvingScreens={approvingScreens}
         language={language}
         t={t}
         onRevoke={(deviceId) =>
@@ -644,6 +516,7 @@ export default function PairingPanel({ language: propLanguage }: { language?: Su
           })
         }
         onRevokeAll={() => setRevokeConfirm({ deviceId: null, name: null })}
+        onApproveScreens={(device) => void approveScreens(device)}
       />
     </div>
   );
