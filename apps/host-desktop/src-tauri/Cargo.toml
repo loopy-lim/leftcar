@@ -23,13 +23,14 @@ libc = "0.2"
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "signal"] }
 nusb = "0.1"
 futures-lite = "2"
 libloading = "0.8"
 mdns-sd = "0.11"
 control-contract = { path = "../../../crates/control-contract" }
 secure-channel = { path = "../../../crates/secure-channel" }
+keymap = { path = "../../../crates/keymap" }
 
 session = { path = "../../../crates/session" }
 domain = { path = "../../../crates/domain" }

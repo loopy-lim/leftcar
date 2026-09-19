@@ -171,7 +171,7 @@ pub(super) struct WindowsSession {
 /// receiver feedback). Silence beyond this budget while a session is running
 /// means the peer is gone: the connected UDP socket may never error, so the
 /// input receiver reaps the session itself.
-const VIEWER_CONTACT_TIMEOUT: Duration = Duration::from_secs(6);
+const VIEWER_CONTACT_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl WindowsBackend {
     pub fn new() -> Result<Self, String> {

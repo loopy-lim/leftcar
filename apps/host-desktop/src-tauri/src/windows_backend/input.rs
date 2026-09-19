@@ -91,7 +91,16 @@ impl InputInjector {
     }
 
     fn button(&mut self, button: u8, down: bool) -> Result<(), String> {
-        send_mouse(0, 0, 0, button_flag(button, down)?)?;
+        if button == 8 || button == 16 {
+            // Android BUTTON_BACK/FORWARD: XBUTTON1 = back, XBUTTON2 =
+            // forward. X-button injection carries the button id in mouseData
+            // instead of a per-button flag.
+            let data: u32 = if button == 8 { 0x0001 } else { 0x0002 };
+            let flags = if down { MOUSEEVENTF_XDOWN } else { MOUSEEVENTF_XUP };
+            send_mouse(0, 0, data, flags)?;
+        } else {
+            send_mouse(0, 0, 0, button_flag(button, down)?)?;
+        }
         if down {
             self.pressed_buttons.insert(button);
         } else {
@@ -117,7 +126,9 @@ impl InputInjector {
     }
 
     fn key(&mut self, android_key_code: u16, down: bool) -> Result<(), String> {
-        let Some(virtual_key) = android_to_virtual_key(android_key_code) else {
+        // 기본표의 단일 소스는 crates/keymap — macOS shim은 같은 표의
+        // 생성물(AndroidKeyMap.swift)을 쓴다.
+        let Some(virtual_key) = keymap::windows(android_key_code) else {
             // 조용히 버리면 뷰어가 원인 없이 "안 쳐진다"를 겪는다 — macOS shim과
             // 같은 진단 로그를 키코드당 한 번만 남긴다.
             if self.logged_unmapped.insert(android_key_code) {
@@ -234,71 +245,4 @@ fn button_flag(button: u8, down: bool) -> Result<MOUSE_EVENT_FLAGS, String> {
         (4, false) => Ok(MOUSEEVENTF_MIDDLEUP),
         _ => Err(format!("unsupported mouse button mask {button}")),
     }
-}
-
-fn android_to_virtual_key(code: u16) -> Option<u16> {
-    if (29..=54).contains(&code) {
-        return Some(VK_A.0 + code - 29);
-    }
-    if (7..=16).contains(&code) {
-        return Some(VK_0.0 + code - 7);
-    }
-    if (131..=142).contains(&code) {
-        return Some(VK_F1.0 + code - 131);
-    }
-    if (144..=153).contains(&code) {
-        return Some(VK_NUMPAD0.0 + code - 144);
-    }
-    // Android F13…F20(183…190) → VK_F13…VK_F20(0x7C…0x83, 연속).
-    if (183..=190).contains(&code) {
-        return Some(VK_F13.0 + code - 183);
-    }
-    Some(match code {
-        19 => VK_UP.0,
-        20 => VK_DOWN.0,
-        21 => VK_LEFT.0,
-        22 => VK_RIGHT.0,
-        23 => VK_RETURN.0,
-        55 => VK_OEM_COMMA.0,
-        56 => VK_OEM_PERIOD.0,
-        57 => VK_MENU.0,
-        58 => VK_RMENU.0,
-        59 => VK_LSHIFT.0,
-        60 => VK_RSHIFT.0,
-        61 => VK_TAB.0,
-        62 => VK_SPACE.0,
-        66 => VK_RETURN.0,
-        67 => VK_BACK.0,
-        68 => VK_OEM_3.0,
-        69 => VK_OEM_MINUS.0,
-        70 => VK_OEM_PLUS.0,
-        71 => VK_OEM_4.0,
-        72 => VK_OEM_6.0,
-        73 => VK_OEM_5.0,
-        74 => VK_OEM_1.0,
-        75 => VK_OEM_7.0,
-        76 => VK_OEM_2.0,
-        92 => VK_PRIOR.0,
-        93 => VK_NEXT.0,
-        111 => VK_ESCAPE.0,
-        112 => VK_DELETE.0,
-        113 => VK_LCONTROL.0,
-        114 => VK_RCONTROL.0,
-        115 => VK_CAPITAL.0,
-        117 => VK_LWIN.0,
-        118 => VK_RWIN.0,
-        122 => VK_HOME.0,
-        123 => VK_END.0,
-        124 => VK_INSERT.0,
-        143 => VK_NUMLOCK.0,
-        154 => VK_DIVIDE.0,
-        155 => VK_MULTIPLY.0,
-        156 => VK_SUBTRACT.0,
-        157 => VK_ADD.0,
-        158 => VK_DECIMAL.0,
-        159 => VK_OEM_COMMA.0,
-        160 => VK_RETURN.0,
-        161 => VK_OEM_PLUS.0,
-        _ => return None,
-    })
 }
