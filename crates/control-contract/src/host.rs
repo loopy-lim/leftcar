@@ -231,6 +231,13 @@ pub struct CatalogView {
     /// endpoint directly for high-speed P2P streaming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_media_endpoint: Option<String>,
+    /// Host's own overlay-network address (100.64.0.0/10, i.e. Tailscale)
+    /// while the tailnet interface is up. Viewers persist it as an alias
+    /// endpoint of the paired host so the same entry stays reachable from
+    /// outside the LAN. Absent on hosts without such a route; older viewers
+    /// ignore unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_host: Option<String>,
     /// The calling device's last reported stream window size in pixels
     /// (setWindowSize). Viewers restore their spatial window to it on the
     /// next launch. Older hosts omit this field, so viewers keep system
@@ -1174,6 +1181,7 @@ mod stream_control_tests {
             }],
             media_host: Some("192.168.0.134".into()),
             public_media_endpoint: None,
+            tailscale_host: Some("100.101.102.103".into()),
             displays: Vec::new(),
             encoder_experiments: Vec::new(),
             reconfigure_encoder_experiment: None,
@@ -1185,6 +1193,7 @@ mod stream_control_tests {
         assert!(json.contains("\"platform\":\"windows\""));
         assert!(json.contains("\"captureBackends\""));
         assert!(json.contains("\"mediaHost\":\"192.168.0.134\""));
+        assert!(json.contains("\"tailscaleHost\":\"100.101.102.103\""));
         assert!(json.contains("\"windowsGraphicsCapture\""));
     }
 
@@ -1198,6 +1207,7 @@ mod stream_control_tests {
             capture_backends: Vec::new(),
             media_host: None,
             public_media_endpoint: None,
+            tailscale_host: None,
             displays: Vec::new(),
             encoder_experiments: phase_a_encoder_experiments(),
             reconfigure_encoder_experiment: None,

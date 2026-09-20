@@ -704,7 +704,7 @@ fn begin_pairing(
     endpoint: tauri::State<'_, ControlEndpoint>,
 ) -> Result<pairing::PairingSessionView, String> {
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
-    Ok(state.begin_pairing(&ip, endpoint.port))
+    Ok(state.begin_pairing_with_tailnet(&ip, endpoint.port, tailscale_ip().as_deref()))
 }
 
 #[tauri::command]
@@ -1255,6 +1255,21 @@ fn local_lan_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:80").ok()?;
     Some(sock.local_addr().ok()?.ip().to_string())
+}
+
+/// 이 호스트의 오버레이 네트워크(100.64.0.0/10 — Tailscale) 자기 주소.
+/// 같은 UDP connect 트릭으로 CGNAT 대역 라우트가 고르는 인터페이스 주소를
+/// 읽는데, 테일넷이 내려가 있으면 기본 라우트의 LAN 주소가 돌아오므로
+/// 결과가 100.64/10일 때만 채택한다. 연결 트릭은 패킷을 보내지 않는다.
+fn tailscale_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("100.100.100.100:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    let octets = match ip {
+        std::net::IpAddr::V4(v4) => v4.octets(),
+        std::net::IpAddr::V6(_) => return None,
+    };
+    (octets[0] == 100 && (64..=127).contains(&octets[1])).then(|| ip.to_string())
 }
 
 #[cfg(test)]

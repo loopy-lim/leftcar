@@ -284,7 +284,21 @@ impl PairingServer {
 
     /// Create a single-use offer and return its QR payload plus the 6-digit
     /// human verification code for the host UI.
+    ///
+    /// `tailscale_ip`는 선택적 테일넷 별칭(100.64/10)이다. 있으면 QR에 `ts`로
+    /// 싣는다 — 같은 페어링으로 LAN 밖에서도 같은 호스트에 접속하기 위함.
+    /// 없는 호스트는 필드를 생략하므로 구버전 뷰어도 v2 페이로드를 그대로
+    /// 읽는다.
     pub fn begin_pairing(&self, host_ip: &str, port: u16) -> PairingSessionView {
+        self.begin_pairing_with_tailnet(host_ip, port, None)
+    }
+
+    pub fn begin_pairing_with_tailnet(
+        &self,
+        host_ip: &str,
+        port: u16,
+        tailscale_ip: Option<&str>,
+    ) -> PairingSessionView {
         let mut inner = self.inner.lock().unwrap();
         // Replacing the QR must invalidate every older image immediately. A
         // screenshot of a superseded offer must not remain usable for 2 min.
@@ -314,15 +328,18 @@ impl PairingServer {
             .expect("secret exists right after begin_offer");
         // v2: `k` = 호스트 Ed25519 공개키(base64url 32B). 뷰어는 이 키를 핀해
         // 제어 평면 핸드셰이크의 ServerHello 서명을 검증한다(secure-channel).
-        let payload = json!({
+        let mut payload = json!({
             "v": 2,
             "id": offer.ephemeral_offer_id,
             "s": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0),
             "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.host_public_key),
             "h": host_ip,
             "p": port,
-        })
-        .to_string();
+        });
+        if let Some(ts) = tailscale_ip {
+            payload["ts"] = serde_json::Value::String(ts.to_string());
+        }
+        let payload = payload.to_string();
         drop(secret); // OfferSecret drops -> zeroized immediately
         let view = PairingSessionView {
             code: offer.human_verification_code.clone(),
@@ -1348,6 +1365,24 @@ mod tests {
             server.list_devices().is_empty(),
             "a failed token store must not register the device"
         );
+    }
+
+    #[test]
+    fn qr_payload_carries_optional_tailnet_alias() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FailingStore));
+        // 별칭이 없으면 `ts` 필드 자체를 생략한다 — 구버전 뷰어 호환.
+        let plain = server.begin_pairing("192.168.0.10", 7777);
+        let payload = serde_json::from_str::<serde_json::Value>(&plain.qr_payload).unwrap();
+        assert!(payload.get("ts").is_none());
+
+        let view =
+            server.begin_pairing_with_tailnet("192.168.0.10", 7777, Some("100.101.102.103"));
+        let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
+        assert_eq!(payload["ts"], "100.101.102.103");
+        // 나머지 v2 필드는 그대로다.
+        assert_eq!(payload["v"], 2);
+        assert_eq!(payload["h"], "192.168.0.10");
+        assert_eq!(payload["p"], 7777);
     }
 
     #[test]

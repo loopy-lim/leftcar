@@ -35,9 +35,10 @@ pub struct ExperimentSettings {
 }
 
 /// 승인 토글 성격의 호스트 설정. 개인정보·캡처에 닿는 토글은 모두 기본
-/// 꺼짐이다. 유일한 예외가 `wan_access`(외부 접속 허용)다 — 소유자 결정
-/// (2026-09-19)에 따라 기본 켜짐이며, 라우터 포트 매핑은 UPnP로 등록되고
-/// 종료 때 제거되며 토글로 즉시 끌 수 있다.
+/// 꺼짐이며 `wan_access`(외부 접속 허용)도 예외가 아니다(2026-09-20) —
+/// 공인 인터넷에 포트를 노출하는 행위라 기본은 꺼짐이고, 외부 접속의 정식
+/// 경로는 Tailscale 같은 오버레이 네트워크다. 켜면 라우터 포트 매핑이 UPnP로
+/// 등록되고 종료 때 제거되며 토글로 즉시 끌 수 있다.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostSettings {
     pub clipboard_share: bool,
@@ -69,7 +70,7 @@ impl Default for HostSettings {
             lock_on_disconnect: false,
             privacy_curtain: false,
             streaming_badge: false,
-            wan_access: true,
+            wan_access: false,
             language: HostLanguage::default(),
             experiment: ExperimentSettings::default(),
         }
@@ -137,7 +138,7 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
         wan_access: parsed
             .get("wanAccess")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true),
+            .unwrap_or(false),
         experiment: parsed
             .get("experiment")
             .and_then(|v| v.as_object())
@@ -419,26 +420,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_defaults_with_wan_access_on() {
+    fn missing_file_defaults_with_wan_access_off() {
         let path = temp_path("missing");
         let settings = load_or_default(Some(&path));
         assert!(!settings.file_share);
         assert!(!settings.clipboard_share);
         assert!(!settings.lock_on_disconnect);
         assert!(!settings.privacy_curtain);
-        // 유일한 기본 켜짐: 외부 접속 허용(소유자 결정, 2026-09-19).
-        assert!(settings.wan_access);
+        // 외부 접속은 전부 기본 꺼짐이다 — 공인 인터넷 노출(wanAccess)도
+        // 예외가 아니다(2026-09-20). 정식 외부 경로는 오버레이 네트워크다.
+        assert!(!settings.wan_access);
     }
 
     #[test]
     fn wan_access_toggle_persists_and_survives_reload() {
         let path = temp_path("wan");
         let shared = SharedSettings::load_or_default(Some(path.clone()));
-        assert!(shared.wan_access());
-        shared.set_wan_access(false).unwrap();
         assert!(!shared.wan_access());
+        shared.set_wan_access(true).unwrap();
+        assert!(shared.wan_access());
         let reloaded = load_or_default(Some(&path));
-        assert!(!reloaded.wan_access);
+        assert!(reloaded.wan_access);
         // 다른 필드는 따라 바뀌지 않는다.
         assert!(!reloaded.file_share);
         let _ = std::fs::remove_file(&path);

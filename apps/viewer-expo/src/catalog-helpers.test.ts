@@ -14,9 +14,27 @@ vi.mock("./session", () => ({
   isRequestContextCurrent: vi.fn(() => true),
 }));
 
-import { catalogErrorMessage, catalogMediaHost, requestWithReconnect, requestForCurrentSelection } from "./catalog-helpers";
+import { catalogErrorMessage, catalogMediaHost, isExternalRouteAddress, requestWithReconnect, requestForCurrentSelection } from "./catalog-helpers";
 import { bindRequestContext, captureRequestContext, controlHost, isRequestContextCurrent } from "./session";
 import { setCurrentLanguage } from "./language-store";
+
+describe("external route detection", () => {
+  it("treats tailnet and public addresses as external", () => {
+    expect(isExternalRouteAddress("100.80.133.120")).toBe(true);
+    expect(isExternalRouteAddress("mac.example.ts.net")).toBe(true);
+    expect(isExternalRouteAddress("203.0.113.9")).toBe(true);
+  });
+
+  it("treats LAN, loopback, and mDNS addresses as local", () => {
+    expect(isExternalRouteAddress("192.168.0.7")).toBe(false);
+    expect(isExternalRouteAddress("10.1.2.3")).toBe(false);
+    expect(isExternalRouteAddress("leftcar-host.local")).toBe(false);
+    expect(isExternalRouteAddress("localhost")).toBe(false);
+    expect(isExternalRouteAddress(undefined)).toBe(false);
+    expect(isExternalRouteAddress(null)).toBe(false);
+    expect(isExternalRouteAddress("")).toBe(false);
+  });
+});
 
 describe("catalog media route", () => {
   it("uses the connected numeric peer for MagicDNS and VPN-routed LAN control", () => {

@@ -8,18 +8,21 @@ import {
   StyleSheet,
   Text,
   View,
+  NativeModules,
   useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
+import type { StreamLauncher } from "../src/launch-stream";
 import {
   beginHostSelection,
   captureRequestContext,
-  connectHost,
+  connectHostWithFallback,
   controlClient,
   controlHost,
+  controlTarget,
   disconnectHost,
   isHostSelectionCurrent,
   isRequestContextCurrent,
@@ -42,11 +45,26 @@ import {
 } from "../src/control";
 import {
   getRecentHosts,
+  mergeAdvertisedRoutes,
+  resolveConnectCandidates,
   saveRecentHost,
   type RecentHostItem,
 } from "../src/recent-hosts";
 import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
+
+const streamLauncher = NativeModules.StreamLauncher as StreamLauncher | undefined;
+
+/**
+ * 접속 후보 계산에 쓰는 뷰어 자기 주소. 네이티브 모듈이 없거나 실패하면
+ * 빈 배열 — 후보 정렬은 저장 순서로만 이루어진다.
+ */
+async function localViewerAddresses(): Promise<string[]> {
+  const discovered = streamLauncher?.getLocalIpv4Addresses
+    ? await streamLauncher.getLocalIpv4Addresses().catch(() => [])
+    : [];
+  return discovered.filter((address) => typeof address === "string" && address.length > 0);
+}
 
 function openCatalog() {
   router.push("/catalog");
@@ -89,25 +107,37 @@ function RecentHostQuickConnect({
     const selection = beginHostSelection();
     let context: SessionRequestContext | null = null;
     try {
-      await connectHost(item.host, item.port, { selection });
+      // 대표 주소와 별칭(LAN·테일넷)을 지금 네트워크에 맞는 순서로 시도한다.
+      const connectedHost = await connectHostWithFallback(
+        resolveConnectCandidates(item, await localViewerAddresses()),
+        item.port,
+        { selection },
+      );
       if (!isHostSelectionCurrent(selection)) return;
       context = captureRequestContext();
       if (!context || !isRequestContextCurrent(context)) return;
+      let catalog: CatalogView;
       try {
-        await context.client.request<CatalogView>("getCatalog");
+        catalog = await context.client.request<CatalogView>("getCatalog");
       } catch (e) {
         if (isUnauthorizedError(e)) {
           await handleUnauthorized({
             context,
             markStale: true,
-            navigate: { endpoint: formatHostEndpoint(item.host, item.port) },
+            navigate: { endpoint: formatHostEndpoint(connectedHost, item.port) },
           });
           return;
         }
         throw e;
       }
       if (!isRequestContextCurrent(context)) return;
-      void saveRecentHost(item.host, item.port, item.name);
+      // 호스트가 광고한 다른 경로(테일넷·LAN)를 같은 엔트리에 병합한다 —
+      // 다음 접속부터 후보 자동 선택이 동작한다.
+      void mergeAdvertisedRoutes(
+        controlTarget() ?? { host: connectedHost, port: item.port },
+        catalog,
+      ).catch(() => undefined);
+      void saveRecentHost(connectedHost, item.port, item.name);
       router.push("/catalog");
     } catch (e) {
       if (!isHostSelectionCurrent(selection)) return;
@@ -197,13 +227,20 @@ export default function Hub() {
           await reconnectHost(retained);
         } else {
           const selection = beginHostSelection();
-          await connectHost(target.host, target.port, { selection });
+          // 네트워크가 바뀌었을 수 있으므로(LAN↔테일넷) 후보 전부를
+          // 지금 네트워크 순위로 다시 시도한다.
+          await connectHostWithFallback(
+            resolveConnectCandidates(target, await localViewerAddresses()),
+            target.port,
+            { selection },
+          );
           if (!isHostSelectionCurrent(selection)) return;
         }
         context = captureRequestContext();
         if (!context || !isRequestContextCurrent(context)) return;
+        let catalog: CatalogView;
         try {
-          await context.client.request<CatalogView>("getCatalog");
+          catalog = await context.client.request<CatalogView>("getCatalog");
         } catch (e) {
           if (isUnauthorizedError(e)) {
             await handleUnauthorized({ context, markStale: true, beforeNavigate: checkConnection });
@@ -212,7 +249,11 @@ export default function Hub() {
           throw e;
         }
         if (!isRequestContextCurrent(context)) return;
-        void saveRecentHost(target.host, target.port, target.name);
+        void mergeAdvertisedRoutes(
+          controlTarget() ?? { host: target.host, port: target.port },
+          catalog,
+        ).catch(() => undefined);
+        void saveRecentHost(controlTarget()?.host ?? target.host, target.port, target.name);
         checkConnection();
       } catch {
         if (context && disconnectHost(context)) checkConnection();

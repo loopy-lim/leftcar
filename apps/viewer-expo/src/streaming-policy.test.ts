@@ -270,3 +270,40 @@ describe("streamingPriorityFromProfileId", () => {
     expect(STREAMING_TARGET_MAX_WIDTH).toBe(5120);
   });
 });
+
+describe("resolveInitialStreamTarget external route", () => {
+  const display = { width: 3840, height: 2160 };
+
+  it("caps the start at the 1080p short side on tailnet/public routes", () => {
+    const responsive = resolveInitialStreamTarget(display, "responsive", undefined, {
+      externalRoute: true,
+    });
+    expect(responsive).toEqual({ width: 1920, height: 1080, fps: STREAM_TARGET_FPS });
+    // clarity 역시 같은 상한에서 시작한다 — 최대(4K)는 그대로 적응의 상승 목표다.
+    const clarity = resolveInitialStreamTarget(display, "clarity", undefined, {
+      externalRoute: true,
+    });
+    expect(clarity.height).toBe(1080);
+  });
+
+  it("never widens a manual maximum but keeps the external clamp", () => {
+    const maximum = { width: 1920, height: 1080 };
+    expect(
+      resolveInitialStreamTarget(display, "responsive", maximum, { externalRoute: true }).height,
+    ).toBe(1080);
+    const small = { width: 1280, height: 720 };
+    expect(
+      resolveInitialStreamTarget(display, "responsive", small, { externalRoute: true }).height,
+    ).toBe(720);
+  });
+
+  it("keeps the LAN start unchanged without the flag", () => {
+    expect(resolveInitialStreamTarget(display, "responsive").height).toBe(
+      RESPONSIVE_STREAM_SHORT_SIDE,
+    );
+    expect(
+      resolveInitialStreamTarget(display, "responsive", undefined, { externalRoute: false })
+        .height,
+    ).toBe(RESPONSIVE_STREAM_SHORT_SIDE);
+  });
+});

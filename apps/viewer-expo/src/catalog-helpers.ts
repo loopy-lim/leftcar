@@ -35,7 +35,7 @@ export function catalogDisplayHost(catalogHost: string): string {
   return catalogHost.split(":")[0] ?? "";
 }
 
-function isPrivateOrLocal(host: string): boolean {
+export function isPrivateOrLocal(host: string): boolean {
   const normalized = host.toLowerCase().replace(/\.$/, "");
   if (normalized === "localhost" || normalized.endsWith(".local")) return true;
   const octets = normalized.split(".").map(Number);
@@ -52,7 +52,7 @@ function isPrivateOrLocal(host: string): boolean {
   );
 }
 
-function isTailscale(host: string): boolean {
+export function isTailscale(host: string): boolean {
   const normalized = host.toLowerCase().replace(/\.$/, "");
   if (normalized.endsWith(".ts.net")) return true;
   const octets = normalized.split(".").map(Number);
@@ -60,6 +60,17 @@ function isTailscale(host: string): boolean {
     return false;
   }
   return octets[0] === 100 && octets[1]! >= 64 && octets[1]! <= 127;
+}
+
+/**
+ * LAN 밖 경로(테일넷·공인 주소) 여부. 외부 경로는 대역폭·지연 예산이 다르므로
+ * 시작 스트림 타깃을 낮추는 근거가 된다. mDNS(.local)는 LAN이다.
+ */
+export function isExternalRouteAddress(host?: string | null): boolean {
+  if (!host) return false;
+  const normalized = host.trim().toLowerCase().replace(/\.$/, "");
+  if (!normalized || normalized === "localhost" || normalized.endsWith(".local")) return false;
+  return isTailscale(normalized) || !isPrivateOrLocal(normalized);
 }
 
 export function catalogMediaHost(

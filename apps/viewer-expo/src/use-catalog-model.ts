@@ -26,6 +26,7 @@ import {
   allocPorts,
   controlClient,
   controlHost,
+  controlTarget,
   disconnectHost,
   reconnectHost,
   requestContextForError,
@@ -54,10 +55,12 @@ import {
 import {
   catalogMediaHost,
   catalogErrorMessage,
+  isExternalRouteAddress,
   isHubDisplay,
   requestWithReconnect,
   requestForCurrentSelection,
 } from "./catalog-helpers";
+import { mergeAdvertisedRoutes } from "./recent-hosts";
 import { resolveStreamResolution } from "./stream-resolution";
 import {
   streamTargetAfterResize,
@@ -253,6 +256,27 @@ export function useCatalogModel() {
     captureRequestContext()?.client.remoteAddress,
     catalogQuery.data?.publicMediaEndpoint,
   );
+  // 외부 경로(테일넷·공인 주소)면 시작 타깃을 1080p로 낮춘다 — 설정 없는
+  // 자동 완화이고, 위로 올라가는 것은 적응 정책의 몫이다.
+  const externalMediaRoute = isExternalRouteAddress(mediaHost);
+
+  // 호스트가 광고하는 다른 경로(테일넷·LAN)를 같은 호스트 엔트리에 병합한다 —
+  // 집에서 한 번 연결하면 어느 네트워크에서든 접속 후보가 생긴다. 실제 병합은
+  // 공용 헬퍼가 담당하고, 여기는 카탈로그 화면 백스톱이다.
+  const advertisedRoutes = useMemo(
+    () => ({
+      tailscaleHost: catalogQuery.data?.tailscaleHost,
+      mediaHost: catalogQuery.data?.mediaHost,
+    }),
+    [catalogQuery.data?.tailscaleHost, catalogQuery.data?.mediaHost],
+  );
+  useEffect(() => {
+    const target = controlTarget();
+    if (!target) return;
+    void mergeAdvertisedRoutes(target, advertisedRoutes).catch(() => {
+      // 별칭 저장 실패는 조용히 넘긴다 — 다음 카탈로그에서 다시 시도한다.
+    });
+  }, [advertisedRoutes]);
   const selectedProfile =
     STREAM_PROFILES.find((profile) => profile.id === preferences.profileId) ??
     STREAM_PROFILES.find((profile) => profile.id === "balanced") ??
@@ -626,6 +650,7 @@ export function useCatalogModel() {
           display,
           streamingPriority,
           maximumTarget,
+          { externalRoute: externalMediaRoute },
         );
         const requestedTarget = {
           width: initialTarget.width,
@@ -764,6 +789,7 @@ export function useCatalogModel() {
       effectiveUdpStability,
       host,
       mediaHost,
+      externalMediaRoute,
       preferences.profileId,
       preferences.showFps,
       preferences.localCursor,
@@ -849,6 +875,7 @@ export function useCatalogModel() {
           display,
           streamingPriority,
           maximumTarget,
+          { externalRoute: externalMediaRoute },
         );
         const target = {
           width: initialTarget.width,
@@ -898,6 +925,7 @@ export function useCatalogModel() {
       }
     },
     [
+      externalMediaRoute,
       preferences.profileId,
       reconfigureActiveStream,
       replaceStreamState,
@@ -945,6 +973,7 @@ export function useCatalogModel() {
     clipboardShare,
     profileId: preferences.profileId,
     streamingPriority,
+    externalMediaRoute,
     showFps: preferences.showFps,
     localCursor: preferences.localCursor,
     localAudio: preferences.localAudio,

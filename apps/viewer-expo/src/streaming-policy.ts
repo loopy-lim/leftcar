@@ -31,6 +31,13 @@ export const RESPONSIVE_STREAM_SHORT_SIDE = 1_440;
 /** Short-side anchor of the clarity 4K target (3840×2160 at 16:9). */
 export const CLARITY_STREAM_SHORT_SIDE = 2_160;
 
+/**
+ * Starting short-side cap when the route leaves the LAN (tailnet / public).
+ * Outside links start conservatively at 1080p and the adaptive policy still
+ * owns the upshift toward the selected maximum.
+ */
+export const EXTERNAL_ROUTE_START_SHORT_SIDE = 1_080;
+
 export interface StreamingTargetSource {
   width: number;
   height: number;
@@ -51,16 +58,19 @@ export function isStreamingPriority(value: unknown): value is StreamingPriority 
  * 2560×1440 (responsive) or 3840×2160 (clarity); supported 32:9 sources reach
  * 5120×1440; portrait sources get the mirrored equivalents. Dimensions are
  * even, pixels stay inside the 4K budget, and smaller sources are never
- * upscaled just to reach a labeled target.
+ * upscaled just to reach a labeled target. `shortSideOverride` replaces the
+ * priority anchor (used by the external-route start cap).
  */
 export function resolveStreamingTarget(
   source: StreamingTargetSource,
   priority: StreamingPriority,
+  shortSideOverride?: number,
 ): StreamingTarget {
   const shortSide =
-    priority === "clarity"
+    shortSideOverride ??
+    (priority === "clarity"
       ? CLARITY_STREAM_SHORT_SIDE
-      : RESPONSIVE_STREAM_SHORT_SIDE;
+      : RESPONSIVE_STREAM_SHORT_SIDE);
   const fitted = fitStreamResolution(source as StreamResolutionSource, {
     maxWidth: STREAMING_TARGET_MAX_WIDTH,
     maxHeight: shortSide,
@@ -75,18 +85,27 @@ export function resolveStreamingTarget(
  * (fitted manual profile or the source itself) only ever shrinks the start —
  * it never widens it. The maximum stays the adaptive policy's upshift goal
  * and is deliberately independent from this initial target.
+ *
+ * `options.externalRoute` caps the start at 1080p short side: on tailnet or
+ * public routes the first seconds must survive a narrow link, and recovering
+ * upward is the adaptive policy's job. It changes the start only — never the
+ * user's profile maximum.
  */
 export function resolveInitialStreamTarget(
   source: StreamingTargetSource,
   priority: StreamingPriority,
   maximum?: StreamingTargetSource,
+  options?: { externalRoute?: boolean },
 ): StreamingTarget {
-  if (!maximum) return resolveStreamingTarget(source, priority);
-  const maxLongSide = Math.max(maximum.width, maximum.height);
-  const maxShortSide = Math.min(maximum.width, maximum.height);
-  const anchor = priority === "clarity"
+  const priorityAnchor = priority === "clarity"
     ? CLARITY_STREAM_SHORT_SIDE
     : RESPONSIVE_STREAM_SHORT_SIDE;
+  const anchor = options?.externalRoute
+    ? Math.min(priorityAnchor, EXTERNAL_ROUTE_START_SHORT_SIDE)
+    : priorityAnchor;
+  if (!maximum) return resolveStreamingTarget(source, priority, anchor);
+  const maxLongSide = Math.max(maximum.width, maximum.height);
+  const maxShortSide = Math.min(maximum.width, maximum.height);
   const fitted = fitStreamResolution(source as StreamResolutionSource, {
     maxWidth: Math.min(STREAMING_TARGET_MAX_WIDTH, maxLongSide),
     maxHeight: Math.min(anchor, maxShortSide),

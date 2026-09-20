@@ -738,6 +738,8 @@ interface DisplayListItemProps {
   hasActiveStream: boolean;
   profileSelection: ViewerProfileSelection;
   streamingPriority: StreamingPriority;
+  /** LAN 밖 경로(테일넷·공인) — 시작 크기 표시가 실제 시작과 같아야 한다. */
+  externalRoute: boolean;
   onOpen: (display: DisplayInfo) => void;
   onSwitch: (display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
@@ -753,6 +755,7 @@ function DisplayListItem({
   hasActiveStream,
   profileSelection,
   streamingPriority,
+  externalRoute,
   onOpen,
   onSwitch,
   styles,
@@ -769,6 +772,7 @@ function DisplayListItem({
     display,
     streamingPriority,
     resolveStreamMaximum(display, profileSelection),
+    { externalRoute },
   );
   const isBusy = isLaunching || isSwitching;
   const isItemDisabled = disabled || isBusy || isActive;
@@ -1157,6 +1161,7 @@ export default function Catalog() {
           hasActiveStream={activeStream !== null}
           profileSelection={model.profileId}
           streamingPriority={model.streamingPriority}
+          externalRoute={model.externalMediaRoute}
           onOpen={model.openDisplay}
           onSwitch={handleSwitchDisplay}
           styles={styles}
@@ -1168,6 +1173,7 @@ export default function Catalog() {
       activeStream,
       colors,
       handleSwitchDisplay,
+      model.externalMediaRoute,
       model.launchingIndex,
       model.openDisplay,
       model.profileId,

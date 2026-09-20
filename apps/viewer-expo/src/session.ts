@@ -250,6 +250,33 @@ export async function connectHost(
   return c;
 }
 
+/**
+ * 후보 주소를 순서대로 시도해 처음 열리는 제어 소켓을 반환한다. 같은 호스트의
+ * LAN 대표 주소와 테일넷 별칭을 하나의 엔트리로 들고 다니기 때문에, 집·밖
+ * 어디서든 호출부는 후보 목록만 넘기면 된다. 취소(선택 교체·화면 종료)는
+ * 즉시 위로 던지고, 순수 네트워크 실패만 다음 후보로 넘어간다. 성공 시 실제로
+ * 연결된 주소를 돌려준다 — 저장·표시가 이 주소 기준으로 정렬된다.
+ */
+export async function connectHostWithFallback(
+  hosts: readonly string[],
+  port = DEFAULT_CONTROL_PORT,
+  options: ConnectHostOptions = {},
+): Promise<string> {
+  let lastError: unknown = new LocalizedError("trustedHostError");
+  for (const host of hosts) {
+    try {
+      await connectHost(host, port, options);
+      return host;
+    } catch (error) {
+      // 사용자가 이미 다른 곳으로 떠났다면 남은 후보를 시도하지 않는다.
+      if (options.signal?.aborted) throw error;
+      if (options.selection && !isHostSelectionCurrent(options.selection)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 /** Reopen the control socket after the host app was restarted. */
 export async function reconnectHost(
   origin: SessionRequestContext | null = captureRequestContext(),

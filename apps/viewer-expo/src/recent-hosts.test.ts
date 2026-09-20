@@ -16,12 +16,14 @@ vi.mock("expo-secure-store", () => {
 
 import * as SecureStore from "expo-secure-store";
 import {
+  classifyHostAddress,
   clearRecentHosts,
   filterOutHost,
   getRecentHosts,
   MAX_RECENT_HOSTS,
   parseRecentHosts,
   removeRecentHost,
+  resolveConnectCandidates,
   saveRecentHost,
   saveRecentHostStrict,
   updateRecentHostsList,
@@ -131,5 +133,89 @@ describe("recent-hosts module", () => {
 
     await clearRecentHosts();
     expect(await getRecentHosts()).toEqual([]);
+  });
+
+  it("keeps one canonical entry when connecting through a tailnet alias", () => {
+    const list: RecentHostItem[] = [
+      {
+        host: "192.168.0.7",
+        port: 7777,
+        name: "Home Mac",
+        aliases: ["100.80.133.120"],
+        lastConnected: 1000,
+      },
+    ];
+    // 별칭(테일넷) 주소로 접속해 성공 — 엔트리가 쪼개지지 않고 본체가 갱신된다.
+    const updated = updateRecentHostsList(list, "100.80.133.120", 7777, undefined, 2000);
+    expect(updated).toHaveLength(1);
+    expect(updated[0]).toEqual({
+      host: "192.168.0.7",
+      port: 7777,
+      name: "Home Mac",
+      aliases: ["100.80.133.120"],
+      lastConnected: 2000,
+    });
+  });
+
+  it("merges discovered aliases into the existing entry without duplicating", () => {
+    const list: RecentHostItem[] = [
+      { host: "192.168.0.7", port: 7777, lastConnected: 1000 },
+    ];
+    const updated = updateRecentHostsList(
+      list,
+      "192.168.0.7",
+      7777,
+      undefined,
+      2000,
+      undefined,
+      ["100.80.133.120"],
+    );
+    expect(updated).toHaveLength(1);
+    expect(updated[0].host).toBe("192.168.0.7");
+    expect(updated[0].aliases).toEqual(["100.80.133.120"]);
+  });
+
+  it("drops malformed aliases when parsing persisted entries", () => {
+    const raw = JSON.stringify([
+      {
+        host: "192.168.0.7",
+        port: 7777,
+        aliases: ["100.80.133.120", "not a host!", 42],
+        lastConnected: 1000,
+      },
+    ]);
+    expect(parseRecentHosts(raw)).toEqual([]);
+  });
+
+  it("orders connect candidates by current network reachability", () => {
+    const item: RecentHostItem = {
+      host: "100.80.133.120",
+      port: 7777,
+      aliases: ["192.168.0.7", "203.0.113.9", "leftcar-host.local"],
+      lastConnected: 1000,
+    };
+    // 같은 /24 LAN → 테일넷(어디서든 도달) → 낯선 사설망/mDNS → 공인.
+    expect(resolveConnectCandidates(item, ["192.168.0.42"])).toEqual([
+      "192.168.0.7",
+      "100.80.133.120",
+      "leftcar-host.local",
+      "203.0.113.9",
+    ]);
+    // 집 밖(다른 서브넷)에서는 테일넷이 도달 불가능한 사설망 주소보다 앞선다.
+    expect(resolveConnectCandidates(item, ["10.20.30.40"])).toEqual([
+      "100.80.133.120",
+      "192.168.0.7",
+      "leftcar-host.local",
+      "203.0.113.9",
+    ]);
+  });
+
+  it("classifies overlay, lan, and wan addresses", () => {
+    expect(classifyHostAddress("100.64.0.1")).toBe("overlay");
+    expect(classifyHostAddress("mac.example.ts.net")).toBe("overlay");
+    expect(classifyHostAddress("192.168.0.7", ["192.168.0.9"])).toBe("sameLan");
+    expect(classifyHostAddress("192.168.0.7", ["10.0.0.9"])).toBe("lan");
+    expect(classifyHostAddress("leftcar-host.local")).toBe("lan");
+    expect(classifyHostAddress("203.0.113.9")).toBe("wan");
   });
 });

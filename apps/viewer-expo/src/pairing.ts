@@ -25,6 +25,12 @@ export interface QrPayload {
   hostKey: string;
   host: string;
   port: number;
+  /**
+   * 호스트의 테일넷 별칭(100.64/10). QR 생성 시점에 테일넷 경로가 있으면
+   * 호스트가 싣는다 — LAN 밖 스캔에서도 같은 페어링으로 접속하기 위함.
+   * 구버전 호스트의 QR에는 없다.
+   */
+  ts?: string;
 }
 
 export interface HostEndpoint {
@@ -120,6 +126,7 @@ interface RawQrPayload {
   k?: unknown;
   h?: unknown;
   p?: unknown;
+  ts?: unknown;
 }
 
 const OFFER_ID_PATTERN =
@@ -200,9 +207,10 @@ export function canSubmitPairingCode(
 }
 
 /**
- * `{"v":2,"id":..,"s":..,"k":..,"h":..,"p":..}` → QrPayload; null on any
- * mismatch. v2부터 `k`(호스트 공개키)가 필수다 — 핀 없는 연결은 중간자를
- * 감지할 수 없으므로 QR이 핀의 원천이다.
+ * `{"v":2,"id":..,"s":..,"k":..,"h":..,"p":..[,"ts":..]}` → QrPayload; null on
+ * any mismatch. v2부터 `k`(호스트 공개키)가 필수다 — 핀 없는 연결은 중간자를
+ * 감지할 수 없으므로 QR이 핀의 원천이다. `ts`는 선택적 테일넷 별칭이며, 있으면
+ * 신뢰 가능한 호스트 문자열이어야 한다.
  */
 export function parseQrPayload(text: string): QrPayload | null {
   if (!text || typeof text !== "string") return null;
@@ -229,7 +237,17 @@ export function parseQrPayload(text: string): QrPayload | null {
   ) {
     return null;
   }
-  return { id: raw.id, secret: raw.s, hostKey: raw.k, host: raw.h, port: raw.p };
+  if (raw.ts !== undefined && (typeof raw.ts !== "string" || !isTrustedHost(raw.ts))) {
+    return null;
+  }
+  return {
+    id: raw.id,
+    secret: raw.s,
+    hostKey: raw.k,
+    host: raw.h,
+    port: raw.p,
+    ...(raw.ts !== undefined ? { ts: raw.ts } : {}),
+  };
 }
 
 /** Stable per-install device label shown in the host's paired-device list. */

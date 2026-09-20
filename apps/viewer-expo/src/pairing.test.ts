@@ -137,6 +137,23 @@ describe("parseQrPayload", () => {
     });
   });
 
+  it("accepts an optional tailnet alias and rejects a malformed one", () => {
+    const withAlias =
+      `{"v":2,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","k":"${HOST_KEY}","h":"192.168.1.5","p":7777,"ts":"100.80.133.120"}`;
+    expect(parseQrPayload(withAlias)).toEqual({
+      id: OFFER_ID,
+      secret: OFFER_SECRET,
+      hostKey: HOST_KEY,
+      host: "192.168.1.5",
+      port: 7777,
+      ts: "100.80.133.120",
+    });
+    const badAlias = withAlias.replace("100.80.133.120", "not a host");
+    expect(parseQrPayload(badAlias)).toBeNull();
+    const tsNetAlias = withAlias.replace("100.80.133.120", "mac.example.ts.net");
+    expect(parseQrPayload(tsNetAlias)?.ts).toBe("mac.example.ts.net");
+  });
+
   it("never trusts a code embedded in a QR payload", () => {
     const qrWithCode =
       `{"v":2,"id":"${OFFER_ID}","s":"${OFFER_SECRET}","k":"${HOST_KEY}","h":"192.168.1.5","p":7777,"c":"123456"}`;

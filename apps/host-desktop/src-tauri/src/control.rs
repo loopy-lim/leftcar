@@ -2284,7 +2284,9 @@ impl ControlServer {
                     return err("no LAN interface found");
                 };
                 let port = self.control_port.load(Ordering::Acquire);
-                ok(self.pairing.begin_pairing(&host_ip, port))
+                ok(self
+                    .pairing
+                    .begin_pairing_with_tailnet(&host_ip, port, crate::tailscale_ip().as_deref()))
             }
             "pair" => {
                 #[derive(serde::Deserialize)]
@@ -2359,6 +2361,7 @@ impl ControlServer {
                             .is_ok_and(|address| address.is_private())
                     }),
                     public_media_endpoint: self.public_media_endpoint(),
+                    tailscale_host: crate::tailscale_ip(),
                     window_size: request_authorization.and_then(|auth| {
                         self.window_metrics
                             .get()

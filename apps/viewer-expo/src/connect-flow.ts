@@ -16,11 +16,13 @@ import {
 import {
   captureRequestContext,
   connectHost,
+  connectHostWithFallback,
   controlTarget,
   disconnectHost,
   isRequestContextCurrent,
   type SessionRequestContext,
 } from "./session";
+import { saveRecentHost } from "./recent-hosts";
 
 /**
  * 401(토큰 만료) 공통 반응: 토큰 폐기 → 연결 해제 → 선택적 부가 처리 →
@@ -139,9 +141,24 @@ export async function runQrPairingWorkflow(options: {
       if (result.kind !== "approved") throw new Error("pairing rejected");
     },
     connect: async () => {
-      await connectHost(options.payload.host, options.payload.port, {
-        signal: options.run.attempt.signal,
-      });
+      // QR이 테일넷 별칭을 싣고 있으면 LAN 주소 다음 폴백으로 시도한다 —
+      // 스캔 위치가 집 안이 아니어도 같은 페어링이 끝난다.
+      await connectHostWithFallback(
+        [options.payload.host, ...(options.payload.ts ? [options.payload.ts] : [])],
+        options.payload.port,
+        { signal: options.run.attempt.signal },
+      );
+      if (options.payload.ts) {
+        // 핀 저장 경로는 대표 주소의 엔트리만 만들므로, 테일넷 경로를 같은
+        // 엔트리의 별칭으로 붙인다. 저장 실패가 페어링을 깨지는 않는다.
+        await saveRecentHost(
+          options.payload.host,
+          options.payload.port,
+          undefined,
+          undefined,
+          [options.payload.ts],
+        ).catch(() => undefined);
+      }
     },
     navigate: options.navigate,
   });

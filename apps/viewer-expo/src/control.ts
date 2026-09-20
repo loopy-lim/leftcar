@@ -58,6 +58,12 @@ export interface CatalogView {
   captureBackends: CaptureBackendInfo[];
   mediaHost?: string | null;
   publicMediaEndpoint?: string | null;
+  /**
+   * 호스트의 테일넷 자기 주소(100.64/10). 테일넷 인터페이스가 살아 있을 때만
+   * 온다 — 뷰어는 이를 같은 호스트 엔트리의 별칭으로 저장해 LAN 밖에서도
+   * 접속할 수 있게 한다. 구버전 호스트는 필드를 생략한다.
+   */
+  tailscaleHost?: string | null;
   displays: DisplayInfo[];
   encoderExperiments?: unknown;
   udpStabilityCapabilities?: unknown;
