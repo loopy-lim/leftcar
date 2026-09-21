@@ -34,13 +34,13 @@ private func projectedCandidates(_ registry: [UInt32: CaptureSession]) -> [Syste
     }
 }
 
-/// Viewer keys whose audio plane is muted by an SNDOFF command. State is
+/// Viewer keys whose audio plane was enabled by an explicit SNDON. State is
 /// keyed by viewer (not session) because every session aimed at one device
 /// shares a single audio plane. The viewer re-asserts its request once per
 /// second, so a datagram lost after a toggle or a host restart heals without
-/// an ACK plane, and the set needs no expiry: a stale key is harmless while
-/// no live session carries it.
-private var systemAudioMutedKeys: Set<String> = []
+/// an ACK plane. A fresh viewer stays silent until that opt-in arrives;
+/// retiring its final session removes the opt-in for the next lifetime.
+private var systemAudioEnabledKeys: Set<String> = []
 private var systemAudioOpusKeys: Set<String> = []
 private let systemAudioMuteLock = NSLock()
 
@@ -48,7 +48,7 @@ private let systemAudioMuteLock = NSLock()
 func systemAudioDeliveryEnabled(forKey key: String) -> Bool {
     systemAudioMuteLock.lock()
     defer { systemAudioMuteLock.unlock() }
-    return !systemAudioMutedKeys.contains(key)
+    return systemAudioEnabledKeys.contains(key)
 }
 
 func systemAudioOpusPreferred(forKey key: String) -> Bool {
@@ -71,8 +71,8 @@ private func setSystemAudioOpusPreferred(_ opus: Bool, viewerKey: String) {
 func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: String) {
     systemAudioMuteLock.lock()
     let changed = enabled
-        ? systemAudioMutedKeys.remove(viewerKey) != nil
-        : systemAudioMutedKeys.insert(viewerKey).inserted
+        ? systemAudioEnabledKeys.insert(viewerKey).inserted
+        : systemAudioEnabledKeys.remove(viewerKey) != nil
     systemAudioMuteLock.unlock()
     guard changed else { return }
     NSLog("Leftcar system audio muted=%d viewerKey=%@", enabled ? 0 : 1, viewerKey)
@@ -83,7 +83,7 @@ func setSystemAudioDeliveryEnabled(_ enabled: Bool, viewerKey: String) {
 }
 
 /// True only while a session may capture: it must hold the viewer's audio
-/// plane and the viewer must not have muted it.
+/// plane and the viewer must have explicitly enabled it.
 func shouldCaptureSystemAudio(owner: Bool, viewerKey: String) -> Bool {
     benchmarkSystemAudioAllowed() && owner && systemAudioDeliveryEnabled(forKey: viewerKey)
 }
@@ -177,10 +177,10 @@ func transferSystemAudioOwnership(afterRemoving removed: CaptureSession) {
         return reg[handle]
     }
     guard let successor else {
-        // A future legacy peer at this address has not negotiated Opus.
-        // Preserve preference only while a surviving current owner exists.
+        // A future lifetime must opt in again and negotiate its codec.
+        // Preserve preferences only while a surviving current owner exists.
         systemAudioMuteLock.lock()
-        systemAudioMutedKeys.remove(key)
+        systemAudioEnabledKeys.remove(key)
         systemAudioOpusKeys.remove(key)
         systemAudioMuteLock.unlock()
         return

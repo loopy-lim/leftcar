@@ -36,16 +36,17 @@ internal fun createStreamSurfaces(
     splitVertical: Boolean,
     callback: SurfaceHolder.Callback,
     pointerHandler: (View, android.view.MotionEvent) -> Boolean,
+    capturedPointerHandler: (View, android.view.MotionEvent) -> Boolean,
 ): StreamSurfaces {
     fun surface(): SurfaceView = SurfaceView(activity).also {
-        configureSurface(it, activity, callback, pointerHandler)
+        configureSurface(it, activity, callback, pointerHandler, capturedPointerHandler)
     }
 
     if (!splitVertical) {
         val left = AspectRatioSurfaceView(activity).apply {
             setVideoSize(sourceWidth, sourceHeight)
         }
-        configureSurface(left, activity, callback, pointerHandler)
+        configureSurface(left, activity, callback, pointerHandler, capturedPointerHandler)
         val root = FrameLayout(activity).apply {
             setBackgroundColor(Color.BLACK)
             addView(
@@ -99,13 +100,17 @@ private fun configureSurface(
     activity: Activity,
     callback: SurfaceHolder.Callback,
     pointerHandler: (View, android.view.MotionEvent) -> Boolean,
+    capturedPointerHandler: (View, android.view.MotionEvent) -> Boolean,
 ) {
     surface.setBackgroundColor(Color.BLACK)
     surface.isFocusable = true
     surface.isFocusableInTouchMode = true
     surface.setZOrderOnTop(true)
-    surface.pointerIcon = PointerIcon.getSystemIcon(activity, PointerIcon.TYPE_NULL)
+    surface.pointerIcon = PointerIcon.getSystemIcon(activity, PointerIcon.TYPE_ARROW)
     surface.setOnGenericMotionListener(pointerHandler)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        surface.setOnCapturedPointerListener(capturedPointerHandler)
+    }
     surface.setOnTouchListener { view, event ->
         if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) view.requestFocus()
         pointerHandler(view, event)

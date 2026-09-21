@@ -1,0 +1,508 @@
+{
+  "schema": 1,
+  "kind": "completion-followup-validation-index",
+  "observedAt": "2026-09-13T14:59:08.038950+00:00",
+  "completedScope": "Local implementation, independent review, automated verification and exact internal Host/APK preparation. Build manifests remain the artifact contract.",
+  "branch": "codex/completion-followup",
+  "candidateSource": {
+    "commit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+    "sha256": "d51d64d54053ac0e1aa0c7d47c89b8f3815288ce2669cc262a835d2312bce248",
+    "inputs": 890,
+    "cleanAtBuild": true,
+    "sourceManifestPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/source-snapshot.json",
+    "sourceManifestFileSha256": "ef0ec9a6b477ebaace90e6dc9721e31c48f9b967ebf767194e28ee3cd482d17f"
+  },
+  "localImplementationCommits": [
+    {
+      "task": 1,
+      "commit": "c2956bac7628d5dd16e69a7fdc740eed89abbc3f",
+      "subject": "fix(viewer): 설정 저장과 화면 종료 시 쓰기 순서 보장",
+      "files": [
+        "apps/viewer-expo/app/catalog.tsx",
+        "apps/viewer-expo/src/clipboard-sync.test.ts",
+        "apps/viewer-expo/src/clipboard-sync.ts",
+        "apps/viewer-expo/src/preference-persistence.test.ts",
+        "apps/viewer-expo/src/preference-persistence.ts",
+        "apps/viewer-expo/src/use-catalog-model.ts",
+        "apps/viewer-expo/src/use-catalog-preferences.ts",
+        "apps/viewer-expo/src/use-preference-persistence.ts",
+        "apps/viewer-expo/src/viewer-preferences.test.ts",
+        "apps/viewer-expo/src/viewer-preferences.ts",
+        "packages/ui-tokens/src/i18n.ts"
+      ]
+    },
+    {
+      "task": 2,
+      "commit": "c94594a4b7b8197e905f5e4286a53acef21e1798",
+      "subject": "fix(usb): AOAP 프록시 종료와 채널 소유권 정리",
+      "files": [
+        "apps/host-desktop/src-tauri/src/aoap.rs",
+        "apps/host-desktop/src-tauri/src/aoap_media.rs",
+        "apps/host-desktop/src-tauri/src/aoap_proxy.rs",
+        "apps/host-desktop/src-tauri/src/aoap_proxy_lifecycle.rs",
+        "apps/host-desktop/src-tauri/src/aoap_proxy_tests.rs"
+      ]
+    },
+    {
+      "task": 3,
+      "commit": "bf07088171ddd15e061eea543060b6493f1265fe",
+      "subject": "fix(security): 감사 로그 최소화와 Android 백업 권한 정리",
+      "files": [
+        "apps/host-desktop/src-tauri/src/audit.rs",
+        "apps/host-desktop/src-tauri/src/control.rs",
+        "apps/viewer-expo/android/app/src/main/AndroidManifest.xml",
+        "apps/viewer-expo/android/app/src/main/res/xml/secure_store_backup_rules.xml",
+        "apps/viewer-expo/android/app/src/main/res/xml/secure_store_data_extraction_rules.xml",
+        "apps/viewer-expo/android/app/src/release/AndroidManifest.xml",
+        "apps/viewer-expo/app.config.ts",
+        "docs/07-security-privacy.md",
+        "docs/platform-permissions-audit.md"
+      ]
+    },
+    {
+      "task": 4,
+      "commit": "44d66cd76ad4873317c4ddad1bf92755552a01c5",
+      "subject": "feat(tooling): 릴리스 입력과 동일 소스 검증 추가",
+      "files": [
+        ".github/workflows/ci.yml",
+        "apps/viewer-android/package.json",
+        "apps/viewer-expo/android/gradle/wrapper/gradle-wrapper.properties",
+        "apps/viewer-expo/src/control.ts",
+        "bun.lock",
+        "docs/research/2026-09-13-dependency-readiness.md",
+        "docs/superpowers/evidence/2026-09-13-actions-pins.json",
+        "docs/superpowers/evidence/2026-09-13-dependency-readiness.json",
+        "package.json",
+        "tools/build.mjs",
+        "tools/fixtures/release-gradle-runtime.txt",
+        "tools/perf-matrix/collect.mjs",
+        "tools/release-dependencies.mjs",
+        "tools/release-gradle.mjs",
+        "tools/release-gradle.test.mjs",
+        "tools/release-inputs.mjs",
+        "tools/release-inputs.test.mjs",
+        "tools/release-manifest.mjs",
+        "tools/release-preflight.mjs",
+        "tools/release-source.mjs",
+        "tools/vitest.inventory.test.mjs",
+        "vitest.config.mts"
+      ]
+    },
+    {
+      "task": 5,
+      "commit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+      "subject": "docs: 마무리 기준과 검증 인계 문서 정리",
+      "files": [
+        "README.md",
+        "docs/01-product-requirements.md",
+        "docs/06-benchmark-device-validation.md",
+        "docs/08-implementation-roadmap.md",
+        "docs/09-risk-register.md",
+        "docs/2026-09-13-completion-followup-validation.md",
+        "docs/EVIDENCE.md",
+        "docs/README.md",
+        "docs/completion-and-support.md",
+        "docs/research/2026-09-13-completion-readiness.json",
+        "docs/research/2026-09-13-completion-readiness.md",
+        "docs/superpowers/plans/2026-09-13-completion-followup.md",
+        "docs/usb-physical-validation.md",
+        "docs/versioning.md",
+        "docs/windows-remote-host.md"
+      ]
+    }
+  ],
+  "verification": {
+    "schema": 1,
+    "command": "fnm exec --using=default bun run verify all",
+    "exitCode": 0,
+    "verifiedSourceCommit": "5a8dde46b4841be57c881a7781050d74d4dafca0",
+    "verifiedSourceDirty": true,
+    "candidateCommit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+    "candidateDirty": false,
+    "sourceSha256": "d51d64d54053ac0e1aa0c7d47c89b8f3815288ce2669cc262a835d2312bce248",
+    "inputs": 890,
+    "beforeAfterIdentical": true,
+    "committedInputFilesIdentical": true,
+    "logSha256": "f95e0b95c5f3b36df7ce936aeeb64f70bc058fc28a98770406dae28823b3eda5",
+    "reactDoctor": {
+      "score": 100,
+      "required": 100
+    },
+    "js": {
+      "files": 61,
+      "tests": 596,
+      "contractSubsetTests": 4,
+      "contractSubsetIsAdditive": false
+    },
+    "uiAssertions": 78,
+    "rustWorkspace": {
+      "passed": 416,
+      "failed": 0,
+      "ignored": 1
+    },
+    "hostRust": {
+      "passed": 268,
+      "failed": 0,
+      "ignored": 0
+    },
+    "rustIgnoredReason": "manual vector printer print_vector, not runtime acceptance",
+    "androidJvm": {
+      "tests": 118,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suites": 19,
+      "finalTask": "UP-TO-DATE after prior full run executed unchanged JVM inputs"
+    },
+    "swift": {
+      "shimAndAdapterTestBinaries": "compiled only",
+      "splitPurePolicyAssertions": 10,
+      "retransmitPurePolicy": "executed passed",
+      "hardware": "unverified"
+    },
+    "formatAndClippy": "passed root and Host",
+    "fullVerifyPassed": true,
+    "warnings": [
+      "Existing Gradle deprecated features; dependency compiler warnings retained in first full run. No source/ignore suppression."
+    ],
+    "evidence": "Automated checks and committed input byte equivalence; no installation, capture, physical devices, runtime streaming or public distribution acceptance."
+  },
+  "verificationLog": {
+    "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/final-verify-all-postfix.log",
+    "sha256": "f95e0b95c5f3b36df7ce936aeeb64f70bc058fc28a98770406dae28823b3eda5"
+  },
+  "review": {
+    "status": "approved-after-final-fix",
+    "openCritical": 0,
+    "openImportant": 0,
+    "nonblockingMinor": "Dense formatting in tools/release-inputs.mjs; recorded as future readability cleanup.",
+    "records": [
+      {
+        "name": "task-1-fix-1-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/task-1-fix-1-review.md",
+        "sha256": "683531822aa9b8a007c6506773751231c9a83f1587d2b3c6cf4254cb3ed14b56"
+      },
+      {
+        "name": "task-2-fix-1-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/task-2-fix-1-review.md",
+        "sha256": "51844367cdc41a65018b1af7b873eea680551b257d929979ace7f9a2288ddb95"
+      },
+      {
+        "name": "task-3-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/task-3-review.md",
+        "sha256": "452de1ba5e71464a90563e2e0091c77f45b9c8e982b58db374faa738b25a66c9"
+      },
+      {
+        "name": "task-4-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/task-4-review.md",
+        "sha256": "9629831a4bdb73639a919344d0f80540fc65285a15967b22d94b041be27ff898"
+      },
+      {
+        "name": "final-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/final-review.md",
+        "sha256": "444d8ada73078ba0143ff903b0f8a2d84c5f1d4abf64a8727e3f1e0c6899e004"
+      },
+      {
+        "name": "final-fix-1-review.md",
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/evidence/reviews/final-fix-1-review.md",
+        "sha256": "abfdf463d5578b552b45455f4bf8368b5f9bf57abea51221286731ec696289e7"
+      }
+    ]
+  },
+  "builds": [
+    {
+      "scope": "host-macos-internal",
+      "manifestPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-host-macos-internal-exwSJd/host-macos-internal-manifest.json",
+      "manifestSha256": "55ddbb65d7b8df2a50cfdef341b1128b948ecee81517b5f671a95127d6e770cf",
+      "createdAt": "2026-09-13T14:52:13.105Z",
+      "sourceCommit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+      "sourceSha256": "d51d64d54053ac0e1aa0c7d47c89b8f3815288ce2669cc262a835d2312bce248",
+      "sourceDirty": false,
+      "target": {
+        "platform": "darwin",
+        "architecture": "arm64",
+        "triple": "aarch64-apple-darwin"
+      },
+      "artifactMetadata": {
+        "identifier": "leftcar.ll3.kr",
+        "version": "0.1.2"
+      },
+      "signing": {
+        "classification": "internal-ad-hoc",
+        "notarized": false,
+        "details": [
+          "Identifier=leftcar.ll3.kr",
+          "Signature=adhoc",
+          "TeamIdentifier=not set"
+        ]
+      },
+      "releaseInputsSha256": "d1519b389bd6688b79f9a48012b1036d161d769d6599d0a882de117d77a66b29",
+      "internalBuildable": true,
+      "distributionReady": false,
+      "artifacts": [
+        {
+          "role": "host-bundle",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-host-macos-internal-exwSJd/artifacts/host-bundle-Leftcar Host.app",
+          "sha256": "95690d34c63a197adda7218a2e88490e0b90822318048534269ecc9997272525",
+          "inspection": {
+            "machO": {
+              "architectures": [
+                "arm64"
+              ]
+            }
+          }
+        },
+        {
+          "role": "native-shim",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-host-macos-internal-exwSJd/artifacts/native-shim-libleftcar_capture.dylib",
+          "sha256": "357ac92fe8648c4312b9e26ea1e42830b8f0c6fbcc3dac370747953fc6a66509",
+          "bytes": 1437976,
+          "inspection": {
+            "machO": {
+              "architectures": [
+                "arm64"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scope": "android-internal",
+      "manifestPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/android-internal-manifest.json",
+      "manifestSha256": "e8e7a8d4c8d96152268ba8bdc88f7810539587cd77bcd82750328f3ceaf39ecc",
+      "createdAt": "2026-09-13T14:52:51.395Z",
+      "sourceCommit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+      "sourceSha256": "d51d64d54053ac0e1aa0c7d47c89b8f3815288ce2669cc262a835d2312bce248",
+      "sourceDirty": false,
+      "target": {
+        "platform": "android",
+        "architecture": "arm64",
+        "abi": "arm64-v8a",
+        "triple": "aarch64-linux-android"
+      },
+      "artifactMetadata": {
+        "identifier": "leftcar.ll3.kr",
+        "versionCode": 4,
+        "version": "0.1.5"
+      },
+      "signing": {
+        "classification": "internal-debug-key",
+        "verified": true,
+        "debugCertificate": true,
+        "certificateSha256": [
+          "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655"
+        ]
+      },
+      "releaseInputsSha256": "92a08d15e9e941f0d1d99e424cba5fd88ca30386be71bdc07933b067cb2fec80",
+      "internalBuildable": true,
+      "distributionReady": false,
+      "artifacts": [
+        {
+          "role": "viewer-apk",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/artifacts/viewer-apk-app-release.apk",
+          "sha256": "93cf61c743d539367c9178ab42e9cd4ed0c98dc7bff58b6a2b761c8119519e8d",
+          "bytes": 26080024,
+          "inspection": {
+            "native": {
+              "entry": "lib/arm64-v8a/libleftcar_viewer.so",
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+              "bytes": 1009568
+            },
+            "javascript": {
+              "status": "observed",
+              "entry": "assets/index.android.bundle",
+              "sha256": "17f38be65830cef0e0fb90204e7eee402ee43812c7272c9c75b37656905c3a6c",
+              "bytes": 3551288,
+              "format": "hermes-bytecode"
+            }
+          }
+        },
+        {
+          "role": "native-cargo-unstripped",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/artifacts/native-cargo-unstripped-libleftcar_viewer.so",
+          "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+          "bytes": 1394056,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+              "bytes": 1394056
+            }
+          }
+        },
+        {
+          "role": "native-gradle-copy",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/artifacts/native-gradle-copy-libleftcar_viewer.so",
+          "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+          "bytes": 1394056,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+              "bytes": 1394056
+            }
+          }
+        },
+        {
+          "role": "native-agp-stripped-apk-input",
+          "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/artifacts/native-agp-stripped-apk-input-libleftcar_viewer.so",
+          "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+          "bytes": 1009568,
+          "inspection": {
+            "native": {
+              "entry": null,
+              "elfClass": 64,
+              "elfMachine": 183,
+              "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+              "bytes": 1009568
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "sourceBinding": {
+    "status": "passed",
+    "sameCommit": true,
+    "sameBuildInputDigest": true,
+    "actualManifestsVerified": true,
+    "note": "Archived source snapshot binds the candidates. A later documentation-only commit is not a newly built candidate."
+  },
+  "delivery": {
+    "hostZip": {
+      "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/Leftcar-Host-0.1.2-internal-arm64.zip",
+      "sha256": "5a7138a573dc671afd4297967f6513e46eebd525341de18075893aef8584c3c1",
+      "bytes": 2995099,
+      "extractedApp": "/tmp/leftcar-final-delivery-o23k5tx1/extracted/Leftcar Host.app",
+      "expectedAppSha256": "95690d34c63a197adda7218a2e88490e0b90822318048534269ecc9997272525",
+      "codesignVerifyExitCode": 0,
+      "extractedAppSha256": "95690d34c63a197adda7218a2e88490e0b90822318048534269ecc9997272525",
+      "matchesManifestArtifact": true
+    },
+    "viewerApk": {
+      "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/Leftcar-Viewer-0.1.5-internal-arm64.apk",
+      "sha256": "93cf61c743d539367c9178ab42e9cd4ed0c98dc7bff58b6a2b761c8119519e8d",
+      "bytes": 26080024,
+      "matchesManifestArtifact": true
+    },
+    "evidence": "Delivery copies only; no installation, application launch or signing identity change."
+  },
+  "androidPackageInspection": {
+    "schema": 1,
+    "artifactPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/artifacts/viewer-apk-app-release.apk",
+    "sha256": "93cf61c743d539367c9178ab42e9cd4ed0c98dc7bff58b6a2b761c8119519e8d",
+    "bytes": 26080024,
+    "identifier": "leftcar.ll3.kr",
+    "versionCode": 4,
+    "version": "0.1.5",
+    "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "sameCertificateAsPublicV014": true,
+    "signingClassification": "internal-debug-key",
+    "backupResources": {
+      "secure_store_backup_rules": {
+        "id": "0x7f140008",
+        "apkPath": "res/-K.xml",
+        "secureStoreExclusions": 1,
+        "legacyExclusions": 1
+      },
+      "secure_store_data_extraction_rules": {
+        "id": "0x7f140009",
+        "apkPath": "res/Hq.xml",
+        "secureStoreExclusions": 2,
+        "legacyExclusions": 2
+      }
+    },
+    "removedPermissionsAbsent": [
+      "READ_EXTERNAL_STORAGE",
+      "WRITE_EXTERNAL_STORAGE",
+      "SYSTEM_ALERT_WINDOW"
+    ],
+    "evidence": "Actual APK bytes, manifest, resource table and compiled backup XML inspected. No installation, update, backup/restore or runtime acceptance."
+  },
+  "dependencyChecks": [
+    {
+      "tool": "bun",
+      "input": "bun.lock",
+      "status": "findings",
+      "findings": 4,
+      "warnings": 0
+    },
+    {
+      "tool": "cargo-audit",
+      "input": "Cargo.lock",
+      "status": "pass",
+      "findings": 0,
+      "warnings": 0
+    },
+    {
+      "tool": "cargo-audit",
+      "input": "apps/host-desktop/src-tauri/Cargo.lock",
+      "status": "findings",
+      "findings": 0,
+      "warnings": 7
+    },
+    {
+      "tool": "gradle",
+      "input": null,
+      "status": "unavailable",
+      "findings": 0,
+      "warnings": 0
+    }
+  ],
+  "dependencyInventories": [
+    {
+      "ecosystem": "bun",
+      "status": "locked",
+      "records": 845,
+      "unknownLicenseMetadata": 161
+    },
+    {
+      "ecosystem": "cargo",
+      "status": "locked",
+      "records": 138,
+      "unknownLicenseMetadata": 0
+    },
+    {
+      "ecosystem": "cargo",
+      "status": "locked",
+      "records": 597,
+      "unknownLicenseMetadata": 0
+    },
+    {
+      "ecosystem": "gradle",
+      "status": "observed-unlocked",
+      "records": 248,
+      "unknownLicenseMetadata": 22
+    }
+  ],
+  "integration": {
+    "status": "awaiting-user-choice",
+    "pushed": false,
+    "newPullRequest": null,
+    "newRemoteCiRun": null,
+    "mainUnchanged": "5a8dde46b4841be57c881a7781050d74d4dafca0",
+    "priorPr": 5,
+    "priorCiRun": 34758245279,
+    "priorCiAppliesToNewChanges": false,
+    "originalUntrackedResearchDocumentsPreserved": true
+  },
+  "remaining": {
+    "physicalAcceptance": "Deferred by user; no new installation, app launch, screen/audio capture, input, network mappings or 10/30-minute runs.",
+    "distribution": "Both candidate releaseInputs report distributionReady=false; Android debug certificate and macOS ad-hoc/not-notarized.",
+    "dependencies": "Bun four advisories (2 high, 2 moderate), Host Cargo seven informational warnings, Gradle unlocked/no scanner and unknown license metadata remain.",
+    "privacy": "Host file identity retained under documented local-account model; historical raw logs not rewritten; FLAG_SECURE and diagnostic export remain explicit limits.",
+    "warnings": [
+      "Android preparation emitted two ARCore1.53.0 R8 stack-map warnings; no dependency/source suppression.",
+      "Gradle/dependency deprecation warnings retained.",
+      "Host internal notarization was intentionally skipped."
+    ]
+  },
+  "evidenceBoundary": "No physical devices, actual streaming/FPS/latency/soak, normal update, backup restore, Windows runtime, notarization or public publication acceptance is claimed."
+}

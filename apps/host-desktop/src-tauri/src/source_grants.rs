@@ -276,9 +276,9 @@ impl GrantStore {
             .collect()
     }
 
-    /// 기기별 상시 원격 입력 승인을 저장한다. 소스 목록과 무관한 단독 결정이므로
+    /// 기기별 상시 원격 입력 결정을 저장한다. 소스 목록과 무관한 단독 결정이므로
     /// 라이브 캡처 리스를 무효화하지 않는다(세션 단위 적용은 호출자가 맡는다).
-    /// 저장 실패 시 되돌려 실패를 반환한다 — 승인의 지속 여부가 불확실하면
+    /// 저장 실패 시 되돌려 실패를 반환한다 — 결정의 지속 여부가 불확실하면
     /// 성공으로 보고하지 않는다.
     pub fn set_input(&mut self, owner: &str, allowed: bool) -> Result<GrantView, String> {
         if self.closed {
@@ -289,7 +289,7 @@ impl GrantStore {
             source_ids: old.source_ids.clone(),
             revision: old.revision + 1,
             reviewed: old.reviewed,
-            input: allowed,
+            input: Some(allowed),
         };
         self.journal.devices.insert(owner.into(), next);
         if let Some(path) = self.path.as_ref() {

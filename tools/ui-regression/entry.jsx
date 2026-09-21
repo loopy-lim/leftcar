@@ -33,9 +33,7 @@ function SettingsFixture() {
   Object.assign(window, { settings: { ...privacy, ...clipboard } });
   return (
     <section>
-      <button id="lock" onClick={privacy.toggleLockOnDisconnect}>
-        {String(privacy.lockOnDisconnect)}
-      </button>
+      <button id="curtain-toggle" onClick={privacy.togglePrivacyCurtain}>Toggle curtain</button>
       <output id="curtain">{String(privacy.privacyCurtain)}</output>
       <output id="settings-state">
         {JSON.stringify({ ...privacy, ...clipboard })}

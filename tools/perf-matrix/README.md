@@ -53,8 +53,16 @@ tools/perf-matrix/collect-1440-4k.sh --profile video --duration 600 --output /tm
 
 ## 기계 판정 범위
 
-`summary.json`은 누적 counter의 `last - first`와 실제 표본 사이 경과시간으로 Host capture/encode-output 및 Android rendered FPS를 계산한다. 보고된 순간 FPS는 판정에 사용하지 않는다. 800–1,200ms 1초 window의 nearest-rank p5, 1초 이상 멈춘 counter, 1.5초 초과 표본 공백/꼬리 누락도 기록한다. 표본이 둘보다 적으면 parse error로 종료하며, 0fps 통과값을 만들지 않는다.
+`summary.json`은 누적 counter의 `last - first`와 실제 표본 사이 경과시간으로 Host capture/encode-output 및 Android rendered FPS를 계산한다. 보고된 순간 FPS는 판정에 사용하지 않는다. 800–1,200ms 실제 표본 쌍의 1초 window nearest-rank p5, 명시적으로 같은 값이 관측된 counter 구간, 1.5초 초과 표본 공백/머리·꼬리 누락을 별도로 기록한다. 공백을 0 FPS로 바꾸거나 p5에 가상의 0을 넣지 않는다. 관측 가능한 1초 window가 없으면 p5는 null이며, 관측 공백이나 window 부족은 observationComplete=false로 남아 기존 성능·collection gate를 통과하지 못한다. 표본이 둘보다 적으면 parse error로 종료하며, 0fps 통과값을 만들지 않는다.
 
 요약은 Host output interval p50/p95, encode-output latency p95, queue-oldest 추세와 Android capture-age p50/p95, output/decoder-input/frame-gap delta, gap↔IDR frame-ID 짝을 포함한다. 55fps 후보는 Host encode-output/Android render 평균 55fps 이상, Android age p95 50ms 이하, queue가 단조 증가하지 않음, decoder-input drop delta 0, 연속 표본을 요구한다. `final4kCriteriaMet`은 여기에 59fps 평균, 55fps p5, Host 16.7/18.5ms interval, 18.5ms output latency, queue가 16.67ms를 지속 초과하지 않음, output/drop 0, gap delta 2 이하와 2 frame 이내 IDR recovery까지 평가한다.
 
 Swift의 현재 `LeftcarPerf` 행에는 hardware/preset/property 결과가 없으므로 그 사실은 JSON만으로 통과로 만들지 않는다. `${report}.md`의 Host 확인과 실제 장치 수집은 최종 acceptance에 여전히 필요하다. macOS unified log는 지우지 않는다. acceptance 명령은 기본으로 연결된 시험 기기의 Android logcat buffer만 Android capture 직전에 지워, 요청한 수집 구간으로 Android 증거를 제한한다. 디버깅을 위해 `--no-clear`를 쓸 수 있지만, 그 artifact는 다른 입증된 구간 경계가 없으면 acceptance를 만족할 수 없다.
+
+### canonical/legacy 및 관측 한계
+
+Viewer의 `LeftcarViewerPerf`와 바로 뒤 `Rendered`는 같은 30-release 출력 이벤트의 두 기록이다. supported canonical과 같은 PID/TID의 연속 이벤트이고 같은 decoderEpoch에서 cumulative released−decoder-local Rendered 차이가 일정할 때만 companion으로 보존한다. 다른 epoch의 차이는 달라도 된다. companion 원문·필드·line 번호를 유지하며 throughput 표본은 canonical만 센다. 단독 legacy, 미지원 schema, 불명확한 연결, 손상 필드는 unknown/invalid로 남긴다.
+
+Host native 로그의 1초 제한은 stats 호출의 최소 간격이며 UI polling은 nominal2초다. Viewer 로그는 시간 heartbeat가 아니라 release 진행 시 출력된다. 따라서 1.5초 넘는 공백이 실제0FPS를 증명하지는 않는다. 기존1.5초 completeness 기준은 완화하지 않으며, 이 주기의 로그만으로 기준을 충족하지 못하면 불완전 관측으로 기록한다. no-progress 미검출은 전 구간 무정지나 패널 표시의 증거가 아니다. 기존55/59/60FPS·지연·drop 수락 기준과 물리 표시 미측정 경계는 유지한다.
+
+기존 수집의 재분석은 raw와 이전 receipt를 덮어쓰지 않고 별도 analyzer commit/version 및 raw/old-receipt hash가 포함된 reanalysis receipt로 남긴다.

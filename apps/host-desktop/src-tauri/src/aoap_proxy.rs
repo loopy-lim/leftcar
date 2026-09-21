@@ -44,16 +44,21 @@ pub fn start_media_proxy(port: u16) -> Result<(), String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("USB media proxy configuration failed: {error}"))?;
-    let Some((sender, receiver)) = crate::aoap::take_usb_media_channel() else {
+    let Some(channel) = crate::aoap::take_usb_media_channel() else {
         return Err("USB accessory link is not ready".into());
     };
+    let sender = channel.sender;
+    let receiver = channel.receiver;
+    // MediaLease는 구독 식별자다 — 프록시 스레드 안에서 살아 있어야 하고,
+    // 스레드가 끝나면 drop되어 미디어 구독이 해제된다(RAII 해제).
+    let lease = channel.lease;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     *active_proxy().lock().unwrap() = Some(stop.clone());
     thread::Builder::new()
         .name(format!("leftcar-usb-media-{port}"))
         .spawn(move || {
+            let _lease = lease;
             accept_media_connection(listener, sender, receiver, &stop);
-            crate::aoap::release_usb_media_channel();
             *active_proxy().lock().unwrap() = None;
         })
         .map_err(|error| format!("USB media proxy thread failed: {error}"))?;
@@ -64,7 +69,6 @@ pub fn stop_media_proxy() {
     if let Some(stop) = active_proxy().lock().unwrap().as_ref() {
         stop.store(true, std::sync::atomic::Ordering::Release);
     }
-    crate::aoap::release_usb_media_channel();
 }
 
 fn accept_media_connection(

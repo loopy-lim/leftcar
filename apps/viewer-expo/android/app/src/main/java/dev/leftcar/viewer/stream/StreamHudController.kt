@@ -47,16 +47,20 @@ internal class StreamHudController(
     private val showDiagnostics: Boolean,
     private val onTermination: (Int) -> Unit,
     private val onRenderedFrame: () -> Unit = {},
+    private val onInputStatusChanged: (Int) -> Unit = {},
 ) {
     companion object {
         private const val INPUT_STATUS_VISIBLE_MS = 900L
         private const val INPUT_STATUS_FADE_MS = 320L
         /** 입력이 켜져 있는 동안 유지하는 은은한 배지 투명도 — 꺼짐과 구분되되
-         *  잠금 배너보다 조용한다. */
+         * 잠금 배너보다 조용한다. */
         private const val INPUT_ALLOWED_IDLE_ALPHA = 0.38f
         private const val DEBUG_STATS_VISIBLE_MS = 6_000L
         private const val DEBUG_STATS_FADE_MS = 420L
-
+        /** 잠금 배너 탭 재요청 냉각 — 연타가 호스트에 알림 노이즈를 만들지
+         * 않게 한다. 냉각 중 탭은 배너를 지나 스트림 입력으로 간다. */
+        private const val INPUT_REQUEST_COOLDOWN_MS = 3_000L
+        private const val INPUT_REQUEST_FEEDBACK_MS = 1_600L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -70,7 +74,6 @@ internal class StreamHudController(
     private var rebindPopup: PopupWindow? = null
     private var rebindView: View? = null
     private var rebindText: TextView? = null
-    private var controls: StreamHudControls? = null
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -237,10 +240,48 @@ internal class StreamHudController(
             .start()
     }
 
+    /** 잠금 배너 탭 → 입력 허용 요청(2026-09-21). 배너 팝업은 터치를 받지
+     * 않으므로 액티비티 dispatchTouchEvent가 이 히트 테스트를 대행한다.
+     * 참을 반환하면 호출자가 요청을 보내고 탭을 소비한다. 냉각 중이면
+     * 거짓 — 탭은 배너를 지나 스트림 입력으로 간다. */
+    fun consumeInputRequestTap(x: Float, y: Float): Boolean {
+        if (lastInputStatus != 0) return false
+        val badge = inputView ?: return false
+        if (!badge.isAttachedToWindow) return false
+        val location = IntArray(2)
+        badge.getLocationInWindow(location)
+        val within = x >= location[0] && x <= location[0] + badge.width &&
+            y >= location[1] && y <= location[1] + badge.height
+        if (!within) return false
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastInputRequestAt < INPUT_REQUEST_COOLDOWN_MS) return false
+        lastInputRequestAt = now
+        return true
+    }
+
+    /** 요청 전송 피드백 — 배너 문구를 잠시 바꿔 탭이 닿았음을 보여 준 뒤
+     * 원래 잠금 문구로 돌아온다(상태가 풀리면 updateInput이 덮어쓴다). */
+    fun onInputRequestSent() {
+        inputLabel?.text = ViewerStrings.inputRequestSent
+        inputView?.animate()?.cancel()
+        inputView?.alpha = 1f
+        handler.removeCallbacks(restoreInputBanner)
+        handler.postDelayed(restoreInputBanner, INPUT_REQUEST_FEEDBACK_MS)
+    }
+
+    private val restoreInputBanner = Runnable {
+        if (lastInputStatus == 0) {
+            inputLabel?.text = ViewerStrings.inputLockedBanner
+        }
+    }
+
+    private var lastInputRequestAt = 0L
+
     fun stop() {
         handler.removeCallbacks(poll)
         handler.removeCallbacks(fadeInput)
         handler.removeCallbacks(fadeStats)
+        handler.removeCallbacks(restoreInputBanner)
         inputView?.animate()?.cancel()
         statsView?.animate()?.cancel()
         inputPopup?.dismiss()
@@ -249,7 +290,6 @@ internal class StreamHudController(
         inputPopup = null
         statsPopup = null
         rebindPopup = null
-        controls = null
         inputView = null
         inputIcon = null
         inputLabel = null
@@ -266,7 +306,7 @@ internal class StreamHudController(
             panelScale,
         )
 
-    /** 창 폭 기반 HUD 배율 — XR 대형 패널에서 배지·칩이 확대된다. */
+    /** 창 폭 기반 HUD 배율 — XR 대형 패널에서 배지가 확대된다. */
     private val panelScale = StreamPanelDensity.scaleOf(activity)
 
     private fun badgeBackground(color: Int): GradientDrawable = GradientDrawable().apply {
@@ -279,6 +319,7 @@ internal class StreamHudController(
     private fun updateInput(status: Int) {
         if (status == lastInputStatus) return
         lastInputStatus = status
+        onInputStatusChanged(status)
         val icon = inputIcon ?: return
         when (status) {
             1 -> {
@@ -339,11 +380,8 @@ internal class StreamHudController(
         inputLabel = label
         inputView = badge
         updateInput(-1)
-        val column = StreamHudControls(activity, panelScale)
-        column.view.addView(badge)
-        controls = column
         val popup = PopupWindow(
-            column.view,
+            badge,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             false,
@@ -456,17 +494,5 @@ internal class StreamHudController(
                 revealStats()
             }
         }
-    }
-}
-
-/** All HUD targets share one measured column; labels and font scale determine
- * actual height, and margins are applied after that height (never fixed y slots).
- */
-internal class StreamHudControls(context: android.content.Context, private val scale: Float) {
-    private val density = context.resources.displayMetrics.density
-    private fun dp(value: Int) = StreamPanelDensity.dp(value.toFloat(), density, scale)
-    val view = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.END
     }
 }

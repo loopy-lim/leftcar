@@ -16,19 +16,19 @@ jobs:
     name: Rust (fmt, clippy, tests)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             .
             apps/host-desktop/src-tauri
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.21.1
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.1
       - run: bun install --frozen-lockfile
@@ -36,6 +36,12 @@ jobs:
         run: bun tools/build.host-macos.integration.mjs
       - name: Build macOS capture resource before Host crate tests
         run: zsh tools/build-macos-capture-shim.zsh library native/macos-capture-shim/libleftcar_capture.dylib
+      - name: Swift and Rust media encryption interoperability
+        run: bun tools/test-media-interop.mjs
+      - name: System audio requires explicit viewer opt-in (no capture)
+        run: |
+          zsh tools/build-macos-capture-shim.zsh audio-ownership-test /tmp/leftcar-audio-ownership-test
+          /tmp/leftcar-audio-ownership-test
       - name: Format
         run: cargo fmt --all -- --check
       - name: Architecture tests (H01)
@@ -64,14 +70,14 @@ jobs:
     name: TypeScript (typecheck, tests, contract, architecture)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.21.1
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.1
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
       - run: bun install --frozen-lockfile
       - name: Unit + contract tests
         run: bun run test && bun run test:contract
@@ -98,8 +104,8 @@ jobs:
     name: Android native (aarch64 check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           targets: aarch64-linux-android,x86_64-linux-android
       - name: Ensure Android Rust target is installed
@@ -112,18 +118,18 @@ jobs:
         run: |
           echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: 17
           cache: gradle
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: cargo check viewer native for Android
         run: cargo check -p android-viewer --target aarch64-linux-android --locked
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.21.1
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.1
       - name: Frozen JS dependencies before Gradle settings resolution
@@ -139,19 +145,19 @@ jobs:
       CARGO_HOME: C:\c
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.21.1
       - name: Enable long paths for Git dependencies
         run: git config --global core.longpaths true
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.1
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: apps/host-desktop/src-tauri
       - run: bun install --frozen-lockfile
@@ -161,7 +167,7 @@ jobs:
         run: cargo clippy --manifest-path apps/host-desktop/src-tauri/Cargo.toml --tests --locked -- -D warnings
       - name: Build unsigned current-user NSIS installer
         run: bun run --cwd apps/host-desktop tauri build -- --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: leftcar-host-windows-x64-unsigned
           path: apps/host-desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
@@ -171,7 +177,7 @@ jobs:
     name: Device evidence (E5-E7) — pending
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Surface evidence gaps
         run: |
           echo "## Evidence level summary" >> $GITHUB_STEP_SUMMARY

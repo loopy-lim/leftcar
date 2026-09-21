@@ -14,6 +14,8 @@ last_updated_by: Codex
 
 # Leftcar 마무리 조사: 후보 통합부터 실사용·출시까지
 
+> 실행 후속 정보: PR #5는 `5a8dde4`로 머지됐다. 활성 세션에서 전달받은 최신 사용자 결정은 실기기 안정성 기준 30분, 검사는 추후 직접 수행이다. 아래 60분 목표와 당시 PR/CI 상태는 조사 시점의 역사 기록이며 현재 실행 기준은 [지원·완료 표](../completion-and-support.md)를 따른다.
+
 ## 판단
 
 **현재 가장 효과적인 다음 작업은 이미 만든 개선을 하나의 후보로 통합하고, 그 후보의 실제 영상 연결과 장시간 사용을 검증하는 것이다.** 성능·복구 기능의 상당 부분은 구현돼 있다. 추가 코덱이나 대규모 구조 변경을 시작하기 전에, 같은 소스·Host·APK에서 “연결 → 표시 → 조작 → 복구 → 종료”를 끝까지 닫아야 한다.
@@ -68,7 +70,7 @@ last_updated_by: Codex
 
 **테스트 집계 문제도 확인했다.** 루트 `bun run test`는 중첩 `.worktrees/audit-improvements`까지 발견해 1,171개를 실행했다. 이것을 main의 테스트 개수로 쓰면 잘못이다. `bun run test --exclude '**/.worktrees/**'`로 main의 612개를 별도 확인했다. 계약 4개는 전체 JS 검사에도 들어가므로 합산하지 않는다.
 
-개선 브랜치에는 같은 `6b73499b…` 입력의 `bun run verify all` 통과 기록도 이번 조사 중 추가됐다. 21:24:34–21:30:01 KST, 327.189초, 전후 입력 동일·종료 코드 0이며 UI 78개/9 suite, Host 225+12, JVM 118개/19 suite 등을 기록한다. 이 전체 실행은 **별도 작업의 증거**이고, 이번 조사에서 직접 다시 실행한 후보 검사는 위 세 가지다. [후보 검증 문서](../../.worktrees/audit-improvements/docs/2026-09-13-audit-remediation-validation.md), [기계 판독 근거](../../.worktrees/audit-improvements/docs/superpowers/evidence/2026-09-13-audit-validation.json).
+개선 브랜치에는 같은 `6b73499b…` 입력의 `bun run verify all` 통과 기록도 이번 조사 중 추가됐다. 21:24:34–21:30:01 KST, 327.189초, 전후 입력 동일·종료 코드 0이며 UI 78개/9 suite, Host 225+12, JVM 118개/19 suite 등을 기록한다. 이 전체 실행은 **별도 작업의 증거**이고, 이번 조사에서 직접 다시 실행한 후보 검사는 위 세 가지다. [후보 검증 문서](../2026-09-13-audit-remediation-validation.md), [기계 판독 근거](../superpowers/evidence/2026-09-13-audit-validation.json).
 
 ## 2. 이미 만든 것을 다시 만들지 않기
 

@@ -5,7 +5,6 @@ import {
   Eye,
   EyeOff,
   Globe,
-  Lock,
   Monitor,
   QrCode,
   Settings,
@@ -31,27 +30,22 @@ export interface HostSettingsModalProps {
   onClose: () => void;
   t: TranslationSchema;
   clipboardShare: boolean;
-  lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
   wanAccess: boolean;
   clipboardPending: boolean;
-  lockPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
   wanPending: boolean;
   clipboardError: string | null;
-  lockError: string | null;
   curtainError: string | null;
   badgeError: string | null;
   wanError: string | null;
   onToggleClipboardShare: () => void;
-  onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
   onToggleStreamingBadge: () => void;
   onToggleWanAccess: () => void;
   retryClipboard: () => void;
-  retryLock: () => void;
   retryCurtain: () => void;
   retryBadge: () => void;
   retryWan: () => void;
@@ -70,16 +64,6 @@ export function HostSettingsModal(props: HostSettingsModalProps) {
       error: props.clipboardError,
       onToggle: props.onToggleClipboardShare,
       onRetry: props.retryClipboard,
-    },
-    {
-      icon: Lock,
-      title: t.host.lockOnDisconnectLabel,
-      desc: t.host.lockOnDisconnectDesc,
-      active: props.lockOnDisconnect,
-      pending: props.lockPending,
-      error: props.lockError,
-      onToggle: props.onToggleLockOnDisconnect,
-      onRetry: props.retryLock,
     },
     {
       icon: EyeOff,
@@ -393,17 +377,14 @@ export interface DashboardModalsProps {
   language: SupportedLanguage;
   t: TranslationSchema;
   clipboardShare: boolean;
-  lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
   wanAccess: boolean;
   clipboardPending: boolean;
-  lockPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
   wanPending: boolean;
   clipboardError: string | null;
-  lockError: string | null;
   curtainError: string | null;
   badgeError: string | null;
   wanError: string | null;
@@ -413,12 +394,10 @@ export interface DashboardModalsProps {
   onCancelStopSession: () => void;
   onConfirmStopSession: (session: SessionRow) => void;
   onToggleClipboardShare: () => void;
-  onToggleLockOnDisconnect: () => void;
   onTogglePrivacyCurtain: () => void;
   onToggleStreamingBadge: () => void;
   onToggleWanAccess: () => void;
   retryClipboard: () => void;
-  retryLock: () => void;
   retryCurtain: () => void;
   retryBadge: () => void;
   retryWan: () => void;
@@ -445,27 +424,22 @@ export function DashboardModals(props: DashboardModalsProps) {
           onClose={props.onCloseSettings}
           t={props.t}
           clipboardShare={props.clipboardShare}
-          lockOnDisconnect={props.lockOnDisconnect}
           privacyCurtain={props.privacyCurtain}
           streamingBadge={props.streamingBadge}
           wanAccess={props.wanAccess}
           clipboardPending={props.clipboardPending}
-          lockPending={props.lockPending}
           curtainPending={props.curtainPending}
           badgePending={props.badgePending}
           wanPending={props.wanPending}
           clipboardError={props.clipboardError}
-          lockError={props.lockError}
           curtainError={props.curtainError}
           badgeError={props.badgeError}
           wanError={props.wanError}
           onToggleClipboardShare={props.onToggleClipboardShare}
-          onToggleLockOnDisconnect={props.onToggleLockOnDisconnect}
           onTogglePrivacyCurtain={props.onTogglePrivacyCurtain}
           onToggleStreamingBadge={props.onToggleStreamingBadge}
           onToggleWanAccess={props.onToggleWanAccess}
           retryClipboard={props.retryClipboard}
-          retryLock={props.retryLock}
           retryCurtain={props.retryCurtain}
           retryBadge={props.retryBadge}
           retryWan={props.retryWan}

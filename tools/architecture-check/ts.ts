@@ -123,6 +123,15 @@ const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
   "import kotlinx.coroutines.withContext",
 ]);
 
+function isKeyBridgeOwnershipContractImport(file: string, line: string): boolean {
+  const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
+  // KeyBridge is an optional installed app. Its AIDL contract may cross the
+  // process boundary only through Leftcar's dedicated ownership adapter.
+  return projectRelativePath ===
+      "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/KeyBridgeInputAdapter.kt" &&
+    line === "import dev.loopy.keybridge.remote.IRemoteInputOwnership";
+}
+
 function isStreamActivityXrCoroutineImport(file: string, line: string): boolean {
   const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
   // Session.create is asynchronous and lifecycle-bound. Keep this exception
@@ -146,10 +155,11 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
       const m = line.match(/^import\s+(.+)$/);
       const allowsJvmUnitTestDependency = isAndroidJvmUnitTestSource(file, folder) && JVM_TEST_IMPORT.test(line);
       const allowsStreamActivityXrCoroutine = isStreamActivityXrCoroutineImport(file, line);
+      const allowsKeyBridgeOwnershipContract = isKeyBridgeOwnershipContractImport(file, line);
       const audioPath = relative(ROOT, file).replaceAll("\\", "/");
       const allowsAudioBuffer = /^apps\/viewer-expo\/android\/app\/src\/(?:main\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoder|test\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoderTest)\.kt$/.test(audioPath)
         && /^import java\.nio\.(?:ByteBuffer|ByteOrder)$/.test(line);
-      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsAudioBuffer) {
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsKeyBridgeOwnershipContract && !allowsAudioBuffer) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,

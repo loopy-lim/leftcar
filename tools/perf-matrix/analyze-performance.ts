@@ -42,6 +42,10 @@ export interface CounterSummary {
   rollingOneSecondP5Fps: number | null;
   maxSampleGapMs: number | null;
   zeroFpsStallDetected: boolean;
+  observedZeroCounterIntervals: Array<{startMs:number;endMs:number}>;
+  observationGaps: Array<{kind:'head'|'samples'|'tail';startMs:number;endMs:number}>;
+  observationComplete: boolean;
+  rollingOneSecondWindowCount: number;
   errors: string[];
 }
 
@@ -326,6 +330,10 @@ export function summarizeCounterSeries(
       rollingOneSecondP5Fps: null,
       maxSampleGapMs: null,
       zeroFpsStallDetected: false,
+      observedZeroCounterIntervals: [],
+      observationGaps: [],
+      observationComplete: false,
+      rollingOneSecondWindowCount: 0,
       errors: ["requires at least two counter samples"],
     };
   }
@@ -335,33 +343,50 @@ export function summarizeCounterSeries(
   const elapsedMs = last.timestampMs - first.timestampMs;
   const gaps = ordered.slice(1).map((sample, index) => sample.timestampMs - ordered[index].timestampMs);
   const maxSampleGapMs = Math.max(...gaps);
-  let lastAdvanceTimestampMs = first.timestampMs;
-  let highestFrameCounter = first.frames;
-  let unchangedForAtLeastOneSecond = false;
-  for (const sample of ordered.slice(1)) {
-    if (sample.frames > highestFrameCounter) {
-      highestFrameCounter = sample.frames;
-      lastAdvanceTimestampMs = sample.timestampMs;
-    } else if (sample.timestampMs - lastAdvanceTimestampMs >= 1_000) {
-      unchangedForAtLeastOneSecond = true;
+  // Equal observed counters prove no progress between their timestamps.
+  // Missing records alone cannot distinguish a stalled stage from log loss.
+  const observedZeroCounterIntervals: CounterSummary['observedZeroCounterIntervals'] = [];
+  let unchangedStart: number | null = null;
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1], current = ordered[index];
+    if (current.frames === previous.frames && current.timestampMs > previous.timestampMs) {
+      unchangedStart ??= previous.timestampMs;
+    } else if (unchangedStart !== null) {
+      observedZeroCounterIntervals.push({startMs:unchangedStart,endMs:previous.timestampMs});
+      unchangedStart = null;
     }
   }
+  if (unchangedStart !== null) observedZeroCounterIntervals.push({startMs:unchangedStart,endMs:last.timestampMs});
   const expectedEndMs = boundary?.endMs ?? first.timestampMs + expectedDurationMs;
   const missingHeadMs = boundary ? Math.max(0, first.timestampMs - boundary.startMs) : 0;
   const reset = ordered.some((sample,index) => index > 0 && sample.frames < ordered[index-1].frames);
   const missingTailMs = Math.max(0, expectedEndMs - last.timestampMs);
-  const rolling = nearestOneSecondFps(ordered);
-  const externalStallDetected = missingHeadMs > 1_500 || unchangedForAtLeastOneSecond || maxSampleGapMs > 1_500 || missingTailMs > 1_500;
-  const zeroFpsStallDetected = externalStallDetected || rolling.some((fps) => fps === 0);
-  if (externalStallDetected) rolling.push(0);
+  const observationGaps: CounterSummary['observationGaps'] = [];
+  // Keep the existing 1500ms completeness requirement. A nominal two-second
+  // Host poll can fail this requirement without proving zero encoder FPS.
+  if (missingHeadMs > 1_500) observationGaps.push({kind:'head',startMs:boundary!.startMs,endMs:first.timestampMs});
+  gaps.forEach((gap,index) => {
+    if (gap > 1_500) observationGaps.push({kind:'samples',startMs:ordered[index].timestampMs,endMs:ordered[index+1].timestampMs});
+  });
+  if (missingTailMs > 1_500) observationGaps.push({kind:'tail',startMs:last.timestampMs,endMs:expectedEndMs});
+  const rolling = reset ? [] : nearestOneSecondFps(ordered);
+  const zeroFpsStallDetected = observedZeroCounterIntervals.some(interval => interval.endMs - interval.startMs >= 1_000)
+    || rolling.some(fps => fps === 0);
+  // No synthetic zero enters the percentile; unavailable windows stay unknown.
+  const observationComplete = !reset && elapsedMs > 0 && gaps.every(gap => gap > 0)
+    && observationGaps.length === 0 && rolling.length > 0;
 
   return {
     sampleCount: ordered.length,
     elapsedMs,
     averageFps: !reset && elapsedMs > 0 ? ((last.frames - first.frames) * 1_000) / elapsedMs : null,
-    rollingOneSecondP5Fps: rolling.length > 0 ? percentile(rolling, 0.05) : zeroFpsStallDetected ? 0 : null,
+    rollingOneSecondP5Fps: rolling.length > 0 ? percentile(rolling, 0.05) : null,
     maxSampleGapMs,
     zeroFpsStallDetected,
+    observedZeroCounterIntervals,
+    observationGaps,
+    observationComplete,
+    rollingOneSecondWindowCount: rolling.length,
     errors: reset ? ["counter reset requires a new segment"] : elapsedMs > 0 ? [] : ["counter timestamps must advance"],
   };
 }
@@ -481,7 +506,7 @@ export function summarizePerformance(
   const hostOutputLatencyP95 = metricPercentile(host, "encodeOutputP95Us", 0.95);
   const hostQueueTrend = queueTrend(host);
   const summariesAreContinuous = [hostEncodeOutput, androidRendered].every(
-    (summary) => summary.errors.length === 0 && !summary.zeroFpsStallDetected,
+    (summary) => summary.errors.length === 0 && summary.observationComplete && !summary.zeroFpsStallDetected,
   );
   const fpsCandidate =
     summariesAreContinuous &&

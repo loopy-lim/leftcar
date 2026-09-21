@@ -315,7 +315,7 @@ impl StreamSealer {
         }
     }
 
-    /// `counter ‖ tag ‖ ct`. 최대 [MAX_PLAINTEXT]바이트까지.
+    /// `counter ‖ ct ‖ tag`. 최대 [MAX_PLAINTEXT]바이트까지.
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, OpenError> {
         if plaintext.len() > MAX_PLAINTEXT {
             return Err(OpenError::TooLarge);
@@ -691,6 +691,38 @@ mod tests {
             receiver.open(&frame).unwrap(),
             b"leftcar media vector v1".to_vec()
         );
+    }
+
+    #[test]
+    fn media_datagrams_match_shared_wire_vectors() {
+        let fixture = include_str!("../tests/fixtures/media-wire-v1.txt");
+        let field = |name: &str| {
+            hex::decode(
+                fixture
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{name}=")))
+                    .expect("fixture field"),
+            )
+            .expect("fixture hex")
+        };
+        let key: [u8; 32] = field("media_key_hex").try_into().unwrap();
+        let plaintext = field("plaintext_hex");
+        let keys = media_keys(&key);
+        for (direction, key) in [("c2s", keys.c2s), ("s2c", keys.s2c)] {
+            let frame = field(&format!("{direction}_frame_hex"));
+            assert_eq!(
+                DatagramSealer::with_counter_start(key, 1)
+                    .seal(&plaintext)
+                    .unwrap(),
+                frame,
+            );
+            assert_eq!(DatagramSealer::new(key).open(&frame).unwrap(), plaintext);
+            let mut in_place = frame.clone();
+            assert_eq!(
+                DatagramSealer::new(key).open_into(&mut in_place).unwrap(),
+                plaintext,
+            );
+        }
     }
 
     /// 재시작 간 논스 재사용 방지: 같은 키로 새 인스턴스를 만들면 카운터

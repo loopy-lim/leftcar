@@ -9,6 +9,8 @@ export interface StreamsListViewProps {
   inputPermission: boolean;
   inputBusy: number | "permission" | null;
   showInspector: boolean;
+  /** 입력 허용을 요청 중인 세션 id(뷰어 잠금 배너 탭). */
+  inputRequestSessions?: number[];
   t: TranslationSchema;
   onToggleInspector: () => void;
   onToggleInput: (session: SessionRow) => Promise<void>;
@@ -22,6 +24,7 @@ export function StreamsListView({
   inputPermission,
   inputBusy,
   showInspector,
+  inputRequestSessions = [],
   t,
   onToggleInspector,
   onToggleInput,
@@ -52,20 +55,24 @@ export function StreamsListView({
       </div>
 
       <div className="stream-cards-container">
-        {sessions.map((session) => (
+        {(() => {
+          const requestedSessions = new Set(inputRequestSessions);
+          return sessions.map((session) => (
           <SessionCard
             key={session.session}
             session={session}
             inputPermission={inputPermission}
             inputBusy={inputBusy === session.session}
             showInspector={showInspector}
+            inputRequested={requestedSessions.has(session.session)}
             t={t}
             onToggleInput={onToggleInput}
             onSetQuality={onSetQuality}
             qualityBusy={qualityBusy === session.session}
             onForceStop={onForceStop}
           />
-        ))}
+          ));
+        })()}
       </div>
     </div>
   );

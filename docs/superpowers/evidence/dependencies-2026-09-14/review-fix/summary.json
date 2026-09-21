@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13T15:39:06.368121+00:00",
+  "scope": "One bounded correction wave for the two independent-review Important license model findings. Source ownership released to parent before final full verification. No Gradle, APK build or OSV query in this correction.",
+  "historicalAudit": {
+    "path": "docs/superpowers/evidence/dependencies-2026-09-14/summary.json",
+    "sha256": "5a13a3782a0eeff3a42b0836cf0af6e2e765e5b8c9317c671a13ea17fe253983",
+    "state": "unchanged; source hashes describe the pre-review-fix snapshot"
+  },
+  "inputs": [
+    {
+      "path": "tools/release-gradle-licenses.mjs",
+      "beforeSha256": "8326aa899a539de470a13bffab4e8107bb9266d30d243c70fc1b244d78d6fd80",
+      "afterSha256": "80ad7dd2510532623d93acc6edad837907b0ae3203141b6893fdfd7e995fe744"
+    },
+    {
+      "path": "tools/release-gradle.test.mjs",
+      "beforeSha256": "77ca3f71c16c8f3f7b18aa58642fc5142436a5d102aee22ed66897bb9ecf8acc",
+      "afterSha256": "23e3b2a5e3fcd50b581839cd963635ba2cc7f177972662866bda6b1e0794ead1"
+    }
+  ],
+  "report": {
+    "path": "docs/research/2026-09-14-dependency-license-review-fix.md",
+    "sha256": "138f3d3f81a9190992117c63ef16c148c7803d9819a2b7c6398b239b6f92c46f"
+  },
+  "tests": {
+    "redCommand": "fnm exec --using=default bun run test -- tools/release-gradle.test.mjs",
+    "redExitCode": 1,
+    "redFailed": 13,
+    "redPassed": 6,
+    "greenCommand": "fnm exec --using=default bun run test -- tools/release-gradle.test.mjs tools/release-inputs.test.mjs",
+    "greenExitCode": 0,
+    "greenPassed": 35,
+    "greenFailed": 0
+  },
+  "inventoryReplay": {
+    "schema": 1,
+    "observedAt": "2026-09-13T15:37:48.694Z",
+    "evidence": "Updated collector replay of the existing actual Gradle report against current cached metadata. No Gradle or build process executed. The original audit evidence remains historical and unchanged.",
+    "report": {
+      "path": "docs/superpowers/evidence/dependencies-2026-09-14/gradle-runtime-after.txt",
+      "sha256": "6f8b2b29d11851dd5be7d4157d406751100c30165f555e93fa2266a2f7d674cf"
+    },
+    "inventorySha256": "ebf221fe2253c75e4c7bf7812c04bfb60d591a8d05ce9e8d1f4a87a93f4b2a01",
+    "identicalRecordsToOriginal": true,
+    "counts": {
+      "coordinates": 248,
+      "declared": 248,
+      "unknown": 0,
+      "sources": {
+        "cached-pom": 227,
+        "cached-parent-pom": 7,
+        "npm-local-publication": 14
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "path": "dependency-review-fixtures.json",
+      "sha256": "d8d400f4837ad423eba51015c6cabdacd177a521f9731f7c6fb4e02416169534"
+    },
+    {
+      "path": "dependency-review-inheritance.json",
+      "sha256": "d833c47930a181b33568b3fbcf218e47abddf16a145dc399d3b0336fe3743ca1"
+    },
+    {
+      "path": "dependency-review.md",
+      "sha256": "2f9e68bbd35a76e1b531b7752a5502b1b0700a4bd8a90f24f26b77d9c9b026ed"
+    },
+    {
+      "path": "gradle-license-inventory.json",
+      "sha256": "ebf221fe2253c75e4c7bf7812c04bfb60d591a8d05ce9e8d1f4a87a93f4b2a01"
+    },
+    {
+      "path": "green.log",
+      "sha256": "890a975ef220412f9cff4b7fc6fd672dbe993b70cabccc7b510d867bbd96d97d"
+    },
+    {
+      "path": "inventory-replay.json",
+      "sha256": "5a4d600f4947c63951df3a786f8a267a4a95349ad0b165c06b5891ab3d79658a"
+    },
+    {
+      "path": "red.log",
+      "sha256": "0e40b3be1bd5cd1f5cd09895116d5fb314fd8e9bd04396444c261e000190cb6e"
+    }
+  ]
+}

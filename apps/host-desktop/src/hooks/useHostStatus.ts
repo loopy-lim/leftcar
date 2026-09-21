@@ -42,9 +42,17 @@ interface StatusView {
   sessions: SessionRow[];
 }
 
+/** 뷰어 잠금 배너 탭으로 접수된 입력 허용 요청(Tauri list_input_requests). */
+export interface InputRequestRow {
+  session: number;
+  device: string | null;
+  ageMs: number;
+}
+
 export function useHostStatus(t: TranslationSchema) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [inputRequests, setInputRequests] = useState<InputRequestRow[]>([]);
   const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
   const [error, setError] = useState<HostErrorView | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
@@ -59,7 +67,7 @@ export function useHostStatus(t: TranslationSchema) {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, permission, screenGranted, hostPlatform, actualControlPort, actualLanIp] =
+      const [status, permission, screenGranted, hostPlatform, actualControlPort, actualLanIp, requests] =
         await Promise.all([
           invoke<StatusView>("get_status"),
           invoke<boolean>("get_input_permission"),
@@ -67,6 +75,7 @@ export function useHostStatus(t: TranslationSchema) {
           invoke<HostSnapshotView["platform"]>("get_host_platform"),
           invoke<number>("get_control_port"),
           invoke<string | null>("get_lan_ip").catch(() => null),
+          invoke<InputRequestRow[]>("list_input_requests").catch(() => [] as InputRequestRow[]),
         ]);
       const statusSessions = status.sessions || [];
       const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
@@ -101,6 +110,7 @@ export function useHostStatus(t: TranslationSchema) {
       );
       hasStatusSnapshot.current = true;
       setSessions(activeSessions);
+      setInputRequests(requests);
       if (nextTerminationNotice) setTerminationNotice(nextTerminationNotice);
       setBanner(
         trayStatus({
@@ -141,6 +151,7 @@ export function useHostStatus(t: TranslationSchema) {
   return {
     banner,
     sessions,
+    inputRequests,
     terminationNotice,
     dismissTerminationNotice,
     error,

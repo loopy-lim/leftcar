@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import {sha256, validateSourceBinding} from './release-source.mjs';
+export {sha256, validateSourceBinding} from './release-source.mjs';
 import { readFile, lstat, readdir, readlink, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join, resolve, isAbsolute } from 'node:path';
-export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+import {bindArtifactReleaseInputs,validateReleaseInputs} from './release-inputs.mjs';
 export async function hashPath(path) {
   const stat = await lstat(path);
   if (stat.isSymbolicLink()) return { kind: 'symlink', sha256: sha256(await readlink(path)) };
@@ -69,14 +70,17 @@ export async function inspectTargetArtifact(artifact, target) {
   if (!archs.includes(target.architecture === 'x64' ? 'x86_64' : 'arm64')) throw new Error('Mach-O does not match target');
   return {machO:{architectures:archs}};
 }
-export async function createManifest({ root, before, artifacts, versions, signing, profile = null, adaptation = null, target = null }) {
+export async function createManifest({ root, before, artifacts, versions, signing, profile = null, adaptation = null, target = null, releaseInputs = null, artifactMetadata = null }) {
   const after = await sourceSnapshot(root);
   if (before.sha256 !== after.sha256 || before.commit !== after.commit) throw new Error('Build source changed during the build; refusing manifest');
   if (!artifacts.length || !signing?.classification) throw new Error('Artifacts and signing classification required');
+  if(releaseInputs)releaseInputs=bindArtifactReleaseInputs(releaseInputs,{source:before,target,artifactMetadata,signing,profile,artifacts,versions});
   const outputs = [];
   for (const artifact of artifacts) outputs.push({ role:artifact.role, path:resolve(artifact.path), ...await hashPath(artifact.path), ...(target ? {inspection:await inspectTargetArtifact(artifact,target)} : {}) });
+  if(releaseInputs)await verifyBundledShim(outputs,releaseInputs);
   return { schema:target ? 2 : 1, ...(target ? {builder:{platform:process.platform,architecture:process.arch},target} : {}), createdAt:new Date().toISOString(), platform:process.platform, architecture:process.arch,
     source:before, versions, signing, profile, adaptation, artifacts:outputs,
+    ...(releaseInputs ? {releaseInputsSchema:1,releaseInputs,artifactMetadata} : {}),
     evidence:'local build and packaging only; no installation, capture, device, notarization or publication claim' };
 }
 export async function verifyManifest(manifest) {
@@ -84,12 +88,31 @@ export async function verifyManifest(manifest) {
   for(const artifact of manifest.artifacts) {
     if(!artifact.role || !isAbsolute(artifact.path??'') || !/^[a-f0-9]{64}$/.test(artifact.sha256??''))throw new Error('Invalid artifact record');
   }
-  if (![1,2].includes(manifest.schema) || sha256(JSON.stringify(manifest.source.files)) !== manifest.source.sha256) throw new Error('Invalid source manifest hash');
+  if (![1,2].includes(manifest.schema))throw new Error('Invalid manifest schema');
+  validateSourceBinding(manifest);
+  if(manifest.releaseInputsSchema!==undefined && (manifest.releaseInputsSchema!==1||!manifest.releaseInputs))throw new Error('Required release inputs missing or invalid');
+  if(manifest.releaseInputs!==undefined) {
+    validateReleaseInputs(manifest.releaseInputs,manifest.source);
+    const bound=bindArtifactReleaseInputs(manifest.releaseInputs,{...manifest,source:manifest.source});
+    if(JSON.stringify(bound)!==JSON.stringify(manifest.releaseInputs))throw new Error('Manifest release signing/readiness mismatch');
+    if(manifest.build?.scope && manifest.build.scope!==manifest.releaseInputs.scope)throw new Error('Manifest build scope mismatch');
+    await verifyBundledShim(manifest.artifacts,manifest.releaseInputs);
+  }
   for (const artifact of manifest.artifacts) {
-    if (manifest.schema === 2 && JSON.stringify(await inspectTargetArtifact(artifact,manifest.target)) !== JSON.stringify(artifact.inspection)) throw new Error('Artifact target inspection mismatch');
     if ((await hashPath(artifact.path)).sha256 !== artifact.sha256) throw new Error(`Artifact hash mismatch: ${artifact.role}`);
+    if (manifest.schema === 2 && JSON.stringify(await inspectTargetArtifact(artifact,manifest.target)) !== JSON.stringify(artifact.inspection)) throw new Error('Artifact target inspection mismatch');
   }
   return true;
+}
+async function verifyBundledShim(artifacts,inputs) {
+  if(inputs.scope!=='host-macos-internal')return;
+  const shim=artifacts.find(a=>a.role==='native-shim');
+  const bundle=artifacts.find(a=>a.role==='host-bundle');
+  const bundledPath=join(bundle.path,'Contents/Resources/libleftcar_capture.dylib');
+  if((await hashPath(bundledPath)).sha256!==(await hashPath(shim.path)).sha256)throw new Error('Bundled shim differs from archived native-shim');
+  const exports=execFileSync('/usr/bin/nm',['-gU',bundledPath],{encoding:'utf8'});
+  const names=new Set(exports.split('\n').map(line=>line.trim().split(/\s+/).at(-1)?.replace(/^_/,'')));
+  if(inputs.components.shim.requiredSymbols.some(symbol=>!names.has(symbol)))throw new Error('Bundled shim required symbol missing');
 }
 if (import.meta.main) {
   const [mode, path] = process.argv.slice(2);

@@ -58,6 +58,7 @@ import {
   catalogMediaHost,
   catalogErrorMessage,
   isExternalRouteAddress,
+  isExtensionDisplay,
   isHubDisplay,
   requestWithReconnect,
   requestForCurrentSelection,
@@ -1022,6 +1023,60 @@ export function useCatalogModel() {
     }
   }, [openDisplay, refetchCatalog]);
 
+  /** 확장 화면 제거(2026-09-21): 뷰어에서 직접 정리한다. macOS 시스템
+   * 반영이 비동기(실측 ~30s)라 제거 직후에도 목록에 잠시 남는데, 이때는
+   * 카탈로그의 virtualDisplayPendingRemoval로 "제거 중" 상태를 그린다. */
+  const [removingExtension, setRemovingExtension] = useState(false);
+  const extensionDisplay = displays.find((display) =>
+    isExtensionDisplay(display.name),
+  );
+  const extensionRemovalPending =
+    catalogQuery.data?.virtualDisplayPendingRemoval != null;
+  const handleRemoveExtensionDisplay = useCallback(async () => {
+    const client = controlClient();
+    if (!client) {
+      setError(currentTranslation().viewer.connectionLostError);
+      return;
+    }
+    const copy = currentTranslation();
+    const confirmed = await new Promise<boolean>((resolve) => {
+      Alert.alert(
+        copy.viewer.extRemoveConfirmTitle,
+        copy.viewer.extRemoveConfirmDesc,
+        [
+          { text: copy.common.cancel, style: "cancel", onPress: () => resolve(false) },
+          { text: copy.viewer.extRemoveButton, style: "destructive", onPress: () => resolve(true) },
+        ],
+        { cancelable: true },
+      );
+    });
+    if (!confirmed) return;
+    setRemovingExtension(true);
+    try {
+      await client.request("removeVirtualDisplay", {});
+      // 목록에서 사라지거나 호스트가 제거 진행(pending)을 알릴 때까지 짧게
+      // 재시도한다 — 사용자가 카드를 다시 누르게 만드는 애매한 중간 상태를
+      // 줄인다.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const refetched = await refetchCatalog();
+        const stillListed = (refetched.data?.displays ?? []).some((entry) =>
+          isExtensionDisplay(entry.name),
+        );
+        const pending = refetched.data?.virtualDisplayPendingRemoval != null;
+        if (!stillListed || pending) break;
+        if (attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
+      }
+      setError(null);
+    } catch (cause) {
+      setError(new LocalizedError("extRemoveFailed").format());
+      console.warn("[leftcar] extension display removal failed", cause);
+    } finally {
+      setRemovingExtension(false);
+    }
+  }, [refetchCatalog]);
+
   const visibleError =
     error ||
     streamError ||
@@ -1031,8 +1086,13 @@ export function useCatalogModel() {
   return {
     displays,
     creatingExtension,
+    removingExtension,
+    extensionDisplay,
+    extensionRemovalPending,
+    inputAllowed: catalogQuery.data?.inputAllowed,
     panelShortSide,
     handleCreateExtensionDisplay,
+    handleRemoveExtensionDisplay,
     effectiveNextEncoderExperiment,
     effectiveUdpStability,
     handleApplyUdpStability,

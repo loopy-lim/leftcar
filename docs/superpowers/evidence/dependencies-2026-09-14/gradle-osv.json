@@ -1,0 +1,4469 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13T15:15:08.599659+00:00",
+  "inputManifest": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260913/leftcar-android-internal-D49wkS/android-internal-manifest.json",
+  "inputManifestSha256": "e8e7a8d4c8d96152268ba8bdc88f7810539587cd77bcd82750328f3ceaf39ecc",
+  "inputSourceCommit": "fdfbf7e7c0e12964a5f3c1b91fb7b617c869a13f",
+  "inventoryCoordinates": 248,
+  "queriedPublicMavenCoordinates": 234,
+  "excludedLocalExpoCoordinates": [
+    {
+      "name": "expo.modules.asset:expo.modules.asset",
+      "version": "57.0.13"
+    },
+    {
+      "name": "expo.modules.router:expo.modules.router",
+      "version": "57.0.15"
+    },
+    {
+      "name": "expo.modules.ui:expo.modules.ui",
+      "version": "57.0.12"
+    },
+    {
+      "name": "expo.modules.webview:expo.modules.webview",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.camera",
+      "version": "57.0.4"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.clipboard",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.crypto",
+      "version": "57.0.2"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.documentpicker",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.filesystem",
+      "version": "57.0.6"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.font",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.keepawake",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.linking",
+      "version": "57.0.7"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.securestore",
+      "version": "57.0.1"
+    },
+    {
+      "name": "host.exp.exponent:expo.modules.statusbar",
+      "version": "57.0.1"
+    }
+  ],
+  "endpoint": "https://api.osv.dev/v1/querybatch",
+  "request": {
+    "queries": [
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.activity:activity-compose"
+        },
+        "version": "1.8.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.activity:activity-ktx"
+        },
+        "version": "1.8.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.activity:activity"
+        },
+        "version": "1.8.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.annotation:annotation-experimental"
+        },
+        "version": "1.4.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.annotation:annotation-jvm"
+        },
+        "version": "1.9.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.annotation:annotation"
+        },
+        "version": "1.9.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.appcompat:appcompat-resources"
+        },
+        "version": "1.7.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.appcompat:appcompat"
+        },
+        "version": "1.7.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.arch.core:core-common"
+        },
+        "version": "2.2.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.arch.core:core-runtime"
+        },
+        "version": "2.2.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.autofill:autofill"
+        },
+        "version": "1.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.biometric:biometric"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-camera2-pipe"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-camera2"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-core"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-extensions"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-lifecycle"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-mlkit-vision"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-video"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera:camera-view"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera.featurecombinationquery:featurecombinationquery"
+        },
+        "version": "1.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.camera.viewfinder:viewfinder-core"
+        },
+        "version": "1.5.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.cardview:cardview"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.collection:collection-jvm"
+        },
+        "version": "1.5.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.collection:collection-ktx"
+        },
+        "version": "1.5.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.collection:collection"
+        },
+        "version": "1.5.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.animation:animation-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.animation:animation-core-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.animation:animation-core"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.animation:animation"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.foundation:foundation-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.foundation:foundation-layout-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.foundation:foundation-layout"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.foundation:foundation"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.material:material-ripple-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.material:material-ripple"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.material3:material3-android"
+        },
+        "version": "1.5.0-alpha17"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.material3:material3"
+        },
+        "version": "1.5.0-alpha17"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-annotation-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-annotation"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-retain-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-retain"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-saveable-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime-saveable"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.runtime:runtime"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-geometry-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-geometry"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-graphics-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-graphics"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-text-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-text"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-unit-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-unit"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-util-android"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui-util"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.compose.ui:ui"
+        },
+        "version": "1.11.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.concurrent:concurrent-futures-ktx"
+        },
+        "version": "1.2.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.concurrent:concurrent-futures"
+        },
+        "version": "1.2.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.constraintlayout:constraintlayout-core"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.constraintlayout:constraintlayout"
+        },
+        "version": "2.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.coordinatorlayout:coordinatorlayout"
+        },
+        "version": "1.2.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.core:core-backported-fixes"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.core:core-ktx"
+        },
+        "version": "1.18.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.core:core-viewtree"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.core:core"
+        },
+        "version": "1.18.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.cursoradapter:cursoradapter"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.customview:customview-poolingcontainer"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.customview:customview"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.documentfile:documentfile"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.drawerlayout:drawerlayout"
+        },
+        "version": "1.1.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.dynamicanimation:dynamicanimation"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.emoji2:emoji2-views-helper"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.emoji2:emoji2"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.exifinterface:exifinterface"
+        },
+        "version": "1.4.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.fragment:fragment-ktx"
+        },
+        "version": "1.8.9"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.fragment:fragment"
+        },
+        "version": "1.8.9"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.graphics:graphics-path"
+        },
+        "version": "1.0.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.graphics:graphics-shapes-android"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.graphics:graphics-shapes"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.interpolator:interpolator"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-common-java8"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-common-jvm"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-common"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-livedata-core-ktx"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-livedata-core"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-livedata"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-process"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime-android"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime-compose-android"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime-compose"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime-ktx-android"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime-ktx"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-runtime"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-viewmodel-android"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-viewmodel-ktx"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-viewmodel-savedstate-android"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-viewmodel-savedstate"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.lifecycle:lifecycle-viewmodel"
+        },
+        "version": "2.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.loader:loader"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-common"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-container"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-database"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-datasource"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-decoder"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-exoplayer"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-extractor"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.media3:media3-muxer"
+        },
+        "version": "1.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.profileinstaller:profileinstaller"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.recyclerview:recyclerview"
+        },
+        "version": "1.2.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.resourceinspection:resourceinspection-annotation"
+        },
+        "version": "1.0.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.savedstate:savedstate-android"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.savedstate:savedstate-compose-android"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.savedstate:savedstate-compose"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.savedstate:savedstate-ktx"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.savedstate:savedstate"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.startup:startup-runtime"
+        },
+        "version": "1.1.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.swiperefreshlayout:swiperefreshlayout"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.tracing:tracing-android"
+        },
+        "version": "1.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.tracing:tracing-ktx"
+        },
+        "version": "1.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.tracing:tracing"
+        },
+        "version": "1.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.transition:transition-ktx"
+        },
+        "version": "1.7.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.transition:transition"
+        },
+        "version": "1.7.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.vectordrawable:vectordrawable-animated"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.vectordrawable:vectordrawable"
+        },
+        "version": "1.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.versionedparcelable:versionedparcelable"
+        },
+        "version": "1.1.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.viewpager:viewpager"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.viewpager2:viewpager2"
+        },
+        "version": "1.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.window:window-core-android"
+        },
+        "version": "1.5.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.window:window-core"
+        },
+        "version": "1.5.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.window:window"
+        },
+        "version": "1.5.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.arcore:arcore-openxr"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.arcore:arcore-play-services"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.arcore:arcore-runtime"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.arcore:arcore"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.runtime:runtime-interfaces"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.runtime:runtime-manifest"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.runtime:runtime-openxr"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.runtime:runtime"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.scenecore:scenecore-runtime"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.scenecore:scenecore-spatial-core"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.scenecore:scenecore-spatial-rendering"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "androidx.xr.scenecore:scenecore"
+        },
+        "version": "1.0.0-beta02"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fbjni:fbjni"
+        },
+        "version": "0.7.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:drawee"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:fbcore"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:fresco"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:imagepipeline-base"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:imagepipeline-native"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:imagepipeline-okhttp3"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:imagepipeline"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:memory-type-ashmem"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:memory-type-java"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:memory-type-native"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:middleware"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:nativeimagefilters"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:nativeimagetranscoder"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:soloader"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:ui-common"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:ui-core"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:urimod"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.fresco:vito-source"
+        },
+        "version": "3.6.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.hermes:hermes-android"
+        },
+        "version": "250829098.0.16"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.infer.annotation:infer-annotation"
+        },
+        "version": "0.18.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.react:react-android"
+        },
+        "version": "0.86.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.soloader:annotation"
+        },
+        "version": "0.12.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.soloader:nativeloader"
+        },
+        "version": "0.12.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.soloader:soloader"
+        },
+        "version": "0.12.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.facebook.yoga:proguard-annotations"
+        },
+        "version": "1.19.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.datatransport:transport-api"
+        },
+        "version": "2.2.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.datatransport:transport-backend-cct"
+        },
+        "version": "2.3.3"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.datatransport:transport-runtime"
+        },
+        "version": "2.2.6"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.gms:play-services-base"
+        },
+        "version": "18.5.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.gms:play-services-basement"
+        },
+        "version": "18.10.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.gms:play-services-code-scanner"
+        },
+        "version": "16.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.gms:play-services-mlkit-barcode-scanning"
+        },
+        "version": "18.3.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.gms:play-services-tasks"
+        },
+        "version": "18.2.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.material:material"
+        },
+        "version": "1.13.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.android.odml:image"
+        },
+        "version": "1.0.0-beta1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.ar:core"
+        },
+        "version": "1.53.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.ar:impress"
+        },
+        "version": "1.0.0-beta03"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.auto.value:auto-value-annotations"
+        },
+        "version": "1.6.3"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.code.findbugs:jsr305"
+        },
+        "version": "3.0.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.code.gson:gson"
+        },
+        "version": "2.8.6"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.dagger:dagger"
+        },
+        "version": "2.59"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.errorprone:error_prone_annotations"
+        },
+        "version": "2.30.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.firebase:firebase-annotations"
+        },
+        "version": "16.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.firebase:firebase-components"
+        },
+        "version": "16.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.firebase:firebase-encoders-json"
+        },
+        "version": "17.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.firebase:firebase-encoders"
+        },
+        "version": "16.1.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.guava:failureaccess"
+        },
+        "version": "1.0.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.guava:guava"
+        },
+        "version": "33.3.1-android"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.guava:listenablefuture"
+        },
+        "version": "9999.0-empty-to-avoid-conflict-with-guava"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.mlkit:barcode-scanning-common"
+        },
+        "version": "17.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.mlkit:barcode-scanning"
+        },
+        "version": "17.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.mlkit:common"
+        },
+        "version": "18.11.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.mlkit:vision-common"
+        },
+        "version": "17.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.google.mlkit:vision-interfaces"
+        },
+        "version": "16.3.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.parse.bolts:bolts-tasks"
+        },
+        "version": "1.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.okhttp3:okhttp-urlconnection"
+        },
+        "version": "4.9.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.okhttp3:okhttp"
+        },
+        "version": "4.9.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.okio:okio-jvm"
+        },
+        "version": "3.16.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.okio:okio"
+        },
+        "version": "3.16.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.zstd:zstd-kmp-android"
+        },
+        "version": "0.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.zstd:zstd-kmp-okio-android"
+        },
+        "version": "0.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.zstd:zstd-kmp-okio"
+        },
+        "version": "0.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "com.squareup.zstd:zstd-kmp"
+        },
+        "version": "0.4.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "commons-codec:commons-codec"
+        },
+        "version": "1.10"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "commons-io:commons-io"
+        },
+        "version": "2.6"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "io.github.lukmccall.pika:pika-api"
+        },
+        "version": "0.3.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "jakarta.inject:jakarta.inject-api"
+        },
+        "version": "2.0.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "javax.inject:javax.inject"
+        },
+        "version": "1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.bouncycastle:bcpkix-jdk15to18"
+        },
+        "version": "1.78.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.bouncycastle:bcprov-jdk15to18"
+        },
+        "version": "1.78.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.bouncycastle:bcutil-jdk15to18"
+        },
+        "version": "1.78.1"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.brotli:dec"
+        },
+        "version": "0.1.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains:annotations"
+        },
+        "version": "23.0.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-annotations-jvm"
+        },
+        "version": "1.3.72"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-bom"
+        },
+        "version": "1.8.22"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-reflect"
+        },
+        "version": "2.1.20"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-stdlib-jdk7"
+        },
+        "version": "2.1.20"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-stdlib-jdk8"
+        },
+        "version": "1.8.22"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlin:kotlin-stdlib"
+        },
+        "version": "2.2.20"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:atomicfu-jvm"
+        },
+        "version": "0.28.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:atomicfu"
+        },
+        "version": "0.28.0"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-coroutines-android"
+        },
+        "version": "1.10.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-coroutines-bom"
+        },
+        "version": "1.10.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm"
+        },
+        "version": "1.10.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-coroutines-core"
+        },
+        "version": "1.10.2"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-serialization-bom"
+        },
+        "version": "1.7.3"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm"
+        },
+        "version": "1.7.3"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jetbrains.kotlinx:kotlinx-serialization-core"
+        },
+        "version": "1.7.3"
+      },
+      {
+        "package": {
+          "ecosystem": "Maven",
+          "name": "org.jspecify:jspecify"
+        },
+        "version": "1.0.0"
+      }
+    ]
+  },
+  "response": {
+    "results": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "vulns": [
+          {
+            "id": "GHSA-4jrv-ppp4-jm57",
+            "modified": "2026-09-10T03:49:19.710819Z"
+          }
+        ]
+      },
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "vulns": [
+          {
+            "id": "GHSA-78wr-2p64-hpwj",
+            "modified": "2026-09-10T03:50:19.619589Z"
+          },
+          {
+            "id": "GHSA-gwrp-pvrq-jmwv",
+            "modified": "2024-02-14T20:25:59Z"
+          }
+        ]
+      },
+      {},
+      {},
+      {},
+      {
+        "vulns": [
+          {
+            "id": "GHSA-4cx2-fc23-5wg6",
+            "modified": "2026-09-10T03:50:26.717417Z"
+          },
+          {
+            "id": "GHSA-wg6q-6289-32hp",
+            "modified": "2026-09-10T03:50:45.075900Z"
+          }
+        ]
+      },
+      {
+        "vulns": [
+          {
+            "id": "GHSA-574f-3g2m-x479",
+            "modified": "2026-09-10T03:50:43.878677Z"
+          },
+          {
+            "id": "GHSA-c3fc-8qff-9hwx",
+            "modified": "2026-09-10T03:51:01.534612Z"
+          },
+          {
+            "id": "GHSA-p93r-85wp-75v3",
+            "modified": "2026-09-10T03:50:44.836711Z"
+          }
+        ]
+      },
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {}
+    ]
+  },
+  "findings": [
+    {
+      "package": "com.google.code.gson:gson",
+      "version": "2.8.6",
+      "advisory": {
+        "id": "GHSA-4jrv-ppp4-jm57",
+        "summary": "Deserialization of Untrusted Data in Gson",
+        "details": "The package `com.google.code.gson:gson` before 2.8.9 is vulnerable to Deserialization of Untrusted Data via the `writeReplace()` method in internal classes, which may lead to denial of service attacks.",
+        "aliases": [
+          "CVE-2022-25647",
+          "SNYK-JAVA-COMGOOGLECODEGSON-1730327"
+        ],
+        "modified": "2026-09-10T03:49:19.710819205Z",
+        "published": "2022-05-03T00:00:44Z",
+        "database_specific": {
+          "severity": "HIGH",
+          "github_reviewed": true,
+          "github_reviewed_at": "2022-05-20T20:31:08Z",
+          "nvd_published_at": "2022-05-01T16:15:00Z",
+          "cwe_ids": [
+            "CWE-502"
+          ]
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-25647"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/google/gson/pull/1991"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/google/gson/pull/1991/commits"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/google/gson"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.debian.org/debian-lts-announce/2022/05/msg00015.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.debian.org/debian-lts-announce/2022/09/msg00009.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://security.netapp.com/advisory/ntap-20220901-0009"
+          },
+          {
+            "type": "WEB",
+            "url": "https://snyk.io/vuln/SNYK-JAVA-COMGOOGLECODEGSON-1730327"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.debian.org/security/2022/dsa-5227"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "com.google.code.gson:gson",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/com.google.code.gson/gson"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "0"
+                  },
+                  {
+                    "fixed": "2.8.9"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.1",
+              "1.4",
+              "1.5",
+              "1.6",
+              "1.7",
+              "1.7.1",
+              "1.7.2",
+              "2.0",
+              "2.1",
+              "2.2",
+              "2.2.1",
+              "2.2.2",
+              "2.2.3",
+              "2.2.4",
+              "2.3",
+              "2.3.1",
+              "2.4",
+              "2.5",
+              "2.6",
+              "2.6.1",
+              "2.6.2",
+              "2.7",
+              "2.8.0",
+              "2.8.1",
+              "2.8.2",
+              "2.8.3",
+              "2.8.4",
+              "2.8.5",
+              "2.8.6",
+              "2.8.7",
+              "2.8.8"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2022/05/GHSA-4jrv-ppp4-jm57/GHSA-4jrv-ppp4-jm57.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V3",
+            "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:H"
+          }
+        ]
+      }
+    },
+    {
+      "package": "commons-io:commons-io",
+      "version": "2.6",
+      "advisory": {
+        "id": "GHSA-78wr-2p64-hpwj",
+        "summary": "Apache Commons IO: Possible denial of service attack on untrusted input to XmlStreamReader",
+        "details": "Uncontrolled Resource Consumption vulnerability in Apache Commons IO.\n\nThe `org.apache.commons.io.input.XmlStreamReader` class may excessively consume CPU resources when processing maliciously crafted input.\n\n\nThis issue affects Apache Commons IO: from 2.0 before 2.14.0.\n\nUsers are recommended to upgrade to version 2.14.0 or later, which fixes the issue.",
+        "aliases": [
+          "CVE-2024-47554"
+        ],
+        "modified": "2026-09-10T03:50:19.619589743Z",
+        "published": "2024-10-03T12:30:48Z",
+        "database_specific": {
+          "cwe_ids": [
+            "CWE-400"
+          ],
+          "severity": "HIGH",
+          "github_reviewed": true,
+          "github_reviewed_at": "2024-10-03T16:52:23Z",
+          "nvd_published_at": "2024-10-03T12:15:02Z"
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-47554"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/apache/commons-io"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread/6ozr91rr9cj5lm0zyhv30bsp317hk5z1"
+          },
+          {
+            "type": "WEB",
+            "url": "https://security.netapp.com/advisory/ntap-20250131-0010"
+          },
+          {
+            "type": "WEB",
+            "url": "http://www.openwall.com/lists/oss-security/2024/10/03/2"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "commons-io:commons-io",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/commons-io/commons-io"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "2.0"
+                  },
+                  {
+                    "fixed": "2.14.0"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "2.0",
+              "2.0.1",
+              "2.1",
+              "2.10.0",
+              "2.11.0",
+              "2.12.0",
+              "2.13.0",
+              "2.2",
+              "2.3",
+              "2.4",
+              "2.5",
+              "2.6",
+              "2.7",
+              "2.8.0",
+              "2.9.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2024/10/GHSA-78wr-2p64-hpwj/GHSA-78wr-2p64-hpwj.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V3",
+            "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"
+          }
+        ]
+      }
+    },
+    {
+      "package": "commons-io:commons-io",
+      "version": "2.6",
+      "advisory": {
+        "id": "GHSA-gwrp-pvrq-jmwv",
+        "summary": "Path Traversal and Improper Input Validation in Apache Commons IO",
+        "details": "In Apache Commons IO before 2.7, When invoking the method FileNameUtils.normalize with an improper input string, like \"//../foo\", or \"\\\\..\\foo\", the result would be the same value, thus possibly providing access to files in the parent directory, but not further above (thus \"limited\" path traversal), if the calling code would use the result to construct a path value.",
+        "aliases": [
+          "CVE-2021-29425"
+        ],
+        "modified": "2024-02-14T20:25:59Z",
+        "published": "2021-04-26T16:04:00Z",
+        "database_specific": {
+          "cwe_ids": [
+            "CWE-20",
+            "CWE-22"
+          ],
+          "severity": "MODERATE",
+          "github_reviewed": true,
+          "github_reviewed_at": "2021-04-26T15:21:31Z",
+          "nvd_published_at": "2021-04-13T07:15:00Z"
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-29425"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r8efcbabde973ea72f5e0933adc48ef1425db5cde850bf641b3993f31@%3Cdev.commons.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r92ea904f4bae190b03bd42a4355ce3c2fbe8f36ab673e03f6ca3f9fa@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/ra8ef65aedc086d2d3d21492b4c08ae0eb8a3a42cc52e29ba1bc009d8@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/raa053846cae9d497606027816ae87b4e002b2e0eb66cb0dee710e1f5@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rad4ae544747df32ccd58fff5a86cd556640396aeb161aa71dd3d192a@%3Cuser.commons.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rbebd3e19651baa7a4a5503a9901c95989df9d40602c8e35cb05d3eb5@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rc10fa20ef4d13cbf6ebe0b06b5edb95466a1424a9b7673074ed03260@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rc2dd3204260e9227a67253ef68b6f1599446005bfa0e1ddce4573a80@%3Cpluto-dev.portals.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rc359823b5500e9a9a2572678ddb8e01d3505a7ffcadfa8d13b8780ab%40%3Cuser.commons.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rc5f3df5316c5237b78a3dff5ab95b311ad08e61d418cd992ca7e34ae@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rc65f9bc679feffe4589ea0981ee98bc0af9139470f077a91580eeee0@%3Cpluto-dev.portals.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rca71a10ca533eb9bfac2d590533f02e6fb9064d3b6aa3ec90fdc4f51@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rd09d4ab3e32e4b3a480e2ff6ff118712981ca82e817f28f2a85652a6@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/re41e9967bee064e7369411c28f0f5b2ad28b8334907c9c6208017279@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/red3aea910403d8620c73e1c7b9c9b145798d0469eb3298a7be7891af@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rfa2f08b7c0caf80ca9f4a18bd875918fdd4e894e2ea47942a4589b9c@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rfcd2c649c205f12b72dde044f905903460669a220a2eb7e12652d19d@%3Cdev.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/rfd01af05babc95b8949e6d8ea78d9834699e1b06981040dde419a330@%3Cdev.commons.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.debian.org/debian-lts-announce/2021/08/msg00016.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://security.netapp.com/advisory/ntap-20220210-0004"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://www.oracle.com/security-alerts/cpuoct2021.html"
+          },
+          {
+            "type": "WEB",
+            "url": "https://arxiv.org/pdf/2306.05534.pdf"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/jensdietrich/xshady-release/tree/main/CVE-2021-29425"
+          },
+          {
+            "type": "WEB",
+            "url": "https://issues.apache.org/jira/browse/IO-556"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r01b4a1fcdf3311c936ce33d75a9398b6c255f00c1a2f312ac21effe1@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r0bfa8f7921abdfae788b1f076a12f73a92c93cc0a6e1083bce0027c5@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r0d73e2071d1f1afe1a15da14c5b6feb2cf17e3871168d5a3c8451436@%3Ccommits.pulsar.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r1c2f4683c35696cf6f863e3c107e37ec41305b1930dd40c17260de71@%3Ccommits.pulsar.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r20416f39ca7f7344e7d76fe4d7063bb1d91ad106926626e7e83fb346@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r2345b49dbffa8a5c3c589c082fe39228a2c1d14f11b96c523da701db@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r2721aba31a8562639c4b937150897e24f78f747cdbda8641c0f659fe@%3Cusers.kafka.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r27b1eedda37468256c4bb768fde1e8b79b37ec975cbbfd0d65a7ac34@%3Cdev.myfaces.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r2bc986a070457daca457a54fe71ee09d2584c24dc262336ca32b6a19@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r2df50af2641d38f432ef025cd2ba5858215cc0cf3fc10396a674ad2e@%3Cpluto-scm.portals.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r345330b7858304938b7b8029d02537a116d75265a598c98fa333504a@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r4050f9f6b42ebfa47a98cbdee4aabed4bb5fb8093db7dbb88faceba2@%3Ccommits.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r462db908acc1e37c455e11b1a25992b81efd18e641e7e0ceb1b6e046@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r477c285126ada5c3b47946bb702cb222ac4e7fd3100c8549bdd6d3b2@%3Cissues.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r47ab6f68cbba8e730f42c4ea752f3a44eb95fb09064070f2476bb401@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r5149f78be265be69d34eacb4e4b0fc7c9c697bcdfa91a1c1658d717b@%3Cissues.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r523a6ffad58f71c4f3761e3cee72df878e48cdc89ebdce933be1475c@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r808be7d93b17a7055c1981a8453ae5f0d0fce5855407793c5d0ffffa@%3Cuser.commons.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r8569a41d565ca880a4dee0e645dad1cd17ab4a92e68055ad9ebb7375@%3Cdev.creadur.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r86528f4b7d222aed7891e7ac03d69a0db2a2dfa17b86ac3470d7f374@%3Cnotifications.zookeeper.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r873d5ddafc0a68fd999725e559776dc4971d1ab39c0f5cc81bd9bc04@%3Ccommits.pulsar.apache.org%3E"
+          },
+          {
+            "type": "WEB",
+            "url": "https://lists.apache.org/thread.html/r8bfc7235e6b39d90e6f446325a5a44c3e9e50da18860fdabcee23e29@%3Cissues.zookeeper.apache.org%3E"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "commons-io:commons-io",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/commons-io/commons-io"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "0"
+                  },
+                  {
+                    "fixed": "2.7"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "0.1",
+              "1.0",
+              "1.1",
+              "1.2",
+              "1.3",
+              "1.3.1",
+              "1.3.2",
+              "1.4",
+              "2.0",
+              "2.0.1",
+              "2.1",
+              "2.2",
+              "2.3",
+              "2.4",
+              "2.5",
+              "2.6"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "com.cosium.vet:vet",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/com.cosium.vet/vet"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.0"
+                  },
+                  {
+                    "last_affected": "3.22"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.0",
+              "1.1",
+              "1.11",
+              "1.12",
+              "1.13",
+              "1.2",
+              "1.3",
+              "1.4",
+              "1.5",
+              "2.2",
+              "2.3",
+              "2.6",
+              "2.7",
+              "2.8",
+              "2.9",
+              "3.0",
+              "3.10",
+              "3.11",
+              "3.12",
+              "3.13",
+              "3.14",
+              "3.15",
+              "3.16",
+              "3.17",
+              "3.18",
+              "3.19",
+              "3.22"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "com.diamondq.common:common-thirdparty.jcasbin",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/com.diamondq.common/common-thirdparty.jcasbin"
+            },
+            "versions": [
+              "1.4.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "com.liferay:com.liferay.sass.compiler.jsass",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/com.liferay/com.liferay.sass.compiler.jsass"
+            },
+            "versions": [
+              "1.0.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "com.virjar:ratel-api",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/com.virjar/ratel-api"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.0.0"
+                  },
+                  {
+                    "last_affected": "1.3.6"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.0.0",
+              "1.1.0",
+              "1.2.0",
+              "1.3.0",
+              "1.3.1",
+              "1.3.2",
+              "1.3.3",
+              "1.3.4",
+              "1.3.5",
+              "1.3.6"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "net.hasor:cobble-lang",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/net.hasor/cobble-lang"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "4.4.1"
+                  },
+                  {
+                    "last_affected": "4.6.2"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "4.4.1",
+              "4.4.2",
+              "4.5.0",
+              "4.5.1",
+              "4.5.2",
+              "4.5.3",
+              "4.5.4",
+              "4.6.0",
+              "4.6.1",
+              "4.6.2"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.apache.commons:commons-io",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.apache.commons/commons-io"
+            },
+            "versions": [
+              "1.3.2"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.apache.servicemix.bundles:org.apache.servicemix.bundles.commons-io",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.apache.servicemix.bundles/org.apache.servicemix.bundles.commons-io"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.4"
+                  },
+                  {
+                    "last_affected": "1.5"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.4_1",
+              "1.4_2",
+              "1.4_3"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.checkerframework.annotatedlib:commons-io",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.checkerframework.annotatedlib/commons-io"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "2.6"
+                  },
+                  {
+                    "fixed": "2.7"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "2.6",
+              "2.6.0.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.smartboot.servlet:servlet-core",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.smartboot.servlet/servlet-core"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "0.1.9"
+                  },
+                  {
+                    "last_affected": "0.6"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "0.1.9",
+              "0.2",
+              "0.2.1",
+              "0.3",
+              "0.3.1",
+              "0.4",
+              "0.5",
+              "0.6"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/04/GHSA-gwrp-pvrq-jmwv/GHSA-gwrp-pvrq-jmwv.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V3",
+            "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N"
+          }
+        ]
+      }
+    },
+    {
+      "package": "org.bouncycastle:bcpkix-jdk15to18",
+      "version": "1.78.1",
+      "advisory": {
+        "id": "GHSA-4cx2-fc23-5wg6",
+        "summary": "Bouncy Castle for Java bcpkix, bcprov, bcpkix-fips on All (API modules) allows Excessive Allocation",
+        "details": "Allocation of Resources Without Limits or Throttling vulnerability in Legion of the Bouncy Castle Inc. Bouncy Castle for Java bcpkix, bcprov, bcpkix-fips on All (API modules) allows Excessive Allocation. This vulnerability is associated with program files  https://github.Com/bcgit/bc-java/blob/main/pkix/src/main/java/org/bouncycastle/pkix/jcajce/PKIXCertP... https://github.Com/bcgit/bc-java/blob/main/pkix/src/main/java/org/bouncycastle/pkix/jcajce/PKIXCertPathReviewer.java ,  https://github.Com/bcgit/bc-java/blob/main/prov/src/main/java/org/bouncycastle/x509/PKIXCertPathRevi... https://github.Com/bcgit/bc-java/blob/main/prov/src/main/java/org/bouncycastle/x509/PKIXCertPathReviewer.java .\n\nThis issue affects Bouncy Castle for Java: from BC 1.44 through 1.78, from BCPKIX FIPS 1.0.0 through 1.0.7, from BCPKIX FIPS 2.0.0 through 2.0.7.",
+        "aliases": [
+          "CVE-2025-8916"
+        ],
+        "modified": "2026-09-10T03:50:26.717417411Z",
+        "published": "2025-08-13T12:31:30Z",
+        "database_specific": {
+          "severity": "MODERATE",
+          "github_reviewed": true,
+          "github_reviewed_at": "2025-08-13T22:52:42Z",
+          "nvd_published_at": "2025-08-13T10:15:27Z",
+          "cwe_ids": [
+            "CWE-770"
+          ]
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-8916"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/310b30a4fbf36d13f6cc201ffa7771715641e67e"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/ff444a479942d88de64004dc82c3ee32a9e9075a"
+          },
+          {
+            "type": "WEB",
+            "url": "https://cert-portal.siemens.com/productcert/html/ssa-032379.html"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/bcgit/bc-java"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902025%E2%80%908916"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk15on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk15on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.44"
+                  },
+                  {
+                    "fixed": "1.79"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.47",
+              "1.48",
+              "1.49",
+              "1.50",
+              "1.51",
+              "1.52",
+              "1.53",
+              "1.54",
+              "1.55",
+              "1.56",
+              "1.57",
+              "1.58",
+              "1.59",
+              "1.60",
+              "1.61",
+              "1.62",
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.66",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2025/08/GHSA-4cx2-fc23-5wg6/GHSA-4cx2-fc23-5wg6.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.44"
+                  },
+                  {
+                    "fixed": "1.79"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.66",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2025/08/GHSA-4cx2-fc23-5wg6/GHSA-4cx2-fc23-5wg6.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.44"
+                  },
+                  {
+                    "fixed": "1.79"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.71.1",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2025/08/GHSA-4cx2-fc23-5wg6/GHSA-4cx2-fc23-5wg6.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-fips",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-fips"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.0.0"
+                  },
+                  {
+                    "fixed": "1.0.8"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.0.0",
+              "1.0.1",
+              "1.0.2",
+              "1.0.3",
+              "1.0.4",
+              "1.0.5",
+              "1.0.6",
+              "1.0.7"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.0.7",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2025/08/GHSA-4cx2-fc23-5wg6/GHSA-4cx2-fc23-5wg6.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-fips",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-fips"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "2.0.0"
+                  },
+                  {
+                    "fixed": "2.0.8"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "2.0.7"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2025/08/GHSA-4cx2-fc23-5wg6/GHSA-4cx2-fc23-5wg6.json",
+              "last_known_affected_version_range": "<= 2.0.7"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/S:P/R:U/RE:M/U:Amber"
+          }
+        ]
+      }
+    },
+    {
+      "package": "org.bouncycastle:bcpkix-jdk15to18",
+      "version": "1.78.1",
+      "advisory": {
+        "id": "GHSA-wg6q-6289-32hp",
+        "summary": "Bouncy Castle Crypto Package For Java: Use of a Broken or Risky Cryptographic Algorithm vulnerability in bcpkix modules",
+        "details": ": Use of a Broken or Risky Cryptographic Algorithm vulnerability in Legion of the Bouncy Castle Inc. BC-JAVA bcpkix on all (pkix modules).\n\n\nPKIX draft CompositeVerifier accepts empty signature sequence as valid.\n\n\nThis issue affects BC-JAVA: from 1.49 before 1.84.",
+        "aliases": [
+          "CVE-2026-5588"
+        ],
+        "modified": "2026-09-10T03:50:45.075900186Z",
+        "published": "2026-04-15T18:31:54Z",
+        "database_specific": {
+          "cwe_ids": [
+            "CWE-327"
+          ],
+          "severity": "MODERATE",
+          "github_reviewed": true,
+          "github_reviewed_at": "2026-04-16T21:32:20Z",
+          "nvd_published_at": "2026-04-15T10:16:49Z"
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-5588"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/656bae0dbd9b1521f840521ff786e78749fe3057"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/bcgit/bc-java"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902026%E2%80%905588"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.71.1",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.80.2",
+              "1.81",
+              "1.81.1",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.66",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk15on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk15on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.49",
+              "1.50",
+              "1.51",
+              "1.52",
+              "1.53",
+              "1.54",
+              "1.55",
+              "1.56",
+              "1.57",
+              "1.58",
+              "1.59",
+              "1.60",
+              "1.61",
+              "1.62",
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.66",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.49",
+              "1.50",
+              "1.51",
+              "1.53",
+              "1.54",
+              "1.55",
+              "1.56",
+              "1.57",
+              "1.58",
+              "1.59",
+              "1.60",
+              "1.61",
+              "1.62",
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-debug-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-debug-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-debug-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-debug-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcpkix-debug-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcpkix-debug-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.49"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-wg6q-6289-32hp/GHSA-wg6q-6289-32hp.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N/U:Green"
+          }
+        ]
+      }
+    },
+    {
+      "package": "org.bouncycastle:bcprov-jdk15to18",
+      "version": "1.78.1",
+      "advisory": {
+        "id": "GHSA-574f-3g2m-x479",
+        "summary": "Bouncy Castle for Java GOST 28147 CTR mode reuses keystream after 255 blocks",
+        "details": "The GOST 28147-2015 CTR mode implementation (`G3413CTRBlockCipher`) in the Legion of the Bouncy Castle BC-JAVA `bcprov` core module only increments the final byte of the counter, so the counter wraps after 255 blocks and the keystream is reused. Reusing CTR keystream allows an attacker who can observe two ciphertexts produced with the same key/IV to recover the XOR of the plaintexts, breaking confidentiality. Affects BC-JAVA from 1.59 before 1.84 (with backported fixes in 1.80.2 and 1.81.1).",
+        "aliases": [
+          "CVE-2025-14813"
+        ],
+        "modified": "2026-09-10T03:50:43.878677700Z",
+        "published": "2026-04-17T18:31:50Z",
+        "database_specific": {
+          "github_reviewed_at": "2026-06-30T19:45:20Z",
+          "nvd_published_at": "2026-04-15T10:16:38Z",
+          "cwe_ids": [
+            "CWE-323"
+          ],
+          "severity": "CRITICAL",
+          "github_reviewed": true
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-14813"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/b42574345414e4b7c8051b16fa1fafe01c29871f"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/701686cb0184cd9ae103c801b3581fdf95c6d4f3"
+          },
+          {
+            "type": "WEB",
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2025/cve-2025-14813.json"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902025%E2%80%9014813"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/bcgit/bc-java"
+          },
+          {
+            "type": "WEB",
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2458640"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/security/cve/CVE-2025-14813"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:24977"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:21772"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:18059"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:18055"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:18054"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:17668"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:14276"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:14272"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:13631"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:11721"
+          },
+          {
+            "type": "WEB",
+            "url": "https://access.redhat.com/errata/RHSA-2026:11720"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.80.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.59",
+              "1.60",
+              "1.61",
+              "1.62",
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.80.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.63",
+              "1.64",
+              "1.65",
+              "1.66",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "fixed": "1.80.2"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.71.1",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.80.1",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.80.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.59",
+              "1.60",
+              "1.64",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.78",
+              "1.79",
+              "1.80"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.80.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.64",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.80.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.78.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.60",
+              "1.64",
+              "1.65",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.75",
+              "1.76",
+              "1.78",
+              "1.78.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.78.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.64",
+              "1.67",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.78.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-debug-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-debug-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.74"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.60",
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-debug-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-debug-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.77"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.68",
+              "1.69",
+              "1.70",
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-ext-debug-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-ext-debug-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.59"
+                  },
+                  {
+                    "last_affected": "1.77"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk14"
+            },
+            "versions": [
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk15to18"
+            },
+            "versions": [
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.81.0"
+                  },
+                  {
+                    "fixed": "1.81.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.81",
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk14"
+            },
+            "versions": [
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk15to18"
+            },
+            "versions": [
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk18on"
+            },
+            "versions": [
+              "1.81.0"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.83",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json",
+              "last_known_affected_version_range": "<= 1.83"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.83",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.83",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.83",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-debug-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-debug-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "last_known_affected_version_range": "<= 1.83",
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-574f-3g2m-x479/GHSA-574f-3g2m-x479.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N/RE:M/U:Red"
+          }
+        ]
+      }
+    },
+    {
+      "package": "org.bouncycastle:bcprov-jdk15to18",
+      "version": "1.78.1",
+      "advisory": {
+        "id": "GHSA-c3fc-8qff-9hwx",
+        "summary": "Bouncy Castle has an LDAP injection",
+        "details": "Improper neutralization of special elements used in an LDAP query ('LDAP injection') vulnerability in Legion of the Bouncy Castle Inc. BC-JAVA bcprov on all (prov modules). This vulnerability is associated with program files LDAPStoreHelper.\n\nThis issue affects BC-JAVA: from 1.74 before 1.84.",
+        "aliases": [
+          "CVE-2026-0636"
+        ],
+        "modified": "2026-09-10T03:51:01.534612930Z",
+        "published": "2026-04-17T18:31:50Z",
+        "database_specific": {
+          "cwe_ids": [
+            "CWE-90"
+          ],
+          "severity": "MODERATE",
+          "github_reviewed": true,
+          "github_reviewed_at": "2026-04-18T01:06:02Z",
+          "nvd_published_at": "2026-04-15T10:16:38Z"
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-0636"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/d20cdb8430e09224114fec0179a71859929fcbde"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/bcgit/bc-java"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902026%E2%80%900636"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.74"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-c3fc-8qff-9hwx/GHSA-c3fc-8qff-9hwx.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.74"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.81",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-c3fc-8qff-9hwx/GHSA-c3fc-8qff-9hwx.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.74"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80",
+              "1.80.2",
+              "1.81",
+              "1.81.1",
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-c3fc-8qff-9hwx/GHSA-c3fc-8qff-9hwx.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N/E:P/RE:M/U:Amber"
+          }
+        ]
+      }
+    },
+    {
+      "package": "org.bouncycastle:bcprov-jdk15to18",
+      "version": "1.78.1",
+      "advisory": {
+        "id": "GHSA-p93r-85wp-75v3",
+        "summary": "Bouncy Castle Has Covert Timing Channel Vulnerability",
+        "details": "Covert timing channel vulnerability in Legion of the Bouncy Castle Inc. BC-JAVA core on all (core modules). This vulnerability is associated with program files FrodoEngine.Java.\n\nThis issue only affects users of the FrodoKEM algorithm involved in the decryption of encapsulations.\n\nThis issue affects BC-JAVA: from 1.71 to 1.80.1, 1.81, 1.82 to 1.83.\n\nFixed versions: 1.80.2, 1.81.1, 1.84",
+        "aliases": [
+          "CVE-2026-5598"
+        ],
+        "modified": "2026-09-10T03:50:44.836711239Z",
+        "published": "2026-04-17T18:31:50Z",
+        "database_specific": {
+          "severity": "HIGH",
+          "github_reviewed": true,
+          "github_reviewed_at": "2026-04-25T23:25:24Z",
+          "nvd_published_at": "2026-04-15T10:16:49Z",
+          "cwe_ids": [
+            "CWE-385"
+          ]
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-5598"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/8692e6b2b191fc4aafa32545c7a78bdb9bf110c5"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/commit/94abbd56413dfdac651fd878bc60253871ef5e87"
+          },
+          {
+            "type": "PACKAGE",
+            "url": "https://github.com/bcgit/bc-java"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902026%E2%80%905598"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/bcgit/bc-java/wiki/CVE-2026-5598"
+          }
+        ],
+        "affected": [
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk15to18",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk15to18"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.71"
+                  },
+                  {
+                    "fixed": "1.80.2"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.71",
+              "1.72",
+              "1.73",
+              "1.74",
+              "1.75",
+              "1.76",
+              "1.77",
+              "1.78",
+              "1.78.1",
+              "1.79",
+              "1.80"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-p93r-85wp-75v3/GHSA-p93r-85wp-75v3.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk14",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk14"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.81"
+                  },
+                  {
+                    "fixed": "1.81.1"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.81"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-p93r-85wp-75v3/GHSA-p93r-85wp-75v3.json"
+            }
+          },
+          {
+            "package": {
+              "name": "org.bouncycastle:bcprov-jdk18on",
+              "ecosystem": "Maven",
+              "purl": "pkg:maven/org.bouncycastle/bcprov-jdk18on"
+            },
+            "ranges": [
+              {
+                "type": "ECOSYSTEM",
+                "events": [
+                  {
+                    "introduced": "1.82"
+                  },
+                  {
+                    "fixed": "1.84"
+                  }
+                ]
+              }
+            ],
+            "versions": [
+              "1.82",
+              "1.83"
+            ],
+            "database_specific": {
+              "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/04/GHSA-p93r-85wp-75v3/GHSA-p93r-85wp-75v3.json"
+            }
+          }
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V4",
+            "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N/E:U/S:P/AU:Y/U:Red"
+          }
+        ]
+      }
+    }
+  ]
+}

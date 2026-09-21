@@ -404,6 +404,9 @@ interface CatalogSettingsModalProps {
   onToggleBalancedPresentation: (enabled: boolean) => void;
   presentationSmooth: boolean;
   onTogglePresentationSmooth: (enabled: boolean) => void;
+  /** 이 기기의 상시 원격 입력 허용 여부(호스트 정책). 구호스트는 undefined로
+   * 행을 숨긴다. */
+  inputAllowed?: boolean | null;
   encoderExperiments: EncoderExperimentInfo[];
   encoderExperiment: EncoderExperimentId;
   onSelectEncoderExperiment: (id: EncoderExperimentId) => void;
@@ -434,6 +437,7 @@ function CatalogSettingsModal({
   onToggleBalancedPresentation,
   presentationSmooth,
   onTogglePresentationSmooth,
+  inputAllowed = null,
   encoderExperiments,
   encoderExperiment,
   onSelectEncoderExperiment,
@@ -499,6 +503,40 @@ function CatalogSettingsModal({
                   onToggleClipboardShare={onToggleClipboardShare}
                   colors={colors}
                 />
+                {typeof inputAllowed === "boolean" && (
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginTop: 10,
+                    }}
+                    accessibilityLabel={`${t.viewer.remoteInputLabel} ${
+                      inputAllowed
+                        ? t.viewer.remoteInputAllowedLabel
+                        : t.viewer.remoteInputBlockedLabel
+                    }`}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Ionicons
+                        name={inputAllowed ? "lock-open-outline" : "lock-closed-outline"}
+                        size={14}
+                        color={inputAllowed ? colors.textSecondary : colors.textMuted}
+                      />
+                      <Text style={styles.advancedToggleText}>{t.viewer.remoteInputLabel}</Text>
+                    </View>
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        color: inputAllowed ? colors.textSecondary : colors.textMuted,
+                      }}
+                    >
+                      {inputAllowed
+                        ? t.viewer.remoteInputAllowedLabel
+                        : t.viewer.remoteInputBlockedLabel}
+                    </Text>
+                  </View>
+                )}
               </View>
 
               <View style={styles.modalSection}>
@@ -1250,33 +1288,71 @@ export default function Catalog() {
               styles={styles}
               colors={colors}
             />
-            <Pressable
-              style={({ pressed }) => [
-                styles.displayCard,
-                pressed && styles.itemPressed,
-              ]}
-              onPress={() => void model.handleCreateExtensionDisplay()}
-              disabled={model.creatingExtension}
-              accessibilityRole="button"
-              accessibilityLabel={t.viewer.extCreateButton}
-            >
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 6,
-                  paddingVertical: 8,
-                }}
+            {model.extensionDisplay || model.extensionRemovalPending ? (
+              // 확장 화면이 있으면 생성 카드 대신 제거 카드를 내건다 — 생성은
+              // 어차피 "이미 있음"이고, 호스트 앞으로 가지 않고도 정리할 수
+              // 있게 하는 것이 이 카드의 목적이다(2026-09-21). 시스템 반영이
+              // 비동기(~30s)라 목록에 잔류하는 동안은 "제거 중"으로 고정한다.
+              <Pressable
+                style={({ pressed }) => [
+                  styles.displayCard,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => void model.handleRemoveExtensionDisplay()}
+                disabled={model.removingExtension || model.extensionRemovalPending}
+                accessibilityRole="button"
+                accessibilityLabel={t.viewer.extRemoveButton}
               >
-                {model.creatingExtension ? (
-                  <ActivityIndicator color={colors.textPrimary} size="small" />
-                ) : (
-                  <Ionicons name="add-circle-outline" size={16} color={colors.textPrimary} />
-                )}
-                <Text style={styles.displayName}>{t.viewer.extCreateButton}</Text>
-              </View>
-            </Pressable>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    paddingVertical: 8,
+                  }}
+                >
+                  {model.removingExtension || model.extensionRemovalPending ? (
+                    <ActivityIndicator color={colors.textPrimary} size="small" />
+                  ) : (
+                    <Ionicons name="trash-outline" size={16} color={colors.textPrimary} />
+                  )}
+                  <Text style={styles.displayName}>
+                    {model.removingExtension || model.extensionRemovalPending
+                      ? t.viewer.extRemovingLabel
+                      : t.viewer.extRemoveButton}
+                  </Text>
+                </View>
+              </Pressable>
+            ) : (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.displayCard,
+                  pressed && styles.itemPressed,
+                ]}
+                onPress={() => void model.handleCreateExtensionDisplay()}
+                disabled={model.creatingExtension}
+                accessibilityRole="button"
+                accessibilityLabel={t.viewer.extCreateButton}
+              >
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    paddingVertical: 8,
+                  }}
+                >
+                  {model.creatingExtension ? (
+                    <ActivityIndicator color={colors.textPrimary} size="small" />
+                  ) : (
+                    <Ionicons name="add-circle-outline" size={16} color={colors.textPrimary} />
+                  )}
+                  <Text style={styles.displayName}>{t.viewer.extCreateButton}</Text>
+                </View>
+              </Pressable>
+            )}
           </>
         }
         data={model.displays}
@@ -1314,6 +1390,7 @@ export default function Catalog() {
         onToggleBalancedPresentation={model.handleToggleBalancedPresentation}
         presentationSmooth={model.presentationSmooth}
         onTogglePresentationSmooth={model.handleTogglePresentationSmooth}
+        inputAllowed={model.inputAllowed}
         encoderExperiments={model.selectedEncoderExperiments}
         encoderExperiment={model.effectiveNextEncoderExperiment}
         onSelectEncoderExperiment={model.handleSelectEncoderExperiment}

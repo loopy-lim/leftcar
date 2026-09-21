@@ -1,0 +1,87 @@
+$ vitest run tools/release-gradle.test.mjs
+
+ RUN  v4.1.11 /Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup
+
+ ❯ tools/release-gradle.test.mjs (5 tests | 3 failed) 38ms
+   × Gradle licenses follow exact cached parent coordinates and retain their provenance 8ms
+   × Gradle licenses reject parent cycles, wrong identities and nested plugin licenses 4ms
+   × Gradle local Expo licenses require exact publication and package versions 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle licenses follow exact cached parent coordinates and retain their provenance
+AssertionError: expected { name: 'org.example:child', …(4) } to match object { license: 'Apache & MIT', …(2) }
+(3 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "license": "Apache & MIT",
+-   "licenseSource": "cached-parent-pom",
+-   "licenseStatus": "declared",
++   "license": null,
++   "licenseStatus": "unknown",
+  }
+
+ ❯ tools/release-gradle.test.mjs:42:32
+     40|   await pom('org.example','parent','1','<licenses><license><name>Apach…
+     41|   const inventory=await collectGradleInventory('/fixture',{gradleCache…
+     42|   expect(inventory.records[0]).toMatchObject({license:'Apache & MIT',l…
+       |                                ^
+     43|   expect(inventory.records[0].licenseEvidence).toHaveLength(2);
+     44|   expect(inventory.records[0].licenseEvidence[1]).toMatchObject({coord…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle licenses reject parent cycles, wrong identities and nested plugin licenses
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tools/release-gradle.test.mjs:61:85
+     59|   }
+     60|   const inventory=await collectGradleInventory('/fixture',{gradleCache…
+     61|   expect(inventory.records.every(r=>r.licenseStatus==='unknown'&&r.lic…
+       |                                                                                     ^
+     62|  }finally {await rm(cache,{recursive:true,force:true});}
+     63| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle local Expo licenses require exact publication and package versions
+AssertionError: expected { name: 'expo.fixture:fixture', …(4) } to match object { license: 'MIT', …(2) }
+(3 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "license": "MIT",
+-   "licenseSource": "npm-local-publication",
+-   "licenseStatus": "declared",
++   "license": null,
++   "licenseStatus": "unknown",
+  }
+
+ ❯ tools/release-gradle.test.mjs:74:32
+     72|   const run=()=>({status:0,stdout:'+--- expo.fixture:fixture:3\n+--- e…
+     73|   const inventory=await collectGradleInventory(root,{gradleCache:join(…
+     74|   expect(inventory.records[0]).toMatchObject({license:'MIT',licenseSta…
+       |                                ^
+     75|   expect(inventory.records[0].licenseEvidence).toHaveLength(2);
+     76|   expect(inventory.records[1]).toMatchObject({license:null,licenseStat…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed (5)
+   Start at  00:19:10
+   Duration  149ms (transform 19ms, setup 0ms, import 22ms, tests 38ms, environment 0ms)
+
+error: script "test" exited with code 1

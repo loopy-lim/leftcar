@@ -73,6 +73,7 @@ function Dashboard() {
 
   const {
     sessions,
+    inputRequests,
     terminationNotice,
     dismissTerminationNotice,
     error,
@@ -112,11 +113,9 @@ function Dashboard() {
 
   const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
   const {
-    lockOnDisconnect,
     privacyCurtain,
-    toggleLockOnDisconnect,
     togglePrivacyCurtain,
-    lockPending, curtainPending, lockError, curtainError, retryLock, retryCurtain,
+    curtainPending, curtainError, retryCurtain,
   } = usePrivacySettings();
   const {
     streamingBadge,
@@ -230,6 +229,7 @@ function Dashboard() {
             inputPermission={inputPermission}
             inputBusy={inputBusy}
             showInspector={showInspector}
+            inputRequestSessions={inputRequests.map((request) => request.session)}
             t={t}
             onToggleInspector={() => setShowInspector((prev) => !prev)}
             onToggleInput={toggleSessionInput}
@@ -251,7 +251,6 @@ function Dashboard() {
         copiedToast={copiedToast}
         inputPermission={inputPermission}
         clipboardShare={clipboardShare}
-        lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
         platform={platform}
         t={t}
@@ -269,18 +268,15 @@ function Dashboard() {
         language={language}
         t={t}
         clipboardShare={clipboardShare}
-        lockOnDisconnect={lockOnDisconnect}
         privacyCurtain={privacyCurtain}
         streamingBadge={streamingBadge}
         clipboardPending={clipboardPending}
-        lockPending={lockPending}
         curtainPending={curtainPending}
         badgePending={badgePending}
         wanAccess={wanAccess}
         wanPending={wanPending}
         wanError={wanError}
         clipboardError={clipboardError}
-        lockError={lockError}
         curtainError={curtainError}
         badgeError={badgeError}
         onClosePairing={() => setShowPairingModal(false)}
@@ -289,12 +285,10 @@ function Dashboard() {
         onCancelStopSession={() => setPendingStopSession(null)}
         onConfirmStopSession={(session) => void forceStopSession(session)}
         onToggleClipboardShare={toggleClipboardShare}
-        onToggleLockOnDisconnect={toggleLockOnDisconnect}
         onTogglePrivacyCurtain={togglePrivacyCurtain}
         onToggleStreamingBadge={toggleStreamingBadge}
         onToggleWanAccess={toggleWanAccess}
         retryClipboard={retryClipboard}
-        retryLock={retryLock}
         retryCurtain={retryCurtain}
         retryBadge={retryBadge}
         retryWan={retryWan}

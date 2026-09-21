@@ -20,6 +20,17 @@ import org.robolectric.util.ReflectionHelpers.ClassParameter.from
 class StreamMouseInputTest {
     @After fun resetInputGate() { PresentationNativeShadow.inputEnabled = 0 }
 
+    /**
+     * 입력 소유권 아키텍처(6a4ae1b)에서 물리 마우스·하드웨어 키는 KeyBridge
+     * 획득 → 포인터 캡처 확인 후에만 원격으로 승격된다. Robolectric에서는
+     * KeyBridge 바인딩이 즉시 실패해 실제 핸드셰이크를 완주할 수 없으므로,
+     * 컨트롤러를 원격 상태로 직접 승격한 뒤 원격 라우팅 동작을 검증한다.
+     */
+    private fun promoteToRemoteMouse(activity: StreamActivity) {
+        val ownership = ReflectionHelpers.getField<InputOwnershipController>(activity, "inputOwnership")
+        ReflectionHelpers.setField(ownership, "owner", InputOwner.REMOTE_MAC)
+    }
+
     private fun event(action: Int, buttons: Int, button: Int = 0): MotionEvent {
         val properties = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_MOUSE }
         val coordinates = MotionEvent.PointerCoords().apply { x = 300f; y = 200f; pressure = if (buttons == 0) 0f else 1f }
@@ -91,6 +102,7 @@ class StreamMouseInputTest {
         PresentationNativeShadow.pointerButtons.clear()
         val controller = Robolectric.buildActivity(StreamActivity::class.java, Intent().putExtra("instance", "middle-click").putExtra("host", "192.168.0.2")).create().start().resume()
         val surfaces = ReflectionHelpers.getField<StreamSurfaces>(controller.get(), "streamSurfaces")
+        promoteToRemoteMouse(controller.get())
         assertTrue(surfaces.left.dispatchGenericMotionEvent(event(MotionEvent.ACTION_BUTTON_PRESS, 4, 4)))
         assertTrue(surfaces.left.dispatchGenericMotionEvent(event(MotionEvent.ACTION_BUTTON_RELEASE, 0, 4)))
         assertEquals(listOf(Triple(2, 4, 4), Triple(3, 4, 0)), PresentationNativeShadow.pointerButtons)
@@ -102,6 +114,7 @@ class StreamMouseInputTest {
         PresentationNativeShadow.keyEvents.clear()
         PresentationNativeShadow.textEvents.clear()
         val controller = Robolectric.buildActivity(StreamActivity::class.java, Intent().putExtra("instance", "hardware-key-hold").putExtra("host", "192.168.0.2")).create().start().resume()
+        promoteToRemoteMouse(controller.get())
         for ((action, repeat) in listOf(KeyEvent.ACTION_DOWN to 0, KeyEvent.ACTION_DOWN to 1, KeyEvent.ACTION_UP to 0)) {
             assertTrue(controller.get().dispatchKeyEvent(KeyEvent(1, 2, action, KeyEvent.KEYCODE_A, repeat, 0, -1, 30, 0, InputDevice.SOURCE_KEYBOARD)))
         }
@@ -117,6 +130,7 @@ class StreamMouseInputTest {
         val surfaces = ReflectionHelpers.getField<StreamSurfaces>(controller.get(), "streamSurfaces")
         surfaces.root.measure(View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY))
         surfaces.root.layout(0, 0, 1920, 1080)
+        promoteToRemoteMouse(controller.get())
         assertTrue("DOWN must retain the Surface as the drag gesture target", surfaces.root.dispatchTouchEvent(event(MotionEvent.ACTION_DOWN, 1)))
         assertTrue(surfaces.left.dispatchGenericMotionEvent(event(MotionEvent.ACTION_BUTTON_PRESS, 1, 1)))
         assertTrue(surfaces.root.dispatchTouchEvent(event(MotionEvent.ACTION_MOVE, 1)))

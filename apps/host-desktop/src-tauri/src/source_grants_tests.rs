@@ -242,10 +242,14 @@ async fn task10_new_devices_have_no_catalog_or_start_access_and_two_devices_are_
     assert_ne!(calls[0].1.owner, calls[1].1.owner);
     assert_eq!(calls[0].1.source_id, "test:display:a");
     assert_eq!(calls[1].1.source_id, "test:display:b");
-    assert!(
-        io.input.lock().unwrap().is_empty(),
-        "view grants never enable input"
-    );
+    drop(calls);
+    // 입력 기본 허용(2026-09-21): 검토된 기기의 화면 승인은 입력도 기본
+    // 켠다. 명시 거부(set_device_input false)일 때만 잠긴 채 시작한다.
+    // 두 세션이 연달아 시작되면 마지막 세션이 이기는 입력 중재(U4b)로
+    // 첫 세션 끄기 호출이 추가될 수 있다 — 세션 수만큼의 enable만 센다.
+    let input = io.input.lock().unwrap();
+    let enabled = input.iter().filter(|(_, on)| *on).count();
+    assert_eq!(enabled, 2, "both sessions enable input by default: {input:?}");
 }
 #[tokio::test]
 async fn task10_catalog_reorder_legacy_snapshot_disappearance_and_ambiguity_never_switch_identity()

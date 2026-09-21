@@ -9,7 +9,7 @@
 //! its Surface exists. Sharing one `MediaSessionCrypto` instance keeps the
 //! AEAD counters continuous across the handoff.
 
-use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX};
+use crate::media_crypto::{SharedMediaCrypto, CHALLENGE_PREFIX, MAX_CHALLENGE_BYTES};
 use crate::net_guard::{hosts_are_valid, peer_allowed};
 use std::collections::VecDeque;
 use std::io;
@@ -30,9 +30,6 @@ fn prepared_log(message: &str) {
 #[cfg(not(target_os = "android"))]
 fn prepared_log(_message: &str) {}
 
-/// Sealed challenge + AEAD overhead; genuine host challenges fit easily.
-const MAX_CHALLENGE_BYTES: usize = 192;
-
 /// Sealed media datagrams run counter(8) + tag(16) + payload, so a full
 /// host fragment fits well under 2 KiB. The old 256 B worker buffer
 /// truncated every early media frame into an unopenable datagram.
@@ -43,7 +40,6 @@ const WORKER_READ_BYTES: usize = 2_048;
 /// many times over while bounding memory under 1 MiB. Overflow drops the
 /// oldest, matching the live-edge policy the renderer applies anyway.
 const PREPARED_BACKLOG_CAP: usize = 512;
-
 /// Recognize a Host `LCH1` reachability challenge from an already-opened
 /// plaintext. Shared by the preflight worker and both renderers so the
 /// acceptance rule cannot drift.
@@ -286,6 +282,10 @@ mod tests {
         assert_eq!(backlog.len(), 1);
         let early = backlog.pop_front().unwrap();
         assert_eq!(crypto.open(&early).unwrap(), b"early media");
+        assert!(
+            handed_crypto.is_established(),
+            "preflight must hand the renderer a session ready for IDR/input/feedback"
+        );
         socket
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();

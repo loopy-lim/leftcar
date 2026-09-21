@@ -1,0 +1,193 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13",
+  "evidence": "Dependency scan and declared-license observations only; not distribution approval or runtime exploitability assessment. No ignores.",
+  "bun": {
+    "lockfile": "bun.lock",
+    "lockSha256": "711b69e938dbf22f7553c2348b65e9860c909ca7b7f7f44dc629ae2b5032dcd8",
+    "tool": "bun 1.4.1",
+    "status": "findings",
+    "advisories": {
+      "decode-uri-component": [
+        {
+          "id": 1147955,
+          "url": "https://github.com/advisories/GHSA-vcc3-ghjq-m6fr",
+          "title": "decode-uri-component: Denial of service via exponential decoding of malformed percent-encoded input",
+          "severity": "moderate",
+          "vulnerable_versions": "<=0.4.2",
+          "cwe": [
+            "CWE-400",
+            "CWE-405",
+            "CWE-407",
+            "CWE-1176"
+          ],
+          "cvss": {
+            "score": 0,
+            "vectorString": null
+          }
+        }
+      ],
+      "image-size": [
+        {
+          "id": 1138808,
+          "url": "https://github.com/advisories/GHSA-w3rx-r6r6-pgpr",
+          "title": "image-size: ICNS parser allows denial of service through an infinite loop",
+          "severity": "high",
+          "vulnerable_versions": "<=2.0.2",
+          "cwe": [
+            "CWE-835"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          }
+        },
+        {
+          "id": 1138809,
+          "url": "https://github.com/advisories/GHSA-5p2g-fcmc-qvqq",
+          "title": "image-size: JXL and HEIF parsers allow denial of service through infinite loops",
+          "severity": "high",
+          "vulnerable_versions": "<=2.0.2",
+          "cwe": [
+            "CWE-835"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          }
+        }
+      ],
+      "uuid": [
+        {
+          "id": 1119441,
+          "url": "https://github.com/advisories/GHSA-w5hq-g745-h8pq",
+          "title": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided",
+          "severity": "moderate",
+          "vulnerable_versions": "<11.1.1",
+          "cwe": [
+            "CWE-787",
+            "CWE-1285"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N"
+          }
+        }
+      ]
+    },
+    "counts": {
+      "moderate": 2,
+      "high": 2
+    },
+    "productionCounts": {
+      "moderate": 2,
+      "high": 2
+    },
+    "rawSha256": "169f48e4abb6e175bfc3b95bde8b31a371af706e94d5ad21e5d01ccc4930b502",
+    "licenses": {
+      "packageVersionPairs": 639,
+      "expressions": {
+        "(BSD-3-Clause OR GPL-2.0)": 1,
+        "(MIT OR Apache-2.0)": 1,
+        "(MIT OR CC0-1.0)": 3,
+        "0BSD": 2,
+        "Apache-2.0": 16,
+        "Apache-2.0 OR MIT": 3,
+        "BSD-2-Clause": 3,
+        "BSD-3-Clause": 8,
+        "BlueOak-1.0.0": 6,
+        "CC-BY-4.0": 1,
+        "ISC": 32,
+        "MIT": 553,
+        "MIT AND Apache-2.0": 1,
+        "MPL-2.0": 6,
+        "Python-2.0": 1,
+        "Unlicense": 2
+      },
+      "unknown": 0
+    }
+  },
+  "rust": [
+    {
+      "lockfile": "Cargo.lock",
+      "lockSha256": "2dc0c19ef5b9cc7b0cf713b4deb400c11159003b2190d9524324ccb15a8eeab3",
+      "tool": "cargo-audit 0.22.2",
+      "databaseCommit": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+      "databaseAdvisories": 1243,
+      "vulnerabilities": 0,
+      "warnings": [],
+      "rawSha256": "89d3c2fa4c49044892bb24b4bfd659fbb14611828a0c225f541ddfbbd3ed14ae"
+    },
+    {
+      "lockfile": "apps/host-desktop/src-tauri/Cargo.lock",
+      "lockSha256": "79c5361f05aa013f99623f52d5bb4845c1fc740866aaaf5b7694686d548ed3eb",
+      "tool": "cargo-audit 0.22.2",
+      "databaseCommit": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+      "databaseAdvisories": 1243,
+      "vulnerabilities": 0,
+      "warnings": [
+        {
+          "kind": "unmaintained",
+          "name": "proc-macro-error",
+          "version": "1.0.4",
+          "id": "RUSTSEC-2024-0370",
+          "url": "https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20",
+          "title": "proc-macro-error is unmaintained"
+        },
+        {
+          "kind": "unmaintained",
+          "name": "unic-char-property",
+          "version": "0.9.0",
+          "id": "RUSTSEC-2025-0081",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414",
+          "title": "`unic-char-property` is unmaintained"
+        },
+        {
+          "kind": "unmaintained",
+          "name": "unic-char-range",
+          "version": "0.9.0",
+          "id": "RUSTSEC-2025-0075",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414",
+          "title": "`unic-char-range` is unmaintained"
+        },
+        {
+          "kind": "unmaintained",
+          "name": "unic-common",
+          "version": "0.9.0",
+          "id": "RUSTSEC-2025-0080",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414",
+          "title": "`unic-common` is unmaintained"
+        },
+        {
+          "kind": "unmaintained",
+          "name": "unic-ucd-ident",
+          "version": "0.9.0",
+          "id": "RUSTSEC-2025-0100",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414",
+          "title": "`unic-ucd-ident` is unmaintained"
+        },
+        {
+          "kind": "unmaintained",
+          "name": "unic-ucd-version",
+          "version": "0.9.0",
+          "id": "RUSTSEC-2025-0098",
+          "url": "https://github.com/rustsec/advisory-db/issues/2414",
+          "title": "`unic-ucd-version` is unmaintained"
+        },
+        {
+          "kind": "unsound",
+          "name": "glib",
+          "version": "0.18.5",
+          "id": "RUSTSEC-2024-0429",
+          "url": "https://github.com/gtk-rs/gtk-rs-core/pull/1343",
+          "title": "Unsoundness in `Iterator` and `DoubleEndedIterator` impls for `glib::VariantStrIter`"
+        }
+      ],
+      "rawSha256": "3952e5f9735b1665b47f63c491131e951458ecc4cad25c0098f3a212766baa51"
+    }
+  ],
+  "gradle": {
+    "status": "unverified",
+    "reason": "Resolved dependency report exists; no Gradle dependency locking/verification metadata or configured vulnerability scanner. Wrapper checksum is a separate pinned distribution integrity control."
+  }
+}

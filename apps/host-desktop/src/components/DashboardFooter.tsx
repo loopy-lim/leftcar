@@ -1,4 +1,4 @@
-import { Check, ClipboardCheck, Copy, EyeOff, Lock, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Check, ClipboardCheck, Copy, EyeOff, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import { formatHostAddress, type HostSnapshotView } from "../hostState";
 
@@ -8,7 +8,6 @@ export interface DashboardFooterProps {
   copiedToast: boolean;
   inputPermission: boolean;
   clipboardShare: boolean;
-  lockOnDisconnect: boolean;
   privacyCurtain: boolean;
   platform: HostSnapshotView["platform"];
   t: TranslationSchema;
@@ -26,7 +25,7 @@ export function DashboardFooter(props: DashboardFooterProps) {
   };
   const platformLabel = platformLabels[props.platform];
   const addressText = formatHostAddress(props.lanIp, props.controlPort);
-  const hasActivePrivacyFeature = props.clipboardShare || props.lockOnDisconnect || props.privacyCurtain;
+  const hasActivePrivacyFeature = props.clipboardShare || props.privacyCurtain;
 
   return (
     <footer className="host-footer">
@@ -73,11 +72,6 @@ export function DashboardFooter(props: DashboardFooterProps) {
             {props.clipboardShare && (
               <span className="footer-tag-pill" title={t.host.clipboardShareDesc}>
                 <ClipboardCheck size={11} /> {t.host.clipboardShareLabel}
-              </span>
-            )}
-            {props.lockOnDisconnect && (
-              <span className="footer-tag-pill" title={t.host.lockOnDisconnectDesc}>
-                <Lock size={11} /> {t.host.lockOnDisconnectLabel}
               </span>
             )}
             {props.privacyCurtain && (

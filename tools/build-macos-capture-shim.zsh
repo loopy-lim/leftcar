@@ -5,7 +5,7 @@ set -euo pipefail
 tool_dir=${0:A:h}
 repo_root=${tool_dir:h}
 shim_root="$repo_root/native/macos-capture-shim"
-mode=${1:?"usage: build-macos-capture-shim.zsh <library|vdisp-test|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|media-sealer-test|retransmit-ring-test|retransmit-policy-test|tile-throughput-probe|peer-congestion-test|recovery-pacing-test|mouse-button-test> <output>"}
+mode=${1:?"usage: build-macos-capture-shim.zsh <library|vdisp-test|capture-start-export-test|policy-test|adaptive-policy-test|split-test|split-policy-test|cursor-test|audio-ownership-test|media-sealer-test|media-interop-test|retransmit-ring-test|retransmit-policy-test|tile-throughput-probe|udp-send-probe|udp-frame-budget-test|udp-packet-size-test|peer-congestion-test|recovery-pacing-test|congestion-cut-test|pacing-clock-test|input-language-test|mouse-button-test> <output>"}
 output=${2:?"missing output path"}
 
 typeset -a shim_sources frameworks framework_args
@@ -163,6 +163,14 @@ case "$mode" in
       "$shim_root/Tests/CursorStreamTests.swift" \
       -o "$output" \
       "${framework_args[@]}"
+    ;;
+  media-interop-test)
+    # In-memory encryption plus a fixture-only Rust peer; no capture or sockets.
+    /usr/bin/xcrun swiftc -O \
+      -module-cache-path "${TMPDIR:-/tmp}/leftcar-media-interop-module-cache" \
+      "$shim_root/Sources/Transport/MediaSealer.swift" \
+      "$shim_root/Tests/MediaCryptoInteropTests.swift" \
+      -o "$output" -framework Foundation
     ;;
   audio-ownership-test)
     /usr/bin/xcrun swiftc -O \

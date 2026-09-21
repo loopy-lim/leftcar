@@ -1,99 +1,48 @@
-# 플랫폼별 권한 감사 및 다음 작업 정리
+# 플랫폼 권한과 남은 검증
 
-작성일: 2026-09-07.
-목적: 뷰어 주도 화면 크기 기능(feat/viewer-driven-display-sizing) 완료 후, 플랫폼별
-권한/entitlement 현황을 정리하고 남은 검증·후속 작업의 우선순위를 확정한다.
+기준: 2026-09-13 completion-followup 소스. 최초 2026-09-07 조사의 가상 디스플레이 복구 제안과 오래된 권한 목록을 현재 구현에 맞게 교체했다. 현재 후보의 최종 빌드/실기기 상태는 [완료와 지원 기준](completion-and-support.md)을 따른다.
 
-## 플랫폼별 권한 현황
+## macOS Host
 
-### macOS 호스트 — 구현됨
+- 캡처는 display-only다. 화면 녹화 TCC 상태를 shim의 `CGPreflightScreenCaptureAccess`로 확인하고 Host 대시보드에서 설정 열기/재시작을 안내한다. 권한 없이 캡처에 성공한 것으로 처리하지 않는다.
+- 원격 입력은 Host 세션별 기본 OFF이며, 손쉬운 사용 권한과 명시적 세션 허용이 모두 필요하다. OS 권한을 얻어도 source grant나 입력 토글을 대체하지 않는다.
+- `persistent-content-capture`는 예제 entitlement와 런타임 게이트만 존재한다. Apple 승인·활성 entitlement·장시간 안정성은 각각 확인해야 한다. entitlement가 없어도 내부 후보를 빌드할 수 있지만 해당 권한을 가진 배포본으로 설명하지 않는다.
+- `tauri.macos.conf.json`의 개발용 signingIdentity와 내부 build의 ad-hoc 서명, Developer ID/notarization은 다른 상태다. 현재 내부 빌드 도구의 실제 `codesign` 검사와 manifest를 따른다. 설정 파일의 identity만으로 서명을 확인했다고 하지 않는다.
+- 사용자 TCC 허용, 권한 철회, Host/Viewer 종료 후 캡처 해제, 디스플레이 sleep/wake는 실기기 체크에 남는다. 가상 디스플레이 관리 복원은 현재 완료 범위가 아니다.
 
-- `apps/host-desktop/src-tauri/Info.plist`: `NSScreenCaptureUsageDescription` 유일.
-  `tauri.macos.conf.json`의 `bundle.macOS.infoPlist`로 반영.
-- TCC 화면 녹화 권한: `native/macos-capture-shim/Sources/CaptureShim.swift`의
-  `CGPreflightScreenCaptureAccess()` 사전 점검만 사용. `CGRequestScreenCaptureAccess`
-  (권한 요청 프롬프트)는 의도적으로 호출하지 않음 — 새 TCC 신원의 릴리스 번들이 사용자
-  입력 대기로 멈추는 문제 때문. 권한이 없으면 카탈로그/시작이 에러로 실패하고 시스템
-  설정에서 수동 허용해야 함. 실측에서도 "display catalog warmup deferred" 경고로 확인됨.
-- `persistent-content-capture` entitlement: `PersistentCapture.entitlements.example`로만
-  존재, 미활성. 런타임에 `SecTaskCopyValueForEntitlement`로 실제 여부를 확인해
-  persistent SCK 경로를 게이트. Apple 승인 전까지 ad-hoc.
-- hardened runtime / 활성 entitlements: `2026-08-25-v0.2-hardening.md` 계획에 따라
-  의도적으로 연기됨.
+## Android Viewer
 
-2026-09-08 추가: 인앱 TCC 안내 흐름 구현 — shim `leftcar_capture_screen_permission_v1`
-(`CGPreflightScreenCaptureAccess` 전용, 프롬프트 없음) → Rust `get_screen_permission`
-(백엔드 트레이트 기본값은 "문제 없음", 구 shim에서도 오탐 없음) → 대시보드 경고 배너
-("화면 기록 권한 필요" + 설정 열기 버튼, 허용 후 앱 재시작 안내). 스트림 실패로 같은
-종류의 오류 배너가 이미 떠 있으면 중복 표시하지 않는다.
+주력은 `apps/viewer-expo`다. 네이티브 main manifest는 네트워크·Wi-Fi/mDNS·wake lock·진동, USB accessory 진입을 선언한다. QR용 CAMERA 등 의존성이 병합하는 권한은 최종 manifest/APK에서 함께 확인한다.
 
-### Android 뷰어 — 구현됨 (Expo 앱이 주력)
+배포용 `src/release/AndroidManifest.xml`은 `READ_EXTERNAL_STORAGE`, `WRITE_EXTERNAL_STORAGE`, `SYSTEM_ALERT_WINDOW`를 merger remove로 제거한다. 파일 선택은 `expo-document-picker`와 앱 전용 파일 경로를 이용하므로 전체 외부 저장소 권한을 요구하지 않는다. debug에는 Expo/RN 개발 기능에 필요한 기존 선언을 유지한다. 오버레이 기능을 새로 만들지는 않았다.
 
-- `apps/viewer-expo/android/app/src/main/AndroidManifest.xml`: `INTERNET`,
-  `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, `ACCESS_WIFI_STATE`,
-  `CHANGE_WIFI_MULTICAST_STATE`(mDNS), `SYSTEM_ALERT_WINDOW`, `VIBRATE`,
-  maxSdk 32 스코프 저장소. `usesCleartextTraffic="true"`(LAN 스트리밍).
-- USB: MainActivity에 `USB_ACCESSORY_ATTACHED` 인텐트 필터 + accessory_filter
-  (AOAP 호스트 감지).
-- `SYSTEM_ALERT_WINDOW`은 선언만 있고 `canDrawOverlays` 요청 코드가 없음 —
-  사실상 잔여 선언. 제거하거나 실제 오버레이 기능(FPS 표시 등)에 연결할 것.
-- 포그라운드 서비스 없음: 시청 전용 앱이라 당장 문제없으나, 화면 꺼짐 상태 장시간
-  수신·백그라운드 지속 요구가 생기면 `FOREGROUND_SERVICE_MEDIA_PLAYBACK` 계열 검토.
-- `expo-camera` 권한 문자열은 QR 페어링용.
-- 레거시 `apps/viewer-android`는 최소 권한만 사용(유지보수 대상 아님).
+`usesCleartextTraffic="true"`는 플랫폼의 cleartext 허용 설정이다. 이것만으로 Leftcar 제어/미디어가 평문이라고 판단하지 않는다. LAN 제어는 애플리케이션의 인증 암호 채널, 미디어는 세션 AEAD로 보호한다. 루프백 진단과 물리 AOAP 제어의 예외는 [보안 문서](07-security-privacy.md)에 명시돼 있다.
 
-빠진 것: 런타임 권한 요청 코드(필요한 것 없음), 사용하지 않는 overlay 권한 정리.
+백업은 앱 전체를 끄지 않고 `SecureStore` 및 레거시 `ReactNativePreferences.xml` shared preferences를 제외한다. full backup, cloud backup, device transfer의 세 경로를 모두 설정한다. 자체 XML을 사용하므로 `app.config.ts`의 `expo-secure-store.configureAndroidBackup`은 false다. Expo는 복원 뒤 키를 잃어 해독할 수 없는 SecureStore 항목을 이렇게 제외하도록 안내한다. [Expo 공식 문서](https://docs.expo.dev/versions/latest/sdk/securestore/#android-auto-backup), [Android 백업 규칙](https://developer.android.com/identity/data/autobackup)
 
-### iOS 뷰어 — 미구현, 구체적 계획 없음
+2026-09-13 로컬 Gradle의 `processReleaseMainManifest`/`processDebugMainManifest`가 성공했고, release에서 위 세 권한 부재와 양쪽 variant의 소유 XML 참조를 검사했다. 이후 최종 내부 APK의 manifest/resource table/compiled XML에서도 세 권한 부재와 세 백업 경로의 제외 규칙을 확인했다. 정확한 파일과 해시는 [후속 검증 기록](2026-09-13-completion-followup-validation.md)을 따른다. 실제 backup/restore·앱 업데이트는 별도 미실행이다.
 
-- `ios/` 디렉터리, Podfile, entitlements, ReplayKit/Broadcast Upload Extension 코드
-  전부 없음. `app.config.ts`에 iOS 섹션 없음.
-- iOS에서 화면 "수신" 뷰어는 ReplayKit 없이 가능(단순 디코딩 표시). 다만 백그라운드
-  재생, Picture-in-Picture, 네트워크 멀티캐스트 권한 등 별도 검토 필요.
-- 결론: 권한 걱정보다 "플랫폼 지원 여부" 자체가 결정 사항. 로드맵에 명시적으로
-  포함/제외할 것.
+현재 StreamActivity는 recent task에 표시되며 `FLAG_SECURE`를 쓰지 않는다. screenshot/preview 차단을 보장하지 않는다. 해당 flag는 screenshot과 비보안 display 표시를 제한하므로, Galaxy XR Home Space/Surface 호환성 확인 없이 켜지 않는다. 태블릿과 XR에서 스트림 표시, task 전환, 복귀, screenshot/preview를 따로 검증한 후 결정한다. [Android secure activity 안내](https://developer.android.com/security/fraud-prevention/activities)
 
-### Windows 호스트 — 코드 존재, 실기 미검증
+백그라운드·화면 OFF 지속 수신은 현재 지원 수락 범위가 아니다. foreground service를 선언해 놓았다는 식으로 장시간 수신을 추정하지 않는다. `apps/viewer-android`는 레거시 경로이며 현재 후보 APK의 근거로 사용하지 않는다.
 
-- `apps/host-desktop/src-tauri/src/windows_backend/`: Windows Graphics Capture
-  (`CreateForMonitor` + frame pool), MF 하드웨어 H.264, `SendInput`.
-- **WGC 동의 처리 없음**: `GraphicsCaptureAccess.RequestAccessAsync` 호출이
-  `capture.rs`에 없음. Windows 10 1903+ 에서 모니터 캡처는 사용자 동의(노란 테두리,
-  설정의 "그래픽 캡처" 허용)에 묶이므로 실기 검증 시 필수 확인 항목.
-- `SendInput`/UIPI 제약: 상승된 권한 앱 제어 불가 — 문서화됨.
-- 설치본 미서명.
-- 물리 Windows 빌드/실행 자체가 대기 상태(로드맵 H39).
+## Windows Host
 
-## 권한 관련 결론
+WGC `CreateForMonitor`와 Media Foundation H.264, `SendInput` 구현이 있다. PR #5의 Windows 빌드/NSIS CI 성공은 패키징 증거이며 실제 디스플레이·GPU·입력 결과가 아니다.
 
-- 지금 당장 권한 때문에 막히는 플랫폼은 없다. macOS TCC는 "수동 허용" 설계이고,
-  Android는 필요 최소권한, iOS는 미지원, Windows는 실기 검증 전 단계.
-- 다만 사용자 질문의 지적대로 플랫폼별 "받을 수 있는 것" 차이는 실재한다:
-  - macOS: persistent-content-capture(Apple 승인 필요) 유무가 장시간 캡처 안정성을 가름.
-  - Windows: WGC 동의 + UIPI 제약 → macOS와 동등한 제어 범위를 못 얻을 수 있음.
-  - Android: 백그라운드 지속성 요구 시 서비스 권한 추가 필요.
-  - iOS: 지원 여부 결정이 선행.
-- 권장: 권한 항목을 플랫폼 지원 매트릭스(로드맵)에 한 테이블로 반영하고,
-  Windows 실기 검증 체크리스트에 WGC 동의/노란 테두리/UIPI 항목을 명시할 것.
+이 구현은 Win32 monitor interop 경로다. 일반 WGC picker 문서와 동일하게 `RequestAccessAsync` 호출을 반드시 추가해야 한다고 단정하지 않는다. 사용 OS에서 `IsSupported`, 캡처 시작/실패, 보호 콘텐츠, 노란 테두리, 종료 뒤 자원 해제를 확인한다. `CreateForMonitor`의 공식 최소 클라이언트는 Windows 10 1903이다. [Microsoft Win32 API](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createformonitor), [WGC 개요](https://learn.microsoft.com/en-us/windows/apps/develop/media-authoring-processing/screen-capture)
 
-## 다음 작업 우선순위
+입력은 UIPI를 따른다. current-user 설치·일반 권한 실행을 기본으로 하고 관리자 앱을 제어하려고 자동 상승하지 않는다. 서명된 설치본, 설치/업데이트, 방화벽 안내, 실제 WGC/입력 검증은 배포 게이트에 남는다.
 
-viewer-display-sizing-validation.md의 미검증 항목 + 위 권한 항목을 합쳐 정리:
+## iOS
 
-1. **Galaxy XR 실기 검증** — 비율 프리셋 실시간 전환(재시작 없음), Mac 가상 해상도
-   불변 확인, config-change/process-death 후 비율 복원, 9:16 세로와 home-space
-   bounds 충돌. (기능 완성도의 마지막 미검증 축)
-2. **cgvd-shim RESIZE GUI 세션 실측** — 모드 전환·지연, maxPixels 거부→FAILED,
-   scale 1↔2 왕복, RESIZE 직후 PLACE.
-3. ~~**macOS TCC 안내 UX**~~ — 2026-09-08 완료. 호스트 대시보드가 화면 기록 권한 부재를
-   사전 경고 배너로 표시한다(위 macOS 절). 실기 확인은
-   `docs/2026-09-08-usability-review.md` §6 체크리스트 4번.
-4. **Android 권한 정리** — 미사용 `SYSTEM_ALERT_WINDOW` 제거(또는 실기능 연결),
-   장시간 수신 시나리오에 대한 포그라운드 서비스 필요성 판단.
-5. **Windows 실기 검증 준비** — WGC 동의 흐름(`RequestAccessAsync` 추가 여부 포함),
-   미서명 설치본, UIPI 제약 체크리스트. (H39)
-6. **iOS 지원 결정** — 지원하면 Expo iOS 빌드 + 백그라운드/PiP 권한 설계부터.
+현재 지원 범위 밖이며 이 작업에서 추가하지 않는다. 수신 Viewer 개발은 별도 플랫폼 작업이다. iOS 권한 준비를 Android/macOS 후보 완료 조건으로 넣지 않는다.
 
-연관 문서: docs/viewer-display-sizing-validation.md (미검증 상세),
-docs/08-implementation-roadmap.md (H39), docs/windows-remote-host.md,
-docs/macos-persistent-capture.md.
+## 사용자가 수행할 다음 검증
+
+1. 같은 source digest의 Host와 APK로 LAN 제어→미디어 연결, 짧은 실행 3회→10분→30분 순서로 수행한다.
+2. 태블릿과 Galaxy XR에서 source/input 승인, 회전·비율·task 복귀·process death, 케이블 재연결을 확인한다.
+3. macOS TCC 철회와 종료 후 캡처 해제를 확인한다. Windows는 별도 기기에서 설치·WGC·UIPI·재연결을 확인한다.
+4. Android 기존 APK 업데이트 시 pairing/설정 유지, 백업/복원 시 재페어링과 저장 오류 안내를 확인한다. 자동 uninstall/reset으로 실패를 우회하지 않는다.
+
+상세 절차와 정확한 후보 선택은 [완료와 지원 기준](completion-and-support.md), [Windows 검증](windows-remote-host.md), [persistent capture](macos-persistent-capture.md)를 따른다.

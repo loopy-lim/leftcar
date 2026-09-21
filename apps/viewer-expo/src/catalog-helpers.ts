@@ -31,6 +31,14 @@ export function isHubDisplay(name: string): boolean {
   return HIDABLE_DISPLAY_LABELS.some((label) => normalized.includes(label));
 }
 
+/** 호스트가 만든 확장(가상) 디스플레이의 고정 이름 — shim 브리지가 항상
+ * 이 이름으로 만든다(CGVirtualDisplayBridge). 제거 카드 노출 판단에 쓴다. */
+const EXTENSION_DISPLAY_LABEL = "leftcar display";
+
+export function isExtensionDisplay(name: string): boolean {
+  return name.trim().toLowerCase() === EXTENSION_DISPLAY_LABEL;
+}
+
 export function catalogDisplayHost(catalogHost: string): string {
   return catalogHost.split(":")[0] ?? "";
 }

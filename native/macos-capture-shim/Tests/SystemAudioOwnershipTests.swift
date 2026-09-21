@@ -74,8 +74,14 @@ struct SystemAudioOwnershipTests {
             systemAudioOwnerHandle(candidates: [], viewerKey: headset) == nil
         )
 
-        // SNDON is the default state: an unmuted viewer's owner captures.
+        // Ownership alone must never capture before an explicit SNDON.
+        precondition(!shouldCaptureSystemAudio(owner: true, viewerKey: headset))
+        precondition(!shouldCaptureSystemAudio(owner: true, viewerKey: tablet))
+        setSystemAudioDeliveryEnabled(true, viewerKey: headset)
         precondition(shouldCaptureSystemAudio(owner: true, viewerKey: headset))
+        precondition(!shouldCaptureSystemAudio(owner: false, viewerKey: headset))
+        precondition(!shouldCaptureSystemAudio(owner: true, viewerKey: tablet))
+        setSystemAudioDeliveryEnabled(true, viewerKey: tablet)
 
         // SNDOFF gates the plane even while the session still owns it.
         setSystemAudioDeliveryEnabled(false, viewerKey: headset)

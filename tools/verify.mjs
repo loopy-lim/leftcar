@@ -47,7 +47,10 @@ export function verify(scope='all', { platform = process.platform, diagnose: doc
       run(join(dir,'split-policy-test'));
       run('zsh',['tools/build-macos-capture-shim.zsh','retransmit-policy-test',join(dir,'retransmit-policy-test')]);
       run(join(dir,'retransmit-policy-test'));
-      console.log('Swift: full shim and existing adapter test binaries COMPILED ONLY; Pure production split and RTX policies (Foundation/CryptoKit) EXECUTED. Hardware adapters/encoder/capture UNVERIFIED.');
+      run('bun',['tools/test-media-interop.mjs']);
+      run('zsh',['tools/build-macos-capture-shim.zsh','audio-ownership-test',join(dir,'audio-ownership-test')]);
+      run(join(dir,'audio-ownership-test'));
+      console.log('Swift: full shim and existing adapter test binaries COMPILED ONLY; production split, RTX, media interoperability and audio opt-in policies EXECUTED. Hardware adapters/encoder/capture UNVERIFIED.');
     }
   }
   if(scope==='all') run(platform==='win32'?'gradlew.bat':'./gradlew',[':app:testDebugUnitTest','--no-daemon'],join(root,'apps/viewer-expo/android'));

@@ -262,6 +262,17 @@ pub struct CatalogView {
     /// viewers must preserve the legacy 8-datagram/2-parity behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_stability_capabilities: Option<UdpStabilityCapabilities>,
+    /// The calling device's standing remote-input permission (allowed by
+    /// default; false only after an explicit host denial). Viewers surface it
+    /// in their settings. Absent on older hosts and unauthenticated calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_allowed: Option<bool>,
+    /// Source id of a viewer-created virtual display whose removal was just
+    /// requested and is still being reflected by the OS (up to ~30s). Viewers
+    /// show a pending state on the extension entry instead of re-listing it as
+    /// a normal display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_display_pending_removal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1187,7 +1198,9 @@ mod stream_control_tests {
             reconfigure_encoder_experiment: None,
             reconfigure_source: None,
             udp_stability_capabilities: None,
-        window_size: None,
+            window_size: None,
+            input_allowed: None,
+            virtual_display_pending_removal: None,
         };
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(json.contains("\"platform\":\"windows\""));
@@ -1213,7 +1226,9 @@ mod stream_control_tests {
             reconfigure_encoder_experiment: None,
             reconfigure_source: None,
             udp_stability_capabilities: None,
-        window_size: None,
+            window_size: None,
+            input_allowed: None,
+            virtual_display_pending_removal: None,
         };
         assert!(catalog
             .encoder_experiments

@@ -945,8 +945,9 @@ impl PairingServer {
             && inner.grants.allows(&auth.owner, source)
     }
 
-    /// 기기의 상시 원격 입력 승인(다음 세션부터 자동 활성화). 미페어링 기기·
-    /// 종료 중·미검토 기록은 항상 거짓이다.
+    /// 기기의 상시 원격 입력 허용 여부(다음 세션부터 자동 활성화). 기본
+    /// 허용(2026-09-21) — 검토된 페어링 기기는 명시 거부가 없으면 허용이다.
+    /// 미페어링 기기·종료 중·미검토 기록은 여전히 거짓이다.
     pub(crate) fn device_input_allowed(&self, device_id: &str) -> bool {
         let inner = self.inner.lock().unwrap();
         if inner.shutting_down {

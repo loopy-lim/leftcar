@@ -55,48 +55,37 @@ function useOptimisticToggle(command: string, initial: boolean): {
 }
 
 /**
- * 프라이버시 옵션(종료 시 잠금 · 커튼)의 대시보드 훅. 같은 0600
- * settings.json에 살며 토글은 즉시 효력을 가진다. get_privacy_settings는
- * [잠금, 커튼] 순서의 튜플을 돌려준다. 토글이 발행된 뒤에 늦게 도착한
- * 초기 로드 응답은 무시한다.
+ * 프라이버시 커튼의 대시보드 훅. 0600 settings.json에 살며 토글은 즉시
+ * 효력을 가진다. 토글이 발행된 뒤에 늦게 도착한 초기 로드 응답은 무시한다.
  */
 export function usePrivacySettings() {
   const [loadAttempt, retryLoad] = useState(0);
-  const lock = useOptimisticToggle("set_lock_on_disconnect", false);
   const curtain = useOptimisticToggle("set_privacy_curtain", false);
 
   useEffect(() => {
     let cancelled = false;
-    if (lock.gate.allowsInitialLoad()) lock.setError(null);
     if (curtain.gate.allowsInitialLoad()) curtain.setError(null);
-    void invoke<[boolean, boolean]>("get_privacy_settings")
-      .then(([lockOn, curtainOn]) => {
+    void invoke<boolean>("get_privacy_settings")
+      .then((curtainOn) => {
         if (cancelled) return;
-        if (lock.gate.allowsInitialLoad()) lock.setValue(lockOn);
         if (curtain.gate.allowsInitialLoad()) curtain.setValue(curtainOn);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         const message = String(cause instanceof Error ? cause.message : cause);
-        if (lock.gate.allowsInitialLoad()) lock.setError(message);
         if (curtain.gate.allowsInitialLoad()) curtain.setError(message);
       });
     return () => {
       cancelled = true;
     };
-  }, [loadAttempt, lock.gate, lock.setValue, lock.setError, curtain.gate, curtain.setValue, curtain.setError]);
+  }, [loadAttempt, curtain.gate, curtain.setValue, curtain.setError]);
 
   return {
-    lockOnDisconnect: lock.value,
     privacyCurtain: curtain.value,
-    toggleLockOnDisconnect: lock.toggle,
     togglePrivacyCurtain: curtain.toggle,
-    pending: lock.pending || curtain.pending,
-    lockPending: lock.pending,
+    pending: curtain.pending,
     curtainPending: curtain.pending,
-    lockError: lock.error,
     curtainError: curtain.error,
-    retryLock: () => lock.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : lock.toggle(),
     retryCurtain: () => curtain.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : curtain.toggle(),
   };
 }

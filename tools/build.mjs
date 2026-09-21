@@ -6,6 +6,7 @@ import { diagnose, root } from './doctor.mjs';
 import { cargoTargetDirectory, hostBuildPlan } from './build.host-plan.mjs';
 import { benchmarkProfile } from './benchmark-profile.mjs';
 import { sourceSnapshot, createManifest, hashPath } from './release-manifest.mjs';
+import {collectReleaseInputs,classifyAndroidSigning} from './release-inputs.mjs';
 const args=process.argv.slice(2).filter(a=>a!=='--');
 const scope=args[0];
 if(!['android-debug','android-internal','android-release','host-macos-internal'].includes(scope))throw new Error('Usage: bun run build <android-debug|android-internal|android-release|host-macos-internal>');
@@ -30,6 +31,7 @@ if(!host && scope!=='android-release') {
   if((override!==undefined && !isAbsolute(override)) || !(await stat(key).catch(()=>null))?.isFile())throw new Error('Debug/internal packaging requires the existing app/debug.keystore or LEFTCAR_INTERNAL_DEBUG_KEYSTORE=<existing absolute debug-keystore path>. No key is created.');
 }
 const before=await sourceSnapshot(root);
+const releaseInputs=await collectReleaseInputs(root,scope,{source:before,cargoAuditDb:process.env.LEFTCAR_CARGO_AUDIT_DB??null});
 const receiptRoot=process.env.LEFTCAR_BUILD_RECEIPTS ? resolve(process.env.LEFTCAR_BUILD_RECEIPTS) : tmpdir();
 await mkdir(receiptRoot,{recursive:true});
 const relativeReceipt=relative(await realpath(root),await realpath(receiptRoot));
@@ -87,8 +89,7 @@ if(host){
  if(artifactMetadata.identifier!==(profile?.viewerPackage??'leftcar.ll3.kr'))throw new Error('APK identifier does not match requested profile');
  const embedded=execFileSync('unzip',['-p',apk,'lib/arm64-v8a/libleftcar_viewer.so'],{maxBuffer:64*1024*1024});
  if(!embedded.equals(await readFile(strippedNative)))throw new Error('APK native library differs from AGP stripped input');
- signing={classification:scope==='android-release'?'configured-release-key':scope==='android-internal'?'internal-debug-key':'debug-key',
-   certificateSha256:certificate.split('\n').filter(line=>line.includes('certificate SHA-256 digest'))};
+ signing=classifyAndroidSigning(certificate,scope);
 }
 const gradle=await readFile(join(root,'apps/viewer-expo/android/app/build.gradle'),'utf8');
 const expo=await import(join(root,'apps/viewer-expo/app.config.ts'));
@@ -105,7 +106,7 @@ for(const artifact of artifacts) {
   if((await hashPath(path)).sha256!==original.sha256)throw new Error(`Artifact archive differs: ${artifact.role}`);
   archived.push({...artifact,path,buildPath:artifact.path});
 }
-const manifest=await createManifest({root,before,artifacts:archived,versions,signing,profile,target:host ? {platform:'darwin',architecture:buildTarget.startsWith('aarch64')?'arm64':'x64',triple:buildTarget} : {platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:buildTarget}});
+const manifest=await createManifest({root,before,artifacts:archived,versions,signing,profile,releaseInputs,artifactMetadata,target:host ? {platform:'darwin',architecture:buildTarget.startsWith('aarch64')?'arm64':'x64',triple:buildTarget} : {platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:buildTarget}});
 manifest.artifactMetadata=artifactMetadata;
 manifest.artifactBuildPaths=archived.map(({role,buildPath})=>({role,buildPath}));
 manifest.build={scope,targetTriple:buildTarget,cargoTargetDir:buildEnv.CARGO_TARGET_DIR??null,hostBuildProfile:buildEnv.LEFTCAR_BENCHMARK_BUILD_PROFILE??null,

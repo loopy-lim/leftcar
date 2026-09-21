@@ -201,6 +201,38 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             }
         }
 
+        /**
+         * 활성 StreamActivity에서 입력 잠금 배너를 탭했다고 알린다(2026-09-21).
+         * RN은 그 포트의 세션으로 requestInputEnable 제어 명령을 보내고, 호스트
+         * UI의 승인 알림으로 이어진다 — 승인 자체는 호스트 운용자만 한다.
+         */
+        fun emitInputEnableRequested(port: Int) {
+            val context = activeRegisteredReactContext() ?: run {
+                android.util.Log.w(
+                    "LeftcarStream",
+                    "stream event unavailable: React context port=$port (input request)",
+                )
+                return
+            }
+            try {
+                context.runOnNativeModulesQueueThread {
+                    if (!isCurrentActiveReactContext(context)) return@runOnNativeModulesQueueThread
+                    try {
+                        val payload = Arguments.createMap().apply {
+                            putInt("port", port)
+                        }
+                        context
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                            .emit("leftcarInputEnableRequested", payload)
+                    } catch (_: IllegalStateException) {
+                        // React may invalidate after the queue check; do not emit.
+                    }
+                }
+            } catch (_: IllegalStateException) {
+                // The native-modules queue can disappear during React teardown.
+            }
+        }
+
         @JvmStatic
         fun forgetStream(instanceId: String, generation: Long) {
             val current = liveStreams[instanceId]

@@ -26,6 +26,7 @@ import { DEFAULT_CONTROL_PORT } from "./defaults";
 const REQUEST_TIMEOUT_MS: Record<string, number> = {
   startStream: 25_000,
   createVirtualDisplay: 30_000,
+  removeVirtualDisplay: 20_000,
   getCatalog: 15_000,
   setClipboard: 15_000,
   getClipboard: 15_000,
@@ -85,6 +86,17 @@ export interface CatalogView {
    * 여는 데 쓰인다(XR 창 크기 유지). 구버전 호스트는 필드를 생략한다.
    */
   windowSize?: { widthPx: number; heightPx: number } | null;
+  /**
+   * 이 기기의 상시 원격 입력 허용 여부(기본 허용 — 호스트가 명시적으로 차단한
+   * 경우에만 false). 설정의 권한 상태 표시에 쓰인다. 구버전 호스트·미인증
+   * 호출에서는 필드가 없다.
+   */
+  inputAllowed?: boolean | null;
+  /**
+   * 방금 제거 요청된 확장 화면의 sourceId(시스템 반영 최대 ~30s). 카탈로그에
+   * 디스플레이가 여전히 남아 있으면 "제거 중" 상태로 표시한다.
+   */
+  virtualDisplayPendingRemoval?: string | null;
 };
 
 export interface CaptureBackendInfo {
@@ -594,7 +606,7 @@ export function connect(
       }
     };
 
-    socket.on("data", (data: Buffer | string) => {
+    socket.on("data", (data) => {
       buffer += typeof data === "string" ? data : data.toString("utf8");
       drain();
     });

@@ -9,6 +9,8 @@ export interface SessionCardProps {
   inputPermission: boolean;
   inputBusy: boolean;
   showInspector: boolean;
+  /** 이 세션의 뷰어가 잠금 배너 탭으로 입력 허용을 요청 중이다. */
+  inputRequested?: boolean;
   t: TranslationSchema;
   onToggleInput: (session: SessionRow) => Promise<void>;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
@@ -42,6 +44,7 @@ export function SessionCard({
   inputPermission,
   inputBusy,
   showInspector,
+  inputRequested = false,
   t,
   onToggleInput,
   onSetQuality,
@@ -73,6 +76,11 @@ export function SessionCard({
         </div>
 
         <div className="stream-card-action">
+          {inputRequested && !session.inputEnabled && (
+            <span className="input-request-badge" title={t.host.remoteInputApprovalHint}>
+              {t.host.remoteInputRequestedBadge}
+            </span>
+          )}
           <button
             className={controlToggleVariants({ active: session.inputEnabled })}
             disabled={(!inputPermission && !session.inputEnabled) || session.state !== "running" || inputBusy}

@@ -32,6 +32,7 @@ import {
   subscribeStreamTermination,
   type RestartRequest,
 } from "./stream-termination";
+import { subscribeInputEnableRequested } from "./stream-input-request";
 import { subscribeWindowSizeChanged } from "./stream-window-size";
 import {
   getUsbState,
@@ -164,6 +165,22 @@ export function useStreamController(
     });
     return () => subscription.remove();
   }, [host]);
+
+  useEffect(() => {
+    // 입력 잠금 배너 탭(2026-09-21): 네이티브 창이 탭을 보고하면 그 포트의
+    // 세션으로 requestInputEnable을 보낸다. 호스트 UI에 승인 알림이 뜨고,
+    // 승인되면 기존 입력 상태 패킷(LCS1)이 배지를 자동으로 푼다. 요청 실패는
+    // 콘솔만 남긴다 — 배너 탭의 시각 피드백은 이미 지나갔고 재탭이 재시도다.
+    const request = requestForCurrentSelection(host);
+    const subscription = subscribeInputEnableRequested(({ port }) => {
+      const active = streamsRef.current.find((stream) => stream.port === port);
+      if (!active) return;
+      void request("requestInputEnable", { session: active.session }).catch((error: unknown) => {
+        console.warn("[leftcar] input enable request failed", error);
+      });
+    });
+    return () => subscription.remove();
+  }, [host, streamsRef]);
 
   useEffect(() => {
     reconfigureStreamRef.current = reconfigureStream;

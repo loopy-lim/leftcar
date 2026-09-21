@@ -1,16 +1,15 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from "vitest/config";
 
-// `.worktrees/` holds gitignored frozen snapshots from past verification
-// sessions; their tests pin old versions and reference files that only exist
-// inside the snapshot, so the main suite must not collect them.
 export default defineConfig({
   test: {
     exclude: [
-      '**/node_modules/**',
-      '**/dist/**',
-      '**/cypress/**',
-      '**/.{idea,git,cache,output,temp}/**',
-      '**/.worktrees/**',
+      ...configDefaults.exclude,
+      // Preserve the Vitest 2 inventory when updating the runner to Vitest 4.
+      "**/dist/**",
+      "**/cypress/**",
+      "**/.{idea,git,cache,output,temp}/**",
+      "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*",
+      "**/.worktrees/**",
     ],
   },
 });

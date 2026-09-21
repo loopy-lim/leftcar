@@ -1,0 +1,538 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13T16:00:58.247498+00:00",
+  "source": {
+    "commit": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+    "sha256": "1904d74926243c21e642dcbbc8269aaab90e3943cf4c058def05e6d699eb0b3f"
+  },
+  "changes": [
+    "Keep already removed virtual-display management disabled; existing approved display only and no external display creation/mode/scale/topology changes",
+    "Gson2.8.9 and aligned BouncyCastle jdk15to18 1.86 compatible dependency constraints",
+    "Exact Maven parent/local Expo license provenance with duplicate-singleton and unnamed-child fail-closed behavior"
+  ],
+  "verification": {
+    "schema": 1,
+    "observedAt": "2026-09-13T15:49:23.830675+00:00",
+    "command": "fnm exec --using=default bun run verify all",
+    "exitCode": 0,
+    "source": {
+      "verifiedCommit": "091a9164a135d901325ba24d31c0736d0bbbcce5",
+      "verifiedDirty": true,
+      "candidateCommit": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+      "candidateDirty": false,
+      "sha256": "1904d74926243c21e642dcbbc8269aaab90e3943cf4c058def05e6d699eb0b3f",
+      "fileCount": 891,
+      "beforeAfterIdentical": true,
+      "committedInputFilesIdentical": true
+    },
+    "results": {
+      "reactDoctor": 100,
+      "jsTests": 613,
+      "rustWorkspacePassed": 416,
+      "rustWorkspaceIgnored": 1,
+      "hostUnitPassed": 256,
+      "hostE2ePassed": 12,
+      "androidJvm": {
+        "suites": 19,
+        "tests": 118,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "task": "UP-TO-DATE; successful current Gradle invocation with retained task outputs"
+      },
+      "typecheck": "pass",
+      "structureFmtClippy": "pass",
+      "browserUi": "pass",
+      "swift": "shim and adapter compilation; split and retransmit policy executed; hardware adapter execution excluded"
+    },
+    "evidence": [
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/full-verify-postfix.log",
+        "sha256": "768e3aea05fde2e26334aa8c9297a50a37b882ba8bc5019aa9b0feb2af89eb09"
+      },
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/source-before-verify-postfix.json",
+        "sha256": "d29123a524f3a956848227a9bce431629a5b5768ba8cf53c090f9190af9e9f35"
+      },
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/source-after-verify-postfix.json",
+        "sha256": "d29123a524f3a956848227a9bce431629a5b5768ba8cf53c090f9190af9e9f35"
+      },
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/source-snapshot.json",
+        "sha256": "c0ff728c678e3b22e6f218d394db19bf2bd743130db1d18226d2658e60cf0823"
+      },
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/dependency-fix-review.md",
+        "sha256": "abc43a07c9e3afc1df1b07a42040c04ca32098cc03de7b28f5cd543aebf0031e"
+      }
+    ],
+    "boundary": "Automated source checks only; no app installation, actual display capture or 30-minute physical stream acceptance"
+  },
+  "review": {
+    "critical": 0,
+    "important": 0,
+    "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/dependency-fix-review.md",
+    "sha256": "abc43a07c9e3afc1df1b07a42040c04ca32098cc03de7b28f5cd543aebf0031e"
+  },
+  "delivery": {
+    "schema": 1,
+    "source": {
+      "commit": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+      "sha256": "1904d74926243c21e642dcbbc8269aaab90e3943cf4c058def05e6d699eb0b3f"
+    },
+    "host": {
+      "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/Leftcar-Host-0.1.2-internal-arm64.zip",
+      "kind": "file",
+      "sha256": "23fbf22101ce6a2806f527a76bf0851c7c8732789524345feb5920470ac27926",
+      "bytes": 2995099,
+      "bundleSha256": "95690d34c63a197adda7218a2e88490e0b90822318048534269ecc9997272525",
+      "zipRoundTripVerified": true,
+      "strictCodesignVerified": true,
+      "signing": {
+        "classification": "internal-ad-hoc",
+        "notarized": false,
+        "details": [
+          "Identifier=leftcar.ll3.kr",
+          "Signature=adhoc",
+          "TeamIdentifier=not set"
+        ]
+      }
+    },
+    "android": {
+      "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/Leftcar-Viewer-0.1.5-internal-arm64.apk",
+      "kind": "file",
+      "sha256": "3766f23688c8348a50fbdb8344314c188851fb9f76a774d2e5a009a6beea5b05",
+      "bytes": 25084923,
+      "metadata": {
+        "identifier": "leftcar.ll3.kr",
+        "versionCode": 4,
+        "version": "0.1.5"
+      },
+      "signing": {
+        "classification": "internal-debug-key",
+        "verified": true,
+        "debugCertificate": true,
+        "certificateSha256": [
+          "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655"
+        ]
+      }
+    },
+    "manifests": [
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-host-macos-internal-xosqJp/host-macos-internal-manifest.json",
+        "sha256": "c3d1c6f65b1f1772cc400219e244afbf964a5163287d11404f65616c075982c5",
+        "sourceDirty": false,
+        "target": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "triple": "aarch64-apple-darwin"
+        },
+        "metadata": {
+          "identifier": "leftcar.ll3.kr",
+          "version": "0.1.2"
+        },
+        "profile": null,
+        "internalBuildable": true,
+        "distributionReady": false
+      },
+      {
+        "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-NQh8la/android-internal-manifest.json",
+        "sha256": "6f546a6202a85e03d0b02daa037db5032449e9ade973fd2a8a1a74467307743f",
+        "sourceDirty": false,
+        "target": {
+          "platform": "android",
+          "architecture": "arm64",
+          "abi": "arm64-v8a",
+          "triple": "aarch64-linux-android"
+        },
+        "metadata": {
+          "identifier": "leftcar.ll3.kr",
+          "versionCode": 4,
+          "version": "0.1.5"
+        },
+        "profile": null,
+        "internalBuildable": true,
+        "distributionReady": false
+      }
+    ],
+    "boundary": "General internal delivery artifacts; no app install, update, device capture, 30-minute stream, notarization or public release acceptance"
+  },
+  "benchmark": {
+    "schema": 1,
+    "binding": {
+      "commit": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+      "sha256": "1904d74926243c21e642dcbbc8269aaab90e3943cf4c058def05e6d699eb0b3f"
+    },
+    "manifests": [
+      {
+        "path": "../completion-followup-artifacts-20260914/leftcar-host-macos-internal-jqbNu8/host-macos-internal-manifest.json",
+        "sourceDirty": false,
+        "profile": {
+          "slug": "completion-30m",
+          "sourceId": "macos:display:e8da9bbf-0a8e-4b76-ac34-675dd8bf2f27",
+          "systemAudioCapture": false,
+          "root": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/state",
+          "viewerPackage": "leftcar.ll3.kr.benchmark.completion_30m",
+          "hostIdentifier": "leftcar.ll3.kr.benchmark.completion-30m",
+          "hostProductName": "Leftcar Benchmark completion-30m",
+          "credentialService": "leftcar-host.benchmark.completion-30m",
+          "stateChild": "host-completion-30m"
+        },
+        "target": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "triple": "aarch64-apple-darwin"
+        },
+        "artifactMetadata": {
+          "identifier": "leftcar.ll3.kr.benchmark.completion-30m",
+          "version": "0.1.2"
+        },
+        "signing": {
+          "classification": "internal-ad-hoc",
+          "notarized": false,
+          "details": [
+            "Identifier=leftcar.ll3.kr.benchmark.completion-30m",
+            "Signature=adhoc",
+            "TeamIdentifier=not set"
+          ]
+        },
+        "artifacts": [
+          {
+            "role": "host-bundle",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-host-macos-internal-jqbNu8/artifacts/host-bundle-Leftcar Benchmark completion-30m.app",
+            "sha256": "b62774cfa693bcaaca82bc72b0ff279b9a040f167768a169d969b64ff0c11f33",
+            "inspection": {
+              "machO": {
+                "architectures": [
+                  "arm64"
+                ]
+              }
+            }
+          },
+          {
+            "role": "native-shim",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-host-macos-internal-jqbNu8/artifacts/native-shim-libleftcar_capture.dylib",
+            "sha256": "357ac92fe8648c4312b9e26ea1e42830b8f0c6fbcc3dac370747953fc6a66509",
+            "bytes": 1437976,
+            "inspection": {
+              "machO": {
+                "architectures": [
+                  "arm64"
+                ]
+              }
+            }
+          }
+        ],
+        "releaseReadiness": {
+          "internalBuildable": true,
+          "distributionReady": false,
+          "status": "blocked",
+          "blockers": [
+            {
+              "code": "VULNERABILITY_CHECK_FINDINGS",
+              "input": "bun.lock",
+              "tool": "bun"
+            },
+            {
+              "code": "VULNERABILITY_CHECK_FINDINGS",
+              "input": "apps/host-desktop/src-tauri/Cargo.lock",
+              "tool": "cargo-audit"
+            },
+            {
+              "code": "VULNERABILITY_CHECK_UNAVAILABLE",
+              "input": null,
+              "tool": "gradle"
+            },
+            {
+              "code": "GRADLE_DEPENDENCIES_UNLOCKED"
+            },
+            {
+              "code": "LICENSE_METADATA_UNKNOWN"
+            },
+            {
+              "code": "INTERNAL_SCOPE"
+            }
+          ]
+        }
+      },
+      {
+        "path": "../completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/android-internal-manifest.json",
+        "sourceDirty": false,
+        "profile": {
+          "slug": "completion-30m",
+          "sourceId": "macos:display:e8da9bbf-0a8e-4b76-ac34-675dd8bf2f27",
+          "systemAudioCapture": false,
+          "root": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/state",
+          "viewerPackage": "leftcar.ll3.kr.benchmark.completion_30m",
+          "hostIdentifier": "leftcar.ll3.kr.benchmark.completion-30m",
+          "hostProductName": "Leftcar Benchmark completion-30m",
+          "credentialService": "leftcar-host.benchmark.completion-30m",
+          "stateChild": "host-completion-30m"
+        },
+        "target": {
+          "platform": "android",
+          "architecture": "arm64",
+          "abi": "arm64-v8a",
+          "triple": "aarch64-linux-android"
+        },
+        "artifactMetadata": {
+          "identifier": "leftcar.ll3.kr.benchmark.completion_30m",
+          "versionCode": 4,
+          "version": "0.1.5"
+        },
+        "signing": {
+          "classification": "internal-debug-key",
+          "verified": true,
+          "debugCertificate": true,
+          "certificateSha256": [
+            "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655"
+          ]
+        },
+        "artifacts": [
+          {
+            "role": "viewer-apk",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/artifacts/viewer-apk-app-release.apk",
+            "sha256": "9e589ba1f675db25267afb321890482867d1df7e36cdc777689e5e47b08e1cc9",
+            "bytes": 25084971,
+            "inspection": {
+              "native": {
+                "entry": "lib/arm64-v8a/libleftcar_viewer.so",
+                "elfClass": 64,
+                "elfMachine": 183,
+                "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+                "bytes": 1009568
+              },
+              "javascript": {
+                "status": "observed",
+                "entry": "assets/index.android.bundle",
+                "sha256": "17f38be65830cef0e0fb90204e7eee402ee43812c7272c9c75b37656905c3a6c",
+                "bytes": 3551288,
+                "format": "hermes-bytecode"
+              }
+            }
+          },
+          {
+            "role": "native-cargo-unstripped",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/artifacts/native-cargo-unstripped-libleftcar_viewer.so",
+            "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+            "bytes": 1394056,
+            "inspection": {
+              "native": {
+                "entry": null,
+                "elfClass": 64,
+                "elfMachine": 183,
+                "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+                "bytes": 1394056
+              }
+            }
+          },
+          {
+            "role": "native-gradle-copy",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/artifacts/native-gradle-copy-libleftcar_viewer.so",
+            "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+            "bytes": 1394056,
+            "inspection": {
+              "native": {
+                "entry": null,
+                "elfClass": 64,
+                "elfMachine": 183,
+                "sha256": "dd897e89c6e87c8ee3b64281a5a62a7cb8c817bd395d4e5495da46e55d432e84",
+                "bytes": 1394056
+              }
+            }
+          },
+          {
+            "role": "native-agp-stripped-apk-input",
+            "path": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/artifacts/native-agp-stripped-apk-input-libleftcar_viewer.so",
+            "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+            "bytes": 1009568,
+            "inspection": {
+              "native": {
+                "entry": null,
+                "elfClass": 64,
+                "elfMachine": 183,
+                "sha256": "17ed36918d22d26a3122c2880e0879f98603fc50000b32c7ec1695502d5eb522",
+                "bytes": 1009568
+              }
+            }
+          }
+        ],
+        "releaseReadiness": {
+          "internalBuildable": true,
+          "distributionReady": false,
+          "status": "blocked",
+          "blockers": [
+            {
+              "code": "VULNERABILITY_CHECK_FINDINGS",
+              "input": "bun.lock",
+              "tool": "bun"
+            },
+            {
+              "code": "VULNERABILITY_CHECK_FINDINGS",
+              "input": "apps/host-desktop/src-tauri/Cargo.lock",
+              "tool": "cargo-audit"
+            },
+            {
+              "code": "VULNERABILITY_CHECK_UNAVAILABLE",
+              "input": null,
+              "tool": "gradle"
+            },
+            {
+              "code": "GRADLE_DEPENDENCIES_UNLOCKED"
+            },
+            {
+              "code": "LICENSE_METADATA_UNKNOWN"
+            },
+            {
+              "code": "INTERNAL_SCOPE"
+            }
+          ]
+        }
+      }
+    ],
+    "boundary": "New benchmark artifacts verified; no installation or physical stream acceptance"
+  },
+  "androidActualApk": [
+    {
+      "schema": 1,
+      "artifactPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-iCpKNP/artifacts/viewer-apk-app-release.apk",
+      "sha256": "9e589ba1f675db25267afb321890482867d1df7e36cdc777689e5e47b08e1cc9",
+      "bytes": 25084971,
+      "identifier": "leftcar.ll3.kr.benchmark.completion_30m",
+      "versionCode": 4,
+      "version": "0.1.5",
+      "minimumSdk": 24,
+      "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+      "signingClassification": "internal-debug-key",
+      "backupResources": {
+        "secure_store_backup_rules": {
+          "id": "0x7f140008",
+          "apkPath": "res/-K.xml",
+          "secureStoreExclusions": 1,
+          "legacyExclusions": 1
+        },
+        "secure_store_data_extraction_rules": {
+          "id": "0x7f140009",
+          "apkPath": "res/Hq.xml",
+          "secureStoreExclusions": 2,
+          "legacyExclusions": 2
+        }
+      },
+      "removedPermissionsAbsent": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "SYSTEM_ALERT_WINDOW"
+      ],
+      "evidence": "Actual new benchmark APK bytes/manifest/resource table/compiled XML inspected. No install, update, backup restore or runtime acceptance."
+    },
+    {
+      "schema": 1,
+      "artifactPath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/leftcar-android-internal-NQh8la/artifacts/viewer-apk-app-release.apk",
+      "sha256": "3766f23688c8348a50fbdb8344314c188851fb9f76a774d2e5a009a6beea5b05",
+      "bytes": 25084923,
+      "identifier": "leftcar.ll3.kr",
+      "versionCode": 4,
+      "version": "0.1.5",
+      "minimumSdk": 24,
+      "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+      "signingClassification": "internal-debug-key",
+      "backupResources": {
+        "secure_store_backup_rules": {
+          "id": "0x7f140008",
+          "apkPath": "res/-K.xml",
+          "secureStoreExclusions": 1,
+          "legacyExclusions": 1
+        },
+        "secure_store_data_extraction_rules": {
+          "id": "0x7f140009",
+          "apkPath": "res/Hq.xml",
+          "secureStoreExclusions": 2,
+          "legacyExclusions": 2
+        }
+      },
+      "removedPermissionsAbsent": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "SYSTEM_ALERT_WINDOW"
+      ],
+      "evidence": "Actual new general internal APK bytes/manifest/resource table/compiled XML inspected. No install, update, backup restore or runtime acceptance."
+    }
+  ],
+  "ci": {
+    "run": 34766688291,
+    "headSha": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+    "status": "completed",
+    "conclusion": "success",
+    "url": "https://github.com/loopy-lim/leftcar/actions/runs/34766688291",
+    "jobs": [
+      {
+        "name": "TypeScript (typecheck, tests, contract, architecture)",
+        "conclusion": "success"
+      },
+      {
+        "name": "Android native (aarch64 check)",
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows Host (WGC, Media Foundation, NSIS)",
+        "conclusion": "success"
+      },
+      {
+        "name": "Rust (fmt, clippy, tests)",
+        "conclusion": "success"
+      },
+      {
+        "name": "Device evidence (E5-E7) \u2014 pending",
+        "conclusion": "success"
+      }
+    ],
+    "devicePlaceholderIsNotAcceptance": true,
+    "evidencePath": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/evidence/ci-candidate-result.json",
+    "evidenceSha256": "b1b9f0b0cd9d4cf1a2aeba73721ece13a2def8a6cf2a5e5038035c3b3ac28888"
+  },
+  "physical": {
+    "status": "not-started-awaiting-selected-existing-display-sharing-reply",
+    "actualStreamSeconds": 0,
+    "requestedSeconds": 1800,
+    "displayCreated": false,
+    "displayModeChanged": false,
+    "appInstalledOrLaunched": false,
+    "remoteInputEnabled": false,
+    "preparedContext": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/runtime/run-context.template.json",
+    "deviceCoordination": "Yeoyu device window returned unused; fresh handshake before actual start",
+    "display": "Existing DP, mirrored to HDP-V105",
+    "target": "Lenovo TB710FU",
+    "approvalReason": "Previously approved virtual audit display is absent; selected physical DP is a different screen-sharing target",
+    "displayStreamOrSystemAudioCaptured": false
+  },
+  "remaining": [
+    "Bun4 advisory findings (high2/moderate2)",
+    "CommonsIO2.6 two advisory findings and Android24/25 compatibility acceptance before upgrade",
+    "Gradle lock/trust policy and integrated vulnerability scanner",
+    "NOTICE/license policy approval and production signing/notarization",
+    "30-minute stream and remaining physical input/audio/USB/XR/Windows acceptance",
+    "DraftPR6 integration; no main merge or public release performed"
+  ],
+  "historicalBoundary": "September13 candidate and reports remain historical. New artifacts were built from clean996acba with matching891 build inputs; document-only later commits do not create a new binary candidate.",
+  "windowsCiArtifact": {
+    "schema": 1,
+    "artifactId": 10320902783,
+    "name": "leftcar-host-windows-x64-unsigned",
+    "ciRun": 34766688291,
+    "headSha": "996acba8a3f539ce4658d829065ea3fc744a19e3",
+    "archive": "/Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup-artifacts-20260914/Leftcar-Host-Windows-x64-unsigned-ci.zip",
+    "sha256": "41a972519e12624299cc5538926cb77fc28bb56dd8cdda605051da7875f98042",
+    "githubArchiveDigestMatched": true,
+    "entry": "Leftcar Host_0.1.2_x64-setup.exe",
+    "executableSha256": "0d2a2dc29b20e2d418cca6758c528200d1b45dfcb60bd7fbeb3dcfb08661d17c",
+    "peMachine": "0x14c",
+    "boundary": "Exact CI artifact downloaded and archive digest/header checked. NSIS installer wrapper architecture is not payload architecture proof. No Windows install, launch, capture or signature acceptance."
+  },
+  "documentationPublication": {
+    "status": "local-only",
+    "reason": "Automatic approval review rejected public push of new documentation containing local paths, device and verification metadata without explicit payload-publication authorization",
+    "codePr": "https://github.com/loopy-lim/leftcar/pull/6",
+    "codePrHead": "996acba8a3f539ce4658d829065ea3fc744a19e3"
+  }
+}

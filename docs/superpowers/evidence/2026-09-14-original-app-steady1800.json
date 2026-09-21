@@ -1,0 +1,521 @@
+{
+  "schema": 1,
+  "kind": "curated-public-evidence-summary",
+  "generatedAt": "2026-09-14T05:24:43.732197+00:00",
+  "claim": "1800-second acquisition completed; 60 FPS performance acceptance failed; original invalid receipt retained",
+  "application": {
+    "sourceCommit": "cc52614a8fc519f723b7958976af5bc18a70a0eb",
+    "sourceInputSha256": "465cbd2fa66fcb278872d5864f29f5fa8b4817c16c6fc5d9d84cbe6ca422f2a3",
+    "sourceInputCount": 896,
+    "sourceManifestFileSha256": "10e833f80616be37300d1af33472ad1a93ef6d22a8ee927eb3dd476e855e557b",
+    "originalBundleAndPackageId": "leftcar.ll3.kr",
+    "hostBundleSha256": "b6c23fcfee1f459bac7327c8d6849b06fa960bed00ffcb96183ca9db570c5a5e",
+    "hostZipSha256": "12f47be65535cc92c369f91327c3af1dd828f5cc5684eb98daecffbee427f61e",
+    "viewerApkSha256": "51bb0aec5f628d402d002ed6f1fec6f786a83bf2dc24b8611845ad6addcf24c1",
+    "viewerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "hostExistingDesignatedRequirementPreserved": true,
+    "pairingAndSettingsPreserved": true,
+    "ci": {
+      "runId": 34806019257,
+      "headSha": "cc52614a8fc519f723b7958976af5bc18a70a0eb",
+      "conclusion": "success",
+      "url": "https://github.com/loopy-lim/leftcar/actions/runs/34806019257",
+      "devicePlaceholderIsNotAcceptance": true
+    },
+    "windowsCiArtifact": {
+      "observedAt": "2026-09-14T05:26:18.359543+00:00",
+      "sourceCommit": "cc52614a8fc519f723b7958976af5bc18a70a0eb",
+      "runId": 34806019257,
+      "artifactId": 10332988212,
+      "artifactName": "leftcar-host-windows-x64-unsigned",
+      "file": "Leftcar Host_0.1.2_x64-setup.exe",
+      "sha256": "3732d7f2b697ba36ab0ca360f52fd6ce7ef8805746672002bf9310017a85a354",
+      "bytes": 2241032,
+      "signature": "unsigned",
+      "physicalWindowsRuntime": "unverified"
+    }
+  },
+  "acquisition": {
+    "timing": {
+      "requestedMs": 1800000,
+      "elapsedMs": 1800000.1665420001
+    },
+    "boundaries": {
+      "start": {
+        "hostBeforeMs": 1789360959837,
+        "hostAfterMs": 1789360959941,
+        "deviceMs": 1789360959365.2263,
+        "raw": "1789360959.365226336",
+        "basis": "device Unix wall; Host acquisition bracket, not synchronization proof"
+      },
+      "end": {
+        "hostBeforeMs": 1789362759864,
+        "hostAfterMs": 1789362759928,
+        "deviceMs": 1789362759420.7168,
+        "raw": "1789362759.420716795",
+        "basis": "device Unix wall; Host acquisition bracket, not synchronization proof"
+      }
+    },
+    "interrupted": false,
+    "childErrors": [],
+    "childOutcomes": [
+      {
+        "index": 0,
+        "code": null,
+        "signal": "SIGTERM",
+        "expected": true
+      },
+      {
+        "index": 1,
+        "code": null,
+        "signal": "SIGTERM",
+        "expected": true
+      }
+    ]
+  },
+  "processContinuity": {
+    "hostPid": 76871,
+    "viewerPid": 14228,
+    "viewerStartTicks": "107553121",
+    "unchanged": true
+  },
+  "conditions": {
+    "device": "Lenovo TB710FU / Android 16",
+    "uiControl": "ADB on original Android package",
+    "mediaTransport": "UDP over local Wi-Fi",
+    "source": "existing physical DP",
+    "sourceMode": "3840x2160@60",
+    "sourceLogicalSize": "1920x1080",
+    "sourceScale": 2,
+    "encodedSize": "2560x1440",
+    "videoCodec": "H264",
+    "sourceDisplayPropertiesUnchanged": true,
+    "audio": false,
+    "remoteInput": false,
+    "displayCreation": false,
+    "displayModeChanges": false,
+    "presentationExperiment": false,
+    "surfaceBufferDimensions": "unmeasured",
+    "viewerRefreshRate": "unmeasured"
+  },
+  "analysis": {
+    "commit": "76ccebf6a7a480728031a343f3be1a0441daf38b",
+    "version": "measurement-observation-v3-38e512c4",
+    "baseCommit": "cc52614a8fc519f723b7958976af5bc18a70a0eb",
+    "reviewedPatchSha256": "38e512c405281e9bdffc185c53ff862327f1da41579ba7151a70313e7875e340",
+    "trackedScopedDiffSha256": "58460b293b3bfd79225242e9d90c76c7b1ad42dff53545530f71ffb9569cd949",
+    "sourceFiles": {
+      "tools/perf-matrix/analyze-performance.ts": "682056d1b6372d6bd6a5a259394a27d8a2e51da3ce9c416f60986ecd4c433526",
+      "tools/perf-matrix/measurement.ts": "4eea187c94653d2538daf24be935760ef124860fb3f1fe245216bb4b6955727e",
+      "tools/perf-matrix/analyze-performance.test.ts": "f27cfa38cc6541dffd66e05e104bd6f4a9b808dc36b9f83764aabfc8d46d1d95",
+      "tools/perf-matrix/counter-boundaries.test.ts": "710ef92cecc2b3724faced4b11f12c8d1c75b4ca298a87f1a5d2d9f2fd5e0754",
+      "tools/perf-matrix/measurement-observation.test.ts": "fa8efd516fed754f4e5678882e2aa940fa5e9c15593c3742bdd18b8a8407acad",
+      "tools/perf-matrix/README.md": "19700d10f8e21e15b984df6ecf99abdb55345b0c6eef523681b0570faeb73270",
+      "tools/perf-matrix/measurement.test.ts": "9092dbeed00f6f155044927cb3fac5b6318655feafd7cc52c87d798c6deee88b",
+      "tools/perf-matrix/collection-boundaries.test.ts": "2f2f997827be879dac169839fad898623b2f58362c41044f112c82b80ce7f6d4"
+    },
+    "sourceFileSetSha256": "30a292c915fab6379490c3cd7e060e5ab4660e6cbc8c86e46c57c6e40a9d092d",
+    "note": "Committed analyzer file hashes are separate from the installed application source. Original reanalysis receipt remains unchanged.",
+    "originalReceiptSha256": "cb53a849189092eaf79dfaae3b6a87221948c5f19eee8ed9e21996c01d4f0891",
+    "rawHashes": {
+      "host": "c04173173a439b102e8c3d2ec1697cee49aa770c4b005a92681a48a3d11632a8",
+      "android": "55b7384309fecaeab6b66f8fc94d33f11be2fee81dbf3ab35428b59e5b537b0e"
+    },
+    "reanalysisReceiptSha256": "af147a95f0c97f7ec6761f1e5d2a3e547ead37ccee9083f26f7b697b3e21c9ee",
+    "originalHashesVerifiedUnchanged": true,
+    "collectionBefore": {
+      "status": "invalid",
+      "reasons": [
+        "Incomplete or unsupported attributed stage metrics"
+      ]
+    },
+    "collectionAfter": {
+      "status": "invalid",
+      "reasons": [
+        "Incomplete or unsupported attributed stage metrics"
+      ]
+    },
+    "stages": {
+      "host": [
+        {
+          "stage": "encoder-output",
+          "segment": 0,
+          "complete": false,
+          "coverage": {
+            "missingHeadMs": 922,
+            "missingTailMs": 79
+          },
+          "sampleCount": 1152,
+          "averageFps": 55.54659957463414,
+          "rollingOneSecondP5Fps": 53.83848454636092,
+          "rollingOneSecondWindowCount": 503,
+          "maxSampleGapMs": 2008,
+          "zeroFpsStallDetected": false,
+          "observedZeroCounterIntervalCount": 0,
+          "observationGapCount": 648,
+          "observationGapsByKind": {
+            "head": 0,
+            "samples": 648,
+            "tail": 0
+          },
+          "observationComplete": false,
+          "errors": [],
+          "companionCount": 0
+        }
+      ],
+      "android": [
+        {
+          "stage": "surface-release",
+          "segment": 0,
+          "complete": false,
+          "coverage": {
+            "missingHeadMs": 359.773681640625,
+            "missingTailMs": 498.716796875
+          },
+          "sampleCount": 1748,
+          "averageFps": 29.47203669192423,
+          "rollingOneSecondP5Fps": 26.785714285714285,
+          "rollingOneSecondWindowCount": 648,
+          "maxSampleGapMs": 14446,
+          "zeroFpsStallDetected": false,
+          "observedZeroCounterIntervalCount": 0,
+          "observationGapCount": 229,
+          "observationGapsByKind": {
+            "head": 0,
+            "samples": 229,
+            "tail": 0
+          },
+          "observationComplete": false,
+          "errors": [],
+          "companionCount": 1748
+        }
+      ]
+    },
+    "noProgressNotObservedIsNotNoStallProof": true,
+    "syntheticZerosRemoved": true,
+    "performanceThresholdsUnchanged": true,
+    "acquisitionToleranceUnchanged": true,
+    "physicalPresentation": "unmeasured",
+    "glassToGlass": "unmeasured",
+    "final4kCriteriaMet": false
+  },
+  "androidRuntime": {
+    "decoderCreationLogCount": 53,
+    "decoderCreationSuccessLogCount": 53,
+    "decoderCreationFailureLogCount": 0,
+    "onDestroyLogCount": 0,
+    "networkLossLogCount": 1233,
+    "recoverySkipLogCount": 1262,
+    "gapMeaning": "App AU continuity/recovery classification, not independent RF packet-loss measurement",
+    "latestReleaseCaptureAgeMs": {
+      "count": 1739,
+      "first": 44,
+      "last": 104,
+      "min": 0,
+      "max": 1046,
+      "median": 45
+    },
+    "latencyMeaning": "Latest released-output samples using estimated host wall offset; not every frame, physical presentation or optical latency"
+  },
+  "hostRuntime": {
+    "encoderWatchdogRestarts": {
+      "count": 1152,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0.0
+    },
+    "encoderWatchdogTerminations": {
+      "count": 1152,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0.0
+    },
+    "encoderLateCallbacks": {
+      "count": 1152,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0.0
+    },
+    "rtxRetainedEnvelopeBytes": {
+      "count": 1152,
+      "first": 85781,
+      "last": 83983,
+      "min": 0,
+      "max": 158780,
+      "median": 83054.5
+    },
+    "rtxServedEnvelopeBytes": {
+      "count": 1152,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0.0
+    },
+    "rtxRejectedEnvelopeBytes": {
+      "count": 1152,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0.0
+    }
+  },
+  "resources": {
+    "sampleCount": 1609,
+    "host": {
+      "rssKiB": {
+        "count": 1609,
+        "first": 116784,
+        "last": 116304,
+        "min": 116048,
+        "max": 117008,
+        "median": 116272
+      },
+      "cpuPercent": {
+        "count": 1609,
+        "first": 8,
+        "last": 8.4,
+        "min": 3.5,
+        "max": 17.1,
+        "median": 11.4
+      }
+    },
+    "viewer": {
+      "rssKiB": {
+        "count": 1609,
+        "first": 243832,
+        "last": 249168,
+        "min": 236820,
+        "max": 272892,
+        "median": 248160
+      }
+    },
+    "currentHalCelsius": {
+      "CPU2": {
+        "count": 1609,
+        "first": 39.9,
+        "last": 39.5,
+        "min": 37.5,
+        "max": 45,
+        "median": 39.5
+      },
+      "hbm": {
+        "count": 1609,
+        "first": 37.613,
+        "last": 38.553,
+        "min": 37.613,
+        "max": 38.598,
+        "median": 38.357
+      },
+      "battery": {
+        "count": 1609,
+        "first": 33.7,
+        "last": 34.7,
+        "min": 33.7,
+        "max": 34.7,
+        "median": 34.5
+      },
+      "skin": {
+        "count": 1609,
+        "first": 36.564,
+        "last": 37.664,
+        "min": 36.564,
+        "max": 38.22,
+        "median": 37.49
+      },
+      "GPU7": {
+        "count": 1609,
+        "first": 35.8,
+        "last": 37,
+        "min": 35.4,
+        "max": 39.7,
+        "median": 36.6
+      },
+      "GPU6": {
+        "count": 1609,
+        "first": 36.2,
+        "last": 37.4,
+        "min": 35.8,
+        "max": 40.1,
+        "median": 37
+      },
+      "GPU5": {
+        "count": 1609,
+        "first": 36.2,
+        "last": 37,
+        "min": 35.4,
+        "max": 40.9,
+        "median": 37
+      },
+      "GPU4": {
+        "count": 1609,
+        "first": 35.8,
+        "last": 37,
+        "min": 35.4,
+        "max": 40.9,
+        "median": 37
+      },
+      "GPU3": {
+        "count": 1609,
+        "first": 36.6,
+        "last": 37,
+        "min": 35.4,
+        "max": 38.9,
+        "median": 36.6
+      },
+      "CPU5": {
+        "count": 1609,
+        "first": 40.3,
+        "last": 41,
+        "min": 38.3,
+        "max": 48.5,
+        "median": 40.6
+      },
+      "GPU2": {
+        "count": 1609,
+        "first": 36.2,
+        "last": 37,
+        "min": 35.8,
+        "max": 39.3,
+        "median": 37
+      },
+      "CPU4": {
+        "count": 1609,
+        "first": 38.7,
+        "last": 40.3,
+        "min": 37.9,
+        "max": 43.8,
+        "median": 39.5
+      },
+      "GPU0": {
+        "count": 1609,
+        "first": 35.8,
+        "last": 37,
+        "min": 35.4,
+        "max": 39.3,
+        "median": 37
+      },
+      "GPU1": {
+        "count": 1609,
+        "first": 36.2,
+        "last": 37.4,
+        "min": 35.4,
+        "max": 38.9,
+        "median": 37
+      },
+      "CPU3": {
+        "count": 1609,
+        "first": 38.3,
+        "last": 39.5,
+        "min": 37.5,
+        "max": 45.7,
+        "median": 39.5
+      },
+      "CPU1": {
+        "count": 1609,
+        "first": 37,
+        "last": 38.5,
+        "min": 35.8,
+        "max": 42.4,
+        "median": 37.7
+      },
+      "CPU0": {
+        "count": 1609,
+        "first": 37.4,
+        "last": 38.9,
+        "min": 36.6,
+        "max": 43.2,
+        "median": 38.1
+      }
+    },
+    "thermalStatus": {
+      "count": 1609,
+      "first": 0,
+      "last": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "batteryPercent": {
+      "count": 1609,
+      "first": 100,
+      "last": 100,
+      "min": 100,
+      "max": 100,
+      "median": 100
+    },
+    "limitations": [
+      "System sensors are not per-app heat",
+      "ps CPU percentage is not a per-sample CPU-time delta",
+      "Charging prevents a battery-drain energy claim",
+      "Snapshots do not prove absence of a memory leak"
+    ]
+  },
+  "normalStop": {
+    "viewerUiXAtUtc": "2026-09-14T05:14:05.932065Z",
+    "viewerIdleCatalogObserved": true,
+    "hostFinalSessionStopLogAtUtc": "2026-09-14T05:14:18.448Z",
+    "sourceDisplayPropertiesCompared": true,
+    "patternTabClosed": true,
+    "ownedPatternServerStopRequested": true,
+    "earlierSmokeRegistryCleanupDelayedSeconds": 2113.605141,
+    "completeNativeDeinitializationTime": "unmeasured"
+  },
+  "validation": {
+    "measurementTests": {
+      "redFailed": 25,
+      "redTotal": 97,
+      "greenPassed": 97,
+      "greenTotal": 97
+    },
+    "typecheckExitCode": 0,
+    "sourceFilesMatchReviewedPatch": true,
+    "checks": [
+      {
+        "command": "bun run test tools/perf-matrix",
+        "exitCode": 1,
+        "logSha256": "60ccdd079b082cb2f48c0020a7da6b3070478c12a63f3438ededf98e0a4be2fc"
+      },
+      {
+        "command": "bun run test tools/perf-matrix",
+        "exitCode": 0,
+        "logSha256": "4f7125fd225bb5905efe36fc49e5b6c5c10d4ecfbfb665950fdc4751968a3b61"
+      },
+      {
+        "command": "bun run typecheck",
+        "exitCode": 0,
+        "logSha256": "ab85d04819510a85725e0f12b80571c9c71cba8b387b2fb1263da2477d4833e2"
+      },
+      {
+        "command": "bun evidence/measurement-analysis-fix/reanalyze.mts",
+        "exitCode": 0,
+        "logSha256": "14af6ba5c6158a7d2cc518a02ee3eb46c2ec91b52fe98e93ba1d76c1b83df36e"
+      },
+      {
+        "command": "git diff --check",
+        "exitCode": 0,
+        "logSha256": null
+      }
+    ]
+  },
+  "figure": {
+    "file": "2026-09-14-steady1800-stage-throughput.png",
+    "sha256": "15eb8ba0a06bd819e3337644d8afd593a7e4f82b1ef94979f2ee383dea953ba0",
+    "basis": "30-second bins of observed first/last counter deltas; no missing-edge extrapolation"
+  },
+  "remaining": [
+    "60 FPS throughput and decoder recovery stability",
+    "Deterministic terminal registry cleanup and native resource lifetime evidence",
+    "Periodic metric observability for continuity acceptance",
+    "Physical panel and optical latency measurement",
+    "Dependency advisories and API24/25 compatibility",
+    "Production signing/notarization and hardware/transport acceptance matrix"
+  ]
+}

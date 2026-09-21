@@ -3,7 +3,7 @@
  *
  * 제어 평면 핸드셰이크(뷰어 측): 임시 X25519로 PFS 세션 키를 합의하고, QR로
  * 핀한 호스트 Ed25519 공개키로 ServerHello 서명을 검증한다. 이후 모든 줄은
- * ChaCha20-Poly1305 봉인 프레임 `{"e":"<b64url(counter‖tag‖ct)>"}`로 오간다.
+ * ChaCha20-Poly1305 봉인 프레임 `{"e":"<b64url(counter‖ct‖tag)>"}`로 오간다.
  *
  * 상호 운용은 고정 벡터로 잠긴다 — 키·프레임 값은 Rust 테스트
  * (cargo test -p secure-channel print_vector)의 출력과 정확히 일치해야 한다.

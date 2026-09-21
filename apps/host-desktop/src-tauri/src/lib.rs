@@ -14,7 +14,6 @@ pub mod fec;
 pub mod ffi;
 pub mod file_transfer;
 pub mod identity;
-pub mod lock;
 pub mod media_pacing;
 pub mod pairing;
 pub mod settings;
@@ -37,6 +36,35 @@ use tauri::{Manager, WindowEvent};
 /// Preferred control-plane port. If it is already occupied, the Host binds an
 /// OS-assigned port and advertises that actual endpoint through mDNS and QR.
 const PREFERRED_CONTROL_PORT: u16 = 7777;
+
+#[derive(Clone, Copy)]
+enum DashboardPresentation {
+    Hidden,
+    Visible,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn dock_visibility_for_dashboard(presentation: DashboardPresentation) -> bool {
+    matches!(presentation, DashboardPresentation::Visible)
+}
+
+#[cfg(target_os = "macos")]
+fn activation_policy_for_dashboard(presentation: DashboardPresentation) -> tauri::ActivationPolicy {
+    if dock_visibility_for_dashboard(presentation) {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    }
+}
+
+fn set_dashboard_dock_visibility(app: &tauri::AppHandle, presentation: DashboardPresentation) {
+    #[cfg(target_os = "macos")]
+    if let Err(error) = app.set_activation_policy(activation_policy_for_dashboard(presentation)) {
+        eprintln!("Leftcar Host activation policy update failed: {error}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, presentation);
+}
 
 #[derive(Clone, Copy)]
 struct ControlEndpoint {
@@ -147,9 +175,6 @@ pub fn run() {
             server_for_upnp.set_public_media_endpoint(endpoint);
         }));
     }
-    // 세션 종료 후 화면 잠금 실행부(설정 lock_on_disconnect가 켜져 있을 때
-    // 마지막 세션 teardown에서 호출된다).
-    server.set_lock_screen(std::sync::Arc::new(lock::lock_workstation));
     // 확장(가상) 디스플레이 매니저 — 프로브는 첫 사용 때 shim에서 늦게
     // 확인한다. 심볼 부재 플랫폼/빌드에서는 "지원 안 됨"으로만 존재한다.
     let virtual_display = Arc::new(virtual_display::VirtualDisplayManager::new());
@@ -179,6 +204,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
+            list_input_requests,
             get_host_platform,
             get_control_port,
             get_lan_ip,
@@ -210,7 +236,6 @@ pub fn run() {
             get_privacy_settings,
             get_experiments,
             set_experiments,
-            set_lock_on_disconnect,
             set_privacy_curtain,
             add_share_files,
             list_share_queue,
@@ -292,8 +317,10 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                            if window.show().is_ok() {
+                                set_dashboard_dock_visibility(app, DashboardPresentation::Visible);
+                                let _ = window.set_focus();
+                            }
                         }
                     }
                     "pairing" => show_pairing_window(app),
@@ -306,8 +333,10 @@ pub fn run() {
             // AppKit startups. Show+focus defensively; users reported the
             // app appearing to "not launch" when only the tray existed.
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+                if window.show().is_ok() {
+                    set_dashboard_dock_visibility(app.handle(), DashboardPresentation::Visible);
+                    let _ = window.set_focus();
+                }
             }
 
             Ok(())
@@ -318,7 +347,12 @@ pub fn run() {
                     // Closing the dashboard hides it; the control server, mDNS
                     // advertisement, and active capture sessions keep running.
                     api.prevent_close();
-                    let _ = window.hide();
+                    if window.hide().is_ok() {
+                        set_dashboard_dock_visibility(
+                            window.app_handle(),
+                            DashboardPresentation::Hidden,
+                        );
+                    }
                 }
             } else if window.label() == "pairing" {
                 if let WindowEvent::CloseRequested { .. } = event {
@@ -642,6 +676,14 @@ fn get_screen_permission(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> Result<bool, String> {
     state.screen_permission()
+}
+
+/// 뷰어 잠금 배너 탭으로 접수된 입력 허용 요청(60s TTL) — 대시보드 폴링용.
+#[tauri::command]
+fn list_input_requests(
+    state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
+) -> Vec<control::PendingInputRequestView> {
+    state.pending_input_requests()
 }
 
 #[tauri::command]
@@ -1111,22 +1153,8 @@ fn set_experiments(
 #[tauri::command]
 fn get_privacy_settings(
     settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-) -> (bool, bool) {
-    (settings.lock_on_disconnect(), settings.privacy_curtain())
-}
-
-#[tauri::command]
-fn set_lock_on_disconnect(
-    settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-    audit_state: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
-    enabled: bool,
-) -> Result<(), String> {
-    settings.set_lock_on_disconnect(enabled)?;
-    audit_state.log(
-        "lock_on_disconnect_changed",
-        serde_json::json!({ "enabled": enabled }),
-    );
-    Ok(())
+) -> bool {
+    settings.privacy_curtain()
 }
 
 #[tauri::command]
@@ -1279,6 +1307,42 @@ fn tailscale_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::activation_policy_for_dashboard;
+    use super::{dock_visibility_for_dashboard, DashboardPresentation};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_dashboard_uses_accessory_activation_policy() {
+        assert!(matches!(
+            activation_policy_for_dashboard(DashboardPresentation::Hidden),
+            tauri::ActivationPolicy::Accessory
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn visible_dashboard_uses_regular_activation_policy() {
+        assert!(matches!(
+            activation_policy_for_dashboard(DashboardPresentation::Visible),
+            tauri::ActivationPolicy::Regular
+        ));
+    }
+
+    #[test]
+    fn hidden_dashboard_removes_the_macos_dock_icon() {
+        assert!(!dock_visibility_for_dashboard(
+            DashboardPresentation::Hidden
+        ));
+    }
+
+    #[test]
+    fn visible_dashboard_restores_the_macos_dock_icon() {
+        assert!(dock_visibility_for_dashboard(
+            DashboardPresentation::Visible
+        ));
+    }
+
     #[test]
     fn occupied_control_port_falls_back_to_an_available_port() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();

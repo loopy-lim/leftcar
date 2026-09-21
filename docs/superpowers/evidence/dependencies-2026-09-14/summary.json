@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "observedAt": "2026-09-13T15:25:23.091055+00:00",
+  "sourceCommit": "091a9164a135d901325ba24d31c0736d0bbbcce5",
+  "sourceScope": "Scoped changed dependency/tool inputs; not a frozen full candidate source or APK manifest. Other work in progress is outside this receipt.",
+  "inputs": [
+    {
+      "path": "package.json",
+      "sha256": "9f84e45fda5576e88ee428a27c4ba4b260cc2e2edfe179e4c8e7e020f27573fb"
+    },
+    {
+      "path": "bun.lock",
+      "sha256": "7a2d0dd19800586ffced906d6aa95c512f02e229b9a57c3966d1e5c6f4e1abba"
+    },
+    {
+      "path": "apps/viewer-expo/android/app/build.gradle",
+      "sha256": "654faa0502dfbf9e3670ab5c64d90580fb8a7f7c9ffd67304b41c76e55ffae8a"
+    },
+    {
+      "path": "tools/release-gradle.mjs",
+      "sha256": "8abc0eed997a6faec4de79abfdefe6ba42b7b4772b8a8cacb29703eee882b52e"
+    },
+    {
+      "path": "tools/release-gradle-licenses.mjs",
+      "sha256": "8326aa899a539de470a13bffab4e8107bb9266d30d243c70fc1b244d78d6fd80"
+    },
+    {
+      "path": "tools/release-gradle.test.mjs",
+      "sha256": "77ca3f71c16c8f3f7b18aa58642fc5142436a5d102aee22ed66897bb9ecf8acc"
+    }
+  ],
+  "bun": {
+    "lockSha256": "7a2d0dd19800586ffced906d6aa95c512f02e229b9a57c3966d1e5c6f4e1abba",
+    "exitCode": 1,
+    "findings": 4,
+    "counts": {
+      "critical": 0,
+      "high": 2,
+      "moderate": 2,
+      "low": 0
+    }
+  },
+  "rust": [
+    {
+      "input": "Cargo.lock",
+      "inputSha256": "2dc0c19ef5b9cc7b0cf713b4deb400c11159003b2190d9524324ccb15a8eeab3",
+      "vulnerabilities": 0,
+      "warnings": [],
+      "database": {
+        "advisory-count": 1243,
+        "last-commit": null,
+        "last-updated": null
+      },
+      "exitCode": 0
+    },
+    {
+      "input": "apps/host-desktop/src-tauri/Cargo.lock",
+      "inputSha256": "79c5361f05aa013f99623f52d5bb4845c1fc740866aaaf5b7694686d548ed3eb",
+      "vulnerabilities": 0,
+      "warnings": [
+        {
+          "id": "RUSTSEC-2024-0370",
+          "package": "proc-macro-error",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2025-0081",
+          "package": "unic-char-property",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2025-0075",
+          "package": "unic-char-range",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2025-0080",
+          "package": "unic-common",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2025-0100",
+          "package": "unic-ucd-ident",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2025-0098",
+          "package": "unic-ucd-version",
+          "kind": "unmaintained"
+        },
+        {
+          "id": "RUSTSEC-2024-0429",
+          "package": "glib",
+          "kind": "unsound"
+        }
+      ],
+      "database": {
+        "advisory-count": 1243,
+        "last-commit": null,
+        "last-updated": null
+      },
+      "exitCode": 0
+    }
+  ],
+  "gradle": {
+    "resolutionStatus": "observed-unlocked",
+    "gradleReport": "gradle-runtime-after.txt",
+    "coordinates": 248,
+    "licenseDeclared": 248,
+    "licenseUnknown": 0,
+    "licenseSources": {
+      "cached-pom": 227,
+      "cached-parent-pom": 7,
+      "npm-local-publication": 14
+    },
+    "osvPublicCoordinates": 234,
+    "osvFindings": [
+      {
+        "name": "commons-io:commons-io",
+        "version": "2.6",
+        "id": "GHSA-78wr-2p64-hpwj",
+        "modified": "2026-09-10T03:50:19.619589Z"
+      },
+      {
+        "name": "commons-io:commons-io",
+        "version": "2.6",
+        "id": "GHSA-gwrp-pvrq-jmwv",
+        "modified": "2024-02-14T20:25:59Z"
+      }
+    ],
+    "osvStatus": "findings",
+    "releasePreflightScannerStatus": "unavailable; this separately recorded OSV query has not been integrated into the preflight schema",
+    "dependencyLocks": "not configured",
+    "verificationTrust": "not configured; no automatic trust metadata generated"
+  },
+  "compatibilityProbe": {
+    "assertionsPassed": 3,
+    "receipt": "jvm-receipt.json",
+    "boundary": "Host JVM API and Java 8 compilation only; whole APK and physical Android acceptance remain separate"
+  },
+  "tests": {
+    "command": "fnm exec --using=default bun run test -- tools/release-gradle.test.mjs tools/release-inputs.test.mjs",
+    "passed": 21,
+    "failed": 0,
+    "redFailures": 3
+  },
+  "artifacts": [
+    {
+      "path": "DependencyCompatibility.java",
+      "sha256": "e5bad9177c91428af5ef8e3166bef6f5b19600ddd2d227671e547d75e0a0a8d5"
+    },
+    {
+      "path": "bun-audit-after.json",
+      "sha256": "169f48e4abb6e175bfc3b95bde8b31a371af706e94d5ad21e5d01ccc4930b502"
+    },
+    {
+      "path": "cargo-audit.json",
+      "sha256": "89d3c2fa4c49044892bb24b4bfd659fbb14611828a0c225f541ddfbbd3ed14ae"
+    },
+    {
+      "path": "collector-green.log",
+      "sha256": "095e16ad18540c22319219524452bcd1d51261831f211e9834b3001bc9e0120a"
+    },
+    {
+      "path": "collector-red.log",
+      "sha256": "6e75c3f1613829ebed0fbbf88b8d4393b1cc7bd067b38f18b5c1cc74a2186f39"
+    },
+    {
+      "path": "frozen-install.log",
+      "sha256": "8ec5b288ab905c2b84ef9b351be8d4d579b42d79305a40e7f0ebb422e59a491a"
+    },
+    {
+      "path": "gradle-osv-after.json",
+      "sha256": "a7571ca018e4388abf3830ecefe178dafb299d4fe5a7dfcf8d320d67afb73fdf"
+    },
+    {
+      "path": "gradle-osv.json",
+      "sha256": "76658be92d88b137cc908d1bf9b7637bc281e04c8dd394bf23b2109132c612f3"
+    },
+    {
+      "path": "gradle-runtime-after.json",
+      "sha256": "ebf221fe2253c75e4c7bf7812c04bfb60d591a8d05ce9e8d1f4a87a93f4b2a01"
+    },
+    {
+      "path": "gradle-runtime-after.txt",
+      "sha256": "6f8b2b29d11851dd5be7d4157d406751100c30165f555e93fa2266a2f7d674cf"
+    },
+    {
+      "path": "host-cargo-audit.json",
+      "sha256": "3952e5f9735b1665b47f63c491131e951458ecc4cad25c0098f3a212766baa51"
+    },
+    {
+      "path": "jvm-receipt.json",
+      "sha256": "ef21da874950d1ccd3ab39f987983e8061605de19342cc191a3135c7defe71fa"
+    },
+    {
+      "path": "npm-upstream-metadata.json",
+      "sha256": "bc655aebc3b2d6cb20d3bd6801298a7910a040d08a1e602f91941e6c69c66758"
+    }
+  ],
+  "rustDatabaseProvenance": {
+    "url": "https://github.com/RustSec/advisory-db.git",
+    "commit": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+    "method": "fresh shallow clone; scans use --no-fetch --db explicitly"
+  },
+  "report": {
+    "path": "docs/research/2026-09-14-dependency-readiness.md",
+    "sha256": "a0eafbe4e3e8926555be9f9155b1b2e68822c981432ab86bb063e07f522cc0a1"
+  }
+}

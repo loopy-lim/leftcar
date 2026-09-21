@@ -676,6 +676,23 @@ html, body, #root {
   gap: 8px;
 }
 
+/* 뷰어 잠금 배너 탭으로 온 입력 허용 요청 — 원격 조작 버튼 옆 알림 배지. */
+.input-request-badge {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-primary);
+  white-space: nowrap;
+  animation: input-request-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes input-request-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 /* Metric Cards Grid */
 .stream-card-metrics-grid {
   display: grid;

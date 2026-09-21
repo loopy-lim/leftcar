@@ -36,7 +36,9 @@ describe("counter summaries", () => {
     ];
 
     expect(summarizeCounterSeries(stalled, 3_000)).toMatchObject({
-      rollingOneSecondP5Fps: 0,
+      rollingOneSecondP5Fps: 60,
+      observedZeroCounterIntervals: [{startMs:1_000,endMs:3_000}],
+      observationComplete: false,
       zeroFpsStallDetected: true,
     });
   });
@@ -53,7 +55,9 @@ describe("counter summaries", () => {
         2_100,
       ),
     ).toMatchObject({
-      rollingOneSecondP5Fps: 0,
+      rollingOneSecondP5Fps: null,
+      observedZeroCounterIntervals: [{startMs:700,endMs:2_100}],
+      observationComplete: false,
       zeroFpsStallDetected: true,
     });
   });
@@ -71,7 +75,7 @@ describe("counter summaries", () => {
     ).toBe(80);
   });
 
-  test("marks a long sample gap and missing expected tail as stalls", () => {
+  test("keeps long sample gaps and missing tails as incomplete observations", () => {
     expect(
       summarizeCounterSeries(
         [
@@ -82,7 +86,13 @@ describe("counter summaries", () => {
       ),
     ).toMatchObject({
       maxSampleGapMs: 2_000,
-      zeroFpsStallDetected: true,
+      zeroFpsStallDetected: false,
+      observationComplete: false,
+      rollingOneSecondP5Fps: null,
+      observationGaps: [
+        {kind:'samples',startMs:0,endMs:2_000},
+        {kind:'tail',startMs:2_000,endMs:4_000},
+      ],
     });
   });
 

@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "evidence": "Host JVM API/bytecode compatibility only; not Android API 24/25 execution or whole APK packaging. Synthetic PEM bytes, no production keys.",
+  "sourceSha256": "e5bad9177c91428af5ef8e3166bef6f5b19600ddd2d227671e547d75e0a0a8d5",
+  "artifacts": [
+    {
+      "coordinate": "com.google.code.gson:gson:2.8.9",
+      "url": "https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.8.9/gson-2.8.9.jar",
+      "sha256": "d3999291855de495c94c743761b8ab5176cfeabe281a5ab0d8e8d45326fd703e",
+      "path": "/private/tmp/leftcar-dependencies-20260914/jvm/gson-2.8.9.jar"
+    },
+    {
+      "coordinate": "org.bouncycastle:bcprov-jdk15to18:1.86",
+      "url": "https://repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.86/bcprov-jdk15to18-1.86.jar",
+      "sha256": "fc50334d4d87b4272e72fa95ca748ead05bdef02ef760a5b13f64ffee317cd81",
+      "path": "/private/tmp/leftcar-dependencies-20260914/jvm/bcprov-jdk15to18-1.86.jar"
+    },
+    {
+      "coordinate": "org.bouncycastle:bcpkix-jdk15to18:1.86",
+      "url": "https://repo.maven.apache.org/maven2/org/bouncycastle/bcpkix-jdk15to18/1.86/bcpkix-jdk15to18-1.86.jar",
+      "sha256": "cf70d32101e53c3f92d55ba5c5f1329af51a9a44057fd21e81e20cfd6cd64953",
+      "path": "/private/tmp/leftcar-dependencies-20260914/jvm/bcpkix-jdk15to18-1.86.jar"
+    },
+    {
+      "coordinate": "org.bouncycastle:bcutil-jdk15to18:1.86",
+      "url": "https://repo.maven.apache.org/maven2/org/bouncycastle/bcutil-jdk15to18/1.86/bcutil-jdk15to18-1.86.jar",
+      "sha256": "e72ef8a0fcad295207529b268ee02eb72acc7c83ec2e3a9df90cbed9380e3990",
+      "path": "/private/tmp/leftcar-dependencies-20260914/jvm/bcutil-jdk15to18-1.86.jar"
+    }
+  ],
+  "commands": [
+    {
+      "command": [
+        "javac",
+        "--release",
+        "8",
+        "-encoding",
+        "UTF-8",
+        "-cp",
+        "/private/tmp/leftcar-dependencies-20260914/jvm/bcpkix-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/bcutil-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/bcprov-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/gson-2.8.9.jar",
+        "/private/tmp/leftcar-dependencies-20260914/jvm/DependencyCompatibility.java"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "java",
+        "-cp",
+        "/private/tmp/leftcar-dependencies-20260914/jvm:/private/tmp/leftcar-dependencies-20260914/jvm/bcpkix-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/bcutil-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/bcprov-jdk15to18-1.86.jar:/private/tmp/leftcar-dependencies-20260914/jvm/gson-2.8.9.jar",
+        "DependencyCompatibility"
+      ],
+      "exitCode": 0,
+      "stdout": "PASS: Gson JSON round trip; PEM content; truncated PEM rejection (3 checks)\n",
+      "stderr": ""
+    }
+  ],
+  "classBytecode": [
+    {
+      "jar": "gson-2.8.9.jar",
+      "class": "com/google/gson/Gson.class",
+      "major": 50
+    },
+    {
+      "jar": "bcprov-jdk15to18-1.86.jar",
+      "class": "org/bouncycastle/util/io/pem/PemReader.class",
+      "major": 49
+    }
+  ],
+  "assertionsPassed": 3
+}

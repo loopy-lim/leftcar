@@ -395,9 +395,6 @@ pub struct ControlServer {
     /// 장치별 살아 있는 인증 연결. 연결 인증은 소켓 수명당 한 번이므로,
     /// 철회가 즉시 효력을 가지려면 열린 소켓도 함께 깨워야 한다.
     authenticated_conns: Mutex<HashMap<String, Vec<std::sync::Arc<tokio::sync::Notify>>>>,
-    /// 화면 잠금 실행부(선택 — set_lock_screen으로 주입; 테스트는 카운터로
-    /// 대체한다). 미주입 시 잠금 설정이 켜져 있어도 아무 것도 하지 않는다.
-    lock_screen: std::sync::OnceLock<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// 프라이버시 커튼 실행부(선택 — show/hide; lib.rs가 Tauri 창으로 구현해
     /// 주입한다). 상태 변화 시에만 호출되며, 적용 성공 여부를 돌려준다 —
     /// 커튼 상태 커밋은 성공 뒤에만 하기 위해서다(M3).
@@ -416,7 +413,30 @@ pub struct ControlServer {
     viewer_metrics: Mutex<HashMap<String, (std::time::Instant, ViewerDisplayMetricsMsg)>>,
     /// UPnP/NAT-PMP를 통해 매핑된 외부 공인 미디어 엔드포인트(e.g. "1.217.35.59:5001").
     public_media_endpoint: Mutex<Option<String>>,
+    /// 뷰어가 잠금 배너 탭으로 보낸 입력 허용 요청. 세션당 최근 1건만
+    /// 유지하고 60초 뒤 만료 — 호스트 UI 폴링(list_input_requests)이 읽는다.
+    pending_input_requests: Mutex<Vec<PendingInputRequest>>,
 }
+
+/// 뷰어→호스트 입력 허용 요청 1건. 승인은 set_session_input이, 표시는
+/// pending_input_requests()가 담당한다.
+struct PendingInputRequest {
+    session: u32,
+    device_id: Option<String>,
+    requested_at: std::time::Instant,
+}
+
+/// 호스트 UI 폴링용 공개 뷰(감사용 시각 정보 포함).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInputRequestView {
+    pub session: u32,
+    pub device: Option<String>,
+    pub age_ms: u64,
+}
+
+/// 요청이 표시·승인되기 전 사라지는 시간.
+const INPUT_REQUEST_TTL: Duration = Duration::from_secs(60);
 
 struct State {
     next: u32,
@@ -449,7 +469,6 @@ impl ControlServer {
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
             authenticated_conns: Mutex::new(HashMap::new()),
-            lock_screen: std::sync::OnceLock::new(),
             curtain: std::sync::OnceLock::new(),
             curtain_state: Mutex::new(false),
             reconfiguring: Mutex::new(std::collections::HashSet::new()),
@@ -460,6 +479,7 @@ impl ControlServer {
             conn_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS)),
             viewer_metrics: Mutex::new(HashMap::new()),
             public_media_endpoint: Mutex::new(None),
+            pending_input_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -496,11 +516,6 @@ impl ControlServer {
             .values()
             .max_by_key(|(at, _)| *at)
             .map(|(_, metrics)| metrics.clone())
-    }
-
-    /// 화면 잠금 실행부 주입(lib.rs setup). 테스트는 카운터를 넣는다.
-    pub fn set_lock_screen(&self, lock: std::sync::Arc<dyn Fn() + Send + Sync>) {
-        let _ = self.lock_screen.set(lock);
     }
 
     /// 커튼 실행부 주입(lib.rs setup — 모니터별 검은 오버레이 창).
@@ -599,28 +614,6 @@ impl ControlServer {
         }
     }
 
-    /// 이번 teardown에서 세션이 실제로 제거되어 live가 비게 됐을 때만
-    /// (설정 켜짐) 화면을 잠근다. `removed`는 이번에 치운 세션 수 —
-    /// reconfigure는 live 맵에서 세션을 치우지 않으므로 이 훅에 걸리지
-    /// 않고, 같은 뷰어 주소의 교체(stale 정리)도 의도적으로 제외한다.
-    /// 이미 비어 있는 상태의 getStatus 폴링이 잠금을 반복하지 않게 하는
-    /// 것도 이 전이 조건의 역할이다.
-    fn maybe_lock_after_teardown(&self, removed: usize) {
-        if removed == 0 {
-            return;
-        }
-        if !self.sessions.lock().unwrap().live.is_empty() {
-            return;
-        }
-        if !self.settings.get().is_some_and(|s| s.lock_on_disconnect()) {
-            return;
-        }
-        if let Some(lock) = self.lock_screen.get() {
-            lock();
-            self.audit_log("screen_locked", json!({ "reason": "last_session_ended" }));
-        }
-    }
-
     pub fn set_audit(&self, audit: std::sync::Arc<crate::audit::SessionAudit>) {
         let _ = self.audit.set(audit);
     }
@@ -711,7 +704,6 @@ impl ControlServer {
             );
         }
         let removed = targets.len();
-        self.maybe_lock_after_teardown(removed);
         self.refresh_curtain();
         removed
     }
@@ -1768,7 +1760,6 @@ impl ControlServer {
             (sessions, expired)
         };
 
-        let mut removed_count = 0;
         for (id, session) in expired {
             Self::invalidate_session_source(&session);
             let _cleanup_guard = ReconfigureGuard {
@@ -1808,10 +1799,8 @@ impl ControlServer {
             };
             if removed {
                 self.cleanup_registered_transport(session.transport_owner.as_ref());
-                removed_count += 1;
             }
         }
-        self.maybe_lock_after_teardown(removed_count);
         self.refresh_curtain();
 
         StatusView { sessions }
@@ -1904,6 +1893,12 @@ impl ControlServer {
             .enter()
             .ok_or("Host is shutting down")?;
         let _input_change = self.input_changes.lock().unwrap();
+        // 승인이든 거절이든 운용자가 이 세션의 입력을 다뤘으므로 대기 요청은
+        // 닫는다(요청은 "결정을 재촉하는 알림"이지 상태가 아니다).
+        self.pending_input_requests
+            .lock()
+            .unwrap()
+            .retain(|request| request.session != session_id);
         let (handle, access, device) = {
             let mut state = self.sessions.lock().unwrap();
             let session = state
@@ -1987,6 +1982,53 @@ impl ControlServer {
             }
         }
         Ok(())
+    }
+
+    /// 뷰어가 잠금 배너 탭으로 보낸 입력 허용 요청을 기록한다(세션당 최근
+    /// 1건). 세션 입력이 이미 켜져 있으면 기록하지 않고 false를 돌려준다 —
+    /// 호출자가 "already"로 응답하게 한다.
+    pub fn record_input_request(&self, session_id: u32, device_id: Option<&str>) -> bool {
+        let already_enabled = {
+            let state = self.sessions.lock().unwrap();
+            state
+                .live
+                .get(&session_id)
+                .is_some_and(|session| session.input_enabled)
+        };
+        if already_enabled {
+            return false;
+        }
+        let mut pending = self.pending_input_requests.lock().unwrap();
+        pending.retain(|request| {
+            request.session != session_id && request.requested_at.elapsed() < INPUT_REQUEST_TTL
+        });
+        pending.push(PendingInputRequest {
+            session: session_id,
+            device_id: device_id.map(str::to_owned),
+            requested_at: Instant::now(),
+        });
+        true
+    }
+
+    /// 호스트 UI 폴링용 살아 있는 요청 목록. 만료됐거나 세션이 끝난 요청은
+    /// 여기서 조용히 정리된다.
+    pub fn pending_input_requests(&self) -> Vec<PendingInputRequestView> {
+        let live: std::collections::HashSet<u32> = {
+            let state = self.sessions.lock().unwrap();
+            state.live.keys().copied().collect()
+        };
+        let mut pending = self.pending_input_requests.lock().unwrap();
+        pending.retain(|request| {
+            live.contains(&request.session) && request.requested_at.elapsed() < INPUT_REQUEST_TTL
+        });
+        pending
+            .iter()
+            .map(|request| PendingInputRequestView {
+                session: request.session,
+                device: request.device_id.clone(),
+                age_ms: request.requested_at.elapsed().as_millis() as u64,
+            })
+            .collect()
     }
 
     pub fn set_session_quality(&self, session_id: u32, quality: Option<f32>) -> Result<(), String> {
@@ -2401,6 +2443,62 @@ impl ControlServer {
                     "exists": false,
                 }))
             }
+            "removeVirtualDisplay" => {
+                let Some(vdisp_manager) = self.virtual_display.get() else {
+                    return err("virtual display unsupported on this host");
+                };
+                let manager = vdisp_manager.clone();
+                let device = authenticated_device.map(str::to_owned);
+                // 파괴 브리지 폴링(최대 ~10s)이 블로킹이므로 생성과 같은 워커
+                // 위에서 돌린다. 현재 디스플레이가 없으면 무해하게 성공한다.
+                let removed = match tauri::async_runtime::spawn_blocking(move || manager.remove())
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return err(&format!("virtual display task failed: {e}")),
+                };
+                match removed {
+                    Ok(vanished) => {
+                        self.audit_log(
+                            "virtual_display_removed",
+                            json!({
+                                "by": device,
+                                "origin": "viewer",
+                                "vanished": vanished,
+                            }),
+                        );
+                        ok(json!({ "removed": true, "vanished": vanished }))
+                    }
+                    Err(message) => err(&message),
+                }
+            }
+            "requestInputEnable" => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RequestArgs {
+                    session: u32,
+                }
+                let request_args: RequestArgs = match serde_json::from_value(args.clone()) {
+                    Ok(v) => v,
+                    Err(e) => return err(&format!("bad args: {e}")),
+                };
+                // F04 소유 검사 — 남의 세션 id로 승인 알림 노이즈를 못 만든다.
+                if !self.session_owned_by(request_args.session, authenticated_device) {
+                    return err("no such session");
+                }
+                let requested =
+                    self.record_input_request(request_args.session, authenticated_device);
+                if requested {
+                    self.audit_log(
+                        "input_enable_requested",
+                        json!({
+                            "session": request_args.session,
+                            "device": authenticated_device,
+                        }),
+                    );
+                }
+                ok(json!({ "state": if requested { "requested" } else { "already" } }))
+            }
             "beginPairing" => {
                 // Local operator/diagnostic entry point. This exposes the same
                 // short-lived pairing offer as the Tauri pairing window, but
@@ -2502,6 +2600,16 @@ impl ControlServer {
                     reconfigure_encoder_experiment: Some(true),
                     reconfigure_source: Some(true),
                     udp_stability_capabilities: Some(host_udp_stability_capabilities()),
+                    // 뷰어 설정의 권한 상태 표시(기본 허용 정책 — 2026-09-21).
+                    // 미인증 호출(루프백 진단)에는 알려주지 않는다.
+                    input_allowed: authenticated_device
+                        .map(|device| self.pairing.device_input_allowed(device)),
+                    // 방금 제거 요청된 확장 화면(시스템 반영 최대 ~30s) — 뷰어가
+                    // "제거 중" 상태를 그리는 근거.
+                    virtual_display_pending_removal: self
+                        .virtual_display
+                        .get()
+                        .and_then(|manager| manager.last_removed_pending()),
                 })
             }
             "startStream" => {
@@ -2666,12 +2774,12 @@ impl ControlServer {
                 match started {
                     Some((handle, candidate, transport, attempt)) => {
                         let viewer_addr = format!("{candidate}:{}", input.viewer_port);
-                        // 시청 승인은 입력을 주지 않는다(기본 잠금). 다만 운용자가
-                        // 이전에 이 기기의 원격 입력을 허용해 둔 경우(기기별 상시
-                        // 승인)에는 새 세션도 자동으로 켠다 — 매 연결마다 호스트
-                        // 수동 허용을 반복하게 하는 것(f1a846e 이전의 흐름)이
-                        // 아니라, 한 번 허용 + 즉시 철회 가능한 기억이다.
-                        let standing_input = authenticated_device
+                        // 입력 기본 허용(2026-09-21 제품 결정): 페어링 승인
+                        // 자체가 신뢰 표현이므로 새 세션은 입력이 켜져 시작한다.
+                        // 운용자가 명시적으로 꺼 둔 기기(기기별 상시 거부)만
+                        // 잠기며, 끄는 즉시 다음 세션부터 효력이 있다. 미인증
+                        // 경로(None)도 잠금을 유지한다.
+                        let input_policy_allows = authenticated_device
                             .as_ref()
                             .is_some_and(|device| self.pairing.device_input_allowed(device));
                         let input_enabled = false;
@@ -2729,10 +2837,10 @@ impl ControlServer {
                         // 띄운다(창이 필터 생성보다 먼저 있어야 캡처에서
                         // 제외된다).
                         self.refresh_curtain();
-                        // 상시 입력 승인 적용: OS 접근성 권한이 없거나 백엔드가
-                        // 거부하면 실패하고 세션은 잠금에 머민다(fail-closed).
+                        // 기본 허용 정책 적용: OS 접근성 권한이 없거나 백엔드가
+                        // 거부하면 실패하고 세션은 잠금에 머문다(fail-closed).
                         let mut input_enabled = false;
-                        if standing_input {
+                        if input_policy_allows {
                             input_enabled = self.backend.set_input_enabled(handle, true).is_ok();
                             if input_enabled {
                                 let mut st = self.sessions.lock().unwrap();
@@ -2885,7 +2993,6 @@ impl ControlServer {
                                         "reason": input.reason.unwrap_or(3),
                                     }),
                                 );
-                                self.maybe_lock_after_teardown(1);
                                 self.refresh_curtain();
                                 ok(json!({}))
                             }
@@ -3391,23 +3498,29 @@ impl Drop for ReconfigureGuard<'_> {
     }
 }
 
+#[derive(Debug)]
+enum ControlLineReadError {
+    TooLong,
+    Io(std::io::Error),
+}
+
 /// 상한 있는 한 줄 읽기(F08). '\n' 전에 `cap`을 넘기면 Err — 호출자는
 /// 연결을 끊는다. tokio Lines는 줄 길이 상한이 없어 인증 전 소켓이라도
 /// '\n' 없는 입력을 무한히 버퍼링할 수 있으므로 fill_buf 루프로 직접 읽는다.
-/// Ok(None)은 소켓 오류·EOF(연결 종료 취급)다.
-async fn read_bounded_line(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+/// Ok(None)은 EOF이며, 소켓 오류와 상한 초과는 구분해 반환한다.
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
     cap: usize,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let mut line: Vec<u8> = Vec::new();
     loop {
-        let available = reader.fill_buf().await.map_err(|_| ())?;
+        let available = reader.fill_buf().await.map_err(ControlLineReadError::Io)?;
         if available.is_empty() {
             return Ok(None);
         }
         if let Some(pos) = available.iter().position(|&byte| byte == b'\n') {
             if line.len() + pos > cap {
-                return Err(());
+                return Err(ControlLineReadError::TooLong);
             }
             line.extend_from_slice(&available[..pos]);
             reader.consume(pos + 1);
@@ -3418,7 +3531,7 @@ async fn read_bounded_line(
             return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
         }
         if line.len() + available.len() > cap {
-            return Err(());
+            return Err(ControlLineReadError::TooLong);
         }
         let buffered = available.len();
         line.extend_from_slice(available);
@@ -3431,7 +3544,7 @@ async fn read_bounded_line(
 async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<String>, ControlLineReadError> {
     let cap = if killed.is_some() {
         COMMAND_LINE_LIMIT
     } else {
@@ -3467,9 +3580,16 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     .await
     {
         Ok(Ok(Some(line))) => line,
-        Ok(Err(())) => {
+        Ok(Err(ControlLineReadError::TooLong)) => {
             eprintln!(
                 "control handshake line exceeded {HANDSHAKE_LINE_LIMIT} bytes from {peer}; closing"
+            );
+            return;
+        }
+        Ok(Err(ControlLineReadError::Io(error))) => {
+            eprintln!(
+                "control handshake read failed ({:?}); closing",
+                error.kind()
             );
             return;
         }
@@ -3500,13 +3620,17 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 match read_authed_line(&mut reader, killed.as_ref()).await {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
-                    Err(()) => {
+                    Err(ControlLineReadError::TooLong) => {
                         let cap = if device.is_some() {
                             COMMAND_LINE_LIMIT
                         } else {
                             HANDSHAKE_LINE_LIMIT
                         };
                         eprintln!("control command line exceeded {cap} bytes from {peer}; closing");
+                        break;
+                    }
+                    Err(ControlLineReadError::Io(error)) => {
+                        eprintln!("control command read failed ({:?}); closing", error.kind());
                         break;
                     }
                 }
@@ -4421,7 +4545,9 @@ mod tests {
         assert!(line.contains("\"state\":\"running\""), "{line}");
         assert!(line.contains("\"width\":2560"), "{line}");
         assert!(line.contains("\"qualityState\":\"fallback\""), "{line}");
-        assert!(line.contains("\"inputEnabled\":false"), "{line}");
+        // 페어링+검토 기기는 입력이 기본 허용(2026-09-21) — 세션도 켜져
+        // 시작한다.
+        assert!(line.contains("\"inputEnabled\":true"), "{line}");
         assert!(line.contains("\"bitrateFloorCollapseCount\":7"), "{line}");
         assert!(line.contains("\"inputRateHz\":180"), "{line}");
 
@@ -4810,60 +4936,6 @@ mod tests {
         let second = server.snapshot();
         assert!(second.sessions.is_empty());
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn last_session_teardown_locks_the_screen_only_when_enabled() {
-        // 설정 켜짐 + 잠금 카운터 주입.
-        let server = ControlServer::new(
-            Arc::new(TerminalBackend {
-                stopped: Arc::new(AtomicUsize::new(0)),
-            }),
-            test_pairing(),
-            test_identity(),
-        );
-        let settings = crate::settings::SharedSettings::in_memory();
-        settings.set_lock_on_disconnect(true).unwrap();
-        server.set_settings(settings);
-        let locks = Arc::new(AtomicUsize::new(0));
-        let counter = locks.clone();
-        server.set_lock_screen(Arc::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }));
-        insert_live_session(&server, 1, None);
-        server
-            .sessions
-            .lock()
-            .unwrap()
-            .live
-            .get_mut(&1)
-            .unwrap()
-            .terminal_since =
-            Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
-
-        // 만료 세션 GC가 live를 비우면 잠금이 정확히 한 번 불린다.
-        let _ = server.snapshot();
-        assert_eq!(locks.load(Ordering::SeqCst), 1);
-        // 빈 live에 대한 이후 폴링은 중복 잠금하지 않는다(전이 조건).
-        let _ = server.snapshot();
-        assert_eq!(locks.load(Ordering::SeqCst), 1);
-
-        // 설정 꺼짐: 세션 제거가 잠금을 부르지 않는다.
-        let server_off = ControlServer::new(backend(), test_pairing(), test_identity());
-        server_off.set_settings(crate::settings::SharedSettings::in_memory());
-        let locks_off = Arc::new(AtomicUsize::new(0));
-        let counter_off = locks_off.clone();
-        server_off.set_lock_screen(Arc::new(move || {
-            counter_off.fetch_add(1, Ordering::SeqCst);
-        }));
-        insert_live_session(&server_off, 1, None);
-        server_off.sessions.lock().unwrap().live.remove(&1);
-        server_off.maybe_lock_after_teardown(1);
-        assert_eq!(
-            locks_off.load(Ordering::SeqCst),
-            0,
-            "disabled setting must not lock"
-        );
     }
 
     #[test]
@@ -5372,14 +5444,16 @@ mod tests {
 
     #[tokio::test]
     async fn standing_input_approval_auto_enables_new_sessions() {
-        // 기기별 상시 입력 승인: 운용자가 한 번 허용한 기기는 다음 세션부터
-        // 자동으로 입력이 켜진다. 세션 토글 끄기는 상시 승인도 거둔다.
+        // 입력 기본 허용(2026-09-21): 페어링·검토된 기기의 첫 세션도 입력이
+        // 켜져 시작한다. 운용자가 한 번 끄면 상시 거부로 저장되어 다음 세션은
+        // 다시 잠긴다.
         let fake = input_test_backend(true);
         let pairing = test_pairing();
         let _ = direct_pair_token(&pairing, "viewer-1");
-        assert!(!pairing.device_input_allowed("viewer-1"));
-        pairing.set_device_input("viewer-1", true).unwrap();
-        assert!(pairing.device_input_allowed("viewer-1"));
+        assert!(
+            pairing.device_input_allowed("viewer-1"),
+            "reviewed pairing must imply default input allowance"
+        );
 
         let server = Arc::new(ControlServer::new(
             fake.clone(),
@@ -5408,7 +5482,7 @@ mod tests {
             assert_eq!(state.live.len(), 1, "{resp}");
             assert!(
                 state.live.values().next().unwrap().input_enabled,
-                "the approved device's session must start with input on: {resp}"
+                "a default-allowed device's session must start with input on: {resp}"
             );
         }
         let calls = fake.input_calls.lock().unwrap().clone();
@@ -5417,23 +5491,136 @@ mod tests {
             "backend must be told to enable input: {calls:?}"
         );
 
-        // 세션 토글 끄기는 상시 승인도 거둔다 — 다음 세션은 다시 잠긴다.
+        // 세션 토글 끄기는 상시 거부로 저장된다 — 다음 세션은 잠긴 채 시작한다.
         let session_id = {
             let state = server.sessions.lock().unwrap();
             state.live.keys().next().copied().unwrap()
         };
         server.set_session_input(session_id, false).unwrap();
         assert!(!pairing.device_input_allowed("viewer-1"));
+
+        let denied = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5003,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
+                }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(denied["ok"], true, "{denied}");
+        {
+            let state = server.sessions.lock().unwrap();
+            let second = state
+                .live
+                .values()
+                .find(|session| session.viewer_port == 5003)
+                .expect("second session registered");
+            assert!(
+                !second.input_enabled,
+                "an explicitly denied device must start locked: {denied}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_input_enable_pends_until_operator_decides() {
+        // 잠금 배너 탭 → requestInputEnable: 입력이 꺼진 내 세션에만 요청이
+        // 남고, 이미 켜져 있으면 "already", 남의 세션 id는 거부, 운용자
+        // 결정(set_session_input)이 요청을 비운다.
+        let fake = input_test_backend(true);
+        let pairing = test_pairing();
+        let _ = direct_pair_token(&pairing, "viewer-1");
+        // 기본 허용을 명시 거부로 뒤집어 잠긴 세션을 만든다.
+        pairing.set_device_input("viewer-1", false).unwrap();
+        let server = Arc::new(ControlServer::new(
+            fake.clone(),
+            pairing,
+            test_identity(),
+        ));
+        let resp = server
+            .dispatch(
+                "startStream",
+                serde_json::json!({
+                    "sourceIndex": 0,
+                    "viewerPort": 5001,
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 60,
+                    "mediaTransport": "udp",
+                    "mediaKey": TEST_MEDIA_KEY
+                }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        let session_id = {
+            let state = server.sessions.lock().unwrap();
+            let session = state.live.values().next().unwrap();
+            assert!(!session.input_enabled, "{resp}");
+            state.live.keys().next().copied().unwrap()
+        };
+
+        let request = server
+            .dispatch(
+                "requestInputEnable",
+                serde_json::json!({ "session": session_id }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(request["result"]["state"], "requested", "{request}");
+        {
+            let pending = server.pending_input_requests();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].session, session_id);
+            assert_eq!(pending[0].device.as_deref(), Some("viewer-1"));
+        }
+
+        // 다른 기기의 세션 id로는 요청을 만들지 못한다(F04 소유 검사).
+        let forged = server
+            .dispatch(
+                "requestInputEnable",
+                serde_json::json!({ "session": session_id }),
+                "192.168.0.9",
+                Some("viewer-2"),
+            )
+            .await;
+        assert_eq!(forged["ok"], false, "{forged}");
+
+        // 운용자 승인이 요청을 비우고, 이미 켜진 세션 재요청은 already다.
+        server.set_session_input(session_id, true).unwrap();
+        assert!(server.pending_input_requests().is_empty());
+        let again = server
+            .dispatch(
+                "requestInputEnable",
+                serde_json::json!({ "session": session_id }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(again["result"]["state"], "already", "{again}");
     }
 
     #[tokio::test]
     async fn second_start_stream_does_not_steal_explicit_host_input_approval() {
         // 입력 중재(U4b): 마지막 세션이 이긴다. 두 번째 startStream이 입력을
         // 얻으면 첫 세션의 입력은 세션 상태와 백엔드 양쪽에서 꺼진다.
+        // 입력 기본 허용(2026-09-21) 이후 페어링만으로는 입력을 얻으므로,
+        // '입력을 얻지 못하는 시작'은 명시 거부된 기기로 만든다.
         let fake = input_test_backend(true);
         // 시작 등록 직전의 페어링 재검사(F02)가 있으므로 장치를 실제로 페어링한다.
         let pairing = test_pairing();
         let _ = direct_pair_token(&pairing, "viewer-2");
+        pairing.set_device_input("viewer-2", false).unwrap();
         let server = Arc::new(ControlServer::new(fake.clone(), pairing, test_identity()));
         {
             // 기존 시드 패턴: 입력이 켜진 라이브 세션을 직접 심는다. 다음
@@ -5506,11 +5693,14 @@ mod tests {
 
     #[tokio::test]
     async fn start_stream_without_input_permission_leaves_other_sessions_enabled() {
-        // OS 입력 권한이 없어 새 세션 입력이 꺼졌다면 기존 세션은 그대로다.
+        // 입력을 얻지 못한 새 세션은 기존 세션을 건드리지 않는다. 기본
+        // 허용(2026-09-21) 이후 페어링만으로 입력이 켜지므로, 명시 거부된
+        // 기기의 시작으로 이 상황을 만든다.
         let fake = input_test_backend(false);
         // 시작 등록 직전의 페어링 재검사(F02)가 있으므로 장치를 실제로 페어링한다.
         let pairing = test_pairing();
         let _ = direct_pair_token(&pairing, "viewer-2");
+        pairing.set_device_input("viewer-2", false).unwrap();
         let server = Arc::new(ControlServer::new(fake.clone(), pairing, test_identity()));
         {
             let mut st = server.sessions.lock().unwrap();
@@ -5878,8 +6068,20 @@ mod tests {
         assert_eq!(resp["ok"], true, "{resp}");
 
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("\"clipboard_write\""), "{body}");
-        assert!(body.contains("\"device\":\"viewer-1\""), "{body}");
+        let record: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(record["event"], "clipboard_write", "{body}");
+        assert_eq!(record["bytes"], secret.len(), "{body}");
+        let device = record["device"].as_str().unwrap();
+        let pseudonym = device.strip_prefix("dev:").unwrap();
+        assert_eq!(pseudonym.len(), 24, "{body}");
+        assert!(
+            pseudonym
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{body}"
+        );
+        assert_ne!(device, "viewer-1", "{body}");
+        assert!(!body.contains("viewer-1"), "{body}");
         assert!(
             !body.contains(secret),
             "audit must never contain clipboard text: {body}"
@@ -7576,6 +7778,20 @@ mod tests {
     }
 
     // -- 인증 전 입력·연결 상한(F08) ------------------------------------------
+
+    #[tokio::test]
+    async fn bounded_line_preserves_socket_error_instead_of_reporting_overflow() {
+        let socket = tokio_test::io::Builder::new()
+            .read(b"partial request")
+            .read_error(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+            .build();
+        let mut reader = BufReader::new(socket);
+        assert!(matches!(
+            read_bounded_line(&mut reader, HANDSHAKE_LINE_LIMIT).await,
+            Err(ControlLineReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::ConnectionReset
+        ));
+    }
 
     #[tokio::test]
     async fn oversized_preauth_line_is_dropped_and_server_stays_responsive() {

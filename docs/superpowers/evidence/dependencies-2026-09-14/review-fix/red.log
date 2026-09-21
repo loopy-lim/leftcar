@@ -1,0 +1,110 @@
+$ vitest run tools/release-gradle.test.mjs
+
+ RUN  v4.1.11 /Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup
+
+ ❯ tools/release-gradle.test.mjs (19 tests | 13 failed) 101ms
+   × Gradle license declaration stays unknown for duplicate project groupId singletons 8ms
+   × Gradle license declaration stays unknown for duplicate project artifactId singletons 3ms
+   × Gradle license declaration stays unknown for duplicate project version singletons 3ms
+   × Gradle license declaration stays unknown for duplicate project parent singletons 3ms
+   × Gradle license declaration stays unknown for duplicate project licenses singletons 3ms
+   × Gradle license declaration stays unknown for duplicate parent groupId singletons 3ms
+   × Gradle license declaration stays unknown for duplicate parent artifactId singletons 2ms
+   × Gradle license declaration stays unknown for duplicate parent version singletons 2ms
+   × Gradle license declaration stays unknown for duplicate license name singletons 2ms
+   × Gradle license declaration stays unknown for duplicate license URL singletons 3ms
+   × Gradle does not replace a child URL-only license declaration with its parent license 3ms
+   × Gradle does not replace a child empty name license declaration with its parent license 2ms
+   × Gradle does not replace a child partially named list license declaration with its parent license 2ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate project groupId singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate project artifactId singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate project version singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate project parent singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate project licenses singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate parent groupId singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate parent artifactId singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate parent version singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate license name singletons
+ FAIL  tools/release-gradle.test.mjs > Gradle license declaration stays unknown for duplicate license URL singletons
+AssertionError: expected { name: 'org.example:child', …(6) } to match object { license: null, …(1) }
+(5 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "license": null,
+-   "licenseStatus": "unknown",
++   "license": "MIT",
++   "licenseStatus": "declared",
+  }
+
+ ❯ tools/release-gradle.test.mjs:114:17
+    112| ])('Gradle license declaration stays unknown for duplicate %s singleto…
+    113|  const record=await collectPomFixture(body);
+    114|  expect(record).toMatchObject({license:null,licenseStatus:'unknown'});
+       |                 ^
+    115|  expect(record.licenseEvidence).toBeUndefined();
+    116| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/13]⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle does not replace a child URL-only license declaration with its parent license
+ FAIL  tools/release-gradle.test.mjs > Gradle does not replace a child empty name license declaration with its parent license
+AssertionError: expected { name: 'org.example:child', …(6) } to match object { license: null, …(1) }
+(5 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "license": null,
+-   "licenseStatus": "unknown",
++   "license": "MIT",
++   "licenseStatus": "declared",
+  }
+
+ ❯ tools/release-gradle.test.mjs:124:17
+    122| ])('Gradle does not replace a child %s license declaration with its pa…
+    123|  const record=await collectPomFixture(`${fixtureIdentity}${fixturePare…
+    124|  expect(record).toMatchObject({license:null,licenseStatus:'unknown'});
+       |                 ^
+    125|  expect(record.licenseEvidence).toBeUndefined();
+    126| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/13]⎯
+
+ FAIL  tools/release-gradle.test.mjs > Gradle does not replace a child partially named list license declaration with its parent license
+AssertionError: expected { name: 'org.example:child', …(6) } to match object { license: null, …(1) }
+(5 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "license": null,
+-   "licenseStatus": "unknown",
++   "license": "Apache-2.0",
++   "licenseStatus": "declared",
+  }
+
+ ❯ tools/release-gradle.test.mjs:124:17
+    122| ])('Gradle does not replace a child %s license declaration with its pa…
+    123|  const record=await collectPomFixture(`${fixtureIdentity}${fixturePare…
+    124|  expect(record).toMatchObject({license:null,licenseStatus:'unknown'});
+       |                 ^
+    125|  expect(record.licenseEvidence).toBeUndefined();
+    126| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/13]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed | 6 passed (19)
+   Start at  00:36:56
+   Duration  231ms (transform 29ms, setup 0ms, import 27ms, tests 101ms, environment 0ms)
+
+error: script "test" exited with code 1

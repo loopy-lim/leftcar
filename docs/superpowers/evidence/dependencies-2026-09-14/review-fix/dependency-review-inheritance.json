@@ -1,0 +1,23 @@
+{
+  "helperSha256": "8326aa899a539de470a13bffab4e8107bb9266d30d243c70fc1b244d78d6fd80",
+  "xmls": {
+    "child": "<project><parent><groupId>org.example</groupId><artifactId>parent</artifactId><version>1</version></parent><artifactId>child</artifactId><licenses><license><url>https://example.invalid/child-license</url></license></licenses></project>",
+    "parent": "<project><groupId>org.example</groupId><artifactId>parent</artifactId><version>1</version><licenses><license><name>MIT</name></license></licenses></project>"
+  },
+  "result": {
+    "license": "MIT",
+    "licenseSource": "cached-parent-pom",
+    "licenseEvidence": [
+      {
+        "path": "caches/modules-2/files-2.1/org.example/child/1/hash/child.pom",
+        "sha256": "16734b141c626b078da3acf66488977275a33f7d49db62498f2ebef6846cfd5c",
+        "coordinate": "org.example:child:1"
+      },
+      {
+        "path": "caches/modules-2/files-2.1/org.example/parent/1/hash/parent.pom",
+        "sha256": "62b615c31fbb505eb213b956ad95aba33d2632ef4399bae5ae309c84195fda76",
+        "coordinate": "org.example:parent:1"
+      }
+    ]
+  }
+}

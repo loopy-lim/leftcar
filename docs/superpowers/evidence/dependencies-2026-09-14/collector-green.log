@@ -1,0 +1,10 @@
+$ vitest run tools/release-gradle.test.mjs tools/release-inputs.test.mjs
+
+ RUN  v4.1.11 /Users/loopy/dev/ll3/leftcar/.worktrees/completion-followup
+
+
+ Test Files  2 passed (2)
+      Tests  21 passed (21)
+   Start at  00:27:59
+   Duration  4.24s (transform 114ms, setup 0ms, import 368ms, tests 3.88s, environment 0ms)
+
