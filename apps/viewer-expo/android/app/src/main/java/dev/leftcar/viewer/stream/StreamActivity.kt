@@ -915,6 +915,13 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         return true
     }
 
+    /** KeyBridge 원격 소유권 연동이 실제로 묶여 있을(READY) 때만 소유권 분배가
+     *  작동한다. 미설치·구버전(업데이트 요구)·연결 실패는 모두 '연동 없음'과
+     *  같게 취급해 물리 키보드·마우스를 항상 Mac으로 직접 보낸다 — 탭 착지·
+     *  스트림 타이핑 계약. 구버전 KeyBridge 사용자에게 업데이트 알림을
+     *  반복해서 띄우지도 않는다. */
+    private fun keyBridgeOwnershipActive(): Boolean =
+        keyBridgeInput?.availability == KeyBridgeAvailability.READY
 
     private fun forwardPointer(event: MotionEvent, view: View): Boolean {
         StreamPointerDiagnostics.record(event)
@@ -933,6 +940,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return forwardTouchGesture(event, view)
         }
         if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+            keyBridgeOwnershipActive() &&
             inputOwnership.owner != InputOwner.REMOTE_MAC
         ) {
             // 첫 물리 마우스 조작은 원격 소유권 획득(KeyBridge 연동)을 촉발한다.
@@ -1417,9 +1425,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         when (inputOwnership.routePhysicalKey(event.keyCode, down)) {
             // KeyBridge 연동이 없으면 물리 키보드는 언제나 Mac으로 간다 —
             // 태블릿 하드웨어 키보드가 주 사용 흐름이다. 소유권에 따른 로컬
-            // 소비는 KeyBridge가 실제 연결된 환경에서만 의미가 있다.
+            // 소비는 KeyBridge가 실제로 연결된(READY) 환경에서만 의미가 있다.
             KeyRoute.LOCAL_ANDROID ->
-                if (keyBridgeInput != null) return super.dispatchKeyEvent(event)
+                if (keyBridgeOwnershipActive()) return super.dispatchKeyEvent(event)
             KeyRoute.RELEASE_REMOTE -> {
                 if (down) consumeEscapeUp = true
                 forceReleaseInput(InputOwnershipEvent.Escape)
