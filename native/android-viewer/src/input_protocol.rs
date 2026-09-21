@@ -78,7 +78,9 @@ pub enum InputEvent {
     },
     /// Explicit native input language: 1 = English, 2 = Korean.
     /// Send only after authenticated LCL1 capability advertisement.
-    InputLanguage { language: u8 },
+    InputLanguage {
+        language: u8,
+    },
     ReleaseAll,
 }
 
@@ -219,8 +221,14 @@ pub fn encode_latency_probe(sequence: u32, viewer_send_ms: u64) -> Vec<u8> {
 }
 
 pub fn parse_input_language_capability(packet: &[u8]) -> Option<bool> {
-    if packet.len() != 5 || &packet[..4] != b"LCL1" { return None; }
-    match packet[4] { 0 => Some(false), 1 => Some(true), _ => None }
+    if packet.len() != 5 || &packet[..4] != b"LCL1" {
+        return None;
+    }
+    match packet[4] {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 /// Host → viewer session termination notice. The viewer treats it like an
@@ -533,20 +541,34 @@ mod tests {
     fn input_language_is_reliable_and_precedes_following_key_until_ack() {
         let mut queue = InputScheduler::new(60);
         queue.push(InputEvent::InputLanguage { language: 2 });
-        queue.push(InputEvent::Key { key_code: 29, scan_code: 30, meta_state: 0, down: true, repeat: 0 });
+        queue.push(InputEvent::Key {
+            key_code: 29,
+            scan_code: 30,
+            meta_state: 0,
+            down: true,
+            repeat: 0,
+        });
         let language = queue.next_ready(1).unwrap();
         assert_eq!(&encode_input(&language)[8..], &[7, 1, 2]);
         assert!(queue.next_ready(100).is_none());
         assert_eq!(queue.next_ready(20_001).unwrap(), language);
         assert!(queue.acknowledge(language.sequence));
-        assert!(matches!(queue.next_ready(20_002).unwrap().event, InputEvent::Key { .. }));
+        assert!(matches!(
+            queue.next_ready(20_002).unwrap().event,
+            InputEvent::Key { .. }
+        ));
     }
 
     #[test]
     fn language_capability_is_separate_from_legacy_status_and_ack() {
         assert_eq!(parse_input_language_capability(b"LCL1\x01"), Some(true));
         assert_eq!(parse_input_language_capability(b"LCL1\x00"), Some(false));
-        for packet in [b"LCL1".as_slice(), b"LCL1\x02", b"LCS1\x01", b"LCL1\x01\x00"] {
+        for packet in [
+            b"LCL1".as_slice(),
+            b"LCL1\x02",
+            b"LCS1\x01",
+            b"LCL1\x01\x00",
+        ] {
             assert_eq!(parse_input_language_capability(packet), None);
         }
         assert_eq!(parse_input_status(b"LCL1\x01"), None);

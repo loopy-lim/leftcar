@@ -57,6 +57,18 @@ pub fn lookup(android: u16) -> Option<KeyMapping> {
         });
     }
     if (183..=190).contains(&android) {
+        if android == 184 {
+            // F14 원격 신호 키(태블릿 caps+f 바인딩)는 macOS에서 kVK_F14(107)로
+            // 배달하지 않는다. 107은 시스템 밝기 낮춤 단축키와 같은 코드라서,
+            // 이 키를 받아 명령으로 소비하는 호스트 도구(KeyBridge 브리지)가
+            // 상태를 놓치면 이벤트가 시스템으로 새어 화면이 어두워진다. 시스템
+            // 어디에도 바인딩 없는 kVK_F18(79)로 배달해 소비자가 없으면 조용한
+            // 키 입력으로 끝나게 한다. Windows VK_F14는 충돌이 없어 그대로.
+            return Some(KeyMapping {
+                mac: Some(79),           // kVK_F18
+                windows: Some(0x7C + 1), // VK_F14
+            });
+        }
         let i = (android - 183) as usize;
         return Some(KeyMapping {
             mac: Some(MAC_F13_F20[i]),

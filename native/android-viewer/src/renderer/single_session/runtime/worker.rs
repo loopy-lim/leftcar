@@ -154,7 +154,7 @@ fn run(launch: SingleRendererLaunch) {
     // Keep the TCP bridge alive for the lifetime of the renderer. It is
     // intentionally independent from Surface creation so Host can finish
     // the TCP reachability proof before the Activity attaches.
-    let tcp_bridge = tcp_bridge;
+    let mut tcp_bridge = tcp_bridge;
     let (socket, crypto, prepared_peer, mut prepared_backlog) = match prepared_receiver {
         Some(prepared) => match prepared.into_socket_media_crypto_and_backlog() {
             Ok((socket, crypto, peer, backlog)) => {
@@ -316,19 +316,38 @@ fn run(launch: SingleRendererLaunch) {
                 && !control_clone.stop.load(Ordering::SeqCst)
             {
                 if let Some(peer) = host_peer {
-                    if crate::input_protocol::heartbeat_due(&mut heartbeat_attempt, monotonic_us()) {
-                        let _ = send_viewer_command(&control_socket, peer, crate::input_protocol::HEARTBEAT_MAGIC, &crypto);
+                    if crate::input_protocol::heartbeat_due(&mut heartbeat_attempt, monotonic_us())
+                    {
+                        let _ = send_viewer_command(
+                            &control_socket,
+                            peer,
+                            crate::input_protocol::HEARTBEAT_MAGIC,
+                            &crypto,
+                        );
                     }
                     // Focus release must still retry and receive its ACK while
                     // decoding is suspended, so held keys cannot survive a hide.
                     flush_input(&control_socket, peer, &crypto, &control_clone);
                 }
                 for _ in 0..4 {
-                    let Ok((size, source)) = control_socket.recv_from(&mut buf) else { break; };
-                    if !peer_allowed(Some(source), &expected_host) { continue; }
-                    crate::renderer::control_ingress::consume_control_datagram(&crypto, &mut buf[..size], |packet| {
-                        consume_viewer_response(packet, &mut control_health, &control_clone, &mut renderer_stats)
-                    });
+                    let Ok((size, source)) = control_socket.recv_from(&mut buf) else {
+                        break;
+                    };
+                    if !peer_allowed(Some(source), &expected_host) {
+                        continue;
+                    }
+                    crate::renderer::control_ingress::consume_control_datagram(
+                        &crypto,
+                        &mut buf[..size],
+                        |packet| {
+                            consume_viewer_response(
+                                packet,
+                                &mut control_health,
+                                &control_clone,
+                                &mut renderer_stats,
+                            )
+                        },
+                    );
                 }
                 if let Some(bridge) = tcp_bridge.as_ref() {
                     bridge.drain_media();
@@ -342,7 +361,10 @@ fn run(launch: SingleRendererLaunch) {
                         // Video is disposable while hidden. Small sealed
                         // control packets still deliver Host termination/state.
                         if received <= 192 {
-                            if let Some(plaintext) = crypto.open(packet).or_else(|| crypto.open_challenge(packet)) {
+                            if let Some(plaintext) = crypto
+                                .open(packet)
+                                .or_else(|| crypto.open_challenge(packet))
+                            {
                                 if crate::prepared_udp::is_challenge(&plaintext) {
                                     crypto.establish();
                                     control_clone.input.lock().unwrap().reset_session();
@@ -350,7 +372,12 @@ fn run(launch: SingleRendererLaunch) {
                                         let _ = socket.send_to(&reply, peer);
                                     }
                                 } else {
-                                    consume_viewer_response(&plaintext, &mut control_health, &control_clone, &mut renderer_stats);
+                                    consume_viewer_response(
+                                        &plaintext,
+                                        &mut control_health,
+                                        &control_clone,
+                                        &mut renderer_stats,
+                                    );
                                 }
                             }
                         }
@@ -369,13 +396,19 @@ fn run(launch: SingleRendererLaunch) {
                 }
             }
             control_clone.suspended.store(false, Ordering::SeqCst);
-            if control_clone.stop.load(Ordering::SeqCst) { break; }
+            if control_clone.stop.load(Ordering::SeqCst) {
+                break;
+            }
             control_clone
                 .resize_recovery_suppressed_until_us
                 .store(0, Ordering::Relaxed);
             recovery_gate = RecoveryRequestGate::default();
-            window_handle = control_clone.single_surface.lock().unwrap()
-                .as_ref().map_or(window_handle, |surface| surface.window);
+            window_handle = control_clone
+                .single_surface
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(window_handle, |surface| surface.window);
             control_health = ControlHealthState::default();
             last_latency_probe = std::time::Instant::now() - LATENCY_PROBE_INTERVAL;
             last_feedback_rendered_frames = control_clone.rendered_frames.load(Ordering::Relaxed);
@@ -412,9 +445,10 @@ fn run(launch: SingleRendererLaunch) {
             continue;
         }
 
-        if let Some(Err(error)) = decoder.as_mut().map(|decoder| {
-            drain_pending_output(decoder, &mut renderer_stats, &control_clone)
-        }) {
+        if let Some(Err(error)) = decoder
+            .as_mut()
+            .map(|decoder| drain_pending_output(decoder, &mut renderer_stats, &control_clone))
+        {
             log_info!("decoder output poll failed: {error}");
             resync_decoder_after_frame_gap(&mut decoder, &mut awaiting_keyframe, &control_clone);
         }
@@ -522,12 +556,14 @@ fn run(launch: SingleRendererLaunch) {
                             let _ = crate::renderer::control_ingress::consume_control_datagram(
                                 &crypto,
                                 &mut control_buf[..received],
-                                |packet| consume_viewer_response(
-                                    packet,
-                                    control_health,
-                                    &control_clone,
-                                    &mut renderer_stats,
-                                ),
+                                |packet| {
+                                    consume_viewer_response(
+                                        packet,
+                                        control_health,
+                                        &control_clone,
+                                        &mut renderer_stats,
+                                    )
+                                },
                             );
                         }
                         Ok((_received, source)) => {
@@ -666,11 +702,7 @@ fn run(launch: SingleRendererLaunch) {
             // Pre-claim media the prepared listener buffered: drain it in
             // wire order before touching the socket so the Host's startup
             // IDR survives the renderer handoff.
-            fill_batch_from_backlog(
-                &mut prepared_backlog,
-                prepared_peer,
-                &mut media_buffers,
-            )
+            fill_batch_from_backlog(&mut prepared_backlog, prepared_peer, &mut media_buffers)
         } else {
             match recv_media_batch(&socket, &mut media_buffers) {
                 Err(ref e)
@@ -996,6 +1028,15 @@ fn run(launch: SingleRendererLaunch) {
             "Transient Surface detach for instance {}; host will reconnect",
             instance_str
         );
+        // 같은 세션의 재바인드(포트로 워커 재실행)가 미디어 경로를 그대로
+        // 물려받도록 반납한다: 크립토는 첫 클레임이 take로 소비하고, USB
+        // 브리지는 Drop이 액세서리 리더까지 종료시킨다. 반납 없이는 재바인드가
+        // "no session media crypto" 루프로 죽는다(세션 종료 시 JS의 cancel/stop
+        // 경로가 다시 회수한다).
+        crate::jni::rebind_media_crypto(port, &crypto);
+        if let Some(bridge) = tcp_bridge.take() {
+            crate::jni::return_media_bridge_for_rebind(port, bridge);
+        }
     }
     if let Some(decoder) = decoder.as_mut() {
         decoder.stop();

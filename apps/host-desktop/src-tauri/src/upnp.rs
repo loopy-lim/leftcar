@@ -377,7 +377,11 @@ fn is_local_gateway_ip(ip: std::net::IpAddr) -> bool {
 /// 미디어 UDP 전체 — UDP는 뷰어→호스트 미디어 진입로라 WAN 접속에 필수다.
 fn mapping_plan(control_port: u16) -> Vec<(&'static str, u16, &'static str)> {
     let mut plan = vec![("TCP", control_port, CONTROL_DESCRIPTION)];
-    plan.extend(MEDIA_PORTS.iter().map(|&port| ("UDP", port, MEDIA_DESCRIPTION)));
+    plan.extend(
+        MEDIA_PORTS
+            .iter()
+            .map(|&port| ("UDP", port, MEDIA_DESCRIPTION)),
+    );
     plan
 }
 
@@ -572,7 +576,8 @@ mod tests {
 
     #[test]
     fn parses_header_case_insensitively() {
-        let headers = "HTTP/1.1 200 OK\r\nLocation: http://192.168.0.1:1900/desc.xml\r\nServer: MiniUPnP\r\n";
+        let headers =
+            "HTTP/1.1 200 OK\r\nLocation: http://192.168.0.1:1900/desc.xml\r\nServer: MiniUPnP\r\n";
         assert_eq!(
             parse_header_value(headers, "LOCATION"),
             Some("http://192.168.0.1:1900/desc.xml".to_string())
@@ -692,14 +697,29 @@ mod tests {
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".to_string(),
         };
         gateway
-            .add_port_mapping("TCP", 7777, 7777, "192.168.0.5", CONTROL_DESCRIPTION, MAPPING_LEASE_SECS)
+            .add_port_mapping(
+                "TCP",
+                7777,
+                7777,
+                "192.168.0.5",
+                CONTROL_DESCRIPTION,
+                MAPPING_LEASE_SECS,
+            )
             .await
             .unwrap();
         let request = handle.await.unwrap();
-        assert!(request.contains("<NewProtocol>TCP</NewProtocol>"), "{request}");
-        assert!(request.contains("<NewExternalPort>7777</NewExternalPort>"), "{request}");
         assert!(
-            request.contains(&format!("<NewLeaseDuration>{MAPPING_LEASE_SECS}</NewLeaseDuration>")),
+            request.contains("<NewProtocol>TCP</NewProtocol>"),
+            "{request}"
+        );
+        assert!(
+            request.contains("<NewExternalPort>7777</NewExternalPort>"),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!(
+                "<NewLeaseDuration>{MAPPING_LEASE_SECS}</NewLeaseDuration>"
+            )),
             "{request}"
         );
         assert!(request.contains(CONTROL_DESCRIPTION), "{request}");

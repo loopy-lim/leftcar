@@ -90,19 +90,26 @@ export function resolveStreamingTarget(
  * public routes the first seconds must survive a narrow link, and recovering
  * upward is the adaptive policy's job. It changes the start only — never the
  * user's profile maximum.
+ *
+ * `options.panelShortSide` replaces the fixed priority anchor with the client
+ * panel's physical short side so the stream arrives 1:1 (HiDPI 소스는 패널
+ * 네이티브로, 그렇지 않으면 소스 그대로) instead of being upscaled after a
+ * blind 1440 downscale. Missing or implausible metrics simply omit the cap
+ * and the fixed anchors apply.
  */
 export function resolveInitialStreamTarget(
   source: StreamingTargetSource,
   priority: StreamingPriority,
   maximum?: StreamingTargetSource,
-  options?: { externalRoute?: boolean },
+  options?: { externalRoute?: boolean; panelShortSide?: number },
 ): StreamingTarget {
   const priorityAnchor = priority === "clarity"
     ? CLARITY_STREAM_SHORT_SIDE
     : RESPONSIVE_STREAM_SHORT_SIDE;
+  const baseAnchor = options?.panelShortSide ?? priorityAnchor;
   const anchor = options?.externalRoute
-    ? Math.min(priorityAnchor, EXTERNAL_ROUTE_START_SHORT_SIDE)
-    : priorityAnchor;
+    ? Math.min(baseAnchor, EXTERNAL_ROUTE_START_SHORT_SIDE)
+    : baseAnchor;
   if (!maximum) return resolveStreamingTarget(source, priority, anchor);
   const maxLongSide = Math.max(maximum.width, maximum.height);
   const maxShortSide = Math.min(maximum.width, maximum.height);
@@ -112,6 +119,45 @@ export function resolveInitialStreamTarget(
     maxPixels: STREAMING_TARGET_MAX_PIXELS,
   });
   return { width: fitted.width, height: fitted.height, fps: STREAM_TARGET_FPS };
+}
+
+/**
+ * 클라이언트 패널 단변 캡. 메트릭이 없거나 비정상(단변 1080 미만 — 창 크기를
+ * 잘못 보고한 케이스, 2160 초과 — 4K 단변 초과)이면 undefined를 돌려 고정
+ * 앵커(1440/2160)로 폴백한다. 캡이 앵커를 낮추는 쪽(1080p 패널 등)은
+ * fitStreamResolution이 소스를 절대 업스케일하지 않으므로 결과가 동일하다.
+ */
+export function panelShortSideCap(
+  metrics: StreamingTargetSource | undefined,
+): number | undefined {
+  if (!metrics) return undefined;
+  const { width, height } = metrics;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  const shortSide = Math.min(width, height);
+  if (shortSide < 1080 || shortSide > 2160) return undefined;
+  return shortSide;
+}
+
+/**
+ * 적응 정책의 업시프트 목표(최대)도 패널 단변을 넘지 않게 축소한다 — 패널에
+ * 표시되지 않을 픽셀을 인코딩·전송하지 않는다. 소스 크기 이하로는 절대
+ * 줄이지 않는다(그 경우 무캡과 동일).
+ */
+export function capTargetToPanelShortSide<T extends StreamingTargetSource>(
+  target: T,
+  cap: number | undefined,
+): T {
+  if (!cap) return target;
+  const shortSide = Math.min(target.width, target.height);
+  if (shortSide <= cap) return target;
+  const scale = cap / shortSide;
+  return {
+    ...target,
+    width: Math.max(2, Math.floor((target.width * scale) / 2) * 2),
+    height: Math.max(2, Math.floor((target.height * scale) / 2) * 2),
+  };
 }
 
 /**

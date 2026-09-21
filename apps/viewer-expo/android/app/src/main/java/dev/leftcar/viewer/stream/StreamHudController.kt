@@ -375,7 +375,7 @@ internal class StreamHudController(
             lastRenderedFrames = null
             renderedFpsSample = null
             persistentFpsOverlay.update(null)
-            stats.text = "SRC $sourceFps / DISPLAY -- Hz  NET --/-- ms  CAP→SURF --/-- ms\n-- FPS  FEED -- ms"
+            stats.text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
@@ -393,11 +393,10 @@ internal class StreamHudController(
         persistentFpsOverlay.update(displayedFps)
         addLatencySample(networkLatencySamples, if (latency == -1L) 0xffff else latency and 0xffff)
         addLatencySample(surfaceReleaseLatencySamples, surfaceReleaseLatency.toLong())
-        val displayHz = activity.window.decorView.display?.refreshRate?.toInt() ?: 0
-        stats.text = "SRC $sourceFps / DISPLAY ${if (displayHz > 0) displayHz else "--"} Hz  " +
-            "NET ${formatLatency(networkLatencySamples)} ms  " +
-            "CAP→SURF ${formatLatency(surfaceReleaseLatencySamples)} ms\n" +
-            "${persistentFpsText(displayedFps)}  FEED ${feedMs} ms  " +
+        stats.text = "${persistentFpsText(displayedFps)}  " +
+            "ENC ${formatLatency(surfaceReleaseLatencySamples)}ms  " +
+            "DEC ${feedMs}ms  " +
+            "NET ${formatLatency(networkLatencySamples)}ms  " +
             "SKIP ${stale}  LOSS ${inputDrops + frameGaps}"
     }
 
@@ -429,7 +428,7 @@ internal class StreamHudController(
             setPadding(dp(9), dp(4), dp(9), dp(4))
             background = badgeBackground(Color.argb(92, 15, 23, 42))
             alpha = 0f
-            text = "SRC $sourceFps / DISPLAY -- Hz  NET --/-- ms  CAP→SURF --/-- ms\n-- FPS  FEED -- ms"
+            text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
             contentDescription = ViewerStrings.statsDescription
         }
         statsView = stats

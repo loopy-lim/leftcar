@@ -2300,7 +2300,9 @@ mod tests {
         let frame14 = reassembler
             .push(parse_fragment(&datagram(0, 1, 14, 1, 2, 3, b"n")).unwrap())
             .unwrap();
-        assert!(sequencer.push_reassembled_at(frame14, reassembler, start).is_empty());
+        assert!(sequencer
+            .push_reassembled_at(frame14, reassembler, start)
+            .is_empty());
         assert!(sequencer.blocked_hole() == Some(13));
         assert!(reassembler.missing_fragment_indexes(13).is_none());
     }
@@ -2309,7 +2311,11 @@ mod tests {
     fn nack_whole_au_burst_probes_then_requests_precisely() {
         let mut fixture = NackFixture::new();
         fixture.sequencer.configure_nack_grace(true, Some(100));
-        push_whole_au_hole_fixture(&mut fixture.sequencer, &mut fixture.reassembler, fixture.start);
+        push_whole_au_hole_fixture(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            fixture.start,
+        );
 
         // First tick: no state for AU 13 at all → bounded probe, 2 messages.
         let mut sent = Vec::new();
@@ -2377,9 +2383,11 @@ mod tests {
             .reassembler
             .push(parse_fragment(&datagram(2, 3, 13, 1, 2, 3, b"t")).unwrap())
             .unwrap();
-        let ready = fixture
-            .sequencer
-            .push_reassembled_at(healed, &fixture.reassembler, fixture.start + Duration::from_millis(8));
+        let ready = fixture.sequencer.push_reassembled_at(
+            healed,
+            &fixture.reassembler,
+            fixture.start + Duration::from_millis(8),
+        );
         assert_eq!(
             ready.iter().map(|frame| frame.id).collect::<Vec<_>>(),
             vec![13, 14]
@@ -2390,7 +2398,11 @@ mod tests {
     fn nack_whole_au_probe_expires_without_spam() {
         let mut fixture = NackFixture::new();
         fixture.sequencer.configure_nack_grace(true, Some(100));
-        push_whole_au_hole_fixture(&mut fixture.sequencer, &mut fixture.reassembler, fixture.start);
+        push_whole_au_hole_fixture(
+            &mut fixture.sequencer,
+            &mut fixture.reassembler,
+            fixture.start,
+        );
 
         let mut requester = NackRequester::default();
         let outcome = tick_nack_requester(

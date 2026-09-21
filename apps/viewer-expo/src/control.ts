@@ -25,6 +25,7 @@ import { DEFAULT_CONTROL_PORT } from "./defaults";
  * 공용 제어 소켓이 파괴되므로 타임아웃이 오탐이면 안 된다. */
 const REQUEST_TIMEOUT_MS: Record<string, number> = {
   startStream: 25_000,
+  createVirtualDisplay: 30_000,
   getCatalog: 15_000,
   setClipboard: 15_000,
   getClipboard: 15_000,

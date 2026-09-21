@@ -277,9 +277,8 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
 
-        let (socket, handed_crypto, peer, mut backlog) = prepared
-            .into_socket_media_crypto_and_backlog()
-            .unwrap();
+        let (socket, handed_crypto, peer, mut backlog) =
+            prepared.into_socket_media_crypto_and_backlog().unwrap();
         assert!(Arc::ptr_eq(&handed_crypto, &crypto));
         assert_eq!(peer, Some(sender.local_addr().unwrap()));
         // The echoed challenge marks the handshake complete for the session.

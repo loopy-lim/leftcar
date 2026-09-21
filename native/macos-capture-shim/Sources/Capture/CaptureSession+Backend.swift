@@ -73,17 +73,21 @@ extension CaptureSession {
     }
 
     @discardableResult
-    func setupScreenCaptureKit(filter: SCContentFilter) -> Bool {
+    func setupScreenCaptureKit(filter: SCContentFilter, displayID: CGDirectDisplayID) -> Bool {
         guard sourceAuthorization?.begin() ?? true else { setLastError("source authorization revoked"); return false }
         defer { sourceAuthorization?.end() }
         inputLock.lock()
         if #available(macOS 14.0, *) {
-            inputBounds = filter.contentRect
+            // SCK contentRect는 소스 좌표계라 원점이 0,0이 아닌 디스플레이
+            // (가상 디스플레이·측면 모니터)에서 입력 매핑이 어긋난다. 브리지의
+            // 배치 검증이 의존하듯 in-process CGDisplayBounds는 즉시 갱신되므로
+            // 전역 rect를 신뢰한다 — CGDisplayStream 경로(207행)와 동일.
+            inputBounds = CGDisplayBounds(displayID)
         }
         inputLock.unlock()
         stateLock.lock()
         restartFilter = filter
-        restartDisplayID = nil
+        restartDisplayID = displayID
         stateLock.unlock()
         guard beginCapture() else {
             setLastError("media socket closed before capture start")
@@ -381,8 +385,8 @@ extension CaptureSession {
         if let oldCG, let api {
             _ = api.stop(oldCG)
         }
-        if let filter {
-            _ = setupScreenCaptureKit(filter: filter)
+        if let filter, let displayID {
+            _ = setupScreenCaptureKit(filter: filter, displayID: displayID)
         } else if let displayID {
             _ = setupCGDisplayStream(displayID: displayID)
         } else {

@@ -101,6 +101,23 @@ pub(super) fn drain_pending_output(
     Ok(())
 }
 
+/// Resident-set size in KiB from /proc/self/statm. Read at perf-log cadence
+/// (0.5s): an overnight streaming leak shows up here as a monotonic climb in
+/// logcat long before the system starts swapping and the app ANRs.
+fn process_rss_kb() -> u64 {
+    use std::io::Read;
+    let mut text = String::new();
+    if std::fs::File::open("/proc/self/statm")
+        .and_then(|mut file| file.read_to_string(&mut text))
+        .is_err()
+    {
+        return 0;
+    }
+    let mut fields = text.split_whitespace();
+    let pages = fields.nth(1).and_then(|field| field.parse::<u64>().ok());
+    pages.map(|pages| pages.saturating_mul(4)).unwrap_or(0)
+}
+
 fn record_decoder_output(
     dec: &mut viewer_decoder::AndroidDecoder,
     rendered_before: u64,
@@ -145,8 +162,9 @@ fn record_decoder_output(
         // shows up on the display as a visible ~half-second cadence hitch.
         // Format on this thread, emit on a throwaway thread.
         let head = format!(
-            "LeftcarViewerPerf schema=2 process={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset",
+            "LeftcarViewerPerf schema=3 process={} rssKb={} stream={} incarnation={} decoderEpoch={} kind=single released={} releaseCaptureAgeMs={:?} outputPtsUs={:?} outputStage=surface-release clockBasis=estimated-host-wall-offset",
             std::process::id(),
+            process_rss_kb(),
             control.port,
             control.metric_incarnation,
             decoder_epoch,

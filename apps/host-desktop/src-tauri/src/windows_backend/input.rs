@@ -96,7 +96,11 @@ impl InputInjector {
             // forward. X-button injection carries the button id in mouseData
             // instead of a per-button flag.
             let data: u32 = if button == 8 { 0x0001 } else { 0x0002 };
-            let flags = if down { MOUSEEVENTF_XDOWN } else { MOUSEEVENTF_XUP };
+            let flags = if down {
+                MOUSEEVENTF_XDOWN
+            } else {
+                MOUSEEVENTF_XUP
+            };
             send_mouse(0, 0, data, flags)?;
         } else {
             send_mouse(0, 0, 0, button_flag(button, down)?)?;

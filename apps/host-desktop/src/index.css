@@ -1338,6 +1338,55 @@ html, body, #root {
   gap: 14px;
 }
 
+.pairing-network-card {
+  background: var(--bg-surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pairing-network-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pairing-network-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pairing-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-live, #10b981);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+  animation: pulse-dot 2.5s infinite ease-in-out;
+}
+
+.pairing-network-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.pairing-advanced-details {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
 .pairing-security-note {
   display: flex;
   align-items: flex-start;

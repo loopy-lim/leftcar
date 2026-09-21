@@ -153,6 +153,8 @@ pub fn run() {
     // 확장(가상) 디스플레이 매니저 — 프로브는 첫 사용 때 shim에서 늦게
     // 확인한다. 심볼 부재 플랫폼/빌드에서는 "지원 안 됨"으로만 존재한다.
     let virtual_display = Arc::new(virtual_display::VirtualDisplayManager::new());
+    // 제어 채널의 createVirtualDisplay(태블릿 주도 생성)가 같은 매니저를 쓴다.
+    server.set_virtual_display(virtual_display.clone());
     let (control_listener, control_port) =
         bind_control_listener().unwrap_or_else(|message| fatal_startup_error(message));
     server.set_control_port(control_port);
@@ -338,14 +340,10 @@ pub fn run() {
                 // WAN 포트 매핑을 종료 때 즉시 치운다. 응답 없는 게이트웨이 앞에서
                 // 종료가 붙잡히지 않게 3초로 잘라내고, 못 치운 매핑은 lease(1시간)가
                 // 만료시킨다.
-                let upnp = app
-                    .state::<Arc<upnp::UpnpMappingManager>>()
-                    .inner()
-                    .clone();
+                let upnp = app.state::<Arc<upnp::UpnpMappingManager>>().inner().clone();
                 tauri::async_runtime::block_on(async {
-                    let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(3), upnp.disable())
-                            .await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), upnp.disable())
+                        .await;
                 });
                 if let Err(error) = app
                     .state::<Arc<control::ControlServer>>()
@@ -725,7 +723,9 @@ fn approve_pending_pairing(
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
     offer_id: String,
 ) -> Result<(), String> {
-    let approved_device_id = state.approve_pending(&offer_id).map_err(|e| e.to_string())?;
+    let approved_device_id = state
+        .approve_pending(&offer_id)
+        .map_err(|e| e.to_string())?;
     // 기본적으로 모두 허용: 사용자가 호스트에서 기기 연결을 승인하면 그 기기
     // 한 대에 모든 화면 접근 권한을 기본으로 부여한다. 다른 기기는 이 명령이
     // 절대 승격하지 않는다 — 기기별 승인은 그 기기의 승인 플로우에서만 결정되고,
@@ -737,8 +737,7 @@ fn approve_pending_pairing(
     let Some(device) = device else {
         return Ok(());
     };
-    let fresh =
-        device.source_grants.review_required || device.source_grants.source_ids.is_empty();
+    let fresh = device.source_grants.review_required || device.source_grants.source_ids.is_empty();
     if !fresh {
         // 재승인이라도 사용자가 좁혀 둔 권한을 넓히지 않는다.
         return Ok(());
@@ -794,37 +793,36 @@ fn build_virtual_display_status(
     manager: &Arc<virtual_display::VirtualDisplayManager>,
 ) -> virtual_display::VirtualDisplayStatusPublic {
     let (supported, reason, live) = manager.status();
-    let suggested = match server.latest_viewer_metrics().map(|metrics| {
-        virtual_display::ViewerDisplayMetrics {
-            physical_width: metrics.physical_width,
-            physical_height: metrics.physical_height,
-            density_dpi: metrics.density_dpi,
-        }
-    }) {
-        Some(metrics) => virtual_display::match_display_size(&metrics)
-            .map(|matched| virtual_display::SuggestedModePublic {
-                width: matched.logical_width,
-                height: matched.logical_height,
-                scale: matched.scale,
-                source: "viewerMetrics",
-            })
-            .unwrap_or_else(|| fallback_suggestion()),
-        None => fallback_suggestion(),
-    };
-    // 제거 요청 뒤 시스템 반영(~30s 비동기)이 카탈로그에 아직 보이는지.
-    let removal_pending = manager
-        .last_removed_pending()
-        .is_some_and(|source_id| {
-            server
-                .backend()
-                .list_displays()
-                .map(|displays| {
-                    displays
-                        .iter()
-                        .any(|display| display.source_id.as_deref() == Some(source_id.as_str()))
+    let suggested =
+        match server
+            .latest_viewer_metrics()
+            .map(|metrics| virtual_display::ViewerDisplayMetrics {
+                physical_width: metrics.physical_width,
+                physical_height: metrics.physical_height,
+                density_dpi: metrics.density_dpi,
+            }) {
+            Some(metrics) => virtual_display::match_display_size(&metrics)
+                .map(|matched| virtual_display::SuggestedModePublic {
+                    width: matched.logical_width,
+                    height: matched.logical_height,
+                    scale: matched.scale,
+                    source: "viewerMetrics",
                 })
-                .unwrap_or(false)
-        });
+                .unwrap_or_else(|| fallback_suggestion()),
+            None => fallback_suggestion(),
+        };
+    // 제거 요청 뒤 시스템 반영(~30s 비동기)이 카탈로그에 아직 보이는지.
+    let removal_pending = manager.last_removed_pending().is_some_and(|source_id| {
+        server
+            .backend()
+            .list_displays()
+            .map(|displays| {
+                displays
+                    .iter()
+                    .any(|display| display.source_id.as_deref() == Some(source_id.as_str()))
+            })
+            .unwrap_or(false)
+    });
     virtual_display::VirtualDisplayStatusPublic {
         supported,
         reason,
@@ -860,11 +858,9 @@ async fn virtual_display_create(
     let manager = manager.inner().clone();
     // 생성은 활성화+모드 폴링로 수 초 걸린다 — 워커 스레드에서 돌린다.
     let worker = manager.clone();
-    let live = tauri::async_runtime::spawn_blocking(move || {
-        worker.create(width, height, scale)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let live = tauri::async_runtime::spawn_blocking(move || worker.create(width, height, scale))
+        .await
+        .map_err(|e| e.to_string())??;
     let Some(source_id) = live.source_id.clone() else {
         return Err("virtual display has no stable source id".into());
     };
@@ -904,7 +900,7 @@ async fn virtual_display_create(
 
 /// 기존 화면 권한에 새 가상 디스플레이를 얹은 목록. 미검토이거나 권한이 비어
 /// 있으면(명시적 거부) None — 이 기기에 자동 승인은 일어나지 않는다.
-fn grants_with_virtual_source(
+pub(crate) fn grants_with_virtual_source(
     current: &[String],
     review_required: bool,
     source_id: &str,
@@ -929,7 +925,10 @@ mod virtual_grant_tests {
     fn appends_new_source_to_reviewed_devices() {
         let ids = vec!["macos:display:b".to_string(), "macos:display:a".to_string()];
         let next = grants_with_virtual_source(&ids, false, "macos:virtual:v1").unwrap();
-        assert_eq!(next, vec!["macos:display:a", "macos:display:b", "macos:virtual:v1"]);
+        assert_eq!(
+            next,
+            vec!["macos:display:a", "macos:display:b", "macos:virtual:v1"]
+        );
         // 이미 있으면 그대로다.
         assert_eq!(
             grants_with_virtual_source(&next, false, "macos:virtual:v1").unwrap(),
@@ -940,8 +939,14 @@ mod virtual_grant_tests {
     #[test]
     fn never_grants_to_unreviewed_or_denied_devices() {
         let ids = ["macos:display:a".to_string()];
-        assert!(grants_with_virtual_source(&[], true, "v").is_none(), "미검토");
-        assert!(grants_with_virtual_source(&ids, true, "v").is_none(), "미검토");
+        assert!(
+            grants_with_virtual_source(&[], true, "v").is_none(),
+            "미검토"
+        );
+        assert!(
+            grants_with_virtual_source(&ids, true, "v").is_none(),
+            "미검토"
+        );
         // 검토 후 비워 둔 권한은 거부다 — 채우지 않는다.
         assert!(grants_with_virtual_source(&[], false, "v").is_none());
     }

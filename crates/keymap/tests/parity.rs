@@ -27,6 +27,12 @@ fn old_mac(android: u16) -> Option<u16> {
         return Some(function_keys[(android - 131) as usize]);
     }
     let upper_function_keys: [u16; 8] = [105, 107, 113, 106, 64, 79, 80, 90];
+    if android == 184 {
+        // 2026-09-21 의도적 변경(원 표는 107): F14 신호 키는 macOS 밝기 낮춤
+        // 단축키(kVK_F14=107)와 충돌해 소비 실패 시 화면이 어두워진다 —
+        // 시스템 바인딩이 없는 kVK_F18(79)로 배달한다.
+        return Some(79);
+    }
     if (183..=190).contains(&android) {
         return Some(upper_function_keys[(android - 183) as usize]);
     }

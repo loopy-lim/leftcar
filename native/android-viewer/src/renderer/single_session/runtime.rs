@@ -59,7 +59,11 @@ pub(crate) fn spawn_live_stream_renderer(
 
     let control = Arc::new(RendererControl {
         single_surface: Mutex::new(Some(SingleSurface {
-            host: paired_host.clone(), width, height, fps, window: surface_window as usize,
+            host: paired_host.clone(),
+            width,
+            height,
+            fps,
+            window: surface_window as usize,
         })),
         metric_incarnation: crate::renderer::metric_identity(),
         output_metadata: Mutex::new(Default::default()),

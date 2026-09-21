@@ -201,18 +201,17 @@ fn tile_worker(launch: TileWorkerLaunch) {
     // Split tiles re-request their own IDR on the recovery carrier, so the
     // pre-claim backlog is intentionally not replayed here; single-session
     // is the path that drains it.
-    let (socket, crypto, mut peer, _pre_claim_backlog) = match prepared
-        .into_socket_media_crypto_and_backlog()
-    {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = events.send(CoordinatorEvent::Fatal);
-            if release_window_on_exit {
-                release_window(window);
+    let (socket, crypto, mut peer, _pre_claim_backlog) =
+        match prepared.into_socket_media_crypto_and_backlog() {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = events.send(CoordinatorEvent::Fatal);
+                if release_window_on_exit {
+                    release_window(window);
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
     match configure_split_media_socket(&socket) {
         Ok(actual) => log_info!(
             "split {:?} media SO_RCVBUF requested={} actual={}",
@@ -474,7 +473,8 @@ fn tile_worker(launch: TileWorkerLaunch) {
                             // Release submitted to MediaCodec: closes the local
                             // ready -> release (pair wait + dispatch) and
                             // receive -> release segments for this pts.
-                            let capture_wall_ms = telemetry.note_released(output.pts_us, monotonic_ns());
+                            let capture_wall_ms =
+                                telemetry.note_released(output.pts_us, monotonic_ns());
                             match side {
                                 TileSide::Left => {
                                     stats.left_rendered.store(rendered, Ordering::Relaxed)
@@ -717,8 +717,12 @@ fn tile_worker(launch: TileWorkerLaunch) {
                                 let _ = events.send(CoordinatorEvent::Fatal);
                                 continue;
                             }
-                            if let Some(supported) = crate::input_protocol::parse_input_language_capability(packet) {
-                                control.input_language_supported.store(supported, Ordering::SeqCst);
+                            if let Some(supported) =
+                                crate::input_protocol::parse_input_language_capability(packet)
+                            {
+                                control
+                                    .input_language_supported
+                                    .store(supported, Ordering::SeqCst);
                                 continue;
                             }
                         }

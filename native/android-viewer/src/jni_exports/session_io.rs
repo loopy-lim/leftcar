@@ -58,12 +58,21 @@ pub extern "C" fn leftcar_jni_input_status(instance_c: *const c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn leftcar_jni_input_language(instance_c: *const c_char, language: u32) -> i32 {
     with_active_control_err(instance_c, |control| {
-        if language != 1 && language != 2 { return LEFTCAR_ERR_INVALID; }
+        if language != 1 && language != 2 {
+            return LEFTCAR_ERR_INVALID;
+        }
         if control.input_enabled.load(Ordering::SeqCst) != 1
-            || !control.input_language_supported.load(Ordering::SeqCst) {
+            || !control.input_language_supported.load(Ordering::SeqCst)
+        {
             return LEFTCAR_ERR_STATE;
         }
-        control.input.lock().unwrap().push(InputEvent::InputLanguage { language: language as u8 });
+        control
+            .input
+            .lock()
+            .unwrap()
+            .push(InputEvent::InputLanguage {
+                language: language as u8,
+            });
         LEFTCAR_OK
     })
 }
@@ -422,15 +431,29 @@ mod cursor_export_tests {
         const KEY: &str = "input-language-jni/capability";
         let (instance, control) = installed_control(KEY);
         control.input_enabled.store(1, Ordering::SeqCst);
-        assert_eq!(leftcar_jni_input_language(instance.as_ptr(), 2), LEFTCAR_ERR_STATE);
+        assert_eq!(
+            leftcar_jni_input_language(instance.as_ptr(), 2),
+            LEFTCAR_ERR_STATE
+        );
         assert!(control.input.lock().unwrap().next_ready(1).is_none());
-        control.input_language_supported.store(true, Ordering::SeqCst);
+        control
+            .input_language_supported
+            .store(true, Ordering::SeqCst);
         control.input_enabled.store(0, Ordering::SeqCst);
-        assert_eq!(leftcar_jni_input_language(instance.as_ptr(), 2), LEFTCAR_ERR_STATE);
+        assert_eq!(
+            leftcar_jni_input_language(instance.as_ptr(), 2),
+            LEFTCAR_ERR_STATE
+        );
         control.input_enabled.store(1, Ordering::SeqCst);
-        assert_eq!(leftcar_jni_input_language(instance.as_ptr(), 99), LEFTCAR_ERR_INVALID);
+        assert_eq!(
+            leftcar_jni_input_language(instance.as_ptr(), 99),
+            LEFTCAR_ERR_INVALID
+        );
         assert_eq!(leftcar_jni_input_language(instance.as_ptr(), 2), LEFTCAR_OK);
-        assert_eq!(control.input.lock().unwrap().next_ready(1).unwrap().event, InputEvent::InputLanguage { language: 2 });
+        assert_eq!(
+            control.input.lock().unwrap().next_ready(1).unwrap().event,
+            InputEvent::InputLanguage { language: 2 }
+        );
         drop_control(KEY, &control);
     }
     use std::ffi::CString;

@@ -382,8 +382,11 @@ pub struct ControlServer {
     clipboard: std::sync::OnceLock<std::sync::Arc<dyn ClipboardBackend>>,
     /// 기기별 스트림 창 크기 영속 저장(선택 — set_window_metrics로 주입;
     /// 미주입 시 getCatalog가 windowSize를 생략한다).
-    window_metrics:
-        std::sync::OnceLock<std::sync::Arc<crate::window_metrics::WindowMetricsStore>>,
+    window_metrics: std::sync::OnceLock<std::sync::Arc<crate::window_metrics::WindowMetricsStore>>,
+    /// 확장(가상) 디스플레이 매니저(선택 — set_virtual_display로 주입;
+    /// 미주입 시 createVirtualDisplay는 unsupported로 응답한다).
+    virtual_display:
+        std::sync::OnceLock<std::sync::Arc<crate::virtual_display::VirtualDisplayManager>>,
     /// 파일 공유 게이트(선택 — set_settings으로 주입; 없으면 꺼짐).
     settings: std::sync::OnceLock<std::sync::Arc<crate::settings::SharedSettings>>,
     /// 파일 전송 청크 상태와 호스트 공유 대기열. Tauri UI 명령도 같은
@@ -442,6 +445,7 @@ impl ControlServer {
             clipboard_revision_cache: Mutex::new(None),
             clipboard: std::sync::OnceLock::new(),
             window_metrics: std::sync::OnceLock::new(),
+            virtual_display: std::sync::OnceLock::new(),
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
             authenticated_conns: Mutex::new(HashMap::new()),
@@ -657,6 +661,13 @@ impl ControlServer {
         let _ = self.window_metrics.set(store);
     }
 
+    pub fn set_virtual_display(
+        &self,
+        manager: std::sync::Arc<crate::virtual_display::VirtualDisplayManager>,
+    ) {
+        let _ = self.virtual_display.set(manager);
+    }
+
     /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
     pub fn file_transfer_state(&self) -> &crate::file_transfer::FileTransferState {
         &self.file_transfers
@@ -788,12 +799,28 @@ impl ControlServer {
         for source in &sources {
             resolve_display(&displays, Some(source), None)?;
         }
+        // 승인 '추가'(예: 확장 화면 자동 승인)는 라이브 세션을 건드리지
+        // 않는다. 실제로 제거된 소스가 있을 때만 철회 즉시 차단으로 세션을
+        // 끊는다 — 추가만 했는데 끊으면 "확장 화면 만들기"가 요청자의 진행
+        // 중 스트림을 device_revoked로 죽인다.
+        let previous_sources: Vec<String> = self
+            .pairing
+            .list_device_views()
+            .into_iter()
+            .find(|view| view.device_id == device)
+            .map(|view| view.source_grants.source_ids)
+            .unwrap_or_default();
         let (result, leases) = self.pairing.update_source_grants_for_credential(
             device,
-            sources,
+            sources.clone(),
             expected_credential,
         )?;
-        self.stop_sessions_for_device(device);
+        let removed_any = previous_sources
+            .iter()
+            .any(|source| !sources.iter().any(|kept| kept == source));
+        if removed_any {
+            self.stop_sessions_for_device(device);
+        }
         for lease in leases {
             lease.wait_idle();
         }
@@ -2273,6 +2300,107 @@ impl ControlServer {
                 Ok(()) => ok(json!({ "attached": true })),
                 Err(error) => err(&error),
             },
+            "createVirtualDisplay" => {
+                let Some(vdisp_manager) = self.virtual_display.get() else {
+                    return err("virtual display unsupported on this host");
+                };
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct CreateArgs {
+                    physical_width: Option<u32>,
+                    physical_height: Option<u32>,
+                    density_dpi: Option<u32>,
+                }
+                let create_args: CreateArgs =
+                    serde_json::from_value(args.clone()).unwrap_or(CreateArgs {
+                        physical_width: None,
+                        physical_height: None,
+                        density_dpi: None,
+                    });
+                let manager = vdisp_manager.clone();
+                let device = authenticated_device.map(str::to_owned);
+                // 생성은 활성화+모드 폴링으로 수 초 걸린다(lib.rs의 Tauri 경로와
+                // 동일) — 워커 스레드에서 돌린다.
+                let created = match tauri::async_runtime::spawn_blocking(move || {
+                    let (width, height, scale) =
+                        match (create_args.physical_width, create_args.physical_height) {
+                            (Some(w), Some(h)) if w > 0 && h > 0 => {
+                                crate::virtual_display::match_display_size(
+                                    &crate::virtual_display::ViewerDisplayMetrics {
+                                        physical_width: w,
+                                        physical_height: h,
+                                        density_dpi: create_args.density_dpi.unwrap_or(160),
+                                    },
+                                )
+                                .map(|matched| {
+                                    (
+                                        matched.logical_width,
+                                        matched.logical_height,
+                                        matched.scale as u32,
+                                    )
+                                })
+                                .unwrap_or((1280, 800, 2))
+                            }
+                            _ => (1280, 800, 2),
+                        };
+                    manager.create(width, height, scale)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return err(&format!("virtual display task failed: {e}")),
+                };
+                let live = match created {
+                    Ok(live) => live,
+                    Err(message) if message.contains("already exists") => {
+                        // 이미 있으면 재생성하지 않고 기존 디스플레이를 알려준다 —
+                        // 뷰어는 카탈로그 새로고침 후 바로 열 수 있다.
+                        let (_, _, current) = vdisp_manager.status();
+                        let Some(current) = current else {
+                            return err(&message);
+                        };
+                        return ok(json!({
+                            "sourceId": current.source_id,
+                            "width": current.backing_width,
+                            "height": current.backing_height,
+                            "exists": true,
+                        }));
+                    }
+                    Err(message) => return err(&message),
+                };
+                let Some(source_id) = live.source_id.clone() else {
+                    return err("virtual display has no stable source id");
+                };
+                // 요청한 기기 본인에게는 즉시 승인을 얹는다 — 생성 시점의 전체
+                // 기기 갱신(lib.rs)은 연결 중인 기기를 건너뛰지만, 요청자는
+                // 정의상 연결 중이므로 여기서 직접 승인하지 않으면 카탈로그에
+                // 영원히 안 보인다. 이미 화면 승인된 기기만 자동 승인된다.
+                if let Some(device_id) = device {
+                    for view in self.pairing.list_device_views() {
+                        if view.device_id != device_id {
+                            continue;
+                        }
+                        if let Some(ids) = crate::grants_with_virtual_source(
+                            &view.source_grants.source_ids,
+                            view.source_grants.review_required,
+                            &source_id,
+                        ) {
+                            let _ = self.set_source_grants_for_credential(
+                                &view.device_id,
+                                ids,
+                                Some(&view.source_grants.credential_id),
+                            );
+                        }
+                        break;
+                    }
+                }
+                ok(json!({
+                    "sourceId": source_id,
+                    "width": live.logical_width * live.scale,
+                    "height": live.logical_height * live.scale,
+                    "exists": false,
+                }))
+            }
             "beginPairing" => {
                 // Local operator/diagnostic entry point. This exposes the same
                 // short-lived pairing offer as the Tauri pairing window, but
@@ -2284,9 +2412,11 @@ impl ControlServer {
                     return err("no LAN interface found");
                 };
                 let port = self.control_port.load(Ordering::Acquire);
-                ok(self
-                    .pairing
-                    .begin_pairing_with_tailnet(&host_ip, port, crate::tailscale_ip().as_deref()))
+                ok(self.pairing.begin_pairing_with_tailnet(
+                    &host_ip,
+                    port,
+                    crate::tailscale_ip().as_deref(),
+                ))
             }
             "pair" => {
                 #[derive(serde::Deserialize)]
@@ -4309,6 +4439,79 @@ mod tests {
         assert!(line.contains("\"value\":42"), "{line}");
     }
 
+    /// 승인 '추가'(확장 화면 자동 승인 경로)는 라이브 세션을 끊지 않고,
+    /// 실제 제거(철회)만 device_revoked로 즉시 차단하는지 검증한다.
+    #[tokio::test]
+    async fn grant_addition_keeps_live_session_and_removal_stops_it() {
+        let pairing = test_pairing();
+        let two_displays = Arc::new(FakeBackend {
+            displays: vec![
+                DisplayInfo {
+                    source_id: Some("test:display:0".into()),
+                    index: 0,
+                    name: "Main".into(),
+                    width: 1920,
+                    height: 1080,
+                },
+                DisplayInfo {
+                    source_id: Some("test:display:1".into()),
+                    index: 1,
+                    name: "Ext".into(),
+                    width: 1280,
+                    height: 720,
+                },
+            ],
+            encoder_experiment: Mutex::new(EncoderExperiment::Auto),
+            advertise_split_vertical: false,
+            stops: AtomicUsize::new(0),
+            input_permission: true,
+            input_calls: Mutex::new(Vec::new()),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Arc::new(ControlServer::new(
+            two_displays,
+            pairing.clone(),
+            test_identity(),
+        ));
+        server.set_control_port(addr.port());
+        let run_server = Arc::clone(&server);
+        tokio::spawn(async move { run_server.run(listener).await });
+
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let token = pair_token(&mut sock, &pairing).await;
+
+        let line = request(
+            &mut sock,
+            "startStream",
+            r#"{"mediaKey":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","sourceIndex":0,"viewerPort":5001,"width":1920,"height":1080,"fps":90}"#,
+            &token,
+        )
+        .await;
+        assert!(line.contains("\"session\":1"), "{line}");
+
+        // 추가 승인: 기존 test:display:0 유지 + test:display:1 추가 —
+        // 확장 화면 자동 승인이 요청자의 진행 중 스트림을 죽여선 안 된다.
+        server
+            .set_source_grants(
+                "test-viewer",
+                vec!["test:display:0".into(), "test:display:1".into()],
+            )
+            .unwrap();
+        let line = request(&mut sock, "getStatus", "{}", &token).await;
+        assert!(line.contains("\"state\":\"running\""), "{line}");
+
+        // 철회: test:display:0 제거 — 즉시 차단으로 세션이 끊기고 라이브 제어
+        // 연결도 닫힌다(철회 즉시 차단). 단말은 재접속해 상태를 관찰한다.
+        server
+            .set_source_grants("test-viewer", vec!["test:display:1".into()])
+            .unwrap();
+        drop(sock);
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let line = request(&mut sock, "getStatus", "{}", &token).await;
+        assert!(!line.contains("\"state\":\"running\""), "{line}");
+    }
+
     #[tokio::test]
     async fn unknown_command_and_restart_session_ids() {
         let pairing = test_pairing();
@@ -4436,7 +4639,10 @@ mod tests {
     #[test]
     fn media_candidate_must_be_private_and_on_the_control_peers_lan() {
         assert!(same_private_lan_candidate("192.168.0.18", "192.168.0.170"));
-        assert!(!same_private_lan_candidate("192.168.0.18", "100.80.133.120"));
+        assert!(!same_private_lan_candidate(
+            "192.168.0.18",
+            "100.80.133.120"
+        ));
         assert!(!same_private_lan_candidate("192.168.1.18", "192.168.0.170"));
         assert!(!same_private_lan_candidate("1.2.3.4", "192.168.0.170"));
         assert!(!same_private_lan_candidate("192.168.0.18", "100.128.0.1"));

@@ -1375,8 +1375,7 @@ mod tests {
         let payload = serde_json::from_str::<serde_json::Value>(&plain.qr_payload).unwrap();
         assert!(payload.get("ts").is_none());
 
-        let view =
-            server.begin_pairing_with_tailnet("192.168.0.10", 7777, Some("100.101.102.103"));
+        let view = server.begin_pairing_with_tailnet("192.168.0.10", 7777, Some("100.101.102.103"));
         let payload = serde_json::from_str::<serde_json::Value>(&view.qr_payload).unwrap();
         assert_eq!(payload["ts"], "100.101.102.103");
         // 나머지 v2 필드는 그대로다.

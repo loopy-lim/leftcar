@@ -25,7 +25,19 @@ fn active_proxy() -> &'static Mutex<Option<Arc<std::sync::atomic::AtomicBool>>> 
 
 pub fn start_media_proxy(port: u16) -> Result<(), String> {
     if active_proxy().lock().unwrap().is_some() {
-        return Err("USB media proxy is already active".into());
+        // A previous session's proxy teardown is asynchronous: the stop flag
+        // only breaks its accept/bridge loop on the next poll, so a
+        // replacement stream started right after the old one can still see
+        // the occupied slot. Stop it and wait briefly instead of failing —
+        // the caller already tore down the predecessor transport.
+        stop_media_proxy();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while active_proxy().lock().unwrap().is_some() {
+            if std::time::Instant::now() >= deadline {
+                return Err("USB media proxy is already active".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     let listener = TcpListener::bind(("127.0.0.1", port))
         .map_err(|error| format!("USB media proxy bind failed on {port}: {error}"))?;

@@ -37,6 +37,8 @@ import {
   is4KResolution,
 } from "./stream-profile";
 import {
+  capTargetToPanelShortSide,
+  panelShortSideCap,
   resolveInitialStreamTarget,
   streamingPriorityFromProfileId,
 } from "./streaming-policy";
@@ -644,13 +646,24 @@ export function useCatalogModel() {
         // 목표(responsive 1440 / clarity 최대)를 분리한다. AUTO는 실제
         // clarity 스트리밍 목표(resolveStreamingTarget)를 최대로 쓰고,
         // 수동 프로필은 기존 프로필 상한을 그대로 유지한다. 논리 데스크톱
-        // 크기는 자동 품질 전환으로 바꾸지 않는다.
-        const maximumTarget = resolveStreamMaximum(display, preferences.profileId);
+        // 크기는 자동 품질 전환으로 바꾸지 않는다. 클라이언트 패널 메트릭이
+        // 정상이면 시작·최대 모두 패널 단변으로 캡해 1:1(HiDPI)로 전송하고,
+        // 메트릭이 없거나 비정상이면 기존 고정 앵커로 폴백한다.
+        const viewerMetrics = await readViewerDisplayMetrics(launcher);
+        const panelCap = panelShortSideCap(
+          viewerMetrics
+            ? { width: viewerMetrics.physicalWidth, height: viewerMetrics.physicalHeight }
+            : undefined,
+        );
+        const maximumTarget = capTargetToPanelShortSide(
+          resolveStreamMaximum(display, preferences.profileId),
+          panelCap,
+        );
         const initialTarget = resolveInitialStreamTarget(
           display,
           streamingPriority,
           maximumTarget,
-          { externalRoute: externalMediaRoute },
+          { externalRoute: externalMediaRoute, panelShortSide: panelCap },
         );
         const requestedTarget = {
           width: initialTarget.width,
@@ -669,7 +682,6 @@ export function useCatalogModel() {
         ownedReservations.add(reservation);
         try {
           const { width, height, fps } = launchTarget;
-          const viewerMetrics = await readViewerDisplayMetrics(launcher);
           const sourceTarget = {
             width: maximumTarget.width,
             height: maximumTarget.height,
@@ -870,12 +882,19 @@ export function useCatalogModel() {
         // 목표는 디스플레이+프로필에서, 적응 상태는 새 디스플레이의 최대
         // 목표에 다시 심는다(openDisplay의 시딩과 동일).
         const profileId = resolveViewerProfileId(preferences.profileId, display);
-        const maximumTarget = resolveStreamMaximum(display, preferences.profileId);
+        const metrics = await readViewerDisplayMetrics(launcher);
+        const panelCap = panelShortSideCap(
+          metrics ? { width: metrics.physicalWidth, height: metrics.physicalHeight } : undefined,
+        );
+        const maximumTarget = capTargetToPanelShortSide(
+          resolveStreamMaximum(display, preferences.profileId),
+          panelCap,
+        );
         const initialTarget = resolveInitialStreamTarget(
           display,
           streamingPriority,
           maximumTarget,
-          { externalRoute: externalMediaRoute },
+          { externalRoute: externalMediaRoute, panelShortSide: panelCap },
         );
         const target = {
           width: initialTarget.width,
@@ -934,6 +953,75 @@ export function useCatalogModel() {
     ],
   );
 
+  /** 태블릿 주도 확장 화면 생성: createVirtualDisplay → 카탈로그 갱신 → 자동
+   * 오픈. 호스트에 이미 디스플레이가 있으면(존재 응답) 그것을 연다. */
+  const [creatingExtension, setCreatingExtension] = useState(false);
+  /** 클라이언트 패널 단변(물리) — 카드 라벨·시작 크기 계산에 쓰인다. 메트릭이
+   * 없거나 비정상이면 undefined(고정 앵커 폴백). */
+  const [panelShortSide, setPanelShortSide] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    void readViewerDisplayMetrics(launcher).then((metrics) => {
+      if (cancelled) return;
+      setPanelShortSide(
+        panelShortSideCap(
+          metrics
+            ? { width: metrics.physicalWidth, height: metrics.physicalHeight }
+            : undefined,
+        ),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const handleCreateExtensionDisplay = useCallback(async () => {
+    const client = controlClient();
+    if (!client) {
+      setError(currentTranslation().viewer.connectionLostError);
+      return;
+    }
+    setCreatingExtension(true);
+    try {
+      const metrics = await readViewerDisplayMetrics(launcher);
+      const created = await client.request<{ sourceId: string }>(
+        "createVirtualDisplay",
+        metrics
+          ? {
+              physicalWidth: metrics.physicalWidth,
+              physicalHeight: metrics.physicalHeight,
+              densityDpi: metrics.densityDpi,
+            }
+          : {},
+      );
+      // 생성 직후의 첫 카탈로그 조회는 macOS 디스플레이 재구성 지연(실측
+      // ~2.2s)에 걸려 새 소스가 빠진 목록을 반환할 수 있다. 보일 때까지
+      // 짧게 재시도하고, 그래도 없으면 조용히 넘기지 않고 안내한다 —
+      // 아무 일도 일어나지 않는 것처럼 보이면 사용자는 카드를 계속 누르게
+      // 된다.
+      let display: DisplayInfo | undefined;
+      for (let attempt = 0; attempt < 4 && !display; attempt += 1) {
+        const refetched = await refetchCatalog();
+        display = (refetched.data?.displays ?? []).find(
+          (entry) => entry.sourceId === created.sourceId,
+        );
+        if (!display && attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+        }
+      }
+      setError(null);
+      if (display) {
+        await openDisplay(display);
+      } else {
+        setError(new LocalizedError("errExtNotListed").format());
+      }
+    } catch (cause) {
+      setError(formatErrorMessage(cause));
+    } finally {
+      setCreatingExtension(false);
+    }
+  }, [openDisplay, refetchCatalog]);
+
   const visibleError =
     error ||
     streamError ||
@@ -942,6 +1030,9 @@ export function useCatalogModel() {
 
   return {
     displays,
+    creatingExtension,
+    panelShortSide,
+    handleCreateExtensionDisplay,
     effectiveNextEncoderExperiment,
     effectiveUdpStability,
     handleApplyUdpStability,

@@ -358,8 +358,20 @@ pub extern "C" fn leftcar_jni_attach_port_presentation(
         let instance_str = unsafe { CStr::from_ptr(instance_c) }
             .to_string_lossy()
             .into_owned();
-        if resume_owned_single_renderer(state_key, &instance_str, port, &host, width, height, fps, surface as usize) {
-            log_info!("resumed existing media transport on replacement Surface for {}", instance_str);
+        if resume_owned_single_renderer(
+            state_key,
+            &instance_str,
+            port,
+            &host,
+            width,
+            height,
+            fps,
+            surface as usize,
+        ) {
+            log_info!(
+                "resumed existing media transport on replacement Surface for {}",
+                instance_str
+            );
             return LEFTCAR_OK;
         }
         let tcp_bridge = take_media_bridge(port);

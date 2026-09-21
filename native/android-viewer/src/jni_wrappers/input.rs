@@ -3,9 +3,14 @@ use super::*;
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_sendInputLanguage(
-    env: *mut JNIEnv, _class: *mut jobject, instance: *mut jobject, language: i32,
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    instance: *mut jobject,
+    language: i32,
 ) -> i32 {
-    let Some(c) = (unsafe { get_utf(env, instance) }) else { return 1; };
+    let Some(c) = (unsafe { get_utf(env, instance) }) else {
+        return 1;
+    };
     unsafe { leftcar_jni_input_language(c.as_ptr(), language as u32) }
 }
 

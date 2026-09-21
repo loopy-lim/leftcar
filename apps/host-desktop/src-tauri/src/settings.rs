@@ -245,7 +245,11 @@ fn validate_experiment(experiment: &ExperimentSettings) -> Result<(), String> {
     };
     check("maxEncodeInFlight", experiment.max_encode_in_flight, 1..=5)?;
     check("queueMaxAgeMs", experiment.queue_max_age_ms, 0..=120_000)?;
-    check("sndbufBytes", experiment.sndbuf_bytes, 64 * 1024..=2 * 1024 * 1024)?;
+    check(
+        "sndbufBytes",
+        experiment.sndbuf_bytes,
+        64 * 1024..=2 * 1024 * 1024,
+    )?;
     check("drlWindowMs", experiment.drl_window_ms, 50..=1000)?;
     check("pacingBudgetPct", experiment.pacing_budget_pct, 30..=100)?;
     Ok(())
@@ -255,9 +259,7 @@ fn validate_experiment(experiment: &ExperimentSettings) -> Result<(), String> {
 /// shim 기본값이 그대로 쓰인다. 문자열 형식은 shim 파서(Int/Double init,
 /// FRAME_TRACE는 "1" 비교)와 정확히 맞춘다. shim은 스트림 시작마다 읽으므로
 /// 주입은 앱 시작 때와 설정 변경 때 하면 충분하다.
-pub fn experiment_env_vars(
-    experiment: &ExperimentSettings,
-) -> Vec<(&'static str, String)> {
+pub fn experiment_env_vars(experiment: &ExperimentSettings) -> Vec<(&'static str, String)> {
     let mut vars = Vec::new();
     if let Some(limit) = experiment.max_encode_in_flight {
         vars.push(("LEFTCAR_MAX_ENCODE_IN_FLIGHT", limit.to_string()));
@@ -483,11 +485,9 @@ mod tests {
                 ..shared.experiment()
             })
             .unwrap();
-        assert!(
-            !experiment_env_vars(&shared.experiment())
-                .iter()
-                .any(|(key, _)| *key == "LEFTCAR_QUEUE_MAX_AGE_MS")
-        );
+        assert!(!experiment_env_vars(&shared.experiment())
+            .iter()
+            .any(|(key, _)| *key == "LEFTCAR_QUEUE_MAX_AGE_MS"));
         let _ = std::fs::remove_file(&path);
     }
 

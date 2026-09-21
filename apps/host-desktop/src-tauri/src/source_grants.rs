@@ -75,8 +75,10 @@ pub struct GrantView {
     pub source_ids: Vec<String>,
     pub revision: u64,
     pub review_required: bool,
-    /// Standing remote-input approval for this device. Screen grants and the
-    /// input approval are separate decisions: viewing never implies input.
+    /// Standing remote-input approval for this device (effective value). Input
+    /// is allowed by default for reviewed devices (2026-09-21 product call);
+    /// `None` means "no explicit decision" and follows that default, while a
+    /// stored `Some(false)` keeps an operator denial across restarts.
     pub input: bool,
     pub persistence_error: Option<String>,
 }
@@ -85,9 +87,12 @@ struct Record {
     source_ids: Vec<String>,
     revision: u64,
     reviewed: bool,
-    /// 기기별 상시 원격 입력 승인. 화면 승인과 달리 기본값은 꺼짐이다.
+    /// 기기별 상시 원격 입력 결정. None=명시 결정 없음(기본 허용 — 2026-09-21
+    /// 제품 결정, 페어링 승인 자체가 신뢰 표현이므로 입력도 기본 허용한다),
+    /// Some(false)=운용자 명시 거부(재시작 후에도 유지), Some(true)=명시 허용.
+    /// 구저널의 true/false는 Some(true)/Some(false)로 읽힌다.
     #[serde(default)]
-    input: bool,
+    input: Option<bool>,
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -166,7 +171,7 @@ impl GrantStore {
             source_ids: record.source_ids,
             revision: record.revision,
             review_required: !record.reviewed,
-            input: record.input,
+            input: record.input.unwrap_or(true),
             persistence_error: self.errors.get(owner).cloned(),
         }
     }
@@ -179,15 +184,16 @@ impl GrantStore {
                 .is_some_and(|r| r.reviewed && r.source_ids.iter().any(|id| id == source))
     }
 
-    /// 상시 원격 입력 승인 여부. 승인은 호스트 재시작과 무관하게 유지된다
-    /// (2026-09-19 제품 결정) — 거부(input=false)도 마찬가지로 유지된다.
+    /// 상시 원격 입력 허용 여부. 기본 허용(2026-09-21) — 검토된(reviewer
+    /// 승인) 기기는 명시 거부가 없는 한 입력이 허용된다. 결정은 호스트
+    /// 재시작과 무관하게 유지된다(2026-09-19 제품 결정).
     pub fn input_allowed(&self, owner: &str) -> bool {
         !self.closed
             && self
                 .journal
                 .devices
                 .get(owner)
-                .is_some_and(|r| r.reviewed && r.input)
+                .is_some_and(|r| r.reviewed && r.input.unwrap_or(true))
     }
     pub fn access(&mut self, owner: &str, source: &str) -> Result<CaptureAccess, String> {
         if !self.allows(owner, source) {
@@ -239,7 +245,7 @@ impl GrantStore {
             source_ids: sources,
             revision: old.revision + 1,
             reviewed: true,
-            // 화면 목록 편집은 별개 결정인 입력 승인을 건드리지 않는다.
+            // 화면 목록 편집은 별개 결정인 입력 결정을 건드리지 않는다.
             input: old.input,
         };
         self.journal.devices.insert(owner.into(), next);
@@ -516,10 +522,8 @@ mod tests {
                 // 내구 지점에 따라 저널은 이전 승인(record 유지)이거나 이미
                 // 부분 확정된 차단(sources 비움)이다. 둘 다 마지막 확정 상태를
                 // 따른다. 정상 종료는 메모리 차단을 내구화하므로 거부 유지.
-                let durable: serde_json::Value = serde_json::from_str(
-                    &std::fs::read_to_string(&path).unwrap(),
-                )
-                .unwrap();
+                let durable: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 let record = &durable["devices"]["a"];
                 let durable_granted = record["reviewed"].as_bool().unwrap_or(false)
                     && record["source_ids"]

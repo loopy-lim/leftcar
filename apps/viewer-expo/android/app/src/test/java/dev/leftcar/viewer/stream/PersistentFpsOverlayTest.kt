@@ -90,12 +90,17 @@ class PersistentFpsOverlayTest {
         tick(2_500L, 14L)
         assertEquals(48.0, sample.displayedFps!!, 0.001)
 
-        // 죽은 틱이 창에서 나가면 정상 속도로 완전히 복귀한다.
+        // 죽은 틱이 창에서 나가면 정상 속도로 완전히 복귀한다 — EMA처럼 값이
+        // 달라붙지 않는다. 창이 8포인트라 죽은 틱은 그 뒤 샘플 8개가 쌓여야
+        // 빠져나간다(3_750에서는 여전히 48로 희석).
         tick(2_750L, 14L)
         tick(3_000L, 14L)
         tick(3_250L, 14L)
         tick(3_500L, 14L)
         tick(3_750L, 14L)
+        assertEquals(48.0, sample.displayedFps!!, 0.001)
+        tick(4_000L, 14L)
+        tick(4_250L, 14L)
         assertEquals(56.0, sample.displayedFps!!, 0.001)
     }
 

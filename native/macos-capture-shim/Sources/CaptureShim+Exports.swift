@@ -161,7 +161,7 @@ public func leftcarCaptureListDisplays() -> UnsafeMutablePointer<CChar> {
             candidates: activeDisplayIDs().map { (id: stableDisplaySourceID($0), value: $0) },
             index: displayIndex, sourceID: sourceID
         ) == selectedDisplay else { return abort("display identity changed during selection") }
-        started = session.setupScreenCaptureKit(filter: filter)
+        started = session.setupScreenCaptureKit(filter: filter, displayID: selectedDisplay)
     case .cgDisplayStream:
         started = session.setupCGDisplayStream(displayID: selectedDisplay)
     }

@@ -740,6 +740,8 @@ interface DisplayListItemProps {
   streamingPriority: StreamingPriority;
   /** LAN 밖 경로(테일넷·공인) — 시작 크기 표시가 실제 시작과 같아야 한다. */
   externalRoute: boolean;
+  /** 클라이언트 패널 단변 캡 — 카드 라벨도 열기 경로와 같은 크기를 보여준다. */
+  panelShortSide?: number;
   onOpen: (display: DisplayInfo) => void;
   onSwitch: (display: DisplayInfo) => void;
   styles: ReturnType<typeof createCatalogStyles>;
@@ -756,6 +758,7 @@ function DisplayListItem({
   profileSelection,
   streamingPriority,
   externalRoute,
+  panelShortSide,
   onOpen,
   onSwitch,
   styles,
@@ -772,7 +775,7 @@ function DisplayListItem({
     display,
     streamingPriority,
     resolveStreamMaximum(display, profileSelection),
-    { externalRoute },
+    { externalRoute, panelShortSide },
   );
   const isBusy = isLaunching || isSwitching;
   const isItemDisabled = disabled || isBusy || isActive;
@@ -1161,6 +1164,7 @@ export default function Catalog() {
           hasActiveStream={activeStream !== null}
           profileSelection={model.profileId}
           streamingPriority={model.streamingPriority}
+          panelShortSide={model.panelShortSide}
           externalRoute={model.externalMediaRoute}
           onOpen={model.openDisplay}
           onSwitch={handleSwitchDisplay}
@@ -1176,6 +1180,7 @@ export default function Catalog() {
       model.externalMediaRoute,
       model.launchingIndex,
       model.openDisplay,
+      model.panelShortSide,
       model.profileId,
       model.streams,
       model.streamingPriority,
@@ -1231,19 +1236,48 @@ export default function Catalog() {
           />
         }
         ListHeaderComponent={
-          <CatalogHeader
-            error={model.visibleError}
-            host={model.host}
-            loading={model.loading}
-            profileId={model.profileId}
-            refreshing={model.refreshing}
-            onRefresh={model.handleRefresh}
-            onSelectProfile={model.handleSelectProfile}
-            onOpenSettings={handleOpenSettings}
-            hasSettingsNotice={hasSettingsNotice}
-            styles={styles}
-            colors={colors}
-          />
+          <>
+            <CatalogHeader
+              error={model.visibleError}
+              host={model.host}
+              loading={model.loading}
+              profileId={model.profileId}
+              refreshing={model.refreshing}
+              onRefresh={model.handleRefresh}
+              onSelectProfile={model.handleSelectProfile}
+              onOpenSettings={handleOpenSettings}
+              hasSettingsNotice={hasSettingsNotice}
+              styles={styles}
+              colors={colors}
+            />
+            <Pressable
+              style={({ pressed }) => [
+                styles.displayCard,
+                pressed && styles.itemPressed,
+              ]}
+              onPress={() => void model.handleCreateExtensionDisplay()}
+              disabled={model.creatingExtension}
+              accessibilityRole="button"
+              accessibilityLabel={t.viewer.extCreateButton}
+            >
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  paddingVertical: 8,
+                }}
+              >
+                {model.creatingExtension ? (
+                  <ActivityIndicator color={colors.textPrimary} size="small" />
+                ) : (
+                  <Ionicons name="add-circle-outline" size={16} color={colors.textPrimary} />
+                )}
+                <Text style={styles.displayName}>{t.viewer.extCreateButton}</Text>
+              </View>
+            </Pressable>
+          </>
         }
         data={model.displays}
         keyExtractor={displayKey}

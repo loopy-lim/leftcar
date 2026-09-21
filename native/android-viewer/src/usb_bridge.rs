@@ -219,17 +219,39 @@ fn read_accessory(
                 // Only a sealed frame that opens under the session key with
                 // the LCH1 prefix is echoed to the Host; media stays sealed
                 // end to end and is opened by the renderer.
+                //
+                // The reachability challenge arrives once per session, before
+                // any media. Probe-opening later frames would consume their
+                // AEAD receive counters here while the renderer opens the
+                // same sealed frame again — every media datagram would then
+                // die as a replay. After establishment, forward every
+                // channel-1 frame sealed.
                 let crypto = media_crypto.lock().ok().and_then(|slot| slot.clone());
                 if let Some(crypto) = crypto {
-                    if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
-                        if let Some(reply) = crypto.seal(&plaintext) {
-                            let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply) else {
-                                break;
-                            };
-                            let Ok(mut output) = writer.lock() else { break };
-                            if output.write_all(&bytes).is_err() {
-                                break;
+                    if !crypto.is_established() {
+                        if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
+                            // The UDP preflight receiver marks the shared
+                            // instance established when it verifies the
+                            // sealed challenge (prepared_udp). The USB bridge
+                            // answers the same handshake, so it must set the
+                            // same gate here — without it every renderer
+                            // control send (initial IDR request, feedback,
+                            // probes) stays gated off and the host health
+                            // check kills the session at 6s.
+                            crypto.establish();
+                            if let Some(reply) = crypto.seal(&plaintext) {
+                                let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply)
+                                else {
+                                    break;
+                                };
+                                let Ok(mut output) = writer.lock() else { break };
+                                if output.write_all(&bytes).is_err() {
+                                    break;
+                                }
                             }
+                            // The echoed challenge is a control exchange, not
+                            // renderer media.
+                            continue;
                         }
                     }
                 }

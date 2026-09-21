@@ -56,7 +56,8 @@ fn clamp_to_long_edge(width: u32, height: u32) -> (u32, u32) {
         return (width, height);
     }
     let short = width.min(height);
-    let scaled_short = ((u64::from(short) * u64::from(MAX_LOGICAL_LONG_EDGE)) / u64::from(long)) as u32;
+    let scaled_short =
+        ((u64::from(short) * u64::from(MAX_LOGICAL_LONG_EDGE)) / u64::from(long)) as u32;
     let scaled_short = (scaled_short / 2) * 2;
     if width >= height {
         (MAX_LOGICAL_LONG_EDGE, scaled_short)
@@ -99,7 +100,8 @@ pub fn match_display_size(metrics: &ViewerDisplayMetrics) -> Option<MatchedDispl
         logical_height: height,
         scale: 1,
     };
-    if fallback.logical_width >= MIN_LOGICAL_WIDTH && fallback.logical_height >= MIN_LOGICAL_HEIGHT {
+    if fallback.logical_width >= MIN_LOGICAL_WIDTH && fallback.logical_height >= MIN_LOGICAL_HEIGHT
+    {
         let (width, height) = clamp_to_long_edge(fallback.logical_width, fallback.logical_height);
         return Some(MatchedDisplaySize {
             logical_width: width,
@@ -231,7 +233,11 @@ impl VirtualDisplayManager {
             supported: false,
             reason: Some("probe unavailable".into()),
         });
-        (probe.supported, probe.reason, state.current.as_ref().map(LiveVirtualDisplay::public))
+        (
+            probe.supported,
+            probe.reason,
+            state.current.as_ref().map(LiveVirtualDisplay::public),
+        )
     }
 
     /// 최근 제거한 source id — 창 안에 있으면 아직 시스템에 남아 있다.
@@ -282,7 +288,10 @@ impl VirtualDisplayManager {
         let live = LiveVirtualDisplay {
             display_id: value["displayId"].as_u64().unwrap_or_default() as u32,
             source_id: value["sourceId"].as_str().map(str::to_owned),
-            name: value["name"].as_str().unwrap_or("Leftcar Display").to_owned(),
+            name: value["name"]
+                .as_str()
+                .unwrap_or("Leftcar Display")
+                .to_owned(),
             logical_width: value["logicalWidth"].as_u64().unwrap_or_default() as u32,
             logical_height: value["logicalHeight"].as_u64().unwrap_or_default() as u32,
             scale: value["scale"].as_u64().unwrap_or(scale as u64) as u32,
@@ -353,7 +362,10 @@ impl VirtualDisplayManager {
             serde_json::from_str(&json).map_err(|e| format!("bad probe json: {e}"))?;
         Ok(ProbeOutcome {
             supported: value["supported"].as_bool().unwrap_or(false),
-            reason: value["reason"].as_str().filter(|r| !r.is_empty()).map(str::to_owned),
+            reason: value["reason"]
+                .as_str()
+                .filter(|r| !r.is_empty())
+                .map(str::to_owned),
         })
     }
 
@@ -374,11 +386,18 @@ impl VirtualDisplayManager {
         let name = CString::new("Leftcar Display").map_err(|e| e.to_string())?;
         unsafe {
             let create: Symbol<
-                unsafe extern "C" fn(u32, u32, u32, *const std::ffi::c_char) -> *mut std::ffi::c_char,
+                unsafe extern "C" fn(
+                    u32,
+                    u32,
+                    u32,
+                    *const std::ffi::c_char,
+                ) -> *mut std::ffi::c_char,
             > = lib
                 .get(b"leftcar_vdisp_create_v1")
                 .map_err(|e| format!("create symbol unavailable: {e}"))?;
-            Ok(take_json_with(lib, || create(logical_width, logical_height, scale, name.as_ptr())))
+            Ok(take_json_with(lib, || {
+                create(logical_width, logical_height, scale, name.as_ptr())
+            }))
         }
     }
 
@@ -388,7 +407,9 @@ impl VirtualDisplayManager {
             return false;
         };
         unsafe {
-            let Ok(destroy) = lib.get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_vdisp_destroy_v1") else {
+            let Ok(destroy) =
+                lib.get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_vdisp_destroy_v1")
+            else {
                 return false;
             };
             // 0 = 목록에서 사라짐, 2 = 폴링 창(~10s) 안에 못 사라짐(곧 사라짐).
@@ -444,7 +465,9 @@ fn take_json_with(
     if ptr.is_null() {
         return String::new();
     }
-    let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    let owned = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
     if let Ok(free) = unsafe {
         lib.get::<unsafe extern "C" fn(*mut std::ffi::c_char)>(b"leftcar_capture_free_string")
     } {

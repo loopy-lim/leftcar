@@ -604,19 +604,33 @@ pub(crate) fn detach_owned_renderer(state: usize, instance: &str) -> bool {
 /// native window after the decoder has acknowledged suspension.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resume_owned_single_renderer(
-    state: usize, instance: &str, port: u16, host: &str,
-    width: u32, height: u32, fps: u32, window: usize,
+    state: usize,
+    instance: &str,
+    port: u16,
+    host: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    window: usize,
 ) -> bool {
-    let Some(control) = owned_renderer(state, instance) else { return false; };
+    let Some(control) = owned_renderer(state, instance) else {
+        return false;
+    };
     if control.is_split() || control.port != port || window == 0
         || control.stop.load(Ordering::SeqCst) || control.finished.load(Ordering::SeqCst)
         || !control.suspend.load(Ordering::SeqCst) || !control.suspended.load(Ordering::SeqCst)
         || !active_renderer(instance).is_some_and(|active| Arc::ptr_eq(&active, &control))
         // A newly prepared session must use its new media key and handshake.
-        || media_crypto_for(port).is_some() { return false; }
+        || media_crypto_for(port).is_some()
+    {
+        return false;
+    }
     let mut target = control.single_surface.lock().unwrap();
-    let Some(target) = target.as_mut() else { return false; };
-    if target.host != host || target.width != width || target.height != height || target.fps != fps {
+    let Some(target) = target.as_mut() else {
+        return false;
+    };
+    if target.host != host || target.width != width || target.height != height || target.fps != fps
+    {
         return false;
     }
     target.window = window;
@@ -713,6 +727,25 @@ pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
     })
 }
 
+/// `take_media_bridge`의 대칭 연산: 탈착(transient detach)으로 워커가
+/// 종료될 때 살아있는 세션의 미디어 경로를 되돌려 놓아, 같은 포트로
+/// 재실행되는 워커가 브리지를 다시 클레임할 수 있게 한다. TCP 브리지는
+/// 포트 키 슬롯으로, USB 브리지는 전역 슬롯으로 반환한다.
+pub(crate) fn return_media_bridge_for_rebind(port: u16, bridge: MediaBridge) {
+    match bridge {
+        MediaBridge::Tcp(tcp) => {
+            PREPARED_TCP_BRIDGES
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(port, tcp);
+        }
+        MediaBridge::Usb(usb) => {
+            *PREPARED_USB_BRIDGE.lock().unwrap() = Some(usb);
+        }
+    }
+}
+
 /// Build (or reuse) the one media-crypto instance for `port`. `key` must be
 /// the viewer-generated session key; a re-prepare with a different key
 /// replaces the instance, which is safe because the host cannot send any
@@ -725,6 +758,18 @@ pub(crate) fn register_media_crypto(port: u16, key: &[u8; 32]) -> SharedMediaCry
         .get_or_insert_with(HashMap::new)
         .insert(port, Arc::clone(&crypto));
     crypto
+}
+
+/// 탈착(transient detach) 종료가 라이브 세션의 크립토 인스턴스를 그대로
+/// 되돌려 놓는다. 키로 새 인스턴스를 만들면 안 된다: 첼린지 확립 상태와
+/// AEAD 송신 카운터가 리셋되어 재바인드의 초기 IDR 요청이 막히고 피드백이
+/// 호스트 리플레이 창에 걸려 세션이 헬스체크로 죽는다.
+pub(crate) fn rebind_media_crypto(port: u16, crypto: &SharedMediaCrypto) {
+    MEDIA_CRYPTO
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(port, Arc::clone(crypto));
 }
 
 /// Register를 소모하지 않고 등록된 크립토를 조회한다(재바인드 폴백용).
@@ -902,22 +947,78 @@ mod renderer_lifecycle_tests {
         let mut control = RendererControl::new_split(52_301, 60);
         control.split = false;
         *control.single_surface.lock().unwrap() = Some(SingleSurface {
-            host: "100.80.133.120".into(), width: 2560, height: 1440, fps: 60, window: 42,
+            host: "100.80.133.120".into(),
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            window: 42,
         });
         let control = Arc::new(control);
         control.suspend.store(true, Ordering::SeqCst);
         control.suspended.store(true, Ordering::SeqCst);
-        control.input.lock().unwrap().push(InputEvent::InputLanguage { language: 2 });
+        control
+            .input
+            .lock()
+            .unwrap()
+            .push(InputEvent::InputLanguage { language: 2 });
         let pending = control.input.lock().unwrap().next_ready(1).unwrap();
         install_renderer(name, Arc::clone(&control));
         bind_owned_renderer(902, name, Arc::clone(&control));
-        assert!(!resume_owned_single_renderer(901, name, 52_301, "100.80.133.120", 2560, 1440, 60, 43));
-        assert!(!resume_owned_single_renderer(902, name, 52_301, "192.168.0.1", 2560, 1440, 60, 43));
-        assert!(!resume_owned_single_renderer(902, name, 52_301, "100.80.133.120", 3840, 2160, 60, 43));
-        assert!(resume_owned_single_renderer(902, name, 52_301, "100.80.133.120", 2560, 1440, 60, 43));
+        assert!(!resume_owned_single_renderer(
+            901,
+            name,
+            52_301,
+            "100.80.133.120",
+            2560,
+            1440,
+            60,
+            43
+        ));
+        assert!(!resume_owned_single_renderer(
+            902,
+            name,
+            52_301,
+            "192.168.0.1",
+            2560,
+            1440,
+            60,
+            43
+        ));
+        assert!(!resume_owned_single_renderer(
+            902,
+            name,
+            52_301,
+            "100.80.133.120",
+            3840,
+            2160,
+            60,
+            43
+        ));
+        assert!(resume_owned_single_renderer(
+            902,
+            name,
+            52_301,
+            "100.80.133.120",
+            2560,
+            1440,
+            60,
+            43
+        ));
         assert!(!control.suspend.load(Ordering::SeqCst));
-        assert_eq!(control.single_surface.lock().unwrap().as_ref().unwrap().window, 43);
-        assert_eq!(control.input.lock().unwrap().next_ready(20_001).unwrap(), pending);
+        assert_eq!(
+            control
+                .single_surface
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .window,
+            43
+        );
+        assert_eq!(
+            control.input.lock().unwrap().next_ready(20_001).unwrap(),
+            pending
+        );
         remove_renderer_if_current(name, &control);
         forget_owned_renderer(902, name, &control);
         clear_cached_termination(name);
@@ -1180,6 +1281,28 @@ mod split_receiver_tests {
         let right = bind_prepared();
         assert!(take_split_receivers(left.port().unwrap(), right.port().unwrap(), HOST).is_none());
         assert_eq!(store_len(), before);
+    }
+
+    /// 탈착(transient detach) 후 재바인드 크립토 수명: 첫 클레임의 take로
+    /// 소비된 세션 키가 worker 종료 시 반납(register)되면 같은 포트의 재바인드
+    /// 클레임이 다시 찾을 수 있어야 한다. 반납 없이는 "no session media
+    /// crypto" 루프로 재바인드가 죽는다.
+    #[test]
+    fn rebind_crypto_survives_claim_then_take_via_worker_return() {
+        let _serial = STORE_LOCK.lock().unwrap();
+        let port = 41891_u16;
+        let key = [0x5bu8; 32];
+        register_media_crypto(port, &key);
+        // 첫 렌더러 클레임(prepared 리스너 경로)이 키를 소비한다.
+        assert!(take_media_crypto(port).is_some());
+        // 반납 전 재바인드는 실패 — 구 결함의 재현.
+        assert!(take_media_crypto(port).is_none());
+        // worker의 탈착 종료가 키를 되돌려 놓는다.
+        register_media_crypto(port, &key);
+        // 재바인드 클레임이 성공한다.
+        assert!(take_media_crypto(port).is_some());
+        // 정리.
+        take_media_crypto(port);
     }
 }
 

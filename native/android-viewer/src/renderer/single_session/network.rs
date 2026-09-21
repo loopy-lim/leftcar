@@ -10,7 +10,8 @@ pub(super) struct MediaBatch {
 pub(super) fn recv_media_batch(
     socket: &std::net::UdpSocket,
     buffers: &mut [[u8; crate::media_datagram::MEDIA_BUFFER_BYTES]; MEDIA_BATCH_SIZE],
-) -> std::io::Result<MediaBatch> {    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
+) -> std::io::Result<MediaBatch> {
+    let mut peers: [libc::sockaddr_in; MEDIA_BATCH_SIZE] = unsafe { std::mem::zeroed() };
     let mut iovecs: [libc::iovec; MEDIA_BATCH_SIZE] = std::array::from_fn(|index| libc::iovec {
         iov_base: buffers[index].as_mut_ptr().cast(),
         iov_len: crate::media_datagram::MEDIA_BUFFER_BYTES,
@@ -193,7 +194,9 @@ pub(super) fn consume_viewer_response(
         return true;
     }
     if let Some(supported) = crate::input_protocol::parse_input_language_capability(packet) {
-        control.input_language_supported.store(supported, Ordering::SeqCst);
+        control
+            .input_language_supported
+            .store(supported, Ordering::SeqCst);
         return true;
     }
     false

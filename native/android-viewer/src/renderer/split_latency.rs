@@ -325,7 +325,8 @@ impl TileLatencyTelemetry {
     }
 
     pub fn note_capture(&mut self, pts_us: i64, capture_wall_ms: Option<u64>) {
-        self.output_metadata.observe(pts_us, capture_wall_ms, true, None, 0);
+        self.output_metadata
+            .observe(pts_us, capture_wall_ms, true, None, 0);
     }
 
     /// Records feed -> ready. When this output is the first one after a
@@ -352,12 +353,14 @@ impl TileLatencyTelemetry {
         if let Some(ready_us) = ready_us {
             self.ready_to_release_us.record(ready_us);
         }
-        self.output_metadata.observe(0, None, false, Some(pts_us), 1)
+        self.output_metadata
+            .observe(0, None, false, Some(pts_us), 1)
     }
 
     pub fn note_discarded(&mut self, pts_us: i64) {
         self.traces.note_discarded(pts_us);
-        self.output_metadata.observe(0, None, false, Some(pts_us), 1);
+        self.output_metadata
+            .observe(0, None, false, Some(pts_us), 1);
     }
 
     pub fn note_frozen_input(&mut self) {

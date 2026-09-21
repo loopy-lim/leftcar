@@ -91,7 +91,8 @@ mod tests {
     use super::*;
 
     fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("leftcar-window-metrics-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("leftcar-window-metrics-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -99,10 +100,21 @@ mod tests {
     #[test]
     fn reported_size_roundtrips_within_process() {
         let store = WindowMetricsStore::open(None);
-        store.set("owner-a", WindowSizeView { width_px: 1942, height_px: 1092 }).unwrap();
+        store
+            .set(
+                "owner-a",
+                WindowSizeView {
+                    width_px: 1942,
+                    height_px: 1092,
+                },
+            )
+            .unwrap();
         assert_eq!(
             store.get("owner-a"),
-            Some(WindowSizeView { width_px: 1942, height_px: 1092 })
+            Some(WindowSizeView {
+                width_px: 1942,
+                height_px: 1092
+            })
         );
         assert_eq!(store.get("owner-b"), None);
     }
@@ -112,12 +124,23 @@ mod tests {
         let dir = tempdir();
         let path = dir.join("window_metrics.json");
         let store = WindowMetricsStore::open(Some(path.clone()));
-        store.set("owner-a", WindowSizeView { width_px: 1600, height_px: 900 }).unwrap();
+        store
+            .set(
+                "owner-a",
+                WindowSizeView {
+                    width_px: 1600,
+                    height_px: 900,
+                },
+            )
+            .unwrap();
         drop(store);
         let reopened = WindowMetricsStore::open(Some(path));
         assert_eq!(
             reopened.get("owner-a"),
-            Some(WindowSizeView { width_px: 1600, height_px: 900 })
+            Some(WindowSizeView {
+                width_px: 1600,
+                height_px: 900
+            })
         );
     }
 
@@ -126,9 +149,25 @@ mod tests {
         let dir = tempdir();
         let path = dir.join("window_metrics.json");
         let store = WindowMetricsStore::open(Some(path.clone()));
-        store.set("owner-a", WindowSizeView { width_px: 1600, height_px: 900 }).unwrap();
+        store
+            .set(
+                "owner-a",
+                WindowSizeView {
+                    width_px: 1600,
+                    height_px: 900,
+                },
+            )
+            .unwrap();
         let first = std::fs::metadata(&path).unwrap().modified().unwrap();
-        store.set("owner-a", WindowSizeView { width_px: 1600, height_px: 900 }).unwrap();
+        store
+            .set(
+                "owner-a",
+                WindowSizeView {
+                    width_px: 1600,
+                    height_px: 900,
+                },
+            )
+            .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first);
     }
 

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  capTargetToPanelShortSide,
   CLARITY_STREAM_SHORT_SIDE,
   isStreamingPriority,
+  panelShortSideCap,
   RESPONSIVE_STREAM_SHORT_SIDE,
   resolveInitialStreamTarget,
   resolveStreamingTarget,
@@ -305,5 +307,64 @@ describe("resolveInitialStreamTarget external route", () => {
       resolveInitialStreamTarget(display, "responsive", undefined, { externalRoute: false })
         .height,
     ).toBe(RESPONSIVE_STREAM_SHORT_SIDE);
+  });
+});
+
+describe("client panel fitting", () => {
+  it("caps the short side at the client panel so HiDPI sources stream 1:1", () => {
+    const vdisp = { width: 2560, height: 1600 };
+    expect(
+      resolveInitialStreamTarget(vdisp, "responsive", vdisp, { panelShortSide: 1600 }),
+    ).toEqual({ width: 2560, height: 1600, fps: STREAM_TARGET_FPS });
+  });
+
+  it("fits larger sources to the panel short side without upscaling smaller ones", () => {
+    const display4K = { width: 3840, height: 2160 };
+    expect(
+      resolveInitialStreamTarget(display4K, "responsive", display4K, { panelShortSide: 1600 }),
+    ).toEqual({ width: 2844, height: 1600, fps: STREAM_TARGET_FPS });
+    const small = { width: 1280, height: 800 };
+    expect(
+      resolveInitialStreamTarget(small, "responsive", small, { panelShortSide: 1600 }),
+    ).toEqual({ width: 1280, height: 800, fps: STREAM_TARGET_FPS });
+  });
+
+  it("still applies the external route clamp below the panel cap", () => {
+    const display4K = { width: 3840, height: 2160 };
+    expect(
+      resolveInitialStreamTarget(display4K, "responsive", display4K, {
+        panelShortSide: 1600,
+        externalRoute: true,
+      }),
+    ).toEqual({ width: 1920, height: 1080, fps: STREAM_TARGET_FPS });
+  });
+});
+
+describe("panelShortSideCap", () => {
+  it("accepts sane panels and rejects missing or implausible metrics", () => {
+    expect(panelShortSideCap(undefined)).toBeUndefined();
+    expect(panelShortSideCap({ width: 2560, height: 1600 })).toBe(1600);
+    expect(panelShortSideCap({ width: 1920, height: 1080 })).toBe(1080);
+    expect(panelShortSideCap({ width: 864, height: 891 })).toBeUndefined();
+    expect(panelShortSideCap({ width: 4096, height: 2304 })).toBeUndefined();
+    expect(panelShortSideCap({ width: 0, height: 0 })).toBeUndefined();
+  });
+});
+
+describe("capTargetToPanelShortSide", () => {
+  it("shrinks the adaptive maximum to the panel and leaves smaller targets alone", () => {
+    expect(capTargetToPanelShortSide({ width: 3840, height: 2160, fps: 60 }, 1600)).toEqual({
+      width: 2844,
+      height: 1600,
+      fps: 60,
+    });
+    expect(capTargetToPanelShortSide({ width: 2560, height: 1600, fps: 60 }, 1600)).toEqual({
+      width: 2560,
+      height: 1600,
+      fps: 60,
+    });
+    expect(
+      capTargetToPanelShortSide({ width: 3840, height: 2160, fps: 60 }, undefined),
+    ).toEqual({ width: 3840, height: 2160, fps: 60 });
   });
 });

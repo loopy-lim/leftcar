@@ -63,31 +63,10 @@ function PairingNetworkCard({
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
-    <div
-      className="pairing-status-card"
-      style={{
-        background: "var(--bg-surface-subtle)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: 12,
-        padding: "14px 16px",
-        marginBottom: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: "var(--color-emerald-500, #10b981)",
-              boxShadow: "0 0 8px rgba(16, 185, 129, 0.4)",
-              display: "inline-block",
-            }}
-          />
+    <div className="pairing-network-card">
+      <div className="pairing-network-status-row">
+        <div className="pairing-network-status-indicator">
+          <span className="pairing-status-dot" />
           <strong style={{ fontSize: 13, color: "var(--text-primary)" }}>
             {t.host.remoteReady}
           </strong>
@@ -114,22 +93,12 @@ function PairingNetworkCard({
         </button>
       </div>
 
-      <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.4 }}>
+      <p className="pairing-network-card-desc">
         {t.host.remoteReadyDesc}
       </p>
 
       {showAdvanced && (
-        <div
-          style={{
-            marginTop: 4,
-            paddingTop: 10,
-            borderTop: "1px dashed var(--border-subtle)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            fontSize: 12,
-          }}
-        >
+        <div className="pairing-advanced-details">
           <span style={{ color: "var(--text-secondary)" }}>
             {t.host.localLanAddress}:{" "}
             <code style={{ color: "var(--text-primary)", fontWeight: 600 }}>
