@@ -4,6 +4,28 @@ import CoreGraphics
 @main
 struct CursorStreamTests {
     static func main() {
+        // Reposition an already streaming display without recreating its cursor
+        // coordinator. Production observations must use the new global bounds.
+        var target = sockaddr_in()
+        target.sin_family = sa_family_t(AF_INET)
+        let movedSession = CaptureSession(targetAddr: target, targetPort: 0,
+            targetLabel: "placement-test", width: 1280, height: 800, fps: 60,
+            backend: .screenCaptureKit,
+            udpStability: AppliedUdpStability(profile: .auto, burstDatagrams: 4,
+                fecParityShards: 2, adaptivePacing: false),
+            mediaKey: Data(repeating: 7, count: 32))
+        movedSession.inputBounds = CGRect(x: 1920, y: 0, width: 1280, height: 800)
+        movedSession.cursorCoordinator = CursorStreamCoordinator(fps: 60, bounds: movedSession.inputBounds!)
+        movedSession.cursorCoordinator?.setEnabled(true)
+        movedSession.inputBounds = CGRect(x: -1280, y: -100, width: 1280, height: 800)
+        movedSession.observeCursorPosition(CGPoint(x: -640, y: 300))
+        let movedPacket = movedSession.cursorCoordinator!.packetDue(nowUs: 1)!
+        precondition(UInt16(movedPacket[8]) << 8 | UInt16(movedPacket[9]) == 32768,
+                     "cursor must normalize against the moved display, not startup bounds")
+        precondition(movedPacket[12] == 1, "cursor in moved display stays visible")
+        let edge = movedSession.pointerPosition(x: .max, y: .max)!
+        precondition(movedSession.inputBounds!.contains(edge),
+                     "touching the last pixel must not click an adjacent display")
         let contentRect = CGRect(x: 0, y: 0, width: 1920, height: 1200)
 
         // Wire format: LCD1 | seq u32 BE | x u16 BE | y u16 BE | vis u8 | shape u8

@@ -123,13 +123,29 @@ extension CaptureSession {
         return true
     }
 
-     func pointerPosition(x: UInt16, y: UInt16) -> CGPoint? {
+    /// Input and the cursor plane share live global display coordinates. A
+    /// display can move while capture keeps running (System Settings or Leftcar).
+    func currentInputBounds() -> CGRect? {
+        stateLock.lock()
+        let displayID = restartDisplayID
+        stateLock.unlock()
+        if let displayID {
+            guard CGDisplayIsActive(displayID) == 1 else { return nil }
+            let current = CGDisplayBounds(displayID)
+            return current.isEmpty || current.isNull ? nil : current
+        }
         inputLock.lock()
         let bounds = inputBounds
         inputLock.unlock()
-        guard let bounds else { return nil }
-        let px = bounds.origin.x + CGFloat(x) / CGFloat(UInt16.max) * bounds.width
-        let py = bounds.origin.y + CGFloat(y) / CGFloat(UInt16.max) * bounds.height
+        return bounds
+    }
+
+     func pointerPosition(x: UInt16, y: UInt16) -> CGPoint? {
+        guard let bounds = currentInputBounds(), !bounds.isEmpty else { return nil }
+        // CGRect's max edge is exclusive: the last normalized pixel must not
+        // fall onto the adjacent monitor, including at negative origins.
+        let px = bounds.origin.x + CGFloat(x) / CGFloat(UInt16.max) * max(0, bounds.width - 1)
+        let py = bounds.origin.y + CGFloat(y) / CGFloat(UInt16.max) * max(0, bounds.height - 1)
         return CGPoint(x: px, y: py)
     }
 

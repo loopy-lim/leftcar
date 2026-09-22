@@ -93,7 +93,7 @@ func listAllDisplays() {
     }
 }
 
-func destroy() {
+func destroy(exitAfter: Bool = true) {
     typealias Fn = @convention(c) (UInt32) -> Int32
     guard let sym = symbol("leftcar_vdisp_destroy_v1") else {
         print("destroy: bridge symbol missing")
@@ -111,7 +111,8 @@ func destroy() {
     }
     let rc = unsafeBitCast(sym, to: Fn.self)(displayId)
     print("destroy(\(displayId)): rc=\(rc) (0=gone, 1=not-ours, 2=still-active-timeout)")
-    exit(rc == 0 ? 0 : 1)
+    if rc != 0 { exit(1) }
+    if exitAfter { exit(0) }
 }
 
 func cycle(_ args: [String]) {
@@ -245,6 +246,81 @@ let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : "probe"
 switch command {
 case "probe": probe()
+case "verify-mode":
+    guard args.count == 6, let id = UInt32(args[2]), let width = Int(args[3]),
+          let height = Int(args[4]), let scale = Int(args[5]),
+          let mode = CGDisplayCopyDisplayMode(id) else { exit(2) }
+    let bounds = CGDisplayBounds(id)
+    guard Int(bounds.width) == width, Int(bounds.height) == height,
+          mode.width == width, mode.height == height,
+          mode.pixelWidth == width * scale, mode.pixelHeight == height * scale else {
+        print("FAIL mode: bounds=\(bounds), mode=\(mode.width)x\(mode.height), pixels=\(mode.pixelWidth)x\(mode.pixelHeight)")
+        exit(1)
+    }
+    print("PASS external mode: \(width)x\(height) @\(scale)")
+case "verify-lifecycle", "verify-placement", "verify-placement-after-resize":
+    let mainBefore = CGMainDisplayID()
+    let modeArgs = args.count >= 5 ? Array(args[2...4]) : ["1280", "800", "2"]
+    if command == "verify-placement-after-resize" {
+        let previousMode = args.count >= 8 ? Array(args[5...7]) : ["1600", "1000", "1"]
+        create([args[0], "create"] + previousMode)
+        destroy(exitAfter: false)
+    }
+    create([args[0], "create"] + modeArgs)
+    guard let json = callStringFn("leftcar_vdisp_status_v1"),
+          let data = json.data(using: .utf8),
+          let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let displays = payload["displays"] as? [[String: Any]],
+          let displayID = (displays.first?["displayId"] as? NSNumber)?.uint32Value,
+          let sym = symbol("leftcar_vdisp_destroy_v1") else { exit(2) }
+    typealias DestroyFn = @convention(c) (UInt32) -> Int32
+    if command == "verify-placement" || command == "verify-placement-after-resize" {
+        typealias ArrangeFn = @convention(c) (UInt32, UInt32) -> Int32
+        guard let arrange = symbol("leftcar_vdisp_arrange_v1") else {
+            print("FAIL placement: arrangement is unavailable")
+            exit(1)
+        }
+        let mainBounds = CGDisplayBounds(mainBefore)
+        // Start with a negative origin: placing right first can settle a stale
+        // desktop size and hide the first-placement gap after recreation.
+        for side: UInt32 in [1, 2, 3, 0] {
+            let rc = unsafeBitCast(arrange, to: ArrangeFn.self)(displayID, side)
+            let bounds = CGDisplayBounds(displayID)
+            let correctEdge = side == 0 ? bounds.minX == mainBounds.maxX
+                : side == 1 ? bounds.maxX == mainBounds.minX
+                : side == 2 ? bounds.maxY == mainBounds.minY
+                : bounds.minY == mainBounds.maxY
+            guard rc == 0, correctEdge, CGMainDisplayID() == mainBefore,
+                  CGDisplayBounds(mainBefore) == mainBounds else {
+                print("FAIL placement: side=\(side), result=\(rc), bounds=\(bounds)")
+                let external = Process()
+                external.executableURL = URL(fileURLWithPath: args[0])
+                external.arguments = ["list"]
+                try? external.run()
+                external.waitUntilExit()
+                exit(1)
+            }
+            // The creator's mode cache may be stale or empty after recreation.
+            // A fresh process checks that placement did not revert Retina scale.
+            let external = Process()
+            external.executableURL = URL(fileURLWithPath: args[0])
+            external.arguments = ["verify-mode", String(displayID)] + modeArgs
+            try external.run()
+            external.waitUntilExit()
+            guard external.terminationStatus == 0 else { exit(1) }
+        }
+        print("PASS placement: all four sides; main display unchanged")
+    }
+    let result = unsafeBitCast(sym, to: DestroyFn.self)(displayID)
+    var activeIDs = [CGDirectDisplayID](repeating: 0, count: 32)
+    var activeCount: UInt32 = 0
+    let listed = CGGetActiveDisplayList(32, &activeIDs, &activeCount) == .success
+    let stillActive = activeIDs.prefix(Int(activeCount)).contains(displayID)
+    guard result == 0, listed, !stillActive, CGMainDisplayID() == mainBefore else {
+        print("FAIL lifecycle: destroy=\(result), active=\(stillActive), primaryPreserved=\(CGMainDisplayID() == mainBefore)")
+        exit(1)
+    }
+    print("PASS lifecycle: display removed and primary preserved")
 case "create": create(args)
 case "status": status()
 case "list": listAllDisplays()

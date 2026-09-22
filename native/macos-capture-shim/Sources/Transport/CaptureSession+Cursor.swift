@@ -316,13 +316,10 @@ extension CaptureSession {
     /// input path (`pointerPosition` in CaptureSession+Input) inherits the
     /// same limitation, so this is not a regression, but on a scaled Retina
     /// display the pre-capture fallback would skew normalization.
-    /// Frozen after first observation: the coordinator keeps its creation
-    /// bounds for the stream's lifetime, so a later display reconfiguration
-    /// degrades to stale-frame normalization rather than misfiring.
+    /// Read again for every observation so moving a display also moves the
+    /// cursor normalization rect without restarting the stream.
     private func capturedContentRect() -> CGRect {
-        inputLock.lock()
-        let bounds = inputBounds
-        inputLock.unlock()
+        let bounds = currentInputBounds()
         return bounds ?? CGRect(
             x: 0,
             y: 0,
@@ -351,8 +348,10 @@ extension CaptureSession {
     /// the rect, so an off-rect cursor must arrive as visible=0 or the
     /// viewer's overlay would stick to the clamped corner.
      func observeCursorPosition(_ position: CGPoint) {
-        let onScreen = capturedContentRect().contains(position)
+        let bounds = capturedContentRect()
+        let onScreen = bounds.contains(position)
         cursorLock.lock()
+        cursorCoordinator?.updateBounds(bounds)
         cursorCoordinator?.note(position: position, visible: onScreen)
         cursorLock.unlock()
     }
