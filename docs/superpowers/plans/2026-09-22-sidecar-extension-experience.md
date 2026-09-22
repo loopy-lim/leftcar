@@ -55,7 +55,8 @@ Files: `ExtendedDisplayCard.tsx`, Viewer extension component/model, `i18n.ts`, `
 - [x] Rust/Swift/TS 관련 테스트, typecheck 및 React Doctor를 실행한다.
 - [x] 최종 Mac/Android 후보 패키징 및 동일 소스·해시 확인. Mac geometry 실기와 Android 145개 자동 검사 통과.
 - [x] 같은 서명의 새 후보로 Host/태블릿 업데이트, 기존 데이터·Host 페어링 및 입력 권한 유지 확인.
-- [ ] 태블릿 종단간 인수(연결 화면 확인 불일치 해소 및 장시간/잠자기 포함).
+- [x] 태블릿 기본 흐름 재검증: 실제 연결 화면 불일치 해소, 생성·영상·닫기/재열기·크기 변경/복원 및 ADB 클릭·드래그·한영 입력 확인.
+- [ ] 전체 태블릿 인수: ADB Command+A 실패 원인 분리, 물리 조합키·다중 터치·펜·잠자기 및 LAN/외부 장시간 검증은 남음. 이번 요청은 태블릿 재검증까지로 한정.
 - [x] 변경 전체를 검토하고 발견한 중요 결함을 회귀 테스트로 고친다.
 - [x] 현재 증거·제약·후속 실행 순서를 `../specs/2026-09-22-sidecar-extension-verification.md`에 기록한다.
 - [x] 최종 커밋 계획에 사용자 승인을 받음. native 수정과 확장 UI/계약·문서의 두 로컬 커밋으로 정리.
