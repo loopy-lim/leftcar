@@ -273,6 +273,8 @@ fn catalog_advertises_phase_a_encoder_experiments() {
         window_size: None,
         input_allowed: None,
         virtual_display_pending_removal: None,
+        virtual_display_control: None,
+        virtual_display_source_id: None,
     };
     let advertised: Vec<_> = catalog
         .encoder_experiments
@@ -304,6 +306,8 @@ fn reconfigure_encoder_experiment_contract_keeps_old_peers_compatible() {
         udp_stability_capabilities: None,
         input_allowed: None,
         virtual_display_pending_removal: None,
+        virtual_display_control: None,
+        virtual_display_source_id: None,
         reconfigure_encoder_experiment: Some(true),
         reconfigure_source: Some(true),
         window_size: None,
@@ -377,6 +381,8 @@ fn reconfigure_source_contract_keeps_old_peers_compatible() {
         udp_stability_capabilities: None,
         input_allowed: None,
         virtual_display_pending_removal: None,
+        virtual_display_control: None,
+        virtual_display_source_id: None,
         reconfigure_encoder_experiment: None,
         reconfigure_source: Some(true),
         window_size: None,

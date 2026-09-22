@@ -1,6 +1,7 @@
+import { useExtensionDisplay } from "./use-extension-display";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Alert, NativeModules } from "react-native";
+import { NativeModules } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { LocalizedError } from "./localized-error";
@@ -58,7 +59,6 @@ import {
   catalogMediaHost,
   catalogErrorMessage,
   isExternalRouteAddress,
-  isExtensionDisplay,
   isHubDisplay,
   requestWithReconnect,
   requestForCurrentSelection,
@@ -954,9 +954,6 @@ export function useCatalogModel() {
     ],
   );
 
-  /** 태블릿 주도 확장 화면 생성: createVirtualDisplay → 카탈로그 갱신 → 자동
-   * 오픈. 호스트에 이미 디스플레이가 있으면(존재 응답) 그것을 연다. */
-  const [creatingExtension, setCreatingExtension] = useState(false);
   /** 클라이언트 패널 단변(물리) — 카드 라벨·시작 크기 계산에 쓰인다. 메트릭이
    * 없거나 비정상이면 undefined(고정 앵커 폴백). */
   const [panelShortSide, setPanelShortSide] = useState<number | undefined>(undefined);
@@ -976,123 +973,21 @@ export function useCatalogModel() {
       cancelled = true;
     };
   }, []);
-  const handleCreateExtensionDisplay = useCallback(async () => {
-    const client = controlClient();
-    if (!client) {
-      setError(currentTranslation().viewer.connectionLostError);
-      return;
-    }
-    setCreatingExtension(true);
-    try {
-      const metrics = await readViewerDisplayMetrics(launcher);
-      const created = await client.request<{ sourceId: string }>(
-        "createVirtualDisplay",
-        metrics
-          ? {
-              physicalWidth: metrics.physicalWidth,
-              physicalHeight: metrics.physicalHeight,
-              densityDpi: metrics.densityDpi,
-            }
-          : {},
-      );
-      // 생성 직후의 첫 카탈로그 조회는 macOS 디스플레이 재구성 지연(실측
-      // ~2.2s)에 걸려 새 소스가 빠진 목록을 반환할 수 있다. 보일 때까지
-      // 짧게 재시도하고, 그래도 없으면 조용히 넘기지 않고 안내한다 —
-      // 아무 일도 일어나지 않는 것처럼 보이면 사용자는 카드를 계속 누르게
-      // 된다.
-      let display: DisplayInfo | undefined;
-      for (let attempt = 0; attempt < 4 && !display; attempt += 1) {
-        const refetched = await refetchCatalog();
-        display = (refetched.data?.displays ?? []).find(
-          (entry) => entry.sourceId === created.sourceId,
-        );
-        if (!display && attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 700));
-        }
-      }
-      setError(null);
-      if (display) {
-        await openDisplay(display);
-      } else {
-        setError(new LocalizedError("errExtNotListed").format());
-      }
-    } catch (cause) {
-      setError(formatErrorMessage(cause));
-    } finally {
-      setCreatingExtension(false);
-    }
-  }, [openDisplay, refetchCatalog]);
-
-  /** 확장 화면 제거(2026-09-21): 뷰어에서 직접 정리한다. macOS 시스템
-   * 반영이 비동기(실측 ~30s)라 제거 직후에도 목록에 잠시 남는데, 이때는
-   * 카탈로그의 virtualDisplayPendingRemoval로 "제거 중" 상태를 그린다. */
-  const [removingExtension, setRemovingExtension] = useState(false);
-  const extensionDisplay = displays.find((display) =>
-    isExtensionDisplay(display.name),
-  );
-  const extensionRemovalPending =
-    catalogQuery.data?.virtualDisplayPendingRemoval != null;
-  const handleRemoveExtensionDisplay = useCallback(async () => {
-    const client = controlClient();
-    if (!client) {
-      setError(currentTranslation().viewer.connectionLostError);
-      return;
-    }
-    const copy = currentTranslation();
-    const confirmed = await new Promise<boolean>((resolve) => {
-      Alert.alert(
-        copy.viewer.extRemoveConfirmTitle,
-        copy.viewer.extRemoveConfirmDesc,
-        [
-          { text: copy.common.cancel, style: "cancel", onPress: () => resolve(false) },
-          { text: copy.viewer.extRemoveButton, style: "destructive", onPress: () => resolve(true) },
-        ],
-        { cancelable: true },
-      );
-    });
-    if (!confirmed) return;
-    setRemovingExtension(true);
-    try {
-      await client.request("removeVirtualDisplay", {});
-      // 목록에서 사라지거나 호스트가 제거 진행(pending)을 알릴 때까지 짧게
-      // 재시도한다 — 사용자가 카드를 다시 누르게 만드는 애매한 중간 상태를
-      // 줄인다.
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        const refetched = await refetchCatalog();
-        const stillListed = (refetched.data?.displays ?? []).some((entry) =>
-          isExtensionDisplay(entry.name),
-        );
-        const pending = refetched.data?.virtualDisplayPendingRemoval != null;
-        if (!stillListed || pending) break;
-        if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 800));
-        }
-      }
-      setError(null);
-    } catch (cause) {
-      setError(new LocalizedError("extRemoveFailed").format());
-      console.warn("[leftcar] extension display removal failed", cause);
-    } finally {
-      setRemovingExtension(false);
-    }
-  }, [refetchCatalog]);
+  const extension = useExtensionDisplay({ host, catalog: catalogQuery.data, launcher, streams,
+    refetchCatalog, openDisplay, stopStream });
 
   const visibleError =
     error ||
+    extension.extensionError ||
     streamError ||
     (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null) ||
     (catalogQuery.data && displays.length === 0 ? new LocalizedError("errSourceAccess").format() : null);
 
   return {
     displays,
-    creatingExtension,
-    removingExtension,
-    extensionDisplay,
-    extensionRemovalPending,
+    ...extension,
     inputAllowed: catalogQuery.data?.inputAllowed,
     panelShortSide,
-    handleCreateExtensionDisplay,
-    handleRemoveExtensionDisplay,
     effectiveNextEncoderExperiment,
     effectiveUdpStability,
     handleApplyUdpStability,

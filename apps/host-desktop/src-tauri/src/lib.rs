@@ -227,6 +227,8 @@ pub fn run() {
             virtual_display_status,
             virtual_display_create,
             virtual_display_remove,
+            virtual_display_resize,
+            virtual_display_arrange,
             revoke_paired_device,
             revoke_all_devices,
             get_clipboard_share,
@@ -823,70 +825,61 @@ fn set_source_grants(
 /// 확장 디스플레이 상태. UI 폴링용 — 프로브 결과, 라이브 정보, 최근 뷰어
 /// 메트릭에서 도출한 기본 모드 제안을 함께 돌려준다.
 #[tauri::command]
-fn virtual_display_status(
+async fn virtual_display_status(
     server: tauri::State<'_, Arc<control::ControlServer>>,
     manager: tauri::State<'_, Arc<virtual_display::VirtualDisplayManager>>,
-) -> virtual_display::VirtualDisplayStatusPublic {
-    build_virtual_display_status(&server, &manager)
+) -> Result<virtual_display::VirtualDisplayStatusPublic, String> {
+    let server = server.inner().clone();
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || build_virtual_display_status(&server, &manager))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn build_virtual_display_status(
     server: &Arc<control::ControlServer>,
     manager: &Arc<virtual_display::VirtualDisplayManager>,
 ) -> virtual_display::VirtualDisplayStatusPublic {
-    let (supported, reason, live) = manager.status();
-    let suggested =
-        match server
-            .latest_viewer_metrics()
-            .map(|metrics| virtual_display::ViewerDisplayMetrics {
-                physical_width: metrics.physical_width,
-                physical_height: metrics.physical_height,
-                density_dpi: metrics.density_dpi,
-            }) {
-            Some(metrics) => virtual_display::match_display_size(&metrics)
-                .map(|matched| virtual_display::SuggestedModePublic {
-                    width: matched.logical_width,
-                    height: matched.logical_height,
-                    scale: matched.scale,
-                    source: "viewerMetrics",
-                })
-                .unwrap_or_else(|| fallback_suggestion()),
-            None => fallback_suggestion(),
-        };
-    // 제거 요청 뒤 시스템 반영(~30s 비동기)이 카탈로그에 아직 보이는지.
-    let removal_pending = manager.last_removed_pending().is_some_and(|source_id| {
-        server
-            .backend()
-            .list_displays()
-            .map(|displays| {
-                displays
-                    .iter()
-                    .any(|display| display.source_id.as_deref() == Some(source_id.as_str()))
-            })
-            .unwrap_or(false)
-    });
-    virtual_display::VirtualDisplayStatusPublic {
-        supported,
-        reason,
-        live,
-        suggested: Some(suggested),
-        removal_pending,
-    }
+    manager.public_status(server.latest_viewer_metrics().map(|metrics| {
+        virtual_display::ViewerDisplayMetrics {
+            physical_width: metrics.physical_width,
+            physical_height: metrics.physical_height,
+            density_dpi: metrics.density_dpi,
+        }
+    }))
 }
 
-fn fallback_suggestion() -> virtual_display::SuggestedModePublic {
-    virtual_display::SuggestedModePublic {
-        width: virtual_display::FALLBACK_MODE.logical_width,
-        height: virtual_display::FALLBACK_MODE.logical_height,
-        scale: virtual_display::FALLBACK_MODE.scale,
-        source: "fallback",
-    }
+#[tauri::command]
+async fn virtual_display_arrange(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    manager: tauri::State<'_, Arc<virtual_display::VirtualDisplayManager>>,
+    position: virtual_display::DisplayPosition,
+) -> Result<(), String> {
+    let _change = server.begin_virtual_display_change()?;
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.arrange(position))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-/// 확장 디스플레이 생성(호스트 UI 전용). 생성되면 연결 중이 아닌, 이미 화면
-/// 승인을 받은 페어드 기기 권한에 이 가상 디스플레이만 추가한다 — 미검토·거부
-/// 기기에 자동으로 아무 것도 승인하지 않는다. 승인 갱신은 라이브 세션을 끊으므로
-/// 스트리밍 중인 기기는 다음 기회(재연결 뒤 카탈로그)에 포함된다.
+#[tauri::command]
+async fn virtual_display_resize(
+    server: tauri::State<'_, Arc<control::ControlServer>>,
+    width: u32,
+    height: u32,
+    scale: u32,
+) -> Result<virtual_display::LiveVirtualDisplayPublic, String> {
+    server
+        .resize_virtual_display(virtual_display::DisplayMode {
+            width,
+            height,
+            scale,
+        })
+        .await
+}
+
+/// 확장 디스플레이 생성. 이미 화면 승인된 기기에 새 소스만 추가한다.
+/// 권한 추가는 기존 스트림을 유지하며 미검토·거부 기기는 변경하지 않는다.
 #[tauri::command]
 async fn virtual_display_create(
     server: tauri::State<'_, Arc<control::ControlServer>>,
@@ -897,6 +890,7 @@ async fn virtual_display_create(
     height: u32,
     scale: u32,
 ) -> Result<virtual_display::VirtualDisplayStatusPublic, String> {
+    let _change = server.begin_virtual_display_change()?;
     let manager = manager.inner().clone();
     // 생성은 활성화+모드 폴링로 수 초 걸린다 — 워커 스레드에서 돌린다.
     let worker = manager.clone();
@@ -917,13 +911,8 @@ async fn virtual_display_create(
             "modeVerified": live.mode_verified,
         }),
     );
-    // 연결 중이 아닌, 이미 화면 승인된 기기에만 새 소스를 추가한다.
-    let connected: std::collections::HashSet<String> =
-        server.connected_device_ids().into_iter().collect();
+    // 이미 화면 승인된 기기에만 새 소스를 추가한다.
     for device in pairing.list_device_views() {
-        if connected.contains(&device.device_id) {
-            continue;
-        }
         let Some(ids) = grants_with_virtual_source(
             &device.source_grants.source_ids,
             device.source_grants.review_required,
@@ -1002,6 +991,7 @@ async fn virtual_display_remove(
     audit: tauri::State<'_, std::sync::Arc<audit::SessionAudit>>,
     manager: tauri::State<'_, Arc<virtual_display::VirtualDisplayManager>>,
 ) -> Result<virtual_display::VirtualDisplayStatusPublic, String> {
+    let _change = server.begin_virtual_display_change()?;
     let manager = manager.inner().clone();
     let worker = manager.clone();
     let _vanished = tauri::async_runtime::spawn_blocking(move || worker.remove())

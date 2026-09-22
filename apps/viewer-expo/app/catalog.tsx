@@ -1,3 +1,4 @@
+import { ExtensionDisplayCard } from "../src/ExtensionDisplayCard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -1288,71 +1289,15 @@ export default function Catalog() {
               styles={styles}
               colors={colors}
             />
-            {model.extensionDisplay || model.extensionRemovalPending ? (
-              // 확장 화면이 있으면 생성 카드 대신 제거 카드를 내건다 — 생성은
-              // 어차피 "이미 있음"이고, 호스트 앞으로 가지 않고도 정리할 수
-              // 있게 하는 것이 이 카드의 목적이다(2026-09-21). 시스템 반영이
-              // 비동기(~30s)라 목록에 잔류하는 동안은 "제거 중"으로 고정한다.
-              <Pressable
-                style={({ pressed }) => [
-                  styles.displayCard,
-                  pressed && styles.itemPressed,
-                ]}
-                onPress={() => void model.handleRemoveExtensionDisplay()}
-                disabled={model.removingExtension || model.extensionRemovalPending}
-                accessibilityRole="button"
-                accessibilityLabel={t.viewer.extRemoveButton}
-              >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    paddingVertical: 8,
-                  }}
-                >
-                  {model.removingExtension || model.extensionRemovalPending ? (
-                    <ActivityIndicator color={colors.textPrimary} size="small" />
-                  ) : (
-                    <Ionicons name="trash-outline" size={16} color={colors.textPrimary} />
-                  )}
-                  <Text style={styles.displayName}>
-                    {model.removingExtension || model.extensionRemovalPending
-                      ? t.viewer.extRemovingLabel
-                      : t.viewer.extRemoveButton}
-                  </Text>
-                </View>
-              </Pressable>
-            ) : (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.displayCard,
-                  pressed && styles.itemPressed,
-                ]}
-                onPress={() => void model.handleCreateExtensionDisplay()}
-                disabled={model.creatingExtension}
-                accessibilityRole="button"
-                accessibilityLabel={t.viewer.extCreateButton}
-              >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    paddingVertical: 8,
-                  }}
-                >
-                  {model.creatingExtension ? (
-                    <ActivityIndicator color={colors.textPrimary} size="small" />
-                  ) : (
-                    <Ionicons name="add-circle-outline" size={16} color={colors.textPrimary} />
-                  )}
-                  <Text style={styles.displayName}>{t.viewer.extCreateButton}</Text>
-                </View>
-              </Pressable>
-            )}
+            {model.extensionSupported && <ExtensionDisplayCard
+              t={t} colors={colors} exists={Boolean(model.extensionDisplay)}
+              pending={model.extensionRemovalPending} busy={model.extensionOperation !== null}
+              configurable={model.extensionConfigurable} status={model.extensionStatus}
+              onOpen={mode => void model.handleCreateExtensionDisplay(mode)}
+              onRemove={() => void model.handleRemoveExtensionDisplay()}
+              onResize={mode => void model.handleResizeExtensionDisplay(mode)}
+              onArrange={position => void model.handleArrangeExtensionDisplay(position)}
+            />}
           </>
         }
         data={model.displays}

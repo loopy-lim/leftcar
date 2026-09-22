@@ -359,6 +359,7 @@ fn clipboard_sha256_hex(text: &str) -> String {
 }
 
 pub struct ControlServer {
+    virtual_display_changes: tokio::sync::RwLock<()>,
     source_operations: crate::source_grants::SourceLease,
     input_changes: Mutex<()>,
     replacement_retired: Mutex<HashMap<u32, u32>>,
@@ -466,6 +467,7 @@ impl ControlServer {
             clipboard: std::sync::OnceLock::new(),
             window_metrics: std::sync::OnceLock::new(),
             virtual_display: std::sync::OnceLock::new(),
+            virtual_display_changes: tokio::sync::RwLock::new(()),
             settings: std::sync::OnceLock::new(),
             file_transfers: crate::file_transfer::FileTransferState::default(),
             authenticated_conns: Mutex::new(HashMap::new()),
@@ -659,6 +661,80 @@ impl ControlServer {
         manager: std::sync::Arc<crate::virtual_display::VirtualDisplayManager>,
     ) {
         let _ = self.virtual_display.set(manager);
+    }
+
+    pub(crate) fn begin_virtual_display_change(
+        &self,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>, String> {
+        self.virtual_display_changes
+            .try_write()
+            .map_err(|_| "display change in progress; retry shortly".into())
+    }
+
+    pub(crate) async fn resize_virtual_display(
+        &self,
+        mode: crate::virtual_display::DisplayMode,
+    ) -> Result<crate::virtual_display::LiveVirtualDisplayPublic, String> {
+        let _change = self.begin_virtual_display_change()?;
+        self.resize_virtual_display_locked(mode).await
+    }
+
+    async fn resize_virtual_display_locked(
+        &self,
+        mode: crate::virtual_display::DisplayMode,
+    ) -> Result<crate::virtual_display::LiveVirtualDisplayPublic, String> {
+        let manager = self
+            .virtual_display
+            .get()
+            .ok_or("virtual display unsupported on this host")?;
+        let source = manager.status().2.and_then(|live| live.source_id);
+        let in_use = self.sessions.lock().unwrap().live.values().any(|session| {
+            !session.backend_released
+                && session
+                    .authorization
+                    .as_ref()
+                    .and_then(|auth| auth.access.as_ref())
+                    .is_some_and(|access| Some(&access.source_id) == source.as_ref())
+        });
+        if in_use {
+            return Err(
+                "extended display is in use; close its streams before changing size".into(),
+            );
+        }
+        let worker = manager.clone();
+        tauri::async_runtime::spawn_blocking(move || worker.resize(mode))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    fn authorize_virtual_display(
+        &self,
+        auth: Option<&crate::pairing::Authorization>,
+        current: bool,
+    ) -> Result<(), String> {
+        let auth = auth.ok_or("unauthorized")?;
+        let trusted = self.pairing.list_device_views().iter().any(|device| {
+            device.device_id == auth.device_id()
+                && device.source_grants.credential_id == auth.owner_id()
+                && !device.source_grants.review_required
+                && !device.source_grants.source_ids.is_empty()
+        });
+        if !trusted {
+            return Err("source_access_denied".into());
+        }
+        if current {
+            let source = self
+                .virtual_display
+                .get()
+                .and_then(|manager| manager.status().2)
+                .and_then(|live| live.source_id);
+            if let Some(source) = source {
+                if !self.pairing.source_allowed(auth, &source) {
+                    return Err("source_access_denied".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
@@ -2337,12 +2413,42 @@ impl ControlServer {
         {
             return err("unauthorized");
         }
+        // Concurrent starts keep their existing supersession semantics; only
+        // desktop topology changes exclude stream admission/reconfiguration.
+        let _display_use = if matches!(
+            command,
+            "startStream" | "reconfigureStream" | "getVirtualDisplay" | "getCatalog"
+        ) {
+            match self.virtual_display_changes.try_read() {
+                Ok(guard) => Some(guard),
+                Err(_) => return err("display change in progress; retry shortly"),
+            }
+        } else {
+            None
+        };
+        let _display_change = if matches!(
+            command,
+            "createVirtualDisplay"
+                | "removeVirtualDisplay"
+                | "resizeVirtualDisplay"
+                | "arrangeVirtualDisplay"
+        ) {
+            match self.begin_virtual_display_change() {
+                Ok(guard) => Some(guard),
+                Err(error) => return err(&error),
+            }
+        } else {
+            None
+        };
         match command {
             "requestUsb" => match crate::aoap_control::ensure_usb_accessory().await {
                 Ok(()) => ok(json!({ "attached": true })),
                 Err(error) => err(&error),
             },
             "createVirtualDisplay" => {
+                if let Err(error) = self.authorize_virtual_display(request_authorization, true) {
+                    return err(&error);
+                }
                 let Some(vdisp_manager) = self.virtual_display.get() else {
                     return err("virtual display unsupported on this host");
                 };
@@ -2352,19 +2458,18 @@ impl ControlServer {
                     physical_width: Option<u32>,
                     physical_height: Option<u32>,
                     density_dpi: Option<u32>,
+                    mode: Option<crate::virtual_display::DisplayMode>,
                 }
-                let create_args: CreateArgs =
-                    serde_json::from_value(args.clone()).unwrap_or(CreateArgs {
-                        physical_width: None,
-                        physical_height: None,
-                        density_dpi: None,
-                    });
+                let create_args: CreateArgs = match serde_json::from_value(args.clone()) {
+                    Ok(value) => value,
+                    Err(e) => return err(&format!("bad args: {e}")),
+                };
                 let manager = vdisp_manager.clone();
                 let device = authenticated_device.map(str::to_owned);
                 // 생성은 활성화+모드 폴링으로 수 초 걸린다(lib.rs의 Tauri 경로와
                 // 동일) — 워커 스레드에서 돌린다.
                 let created = match tauri::async_runtime::spawn_blocking(move || {
-                    let (width, height, scale) =
+                    let (mut width, mut height, mut scale) =
                         match (create_args.physical_width, create_args.physical_height) {
                             (Some(w), Some(h)) if w > 0 && h > 0 => {
                                 crate::virtual_display::match_display_size(
@@ -2385,6 +2490,10 @@ impl ControlServer {
                             }
                             _ => (1280, 800, 2),
                         };
+                    if let Some(mode) = create_args.mode {
+                        let mode = mode.validate()?;
+                        (width, height, scale) = (mode.width, mode.height, mode.scale);
+                    }
                     manager.create(width, height, scale)
                 })
                 .await
@@ -2401,22 +2510,15 @@ impl ControlServer {
                         let Some(current) = current else {
                             return err(&message);
                         };
-                        return ok(json!({
-                            "sourceId": current.source_id,
-                            "width": current.backing_width,
-                            "height": current.backing_height,
-                            "exists": true,
-                        }));
+                        current
                     }
                     Err(message) => return err(&message),
                 };
                 let Some(source_id) = live.source_id.clone() else {
                     return err("virtual display has no stable source id");
                 };
-                // 요청한 기기 본인에게는 즉시 승인을 얹는다 — 생성 시점의 전체
-                // 기기 갱신(lib.rs)은 연결 중인 기기를 건너뛰지만, 요청자는
-                // 정의상 연결 중이므로 여기서 직접 승인하지 않으면 카탈로그에
-                // 영원히 안 보인다. 이미 화면 승인된 기기만 자동 승인된다.
+                // 요청 기기의 기존 화면 승인에 새 소스를 추가한다.
+                // 권한 추가는 기존 스트림을 유지한다.
                 if let Some(device_id) = device {
                     for view in self.pairing.list_device_views() {
                         if view.device_id != device_id {
@@ -2444,6 +2546,9 @@ impl ControlServer {
                 }))
             }
             "removeVirtualDisplay" => {
+                if let Err(error) = self.authorize_virtual_display(request_authorization, true) {
+                    return err(&error);
+                }
                 let Some(vdisp_manager) = self.virtual_display.get() else {
                     return err("virtual display unsupported on this host");
                 };
@@ -2451,12 +2556,11 @@ impl ControlServer {
                 let device = authenticated_device.map(str::to_owned);
                 // 파괴 브리지 폴링(최대 ~10s)이 블로킹이므로 생성과 같은 워커
                 // 위에서 돌린다. 현재 디스플레이가 없으면 무해하게 성공한다.
-                let removed = match tauri::async_runtime::spawn_blocking(move || manager.remove())
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(e) => return err(&format!("virtual display task failed: {e}")),
-                };
+                let removed =
+                    match tauri::async_runtime::spawn_blocking(move || manager.remove()).await {
+                        Ok(result) => result,
+                        Err(e) => return err(&format!("virtual display task failed: {e}")),
+                    };
                 match removed {
                     Ok(vanished) => {
                         self.audit_log(
@@ -2470,6 +2574,63 @@ impl ControlServer {
                         ok(json!({ "removed": true, "vanished": vanished }))
                     }
                     Err(message) => err(&message),
+                }
+            }
+            "getVirtualDisplay" => {
+                if let Err(error) = self.authorize_virtual_display(request_authorization, true) {
+                    return err(&error);
+                }
+                let Some(manager) = self.virtual_display.get() else {
+                    return err("virtual display unsupported on this host");
+                };
+                ok(manager.public_status(
+                    authenticated_device
+                        .and_then(|device| {
+                            self.viewer_metrics
+                                .lock()
+                                .unwrap()
+                                .get(device)
+                                .map(|(_, metrics)| metrics.clone())
+                        })
+                        .map(|m| crate::virtual_display::ViewerDisplayMetrics {
+                            physical_width: m.physical_width,
+                            physical_height: m.physical_height,
+                            density_dpi: m.density_dpi,
+                        }),
+                ))
+            }
+            "arrangeVirtualDisplay" => {
+                if let Err(error) = self.authorize_virtual_display(request_authorization, true) {
+                    return err(&error);
+                }
+                let Some(manager) = self.virtual_display.get().cloned() else {
+                    return err("virtual display unsupported on this host");
+                };
+                let position = match serde_json::from_value::<crate::virtual_display::DisplayPosition>(
+                    args["position"].clone(),
+                ) {
+                    Ok(position) => position,
+                    Err(_) => return err("invalid display position"),
+                };
+                match tauri::async_runtime::spawn_blocking(move || manager.arrange(position)).await
+                {
+                    Ok(Ok(())) => ok(json!({})),
+                    Ok(Err(error)) => err(&error),
+                    Err(error) => err(&error.to_string()),
+                }
+            }
+            "resizeVirtualDisplay" => {
+                if let Err(error) = self.authorize_virtual_display(request_authorization, true) {
+                    return err(&error);
+                }
+                let mode = match serde_json::from_value::<crate::virtual_display::DisplayMode>(args)
+                {
+                    Ok(mode) => mode,
+                    Err(_) => return err("invalid display size"),
+                };
+                match self.resize_virtual_display_locked(mode).await {
+                    Ok(live) => ok(live),
+                    Err(error) => err(&error),
                 }
             }
             "requestInputEnable" => {
@@ -2610,6 +2771,23 @@ impl ControlServer {
                         .virtual_display
                         .get()
                         .and_then(|manager| manager.last_removed_pending()),
+                    virtual_display_control: Some(
+                        self.authorize_virtual_display(request_authorization, false)
+                            .is_ok()
+                            && self
+                                .virtual_display
+                                .get()
+                                .is_some_and(|manager| manager.status().0),
+                    ),
+                    virtual_display_source_id: self
+                        .virtual_display
+                        .get()
+                        .and_then(|manager| manager.status().2)
+                        .and_then(|live| live.source_id)
+                        .filter(|source| {
+                            request_authorization
+                                .is_some_and(|auth| self.pairing.source_allowed(auth, source))
+                        }),
                 })
             }
             "startStream" => {
@@ -4013,6 +4191,68 @@ fn err(error: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn virtual_display_change_returns_busy_without_blocking_other_connections() {
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let change = server.begin_virtual_display_change().unwrap();
+        for command in [
+            "startStream",
+            "reconfigureStream",
+            "getVirtualDisplay",
+            "getCatalog",
+            "resizeVirtualDisplay",
+        ] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                server.dispatch(command, json!({}), "127.0.0.1", Some("viewer-1")),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result["error"], "display change in progress; retry shortly",
+                "{command}: {result}"
+            );
+        }
+        drop(change);
+        let result = server
+            .dispatch("getCatalog", json!({}), "127.0.0.1", Some("viewer-1"))
+            .await;
+        assert_eq!(result["ok"], true, "{result}");
+    }
+
+    #[tokio::test]
+    async fn virtual_display_management_requires_reviewed_source_access() {
+        let pairing = test_pairing();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        pairing
+            .pair_by_code(&offer.code, "display-viewer", "viewer")
+            .unwrap();
+        let server = ControlServer::new(backend(), pairing.clone(), test_identity());
+        let auth = pairing.authorization("display-viewer").unwrap();
+        for command in [
+            "createVirtualDisplay",
+            "getVirtualDisplay",
+            "arrangeVirtualDisplay",
+            "resizeVirtualDisplay",
+            "removeVirtualDisplay",
+        ] {
+            let response = server
+                .dispatch_with_authorization(
+                    command,
+                    json!({}),
+                    "127.0.0.1",
+                    Some("display-viewer"),
+                    Some(&auth),
+                )
+                .await;
+            assert_eq!(response["error"], "source_access_denied", "{command}");
+            let anonymous = server
+                .dispatch_with_authorization(command, json!({}), "127.0.0.1", None, None)
+                .await;
+            assert_eq!(anonymous["error"], "unauthorized", "{command}");
+        }
+    }
 
     /// Canonical base64url spelling of bytes 0..32, used by startStream tests.
     const TEST_MEDIA_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
@@ -5540,11 +5780,7 @@ mod tests {
         let _ = direct_pair_token(&pairing, "viewer-1");
         // 기본 허용을 명시 거부로 뒤집어 잠긴 세션을 만든다.
         pairing.set_device_input("viewer-1", false).unwrap();
-        let server = Arc::new(ControlServer::new(
-            fake.clone(),
-            pairing,
-            test_identity(),
-        ));
+        let server = Arc::new(ControlServer::new(fake.clone(), pairing, test_identity()));
         let resp = server
             .dispatch(
                 "startStream",
