@@ -56,7 +56,7 @@ func encodeCursorPacket(
 /// regressions by the viewer's newest-wins ordering.
 struct CursorStreamCoordinator {
     private let pollingIntervalUs: UInt64
-    private let bounds: CGRect
+    private var bounds: CGRect
     private var enabled = false
     private var sequence: UInt32 = 0
     private var lastSentUs: UInt64 = 0
@@ -81,6 +81,12 @@ struct CursorStreamCoordinator {
             dirty = hasSample
             lastSentUs = 0
         }
+    }
+
+    mutating func updateBounds(_ newBounds: CGRect) {
+        guard bounds != newBounds else { return }
+        bounds = newBounds
+        dirty = hasSample
     }
 
     /// Records a CGEvent-tap observation in global screen coordinates. The

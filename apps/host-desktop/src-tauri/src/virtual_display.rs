@@ -8,15 +8,11 @@
 //!
 //! 생성된 디스플레이는 실제 CGDirectDisplayID를 가진 활성 디스플레이라
 //! 열거·승인·캡처·입력은 전부 기존 경로를 그대로 지난다. 제거는 객체
-//! 해제로 일어나며 비동기다(실측 ~30s) — 카탈로그에서 잠깐 남아 있을 수
+//! 해제로 일어나며 시스템 반영은 비동기다 — 카탈로그에서 잠깐 남아 있을 수
 //! 있어 상태에 removal_pending으로 드러낸다.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
-/// 최근 제거 표시를 유지하는 창. 실측 제거 지연(~30s)보다 길게.
-const REMOVAL_PENDING_WINDOW: Duration = Duration::from_secs(90);
 
 // ===== 순수 모드 매칭 (옛 display_matching.rs 수학 계승, f1a846e^) =====
 
@@ -124,7 +120,7 @@ pub struct VirtualDisplayStatusPublic {
     pub live: Option<LiveVirtualDisplayPublic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested: Option<SuggestedModePublic>,
-    /// 제거 요청 뒤 시스템 반영(~30s 비동기)이 끝나지 않은 상태.
+    /// 제거 요청 뒤 시스템 반영이 끝나지 않은 상태.
     pub removal_pending: bool,
 }
 
@@ -160,6 +156,39 @@ pub const FALLBACK_MODE: MatchedDisplaySize = MatchedDisplaySize {
     scale: 2,
 };
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayPosition {
+    Right,
+    Left,
+    Above,
+    Below,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+}
+
+impl DisplayMode {
+    pub fn validate(self) -> Result<Self, String> {
+        if !matches!(self.scale, 1 | 2)
+            || !(640..=4096).contains(&self.width)
+            || !(480..=4096).contains(&self.height)
+            || self.width % 2 != 0
+            || self.height % 2 != 0
+        {
+            return Err(
+                "invalid display size: use even dimensions 640–4096 by 480–4096, scale 1 or 2"
+                    .into(),
+            );
+        }
+        Ok(self)
+    }
+}
+
 // ===== 매니저 =====
 
 #[derive(Debug, Clone)]
@@ -190,6 +219,7 @@ impl LiveVirtualDisplay {
 }
 
 pub struct VirtualDisplayManager {
+    operation: Mutex<()>,
     state: Mutex<ManagerState>,
 }
 
@@ -200,7 +230,8 @@ struct ManagerState {
     /// (활성 디스플레이 ≥1)은 달라질 수 있어 재프로브를 허용한다.
     probed: Option<ProbeOutcome>,
     current: Option<LiveVirtualDisplay>,
-    last_removed: Option<(String, Instant)>,
+    last_removed: Option<(u32, String)>,
+    pending_resize: Option<(LiveVirtualDisplay, DisplayMode)>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,14 +241,55 @@ struct ProbeOutcome {
 }
 
 impl VirtualDisplayManager {
+    pub fn public_status(
+        &self,
+        metrics: Option<ViewerDisplayMetrics>,
+    ) -> VirtualDisplayStatusPublic {
+        let (supported, reason, live) = self.status();
+        let matched = metrics.as_ref().and_then(match_display_size);
+        let pending = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_resize
+            .as_ref()
+            .map(|(_, mode)| *mode);
+        let size = pending
+            .map(|m| MatchedDisplaySize {
+                logical_width: m.width,
+                logical_height: m.height,
+                scale: m.scale as u8,
+            })
+            .unwrap_or_else(|| matched.unwrap_or(FALLBACK_MODE));
+        VirtualDisplayStatusPublic {
+            supported,
+            reason,
+            live,
+            suggested: Some(SuggestedModePublic {
+                width: size.logical_width,
+                height: size.logical_height,
+                scale: size.scale,
+                source: if pending.is_some() {
+                    "pendingResize"
+                } else if matched.is_some() {
+                    "viewerMetrics"
+                } else {
+                    "fallback"
+                },
+            }),
+            removal_pending: self.last_removed_pending().is_some(),
+        }
+    }
     pub fn new() -> Self {
         Self {
+            operation: Mutex::new(()),
             state: Mutex::new(ManagerState {
                 #[cfg(target_os = "macos")]
                 lib: None,
                 probed: None,
                 current: None,
                 last_removed: None,
+                pending_resize: None,
             }),
         }
     }
@@ -229,6 +301,7 @@ impl VirtualDisplayManager {
     pub fn status(&self) -> (bool, Option<String>, Option<LiveVirtualDisplayPublic>) {
         let mut state = self.state.lock().unwrap();
         self.refresh_probe(&mut state);
+        Self::refresh_removal(&mut state);
         let probe = state.probed.clone().unwrap_or(ProbeOutcome {
             supported: false,
             reason: Some("probe unavailable".into()),
@@ -240,13 +313,27 @@ impl VirtualDisplayManager {
         )
     }
 
-    /// 최근 제거한 source id — 창 안에 있으면 아직 시스템에 남아 있다.
+    /// Actual OS lifetime, not a timer. A retry must never reuse an identity
+    /// while WindowServer still owns its previous display.
     pub fn last_removed_pending(&self) -> Option<String> {
         let mut state = self.state.lock().unwrap();
-        state.last_removed = state
-            .last_removed
-            .take_if(|(_, at)| at.elapsed() < REMOVAL_PENDING_WINDOW);
-        state.last_removed.as_ref().map(|(id, _)| id.clone())
+        Self::refresh_removal(&mut state);
+        state.last_removed.as_ref().map(|(_, id)| id.clone())
+    }
+
+    fn refresh_removal(state: &mut ManagerState) {
+        #[cfg(target_os = "macos")]
+        if let (Some(lib), Some((display_id, _))) = (&state.lib, &state.last_removed) {
+            unsafe {
+                if let Ok(active) =
+                    lib.get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_vdisp_is_active_v1")
+                {
+                    if active(*display_id) == 0 {
+                        state.last_removed = None;
+                    }
+                }
+            }
+        }
     }
 
     pub fn create(
@@ -255,13 +342,27 @@ impl VirtualDisplayManager {
         logical_height: u32,
         scale: u32,
     ) -> Result<LiveVirtualDisplayPublic, String> {
-        if scale != 1 && scale != 2 {
-            return Err("scale must be 1 or 2".into());
+        let _operation = self.operation.lock().unwrap();
+        self.create_inner(logical_width, logical_height, scale)
+    }
+
+    fn create_inner(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale: u32,
+    ) -> Result<LiveVirtualDisplayPublic, String> {
+        DisplayMode {
+            width: logical_width,
+            height: logical_height,
+            scale,
         }
-        if !(640..=4096).contains(&logical_width) || !(480..=4096).contains(&logical_height) {
-            return Err("logical size out of range".into());
-        }
+        .validate()?;
         let mut state = self.state.lock().unwrap();
+        Self::refresh_removal(&mut state);
+        if state.last_removed.is_some() {
+            return Err("virtual display removal pending".into());
+        }
         if state.current.is_some() {
             return Err("a Leftcar display already exists".into());
         }
@@ -302,22 +403,94 @@ impl VirtualDisplayManager {
         }
         let public = live.public();
         state.current = Some(live);
+        state.pending_resize = None;
         Ok(public)
     }
 
-    /// 제거. 반환값은 즉시 소실 여부(false면 시스템 반영이 수 초 뒤,
-    /// 실측 ~30s). 브리지 폴링(최대 ~10s)은 결과 보고용일 뿐 — 객체 해제
-    /// 자체는 즉시 일어난다.
+    /// false means the object was released but WindowServer still lists it.
     pub fn remove(&self) -> Result<bool, String> {
+        let _operation = self.operation.lock().unwrap();
+        self.state.lock().unwrap().pending_resize = None;
+        self.remove_inner()
+    }
+
+    fn remove_inner(&self) -> Result<bool, String> {
         let mut state = self.state.lock().unwrap();
-        let Some(live) = state.current.take() else {
-            return Ok(true);
+        Self::refresh_removal(&mut state);
+        let Some(live) = state.current.clone() else {
+            return Ok(state.last_removed.is_none());
         };
-        let vanished = self.call_destroy(&state, live.display_id);
-        if let Some(source_id) = &live.source_id {
-            state.last_removed = Some((source_id.clone(), Instant::now()));
+        let vanished = self.call_destroy(&state, live.display_id)?;
+        state.current = None;
+        if !vanished {
+            if let Some(source_id) = &live.source_id {
+                state.last_removed = Some((live.display_id, source_id.clone()));
+            }
         }
         Ok(vanished)
+    }
+
+    pub fn resize(&self, mode: DisplayMode) -> Result<LiveVirtualDisplayPublic, String> {
+        let mode = mode.validate()?;
+        let _operation = self.operation.lock().unwrap();
+        let old = {
+            let state = self.state.lock().unwrap();
+            state
+                .current
+                .clone()
+                .or_else(|| state.pending_resize.as_ref().map(|(old, _)| old.clone()))
+                .ok_or("no extended display")?
+        };
+        if self.state.lock().unwrap().current.is_some()
+            && (old.logical_width, old.logical_height, old.scale)
+                == (mode.width, mode.height, mode.scale)
+        {
+            return Ok(old.public());
+        }
+        self.remove_inner()?;
+        // Keep the requested size available if WindowServer outlives this request.
+        self.state.lock().unwrap().pending_resize = Some((old.clone(), mode));
+        if !wait_for_removal(
+            || self.last_removed_pending().is_some(),
+            || std::thread::sleep(std::time::Duration::from_millis(100)),
+            200,
+        ) {
+            return Err("virtual display removal pending; requested size saved, retry when removal completes".into());
+        }
+        match self.create_inner(mode.width, mode.height, mode.scale) {
+            Ok(live) => Ok(live),
+            Err(error) => {
+                let restored = self
+                    .create_inner(old.logical_width, old.logical_height, old.scale)
+                    .is_ok();
+                Err(format!(
+                    "resize failed: {error}; previous size restored: {restored}"
+                ))
+            }
+        }
+    }
+
+    pub fn arrange(&self, position: DisplayPosition) -> Result<(), String> {
+        let _operation = self.operation.lock().unwrap();
+        let state = self.state.lock().unwrap();
+        let live = state.current.as_ref().ok_or("no extended display")?;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let lib = state.lib.as_ref().ok_or("virtual display unavailable")?;
+            let arrange = lib
+                .get::<unsafe extern "C" fn(u32, u32) -> i32>(b"leftcar_vdisp_arrange_v1")
+                .map_err(|_| "update the Host capture library to arrange displays")?;
+            let result = arrange(live.display_id, position as u32);
+            if result != 0 {
+                return Err(format!("display arrangement failed: {result}"));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (live, position);
+            Err("unsupported platform".into())
+        }
     }
 
     fn refresh_probe(&self, state: &mut ManagerState) {
@@ -402,18 +575,21 @@ impl VirtualDisplayManager {
     }
 
     #[cfg(target_os = "macos")]
-    fn call_destroy(&self, state: &ManagerState, display_id: u32) -> bool {
+    fn call_destroy(&self, state: &ManagerState, display_id: u32) -> Result<bool, String> {
         let Some(lib) = state.lib.as_ref() else {
-            return false;
+            return Err("virtual display library unavailable".into());
         };
         unsafe {
             let Ok(destroy) =
                 lib.get::<unsafe extern "C" fn(u32) -> i32>(b"leftcar_vdisp_destroy_v1")
             else {
-                return false;
+                return Err("virtual display destroy symbol unavailable".into());
             };
-            // 0 = 목록에서 사라짐, 2 = 폴링 창(~10s) 안에 못 사라짐(곧 사라짐).
-            destroy(display_id) == 0
+            match destroy(display_id) {
+                0 => Ok(true),
+                2 => Ok(false),
+                code => Err(format!("virtual display removal failed: {code}")),
+            }
         }
     }
 
@@ -476,10 +652,131 @@ fn take_json_with(
     owned
 }
 
-// ===== 단위 테스트: 순수 매칭 수학 =====
+fn wait_for_removal(
+    mut pending: impl FnMut() -> bool,
+    mut pause: impl FnMut(),
+    attempts: usize,
+) -> bool {
+    for _ in 0..attempts {
+        if !pending() {
+            return true;
+        }
+        pause();
+    }
+    !pending()
+}
+
+// ===== 단위 테스트 =====
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resize_waits_through_delayed_removal() {
+        let mut polls = 0;
+        assert!(super::wait_for_removal(
+            || {
+                polls += 1;
+                polls < 4
+            },
+            || {},
+            5
+        ));
+        assert_eq!(polls, 4);
+        assert!(!super::wait_for_removal(|| true, || {}, 5));
+    }
+    #[test]
+    fn failed_removal_keeps_the_current_display() {
+        let manager = super::VirtualDisplayManager::new();
+        manager.state.lock().unwrap().current = Some(super::LiveVirtualDisplay {
+            display_id: 123,
+            source_id: Some("display:kept".into()),
+            name: "Leftcar Display".into(),
+            logical_width: 1280,
+            logical_height: 800,
+            scale: 2,
+            mode_verified: true,
+        });
+        assert!(manager.remove().is_err());
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .display_id,
+            123
+        );
+    }
+
+    #[test]
+    fn invalid_resize_preserves_current_display() {
+        let manager = super::VirtualDisplayManager::new();
+        manager.state.lock().unwrap().current = Some(super::LiveVirtualDisplay {
+            display_id: 123,
+            source_id: Some("display:kept".into()),
+            name: "Leftcar Display".into(),
+            logical_width: 1280,
+            logical_height: 800,
+            scale: 2,
+            mode_verified: true,
+        });
+        assert!(manager
+            .resize(super::DisplayMode {
+                width: 1,
+                height: 800,
+                scale: 2
+            })
+            .is_err());
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .display_id,
+            123
+        );
+        assert!(manager.state.lock().unwrap().last_removed.is_none());
+    }
+
+    #[test]
+    fn unchanged_resize_reuses_display_and_identity() {
+        let manager = super::VirtualDisplayManager::new();
+        manager.state.lock().unwrap().current = Some(super::LiveVirtualDisplay {
+            display_id: 123,
+            source_id: Some("display:kept".into()),
+            name: "Leftcar Display".into(),
+            logical_width: 1280,
+            logical_height: 800,
+            scale: 2,
+            mode_verified: true,
+        });
+        assert_eq!(
+            manager
+                .resize(super::DisplayMode {
+                    width: 1280,
+                    height: 800,
+                    scale: 2
+                })
+                .unwrap()
+                .display_id,
+            123
+        );
+    }
+    #[test]
+    fn creation_waits_for_previous_display_to_disappear() {
+        let manager = super::VirtualDisplayManager::new();
+        manager.state.lock().unwrap().last_removed = Some((123, "old-display".into()));
+        let error = manager.create(1280, 800, 2).unwrap_err();
+        assert!(
+            error.contains("removal pending"),
+            "unexpected result: {error}"
+        );
+    }
     use super::*;
 
     fn metrics(w: u32, h: u32, dpi: u32) -> ViewerDisplayMetrics {

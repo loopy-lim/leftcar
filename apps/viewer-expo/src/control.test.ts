@@ -425,3 +425,38 @@ describe("secure control channel", () => {
     expect(lastSocket().written.length).toBe(1);
   });
 });
+
+describe("FIFO request deadlines", () => {
+  it("allows status polls to wait behind a slow display resize", async () => {
+    const client = await connect("localhost");
+    vi.useFakeTimers();
+    try {
+      const socket = lastSocket();
+      const destroyed = vi.spyOn(socket, "destroy");
+      const resize = client.request("resizeVirtualDisplay", { width: 1440, height: 900, scale: 2 });
+      const status = client.request("getVirtualDisplay");
+      const streamStatus = client.request("getStatus");
+      // Record rejections immediately so the RED run does not leak promises.
+      const outcomes = Promise.allSettled([resize, status, streamStatus]);
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(destroyed).not.toHaveBeenCalled();
+      reply(socket, { ok: true, result: { sourceId: "display:resized" } });
+      reply(socket, { ok: true, result: { removalPending: false } });
+      reply(socket, { ok: true, result: { sessions: [] } });
+      expect((await outcomes).every(result => result.status === "fulfilled")).toBe(true);
+    } finally { client.close(); lastSocket().emit("close"); vi.useRealTimers(); }
+  });
+  it("still times out an unanswered status once it reaches the front", async () => {
+    const client = await connect("localhost");
+    vi.useFakeTimers();
+    try {
+      const resize = client.request("resizeVirtualDisplay");
+      const status = client.request("getStatus").catch(error => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      reply(lastSocket(), { ok: true, result: {} });
+      await resize;
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(await status).toMatchObject({ kind: "timeout" });
+    } finally { client.close(); lastSocket().emit("close"); vi.useRealTimers(); }
+  });
+});

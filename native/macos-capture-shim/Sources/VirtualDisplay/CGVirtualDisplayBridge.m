@@ -26,6 +26,14 @@
 // 전이 임포트로 쓰는 것과 동일한 함수). 심볼 자체는 libCG에 존재한다.
 extern CFUUIDRef CGDisplayCreateUUIDFromDisplayID(uint32_t display);
 
+// Let ARC see the init method family. Calling init through an unannotated C
+// function pointer loses its retained-return/consumed-self convention and can
+// keep a display alive after its registry entry is removed.
+@interface NSObject (LeftcarVirtualDisplayInitializers)
+- (instancetype)initWithDescriptor:(id)descriptor;
+- (instancetype)initWithWidth:(unsigned long)width height:(unsigned long)height refreshRate:(double)refresh;
+@end
+
 #pragma mark - 런타임 클래스/셀렉터 바인딩
 
 static Class VDClass(void) { return NSClassFromString(@"CGVirtualDisplay"); }
@@ -34,10 +42,6 @@ static Class VDSettingsClass(void) { return NSClassFromString(@"CGVirtualDisplay
 static Class VDModeClass(void) { return NSClassFromString(@"CGVirtualDisplayMode"); }
 
 // 안전한 objc_msgSend 캐스트 — 타입이 다른 후보를 실수로 섞지 않게 케이스별 헬퍼.
-static id MsgInit(id obj) { return ((id (*)(id, SEL))objc_msgSend)(obj, sel_registerName("init")); }
-static id MsgInitWithDescriptor(id obj, id descriptor) {
-    return ((id (*)(id, SEL, id))objc_msgSend)(obj, sel_registerName("initWithDescriptor:"), descriptor);
-}
 static BOOL MsgApplySettings(id obj, id settings) {
     return ((BOOL (*)(id, SEL, id))objc_msgSend)(obj, sel_registerName("applySettings:"), settings);
 }
@@ -74,10 +78,6 @@ static void MsgSetModes(id obj, NSArray *value) {
 }
 static void MsgSetHiDPI(id obj, uint32_t value) {
     ((void (*)(id, SEL, uint32_t))objc_msgSend)(obj, sel_registerName("setHiDPI:"), value);
-}
-static id MsgModeInit(id obj, unsigned long width, unsigned long height, double refresh) {
-    return ((id (*)(id, SEL, unsigned long, unsigned long, double))objc_msgSend)(
-        obj, sel_registerName("initWithWidth:height:refreshRate:"), width, height, refresh);
 }
 
 // 심볼 존재 검사(프로브용): 클래스 4개 + 핵심 셀렉터 전부.
@@ -138,6 +138,13 @@ static NSMutableDictionary *VDRegistry(void) {
     return registry;
 }
 
+static NSMutableDictionary *VDModes(void) {
+    static NSMutableDictionary *modes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ modes = [NSMutableDictionary new]; });
+    return modes;
+}
+
 static dispatch_queue_t VDQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t once;
@@ -195,27 +202,53 @@ static char *CopyJSONString(NSDictionary *payload) {
 
 #pragma mark - 내부 헬퍼: 배치(미러 해제 포함)
 
-// 세션 스코프 origin 재구성. 모드 변경은 좀비 디스플레이를 남길 수 있다는
-// 외부 실측이 있어 v1은 origin-only로 제한한다(검증 E-8).
-static int VDPlaceOrigin(CGDirectDisplayID displayID, int32_t x, int32_t y) {
+// Keep the same mode in the placement transaction when the cached mode agrees
+// with live bounds. After recreation the mode cache can be empty or stale; an
+// origin-only transaction is safer than selecting a different resolution.
+static int VDPlaceOriginAttempt(CGDirectDisplayID displayID, int32_t x, int32_t y) {
     CGDirectDisplayID mainBefore = CGMainDisplayID();
+    CGRect before = CGDisplayBounds(displayID);
+    if ((int32_t)before.origin.x == x && (int32_t)before.origin.y == y && !CGDisplayIsInMirrorSet(displayID)) return 0;
     CGDisplayConfigRef config = NULL;
     if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess) return 2;
-    CGConfigureDisplayOrigin(config, displayID, x, y);
+    if ((CGDisplayIsInMirrorSet(displayID) &&
+         CGConfigureDisplayMirrorOfDisplay(config, displayID, kCGNullDirectDisplay) != kCGErrorSuccess) ||
+        CGConfigureDisplayOrigin(config, displayID, x, y) != kCGErrorSuccess) {
+        CGCancelDisplayConfiguration(config);
+        return 2;
+    }
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
+    if (mode) {
+        NSDictionary *expected;
+        @synchronized (VDRegistry()) { expected = VDModes()[@(displayID)]; }
+        size_t expectedScale = [expected[@"scale"] unsignedLongValue];
+        BOOL sameSize = CGDisplayModeGetWidth(mode) == (size_t)before.size.width
+            && CGDisplayModeGetHeight(mode) == (size_t)before.size.height
+            && expected != nil
+            && CGDisplayModeGetPixelWidth(mode) == [expected[@"width"] unsignedLongValue] * expectedScale
+            && CGDisplayModeGetPixelHeight(mode) == [expected[@"height"] unsignedLongValue] * expectedScale;
+        CGError modeResult = sameSize
+            ? CGConfigureDisplayWithDisplayMode(config, displayID, mode, NULL)
+            : kCGErrorSuccess;
+        CFRelease(mode);
+        if (modeResult != kCGErrorSuccess) { CGCancelDisplayConfiguration(config); return 2; }
+    }
     CGError complete = CGCompleteDisplayConfiguration(config, kCGConfigureForSession);
     if (complete != kCGErrorSuccess) return 2;
-    __block CGRect settled = CGRectNull;
-    BOOL ok = PollUntil(2.0, ^{
+    BOOL ok = PollUntil(2.0, ^BOOL(void) {
         CGRect bounds = CGDisplayBounds(displayID);
-        if ((int32_t)bounds.origin.x == x && (int32_t)bounds.origin.y == y) {
-            settled = bounds;
-            return YES;
-        }
-        return NO;
+        return (int32_t)bounds.origin.x == x && (int32_t)bounds.origin.y == y;
     });
-    if (!ok) return 3;
     if (CGMainDisplayID() != mainBefore) return 4;
-    return 0;
+    return ok ? 0 : 3;
+}
+
+static int VDPlaceOrigin(CGDirectDisplayID displayID, int32_t x, int32_t y) {
+    int result = VDPlaceOriginAttempt(displayID, x, y);
+    // WindowServer can normalize the first origin using the previous desktop
+    // size. Once that transaction settles, one more position-only intent closes
+    // the gap. Never loop indefinitely or retry a primary-display change.
+    return result == 3 ? VDPlaceOriginAttempt(displayID, x, y) : result;
 }
 
 #pragma mark - 공개 C 심볼
@@ -269,7 +302,7 @@ char *leftcar_vdisp_create_v1(uint32_t logical_width, uint32_t logical_height,
 
     NSString *display_name = (name && *name) ? [NSString stringWithUTF8String:name] : @"Leftcar Display";
 
-    id descriptor = MsgInit([VDDescriptorClass() alloc]);
+    id descriptor = [[VDDescriptorClass() alloc] init];
     if (!descriptor) return CopyJSONString(failure(@"init", @"descriptor alloc failed"));
     MsgSetName(descriptor, display_name);
     MsgSetVendorID(descriptor, kLeftcarVdispVendor);
@@ -285,14 +318,14 @@ char *leftcar_vdisp_create_v1(uint32_t logical_width, uint32_t logical_height,
                                                     landscape ? short_mm : long_mm));
     MsgSetDispatchQueue(descriptor, VDQueue());
 
-    id mode = MsgModeInit([VDModeClass() alloc], logical_width, logical_height, 60.0);
+    id mode = [[VDModeClass() alloc] initWithWidth:logical_width height:logical_height refreshRate:60.0];
     if (!mode) return CopyJSONString(failure(@"init", @"mode alloc failed"));
-    id settings = MsgInit([VDSettingsClass() alloc]);
+    id settings = [[VDSettingsClass() alloc] init];
     if (!settings) return CopyJSONString(failure(@"init", @"settings alloc failed"));
     MsgSetModes(settings, @[mode]);
     MsgSetHiDPI(settings, scale == 2 ? 1u : 0u);
 
-    id display = MsgInitWithDescriptor([VDClass() alloc], descriptor);
+    id display = [[VDClass() alloc] initWithDescriptor:descriptor];
     if (!display) return CopyJSONString(failure(@"init", @"CGVirtualDisplay init returned nil"));
     if (!MsgApplySettings(display, settings)) {
         return CopyJSONString(failure(@"apply", @"applySettings was rejected"));
@@ -353,6 +386,7 @@ char *leftcar_vdisp_create_v1(uint32_t logical_width, uint32_t logical_height,
     NSString *uuid = UUIDForDisplayID(display_id);
     @synchronized (VDRegistry()) {
         VDRegistry()[@(display_id)] = display;
+        VDModes()[@(display_id)] = @{@"width": @(logical_width), @"height": @(logical_height), @"scale": @(scale)};
     }
 
     return CopyJSONString(@{
@@ -424,10 +458,52 @@ int32_t leftcar_vdisp_place_v1(uint32_t display_id, int32_t x, int32_t y) {
     return VDPlaceOrigin(display_id, x, y);
 }
 
+int32_t leftcar_vdisp_is_active_v1(uint32_t display_id) {
+    return DisplayIsActiveInList(display_id) ? 1 : 0;
+}
+
+// 0=right, 1=left, 2=above, 3=below. Attach to the outermost existing
+// display so a second physical monitor is never overlapped or moved.
+int32_t leftcar_vdisp_arrange_v1(uint32_t display_id, uint32_t side) {
+    if (side > 3 || display_id == CGMainDisplayID()) return 1;
+    @synchronized (VDRegistry()) {
+        if (VDRegistry()[@(display_id)] == nil) return 1;
+    }
+    uint32_t count = 0;
+    if (CGGetActiveDisplayList(0, NULL, &count) != kCGErrorSuccess || count < 2) return 2;
+    CGDirectDisplayID ids[count];
+    if (CGGetActiveDisplayList(count, ids, &count) != kCGErrorSuccess) return 2;
+    CGRect anchor = CGRectNull;
+    CGFloat edge = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (ids[i] == display_id) continue;
+        CGRect candidate = CGDisplayBounds(ids[i]);
+        CGFloat candidateEdge = side == 0 ? CGRectGetMaxX(candidate)
+            : side == 1 ? CGRectGetMinX(candidate)
+            : side == 2 ? CGRectGetMinY(candidate) : CGRectGetMaxY(candidate);
+        BOOL farther = CGRectIsNull(anchor) ||
+            ((side == 0 || side == 3) ? candidateEdge > edge : candidateEdge < edge);
+        if (farther) { anchor = candidate; edge = candidateEdge; }
+    }
+    if (CGRectIsNull(anchor)) return 2;
+    CGRect current = CGDisplayBounds(display_id);
+    @synchronized (VDRegistry()) {
+        NSDictionary *mode = VDModes()[@(display_id)];
+        current.size = CGSizeMake([mode[@"width"] doubleValue], [mode[@"height"] doubleValue]);
+    }
+    int32_t x = (int32_t)anchor.origin.x, y = (int32_t)anchor.origin.y;
+    if (side == 0) x = (int32_t)CGRectGetMaxX(anchor);
+    if (side == 1) x = (int32_t)(CGRectGetMinX(anchor) - current.size.width);
+    if (side == 2) y = (int32_t)(CGRectGetMinY(anchor) - current.size.height);
+    if (side == 3) y = (int32_t)CGRectGetMaxY(anchor);
+    return VDPlaceOrigin(display_id, x, y);
+}
+
 int32_t leftcar_vdisp_destroy_v1(uint32_t display_id) {
     @synchronized (VDRegistry()) {
         if (VDRegistry()[@(display_id)] == nil) return 1;
         [VDRegistry() removeObjectForKey:@(display_id)];
+        [VDModes() removeObjectForKey:@(display_id)];
     }
     // 제거는 비동기다 — 실측 ~30s. 빈 세션 재구성 한 번이 WindowServer의
     // 고아 정리를 당긴다면 빠르게 끝난다(실험 중).

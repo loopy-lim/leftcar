@@ -27,6 +27,8 @@ const REQUEST_TIMEOUT_MS: Record<string, number> = {
   startStream: 25_000,
   createVirtualDisplay: 30_000,
   removeVirtualDisplay: 20_000,
+  resizeVirtualDisplay: 60_000,
+  arrangeVirtualDisplay: 10_000,
   getCatalog: 15_000,
   setClipboard: 15_000,
   getClipboard: 15_000,
@@ -97,7 +99,22 @@ export interface CatalogView {
    * 디스플레이가 여전히 남아 있으면 "제거 중" 상태로 표시한다.
    */
   virtualDisplayPendingRemoval?: string | null;
+  virtualDisplayControl?: boolean;
+  virtualDisplaySourceId?: string | null;
 };
+
+export type ExtendedDisplayMode = { width: number; height: number; scale: number };
+export type ExtendedDisplayPosition = "left" | "right" | "above" | "below";
+export interface ExtendedDisplayStatus {
+  supported: boolean;
+  removalPending: boolean;
+  suggested?: (ExtendedDisplayMode & { source?: "viewerMetrics" | "fallback" | "pendingResize" }) | null;
+  live?: {
+    sourceId?: string | null;
+    logicalWidth: number; logicalHeight: number; scale: number;
+    backingWidth: number; backingHeight: number;
+  } | null;
+}
 
 export interface CaptureBackendInfo {
   id: string;
@@ -371,7 +388,9 @@ export function connect(
       {
         resolve: (v: unknown) => void;
         reject: (e: Error) => void;
-        timer: ReturnType<typeof setTimeout>;
+        timer?: ReturnType<typeof setTimeout>;
+        command: string;
+        timeoutMs: number;
       }
     >();
     let terminalError: ControlRequestError | null = null;
@@ -438,6 +457,27 @@ export function connect(
       for (const listener of [...closedListeners]) listener();
     };
 
+    // The Host dispatches this socket's commands in FIFO order. A queued read
+    // must not destroy the connection while a preceding resize/start is working.
+    const armFrontDeadline = () => {
+      const first = pending.entries().next().value;
+      if (!first) return;
+      const [id, handler] = first;
+      if (handler.timer !== undefined) return;
+      handler.timer = setTimeout(() => {
+        if (!pending.has(id)) return;
+        const error = new ControlRequestError(`control request timeout: ${handler.command}`, "timeout");
+        terminalError = error;
+        for (const entry of pending.values()) {
+          clearTimeout(entry.timer);
+          entry.reject(error);
+        }
+        pending.clear();
+        // With no response IDs, a late response cannot safely be reused.
+        socket.destroy();
+      }, handler.timeoutMs);
+    };
+
     const makeClient = (): ControlClient => ({
       whenClosed(listener: () => void): void {
         closedListeners.add(listener);
@@ -452,21 +492,13 @@ export function connect(
           const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
           const payload = JSON.stringify(envelope) + "\n";
           const requestTimeout = REQUEST_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
-          const timer = setTimeout(() => {
-            const handler = pending.get(id);
-            if (!handler) return;
-            pending.delete(id);
-            handler.reject(new ControlRequestError(`control request timeout: ${command}`, "timeout"));
-            // Responses do not carry request ids. Once one request times
-            // out, a delayed response could otherwise be matched to the
-            // next request on this socket.
-            socket.destroy();
-          }, requestTimeout);
           pending.set(id, {
             resolve: res as (v: unknown) => void,
             reject: rej,
-            timer,
+            command,
+            timeoutMs: requestTimeout,
           });
+          armFrontDeadline();
           try {
             const wire =
               mode === "sealed" && tx
@@ -480,7 +512,8 @@ export function connect(
               if (!pending.has(id)) return;
               const handler = pending.get(id);
               pending.delete(id);
-              clearTimeout(handler?.timer ?? timer);
+              clearTimeout(handler?.timer);
+              armFrontDeadline();
               const msg = formatErrorMessage(writeError);
               (handler?.reject ?? rej)(
                 new ControlRequestError(`control write error: ${msg}`, "transport"),
@@ -489,7 +522,8 @@ export function connect(
           } catch (e) {
             const handler = pending.get(id);
             pending.delete(id);
-            clearTimeout(handler?.timer ?? timer);
+            clearTimeout(handler?.timer);
+              armFrontDeadline();
             const msg = formatErrorMessage(e);
             rej(new ControlRequestError(`control write error: ${msg}`, "transport"));
           }
@@ -532,6 +566,7 @@ export function connect(
       const [id, handlers] = oldest;
       pending.delete(id);
       clearTimeout(handlers.timer);
+      armFrontDeadline();
       if (parsed.ok) {
         handlers.resolve(parsed.result);
       } else {

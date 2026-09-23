@@ -273,6 +273,12 @@ pub struct CatalogView {
     /// a normal display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_display_pending_removal: Option<String>,
+    /// Supports status, explicit mode selection, resize, and arrangement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_display_control: Option<bool>,
+    /// Stable identity of the managed extended display, never inferred by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_display_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1201,6 +1207,8 @@ mod stream_control_tests {
             window_size: None,
             input_allowed: None,
             virtual_display_pending_removal: None,
+            virtual_display_control: None,
+            virtual_display_source_id: None,
         };
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(json.contains("\"platform\":\"windows\""));
@@ -1229,6 +1237,8 @@ mod stream_control_tests {
             window_size: None,
             input_allowed: None,
             virtual_display_pending_removal: None,
+            virtual_display_control: None,
+            virtual_display_source_id: None,
         };
         assert!(catalog
             .encoder_experiments
