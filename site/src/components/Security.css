@@ -1,0 +1,28 @@
+.section-title {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: var(--text);
+  text-align: center;
+}
+
+.section-lead {
+  font-size: 1.1rem;
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 768px;
+  margin: 0 auto 3rem;
+  line-height: 1.6;
+}
+
+.security-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+}
+
+@media (min-width: 768px) {
+  .security-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

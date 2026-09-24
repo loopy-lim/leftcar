@@ -1,0 +1,111 @@
+.diagram-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+  margin: 4rem 0;
+  padding: 2rem;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  flex-direction: column;
+}
+
+@media (min-width: 768px) {
+  .diagram-container {
+    flex-direction: row;
+    padding: 4rem 2rem;
+  }
+}
+
+.diagram-pc {
+  position: relative;
+  width: 120px;
+  height: 80px;
+}
+
+.pc-screen {
+  position: absolute;
+  width: 100px;
+  height: 60px;
+  border: 2px solid var(--border);
+  background-color: var(--bg);
+  border-radius: 4px;
+}
+
+.pc-screen.offset {
+  top: 15px;
+  left: 20px;
+  border-color: var(--text-dim);
+}
+
+.diagram-network {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: var(--accent);
+  gap: 0.5rem;
+}
+
+.network-line {
+  width: 2px;
+  height: 40px;
+  border-left: 2px dashed var(--accent);
+}
+
+@media (min-width: 768px) {
+  .network-line {
+    width: 60px;
+    height: 2px;
+    border-left: none;
+    border-top: 2px dashed var(--accent);
+  }
+}
+
+.network-label {
+  font-size: 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.network-arrow {
+  font-weight: bold;
+}
+
+@media (min-width: 768px) {
+  .network-arrow {
+    transform: rotate(0deg);
+  }
+}
+@media (max-width: 767px) {
+  .network-arrow {
+    transform: rotate(90deg);
+  }
+}
+
+.diagram-android {
+  width: 140px;
+  height: 200px;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  background-color: var(--bg);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.android-window {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background-color: var(--surface);
+}
+
+.window-header {
+  height: 8px;
+  background-color: var(--border);
+}
+
+.window-body {
+  height: 20px;
+}

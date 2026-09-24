@@ -1,0 +1,28 @@
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+@media (min-width: 768px) {
+  .status-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.status-highlight {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.status-normal {
+  color: var(--text);
+}
+
+.status-note {
+  text-align: center;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  font-style: italic;
+}

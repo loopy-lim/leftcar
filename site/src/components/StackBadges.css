@@ -1,0 +1,29 @@
+.stack-section {
+  text-align: center;
+}
+
+.stack-badges {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+.stack-badge {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.stack-desc {
+  font-size: 1rem;
+  color: var(--text-dim);
+  max-width: 768px;
+  margin: 0 auto;
+}
