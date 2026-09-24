@@ -70,10 +70,6 @@ await writeFile(
   '<!doctype html><html><head><meta charset="utf-8"><title>Isolated catalog lifecycle</title></head><body><div id="root"></div><script src="catalog.js"></script></body></html>',
 );
 
-const grants = await Bun.build({ entrypoints: [`${import.meta.dir}/source-grants.jsx`], outdir, target: "browser", plugins: [reactPlugin] });
-if (!grants.success) throw new Error(grants.logs.join("\n"));
-await writeFile(`${outdir}/source-grants.html`, '<!doctype html><html><head><meta charset="utf-8"><title>Isolated Host source approval</title></head><body><div id="root"></div><script src="source-grants.js"></script></body></html>');
-
 const pairingGrants = await Bun.build({entrypoints:[`${import.meta.dir}/pairing-grants.jsx`],outdir,target:"browser", plugins: [reactPlugin]});
 if(!pairingGrants.success)throw new Error(pairingGrants.logs.join("\n"));
 await writeFile(`${outdir}/pairing-grants.html`,'<!doctype html><html><head><meta charset="utf-8"><title>Isolated actual pairing parent</title></head><body><div id="root"></div><script src="pairing-grants.js"></script></body></html>');
