@@ -71,7 +71,7 @@
 | HiDPI 논리/backing 분리 | 모드=논리+hiDPI 플래그로 해결(§3) | 채택 |
 | update_mode (회전 등) | **모드 변경 = 좀비 리스크** → v1 금지, destroy+recreate(동일 identity)로 대체 | 수정 채택 |
 | window resize ≠ display resolution | 이미 성립: 뷰어가 startStream/reconfigureStream으로 세션 크기만 바꾸고 가상 디스플레이 모드는 불변 | 무수정 |
-| disconnect → destroy / grace | v1은 **호스트 소유 영속**(§6 결정 1)이라 grace 타이머 자체가 불필요 | 정책 변경 제안 |
+| disconnect → destroy / grace | **세션 스코프 소유**(§6 결정 1): 라이브 뷰어 세션이 0이 되는 전환(네트워크 단절·뷰어 강제 종료 포함)에 destroy한다. grace 타이머는 두지 않으며, 앱 종료 시에도 상한 2초 동안 동기 해제한다(44e84ff). | 정책 확정·구현 |
 | Host crash cleanup | WindowServer가 프로세스 사망 시 회수(외부 실측) — 유효성만 실물 확인 | 무료 해결 |
 | 보안: 호스트 승인 | **호스트 UI가 생성 주체**인 구조로 충족(제안 문서의 대안 2). 뷰어 요청 경로·새 명령 없음 = 공격면 0 | 채택 |
 | USB 우선 | startStream이 이미 udp/tcp/usb/adb 순 시도(control.rs:2428 전후) | 무수정 |
@@ -163,8 +163,8 @@ CGDirectDisplayID → 기존 열거/승인/캡처/입력/복구 전체 무수정
 
 | 시나리오 | v1 동작 |
 |---|---|
-| 뷰어 연결 종료 | 디스플레이 유지(§6 결정 1). 세션만 기존 경로로 종료 |
-| 뷰어 재연결 | 같은 source_id(uuid 기반)로 무재생성 재스트리밍 |
+| 뷰어 연결 종료 | 마지막 라이브 뷰어 세션이 제거되어 세션 수가 0이 되는 전환이면 디스플레이를 destroy한다(§6 결정 1). 네트워크 단절·뷰어 강제 종료 같은 비자발적 단절도 미디어 타임아웃/만료 또는 후속 연결의 stale-session 정리를 거쳐 같은 규칙을 따른다. |
+| 뷰어 재연결 | 제거가 완료됐으면 고정 identity의 디스플레이를 다시 생성한다. 제거 직후에는 최대 ~35s `removal pending` 윈도우가 생길 수 있으며, 기존 뷰어의 pending 가드와 상태 폴링이 재열기를 보류한다. |
 | 호스트가 제거 클릭 | destroy → 제거 폴링 → 캡처 중이면 `markStopped`→LCT1→리퍼가 기존 경로로 정리. **순서 보장: 캡처 종료를 기다리지 않고 destroy → 기존 소실 처리 경로가 후행**(옛 설계의 수동 순서 조율 불필요) |
 | 호스트 크래시/강제종료 | WindowServer가 프로세스 사망 시 회수(외부 실측) → E-1 실물 확인. 앱 재시작 시 status 조회로 정합 |
 | sleep/wake | 캡처는 기존 와치독(2.5s 무콜백 제자리 재시작)과 `didStopWithError` 경로가 처리. 디스플레이 객체는 프로세스 생존. wake 후 mirror/모드 비동기 복원은 E-4 확인 |
@@ -174,7 +174,7 @@ CGDirectDisplayID → 기존 열거/승인/캡처/입력/복구 전체 무수정
 
 ## 6. 사용자 확인이 필요한 결정
 
-1. **소유 정책(권장: 호스트 소유 영속)** — 제안 문서는 "disconnect → destroy + grace"를 기본 시나리오로 제시했지만, 실제 모니터는 뷰어가 떠난다고 뽑히지 않는다. 호스트가 만들고 호스트가 없애는 영속 모델이 UX·구현 양면에서 가장 단순하고 grace 타이머가 아예 없어진다. 세션 소유+grace를 원하면 별도 논의.
+1. **소유 정책(확정: 세션 스코프 소유)** — 정책 요약은 **세션 스코프 소유 + 라이브 뷰어 세션 0 전환 시 destroy + 앱 종료 시 상한 2초 동기 해제(44e84ff)**다. 명시적 생성은 호스트가 수행하지만, 한 개 이상이던 라이브 뷰어 세션이 0이 되는 teardown 전환에서 화면을 해제한다. 이 규칙은 정상 `stopStream`뿐 아니라 네트워크 단절·뷰어 강제 종료 같은 비자발적 단절에도 적용하며 별도 grace 타이머를 두지 않는다. 재열기 시 제거가 아직 반영 중이면 최대 ~35s의 `removal pending` 윈도우가 생길 수 있지만, 기존 뷰어의 pending 가드와 상태 폴링이 이를 흡수한다. 구현 근거는 `control.rs`의 `release_virtual_display_if_idle`과 네 호출 지점(`teardown_targets`, 만료 세션 스윕의 `session_expired`, `stop_sessions_for_viewer`의 `viewer_superseded`, `stopStream`의 `stop_stream`)이며, `lib.rs`의 `RunEvent::Exit`는 `remove_blocking_within(Duration::from_secs(2))`로 종료 시 해제를 최대 2초 동기 대기한다.
 2. **기본 모드(권장: 클라이언트 기기 메트릭 도출 + 프리셋 폴백)** — 2026-09-18 피드백 반영. 대상 기기 패널의 종횡비·해상도를 그대로 반영(physical/2 @2x, 호스트 클램프)해 letterbox 없음. 메트릭 부재 시 폴백 1280×800 @2x 60Hz. 주사율은 60Hz 고정(API 상한). 현재 주 기기(TB710FU 2560×1600)에서는 도출 결과가 폴백과 동일(1280×800@2x).
 3. **생성 주체(권장: 호스트 전용)** — 뷰어 요청+승인 경로는 계약 변경·승인 UI가 필요해 후속으로 분리.
 4. **grants UX 병합 시점** — 진행 중인 pairing/grants 리팩터(타 세션)와 충돌 방지를 위해 확장 디스플레이 UI 착수를 그 병합 이후로 배치.
@@ -191,7 +191,7 @@ CGDirectDisplayID → 기존 열거/승인/캡처/입력/복구 전체 무수정
 - E-7 실기기 종단: 태블릿에서 생성 디스플레이 스트리밍 + 터치/키보드 좌표 정확성 + XR 창 종횡비.
 - E-8 PLACE(배치 설정) 후에도 제거가 되는지(모드-변경-좀비 함정의 배치 버전).
 
-레거시 체크리스트(`tablet-display-physical-validation.md`)의 덮개 닫기 생존 항목은 v1 정책(호스트 소유 영속 + 활성 디스플레이 0 전제)에서는 생성 전제만 확인하면 된다.
+레거시 체크리스트(`tablet-display-physical-validation.md`)의 덮개 닫기 항목은 활성 라이브 뷰어 세션 동안의 화면 생존과, 세션 0 전환 뒤 해제를 함께 확인한다. 활성 디스플레이 0 환경에서는 생성 전제도 별도로 확인한다.
 
 각 단계 게이트: shim 단위 테스트(기존 단일 파일 테스트 exe 패턴) + `cargo test`(src-tauri는 루트 워크스페이스 외부 — 개별 실행) + React UI 단계는 react-doctor 100/100·typecheck·테스트 + 전 단계에서 기존 스트리밍 회귀 없음.
 
@@ -204,7 +204,7 @@ CGDirectDisplayID → 기존 열거/승인/캡처/입력/복구 전체 무수정
 
 ## 9. 하지 않을 것 (v1)
 
-BetterDisplay 연동(영구), 라이브 모드 변경, 회전, 4K/120Hz, 다중 가상 디스플레이, 세션 소유+grace 정책, 뷰어 주도 생성, rustra 계약 변경, 새 인코더/전송/디코더, HDR/4:4:4, 색정보 필드(`redPrimary` 등 미검증 surface).
+BetterDisplay 연동(영구), 라이브 모드 변경, 회전, 4K/120Hz, 다중 가상 디스플레이, 세션 종료 grace 타이머, 뷰어 주도 생성, rustra 계약 변경, 새 인코더/전송/디코더, HDR/4:4:4, 색정보 필드(`redPrimary` 등 미검증 surface).
 
 ## 10. 리스크
 

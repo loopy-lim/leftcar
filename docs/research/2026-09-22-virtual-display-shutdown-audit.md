@@ -333,7 +333,49 @@ design.md §6 결정 1의 "호스트 소유 영속"을 이 루프에서 재결�
 
 ### 9.6 수용된 잔여 리스크
 
-1. **재열기 지연 윈도우**: 세션 종료 직후 ~30s 내 재열기 시 pending으로 open이 무동작(use-extension-display.ts:77 가드). C5(cgvd-spark, deactivate 조사)로 지연이 단축되면 자연 완화 — 이 루프의 검증 대상 아님.
-2. **C2·좀비 입양**: 방어 코드 없음(관측 결함 없음, E-1 사망 회수 백스톱). 후속 브리지 과제로 이월.
+1. **재열기 지연 윈도우**: 세션 종료 직후 ~30s 내 재열기 시 pending으로 open이 무동작(use-extension-display.ts:77 가드). deactivate 조사에서 단축용 셀렉터가 확인되지 않았으므로 이 지연은 남는다.
+2. **해소 — C2·좀비 입양**: 브리지의 고정 hardware identity 기반 stale 탐지와 Rust의 생성 전·생성 결과 파싱 실패·`displayId=0` 복구 호출로 방어 경로를 추가했다(§10.1). 회수 완료 전에는 `last_removed`로 pending을 유지한다.
 3. **teardown↔startStream 경합**: 마지막 세션 teardown 직후 새 스트림 시작이 끼어들면 새 스트림의 소스가 제거 중일 수 있다(확률 낮음, 재시도로 회복). v1 수용.
 4. **종료 시 2초 상한 대기**: exit가 최대 2초 늦어진다. rc=2(해제됐으나 열거 잔존)여도 사망 회수가 보장하므로 "호출 보장"으로 충분(§8.4-2 채택).
+
+---
+
+## 10. 후속 조치 결과
+
+### 10.1 좀비 복구와 C2 방어
+
+- 브리지에 `leftcar_vdisp_find_stale_v1`(`CGVirtualDisplayBridge.m:259`)을 추가했다. 현재 브리지 레지스트리 소유분은 제외하고, Leftcar의 고정 vendor/product/serial과 일치하는 온라인 디스플레이를 찾아 이전 프로세스 잔존분을 반환한다.
+- `VirtualDisplayManager::recover_stale`은 `create` 진입 시와 create 결과 JSON 파싱 실패 또는 `displayId=0` 판정 시 호출된다. 발견한 디스플레이를 destroy하고, 즉시 소실하지 않거나 회수 호출이 실패하면 `last_removed`에 `stale:<displayId>`를 기록해 새 identity 생성을 pending 상태로 막는다. 즉시 회수 성공은 감사 이벤트 `virtual_display_zombie_recovered`로 남긴다.
+- 이로써 §9.6-2의 이전 프로세스 좀비 입양 부재와 C2의 생성 결과 불일치 방어 항목을 해소 처리했다.
+
+### 10.2 deactivate 조사 결론
+
+`docs/research/2026-09-24-cgvd-deactivate-investigation.md`의 확정 결론은 다음과 같다.
+
+> **미확인 — 조사한 공개 헤더·사용 코드와 macOS 26.6.2 런타임 어디에서도 `CGVirtualDisplay`의 deactivate/disable/invalidate/stop/terminate/disconnect 계열 셀렉터는 확인되지 않았다. 따라서 현재 근거로는 release-only 대비 30초 제거 지연을 줄일 호출이 없으며, C5의 “deactivate 미호출” 가설은 기각한다.**
+
+따라서 확인되지 않은 비공개 셀렉터를 추측해 호출하지 않고 release-only 모델을 유지한다. WindowServer 내부의 약 30초 지연 원인은 여전히 미해결이다.
+
+### 10.3 정책 문서 정합
+
+`docs/2026-09-18-extended-display-design.md`를 **세션 스코프 소유** 정책으로 갱신했다. 라이브 뷰어 세션이 0이 되는 teardown 전환에서 destroy하고, 앱 종료 시 최대 2초 동안 해제 호출 완료를 기다리며, 별도 grace 타이머는 두지 않는다. 이로써 §9.3-4의 설계 문서 갱신 항목은 해소됐다.
+
+### 10.4 최종 검증 게이트
+
+후속 구현이 반영된 최종 작업 트리에서 다음 게이트를 다시 실행했고 모두 종료 코드 0으로 통과했다.
+
+- `bun run typecheck` — 통과.
+- `bun run test` — 통과(70개 파일, 852개 테스트).
+- `bun run test:architecture` — 통과(`architecture-check: TS/Kotlin rules clean`).
+- `cd apps/host-desktop/src-tauri && cargo test` — 통과(단위 테스트 290개, E2E 테스트 13개, 실패 0개).
+
+검증 시 React/JSX/TSX 변경은 없어 React Doctor는 적용 대상이 아니었다.
+
+### 10.5 사전 존재 위반과 검증 도구 기록
+
+- f3e71c9에서 유입된 `StreamPointerDiagnostics.kt`의 `org.json.JSONObject` import가 Kotlin import allowlist를 위반해 아키텍처 게이트를 막고 있었다. allowlist를 늘리지 않고 해당 의존을 제거해 숫자 필드 전용 수동 JSON 직렬화로 바꿨으며, §10.4의 아키텍처 게이트 통과로 복구를 확인했다.
+- §9.4-2가 지목한 `tools/build-n.zsh`는 저장소에 존재하지 않아 그 경로를 통한 별도 shim 빌드 검증은 실행할 수 없었다. 이 사실은 cargo 및 전체 회귀 게이트 통과와 별개이며, 해당 스크립트 기반 검증을 통과한 것으로 간주하지 않는다.
+
+### 10.6 남은 리스크와 실기 권고
+
+해소되지 않은 리스크는 §9.6-1의 **재열기 지연 윈도우**, §9.6-3의 **teardown↔startStream 경합**, §9.6-4의 **종료 시 최대 2초 대기**다. 또한 §9.4-4의 실기 검증은 여전히 권고한다: 뷰어 뒤로 가기와 앱 강제 종료 뒤 Mac Displays 소실, pending 해소 뒤 재열기, 호스트 Quiet 종료 뒤 소실을 실제 기기에서 확인해야 한다.
