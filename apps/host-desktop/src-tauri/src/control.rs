@@ -737,6 +737,41 @@ impl ControlServer {
         Ok(())
     }
 
+    /// 세션 스코프 소유 정책(2026-09-22 종료 감사 §9.2): 라이브 뷰어
+    /// 세션이 0이 되는 전환마다 확장(가상) 디스플레이를 해제한다.
+    /// "막 세션을 제거한" 경로에서만 호출한다 — 전환 기반 훅이라 세션
+    /// 없이 호스트 UI가 만든 디스플레이(G1)는 상태 폴링으로 죽지 않는다.
+    /// 해제는 백그라운드 워커에서 돌고(브리지 destroy 폴링 최대 ~9.5s)
+    /// 실패해도 명령 응답에 영향하지 않는다.
+    fn release_virtual_display_if_idle(&self, reason: &str) {
+        let Some(manager) = self.virtual_display.get().cloned() else {
+            return;
+        };
+        if !self.sessions.lock().unwrap().live.is_empty() {
+            return;
+        }
+        let audit = self.audit.get().cloned();
+        let reason = reason.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            let had_display = manager.has_live_display();
+            let result = manager.remove();
+            if had_display {
+                if let Some(audit) = &audit {
+                    audit.log(
+                        "virtual_display_released",
+                        json!({
+                            "reason": reason,
+                            "vanished": matches!(&result, Ok(true)),
+                        }),
+                    );
+                }
+            }
+            if let Err(error) = result {
+                eprintln!("virtual display release after {reason} failed: {error}");
+            }
+        });
+    }
+
     /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
     pub fn file_transfer_state(&self) -> &crate::file_transfer::FileTransferState {
         &self.file_transfers
@@ -781,6 +816,11 @@ impl ControlServer {
         }
         let removed = targets.len();
         self.refresh_curtain();
+        // 세션 스코프 소유: 세션이 0이 되는 전환이면 확장 디스플레이도
+        // 함께 해제한다(revoke 등으로 세션을 치운 경로).
+        if removed > 0 {
+            self.release_virtual_display_if_idle(reason);
+        }
         removed
     }
 
@@ -1836,6 +1876,7 @@ impl ControlServer {
             (sessions, expired)
         };
 
+        let mut swept = 0usize;
         for (id, session) in expired {
             Self::invalidate_session_source(&session);
             let _cleanup_guard = ReconfigureGuard {
@@ -1875,9 +1916,15 @@ impl ControlServer {
             };
             if removed {
                 self.cleanup_registered_transport(session.transport_owner.as_ref());
+                swept += 1;
             }
         }
         self.refresh_curtain();
+        // 세션 스코프 소유: 만료 스윕으로 세션이 0이 되는 전환도 해제
+        // 트리거다(뷰어 강제 종료 → 미디어 타임아웃 → 만료 경로).
+        if swept > 0 {
+            self.release_virtual_display_if_idle("session_expired");
+        }
 
         StatusView { sessions }
     }
@@ -2217,6 +2264,7 @@ impl ControlServer {
                 .collect::<Vec<_>>()
         };
 
+        let stale_count = stale.len();
         for (id, session) in stale {
             Self::invalidate_session_source(&session);
             if !session.backend_released {
@@ -2228,6 +2276,11 @@ impl ControlServer {
                 }
             }
             self.cleanup_registered_transport(session.transport_owner.as_ref());
+        }
+        // 세션 스코프 소유: 뷰어 재시작 등으로 낡은 세션이 치워져 0이 되는
+        // 전환도 해제 트리거다(감사 §9.2 — 비자발적 단절 포함).
+        if stale_count > 0 {
+            self.release_virtual_display_if_idle("viewer_superseded");
         }
     }
 
@@ -3172,6 +3225,9 @@ impl ControlServer {
                                     }),
                                 );
                                 self.refresh_curtain();
+                                // 세션 스코프 소유: 마지막 세션이면 확장
+                                // 디스플레이도 해제한다(감사 §9.2).
+                                self.release_virtual_display_if_idle("stop_stream");
                                 ok(json!({}))
                             }
                             Err(e) => err(&e),
@@ -4252,6 +4308,108 @@ mod tests {
                 .await;
             assert_eq!(anonymous["error"], "unauthorized", "{command}");
         }
+    }
+
+    // -- 세션 스코프 소유(감사 §9.2): 세션 0 전환 → 확장 디스플레이 해제 --
+
+    /// 백그라운드 해제 훅이 실제로 remove에 도달할 때까지 기다린다.
+    async fn wait_for_remove_calls(
+        manager: &std::sync::Arc<crate::virtual_display::VirtualDisplayManager>,
+        expected: usize,
+    ) {
+        for _ in 0..300 {
+            if manager.remove_request_count() >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            manager.remove_request_count(),
+            expected,
+            "virtual display remove was not called in time"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_session_stop_releases_the_virtual_display() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        server.set_virtual_display(manager.clone());
+        insert_live_session(&server, 1, Some("viewer-1"));
+
+        let resp = server
+            .dispatch(
+                "stopStream",
+                json!({ "session": 1 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        assert!(server.sessions.lock().unwrap().live.is_empty());
+        // 훅의 remove는 백그라운드 워커에서 돈다 — 관측될 때까지 기다린다.
+        // 실 매니저에 디스플레이가 없으면 no-op 성공이고, 실패해도 stopStream
+        // 응답은 이미 ok로 돌아갔다(오류 비전파).
+        wait_for_remove_calls(&manager, 1).await;
+    }
+
+    #[tokio::test]
+    async fn surviving_sessions_keep_the_virtual_display_until_zero() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        server.set_virtual_display(manager.clone());
+        insert_live_session(&server, 1, Some("viewer-1"));
+        insert_live_session(&server, 2, Some("viewer-2"));
+
+        // 다른 기기 세션이 남는 동안엔 해제가 발동하지 않는다.
+        let resp = server
+            .dispatch(
+                "stopStream",
+                json!({ "session": 1 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
+            .await;
+        assert_eq!(resp["ok"], true, "{resp}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            manager.remove_request_count(),
+            0,
+            "release must stay gated while another device still streams"
+        );
+
+        // 마지막 세션(revoke 경로 = teardown_targets)이 지워지면 발동한다.
+        assert_eq!(server.stop_sessions_for_device("viewer-2"), 1);
+        wait_for_remove_calls(&manager, 1).await;
+    }
+
+    #[tokio::test]
+    async fn absent_sessions_do_not_release_anything_on_removal_misses() {
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        server.set_virtual_display(manager.clone());
+
+        // 세션이 애초에 없는 stopStream 실패는 전환이 아니니 해제도 없다.
+        let resp = server
+            .dispatch("stopStream", json!({ "session": 9 }), "192.168.0.9", Some("viewer-1"))
+            .await;
+        assert_eq!(resp["ok"], false, "{resp}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(manager.remove_request_count(), 0);
     }
 
     /// Canonical base64url spelling of bytes 0..32, used by startStream tests.

@@ -184,6 +184,21 @@ fn sanitized_fields(
             copy_u64(source, &mut safe, "stopped_sessions");
         }
         "devices_revoked_all" => copy_u64(source, &mut safe, "devices"),
+        "virtual_display_released" => {
+            copy_enum(
+                source,
+                &mut safe,
+                "reason",
+                &[
+                    "stop_stream",
+                    "session_expired",
+                    "viewer_superseded",
+                    "device_revoked",
+                    "devices_revoked_all",
+                ],
+            );
+            copy_bool(source, &mut safe, "vanished");
+        }
         "input_reassigned" => {
             copy_session_list(source, &mut safe);
             copy_u32(source, &mut safe, "to");
@@ -486,6 +501,35 @@ mod tests {
         assert_ne!(first[0]["device"], "viewer-stable");
         let _ = std::fs::remove_file(first_path);
         let _ = std::fs::remove_file(second_path);
+    }
+
+    #[test]
+    fn virtual_display_release_records_typed_reason_and_vanished() {
+        let path = temp_path("vdisp-release");
+        let audit = SessionAudit::new(Some(path.clone()));
+        audit.log(
+            "virtual_display_released",
+            serde_json::json!({
+                "reason": "stop_stream",
+                "vanished": false,
+                "session": 4,
+                "device": "viewer-secret-id",
+            }),
+        );
+        // 허용 목록 밖의 reason은 필드만 사라지고 레코드는 남는다.
+        audit.log(
+            "virtual_display_released",
+            serde_json::json!({ "reason": "not-a-known-reason" }),
+        );
+        let records = read_records(&path);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["event"], "virtual_display_released");
+        assert_eq!(records[0]["reason"], "stop_stream");
+        assert_eq!(records[0]["vanished"], false);
+        assert!(records[0].get("session").is_none());
+        assert!(records[0].get("device").is_none());
+        assert!(records[1].get("reason").is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

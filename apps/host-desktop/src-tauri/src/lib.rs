@@ -387,6 +387,28 @@ pub fn run() {
                 {
                     eprintln!("Host grant shutdown uncertain: {error}");
                 }
+                // 확장(가상) 디스플레이도 종료 시점에 확실히 끈다(세션 스코프
+                // 소유 정책, 2026-09-22 종료 감사 §9.2). 브리지 destroy 폴링
+                // (최대 ~9.5s)이 종료를 붙잡지 않게 2초 상한만 두고, 상한 내
+                // 못 끝낸 해제는 프로세스 사망 시 WindowServer 회수(E-1)가
+                // 백스톱한다. tokio 런타임이 내려가는 시점이라 전용 스레드로
+                // 돌린다(remove_blocking_within).
+                let virtual_display = app
+                    .state::<Arc<virtual_display::VirtualDisplayManager>>()
+                    .inner()
+                    .clone();
+                match virtual_display.remove_blocking_within(std::time::Duration::from_secs(2))
+                {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        eprintln!("virtual display release on exit failed: {error}")
+                    }
+                    None => {
+                        eprintln!(
+                            "virtual display release on exit timed out; relying on WindowServer reclaim"
+                        )
+                    }
+                }
             }
         });
 }

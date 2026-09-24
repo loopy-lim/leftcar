@@ -12,6 +12,8 @@
 //! 있어 상태에 removal_pending으로 드러낸다.
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 // ===== 순수 모드 매칭 (옛 display_matching.rs 수학 계승, f1a846e^) =====
@@ -221,6 +223,10 @@ impl LiveVirtualDisplay {
 pub struct VirtualDisplayManager {
     operation: Mutex<()>,
     state: Mutex<ManagerState>,
+    /// remove()의 실제 진입 횟수 — 세션 수명 훅 회귀 검사가 "해제 요청 →
+    /// 화면 해제" 전이를 관측하는 수단이다(프로덕션 빌드에는 없다).
+    #[cfg(test)]
+    remove_requests: AtomicUsize,
 }
 
 struct ManagerState {
@@ -291,6 +297,8 @@ impl VirtualDisplayManager {
                 last_removed: None,
                 pending_resize: None,
             }),
+            #[cfg(test)]
+            remove_requests: AtomicUsize::new(0),
         }
     }
 
@@ -407,9 +415,40 @@ impl VirtualDisplayManager {
         Ok(public)
     }
 
+    /// remove()의 실제 진입 횟수(회귀 검사 전용 관측).
+    #[cfg(test)]
+    pub fn remove_request_count(&self) -> usize {
+        self.remove_requests.load(Ordering::SeqCst)
+    }
+
+    /// 프로브·브리지 호출 없이 라이브 디스플레이 존재만 싸게 본다 — 세션
+    /// 수명 훅의 감사 로그 게이트용. 읽는 순간의 스냅샷이라 훅의 remove와
+    /// 생성 경로가 끼어드는 창은 남는다(감사 §9.6-3, v1 수용).
+    pub fn has_live_display(&self) -> bool {
+        self.state.lock().unwrap().current.is_some()
+    }
+
+    /// 종료 훅용 동기 해제 — remove를 별도 스레드에서 실행하고 상한만큼만
+    /// 기다린다. 브리지 destroy 폴링(최대 ~9.5s)이 프로세스 종료를 붙잡지
+    /// 않게 한다. None은 상한 내 완료 없음: 해제 호출은 이미 보장됐고 잔여
+    /// 정리는 프로세스 사망 시 WindowServer 회수(design.md E-1)가 마무리한다.
+    pub fn remove_blocking_within(
+        self: &std::sync::Arc<Self>,
+        timeout: std::time::Duration,
+    ) -> Option<Result<bool, String>> {
+        let manager = std::sync::Arc::clone(self);
+        let (done, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(manager.remove());
+        });
+        received.recv_timeout(timeout).ok()
+    }
+
     /// false means the object was released but WindowServer still lists it.
     pub fn remove(&self) -> Result<bool, String> {
         let _operation = self.operation.lock().unwrap();
+        #[cfg(test)]
+        self.remove_requests.fetch_add(1, Ordering::SeqCst);
         self.state.lock().unwrap().pending_resize = None;
         self.remove_inner()
     }
@@ -453,7 +492,7 @@ impl VirtualDisplayManager {
         if !wait_for_removal(
             || self.last_removed_pending().is_some(),
             || std::thread::sleep(std::time::Duration::from_millis(100)),
-            200,
+            REMOVAL_WAIT_ATTEMPTS,
         ) {
             return Err("virtual display removal pending; requested size saved, retry when removal completes".into());
         }
@@ -651,6 +690,12 @@ fn take_json_with(
     }
     owned
 }
+
+/// resize가 이전 디스플레이의 실제 소실(활성 열거에서 사라짐)을 기다리는
+/// 폴링 상한(시도 횟수 × 100ms). 실측 제거 반영은 최대 ~30s(design.md
+/// E-5)라 35s로 둔다 — 이전 20s(200회)는 실측 지연보다 짧아 resize가
+/// "removal pending" 오류로 자주 끝났다.
+const REMOVAL_WAIT_ATTEMPTS: usize = 350;
 
 fn wait_for_removal(
     mut pending: impl FnMut() -> bool,
@@ -859,5 +904,47 @@ mod tests {
         assert_eq!(FALLBACK_MODE.logical_width, 1280);
         assert_eq!(FALLBACK_MODE.logical_height, 800);
         assert_eq!(FALLBACK_MODE.scale, 2);
+    }
+
+    // -- 세션 스코프 소유 정책(2026-09-22 종료 감사 §9) 회귀 검사 ----------
+
+    #[test]
+    fn removal_wait_budget_covers_measured_window() {
+        // 실측 제거 반영 ~30s(E-5)를 resize 폴링 상한(100ms × 시도 횟수)이
+        // 덮는지 자기검사한다 — 상한이 실측보다 짧아지면 resize가 pending
+        // 오류로 되돌아가는 회귀다.
+        assert!(REMOVAL_WAIT_ATTEMPTS as u64 * 100 >= 30_000);
+    }
+
+    #[test]
+    fn exit_release_runs_remove_within_the_deadline() {
+        let manager = std::sync::Arc::new(VirtualDisplayManager::new());
+        let outcome = manager.remove_blocking_within(std::time::Duration::from_secs(2));
+        // 디스플레이가 없으면 no-op 성공 — 종료 경로가 여전히 remove를
+        // 호출했음을 카운터로 확인한다.
+        assert_eq!(outcome, Some(Ok(true)));
+        assert_eq!(manager.remove_request_count(), 1);
+    }
+
+    #[test]
+    fn exit_release_caps_the_wait_and_finishes_in_background() {
+        let manager = std::sync::Arc::new(VirtualDisplayManager::new());
+        // remove의 operation 락을 붙잡아 진입을 막는다 — 종료 경로가 브리지
+        // 폴링만큼 끌려가지 않고 상한에서 잘려야 한다.
+        let operation = manager.operation.lock().unwrap();
+        let started = std::time::Instant::now();
+        let outcome = manager.remove_blocking_within(std::time::Duration::from_millis(200));
+        assert!(outcome.is_none(), "the capped release must report a timeout");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(manager.remove_request_count(), 0);
+        drop(operation);
+        // 락이 풀리면 백그라운드 해제가 마무리된다(사망 회수 백스톱 전에).
+        for _ in 0..500 {
+            if manager.remove_request_count() == 1 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(manager.remove_request_count(), 1);
     }
 }
