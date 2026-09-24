@@ -386,9 +386,18 @@ impl VirtualDisplayManager {
             ));
         }
 
+        // Recover objects left by a previous bridge/process before creating. The
+        // bridge registry excludes objects owned by this process.
+        self.recover_stale(&mut state);
+
         let json = self.call_create(&state, logical_width, logical_height, scale)?;
-        let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|e| format!("bad create json: {e}"))?;
+        let value: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(value) => value,
+            Err(error) => {
+                self.recover_stale(&mut state);
+                return Err(format!("bad create json: {error}"));
+            }
+        };
         if value["ok"].as_bool() != Some(true) {
             let stage = value["stage"].as_str().unwrap_or("unknown");
             let error = value["error"].as_str().unwrap_or("unknown");
@@ -407,6 +416,7 @@ impl VirtualDisplayManager {
             mode_verified: value["modeVerified"].as_bool().unwrap_or(false),
         };
         if live.display_id == 0 {
+            self.recover_stale(&mut state);
             return Err("create returned display id 0".into());
         }
         let public = live.public();
@@ -611,6 +621,41 @@ impl VirtualDisplayManager {
                 create(logical_width, logical_height, scale, name.as_ptr())
             }))
         }
+    }
+
+    fn recover_stale(&self, state: &mut ManagerState) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(lib) = state.lib.as_ref() else { return };
+            let result = unsafe {
+                let Ok(find) = lib.get::<unsafe extern "C" fn() -> *mut std::ffi::c_char>(
+                    b"leftcar_vdisp_find_stale_v1",
+                ) else { return };
+                take_json_with(lib, || find())
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&result) else {
+                eprintln!("leftcar: virtual display stale scan returned invalid JSON");
+                return;
+            };
+            if let Some(displays) = value["displays"].as_array() {
+                for display in displays {
+                    let Some(id) = display["displayId"].as_u64().and_then(|id| u32::try_from(id).ok()) else { continue };
+                    match self.call_destroy(state, id) {
+                        Ok(true) => eprintln!("leftcar: virtual_display_zombie_recovered display_id={id} vanished=true"),
+                        Ok(false) => {
+                            state.last_removed = Some((id, format!("stale:{id}")));
+                            eprintln!("leftcar: virtual_display_zombie_recovery_pending display_id={id}");
+                        }
+                        Err(error) => {
+                            state.last_removed = Some((id, format!("stale:{id}")));
+                            eprintln!("leftcar: virtual_display_zombie_recovery_failed display_id={id}: {error}");
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = state;
     }
 
     #[cfg(target_os = "macos")]

@@ -253,6 +253,30 @@ static int VDPlaceOrigin(CGDirectDisplayID displayID, int32_t x, int32_t y) {
 
 #pragma mark - 공개 C 심볼
 
+// Enumerate online displays matching Leftcar's fixed hardware identity. The
+// registry is deliberately excluded: callers use this to find prior-process
+// leftovers, not displays this bridge instance already owns.
+char *leftcar_vdisp_find_stale_v1(void) {
+    NSMutableArray *stale = [NSMutableArray new];
+    uint32_t count = 0;
+    if (CGGetOnlineDisplayList(0, NULL, &count) != kCGErrorSuccess || count == 0)
+        return CopyJSONString(@{ @"displays": stale });
+    CGDirectDisplayID ids[count];
+    if (CGGetOnlineDisplayList(count, ids, &count) != kCGErrorSuccess)
+        return CopyJSONString(@{ @"displays": stale });
+    @synchronized (VDRegistry()) {
+        for (uint32_t i = 0; i < count; i++) {
+            CGDirectDisplayID displayID = ids[i];
+            if (VDRegistry()[@(displayID)] != nil) continue;
+            if (CGDisplayVendorNumber(displayID) != kLeftcarVdispVendor ||
+                CGDisplayModelNumber(displayID) != kLeftcarVdispProduct ||
+                CGDisplaySerialNumber(displayID) != kLeftcarVdispSerial) continue;
+            [stale addObject:@{ @"displayId": @(displayID), @"active": @(CGDisplayIsActive(displayID)) }];
+        }
+    }
+    return CopyJSONString(@{ @"displays": stale });
+}
+
 char *leftcar_vdisp_probe_v1(void) {
     if (!VirtualDisplaySelectorsPresent()) {
         return CopyJSONString(@{@"supported": @NO, @"reason": @"unsupported-classes"});

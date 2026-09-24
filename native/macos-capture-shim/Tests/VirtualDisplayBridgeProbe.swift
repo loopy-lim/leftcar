@@ -33,6 +33,14 @@ func callStringFn(_ name: String) -> String? {
     return String(cString: raw)
 }
 
+func stale() {
+    guard let json = callStringFn("leftcar_vdisp_find_stale_v1") else {
+        print("stale: bridge symbol missing")
+        exit(2)
+    }
+    print("stale: \(json)")
+}
+
 func probe() {
     guard let json = callStringFn("leftcar_vdisp_probe_v1") else {
         print("probe: bridge symbol missing")
@@ -246,6 +254,7 @@ let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : "probe"
 switch command {
 case "probe": probe()
+case "stale": stale()
 case "verify-mode":
     guard args.count == 6, let id = UInt32(args[2]), let width = Int(args[3]),
           let height = Int(args[4]), let scale = Int(args[5]),
