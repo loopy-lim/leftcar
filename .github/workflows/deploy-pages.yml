@@ -1,16 +1,20 @@
 name: Deploy Pages
 
+# 임시 비활성화: Cloudflare Pages 시크릿(CLOUDFLARE_API_TOKEN·ACCOUNT_ID)
+# 준비 전까지 자동 배포를 막는다. 활성화하려면 아래 on.push/pull_request
+# 블록의 주석을 되돌리면 된다.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'site/**'
-      - '.github/workflows/deploy-pages.yml'
-  pull_request:
-    paths:
-      - 'site/**'
-      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - 'site/**'
+  #     - '.github/workflows/deploy-pages.yml'
+  # pull_request:
+  #   paths:
+  #     - 'site/**'
+  #     - '.github/workflows/deploy-pages.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
