@@ -1,7 +1,10 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import PairingPanel from "../../apps/host-desktop/src/PairingPanel";
-const original = { device_id:"fixture-device",name:"Fixture device",paired_at:"2026-09-13",credential_generation:1,source_grants:{credentialId:"credential-A",stateRevision:1,sourceIds:["display:A"],revision:1,reviewRequired:false,persistenceError:null} };
+// ?review=1 — 화면 허용(승인 대기) 행 플로우를 검증하는 스위트용. 신 UI는
+// reviewRequired인 행에만 set_source_grants(화면 허용) 버튼을 노출한다.
+const review = new URLSearchParams(location.search).has("review");
+const original = { device_id:"fixture-device",name:"Fixture device",paired_at:"2026-09-13",credential_generation:1,source_grants:{credentialId:"credential-A",stateRevision:1,sourceIds:["display:A"],revision:1,reviewRequired:review,persistenceError:null} };
 const second = {...original, device_id:"fixture-b",name:"Fixture B",source_grants:{...original.source_grants,credentialId:"credential-B",sourceIds:["display:B"]}};
 const io={revision:1,devices:new URLSearchParams(location.search).has("two")?[original,second]:[original],deferReads:false,pendingReads:[],deferRevoke:false,pendingRevokes:[],refreshFails:false,reads:0,pending:[],calls:[],removed:[],revokeError:null};
 window.pairingIo=io;

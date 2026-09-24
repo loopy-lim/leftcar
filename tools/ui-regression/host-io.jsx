@@ -5,6 +5,7 @@ export const router = { push(value) { hostIo.navigations.push(value); }, replace
 export function useFocusEffect(effect) {
   useEffect(() => { const cleanup = effect(); hostIo.blur.add(cleanup); return () => { hostIo.blur.delete(cleanup); cleanup?.(); }; }, [effect]);
 }
+export const Alert = { alert() {} };
 export const NativeEventEmitter = class { addListener() { return { remove() {} }; } };
 // React Native's handled policy routes a child tap while the keyboard is open;
 // the controlled DOM boundary records the actual caller's ScrollView policy.

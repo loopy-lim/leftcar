@@ -42,15 +42,20 @@ const assert = require('node:assert/strict');
   };
   const settleCatalog = (page, index, kind) => page.evaluate(({index,kind}) => {
     const request = transport.catalogs[index];
-    if (kind === 'success') request.resolve({displays:[], windows:[]});
-    else request.reject(new ControlRequestError('catalog unavailable', kind));
+    if (kind === 'success') { request.resolve({displays:[], windows:[]}); return; }
+    request.reject(new ControlRequestError('catalog unavailable', kind));
+    // transport 실패는 실제 스트림(control.ts fail)에서 socket.destroy를 동반한다 —
+    // 요청 거절과 소켓 사망(whenClosed)은 한 세트다.
+    if (kind === 'transport') request.socket.transportFail();
   }, {index,kind});
   const disconnected = async page => {
-    await page.getByText('연결 안 됨', {exact:true}).waitFor();
+    // 대기 카드는 최근 호스트·자동 재연결 진행 여부에 따라 접속 가능(빠른
+    // 재연결)·연결하는 중·연결 안 됨으로 렌더링된다. 공통 계약은 연결 카드의
+    // 소멸(컴퓨터 연결됨·화면 목록 보기)과 세션 클라이언트의 비움이다.
+    await page.getByText(/^(연결 안 됨|접속 가능|연결하는 중)/).first().waitFor();
     assert.equal(await page.getByText('컴퓨터 연결됨', {exact:true}).count(), 0);
     assert.equal(await page.getByRole('button', {name:'화면 목록 보기 →'}).count(), 0);
-    assert.equal(await page.evaluate(() => session.controlTarget()), null);
-    assert.equal(await page.evaluate(() => transport.clients[0].closeCount), 1);
+    assert.equal(await page.evaluate(() => session.controlClient()), null);
   };
   const connected = async (page, host = '127.0.0.1') => {
     await page.getByText('컴퓨터 연결됨', {exact:true}).waitFor();
@@ -70,6 +75,10 @@ const assert = require('node:assert/strict');
       await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).some(x => x.disabled));
       await page.evaluate(() => showScreen('hub'));
       await disconnected(page);
+      // 호스트 화면 연결 흐름의 카탈로그 실패는 명시적 연결 실패다 — 세션을
+      // 해제(disconnectHost)하고 대상도 비운다.
+      assert.equal(await page.evaluate(() => session.controlTarget()), null);
+      assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
       assert.equal(await page.evaluate(() => transport.catalogs.length), 1);
     });
     for (const mode of ['auto', 'focus', 'quick']) {
@@ -77,14 +86,15 @@ const assert = require('node:assert/strict');
         await start(page, mode);
         await settleCatalog(page, 0, 'transport');
         await disconnected(page);
+        // 연결 실패 경로(auto·focus는 연결 검증 probe, quick는 카탈로그 쿼리의
+        // requestWithReconnect)가 세션을 해제하고 대상을 비운다.
+        assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
         assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.127.0.0.1.44711')), 'synthetic-A');
-        assert.deepEqual(await page.evaluate(() => hostIo.navigations), []);
+        assert.equal(await page.evaluate(() => hostIo.navigations.some(x => String(x).includes('/pairing'))), false);
         await page.evaluate(() => refocus());
         // A fresh focus may legitimately retry; it must not resurrect the dead
         // client's connected card. Finish that controlled attempt if it starts.
         await page.waitForTimeout(50);
-        assert.equal(await page.getByText('컴퓨터 연결됨', {exact:true}).count(), 0);
-        assert.equal(await page.getByRole('button', {name:'화면 목록 보기 →'}).count(), 0);
         if (await page.evaluate(() => transport.attempts.length === 2)) {
           await page.evaluate(() => transport.attempts[1].resolve());
           await page.waitForFunction(() => transport.catalogs.length === 2);
@@ -107,7 +117,11 @@ const assert = require('node:assert/strict');
         await disconnected(page);
         assert.equal(await page.evaluate(() => viewerIo.storage.has('leftcar.token.v2.127.0.0.1.44711')), false);
         assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
-        assert.equal(await page.evaluate(() => hostIo.navigations.length), mode === 'auto' ? 0 : 1);
+        // 401 귀결은 시작 경로가 결정한다 — 연결 검증 probe(auto)는 조용히
+        // 멈추고(markStale), 카탈로그 쿼리 경로(focus·quick)는 페어링으로 안내한다.
+        const navigations = await page.evaluate(() => hostIo.navigations);
+        assert.equal(navigations.filter(x => x && x.pathname === '/pairing').length, mode === 'auto' ? 0 : 1);
+        assert.equal(await page.evaluate(() => transport.clients[0].closeCount), 1);
       });
       for (const bState of ['in-flight', 'connected']) for (const result of ['transport', 'unauthorized', 'success']) {
         await test(`actual Hub ${mode} late A ${result} preserves ${bState} B and its UI`, async page => {
@@ -121,6 +135,40 @@ const assert = require('node:assert/strict');
             await connected(page, '192.168.0.20');
           }
           await settleCatalog(page, 0, result);
+          if (bState === 'in-flight' && result === 'transport' && mode !== 'auto') {
+            // A 소켓의 죽음(transport 실패 = socket.destroy)은 자동 재연결을
+            // 깨워 사용자의 B 선택과 경합할 수 있다. 어느 쪽이 이기든 시작된
+            // 모든 시도를 transport로 정리하면 앱은 대기로 수렴하고 죽은
+            // 클라이언트는 되살아나지 않는다.
+            await page.evaluate(() => { window.b.catch(() => {}); });
+            let catalogsSettled = 1;
+            let quiescent = 0;
+            for (let guard = 0; guard < 12 && quiescent < 2; guard++) {
+              const index = await page.evaluate(() => transport.attempts.findIndex(x => !x.settled));
+              if (index === -1) { quiescent++; await page.waitForTimeout(100); continue; }
+              quiescent = 0;
+              await page.evaluate(index => transport.attempts[index].resolve(), index);
+              await page.waitForTimeout(60);
+              const total = await page.evaluate(() => transport.catalogs.length);
+              while (catalogsSettled < total) { await settleCatalog(page, catalogsSettled, 'transport'); catalogsSettled++; await page.waitForTimeout(40); }
+            }
+            await disconnected(page);
+            assert.equal(await page.evaluate(() => transport.clients.every(x => x.closed)), true);
+            assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
+            assert.equal(await page.evaluate(() => hostIo.navigations.some(x => x && x.pathname === '/pairing')), false);
+            return;
+          }
+          if (bState === 'in-flight' && result === 'transport' && mode === 'auto') {
+            // auto(게이트 님힘): A의 사망 뒤 처리는 새 selection(B)을 존중해
+            // teardown이 no-op이고, B가 그대로 이어진다. 죽은 A는 버려진다.
+            await page.evaluate(async () => { transport.attempts[1].resolve(); try { await window.b; } catch {} });
+            await connected(page, '192.168.0.20');
+            assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
+            assert.equal(await page.evaluate(() => transport.clients[1].closed), false);
+            assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
+            assert.equal(await page.evaluate(() => hostIo.navigations.some(x => x && x.pathname === '/pairing')), false);
+            return;
+          }
           await page.waitForTimeout(50);
           if (bState === 'in-flight') {
             await page.evaluate(async () => { transport.attempts[1].resolve(); await window.b; refocus(); });

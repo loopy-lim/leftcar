@@ -101,7 +101,13 @@ const assert = require("node:assert/strict");
         await page.goto(
           `file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html?dashboard`,
         );
-        const curtain = page.getByRole("button", { name: /Privacy Curtain/ });
+        // 설정 토글은 대시보드 본문이 아니라 Host Settings 모달 안에 산다.
+        await page
+          .getByRole("button", { name: "Host Settings", exact: true })
+          .click();
+        const curtain = page.getByRole("button", {
+          name: /^Privacy Curtain (On|Off)$/,
+        });
         await curtain.click();
         assert.equal(await curtain.isDisabled(), true);
         assert.equal(await curtain.getAttribute("aria-busy"), "true");
@@ -135,10 +141,12 @@ const assert = require("node:assert/strict");
         await page.waitForTimeout(30);
         assert.equal(
           await page
-            .getByRole("button", { name: /Clipboard Sharing/ })
+            .getByRole("button", { name: /^Clipboard Sharing (On|Off)$/ })
             .getAttribute("aria-pressed"),
           "true",
         );
+        // 모달 밖 대시보드 버튼(Help·페어링)은 설정 모달을 닫은 뒤 누른다.
+        await page.keyboard.press("Escape");
         await page.getByRole("button", { name: "Help", exact: true }).click();
         assert.equal(
           await page
