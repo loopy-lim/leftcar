@@ -37,9 +37,6 @@ export function StreamsListView({
       <div className="streams-section-header">
         <div className="streams-header-left">
           <h2>{interpolate(t.host.activeSectionTitle, { count: sessions.length })}</h2>
-          <span className="live-badge-pulse">
-            <span className="status-dot" /> {t.host.liveBadge}
-          </span>
         </div>
         <button
           className={buttonVariants({ variant: "link" })}

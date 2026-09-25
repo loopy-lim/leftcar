@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { TranslationSchema } from "@leftcar/ui-tokens";
 import { buttonVariants } from "./lib/variants";
 import { useExperiments, type ViewerExperiments } from "./Privacy";
@@ -100,6 +101,8 @@ function ExperimentNumberRow({
 
 export function ExperimentsSection({ t }: { t: TranslationSchema }) {
   const { experiments, error, saving, retry, save } = useExperiments();
+  // 전송 계층 A/B 노브는 사용자 설정이 아니라 개발자 값이므로 기본은 접는다(DESIGN-REVIEW X-2).
+  const [expanded, setExpanded] = useState(false);
 
   if (!experiments) {
     if (!error) return null;
@@ -169,46 +172,64 @@ export function ExperimentsSection({ t }: { t: TranslationSchema }) {
 
   return (
     <div className="settings-section">
-      <span className="settings-section-title">{t.host.experimentSection}</span>
-      <div className="settings-group-container">
-        {numericRows.map((spec) => (
-          <ExperimentNumberRow
-            key={spec.key}
-            label={spec.label}
-            desc={spec.desc}
-            min={spec.min}
-            max={spec.max}
-            placeholder={spec.placeholder}
-            value={experiments[spec.key]}
-            disabled={saving}
-            onCommit={(next) => update({ [spec.key]: next })}
+      <div className="settings-section-header">
+        <span className="settings-section-title">{t.host.experimentSection}</span>
+        <button
+          type="button"
+          className="settings-section-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((prev) => !prev)}
+        >
+          {t.viewer.advancedSettingsToggle}
+          <ChevronDown
+            size={12}
+            style={{ transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
           />
-        ))}
-        <div className="settings-item-row">
-          <div className="settings-item-info">
-            <span className="settings-item-name">{t.host.experimentTraceLabel}</span>
-            <p className="settings-item-desc">{t.host.experimentTraceDesc}</p>
+        </button>
+      </div>
+      {expanded && (
+        <>
+          <div className="settings-group-container">
+            {numericRows.map((spec) => (
+              <ExperimentNumberRow
+                key={spec.key}
+                label={spec.label}
+                desc={spec.desc}
+                min={spec.min}
+                max={spec.max}
+                placeholder={spec.placeholder}
+                value={experiments[spec.key]}
+                disabled={saving}
+                onCommit={(next) => update({ [spec.key]: next })}
+              />
+            ))}
+            <div className="settings-item-row">
+              <div className="settings-item-info">
+                <span className="settings-item-name">{t.host.experimentTraceLabel}</span>
+                <p className="settings-item-desc">{t.host.experimentTraceDesc}</p>
+              </div>
+              <button
+                type="button"
+                className={`ui-switch ${experiments.frameTrace ? "switch-active" : ""}`}
+                onClick={() => update({ frameTrace: !experiments.frameTrace })}
+                aria-pressed={experiments.frameTrace}
+                aria-label={t.host.experimentTraceLabel}
+              >
+                <span className="ui-switch-thumb" />
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            className={`ui-switch ${experiments.frameTrace ? "switch-active" : ""}`}
-            onClick={() => update({ frameTrace: !experiments.frameTrace })}
-            aria-pressed={experiments.frameTrace}
-            aria-label={t.host.experimentTraceLabel}
+          <div
+            style={{
+              color: "var(--text-muted)",
+              fontSize: 12,
+              lineHeight: "16px",
+            }}
           >
-            <span className="ui-switch-thumb" />
-          </button>
-        </div>
-      </div>
-      <div
-        style={{
-          color: "var(--text-muted)",
-          fontSize: 12,
-          lineHeight: "16px",
-        }}
-      >
-        {t.host.experimentApplyHint}
-      </div>
+            {t.host.experimentApplyHint}
+          </div>
+        </>
+      )}
       {error && (
         <div className="settings-item-error" role="alert">
           <span>{error}</span>

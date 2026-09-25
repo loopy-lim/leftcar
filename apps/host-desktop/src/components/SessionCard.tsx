@@ -1,6 +1,7 @@
 import { Info, Square, Tv } from "lucide-react";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import type { SessionRow } from "../sessionTypes";
+import QualityOverride from "../QualityOverride";
 import SessionInspector from "../SessionInspector";
 import { buttonVariants, controlToggleVariants } from "../lib/variants";
 
@@ -29,14 +30,15 @@ function remoteInputLabel(busy: boolean, enabled: boolean, t: TranslationSchema)
   return enabled ? t.host.remoteInputAllowed : t.host.remoteInputOff;
 }
 
-function sessionStateLabel(state: string, t: TranslationSchema, badge = false) {
-  if (state === "running") return badge ? t.host.liveBadge : t.host.statusRunning;
+function sessionStateLabel(state: string, t: TranslationSchema) {
+  if (state === "running") return t.host.statusRunning;
   return t.host.statusChecking;
 }
 
+// 상태 한 줄(DESIGN-REVIEW A-2): 정상일 때는 보조 텍스트, 이상 감지 시에만 rose.
 function DroppedFrames({ dropped = 0, t }: { dropped?: number; t: TranslationSchema }) {
   if (dropped > 0) return <span className="font-rose">{interpolate(t.host.droppedFrames, { count: dropped })}</span>;
-  return <span className="font-emerald">{t.host.stabilityStable}</span>;
+  return <span>{t.host.stabilityStable}</span>;
 }
 
 export function SessionCard({
@@ -102,31 +104,29 @@ export function SessionCard({
         </div>
       </div>
 
-      <div className="stream-card-metrics-grid">
-        <div className="metric-card">
-          <span className="metric-card-label">{t.host.encoderOutput}</span>
-          <span className="metric-card-value font-emerald">{encodeOutputFps} FPS</span>
+      {/* 상태 한 줄(DESIGN-REVIEW A-2/D-1): 4칸 균일 메트릭 카드를 정의형 한 줄로 붕괴.
+          실행 중이면 성능 수치 + 안정성, 준비 중이면 상태 한 번만 표기한다(헤더 전역 표기와 중복하지 않음). */}
+      {session.state === "running" ? (
+        <div className="stream-card-status-line">
+          <span>{encodeOutputFps} FPS · {bitrateMbps} Mbps</span>
+          <DroppedFrames dropped={session.dropped} t={t} />
         </div>
+      ) : (
+        <div className="stream-card-status-line">
+          <span>{sessionStateLabel(session.state, t)}</span>
+        </div>
+      )}
 
-        <div className="metric-card">
-          <span className="metric-card-label">{t.host.bitrate}</span>
-          <span className="metric-card-value">{bitrateMbps} Mbps</span>
-        </div>
-
-        <div className="metric-card">
-          <span className="metric-card-label">{t.host.connectionStatus}</span>
-          <span className="metric-card-value font-blue">
-            {sessionStateLabel(session.state, t)}
-          </span>
-        </div>
-
-        <div className="metric-card">
-          <span className="metric-card-label">{t.host.transferStability}</span>
-          <span className="metric-card-value">
-            <DroppedFrames dropped={session.dropped} t={t} />
-          </span>
-        </div>
-      </div>
+      {/* 수동 화질 상한(DESIGN-REVIEW X-1): 사용자 제어이므로 인스펙터 토글 없이 카드 본체에 노출. */}
+      {qualitySupported && (
+        <QualityOverride
+          session={session}
+          qualitySupported={qualitySupported}
+          qualityPercent={qualityPercent}
+          qualityBusy={qualityBusy}
+          onSetQuality={onSetQuality}
+        />
+      )}
 
       {showInspector && (
         <SessionInspector
@@ -139,14 +139,12 @@ export function SessionCard({
         />
       )}
 
+      {/* 카드 푸터(DESIGN-REVIEW D-1): 실행 상태 배지는 제거 — 헤더(전역)와 상태 한 줄(개별)로 충분하다. */}
       <div className="stream-card-footer">
         <div className="stream-termination-policy">
           <Info size={12} />
           <span>{t.host.autoCleanupPolicy}</span>
         </div>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-dim)" }}>
-          {sessionStateLabel(session.state, t, true)}
-        </span>
       </div>
     </div>
   );

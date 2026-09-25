@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import SessionInspector from "./SessionInspector";
+import QualityOverride from "./QualityOverride";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
 import type { SessionRow } from "./sessionTypes";
 
@@ -41,6 +42,19 @@ function renderInspector(currentSession: SessionRow): string {
     createElement(SessionInspector, {
       session: currentSession,
       transportLabel: "Wi-Fi UDP",
+      qualitySupported: true,
+      qualityPercent: 40,
+      qualityBusy: false,
+      onSetQuality: async () => {},
+    }),
+  );
+}
+
+// 수동 화질 상한은 세션 카드 본체의 2차 행으로 승격되었다(DESIGN-REVIEW X-1).
+function renderQualityOverride(currentSession: SessionRow): string {
+  return renderToStaticMarkup(
+    createElement(QualityOverride, {
+      session: currentSession,
       qualitySupported: true,
       qualityPercent: 40,
       qualityBusy: false,
@@ -197,11 +211,15 @@ describe("encoder diagnostics", () => {
     expect(html).toContain("인코더 0 · 패킷화 1");
     expect(html).toContain("유효 출력 FPS");
     expect(html).toContain("58 FPS");
-    expect(html).toContain("40% 고정 · Base QP 기반");
+    // 수동 화질 상한 제어는 인스펙터 밖(세션 카드 본체)에 렌더링된다.
+    expect(html).not.toContain("40% 고정");
+    expect(renderQualityOverride({ ...adaptiveSession, qualityOverride: 0.4 })).toContain(
+      "40% 고정 · Base QP 기반",
+    );
   });
 
   it("keeps the existing quality result wording for non-adaptive profiles", () => {
-    const html = renderInspector({
+    const html = renderQualityOverride({
       ...adaptiveSession,
       encoderExperimentApplied: "rateControl",
       qualityOverride: 0.4,

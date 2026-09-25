@@ -17,13 +17,12 @@ function inspectorLanguage(saved: string | null): SupportedLanguage {
   return saved === "en" ? "en" : "ko";
 }
 
+// qualitySupported·qualityPercent·qualityBusy·onSetQuality는 카드 본체의
+// QualityOverride(DESIGN-REVIEW X-1)가 사용한다 — 인스펙터는 읽기 전용 텔레메트리만
+// 렌더링하므로 전달하지 않는다. 인터페이스는 호출측 호환을 위해 유지한다.
 export default function SessionInspector({
   session,
   transportLabel,
-  qualitySupported,
-  qualityPercent,
-  qualityBusy,
-  onSetQuality,
   language: propLanguage,
 }: SessionInspectorProps) {
   const saved = typeof localStorage === "undefined" ? null : localStorage.getItem("leftcar_lang");
@@ -53,10 +52,6 @@ export default function SessionInspector({
         <div className="inspector-grid">
           <SessionEncoderDiagnostics
             session={session}
-            qualitySupported={qualitySupported}
-            qualityPercent={qualityPercent}
-            qualityBusy={qualityBusy}
-            onSetQuality={onSetQuality}
             language={language}
           />
         </div>

@@ -1,4 +1,4 @@
-import { Check, ClipboardCheck, Copy, EyeOff, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Check, Copy, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import { formatHostAddress, type HostSnapshotView } from "../hostState";
 
@@ -67,19 +67,16 @@ export function DashboardFooter(props: DashboardFooterProps) {
       </div>
 
       <div className="footer-status-right">
+        {/* 활성 프라이버시 기능은 박스 없이 한 줄 나열(DESIGN-REVIEW A-1): pill 크롬 대신 텍스트. */}
         {hasActivePrivacyFeature && (
-          <div className="footer-active-tags" aria-label={t.host.privacySection}>
-            {props.clipboardShare && (
-              <span className="footer-tag-pill" title={t.host.clipboardShareDesc}>
-                <ClipboardCheck size={11} /> {t.host.clipboardShareLabel}
-              </span>
-            )}
-            {props.privacyCurtain && (
-              <span className="footer-tag-pill" title={t.host.privacyCurtainDesc}>
-                <EyeOff size={11} /> {t.host.privacyCurtainLabel}
-              </span>
-            )}
-          </div>
+          <span className="footer-active-tags" aria-label={t.host.privacySection}>
+            {[
+              props.clipboardShare ? t.host.clipboardShareLabel : null,
+              props.privacyCurtain ? t.host.privacyCurtainLabel : null,
+            ]
+              .filter((label): label is string => label !== null)
+              .join(" · ")}
+          </span>
         )}
         <button
           type="button"

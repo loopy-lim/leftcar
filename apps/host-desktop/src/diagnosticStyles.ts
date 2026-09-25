@@ -4,8 +4,8 @@ export const diagnosticValueVariants = cva("inspector-item-value", {
   variants: {
     tone: {
       default: "",
-      active: "!text-sky-600",
-      warning: "!text-amber-600",
+      active: "inspector-tone-active",
+      warning: "inspector-tone-warning",
     },
   },
   defaultVariants: {

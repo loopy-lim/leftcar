@@ -8,17 +8,14 @@ import {
 } from "@leftcar/ui-tokens";
 import { diagnosticValueVariants } from "./diagnosticStyles";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
-import { inspectorButtonVariants } from "./lib/variants";
 import type { SessionRow } from "./sessionTypes";
 
 type InspectorStrings = TranslationSchema["host"]["inspector"];
 
+// 수동 화질 상한 제어(QualityOverride)는 세션 카드 본체로 승격되었다(DESIGN-REVIEW X-1).
+// 인스펙터는 읽기 전용 텔레메트리만 남는다.
 interface Props {
   session: SessionRow;
-  qualitySupported: boolean;
-  qualityPercent: number;
-  qualityBusy: boolean;
-  onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
   language: SupportedLanguage;
 }
 
@@ -26,28 +23,8 @@ function DiagnosticRow({ label, value, tone = "default" }: { label: string; valu
   return <div className="inspector-item"><span className="inspector-item-label">{label}</span><span className={cn(diagnosticValueVariants({ tone }))}>{value}</span></div>;
 }
 
-function QualityOverride({ session, diagnostics, qualitySupported, qualityPercent, qualityBusy, onSetQuality, t }: Omit<Props, "language"> & { diagnostics: ReturnType<typeof encoderDiagnosticsView>; t: InspectorStrings }) {
-  return <div className="inspector-item quality-override-item">
-    <div className="quality-override-heading">
-      <span className="inspector-item-label">{t.manualQualityCeilingLabel}</span>
-      <span className="inspector-item-value">{session.qualityOverride != null ? interpolate(t.fixedQualityPercent, { percent: qualityPercent }) : t.auto}{diagnostics.qualityBasis !== null ? ` · ${diagnostics.qualityBasis}` : null}</span>
-    </div>
-    <div className="quality-override-controls">
-      <span className="quality-override-endpoint">{t.lowEndpoint}</span>
-      <input key={`${session.session}-${session.qualityOverride ?? "auto"}-${Math.round((session.qualityHint ?? 0.5) * 100)}`} type="range" min="25" max="50" step="5" defaultValue={qualityPercent} disabled={!qualitySupported || session.state !== "running" || qualityBusy} aria-label={t.manualQualityCeilingLabel} onChange={(event) => void onSetQuality(session, Number(event.currentTarget.value) / 100)} />
-      <span className="quality-override-endpoint">{t.defaultEndpoint}</span>
-      <button className={cn("btn-ghost btn-sm quality-auto-button", inspectorButtonVariants())} disabled={!qualitySupported || session.qualityOverride == null || qualityBusy} onClick={() => void onSetQuality(session, null)}>{t.autoRevertButton}</button>
-    </div>
-    <span className="quality-override-help">{t.qualityOverrideHelp}</span>
-  </div>;
-}
-
 export default function SessionEncoderDiagnostics({
   session,
-  qualitySupported,
-  qualityPercent,
-  qualityBusy,
-  onSetQuality,
   language,
 }: Props) {
   const t = getTranslation(language).host.inspector;
@@ -93,7 +70,6 @@ export default function SessionEncoderDiagnostics({
             : t.qualityHintNotApplied}
         </span>
       </div>
-      <QualityOverride {...{ session, diagnostics, qualitySupported, qualityPercent, qualityBusy, onSetQuality, t }} />
       <div className="inspector-item">
         <span className="inspector-item-label">{t.captureBackendLabel}</span>
         <span className={cn("inspector-item-value", "capitalize")}>
