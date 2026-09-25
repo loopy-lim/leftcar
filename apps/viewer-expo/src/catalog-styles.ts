@@ -16,6 +16,9 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       paddingTop: 12,
       paddingBottom: 32,
       gap: 10,
+      width: "100%",
+      maxWidth: 840,
+      alignSelf: "center",
     },
     headerContainer: {
       gap: 10,
@@ -47,7 +50,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       flexShrink: 0,
     },
     hostStripText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
       flex: 1,
     },
@@ -235,7 +238,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       fontSize: 12,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
-      color: colors.textDim,
+      color: colors.textSecondary,
     },
     qualityTabDetailActive: {
       color: colors.btnPrimaryText,
@@ -249,7 +252,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     qualityHintText: {
       fontSize: 12,
-      color: colors.textMuted,
+      color: colors.textSecondary,
       lineHeight: 16,
       flex: 1,
     },
@@ -297,10 +300,8 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     sectionTitleText: {
       fontSize: 12,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.04,
+      fontWeight: "600",
+      color: colors.textSecondary,
     },
     btnRefresh: {
       paddingHorizontal: 8,
@@ -441,11 +442,11 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 8,
     },
     loadingText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
     },
     emptyText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
     },
 
@@ -461,10 +462,8 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     activeSectionTitle: {
       fontSize: 12,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.04,
+      fontWeight: "600",
+      color: colors.textSecondary,
     },
     activeCountBadge: {
       backgroundColor: colors.statusLiveSubtle,
@@ -526,7 +525,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       borderRadius: 4,
     },
     sourceTagText: {
-      color: colors.textDim,
+      color: colors.textSecondary,
       fontSize: 12,
       fontFamily: "monospace",
     },
@@ -547,10 +546,10 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
       fontSize: 12,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
-      color: colors.textMuted,
+      color: colors.textSecondary,
     },
     streamPort: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
@@ -558,14 +557,14 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     transportBadge: {
       fontSize: 12,
       fontFamily: "monospace",
-      color: colors.textDim,
+      color: colors.textSecondary,
       backgroundColor: colors.bgSubtle,
       paddingHorizontal: 6,
       paddingVertical: 2,
       borderRadius: 4,
     },
     streamError: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
       overflow: "hidden",
     },
@@ -627,7 +626,7 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     displaySwitchLabel: {
       fontSize: 12,
       fontWeight: "600",
-      color: colors.textDim,
+      color: colors.textSecondary,
     },
     displaySwitchChips: {
       flexDirection: "row",
@@ -723,10 +722,8 @@ export function createCatalogStyles(colors: ThemeTokens, isDark: boolean) {
     },
     modalSectionTitle: {
       fontSize: 12,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.04,
+      fontWeight: "600",
+      color: colors.textSecondary,
     },
   });
 }

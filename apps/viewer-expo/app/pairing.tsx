@@ -34,7 +34,7 @@ import {
   type QrPayload,
 } from "../src/pairing";
 import { formatErrorMessage } from "../src/control";
-import { useAppTheme, type ThemeTokens } from "../src/theme";
+import { typography, useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage, type TranslationSchema } from "../src/i18n";
 
 type PairingMode = "qr" | "code";
@@ -712,7 +712,14 @@ export default function Pairing() {
         {cameraError && (
           <View style={styles.errorCard} accessibilityRole="alert">
             <Text style={styles.errorText}>{cameraError}</Text>
-            <Pressable onPress={refreshPermission}><Text>{t.common.retry}</Text></Pressable>
+            <Pressable
+              onPress={refreshPermission}
+              style={({ pressed }) => [styles.retryBtn, pressed && styles.btnPressed]}
+              accessibilityRole="button"
+              accessibilityLabel={t.common.retry}
+            >
+              <Text style={styles.retryText}>{t.common.retry}</Text>
+            </Pressable>
           </View>
         )}
         <PairingModeCard mode={mode} cameraState={cameraState} onRequestPermission={() => { void runCameraAction(requestPermission); }} onOpenSettings={openAppSettings} code={code} busy={busy} hasCodeTarget={hasCodeTarget} canSubmitCode={canSubmitCode} colors={colors} styles={styles} onCodeChange={(value: string) => dispatch({ type: "update", patch: { code: value } })} onSubmit={() => void handlePairWithCode(code)} onQrScanned={handleQrScanned} />
@@ -746,6 +753,9 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       paddingTop: 14,
       paddingBottom: 32,
       gap: 14,
+      width: "100%",
+      maxWidth: 640,
+      alignSelf: "center",
     },
     hostStrip: {
       backgroundColor: colors.bgSurface,
@@ -762,12 +772,13 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       width: 6,
       height: 6,
       borderRadius: 3,
-      backgroundColor: colors.textPrimary,
+      backgroundColor: colors.borderStrong,
       flexShrink: 0,
     },
     hostText: {
-      color: colors.textMuted,
-      fontSize: 12,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       flex: 1,
     },
     hostAddr: {
@@ -798,8 +809,9 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       backgroundColor: colors.btnPrimaryBg,
     },
     modeTabText: {
-      color: colors.textMuted,
-      fontSize: 12,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       fontWeight: "600",
     },
     modeTabTextActive: {
@@ -833,7 +845,8 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     statusText: {
       color: colors.textPrimary,
-      fontSize: 12,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       fontWeight: "600",
       flex: 1,
     },
@@ -849,10 +862,27 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     errorText: {
       color: colors.textPrimary,
-      fontSize: 12,
-      lineHeight: 16,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       flex: 1,
       fontWeight: "500",
+    },
+    retryBtn: {
+      backgroundColor: colors.bgSubtle,
+      borderWidth: 1,
+      borderColor: colors.btnSecondaryBorder,
+      borderRadius: 8,
+      minHeight: 36,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    retryText: {
+      color: colors.textPrimary,
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
+      fontWeight: "600",
     },
     card: {
       backgroundColor: colors.bgSurface,
@@ -863,14 +893,15 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       gap: 12,
     },
     cardTitle: {
-      fontSize: 14,
-      fontWeight: "700",
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
+      fontWeight: "600",
       color: colors.textPrimary,
     },
     cardDesc: {
-      fontSize: 12,
+      fontSize: typography.fontSize.xs,
       color: colors.textSecondary,
-      lineHeight: 17,
+      lineHeight: typography.lineHeight.xs + 1,
     },
     scannerWrapper: {
       height: 220,
@@ -940,7 +971,8 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     scanHintText: {
       color: "#FFFFFF",
-      fontSize: 12,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       fontWeight: "600",
     },
     cameraNotice: {
@@ -955,10 +987,10 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       fontWeight: "700",
     },
     cameraNoticeText: {
-      color: colors.textMuted,
-      fontSize: 13,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.sm,
       textAlign: "center",
-      lineHeight: 18,
+      lineHeight: typography.lineHeight.sm,
     },
     permissionBtn: {
       backgroundColor: colors.btnPrimaryBg,
@@ -972,14 +1004,15 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     permissionBtnText: {
       color: colors.btnPrimaryText,
-      fontSize: 14,
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
       fontWeight: "600",
     },
     otpHint: {
-      color: colors.textMuted,
-      fontSize: 13,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.sm,
       textAlign: "center",
-      lineHeight: 18,
+      lineHeight: typography.lineHeight.sm,
       marginTop: 4,
     },
     primaryBtn: {
@@ -995,7 +1028,8 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     primaryBtnText: {
       color: colors.btnPrimaryText,
-      fontSize: 14,
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
       fontWeight: "600",
     },
     tipBox: {
@@ -1013,13 +1047,14 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     tipTitle: {
       color: colors.textPrimary,
-      fontSize: 13,
-      fontWeight: "700",
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
+      fontWeight: "600",
     },
     tipText: {
       color: colors.textSecondary,
-      fontSize: 12,
-      lineHeight: 17,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs + 1,
     },
     btnPressed: {
       opacity: 0.8,

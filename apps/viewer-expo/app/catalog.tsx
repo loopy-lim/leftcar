@@ -278,7 +278,7 @@ function ExpertOptionsCard({
 function EncoderExperimentChoices({ experiments, selected, requiresReconnect, colors, t, onSelect }: { experiments: EncoderExperimentInfo[]; selected: EncoderExperimentId; requiresReconnect: boolean; colors: ThemeTokens; t: ReturnType<typeof useAppLanguage>["t"]; onSelect: (id: EncoderExperimentId) => void }) {
   if (experiments.length <= 1) return null;
   return <View style={{ gap: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.borderSubtle, backgroundColor: colors.bgSurface, padding: 12 }}>
-    <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 12, color: colors.textMuted, lineHeight: 16 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
+    <View style={{ gap: 2 }}><Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.encoderExperiments}</Text>{requiresReconnect ? <Text style={{ fontSize: 12, color: colors.textSecondary, lineHeight: 16 }}>{t.viewer.encoderReconnectNotice}</Text> : null}</View>
     <View style={{ gap: 8 }}>{experiments.map((experiment) => {
       const isSelected = experiment.id === selected;
       return <Pressable key={experiment.id} style={{ minHeight: 44, gap: 3, borderRadius: 8, borderWidth: 1, borderColor: isSelected ? colors.btnPrimaryBg : colors.borderSubtle, backgroundColor: isSelected ? colors.btnPrimaryBg : colors.bgSubtle, paddingHorizontal: 12, paddingVertical: 8 }} onPress={() => onSelect(experiment.id)} accessibilityRole="button" accessibilityState={{ selected: isSelected, disabled: false }} accessibilityLabel={`${experiment.label}: ${experiment.hint}`}>
@@ -529,7 +529,8 @@ function CatalogSettingsModal({
                     <Text
                       style={{
                         fontSize: 12,
-                        color: inputAllowed ? colors.textSecondary : colors.textMuted,
+                        color: inputAllowed ? colors.textSecondary : colors.textPrimary,
+                        fontWeight: inputAllowed ? "400" : "500",
                       }}
                     >
                       {inputAllowed

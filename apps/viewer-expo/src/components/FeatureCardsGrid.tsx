@@ -1,32 +1,32 @@
+import { Fragment } from "react";
 import { Text, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import type { TranslationSchema } from "../i18n";
-import type { ThemeTokens } from "../theme";
 import type { HubStyles } from "./hub-styles";
 
 export interface FeatureCardsGridProps {
   styles: HubStyles;
-  colors: ThemeTokens;
   t: TranslationSchema;
 }
 
-export function FeatureCardsGrid({ styles, colors, t }: FeatureCardsGridProps) {
+/* 정의형 행 2줄 — 균일 카드 그리드(design.md G2) 대신 제목 + 한 줄 설명을
+   헤어라인 구분선으로 나열한다. */
+export function FeatureCardsGrid({ styles, t }: FeatureCardsGridProps) {
+  const features = [
+    [t.viewer.feature1Title, t.viewer.feature1Desc],
+    [t.viewer.feature2Title, t.viewer.feature2Desc],
+  ] as const;
+
   return (
-    <View style={styles.featureGrid}>
-      <View style={styles.featureCard}>
-        <View style={styles.featureIconBox}>
-          <Ionicons name="speedometer-outline" size={16} color={colors.textPrimary} />
-        </View>
-        <Text style={styles.featureValue}>{t.viewer.feature1Title}</Text>
-        <Text style={styles.featureLabel}>{t.viewer.feature1Desc}</Text>
-      </View>
-      <View style={styles.featureCard}>
-        <View style={styles.featureIconBox}>
-          <Ionicons name="copy-outline" size={16} color={colors.textPrimary} />
-        </View>
-        <Text style={styles.featureValue}>{t.viewer.feature2Title}</Text>
-        <Text style={styles.featureLabel}>{t.viewer.feature2Desc}</Text>
-      </View>
+    <View style={styles.featureList}>
+      {features.map(([title, desc], index) => (
+        <Fragment key={title}>
+          {index > 0 && <View style={styles.featureDivider} />}
+          <View style={styles.featureRow}>
+            <Text style={styles.featureRowTitle}>{title}</Text>
+            <Text style={styles.featureRowDesc}>{desc}</Text>
+          </View>
+        </Fragment>
+      ))}
     </View>
   );
 }

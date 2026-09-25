@@ -235,7 +235,7 @@ export default function Hub() {
               onOpenPairing={openPairing}
             />
             {!lastHost && <SetupGuideCard styles={styles} t={t} />}
-            {!lastHost && <FeatureCardsGrid styles={styles} colors={colors} t={t} />}
+            {!lastHost && <FeatureCardsGrid styles={styles} t={t} />}
           </>
         )}
       </ScrollView>

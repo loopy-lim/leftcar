@@ -838,6 +838,9 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       paddingTop: 14,
       paddingBottom: 32,
       gap: 14,
+      width: "100%",
+      maxWidth: 840,
+      alignSelf: "center",
     },
     errorCard: {
       backgroundColor: colors.bgSurface,
@@ -906,15 +909,13 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
     },
     sectionTitle: {
       fontSize: 12,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.5,
+      fontWeight: "600",
+      color: colors.textSecondary,
     },
     clearAllText: {
       fontSize: 12,
       fontWeight: "600",
-      color: colors.textMuted,
+      color: colors.textSecondary,
     },
     scanningBadge: {
       flexDirection: "row",
@@ -994,7 +995,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       fontWeight: "700",
     },
     hostAddr: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
@@ -1016,7 +1017,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       borderColor: colors.borderSubtle,
     },
     connectChipDimText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
     },
     connectChipText: {
       color: colors.btnPrimaryText,
@@ -1035,7 +1036,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       color: colors.textPrimary,
     },
     emptyText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 12,
       textAlign: "center",
       lineHeight: 18,
@@ -1154,7 +1155,7 @@ function createStyles(colors: ThemeTokens, isDark: boolean) {
       justifyContent: "center",
     },
     dangerBtnText: {
-      color: colors.textMuted,
+      color: colors.textSecondary,
       fontSize: 13,
       fontWeight: "600",
     },

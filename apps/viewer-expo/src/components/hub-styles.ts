@@ -1,5 +1,5 @@
 import { StyleSheet } from "react-native";
-import type { ThemeTokens } from "../theme";
+import { typography, type ThemeTokens } from "../theme";
 
 export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
   return StyleSheet.create({
@@ -16,6 +16,9 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       paddingTop: 12,
       paddingBottom: 36,
       gap: 16,
+      width: "100%",
+      maxWidth: 640,
+      alignSelf: "center",
     },
     // Minimal, unpretentious top header (no tacky giant branding banner)
     topBar: {
@@ -37,8 +40,9 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       backgroundColor: colors.statusLive,
     },
     topBarTitle: {
-      fontSize: 14,
-      fontWeight: "700",
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
+      fontWeight: "600",
       color: colors.textPrimary,
       letterSpacing: -0.2,
     },
@@ -51,13 +55,14 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       borderColor: colors.borderSubtle,
       paddingHorizontal: 12,
       minHeight: 34,
-      borderRadius: 17,
+      borderRadius: 8,
       justifyContent: "center",
     },
     langToggleText: {
       color: colors.textSecondary,
-      fontSize: 12,
-      fontWeight: "700",
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
+      fontWeight: "600",
     },
 
     /* Hero Cards */
@@ -102,26 +107,22 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       gap: 8,
     },
     heroTitle: {
-      fontSize: 17,
-      fontWeight: "700",
+      fontSize: typography.fontSize.lg,
+      lineHeight: typography.lineHeight.lg,
+      fontWeight: "600",
       color: colors.textPrimary,
       letterSpacing: -0.3,
     },
     heroDesc: {
-      fontSize: 13,
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
       color: colors.textSecondary,
-      lineHeight: 19,
     },
+    /* State is read from dot + text alone — no pill chrome (design.md G1) */
     badgeSuccess: {
       flexDirection: "row",
       alignItems: "center",
       gap: 5,
-      backgroundColor: colors.statusLiveSubtle,
-      borderWidth: 1,
-      borderColor: colors.statusLiveBorder,
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-      borderRadius: 10,
     },
     dotSuccess: {
       width: 6,
@@ -131,19 +132,14 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     badgeSuccessText: {
       color: colors.statusLive,
-      fontSize: 11,
-      fontWeight: "700",
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
+      fontWeight: "600",
     },
     badgeStandby: {
       flexDirection: "row",
       alignItems: "center",
       gap: 6,
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      paddingHorizontal: 8,
-      paddingVertical: 4,
-      borderRadius: 10,
     },
     dotStandby: {
       width: 6,
@@ -152,13 +148,15 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       backgroundColor: colors.textDim,
     },
     badgeStandbyText: {
-      color: colors.textMuted,
-      fontSize: 12,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       fontWeight: "600",
     },
     endpointLabel: {
-      color: colors.textMuted,
-      fontSize: 12,
+      color: colors.textSecondary,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
       fontFamily: "monospace",
       fontVariant: ["tabular-nums"],
     },
@@ -178,7 +176,8 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     primaryActionText: {
       color: colors.btnPrimaryText,
-      fontSize: 15,
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
       fontWeight: "700",
     },
     secondaryActionBtn: {
@@ -195,7 +194,8 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     secondaryActionText: {
       color: colors.btnSecondaryText,
-      fontSize: 13,
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
       fontWeight: "600",
     },
     disconnectActionBtn: {
@@ -211,7 +211,8 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     disconnectActionText: {
       color: colors.statusDanger,
-      fontSize: 13,
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
       fontWeight: "600",
     },
 
@@ -224,12 +225,12 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       padding: 18,
       gap: 14,
     },
+    /* Card title sits above the step names — restored hierarchy (was 12px muted) */
     sectionTitle: {
-      fontSize: 12,
-      fontWeight: "700",
-      color: colors.textMuted,
-      textTransform: "uppercase",
-      letterSpacing: 0.04,
+      fontSize: typography.fontSize.lg,
+      lineHeight: typography.lineHeight.lg,
+      fontWeight: "600",
+      color: colors.textPrimary,
     },
     stepsContainer: {
       gap: 12,
@@ -251,8 +252,9 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     stepNum: {
       color: colors.textPrimary,
-      fontSize: 12,
-      fontWeight: "700",
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
+      fontWeight: "600",
       fontFamily: "monospace",
     },
     stepInfo: {
@@ -260,14 +262,15 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       gap: 1,
     },
     stepName: {
-      fontSize: 14,
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
       fontWeight: "600",
       color: colors.textPrimary,
     },
     stepText: {
-      fontSize: 13,
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
       color: colors.textSecondary,
-      lineHeight: 18,
     },
     stepDivider: {
       height: 1,
@@ -275,39 +278,33 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
       marginLeft: 38,
     },
 
-    /* 2-Column Feature Grid */
-    featureGrid: {
-      flexDirection: "row",
-      gap: 10,
-    },
-    featureCard: {
-      flex: 1,
+    /* Feature definition rows — plain title + one-line desc with hairline dividers
+       (was a uniform 2-column card grid, design.md G2) */
+    featureList: {
       backgroundColor: colors.bgSurface,
-      borderRadius: 14,
+      borderRadius: 16,
       borderWidth: 1,
       borderColor: colors.borderSubtle,
-      padding: 14,
-      gap: 4,
+      paddingHorizontal: 18,
     },
-    featureIconBox: {
-      width: 32,
-      height: 32,
-      borderRadius: 8,
-      backgroundColor: colors.bgSubtle,
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 2,
+    featureRow: {
+      paddingVertical: 14,
+      gap: 3,
     },
-    featureValue: {
-      fontSize: 13,
-      fontWeight: "700",
+    featureRowTitle: {
+      fontSize: typography.fontSize.base,
+      lineHeight: typography.lineHeight.base,
+      fontWeight: "600",
       color: colors.textPrimary,
-      fontVariant: ["tabular-nums"],
     },
-    featureLabel: {
-      fontSize: 12,
+    featureRowDesc: {
+      fontSize: typography.fontSize.sm,
+      lineHeight: typography.lineHeight.sm,
       color: colors.textSecondary,
-      lineHeight: 16,
+    },
+    featureDivider: {
+      height: 1,
+      backgroundColor: colors.borderSubtle,
     },
 
     recentQuickColumn: {
@@ -315,8 +312,8 @@ export function createHubStyles(colors: ThemeTokens, _isDark: boolean) {
     },
     recentQuickError: {
       color: colors.statusDanger,
-      fontSize: 12,
-      lineHeight: 16,
+      fontSize: typography.fontSize.xs,
+      lineHeight: typography.lineHeight.xs,
     },
     btnPressed: {
       opacity: 0.8,
