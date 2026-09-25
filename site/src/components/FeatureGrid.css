@@ -1,25 +1,8 @@
-.section-container {
-  max-width: 1024px;
-  margin: 0 auto;
-  padding: 4rem 1rem;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border-width: 0;
-}
-
 .features-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.5rem;
+  gap: var(--space-5);
+  margin-top: var(--space-6);
 }
 
 @media (min-width: 768px) {

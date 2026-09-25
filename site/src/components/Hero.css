@@ -1,65 +1,50 @@
 .hero {
-  padding: 4rem 1rem 2rem;
   max-width: 1024px;
   margin: 0 auto;
+  padding: var(--section-y) var(--space-4) 0;
   text-align: center;
 }
 
-.hero-badges {
-  display: flex;
-  justify-content: center;
-  gap: 0.5rem;
-  margin-bottom: 2rem;
-  flex-wrap: wrap;
-}
-
-.badge {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  border-radius: 999px;
-  background-color: var(--surface);
-  border: 1px solid var(--border);
-  font-size: 0.85rem;
+/* 사실 나열은 pill 없이 텍스트 한 줄 (design.md G1) */
+.hero-meta {
   color: var(--text-dim);
-}
-
-.badge.version-badge {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-5);
 }
 
 .hero-headline {
-  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-family: var(--font-display);
+  font-size: var(--text-hero);
   font-weight: 700;
-  line-height: 1.2;
-  margin-bottom: 1.5rem;
+  line-height: 1.15;
   color: var(--text);
+  margin-bottom: var(--space-5);
 }
 
 .hero-subcopy {
-  font-size: clamp(1rem, 2vw, 1.25rem);
+  font-size: var(--text-lg);
+  line-height: 1.6;
   color: var(--text-dim);
   max-width: 768px;
-  margin: 0 auto 2.5rem;
-  line-height: 1.6;
+  margin: 0 auto var(--space-6);
 }
 
+/* CTA 행만 좌측으로 꺾어 완전 대칭을 완화한다 (design.md G5) */
 .hero-ctas {
   display: flex;
-  justify-content: center;
-  gap: 1rem;
+  justify-content: flex-start;
   flex-wrap: wrap;
+  gap: var(--space-4);
 }
 
 .cta {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0.75rem 1.5rem;
+  padding: var(--space-3) var(--space-5);
   border-radius: 8px;
   font-weight: 600;
-  transition: all 0.2s ease-in-out;
+  transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
 }
 
 .cta:hover {

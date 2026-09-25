@@ -1,29 +1,27 @@
+/* 섹션이 아닌 컴팩트 스트립: 세로 리듬은 --section-y 절반 */
 .stack-section {
   text-align: center;
+  padding-top: calc(var(--section-y) / 2);
+  padding-bottom: calc(var(--section-y) / 2);
 }
 
-.stack-badges {
-  display: flex;
-  justify-content: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.5rem;
+.stack-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-dim);
 }
 
-.stack-badge {
-  display: inline-block;
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  background-color: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 0.9rem;
+/* 나열은 박스 없이 인라인 텍스트로 (design.md G6) */
+.stack-line {
+  margin-top: var(--space-4);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
   font-weight: 500;
 }
 
 .stack-desc {
-  font-size: 1rem;
+  font-size: var(--text-md);
   color: var(--text-dim);
   max-width: 768px;
-  margin: 0 auto;
+  margin: var(--space-4) auto 0;
 }

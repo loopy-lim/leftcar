@@ -6,12 +6,8 @@ export function StackBadges() {
 
   return (
     <section id="stack" className="section-container stack-section">
-      <h2 className="section-title">Tech Stack</h2>
-      <div className="stack-badges">
-        {stack.badges.map((badge) => (
-          <span key={badge} className="stack-badge">{badge}</span>
-        ))}
-      </div>
+      <p className="stack-label">기술 스택</p>
+      <p className="stack-line">{stack.badges.join(', ')}</p>
       <p className="stack-desc">{stack.description}</p>
     </section>
   );

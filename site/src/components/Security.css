@@ -1,28 +1,40 @@
-.section-title {
-  font-size: 2rem;
-  font-weight: 700;
-  margin-bottom: 1rem;
-  color: var(--text);
-  text-align: center;
+/* full-bleed 틴트 밴드: 리듬 변화는 배경으로만 표현한다 */
+.security-band {
+  background-color: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
-.section-lead {
-  font-size: 1.1rem;
-  color: var(--text-dim);
-  text-align: center;
-  max-width: 768px;
-  margin: 0 auto 3rem;
-  line-height: 1.6;
+/* 본문형 섹션은 좌측 정렬 — 리스트 행과 시선 축을 맞춘다 (design.md G5 유일 오버라이드) */
+.security-band .section-title,
+.security-band .section-lead {
+  text-align: left;
 }
 
-.security-grid {
+/* 카드 크롬 없는 2열 리스트 행 */
+.security-list {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.5rem;
+  gap: var(--space-5);
+  max-width: 768px;
+  margin: var(--space-6) auto 0;
+}
+
+.security-row-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.security-row-desc {
+  font-size: var(--text-md);
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-top: var(--space-1);
 }
 
 @media (min-width: 768px) {
-  .security-grid {
+  .security-list {
     grid-template-columns: repeat(2, 1fr);
   }
 }

@@ -1,0 +1,16 @@
+# Cloudflare Pages 헤더 정의 (SECURITY-REVIEW.md H1)
+# 사이트는 인라인 스크립트/스타일, 외부 오리진 참조가 0건이므로
+# 'unsafe-inline'·'unsafe-eval' 없이 잠긴 CSP를 적용한다.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000
+
+# HSTS includeSubDomains는 의도적으로 제외했다:
+# 동일 계정에서 leftcar와 무관한 다른 서브도메인을 사용할 수 있어,
+# 서브도메인 HTTPS 강제가 다른 서비스를 망가뜨리지 않는지 확인 전까지
+# apex 도메인에만 HSTS를 적용한다. 전용 도메인 확정 후 재검토.

@@ -1,28 +1,57 @@
-.status-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 1.5rem;
-  margin-bottom: 2rem;
+/* 정의형 행 리스트: 좌 항목명 / 우 상태 라벨, 카드 크롬 없음 */
+/* 본문형 섹션은 좌측 정렬 — 행과 시선 축을 맞춘다 (design.md G5 유일 오버라이드) */
+.status-section .section-title,
+.status-section .section-lead {
+  text-align: left;
 }
 
-@media (min-width: 768px) {
-  .status-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
+.status-list {
+  max-width: 768px;
+  margin: var(--space-6) auto 0;
+  border-top: 1px solid var(--border);
 }
 
-.status-highlight {
-  color: var(--accent);
+.status-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-term {
+  font-size: var(--text-md);
   font-weight: 500;
-}
-
-.status-normal {
   color: var(--text);
 }
 
+.status-highlight,
+.status-normal {
+  font-size: var(--text-sm);
+}
+
+/* accent는 현재 사용 가능한 항목 하나만 신호한다 */
+.status-highlight {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.status-normal {
+  color: var(--text-dim);
+}
+
 .status-note {
-  text-align: center;
-  font-size: 0.9rem;
+  margin-top: var(--space-6);
+  font-size: var(--text-xs);
   color: var(--text-dim);
   font-style: italic;
+}
+
+@media (min-width: 768px) {
+  .status-row {
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-6);
+  }
 }

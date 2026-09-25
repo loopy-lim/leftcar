@@ -1,25 +1,23 @@
 import { SITE_CONTENT } from '../content/site';
-import { Card } from './Card';
 import './Status.css';
 
 export function Status() {
   const { status } = SITE_CONTENT;
 
   return (
-    <section id="status" className="section-container">
-      <h2 className="section-title">Status</h2>
+    <section id="status" className="section-container status-section">
+      <h2 className="section-title">지원 현황</h2>
       <p className="section-lead">{status.lead}</p>
-      
-      <div className="status-grid">
+      <dl className="status-list">
         {status.items.map((item) => (
-          <Card key={item.id} title={item.title}>
-            <span className={item.highlight ? 'status-highlight' : 'status-normal'}>
+          <div key={item.id} className="status-row">
+            <dt className="status-term">{item.title}</dt>
+            <dd className={item.highlight ? 'status-highlight' : 'status-normal'}>
               {item.status}
-            </span>
-          </Card>
+            </dd>
+          </div>
         ))}
-      </div>
-      
+      </dl>
       <p className="status-note">{status.note}</p>
     </section>
   );

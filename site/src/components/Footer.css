@@ -1,7 +1,6 @@
 .footer {
   border-top: 1px solid var(--border);
-  margin-top: 4rem;
-  padding: 3rem 1rem;
+  padding: var(--space-7) var(--space-4);
 }
 
 .footer-container {
@@ -10,14 +9,14 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1.5rem;
+  gap: var(--space-5);
 }
 
 .footer-links {
   display: flex;
-  gap: 1.5rem;
   flex-wrap: wrap;
   justify-content: center;
+  gap: var(--space-5);
 }
 
 .footer-links a {
@@ -30,6 +29,6 @@
 
 .footer-copyright {
   color: var(--text-dim);
-  font-size: 0.9rem;
+  font-size: var(--text-xs);
   text-align: center;
 }

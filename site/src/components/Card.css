@@ -2,22 +2,18 @@
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 24px;
-  transition: border-color 0.2s ease-in-out;
-}
-
-.card:hover {
-  border-color: var(--text-dim);
+  padding: var(--space-5);
 }
 
 .card-title {
-  font-size: 1.2rem;
+  font-size: var(--text-sm);
   font-weight: 600;
-  margin-bottom: 12px;
   color: var(--text);
+  margin-bottom: var(--space-3);
 }
 
 .card-desc {
-  font-size: 1rem;
+  font-size: var(--text-md);
   color: var(--text-dim);
+  line-height: 1.6;
 }
