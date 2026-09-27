@@ -327,6 +327,15 @@ pub fn run() {
             app.manage(audit);
             app.manage(settings);
             app.manage(virtual_display.clone());
+            // G-3(artifacts/stale-connected-state-2026-09-27/report.md §2):
+            // 호스트 시작 시 이전 프로세스가 남긴 좀비 가상 디스플레이를
+            // 탐지·복구한다 — recover_stale이 create 진입에만 붙어 있던
+            // 사각지대를 닫는다. 브리지 스캔이 기동을 붙잡지 않게 워커
+            // 스레드로 미루고, 실패 좀비는 removalPending으로 보고된다.
+            tauri::async_runtime::spawn_blocking({
+                let virtual_display = virtual_display.clone();
+                move || virtual_display.recover_stale_if_due()
+            });
             app.manage(upnp);
             app.manage(ControlEndpoint { port: control_port });
             #[cfg(unix)]
@@ -458,21 +467,41 @@ pub fn run() {
                 // (최대 ~9.5s)이 종료를 붙잡지 않게 2초 상한만 두고, 상한 내
                 // 못 끝낸 해제는 프로세스 사망 시 WindowServer 회수(E-1)가
                 // 백스톱한다. tokio 런타임이 내려가는 시점이라 전용 스레드로
-                // 돌린다(remove_blocking_within).
+                // 돌린다(remove_blocking_within). 해제 결과는 감사로 남겨
+                // 종료 경로의 관측 공백을 닫는다(report §6 수정안 3).
                 let virtual_display = app
                     .state::<Arc<virtual_display::VirtualDisplayManager>>()
                     .inner()
                     .clone();
-                match virtual_display.remove_blocking_within(std::time::Duration::from_secs(2))
-                {
-                    Some(Ok(_)) => {}
+                let audit = app.state::<Arc<audit::SessionAudit>>().inner().clone();
+                let had_display = virtual_display.has_live_display();
+                match virtual_display.remove_blocking_within(std::time::Duration::from_secs(2)) {
+                    Some(Ok(vanished)) => {
+                        if had_display {
+                            audit.log(
+                                "virtual_display_released",
+                                serde_json::json!({"reason": "exit", "vanished": vanished}),
+                            );
+                        }
+                    }
                     Some(Err(error)) => {
-                        eprintln!("virtual display release on exit failed: {error}")
+                        eprintln!("virtual display release on exit failed: {error}");
+                        audit.log(
+                            "virtual_display_release_failed",
+                            serde_json::json!({"reason": "exit", "error": error}),
+                        );
                     }
                     None => {
                         eprintln!(
                             "virtual display release on exit timed out; relying on WindowServer reclaim"
-                        )
+                        );
+                        audit.log(
+                            "virtual_display_release_failed",
+                            serde_json::json!({
+                                "reason": "exit_timeout",
+                                "error": "release timed out after 2s"
+                            }),
+                        );
                     }
                 }
             }
@@ -928,6 +957,14 @@ fn build_virtual_display_status(
     server: &Arc<control::ControlServer>,
     manager: &Arc<virtual_display::VirtualDisplayManager>,
 ) -> virtual_display::VirtualDisplayStatusPublic {
+    // 상태 폴링에 idle 해제 재시도를 결합한다(report §6 수정안 1·2).
+    server.poll_virtual_display_idle_release();
+    // G-3: 상태 조회 경로에서도 좀비 가상 디스플레이를 탐지·복구한다.
+    // 내부에 최소 간격 백오프(30s)와 try_lock이 있어 2초 폴링마다 브리지
+    // 스캔이 돌거나 진행 중인 create/remove와 겹치지 않는다. 완전히
+    // 사라지지 못한 좀비는 last_removed로 승격되어 removalPending으로
+    // 보고된다 — UI가 좀비를 '만들기'가 아니라 제거 진행 상태로 보게 한다.
+    manager.recover_stale_if_due();
     manager.public_status(server.latest_viewer_metrics().map(|metrics| {
         virtual_display::ViewerDisplayMetrics {
             physical_width: metrics.physical_width,

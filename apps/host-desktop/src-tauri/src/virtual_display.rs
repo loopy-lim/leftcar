@@ -238,6 +238,18 @@ struct ManagerState {
     current: Option<LiveVirtualDisplay>,
     last_removed: Option<(u32, String)>,
     pending_resize: Option<(LiveVirtualDisplay, DisplayMode)>,
+    /// 마지막 좀비 스캔 시각 — 상태 조회 폴링(2s)마다 find_stale 브리지
+    /// 호출이 반복되지 않게 하는 백오프 근거(G-3).
+    stale_scan_at: Option<std::time::Instant>,
+    /// 회귀 검사용 find 스텁 — 테스트가 실제 dylib·브리지 없이 "좀비 존재
+    /// → 탐지·복구" 전이를 재현하는 수단. 프로덕션 빌드에는 없다.
+    #[cfg(all(test, target_os = "macos"))]
+    test_find_stale: std::sync::Mutex<Option<fn() -> Vec<u32>>>,
+    /// 회귀 검사용 destroy 스텁 — control.rs의 해제 재시도 테스트가
+    /// "실패 → 폴링 재시도 → 성공" 전이를 브리지 없이 재현하는 수단.
+    /// 프로덕션 빌드에는 존재하지 않는다.
+    #[cfg(test)]
+    test_destroy: std::sync::Mutex<Option<fn(u32) -> Result<bool, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +308,11 @@ impl VirtualDisplayManager {
                 current: None,
                 last_removed: None,
                 pending_resize: None,
+                stale_scan_at: None,
+                #[cfg(all(test, target_os = "macos"))]
+                test_find_stale: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                test_destroy: std::sync::Mutex::new(None),
             }),
             #[cfg(test)]
             remove_requests: AtomicUsize::new(0),
@@ -429,6 +446,74 @@ impl VirtualDisplayManager {
     #[cfg(test)]
     pub fn remove_request_count(&self) -> usize {
         self.remove_requests.load(Ordering::SeqCst)
+    }
+
+    /// 세션 수명 훅 회귀 검사용 라이브 디스플레이 설치 — control.rs 테스트가
+    /// 브리지 없는 환경에서 remove 실패·재시도 경로를 재현하는 수단이다.
+    #[cfg(test)]
+    pub(crate) fn install_test_display(&self, display_id: u32) {
+        self.state.lock().unwrap().current = Some(LiveVirtualDisplay {
+            display_id,
+            source_id: Some(format!("display:test:{display_id}")),
+            name: "Leftcar Display".into(),
+            logical_width: 1280,
+            logical_height: 800,
+            scale: 2,
+            mode_verified: true,
+        });
+    }
+
+    /// 회귀 검사용 destroy 스텁 교체. Some이면 실제 dylib 대신 이 함수로
+    /// destroy 결과를 만든다(실패→성공 전이 재현용).
+    #[cfg(test)]
+    pub(crate) fn set_test_destroy(
+        &self,
+        destroy: Option<fn(u32) -> Result<bool, String>>,
+    ) {
+        *self.state.lock().unwrap().test_destroy.lock().unwrap() = destroy;
+    }
+
+    /// 회귀 검사용 find_stale 스텁 교체. Some이면 실제 dylib 스캔 대신 이
+    /// 함수가 좀비 display id 목록을 반환한다.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_test_find_stale(&self, find: Option<fn() -> Vec<u32>>) {
+        *self.state.lock().unwrap().test_find_stale.lock().unwrap() = find;
+    }
+
+    /// 좀비(이전 프로세스 유산) 가상 디스플레이의 탐지·복구 진입점 —
+    /// create 진입 외에 호스트 시작(setup)과 상태 조회 경로에서도 호출한다
+    /// (G-3, artifacts/stale-connected-state-2026-09-27/report.md §2).
+    ///
+    /// 비용 통제: (1) 최소 간격 백오프로 반복 폴링이 브리지 스캔을 폴링
+    /// 주파수로 반복하지 않게 하고, (2) 이 프로세스 소유 디스플레이가 살아
+    /// 있으면 건너뛴다(브리지 레지스트리는 자기 프로세스 객체를 제외하므로
+    /// 이때 좀비는 생길 수 없다), (3) 다른 create/remove가 진행 중이면
+    /// 기다리지 않고 다음 폴링으로 미룬다. 완전히 사라지지 못한 좀비는
+    /// last_removed로 승격되어 removalPending으로 보고된다.
+    pub fn recover_stale_if_due(&self) {
+        let Ok(_operation) = self.operation.try_lock() else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap();
+        if state.current.is_some() {
+            return;
+        }
+        if let Some(last) = state.stale_scan_at {
+            if last.elapsed() < STALE_SCAN_MIN_INTERVAL {
+                return;
+            }
+        }
+        state.stale_scan_at = Some(std::time::Instant::now());
+        // find 스텁이 설치된 회귀 검사는 실제 dylib 프로브 없이 좀비 경로만
+        // 재현한다 — state.lib이 None으로 남아 refresh_removal 같은 실제
+        // 브리지 호출도 차단된다.
+        #[cfg(all(test, target_os = "macos"))]
+        if state.test_find_stale.lock().unwrap().is_some() {
+            self.recover_stale(&mut state);
+            return;
+        }
+        self.refresh_probe(&mut state);
+        self.recover_stale(&mut state);
     }
 
     /// 프로브·브리지 호출 없이 라이브 디스플레이 존재만 싸게 본다 — 세션
@@ -624,6 +709,15 @@ impl VirtualDisplayManager {
     }
 
     fn recover_stale(&self, state: &mut ManagerState) {
+        #[cfg(all(test, target_os = "macos"))]
+        {
+            // fn 포인터는 Copy라 가드를 먼저 떨어뜨리고 state를 다시 빌릴 수 있다.
+            let find = *state.test_find_stale.lock().unwrap();
+            if let Some(find) = find {
+                self.recover_stale_ids(state, find());
+                return;
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             let Some(lib) = state.lib.as_ref() else { return };
@@ -637,29 +731,55 @@ impl VirtualDisplayManager {
                 eprintln!("leftcar: virtual display stale scan returned invalid JSON");
                 return;
             };
-            if let Some(displays) = value["displays"].as_array() {
-                for display in displays {
-                    let Some(id) = display["displayId"].as_u64().and_then(|id| u32::try_from(id).ok()) else { continue };
-                    match self.call_destroy(state, id) {
-                        Ok(true) => eprintln!("leftcar: virtual_display_zombie_recovered display_id={id} vanished=true"),
-                        Ok(false) => {
-                            state.last_removed = Some((id, format!("stale:{id}")));
-                            eprintln!("leftcar: virtual_display_zombie_recovery_pending display_id={id}");
-                        }
-                        Err(error) => {
-                            state.last_removed = Some((id, format!("stale:{id}")));
-                            eprintln!("leftcar: virtual_display_zombie_recovery_failed display_id={id}: {error}");
-                        }
-                    }
-                }
-            }
+            let ids: Vec<u32> = value["displays"]
+                .as_array()
+                .map(|displays| {
+                    displays
+                        .iter()
+                        .filter_map(|display| {
+                            display["displayId"]
+                                .as_u64()
+                                .and_then(|id| u32::try_from(id).ok())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.recover_stale_ids(state, ids);
         }
         #[cfg(not(target_os = "macos"))]
         let _ = state;
     }
 
+    /// 발견된 좀비를 하나씩 해제한다. 즉시 소실 확인(destroy → 0)되면 상태
+    /// 기록 없이 끝나고, WindowServer에 아직 남으면(2, 오류) last_removed로
+    /// 승격해 removalPending으로 보고하고 백오프 만료 뒤 재시도한다.
+    #[cfg(target_os = "macos")]
+    fn recover_stale_ids(&self, state: &mut ManagerState, ids: Vec<u32>) {
+        for id in ids {
+            match self.call_destroy(state, id) {
+                Ok(true) => eprintln!(
+                    "leftcar: virtual_display_zombie_recovered display_id={id} vanished=true"
+                ),
+                Ok(false) => {
+                    state.last_removed = Some((id, format!("stale:{id}")));
+                    eprintln!("leftcar: virtual_display_zombie_recovery_pending display_id={id}");
+                }
+                Err(error) => {
+                    state.last_removed = Some((id, format!("stale:{id}")));
+                    eprintln!(
+                        "leftcar: virtual_display_zombie_recovery_failed display_id={id}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn call_destroy(&self, state: &ManagerState, display_id: u32) -> Result<bool, String> {
+        #[cfg(test)]
+        if let Some(destroy) = *state.test_destroy.lock().unwrap() {
+            return destroy(display_id);
+        }
         let Some(lib) = state.lib.as_ref() else {
             return Err("virtual display library unavailable".into());
         };
@@ -741,6 +861,11 @@ fn take_json_with(
 /// E-5)라 35s로 둔다 — 이전 20s(200회)는 실측 지연보다 짧아 resize가
 /// "removal pending" 오류로 자주 끝났다.
 const REMOVAL_WAIT_ATTEMPTS: usize = 350;
+
+/// 좀비 스캔(recover_stale_if_due)의 최소 재실행 간격. 상태 조회 폴링(2s)이
+/// find_stale 브리지 호출을 폴링 주파수로 반복하지 않게 한다. 좀비는 이전
+/// 프로세스 사망 시점에만 새로 생기므로 30s면 즉각성 충분하다.
+const STALE_SCAN_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn wait_for_removal(
     mut pending: impl FnMut() -> bool,
@@ -991,5 +1116,57 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(manager.remove_request_count(), 1);
+    }
+
+    // -- G-3: 시작/상태 조회 경로의 좀비 복구
+    //    (artifacts/stale-connected-state-2026-09-27/report.md §2) -------
+
+    /// 스텁별 독립 카운터 — 테스트 병렬 실행에서도 정확한 호출 수를 단언한다.
+    static VANISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LINGER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn destroy_vanishes(_display_id: u32) -> Result<bool, String> {
+        VANISH_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    fn destroy_lingers(_display_id: u32) -> Result<bool, String> {
+        LINGER_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(false)
+    }
+
+    #[test]
+    fn startup_and_status_paths_detect_and_recover_zombies() {
+        let manager = VirtualDisplayManager::new();
+        manager.set_test_find_stale(Some(|| vec![777]));
+        manager.set_test_destroy(Some(destroy_vanishes));
+        // 호스트 시작(setup)과 상태 조회가 쓰는 진입점: 좀비를 탐지하고
+        // 즉시 해제한다.
+        manager.recover_stale_if_due();
+        assert_eq!(VANISH_CALLS.load(Ordering::SeqCst), 1);
+        assert!(manager.state.lock().unwrap().last_removed.is_none());
+        // 백오프: 최소 간격 안의 반복 상태 조회는 재스캔하지 않는다.
+        manager.recover_stale_if_due();
+        assert_eq!(VANISH_CALLS.load(Ordering::SeqCst), 1);
+        // 백오프가 지나면 다시 스캔한다(복구 실패 좀비의 재시도 경로).
+        manager.state.lock().unwrap().stale_scan_at = None;
+        manager.recover_stale_if_due();
+        assert_eq!(VANISH_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn zombie_that_has_not_vanished_surfaces_as_removal_pending() {
+        let manager = VirtualDisplayManager::new();
+        manager.set_test_find_stale(Some(|| vec![555]));
+        manager.set_test_destroy(Some(destroy_lingers));
+        manager.recover_stale_if_due();
+        assert_eq!(LINGER_CALLS.load(Ordering::SeqCst), 1);
+        // WindowServer에 아직 남은 좀비는 last_removed로 승격되고,
+        // public_status는 이를 removalPending으로 보고한다 — 확장 디스플레이
+        // 카드가 '만들기' 상태로 잘못 보이지 않게 하는 매핑의 원천.
+        assert_eq!(manager.last_removed_pending().as_deref(), Some("stale:555"));
+        // 좀비가 남아 있는 동안 create는 'removal pending'으로 거절된다.
+        let error = manager.create(1280, 800, 2).unwrap_err();
+        assert!(error.contains("removal pending"), "unexpected: {error}");
     }
 }

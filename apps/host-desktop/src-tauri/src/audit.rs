@@ -195,9 +195,28 @@ fn sanitized_fields(
                     "viewer_superseded",
                     "device_revoked",
                     "devices_revoked_all",
+                    "idle_release",
                 ],
             );
             copy_bool(source, &mut safe, "vanished");
+        }
+        "virtual_display_release_failed" => {
+            copy_enum(
+                source,
+                &mut safe,
+                "reason",
+                &[
+                    "stop_stream",
+                    "session_expired",
+                    "viewer_superseded",
+                    "device_revoked",
+                    "devices_revoked_all",
+                    "idle_release",
+                    "exit",
+                    "exit_timeout",
+                ],
+            );
+            copy_capped(source, &mut safe, "error");
         }
         "input_reassigned" => {
             copy_session_list(source, &mut safe);
@@ -266,6 +285,25 @@ fn copy_enum(
         if allowed.contains(&value) {
             safe.insert(key.into(), serde_json::json!(value));
         }
+    }
+}
+
+/// 내부 오류 문자열(브리지 rc 사유 등)은 상한 없이 감사에 복사하지 않는다.
+const AUDIT_TEXT_CAP: usize = 160;
+
+/// 자유 문자열을 상한 내로 잘라 복사한다 — 가변 길이 텍스트가 감사 레코드
+/// 상한(MAX_RECORD_BYTES)을 흔들지 않게 한다.
+fn copy_capped(
+    source: &serde_json::Map<String, serde_json::Value>,
+    safe: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    if let Some(value) = source.get(key).and_then(serde_json::Value::as_str) {
+        let mut text: String = value.chars().take(AUDIT_TEXT_CAP).collect();
+        if value.chars().count() > AUDIT_TEXT_CAP {
+            text.push('…');
+        }
+        safe.insert(key.into(), serde_json::json!(text));
     }
 }
 

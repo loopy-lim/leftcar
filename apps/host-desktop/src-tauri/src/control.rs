@@ -358,6 +358,32 @@ fn clipboard_sha256_hex(text: &str) -> String {
     hex
 }
 
+/// 확장 디스플레이 해제 실패 후 폴링 재시도 백오프 — UI 폴링(2s)마다
+/// 브리지 destroy를 때리지 않게 한다(report §6 수정안 1).
+const DISPLAY_RELEASE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// 세션 0 전환에서 해제가 실패·누락된 디스플레이를 폴링이 회수하기까지의
+/// 경과 시간(report §6 수정안 2, "스트림 종료 시 해제 재시도" 범위).
+const DISPLAY_IDLE_RELEASE_AFTER: Duration = Duration::from_secs(15);
+
+/// 확장 디스플레이 idle 해제 상태. 폴링 재시도(실패 저장)와 세션 종료
+/// 무장을 함께 보관한다.
+#[derive(Default)]
+struct IdleReleaseState {
+    /// 마지막 세션 0 전환 시점에 라이브 디스플레이가 살아 있었음을 표시.
+    /// None이면 세션과 연동된 해제 이력이 없다는 뜻이며, 세션 없이
+    /// 대시보드에서 명시적으로 만든(G1) 디스플레이는 이 값이 없어
+    /// 폴링 경로로 임의 제거되지 않는다.
+    idle_since: Option<Instant>,
+    /// 마지막 remove 실패 — 폴링 재시도 대상.
+    failed: Option<FailedDisplayRelease>,
+}
+
+#[derive(Clone)]
+struct FailedDisplayRelease {
+    reason: String,
+    failed_at: Instant,
+}
+
 pub struct ControlServer {
     virtual_display_changes: tokio::sync::RwLock<()>,
     source_operations: crate::source_grants::SourceLease,
@@ -417,6 +443,9 @@ pub struct ControlServer {
     /// 뷰어가 잠금 배너 탭으로 보낸 입력 허용 요청. 세션당 최근 1건만
     /// 유지하고 60초 뒤 만료 — 호스트 UI 폴링(list_input_requests)이 읽는다.
     pending_input_requests: Mutex<Vec<PendingInputRequest>>,
+    /// 확장 디스플레이 idle 해제 상태 — 해제 실패 저장과 세션 종료 무장.
+    /// 폴링(get_status·virtual_display_status)이 이 값을 읽어 재시도한다.
+    idle_release: std::sync::Arc<Mutex<IdleReleaseState>>,
 }
 
 /// 뷰어→호스트 입력 허용 요청 1건. 승인은 set_session_input이, 표시는
@@ -482,6 +511,7 @@ impl ControlServer {
             viewer_metrics: Mutex::new(HashMap::new()),
             public_media_endpoint: Mutex::new(None),
             pending_input_requests: Mutex::new(Vec::new()),
+            idle_release: std::sync::Arc::new(Mutex::new(IdleReleaseState::default())),
         }
     }
 
@@ -742,34 +772,107 @@ impl ControlServer {
     /// "막 세션을 제거한" 경로에서만 호출한다 — 전환 기반 훅이라 세션
     /// 없이 호스트 UI가 만든 디스플레이(G1)는 상태 폴링으로 죽지 않는다.
     /// 해제는 백그라운드 워커에서 돌고(브리지 destroy 폴링 최대 ~9.5s)
-    /// 실패해도 명령 응답에 영향하지 않는다.
+    /// 실패해도 명령 응답에 영향하지 않으며, 실패는 폴링 재시도 대상으로
+    /// 저장된다(report §6 수정안 1).
     fn release_virtual_display_if_idle(&self, reason: &str) {
+        if !self.sessions.lock().unwrap().live.is_empty() {
+            return;
+        }
+        let Some(manager) = self.virtual_display.get().cloned() else {
+            return;
+        };
+        // 세션 0 전환 시점에 디스플레이가 살아 있었으면 폴링 결합 해제를
+        // 무장한다(수정안 2). 종료 이후 새로 만든 G1 디스플레이는 무장되지
+        // 않으므로 폴링이 임의로 제거하지 않는다.
+        if manager.has_live_display() {
+            self.idle_release.lock().unwrap().idle_since = Some(Instant::now());
+        }
+        self.spawn_virtual_display_release(&manager, reason);
+    }
+
+    /// 해제 워커(공용). remove 결과를 감사로 남기고(수정안 3), 실패는
+    /// 폴링 재시도 대상으로 저장하며, 시도가 끝나면 세션 종료 무장을
+    /// 정리한다. 성공·실패 모두 기록해 해제 경로의 관측 공백을 닫는다.
+    fn spawn_virtual_display_release(
+        &self,
+        manager: &std::sync::Arc<crate::virtual_display::VirtualDisplayManager>,
+        reason: &str,
+    ) {
+        let audit = self.audit.get().cloned();
+        let idle = std::sync::Arc::clone(&self.idle_release);
+        let manager = std::sync::Arc::clone(manager);
+        let reason = reason.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            let had_display = manager.has_live_display();
+            let result = manager.remove();
+            // 감사 기록은 상태 정리보다 먼저 끝낸다 — 관측자(idle_release
+            // 폴링·테스트)가 성공/실패 상태 전이를 봤다면 대응 감사 레코드도
+            // 이미 디스크에 있음이 보장된다(기록 뒤 상태 해제 순서).
+            if had_display {
+                if let Some(audit) = &audit {
+                    match &result {
+                        Ok(vanished) => audit.log(
+                            "virtual_display_released",
+                            json!({"reason": reason, "vanished": vanished}),
+                        ),
+                        Err(error) => audit.log(
+                            "virtual_display_release_failed",
+                            json!({"reason": reason, "error": error}),
+                        ),
+                    }
+                }
+            }
+            {
+                let mut idle = idle.lock().unwrap();
+                idle.idle_since = None;
+                match &result {
+                    Ok(_) => idle.failed = None,
+                    Err(_) => {
+                        idle.failed = Some(FailedDisplayRelease {
+                            reason: reason.clone(),
+                            failed_at: Instant::now(),
+                        });
+                    }
+                }
+            }
+            if let Err(error) = &result {
+                eprintln!("virtual display release after {reason} failed: {error}");
+            }
+        });
+    }
+
+    /// 상태 폴링(get_status·virtual_display_status)에 결합한 해제 재시도
+    /// (report §6 수정안 1·2). 세션 0 + 라이브 디스플레이 조건에서 (a) 직전
+    /// 해제 실패의 백오프가 지났거나 (b) 세션 종료 시 무장된 해제가 경과
+    /// 시간을 넘었으면 백그라운드로 다시 해제한다. 세션 없이 대시보드에서
+    /// 만든(G1) 디스플레이는 무장·실패 이력이 없어 이 경로로 제거되지
+    /// 않는다(사용자 명시 생성 보호).
+    pub fn poll_virtual_display_idle_release(&self) {
         let Some(manager) = self.virtual_display.get().cloned() else {
             return;
         };
         if !self.sessions.lock().unwrap().live.is_empty() {
             return;
         }
-        let audit = self.audit.get().cloned();
-        let reason = reason.to_owned();
-        tauri::async_runtime::spawn_blocking(move || {
-            let had_display = manager.has_live_display();
-            let result = manager.remove();
-            if had_display {
-                if let Some(audit) = &audit {
-                    audit.log(
-                        "virtual_display_released",
-                        json!({
-                            "reason": reason,
-                            "vanished": matches!(&result, Ok(true)),
-                        }),
-                    );
-                }
-            }
-            if let Err(error) = result {
-                eprintln!("virtual display release after {reason} failed: {error}");
-            }
-        });
+        if !manager.has_live_display() {
+            return;
+        }
+        let idle = self.idle_release.lock().unwrap();
+        let due = match (&idle.failed, idle.idle_since) {
+            (Some(failed), _) => failed.failed_at.elapsed() >= DISPLAY_RELEASE_RETRY_INTERVAL,
+            (None, Some(since)) => since.elapsed() >= DISPLAY_IDLE_RELEASE_AFTER,
+            (None, None) => false,
+        };
+        if !due {
+            return;
+        }
+        let reason = idle
+            .failed
+            .as_ref()
+            .map(|failed| failed.reason.clone())
+            .unwrap_or_else(|| "idle_release".to_owned());
+        drop(idle);
+        self.spawn_virtual_display_release(&manager, &reason);
     }
 
     /// 호스트 UI(공유 대기열 관리)가 같은 파일 전송 상태를 쓰게 한다.
@@ -1790,6 +1893,9 @@ impl ControlServer {
 
     /// Snapshot for the Tauri UI (`get_status` command reuses this).
     pub fn snapshot(&self) -> StatusView {
+        // 폴링 부수 작업: 해제 실패·누락 디스플레이의 재시도(report §6
+        // 수정안 1·2). 발화 조건이 아니면 즉시 반환한다.
+        self.poll_virtual_display_idle_release();
         let paired = self.pairing.list_device_views();
         let now = Instant::now();
         // Sample external backends without the state lock. A callback may stop
@@ -4312,12 +4418,14 @@ mod tests {
 
     // -- 세션 스코프 소유(감사 §9.2): 세션 0 전환 → 확장 디스플레이 해제 --
 
-    /// 백그라운드 해제 훅이 실제로 remove에 도달할 때까지 기다린다.
+    /// 백그라운드 해제 훅이 실제로 remove에 도달할 때까지 기다린다. 전체
+    /// 스위트 병렬 실행 시 워커 스레드 풀 경쟁으로 지연될 수 있어 넉넉히
+    /// 둔다.
     async fn wait_for_remove_calls(
         manager: &std::sync::Arc<crate::virtual_display::VirtualDisplayManager>,
         expected: usize,
     ) {
-        for _ in 0..300 {
+        for _ in 0..600 {
             if manager.remove_request_count() >= expected {
                 return;
             }
@@ -4409,6 +4517,176 @@ mod tests {
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(manager.remove_request_count(), 0);
+    }
+
+    // -- 해제 실패 재시도·폴링 결합(report §6 수정안 1·2) ------------------
+
+    /// idle 해제 상태가 조건을 만족할 때까지 워커 완료를 기다린다.
+    async fn wait_for_idle_release_state(
+        server: &ControlServer,
+        mut predicate: impl FnMut(&IdleReleaseState) -> bool,
+    ) {
+        for _ in 0..300 {
+            if predicate(&server.idle_release.lock().unwrap()) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("idle release state did not converge in time");
+    }
+
+    #[tokio::test]
+    async fn failed_release_is_retried_from_status_polling() {
+        static TEST_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+        // 첫 destroy는 실패, 이후는 성공 — "실패 → 폴링 재시도 → 성공" 전이.
+        fn flaky_destroy(display_id: u32) -> Result<bool, String> {
+            let n = TEST_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(format!("bridge failed once for {display_id}"))
+            } else {
+                Ok(true)
+            }
+        }
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "leftcar-vdisp-release-retry-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
+        server.set_audit(Arc::new(crate::audit::SessionAudit::new(Some(
+            path.clone(),
+        ))));
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        manager.set_test_destroy(Some(flaky_destroy));
+        server.set_virtual_display(manager.clone());
+        manager.install_test_display(123);
+
+        server.release_virtual_display_if_idle("stop_stream");
+        // 실패는 폴링 재시도 대상으로 저장되고, 디스플레이는 남고 세션 종료
+        // 무장은 정리된다.
+        wait_for_idle_release_state(&server, |idle| idle.failed.is_some()).await;
+        assert_eq!(manager.remove_request_count(), 1);
+        assert!(
+            manager.has_live_display(),
+            "실패한 해제는 current를 유지해야 한다"
+        );
+        assert!(server.idle_release.lock().unwrap().idle_since.is_none());
+
+        // 백오프가 남아 있으면 폴링이 재시도하지 않는다.
+        server.poll_virtual_display_idle_release();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            manager.remove_request_count(),
+            1,
+            "폴링은 백오프 동안 재시도해서는 안 된다"
+        );
+
+        // 백오프를 경과 처리하면 폴링 재시도가 발화해 이번에는 성공하고
+        // 실패 상태가 풀린다.
+        {
+            let mut idle = server.idle_release.lock().unwrap();
+            let failed = idle.failed.as_mut().unwrap();
+            failed.failed_at = Instant::now()
+                - DISPLAY_RELEASE_RETRY_INTERVAL
+                - std::time::Duration::from_secs(1);
+        }
+        server.poll_virtual_display_idle_release();
+        wait_for_remove_calls(&manager, 2).await;
+        wait_for_idle_release_state(&server, |idle| idle.failed.is_none()).await;
+        assert!(!manager.has_live_display(), "재시도 해제가 성공해야 한다");
+
+        // 실패와 재시도 성공이 모두 감사로 남는다(수정안 3).
+        let body = std::fs::read_to_string(&path).unwrap();
+        let events: Vec<String> = body
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .map(|record| record["event"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert!(
+            events.iter().any(|event| event == "virtual_display_release_failed"),
+            "{body}"
+        );
+        assert!(
+            events.iter().any(|event| event == "virtual_display_released"),
+            "{body}"
+        );
+        assert!(body.contains("stop_stream"), "{body}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn idle_polling_releases_display_after_session_end_elapsed() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        server.set_virtual_display(manager.clone());
+        manager.install_test_display(77);
+        // 세션 0 전환 무장(수정안 2)만 단독으로 검증한다 — 실제 훅은
+        // 실패 저장까지 일으키므로 위 재시도 테스트가 담당한다.
+        server.idle_release.lock().unwrap().idle_since = Some(Instant::now());
+
+        server.poll_virtual_display_idle_release();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            manager.remove_request_count(),
+            0,
+            "경과 전 폴링은 해제를 발화하지 않는다"
+        );
+
+        server.idle_release.lock().unwrap().idle_since = Some(
+            Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1),
+        );
+        server.poll_virtual_display_idle_release();
+        wait_for_remove_calls(&manager, 1).await;
+    }
+
+    #[tokio::test]
+    async fn user_created_display_survives_polling_without_session_history() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        );
+        let manager = std::sync::Arc::new(crate::virtual_display::VirtualDisplayManager::new());
+        server.set_virtual_display(manager.clone());
+        // G1: 세션 없이 대시보드에서 만든 디스플레이 — 무장·실패 이력이
+        // 없으므로 폴링은 아무리 반복해도 제거하지 않는다.
+        manager.install_test_display(55);
+        for _ in 0..3 {
+            server.poll_virtual_display_idle_release();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            manager.remove_request_count(),
+            0,
+            "사용자 명시 생성 디스플레이는 폴링으로 제거되지 않는다"
+        );
+
+        // 라이브 세션이 있어도 발화하지 않는다(기존 게이트 유지).
+        insert_live_session(&server, 1, Some("viewer-1"));
+        server.idle_release.lock().unwrap().idle_since = Some(
+            Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1),
+        );
+        server.poll_virtual_display_idle_release();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(manager.remove_request_count(), 0);
     }
 
