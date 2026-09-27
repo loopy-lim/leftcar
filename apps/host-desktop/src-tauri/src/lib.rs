@@ -84,8 +84,74 @@ fn fatal_startup_error(message: String) -> ! {
     std::process::exit(1);
 }
 
+/// Debug binaries built by `tauri dev` (or a plain `cargo build`) load
+/// `build.devUrl` (http://localhost:1420, tauri.conf.json) instead of the
+/// bundled `frontendDist`. Running such a binary without the Vite dev server
+/// (e.g. executing `target/debug/leftcar-host-desktop` directly) leaves the
+/// webview on a silently blank window — users report "the app opens an empty
+/// window". Fail fast with instructions instead.
+#[cfg(debug_assertions)]
+fn ensure_debug_dev_server_available() {
+    if !tauri::is_dev() {
+        return;
+    }
+    const DEV_SERVER_PORT: u16 = 1420;
+    // localhost는 환경에 따라 127.0.0.1(IPv4) 또는 ::1(IPv6) 한쪽으로만
+    // resolve·리슨된다(vite는 [::1]:1420만 여는 경우가 있다). 양쪽 loopback을
+    // 모두 probe해 하나라도 도달하면 dev server가 살아 있는 것으로 본다.
+    if dev_server_reachable_on_any(&loopback_candidates(DEV_SERVER_PORT)) {
+        return;
+    }
+    fatal_startup_error(format!(
+        "디버그 빌드는 Vite dev server(localhost:{DEV_SERVER_PORT})가 실행 중이어야 합니다.\n\
+         `bun run tauri dev`로 실행하거나, 배포용 실행은 `bun run dev:host:macos`를 사용하세요.\n\
+         (Debug builds require the Vite dev server; run `bun run tauri dev`.)"
+    ));
+}
+
+/// Probe targets for a dev server port: both IP loopback variants plus
+/// whatever `localhost` resolves to on this host (deduplicated).
+#[cfg(any(debug_assertions, test))]
+fn loopback_candidates(port: u16) -> Vec<std::net::SocketAddr> {
+    let mut candidates = vec![
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+        std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port),
+    ];
+    if let Ok(resolved) = std::net::ToSocketAddrs::to_socket_addrs(&("localhost", port)) {
+        for addr in resolved {
+            if !candidates.contains(&addr) {
+                candidates.push(addr);
+            }
+        }
+    }
+    candidates
+}
+
+/// The dev server is up if any loopback candidate accepts a connection.
+#[cfg(any(debug_assertions, test))]
+fn dev_server_reachable_on_any(addrs: &[std::net::SocketAddr]) -> bool {
+    addrs.iter().any(|addr| dev_server_reachable(*addr))
+}
+
+/// Probe the dev server with short retries so a `tauri dev` startup race
+/// (the binary spawning before vite begins listening) does not false-positive.
+#[cfg(any(debug_assertions, test))]
+fn dev_server_reachable(addr: std::net::SocketAddr) -> bool {
+    for _ in 0..10 {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            .is_ok()
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    ensure_debug_dev_server_available();
     let normal_data = dirs::data_dir();
     let profile = state_profile::StateProfile::from_environment(normal_data.as_deref())
         .unwrap_or_else(|message| fatal_startup_error(message));
@@ -1364,5 +1430,72 @@ mod tests {
 
         assert_ne!(actual_port, occupied_port);
         assert_ne!(actual_port, 0);
+    }
+}
+
+#[cfg(test)]
+mod dev_server_guard_tests {
+    use super::{dev_server_reachable, dev_server_reachable_on_any, loopback_candidates};
+
+    #[test]
+    fn passes_when_only_ipv6_loopback_listens() {
+        let listener = match std::net::TcpListener::bind(("::1", 0)) {
+            Ok(listener) => listener,
+            Err(error) => panic!("IPv6 loopback bind unavailable in this environment: {error}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            dev_server_reachable_on_any(&loopback_candidates(port)),
+            "vite가 [::1]로만 리슨해도 가드는 통과해야 한다"
+        );
+    }
+
+    #[test]
+    fn passes_when_only_ipv4_loopback_listens() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            dev_server_reachable_on_any(&loopback_candidates(port)),
+            "vite가 127.0.0.1로만 리슨해도 가드는 통과해야 한다"
+        );
+    }
+
+    #[test]
+    fn fails_when_no_loopback_candidate_listens() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(
+            !dev_server_reachable_on_any(&loopback_candidates(addr.port())),
+            "양쪽 loopback 모두 닫혀 있으면 가드는 실패해야 한다 — 빈 window 원인 상태"
+        );
+    }
+
+    #[test]
+    fn loopback_candidates_cover_both_ip_versions() {
+        let candidates = loopback_candidates(1420);
+        assert!(candidates
+            .iter()
+            .any(|addr| addr.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+        assert!(candidates
+            .iter()
+            .any(|addr| addr.ip() == std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn detects_open_and_closed_dev_ports() {
+        let open = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        assert!(
+            dev_server_reachable(open.local_addr().unwrap()),
+            "열린 포트는 도달 가능"
+        );
+
+        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+        assert!(
+            !dev_server_reachable(closed_addr),
+            "닫힌 포트는 도달 불가 — 빈 window 원인 상태"
+        );
     }
 }
