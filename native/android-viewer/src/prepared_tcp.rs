@@ -248,7 +248,7 @@ fn tcp_to_media_channel(
                             &payload[..payload.len().min(4)]
                         ));
                     }
-                    if media_tx.send(payload).is_err() {
+                    if !send_media_until_stopped(&media_tx, payload, global_stop, connection_stop) {
                         connection_stop.store(true, Ordering::SeqCst);
                         return;
                     }
@@ -261,6 +261,27 @@ fn tcp_to_media_channel(
         }
     }
     connection_stop.store(true, Ordering::SeqCst);
+}
+
+/// Keep reliable media backpressure while allowing cancellation to interrupt
+/// a sender whose renderer has not claimed or is no longer draining the queue.
+fn send_media_until_stopped(
+    media_tx: &SyncSender<Vec<u8>>,
+    mut payload: Vec<u8>,
+    global_stop: &AtomicBool,
+    connection_stop: &AtomicBool,
+) -> bool {
+    while !global_stop.load(Ordering::SeqCst) && !connection_stop.load(Ordering::SeqCst) {
+        match media_tx.try_send(payload) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Full(pending)) => {
+                payload = pending;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    false
 }
 
 fn udp_to_tcp(
@@ -311,6 +332,57 @@ fn udp_to_tcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_a_bridge_with_a_full_media_queue_finishes() {
+        use crate::media_crypto::{test_media_key, MediaSessionCrypto};
+        use secure_channel::DatagramSealer;
+
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let key = test_media_key(3);
+        let bridge = PreparedTcpBridge::bind(
+            port,
+            "127.0.0.1",
+            "127.0.0.1",
+            Arc::new(MediaSessionCrypto::new(key)),
+        )
+        .unwrap();
+        let mut host = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let host_tx = DatagramSealer::new(secure_channel::media_keys(&key).s2c);
+        let send = |stream: &mut TcpStream, plaintext: &[u8]| {
+            let frame = host_tx.seal(plaintext).unwrap();
+            stream
+                .write_all(&(frame.len() as u32).to_be_bytes())
+                .unwrap();
+            stream.write_all(&frame).unwrap();
+        };
+        let echo = |stream: &mut TcpStream| {
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut frame = vec![0u8; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut frame).unwrap();
+        };
+        send(&mut host, b"LCH1first");
+        echo(&mut host);
+        send(&mut host, b"media");
+        send(&mut host, b"LCH1full-queue");
+        // The final echo is sent after the first two queue insertions and
+        // immediately before the third. No renderer consumes this bridge.
+        echo(&mut host);
+
+        let (done, completed) = mpsc::channel();
+        thread::spawn(move || {
+            drop(bridge);
+            let _ = done.send(());
+        });
+        assert!(
+            completed.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "cancelling a prepared TCP stream must wake a full-queue sender"
+        );
+    }
 
     #[test]
     fn tcp_media_frame_and_session_memory_are_bounded_for_4k() {

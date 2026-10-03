@@ -21,10 +21,18 @@ export interface HostErrorView {
   kind: HostErrorKind;
 }
 
-export function hostErrorView(cause: unknown, t: TranslationSchema): HostErrorView {
-  const message = String(cause instanceof Error ? cause.message : cause).toLowerCase();
+export function hostErrorView(
+  cause: unknown,
+  t: TranslationSchema,
+): HostErrorView {
+  const message = String(
+    cause instanceof Error ? cause.message : cause,
+  ).toLowerCase();
   if (message.includes("remote desktop")) {
-    return { message: t.host.screenPermissionError, kind: "remote-desktop-permission" };
+    return {
+      message: t.host.screenPermissionError,
+      kind: "remote-desktop-permission",
+    };
   }
   if (message.includes("permission") || message.includes("not authorized")) {
     return { message: t.host.screenPermissionError, kind: "screen-permission" };
@@ -53,32 +61,50 @@ export function useHostStatus(t: TranslationSchema) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [inputRequests, setInputRequests] = useState<InputRequestRow[]>([]);
-  const [terminationNotice, setTerminationNotice] = useState<TerminationNotice | null>(null);
+  const [terminationNotice, setTerminationNotice] =
+    useState<TerminationNotice | null>(null);
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState<HostErrorView | null>(null);
   const [inputPermission, setInputPermission] = useState(false);
   const [screenPermission, setScreenPermission] = useState(true);
-  const [platform, setPlatform] = useState<HostSnapshotView["platform"]>("macos");
+  const [platform, setPlatform] =
+    useState<HostSnapshotView["platform"]>("macos");
   const [controlPort, setControlPort] = useState(7777);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const priorActiveSessions = useRef(new Map<number, SessionRow>());
   const seenTerminations = useRef(new Set<string>());
   const hasStatusSnapshot = useRef(false);
+  const refreshRevision = useRef(0);
+  const mounted = useRef(false);
 
   const refresh = useCallback(async () => {
+    const revision = ++refreshRevision.current;
     try {
-      const [status, permission, screenGranted, hostPlatform, actualControlPort, actualLanIp, requests] =
-        await Promise.all([
-          invoke<StatusView>("get_status"),
-          invoke<boolean>("get_input_permission"),
-          invoke<boolean>("get_screen_permission"),
-          invoke<HostSnapshotView["platform"]>("get_host_platform"),
-          invoke<number>("get_control_port"),
-          invoke<string | null>("get_lan_ip").catch(() => null),
-          invoke<InputRequestRow[]>("list_input_requests").catch(() => [] as InputRequestRow[]),
-        ]);
+      const [
+        status,
+        permission,
+        screenGranted,
+        hostPlatform,
+        actualControlPort,
+        actualLanIp,
+        requests,
+      ] = await Promise.all([
+        invoke<StatusView>("get_status"),
+        invoke<boolean>("get_input_permission"),
+        invoke<boolean>("get_screen_permission"),
+        invoke<HostSnapshotView["platform"]>("get_host_platform"),
+        invoke<number>("get_control_port"),
+        invoke<string | null>("get_lan_ip").catch(() => null),
+        invoke<InputRequestRow[]>("list_input_requests").catch(
+          () => [] as InputRequestRow[],
+        ),
+      ]);
+      if (!mounted.current || revision !== refreshRevision.current) return;
       const statusSessions = status.sessions || [];
-      const activeSessions = statusSessions.filter((session) => !isTerminalSession(session));
+      const activeSessions = statusSessions.filter(
+        (session) => !isTerminalSession(session),
+      );
       let nextTerminationNotice: TerminationNotice | null = null;
 
       for (const terminalSession of statusSessions.filter(isTerminalSession)) {
@@ -90,7 +116,9 @@ export function useHostStatus(t: TranslationSchema) {
       }
 
       if (hasStatusSnapshot.current) {
-        const reportedSessionIds = new Set(statusSessions.map((session) => session.session));
+        const reportedSessionIds = new Set(
+          statusSessions.map((session) => session.session),
+        );
         for (const priorSession of priorActiveSessions.current.values()) {
           if (reportedSessionIds.has(priorSession.session)) continue;
           const notice = createTerminationNotice({
@@ -109,6 +137,7 @@ export function useHostStatus(t: TranslationSchema) {
         activeSessions.map((session) => [session.session, session]),
       );
       hasStatusSnapshot.current = true;
+      setReady(true);
       setSessions(activeSessions);
       setInputRequests(requests);
       if (nextTerminationNotice) setTerminationNotice(nextTerminationNotice);
@@ -127,11 +156,13 @@ export function useHostStatus(t: TranslationSchema) {
       setLanIp(actualLanIp);
       setLastUpdated(new Date());
     } catch (cause) {
-      setError(hostErrorView(cause, t));
+      if (mounted.current && revision === refreshRevision.current)
+        setError(hostErrorView(cause, t));
     }
   }, [t]);
 
   useEffect(() => {
+    mounted.current = true;
     const refreshWhenVisible = () => {
       if (!document.hidden) void refresh();
     };
@@ -140,13 +171,18 @@ export function useHostStatus(t: TranslationSchema) {
     document.addEventListener("visibilitychange", refreshWhenVisible);
     window.addEventListener("focus", refreshWhenVisible);
     return () => {
+      mounted.current = false;
+      refreshRevision.current += 1;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
     };
   }, [refresh]);
 
-  const dismissTerminationNotice = useCallback(() => setTerminationNotice(null), []);
+  const dismissTerminationNotice = useCallback(
+    () => setTerminationNotice(null),
+    [],
+  );
 
   return {
     banner,
@@ -155,6 +191,7 @@ export function useHostStatus(t: TranslationSchema) {
     terminationNotice,
     dismissTerminationNotice,
     error,
+    ready,
     inputPermission,
     screenPermission,
     platform,

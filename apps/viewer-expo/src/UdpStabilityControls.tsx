@@ -1,5 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { useMemo, useState } from "react";
+import { View } from "react-native";
+import { cn } from "@leftcar/ui-tokens";
+import { Action, Label, Notice, Surface } from "./ui/primitives";
 import type {
   UdpBurstDatagrams,
   UdpFecParityShards,
@@ -7,7 +9,6 @@ import type {
   UdpStabilityProfileId,
   UdpStabilitySelection,
 } from "./udp-stability";
-import { useAppTheme, type ThemeTokens } from "./theme";
 import { useAppLanguage, type TranslationSchema } from "./i18n";
 
 type ViewerTextKey = keyof TranslationSchema["viewer"];
@@ -17,7 +18,10 @@ const PRESET_COPY_KEYS: Record<
   { label: ViewerTextKey; hint: ViewerTextKey }
 > = {
   auto: { label: "udpPresetAutoLabel", hint: "udpPresetAutoHint" },
-  responsive: { label: "udpPresetLowLatencyLabel", hint: "udpPresetLowLatencyHint" },
+  responsive: {
+    label: "udpPresetLowLatencyLabel",
+    hint: "udpPresetLowLatencyHint",
+  },
   balanced: { label: "udpPresetStandardLabel", hint: "udpPresetStandardHint" },
   stable: { label: "udpPresetStableLabel", hint: "udpPresetStableHint" },
 };
@@ -37,6 +41,7 @@ interface UdpStabilityControlsProps {
   selection: UdpStabilitySelection;
   reconnectRequired: boolean;
   reconnecting: boolean;
+  disabled?: boolean;
   onChange: (selection: UdpStabilitySelection) => void;
   onApplyReconnect: () => void;
 }
@@ -45,120 +50,23 @@ function Choice({
   active,
   label,
   onPress,
-  colors,
+  disabled = false,
 }: {
   active: boolean;
   label: string;
   onPress: () => void;
-  colors: ThemeTokens;
+  disabled?: boolean;
 }) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      style={{
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
-        backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
-        minHeight: 38,
-        justifyContent: "center",
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-      }}
+    <Action
+      variant="secondary"
+      size="compact"
+      label={label}
+      disabled={disabled}
       onPress={onPress}
-    >
-      <Text
-        style={{
-          fontSize: 12,
-          fontWeight: active ? "700" : "600",
-          color: active ? colors.btnPrimaryText : colors.textSecondary,
-        }}
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function PresetChoices({ options, selection, colors, onChange }: { options: UdpStabilityOptions; selection: UdpStabilitySelection; colors: ThemeTokens; onChange: (selection: UdpStabilitySelection) => void }) {
-  const { t } = useAppLanguage();
-  return (
-    <View style={{ gap: 8 }}>
-      {options.profiles.map((profile) => {
-        const copyKeys = PRESET_COPY_KEYS[profile];
-        const active = selection.profile === profile;
-        return (
-          <Pressable
-            key={profile}
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            style={{
-              gap: 3,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
-              backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
-              padding: 12,
-              minHeight: 52,
-              justifyContent: "center",
-            }}
-            onPress={() => onChange({ profile })}
-          >
-            <Text
-              style={{
-                fontSize: 13,
-                fontWeight: "700",
-                color: active ? colors.btnPrimaryText : colors.textPrimary,
-              }}
-            >
-              {t.viewer[copyKeys.label]}
-            </Text>
-            <Text
-              style={{
-                fontSize: 12,
-                lineHeight: 16,
-                color: active ? colors.btnPrimaryText : colors.textSecondary,
-                opacity: active ? 0.85 : 1,
-              }}
-            >
-              {t.viewer[copyKeys.hint]}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
-function DetailChoices({ options, effective, expanded, colors, onToggle, onChange }: { options: UdpStabilityOptions; effective: Required<Omit<UdpStabilitySelection, "profile">>; expanded: boolean; colors: ThemeTokens; onToggle: () => void; onChange: (next: Partial<{ burstDatagrams: UdpBurstDatagrams; fecParityShards: UdpFecParityShards; adaptivePacing: boolean }>) => void }) {
-  const { t, format } = useAppLanguage();
-  const choices = (title: string, children: ReactNode) => (
-    <View style={{ gap: 6 }}>
-      <Text style={{ fontSize: 12, fontWeight: "600", color: colors.textMuted }}>{title}</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>{children}</View>
-    </View>
-  );
-  const detailsAvailable = options.burstDatagrams.length > 1 || options.fecParityShards.length > 1 || options.adaptivePacing;
-  if (!detailsAvailable) return null;
-  return (
-    <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: colors.borderSubtle, paddingTop: 10 }}>
-      <Pressable
-        accessibilityRole="button"
-        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 36 }}
-        onPress={onToggle}
-      >
-        <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textSecondary }}>{t.viewer.udpDetailToggle}</Text>
-        <Text style={{ fontSize: 12, fontWeight: "600", color: colors.textMuted }}>{expanded ? t.viewer.udpDetailCollapse : t.viewer.udpDetailExpand}</Text>
-      </Pressable>
-      {expanded ? (
-        <View style={{ gap: 10 }}>
-          {choices(t.viewer.udpBurstLabel, options.burstDatagrams.map((burst) => <Choice key={burst} active={effective.burstDatagrams === burst} label={format(t.viewer.udpBurstItems, { count: burst })} onPress={() => onChange({ burstDatagrams: burst })} colors={colors} />))}
-          {choices(t.viewer.udpFecLabel, options.fecParityShards.map((parity) => <Choice key={parity} active={effective.fecParityShards === parity} label={parity === 4 ? t.viewer.udpFecStrong : t.viewer.udpFecStandard} onPress={() => onChange({ fecParityShards: parity })} colors={colors} />))}
-          {options.adaptivePacing ? choices(t.viewer.udpAdaptiveLabel, <><Choice active={effective.adaptivePacing} label={t.viewer.udpOn} onPress={() => onChange({ adaptivePacing: true })} colors={colors} /><Choice active={!effective.adaptivePacing} label={t.viewer.udpOff} onPress={() => onChange({ adaptivePacing: false })} colors={colors} /></>) : null}
-        </View>
-      ) : null}
-    </View>
+      accessibilityState={{ selected: active }}
+      className={cn(active && "border-strong bg-active")}
+    />
   );
 }
 
@@ -167,17 +75,20 @@ export function UdpStabilityControls({
   selection,
   reconnectRequired,
   reconnecting,
+  disabled = false,
   onChange,
   onApplyReconnect,
 }: UdpStabilityControlsProps) {
-  const { colors } = useAppTheme();
   const { t } = useAppLanguage();
+  const controlsDisabled = reconnecting || disabled;
   const [expanded, setExpanded] = useState(false);
   const effective = useMemo(() => {
     if (selection.profile === "custom") {
       return {
-        burstDatagrams: selection.burstDatagrams ?? options?.burstDatagrams[0] ?? 4,
-        fecParityShards: selection.fecParityShards ?? options?.fecParityShards[0] ?? 2,
+        burstDatagrams:
+          selection.burstDatagrams ?? options?.burstDatagrams[0] ?? 4,
+        fecParityShards:
+          selection.fecParityShards ?? options?.fecParityShards[0] ?? 2,
         adaptivePacing: selection.adaptivePacing ?? false,
       };
     }
@@ -196,46 +107,107 @@ export function UdpStabilityControls({
     onChange({ profile: "custom", ...effective, ...next });
   };
 
+  const detailsAvailable =
+    options.burstDatagrams.length > 1 ||
+    options.fecParityShards.length > 1 ||
+    options.adaptivePacing;
   return (
-    <View
-      style={{
-        gap: 12,
-        borderRadius: 14,
-        borderWidth: 1,
-        borderColor: colors.borderSubtle,
-        backgroundColor: colors.bgSurface,
-        padding: 12,
-      }}
-    >
-      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>{t.viewer.udpStabilityTitle}</Text>
-
-      <PresetChoices options={options} selection={selection} colors={colors} onChange={onChange} />
-
-      <DetailChoices options={options} effective={effective} expanded={expanded} colors={colors} onToggle={() => setExpanded((current) => !current)} onChange={selectCustom} />
-
-      {reconnectRequired ? (
-        <Pressable
-          accessibilityRole="button"
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            borderRadius: 8,
-            minHeight: 44,
-            backgroundColor: reconnecting ? colors.borderStrong : colors.btnPrimaryBg,
-            paddingVertical: 12,
-            paddingHorizontal: 12,
-          }}
-          disabled={reconnecting}
-          onPress={onApplyReconnect}
-        >
-          {reconnecting ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : null}
-          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.btnPrimaryText }}>
-            {reconnecting ? t.viewer.udpReconnecting : t.viewer.udpApplyReconnect}
-          </Text>
-        </Pressable>
+    <Surface className="gap-3">
+      <Label variant="title">{t.viewer.udpStabilityTitle}</Label>
+      {options.profiles.map((profile) => {
+        const keys = PRESET_COPY_KEYS[profile];
+        return (
+          <View key={profile} className="gap-1">
+            <Choice
+              active={selection.profile === profile}
+              label={t.viewer[keys.label]}
+              disabled={controlsDisabled}
+              onPress={() => onChange({ profile })}
+            />
+            <Label variant="caption" tone="muted">
+              {t.viewer[keys.hint]}
+            </Label>
+          </View>
+        );
+      })}
+      {detailsAvailable ? (
+        <Action
+          variant="ghost"
+          label={t.viewer.udpDetailToggle}
+          accessibilityState={{ expanded }}
+          onPress={() => setExpanded(!expanded)}
+        />
       ) : null}
-    </View>
+      {expanded ? (
+        <View className="gap-3">
+          <Label variant="caption" tone="muted">
+            {t.viewer.udpBurstLabel}
+          </Label>
+          <View className="flex-row flex-wrap gap-2">
+            {options.burstDatagrams.map((value) => (
+              <Choice
+                key={value}
+                active={effective.burstDatagrams === value}
+                label={String(value)}
+                disabled={controlsDisabled}
+                onPress={() => selectCustom({ burstDatagrams: value })}
+              />
+            ))}
+          </View>
+          <Label variant="caption" tone="muted">
+            {t.viewer.udpFecLabel}
+          </Label>
+          <View className="flex-row flex-wrap gap-2">
+            {options.fecParityShards.map((value) => (
+              <Choice
+                key={value}
+                active={effective.fecParityShards === value}
+                label={
+                  value === 4 ? t.viewer.udpFecStrong : t.viewer.udpFecStandard
+                }
+                disabled={controlsDisabled}
+                onPress={() => selectCustom({ fecParityShards: value })}
+              />
+            ))}
+          </View>
+          {options.adaptivePacing ? (
+            <>
+              <Label variant="caption" tone="muted">
+                {t.viewer.udpAdaptiveLabel}
+              </Label>
+              <View className="flex-row gap-2">
+                <Choice
+                  active={effective.adaptivePacing}
+                  label={t.viewer.udpOn}
+                  disabled={controlsDisabled}
+                  onPress={() => selectCustom({ adaptivePacing: true })}
+                />
+                <Choice
+                  active={!effective.adaptivePacing}
+                  label={t.viewer.udpOff}
+                  disabled={controlsDisabled}
+                  onPress={() => selectCustom({ adaptivePacing: false })}
+                />
+              </View>
+            </>
+          ) : null}
+        </View>
+      ) : null}
+      {reconnectRequired ? (
+        <Notice>
+          <Label>{t.viewer.encoderReconnectNotice}</Label>
+          <Action
+            busy={reconnecting}
+            disabled={disabled}
+            onPress={onApplyReconnect}
+            label={
+              reconnecting
+                ? t.viewer.udpReconnecting
+                : t.viewer.udpApplyReconnect
+            }
+          />
+        </Notice>
+      ) : null}
+    </Surface>
   );
 }

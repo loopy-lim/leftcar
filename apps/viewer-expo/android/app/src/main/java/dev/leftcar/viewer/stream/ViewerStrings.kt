@@ -28,8 +28,10 @@ object ViewerStrings {
     val rebindPreparing: String
         get() = if (en) "Preparing to reconnect" else "화면을 다시 연결할 준비 중"
     val rebindFailed: String
-        get() = if (en) "Could not reconnect. Retrying in this window"
-        else "화면을 다시 연결하지 못했습니다. 현재 창에서 재시도합니다"
+        get() = if (en) "Could not reconnect this window. Try again."
+        else "이 창의 화면을 다시 연결하지 못했습니다. 다시 시도해 주세요."
+    val retry: String get() = if (en) "Retry" else "재시도"
+    val retryRebind: String get() = if (en) "Retry reconnecting this screen" else "이 화면 재연결 재시도"
     val rebindDescription: String
         get() = if (en) "Reconnecting stream" else "화면 공유 재연결 중"
 
@@ -46,6 +48,16 @@ object ViewerStrings {
     val inputRequestSent: String
         get() = if (en) "Request sent · Allow in Leftcar Host"
         else "요청 전송됨 · Mac의 Leftcar Host에서 허용"
+    val inputRequestUnavailable: String
+        get() = if (en) "Request unavailable. Open the Viewer, then try again."
+        else "요청을 보낼 수 없습니다. 뷰어 앱을 열고 다시 시도해 주세요."
+    val inputRequestPending: String
+        get() = if (en) "Sending input access request" else "입력 허용 요청을 보내는 중"
+    val inputRequestTimeout: String
+        get() = if (en) "Could not confirm the request. Open the Viewer and try again."
+        else "요청을 확인하지 못했습니다. 뷰어 앱을 열고 다시 시도해 주세요."
+    val inputRequestRetry: String
+        get() = if (en) "Tap to retry requesting input access" else "탭하여 입력 허용 요청 재시도"
     val inputChecking: String
         get() = if (en) "Checking remote input status" else "원격 입력 상태 확인 중"
 

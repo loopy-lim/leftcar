@@ -17,7 +17,10 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT));
     let rendered = keymap::render_swift();
-    let mappings = rendered.lines().filter(|l| l.trim_start().starts_with(char::is_numeric)).count();
+    let mappings = rendered
+        .lines()
+        .filter(|l| l.trim_start().starts_with(char::is_numeric))
+        .count();
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).expect("create output dir");
     }

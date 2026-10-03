@@ -7,6 +7,8 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityManager
+import android.os.Build
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
@@ -38,16 +40,18 @@ internal class GestureHintOverlay(
         }
         TextView(activity).apply {
             text = ViewerStrings.gestureHintTitle
-            setTextColor(Color.WHITE)
-            textSize = 15f * panelScale
+            setTextColor(StreamUiTokens.INK)
+            textSize = StreamUiTokens.TITLE_SP * panelScale
+            maxWidth = (streamChromeWidth(activity) - dp(40)).coerceAtLeast(1)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, dp(6))
         }.also(content::addView)
         GestureHintRows.rows(ViewerStrings.language).forEach { (gesture, action) ->
             TextView(activity).apply {
                 text = "$gesture — $action"
-                setTextColor(Color.argb(224, 255, 255, 255))
-                textSize = 12f * panelScale
+                setTextColor(StreamUiTokens.INK)
+                textSize = StreamUiTokens.BODY_SP * panelScale
+                maxWidth = (streamChromeWidth(activity) - dp(40)).coerceAtLeast(1)
                 setPadding(0, dp(3), 0, dp(3))
             }.also(content::addView)
         }
@@ -64,6 +68,7 @@ internal class GestureHintOverlay(
             // 자동 닫힘으로만 정리한다.
             isOutsideTouchable = false
             isTouchable = false
+            animationStyle = 0
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(6).toFloat()
             setOnDismissListener {
@@ -74,11 +79,15 @@ internal class GestureHintOverlay(
         }
         popup = window
         activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed && !window.isShowing) {
+            if (popup === window && !activity.isFinishing && !activity.isDestroyed && !window.isShowing) {
                 window.showAtLocation(activity.window.decorView, Gravity.CENTER, 0, 0)
                 // 입력을 받지 않는 안내는 스스로 닫혀야 한다. 8초 뒤 사라진다.
                 autoDismissHandler = android.os.Handler(android.os.Looper.getMainLooper()).also { handler ->
-                    handler.postDelayed({ window.dismiss() }, 8_000L)
+                    val timeout = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        activity.getSystemService(AccessibilityManager::class.java)
+                            ?.getRecommendedTimeoutMillis(8_000, AccessibilityManager.FLAG_CONTENT_TEXT) ?: 8_000
+                    } else 8_000
+                    handler.postDelayed({ window.dismiss() }, timeout.toLong())
                 }
             }
         }
@@ -87,7 +96,10 @@ internal class GestureHintOverlay(
     private var autoDismissHandler: android.os.Handler? = null
 
     fun dismiss() {
-        popup?.dismiss()
+        val current = popup
+        popup = null
+        autoDismissHandler?.removeCallbacksAndMessages(null)
+        current?.dismiss()
     }
 
     private fun dp(value: Int): Int =
@@ -99,8 +111,8 @@ internal class GestureHintOverlay(
 
     private fun cardBackground() = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(14).toFloat()
-        setColor(Color.argb(236, 15, 23, 42))
-        setStroke(dp(1), Color.argb(46, 255, 255, 255))
+        cornerRadius = dp(StreamUiTokens.RADIUS_DP).toFloat()
+        setColor(StreamUiTokens.SURFACE)
+        setStroke(dp(1), StreamUiTokens.OUTLINE)
     }
 }

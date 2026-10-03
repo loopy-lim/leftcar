@@ -6,6 +6,8 @@
 
 #[path = "session_lifecycle.rs"]
 mod session_lifecycle;
+#[path = "session_maintenance.rs"]
+mod session_maintenance;
 #[cfg(test)]
 #[path = "source_grants_tests.rs"]
 mod source_grants_tests;
@@ -30,7 +32,7 @@ use std::sync::{
     Mutex,
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::clipboard::ClipboardBackend;
@@ -324,9 +326,9 @@ const TERMINAL_SESSION_RETENTION: Duration = Duration::from_secs(5);
 const STARTUP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_STATS_INTERVAL: Duration = Duration::from_millis(100);
 /// A healthy viewer polls `getStatus` every 2s, so a connected control
-/// socket should never sit silent this long. Half-open connections (network
-/// drop, laptop sleep, no FIN) would otherwise hold their task and socket
-/// open forever.
+/// socket should never sit silent this long. Reads and complete response
+/// writes share this budget so half-open connections and backpressure cannot
+/// retain their task, socket, and connection permit forever.
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 클립보드 텍스트 상한(문자 수, U5 — 256KiB, docs/07 §20).
 const CLIPBOARD_MAX_CHARS: usize = 262_144;
@@ -435,6 +437,9 @@ pub struct ControlServer {
     /// 동시 연결 상한 허가(F08). accept 루프가 연결 작업 하나당 하나씩
     /// 집고, 작업이 끝나면 반납된다.
     conn_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Persistent shutdown signal also reaches unauthenticated sockets and
+    /// writers blocked by peers that stopped reading.
+    connection_shutdown: tokio::sync::watch::Sender<bool>,
     /// 기기(owner)별 최근 뷰어 패널 메트릭(startStream viewerDisplay 선택
     /// 필드). 확장 디스플레이 기본 모드 도출에만 쓰인다.
     viewer_metrics: Mutex<HashMap<String, (std::time::Instant, ViewerDisplayMetricsMsg)>>,
@@ -479,6 +484,7 @@ impl ControlServer {
         pairing: std::sync::Arc<crate::pairing::PairingServer>,
         identity: std::sync::Arc<secure_channel::HostIdentity>,
     ) -> Self {
+        let (connection_shutdown, _) = tokio::sync::watch::channel(false);
         Self {
             backend,
             pairing,
@@ -508,6 +514,7 @@ impl ControlServer {
             replacement_retired: Mutex::new(HashMap::new()),
             pending_retirements: Mutex::new(HashMap::new()),
             conn_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS)),
+            connection_shutdown,
             viewer_metrics: Mutex::new(HashMap::new()),
             public_media_endpoint: Mutex::new(None),
             pending_input_requests: Mutex::new(Vec::new()),
@@ -885,6 +892,19 @@ impl ControlServer {
         self.settings.get().is_some_and(|s| s.file_share())
     }
 
+    fn with_file_authorization<T>(
+        &self,
+        authorization: Option<&crate::pairing::Authorization>,
+        device: &str,
+        operation: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.pairing
+            .with_authorization(authorization, || {
+                operation(authorization.map_or(device, |auth| auth.owner_id()))
+            })
+            .unwrap_or_else(|| Err("unauthorized".into()))
+    }
+
     fn audit_log(&self, event: &str, fields: serde_json::Value) {
         if let Some(audit) = self.audit.get() {
             audit.log(event, fields);
@@ -1047,6 +1067,7 @@ impl ControlServer {
     }
     pub fn shutdown_source_access(&self) -> Result<(), String> {
         self.source_operations.invalidate();
+        self.connection_shutdown.send_replace(true);
         let leases = self.pairing.fence_source_access();
         for lease in leases {
             lease.wait_idle();
@@ -1115,6 +1136,15 @@ impl ControlServer {
             lease.wait_idle();
         }
         outcome.persistence_errors.extend(
+            self.file_transfers.retire_owners(
+                &outcome
+                    .removed_devices
+                    .iter()
+                    .map(|device| device.credential_id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        outcome.persistence_errors.extend(
             self.pending_retirements
                 .lock()
                 .unwrap()
@@ -1139,6 +1169,15 @@ impl ControlServer {
         for lease in outcome.retired_leases.drain(..) {
             lease.wait_idle();
         }
+        outcome.persistence_errors.extend(
+            self.file_transfers.retire_owners(
+                &outcome
+                    .removed_devices
+                    .iter()
+                    .map(|device| device.credential_id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+        );
         outcome.persistence_errors.extend(
             self.pending_retirements
                 .lock()
@@ -1859,19 +1898,30 @@ impl ControlServer {
         }
     }
 
-    /// Accept loop — runs until the process exits.
+    /// Accept loop — stops when Host source access shuts down.
     pub async fn run(self: std::sync::Arc<Self>, listener: TcpListener) {
+        let _maintenance = session_maintenance::SessionMaintenance::start(self.clone());
+        let mut shutdown = self.connection_shutdown.subscribe();
         loop {
+            if *shutdown.borrow() {
+                return;
+            }
             // 연결당 허가 하나(F08). 허가가 바닥나면 accept를 잠시 멈춰
             // 무인증 소켓의 작업 스폰을 제한하고, 연결 작업이 끝나면 반납된다.
-            let permit = match std::sync::Arc::clone(&self.conn_permits)
-                .acquire_owned()
-                .await
-            {
-                Ok(permit) => permit,
-                Err(_) => continue,
+            let permit = tokio::select! {
+                biased;
+                _ = shutdown.changed() => return,
+                permit = std::sync::Arc::clone(&self.conn_permits).acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
             };
-            match listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                _ = shutdown.changed() => return,
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
                 Ok((sock, _)) => {
                     let server = self.clone();
                     tokio::spawn(async move {
@@ -3366,10 +3416,14 @@ impl ControlServer {
                 if !self.file_share_gate() {
                     return err("file share disabled");
                 }
-                match self
-                    .file_transfers
-                    .begin_incoming(device, &input.name, input.size)
-                {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.begin_incoming_for_owner(
+                        device,
+                        owner,
+                        &input.name,
+                        input.size,
+                    )
+                }) {
                     Ok(token) => {
                         self.audit_log(
                             "file_send_begin",
@@ -3398,12 +3452,14 @@ impl ControlServer {
                 if !self.file_share_gate() {
                     return err("file share disabled");
                 }
-                match self.file_transfers.append_incoming(
-                    device,
-                    &input.file_token,
-                    &input.data_base64,
-                    input.offset,
-                ) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.append_incoming(
+                        owner,
+                        &input.file_token,
+                        &input.data_base64,
+                        input.offset,
+                    )
+                }) {
                     Ok(written) => ok(json!({ "written": written })),
                     Err(error) => err(&error),
                 }
@@ -3418,7 +3474,9 @@ impl ControlServer {
                 };
                 // 게이트는 다시 검사하지 않는다 — 진행 중 전송의 마무리는
                 // 게이트를 꺼도 완료할 수 있어야 .part 잔여물이 남지 않는다.
-                match self.file_transfers.finish_incoming(device, &file_token) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.finish_incoming(owner, &file_token)
+                }) {
                     Ok((name, bytes)) => {
                         self.audit_log(
                             "file_received",
@@ -3444,7 +3502,9 @@ impl ControlServer {
                 };
                 // 게이트와 무관하게 받는다 — 실패한 전송의 스테이징 정리가
                 // 게이트 토글에 막혀선 안 된다(만료 스윕의 즉시 버전).
-                match self.file_transfers.cancel_incoming(device, &file_token) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.cancel_incoming(owner, &file_token)
+                }) {
                     Ok(()) => ok(json!({})),
                     Err(error) => err(&error),
                 }
@@ -3474,7 +3534,9 @@ impl ControlServer {
                 if !self.file_share_gate() {
                     return err("file share disabled");
                 }
-                match self.file_transfers.begin_outgoing(device, &input.queue_id) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.begin_outgoing(owner, &input.queue_id)
+                }) {
                     Ok((token, name, size)) => {
                         ok(json!({ "fileToken": token, "name": name, "size": size }))
                     }
@@ -3499,12 +3561,14 @@ impl ControlServer {
                 if !self.file_share_gate() {
                     return err("file share disabled");
                 }
-                match self.file_transfers.read_outgoing(
-                    device,
-                    &input.file_token,
-                    input.offset,
-                    input.length,
-                ) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.read_outgoing(
+                        owner,
+                        &input.file_token,
+                        input.offset,
+                        input.length,
+                    )
+                }) {
                     Ok((data, size)) => ok(json!({ "data": data, "size": size })),
                     Err(error) => err(&error),
                 }
@@ -3517,7 +3581,9 @@ impl ControlServer {
                     Ok(token) => token,
                     Err(response) => return response,
                 };
-                match self.file_transfers.finish_outgoing(device, &file_token) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.finish_outgoing(owner, &file_token)
+                }) {
                     Ok(name) => {
                         self.audit_log("file_fetched", json!({ "device": device, "name": name }));
                         ok(json!({}))
@@ -3533,7 +3599,9 @@ impl ControlServer {
                     Ok(token) => token,
                     Err(response) => return response,
                 };
-                match self.file_transfers.cancel_outgoing(device, &file_token) {
+                match self.with_file_authorization(request_authorization, device, |owner| {
+                    self.file_transfers.cancel_outgoing(owner, &file_token)
+                }) {
                     Ok(()) => ok(json!({})),
                     Err(error) => err(&error),
                 }
@@ -3884,25 +3952,21 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<Option<String>, ControlLineReadError> {
+    if *shutdown.borrow() {
+        return Ok(None);
+    }
     let cap = if killed.is_some() {
         COMMAND_LINE_LIMIT
     } else {
         HANDSHAKE_LINE_LIMIT
     };
-    let read = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, read_bounded_line(reader, cap));
-    match killed {
-        Some(notify) => {
-            tokio::pin!(read);
-            tokio::select! {
-                outcome = &mut read => match outcome {
-                    Ok(inner) => inner,
-                    Err(_) => Ok(None),
-                },
-                _ = notify.notified() => Ok(None),
-            }
-        }
-        None => match read.await {
+    tokio::select! {
+        biased;
+        _ = wait_for_disconnect(killed) => Ok(None),
+        _ = shutdown.changed() => Ok(None),
+        outcome = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, read_bounded_line(reader, cap)) => match outcome {
             Ok(inner) => inner,
             Err(_) => Ok(None),
         },
@@ -3910,23 +3974,19 @@ async fn read_authed_line(
 }
 
 async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
+    let mut shutdown = server.connection_shutdown.subscribe();
     let (rd, mut wr) = sock.into_split();
     let mut reader = BufReader::new(rd);
     // 첫 줄은 인증 전이다 — 핸드셰이크 상한을 넘기면 응답 없이 끊는다(F08).
-    let first_line = match tokio::time::timeout(
-        CONTROL_IDLE_TIMEOUT,
-        read_bounded_line(&mut reader, HANDSHAKE_LINE_LIMIT),
-    )
-    .await
-    {
-        Ok(Ok(Some(line))) => line,
-        Ok(Err(ControlLineReadError::TooLong)) => {
+    let first_line = match read_authed_line(&mut reader, None, &mut shutdown).await {
+        Ok(Some(line)) => line,
+        Err(ControlLineReadError::TooLong) => {
             eprintln!(
                 "control handshake line exceeded {HANDSHAKE_LINE_LIMIT} bytes from {peer}; closing"
             );
             return;
         }
-        Ok(Err(ControlLineReadError::Io(error))) => {
+        Err(ControlLineReadError::Io(error)) => {
             eprintln!(
                 "control handshake read failed ({:?}); closing",
                 error.kind()
@@ -3939,8 +3999,15 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
         // 무차별 시도가 누적된 주소 — 응답조차 주지 않는다(백오프).
         return;
     }
-    let Some((mut crypto, mut pending)) =
-        negotiate(&first_line, &mut reader, &mut wr, server, peer).await
+    let Some((mut crypto, mut pending)) = negotiate(
+        &first_line,
+        &mut reader,
+        &mut wr,
+        server,
+        peer,
+        &mut shutdown,
+    )
+    .await
     else {
         return;
     };
@@ -3957,7 +4024,7 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                 // Reap half-open connections: a peer that vanished without FIN never
                 // unblocks this read otherwise, and its task leaks for the process
                 // lifetime. The viewer's 2s status poll makes 15s a generous budget.
-                match read_authed_line(&mut reader, killed.as_ref()).await {
+                match read_authed_line(&mut reader, killed.as_ref(), &mut shutdown).await {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(ControlLineReadError::TooLong) => {
@@ -4016,6 +4083,8 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                                 &mut wr,
                                 &mut crypto,
                                 &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
+                                killed.as_ref(),
+                                &mut shutdown,
                             )
                             .await;
                             break;
@@ -4036,6 +4105,8 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                         &mut wr,
                         &mut crypto,
                         &serde_json::to_string(&err("unauthorized")).unwrap_or_default(),
+                        killed.as_ref(),
+                        &mut shutdown,
                     )
                     .await;
                     break;
@@ -4053,7 +4124,10 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
         };
-        if write_response(&mut wr, &mut crypto, &resp).await.is_err() {
+        if write_response(&mut wr, &mut crypto, &resp, killed.as_ref(), &mut shutdown)
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -4099,21 +4173,26 @@ impl ConnCrypto {
     }
 }
 
-async fn write_response(
-    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+async fn write_response<W: AsyncWrite + Unpin>(
+    wr: &mut W,
     crypto: &mut ConnCrypto,
     body: &str,
+    killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), ()> {
     let wire = crypto.encode(body)?;
-    let _ = wr.write_all(wire.as_bytes()).await;
-    let _ = wr.write_all(b"\n").await;
-    Ok(())
+    write_line(wr, &wire, killed, shutdown).await
 }
 
-async fn refuse_handshake(wr: &mut tokio::net::tcp::OwnedWriteHalf) {
-    write_line(
+async fn refuse_handshake(
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    let _ = write_line(
         wr,
         &serde_json::to_string(&err("handshake required")).unwrap_or_default(),
+        None,
+        shutdown,
     )
     .await;
 }
@@ -4135,6 +4214,7 @@ async fn negotiate(
     wr: &mut tokio::net::tcp::OwnedWriteHalf,
     server: &ControlServer,
     peer: &str,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Option<(ConnCrypto, Option<String>)> {
     let hello: ClientHelloLine = match serde_json::from_str::<ClientHelloLine>(first_line) {
         Ok(v) if v.hello == "c" => v,
@@ -4142,12 +4222,12 @@ async fn negotiate(
             if is_loopback_peer(peer) {
                 return Some((ConnCrypto::Plain, Some(first_line.to_owned())));
             }
-            refuse_handshake(wr).await;
+            refuse_handshake(wr, shutdown).await;
             return None;
         }
     };
     let (Some(nc), Some(xk)) = (b64_bytes32(&hello.nc), b64_bytes32(&hello.xk)) else {
-        refuse_handshake(wr).await;
+        refuse_handshake(wr, shutdown).await;
         return None;
     };
     let client = secure_channel::ClientHello { nc, xk };
@@ -4160,18 +4240,15 @@ async fn negotiate(
         "spk": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.spk),
         "sig": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hello_out.sig),
     });
-    write_line(wr, &reply.to_string()).await;
+    write_line(wr, &reply.to_string(), None, shutdown)
+        .await
+        .ok()?;
     let mut rx = secure_channel::StreamSealer::new(keys.c2s);
     let tx = secure_channel::StreamSealer::new(keys.s2c);
     // 키 확인: 클라이언트의 첫 봉인 프레임은 {"hello":"ok","nc":<에코>}여야
     // 한다 — 핸드셰이크 유래 값의 되돌림으로 두 방향 키를 모두 증명한다.
-    let confirmation = match tokio::time::timeout(
-        CONTROL_IDLE_TIMEOUT,
-        read_bounded_line(reader, HANDSHAKE_LINE_LIMIT),
-    )
-    .await
-    {
-        Ok(Ok(Some(line))) => line,
+    let confirmation = match read_authed_line(reader, None, shutdown).await {
+        Ok(Some(line)) => line,
         _ => return None,
     };
     let expected_nc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nc);
@@ -4185,9 +4262,11 @@ async fn negotiate(
         Some(value.get("hello")?.as_str()? == "ok" && value.get("nc")?.as_str()? == expected_nc)
     })() == Some(true);
     if !confirmed {
-        write_line(
+        let _ = write_line(
             wr,
             &serde_json::to_string(&err("handshake failed")).unwrap_or_default(),
+            None,
+            shutdown,
         )
         .await;
         return None;
@@ -4218,6 +4297,7 @@ struct FailState {
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_FAILURE_LIMIT: u32 = 5;
 const AUTH_BLOCK: Duration = Duration::from_secs(60);
+const MAX_AUTH_FAILURE_PEERS: usize = 1024;
 
 impl AuthRateLimiter {
     fn new() -> Self {
@@ -4227,21 +4307,24 @@ impl AuthRateLimiter {
     }
 
     fn allow(&self, peer: &str) -> bool {
+        self.allow_at(peer, Instant::now())
+    }
+
+    fn allow_at(&self, peer: &str, now: Instant) -> bool {
         if is_loopback_peer(peer) {
             return true;
         }
         let mut failures = self.failures.lock().unwrap();
-        let now = Instant::now();
-        failures.retain(|_, state| {
-            state.blocked_until.map(|until| until > now).unwrap_or(true)
-                || now.duration_since(state.window_start) < AUTH_FAILURE_WINDOW
-        });
+        Self::sweep_expired(&mut failures, now);
         match failures.get_mut(peer) {
             Some(state) => !state
                 .blocked_until
                 .map(|until| until > now)
                 .unwrap_or(false),
-            None => true,
+            // Keep active bans and failure windows intact. Unknown peers wait
+            // for expiry when tracking is saturated; rotating source IPs must
+            // not evict an existing ban or grow process state without bound.
+            None => failures.len() < MAX_AUTH_FAILURE_PEERS,
         }
     }
 
@@ -4251,6 +4334,10 @@ impl AuthRateLimiter {
         }
         let mut failures = self.failures.lock().unwrap();
         let now = Instant::now();
+        Self::sweep_expired(&mut failures, now);
+        if !failures.contains_key(peer) && failures.len() >= MAX_AUTH_FAILURE_PEERS {
+            return;
+        }
         let state = failures.entry(peer.to_owned()).or_insert(FailState {
             count: 0,
             window_start: now,
@@ -4260,7 +4347,7 @@ impl AuthRateLimiter {
             state.count = 0;
             state.window_start = now;
         }
-        state.count += 1;
+        state.count = state.count.saturating_add(1);
         if state.count >= AUTH_FAILURE_LIMIT {
             state.blocked_until = Some(now + AUTH_BLOCK);
         }
@@ -4272,11 +4359,54 @@ impl AuthRateLimiter {
         }
         self.failures.lock().unwrap().remove(peer);
     }
+
+    fn sweep_expired(failures: &mut HashMap<String, FailState>, now: Instant) {
+        failures.retain(|_, state| {
+            state.blocked_until.is_some_and(|until| until > now)
+                || now.saturating_duration_since(state.window_start) < AUTH_FAILURE_WINDOW
+        });
+    }
 }
 
 #[cfg(test)]
 mod rate_limiter_tests {
     use super::*;
+
+    #[test]
+    fn expired_partial_failures_release_tracking_capacity() {
+        let limiter = AuthRateLimiter::new();
+        limiter.record_failure("192.0.2.1");
+        let window_start = limiter.failures.lock().unwrap()["192.0.2.1"].window_start;
+        assert!(limiter.allow_at("192.0.2.2", window_start + AUTH_FAILURE_WINDOW));
+        assert!(limiter.failures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn peer_tracking_is_bounded_without_evicting_active_bans() {
+        let limiter = AuthRateLimiter::new();
+        let banned_peer = "192.0.2.1";
+        for _ in 0..AUTH_FAILURE_LIMIT {
+            limiter.record_failure(banned_peer);
+        }
+        for index in 0..1024 {
+            let peer = format!("2001:db8::{index:x}");
+            if limiter.allow(&peer) {
+                limiter.record_failure(&peer);
+            }
+        }
+        assert!(limiter.failures.lock().unwrap().len() <= 1024);
+        assert!(!limiter.allow(banned_peer));
+        assert!(!limiter.allow("2001:db8::ffff"));
+        // Even concurrent failures admitted just before saturation cannot grow
+        // the retained map beyond its hard bound.
+        limiter.record_failure("2001:db8::ffff");
+        assert!(limiter.failures.lock().unwrap().len() <= 1024);
+        assert!(limiter.allow_at(
+            "2001:db8::ffff",
+            Instant::now() + AUTH_BLOCK + AUTH_FAILURE_WINDOW,
+        ));
+        assert!(limiter.failures.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn five_failures_block_then_success_clears() {
@@ -4315,9 +4445,34 @@ fn same_private_lan_candidate(candidate: &str, peer: &str) -> bool {
     candidate.is_private() && same_private_subnet
 }
 
-async fn write_line(wr: &mut tokio::net::tcp::OwnedWriteHalf, body: &str) {
-    let _ = wr.write_all(body.as_bytes()).await;
-    let _ = wr.write_all(b"\n").await;
+async fn wait_for_disconnect(killed: Option<&std::sync::Arc<tokio::sync::Notify>>) {
+    match killed {
+        Some(notify) => notify.notified().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The body and delimiter share one deadline. A partial/error/cancelled write
+/// terminates the connection: its wire framing and crypto counter cannot be
+/// reused safely, and backpressure must never retain a connection permit.
+async fn write_line<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    body: &str,
+    killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<(), ()> {
+    if *shutdown.borrow() {
+        return Err(());
+    }
+    tokio::select! {
+        biased;
+        _ = wait_for_disconnect(killed) => Err(()),
+        _ = shutdown.changed() => Err(()),
+        outcome = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, async {
+            wr.write_all(body.as_bytes()).await?;
+            wr.write_all(b"\n").await
+        }) => outcome.map_err(|_| ())?.map_err(|_| ()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -4513,7 +4668,12 @@ mod tests {
 
         // 세션이 애초에 없는 stopStream 실패는 전환이 아니니 해제도 없다.
         let resp = server
-            .dispatch("stopStream", json!({ "session": 9 }), "192.168.0.9", Some("viewer-1"))
+            .dispatch(
+                "stopStream",
+                json!({ "session": 9 }),
+                "192.168.0.9",
+                Some("viewer-1"),
+            )
             .await;
         assert_eq!(resp["ok"], false, "{resp}");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4595,9 +4755,8 @@ mod tests {
         {
             let mut idle = server.idle_release.lock().unwrap();
             let failed = idle.failed.as_mut().unwrap();
-            failed.failed_at = Instant::now()
-                - DISPLAY_RELEASE_RETRY_INTERVAL
-                - std::time::Duration::from_secs(1);
+            failed.failed_at =
+                Instant::now() - DISPLAY_RELEASE_RETRY_INTERVAL - std::time::Duration::from_secs(1);
         }
         server.poll_virtual_display_idle_release();
         wait_for_remove_calls(&manager, 2).await;
@@ -4612,11 +4771,15 @@ mod tests {
             .map(|record| record["event"].as_str().unwrap_or_default().to_owned())
             .collect();
         assert!(
-            events.iter().any(|event| event == "virtual_display_release_failed"),
+            events
+                .iter()
+                .any(|event| event == "virtual_display_release_failed"),
             "{body}"
         );
         assert!(
-            events.iter().any(|event| event == "virtual_display_released"),
+            events
+                .iter()
+                .any(|event| event == "virtual_display_released"),
             "{body}"
         );
         assert!(body.contains("stop_stream"), "{body}");
@@ -4648,9 +4811,8 @@ mod tests {
             "경과 전 폴링은 해제를 발화하지 않는다"
         );
 
-        server.idle_release.lock().unwrap().idle_since = Some(
-            Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1),
-        );
+        server.idle_release.lock().unwrap().idle_since =
+            Some(Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1));
         server.poll_virtual_display_idle_release();
         wait_for_remove_calls(&manager, 1).await;
     }
@@ -4682,9 +4844,8 @@ mod tests {
 
         // 라이브 세션이 있어도 발화하지 않는다(기존 게이트 유지).
         insert_live_session(&server, 1, Some("viewer-1"));
-        server.idle_release.lock().unwrap().idle_since = Some(
-            Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1),
-        );
+        server.idle_release.lock().unwrap().idle_since =
+            Some(Instant::now() - DISPLAY_IDLE_RELEASE_AFTER - std::time::Duration::from_secs(1));
         server.poll_virtual_display_idle_release();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(manager.remove_request_count(), 0);
@@ -5612,6 +5773,163 @@ mod tests {
         let second = server.snapshot();
         assert!(second.sessions.is_empty());
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn listener_maintenance_reaps_terminal_sessions_without_ui_or_connection_permits() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let server = Arc::new(ControlServer::new(
+            Arc::new(TerminalBackend {
+                stopped: stopped.clone(),
+            }),
+            test_pairing(),
+            test_identity(),
+        ));
+        insert_live_session(&server, 1, None);
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .live
+            .get_mut(&1)
+            .unwrap()
+            .terminal_since =
+            Some(Instant::now() - TERMINAL_SESSION_RETENTION - Duration::from_millis(1));
+        let _occupied = server
+            .conn_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_CONNS as u32)
+            .await
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let running = server.clone();
+        let task = tokio::spawn(async move { running.run(listener).await });
+        let cleaned = tokio::time::timeout(Duration::from_millis(1500), async {
+            while stopped.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+        assert!(
+            cleaned.is_ok(),
+            "terminal cleanup depended on UI status polling or an available connection permit"
+        );
+        assert!(server.sessions.lock().unwrap().live.is_empty());
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
+
+    struct BlockedMaintenanceBackend {
+        stats_calls: AtomicUsize,
+        active: AtomicUsize,
+        released: Mutex<bool>,
+        wake: std::sync::Condvar,
+    }
+    impl BlockedMaintenanceBackend {
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.wake.notify_all();
+        }
+    }
+    impl CaptureBackend for BlockedMaintenanceBackend {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            Ok(vec![])
+        }
+        fn start(
+            &self,
+            _: u32,
+            _: &str,
+            _: u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: EncoderExperiment,
+            _: &AppliedUdpStability,
+            _: &[u8; 32],
+            _: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            unreachable!("the maintenance fixture is already running")
+        }
+        fn stop(&self, _: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn stats(&self, _: u32) -> Result<StatsInfo, String> {
+            self.stats_calls.fetch_add(1, Ordering::SeqCst);
+            self.active.fetch_add(1, Ordering::SeqCst);
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(StatsInfo {
+                state: "running".into(),
+                ..StatsInfo::default()
+            })
+        }
+    }
+    struct ReleaseMaintenanceFixture(Arc<BlockedMaintenanceBackend>);
+    impl Drop for ReleaseMaintenanceFixture {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    async fn maintenance_cannot_multiply_or_outlive_listener(shutdown: bool) {
+        let backend = Arc::new(BlockedMaintenanceBackend {
+            stats_calls: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let _release_on_failure = ReleaseMaintenanceFixture(backend.clone());
+        let server = Arc::new(ControlServer::new(
+            backend.clone(),
+            test_pairing(),
+            test_identity(),
+        ));
+        insert_live_session(&server, 1, None);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let running = server.clone();
+        let task = tokio::spawn(async move { running.run(listener).await });
+        wait_until(|| backend.stats_calls.load(Ordering::SeqCst) > 0).await;
+        tokio::time::sleep(Duration::from_millis(650)).await; // A second tick occurs while stats is blocked.
+        assert_eq!(
+            backend.stats_calls.load(Ordering::SeqCst),
+            1,
+            "maintenance spawned concurrent blocked samples"
+        );
+        assert_eq!(backend.active.load(Ordering::SeqCst), 1);
+        if shutdown {
+            server.shutdown_source_access().unwrap();
+            tokio::time::timeout(Duration::from_millis(200), task)
+                .await
+                .expect("shutdown cannot wait for blocked native stats")
+                .unwrap();
+        } else {
+            task.abort();
+            let _ = task.await;
+        }
+        backend.release();
+        wait_until(|| backend.active.load(Ordering::SeqCst) == 0).await;
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert_eq!(
+            backend.stats_calls.load(Ordering::SeqCst),
+            1,
+            "maintenance survived its listener lifetime"
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_maintenance_is_single_flight_and_stops_on_host_shutdown() {
+        maintenance_cannot_multiply_or_outlive_listener(true).await;
+    }
+    #[tokio::test]
+    async fn listener_maintenance_is_single_flight_and_stops_when_run_is_cancelled() {
+        maintenance_cannot_multiply_or_outlive_listener(false).await;
     }
 
     #[test]
@@ -7679,6 +7997,230 @@ mod tests {
         server.settings.get().unwrap().set_file_share(true).unwrap();
     }
 
+    #[test]
+    fn revocation_drains_old_credential_file_transfers_and_preserves_new_pairings() {
+        for revoke_all in [false, true] {
+            let (server, root) = file_test_server("revoke-files");
+            let server = Arc::new(server);
+            let token = direct_pair_token(&server.pairing, "viewer-1");
+            let auth = server.pairing.authenticate(&token).unwrap();
+            let auth = server
+                .pairing
+                .source_authorization(&auth, "test:display:0")
+                .unwrap();
+            let operation = auth.access.as_ref().unwrap().lease.enter().unwrap();
+            let first = server
+                .file_transfers
+                .begin_incoming_for_owner("viewer-1", auth.owner_id(), "first.txt", 2)
+                .unwrap();
+            server
+                .file_transfers
+                .append_incoming(auth.owner_id(), &first, "eA==", 0)
+                .unwrap();
+            let survivor = server
+                .file_transfers
+                .begin_incoming("viewer-2", "other.txt", 1)
+                .unwrap();
+            let source = root.join("shared.txt");
+            std::fs::write(&source, b"shared").unwrap();
+            let entry = server.file_transfers.add_share_file(source).unwrap();
+            let outgoing = server
+                .file_transfers
+                .begin_outgoing(auth.owner_id(), &entry.queue_id)
+                .unwrap()
+                .0;
+            let surviving_outgoing = server
+                .file_transfers
+                .begin_outgoing("viewer-2", &entry.queue_id)
+                .unwrap()
+                .0;
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let revoking = server.clone();
+            let worker = std::thread::spawn(move || {
+                let result = if revoke_all {
+                    revoking.revoke_all_devices()
+                } else {
+                    revoking.revoke_device("viewer-1")
+                };
+                finished_tx.send(result).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while server.pairing.authenticate(&token).is_some() {
+                assert!(
+                    Instant::now() < deadline,
+                    "revocation must retire authentication"
+                );
+                std::thread::yield_now();
+            }
+            assert!(
+                finished_rx.try_recv().is_err(),
+                "revocation must await active auth work"
+            );
+            // Any old operation already admitted before revocation is cleaned
+            // after idle, including its late token. A same-ID new credential is
+            // distinct and must survive both single-device and all revocations.
+            let late = server
+                .file_transfers
+                .begin_incoming_for_owner("viewer-1", auth.owner_id(), "late.txt", 1)
+                .unwrap();
+            let replacement_token = direct_pair_token(&server.pairing, "viewer-1");
+            let replacement_auth = server.pairing.authenticate(&replacement_token).unwrap();
+            assert_ne!(auth.owner_id(), replacement_auth.owner_id());
+            let replacement_in = server
+                .file_transfers
+                .begin_incoming_for_owner(
+                    "viewer-1",
+                    replacement_auth.owner_id(),
+                    "replacement.txt",
+                    1,
+                )
+                .unwrap();
+            let replacement_out = server
+                .file_transfers
+                .begin_outgoing(replacement_auth.owner_id(), &entry.queue_id)
+                .unwrap()
+                .0;
+            assert!(
+                server
+                    .file_transfers
+                    .append_incoming(replacement_auth.owner_id(), &first, "eA==", 1)
+                    .is_err(),
+                "new credentials cannot claim old incoming tokens"
+            );
+            assert!(
+                server
+                    .file_transfers
+                    .read_outgoing(replacement_auth.owner_id(), &outgoing, 0, 1)
+                    .is_err(),
+                "new credentials cannot claim old outgoing tokens"
+            );
+            assert!(root.join("viewer-1").join(format!("{first}.part")).exists());
+            drop(operation);
+            let outcome = finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            worker.join().unwrap();
+            assert!(
+                outcome.persistence_errors.is_empty(),
+                "{:?}",
+                outcome.persistence_errors
+            );
+            assert!(!root.join("viewer-1").join(format!("{first}.part")).exists());
+            assert!(!root.join("viewer-1").join(format!("{late}.part")).exists());
+            assert!(server
+                .file_transfers
+                .read_outgoing(auth.owner_id(), &outgoing, 0, 1)
+                .is_err());
+            server
+                .file_transfers
+                .append_incoming("viewer-2", &survivor, "eA==", 0)
+                .unwrap();
+            assert!(server
+                .file_transfers
+                .read_outgoing("viewer-2", &surviving_outgoing, 0, 1)
+                .is_ok());
+            server
+                .file_transfers
+                .append_incoming(replacement_auth.owner_id(), &replacement_in, "eA==", 0)
+                .unwrap();
+            assert!(server
+                .file_transfers
+                .read_outgoing(replacement_auth.owner_id(), &replacement_out, 0, 1)
+                .is_ok());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn revoke_all_reopens_incoming_and_outgoing_admission() {
+        let (server, root) = file_test_server("revoke-all-files");
+        let token = direct_pair_token(&server.pairing, "viewer-1");
+        let auth = server.pairing.authenticate(&token).unwrap();
+        let source = root.join("shared.txt");
+        std::fs::write(&source, b"shared").unwrap();
+        let entry = server.file_transfers.add_share_file(source).unwrap();
+        for _ in 0..8 {
+            server
+                .file_transfers
+                .begin_incoming_for_owner("viewer-1", auth.owner_id(), "partial.txt", 1)
+                .unwrap();
+            server
+                .file_transfers
+                .begin_outgoing(auth.owner_id(), &entry.queue_id)
+                .unwrap();
+        }
+        let outcome = server.revoke_all_devices();
+        assert!(
+            outcome.persistence_errors.is_empty(),
+            "{:?}",
+            outcome.persistence_errors
+        );
+        assert_eq!(std::fs::read_dir(root.join("viewer-1")).unwrap().count(), 0);
+        assert!(server
+            .file_transfers
+            .begin_incoming("viewer-2", "new.txt", 1)
+            .is_ok());
+        assert!(server
+            .file_transfers
+            .begin_outgoing("viewer-2", &entry.queue_id)
+            .is_ok());
+        assert_eq!(
+            server.file_transfers.queue_entries().len(),
+            1,
+            "local share queue survives revocation"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn revoke_cleanup_failure_is_reported_and_retried_after_the_device_is_removed() {
+        let (server, root) = file_test_server("revoke-files-retry");
+        let token = direct_pair_token(&server.pairing, "viewer-1");
+        let auth = server.pairing.authenticate(&token).unwrap();
+        let transfer = server
+            .file_transfers
+            .begin_incoming_for_owner("viewer-1", auth.owner_id(), "partial.txt", 2)
+            .unwrap();
+        let part = root.join("viewer-1").join(format!("{transfer}.part"));
+        std::fs::remove_file(&part).unwrap();
+        std::fs::create_dir(&part).unwrap();
+        let outcome = server.revoke_device("viewer-1");
+        assert_eq!(outcome.removed_devices.len(), 1);
+        assert!(outcome
+            .persistence_errors
+            .iter()
+            .any(|error| error.contains("file staging cleanup failed")));
+        assert!(
+            server
+                .file_transfers
+                .append_incoming(auth.owner_id(), &transfer, "eA==", 0)
+                .is_err(),
+            "retained cleanup state must not admit writes"
+        );
+        let replacement_token = direct_pair_token(&server.pairing, "viewer-2");
+        let replacement = server.pairing.authenticate(&replacement_token).unwrap();
+        let survivor = server
+            .file_transfers
+            .begin_incoming_for_owner("viewer-2", replacement.owner_id(), "new.txt", 1)
+            .unwrap();
+        std::fs::remove_dir(&part).unwrap();
+        std::fs::write(&part, b"x").unwrap();
+        let retry = server.revoke_device("viewer-1");
+        assert!(retry.removed_devices.is_empty());
+        assert!(
+            retry.persistence_errors.is_empty(),
+            "{:?}",
+            retry.persistence_errors
+        );
+        assert!(
+            !part.exists(),
+            "retry must retain cleanup ownership after credentials were removed"
+        );
+        server
+            .file_transfers
+            .append_incoming(replacement.owner_id(), &survivor, "eA==", 0)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn file_commands_require_an_authenticated_device() {
         let (server, root) = file_test_server("unauth");
@@ -8450,6 +8992,215 @@ mod tests {
     }
 
     // -- 인증 전 입력·연결 상한(F08) ------------------------------------------
+
+    #[tokio::test]
+    async fn control_response_reports_socket_write_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let (_, mut writer) = socket.into_split();
+        writer.shutdown().await.unwrap();
+        let (_shutdown_signal, mut shutdown) = tokio::sync::watch::channel(false);
+
+        assert!(
+            write_response(
+                &mut writer,
+                &mut ConnCrypto::Plain,
+                "{\"ok\":true}",
+                None,
+                &mut shutdown
+            )
+            .await
+            .is_err(),
+            "a failed response must end the command loop instead of accepting another request"
+        );
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn control_response_backpressure_releases_connection_permit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await.unwrap();
+        let (_shutdown_signal, mut shutdown) = tokio::sync::watch::channel(false);
+        let send = tokio::spawn(async move {
+            let _permit = permit;
+            let (_, mut writer) = socket.into_split();
+            let response = "x".repeat(32 * 1024 * 1024);
+            write_response(
+                &mut writer,
+                &mut ConnCrypto::Plain,
+                &response,
+                None,
+                &mut shutdown,
+            )
+            .await
+        });
+
+        let result = tokio::time::timeout(CONTROL_IDLE_TIMEOUT + Duration::from_secs(2), send)
+            .await
+            .expect("a peer that does not read must not retain its connection permit indefinitely")
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "backpressured responses must fail at their deadline"
+        );
+        assert_eq!(permits.available_permits(), 1);
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn control_response_reports_delimiter_write_failure() {
+        let mut writer = tokio_test::io::Builder::new()
+            .write(b"response")
+            .write_error(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            .build();
+        let (_shutdown_signal, mut shutdown) = tokio::sync::watch::channel(false);
+
+        assert!(write_response(
+            &mut writer,
+            &mut ConnCrypto::Plain,
+            "response",
+            None,
+            &mut shutdown
+        )
+        .await
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_response_failure_stops_pipelined_commands() {
+        use std::os::fd::AsRawFd;
+        let (server, clipboard) = clipboard_server(true);
+        let offer = server.pairing.begin_pairing("127.0.0.1", 7777);
+        let token = server
+            .pairing
+            .pair_by_code(&offer.code, "writer-viewer", "viewer")
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        // Disable only the server's outbound direction while preserving real
+        // inbound commands, so its first response deterministically fails.
+        assert_eq!(
+            unsafe { libc::shutdown(socket.as_raw_fd(), libc::SHUT_WR) },
+            0
+        );
+        let task = tokio::spawn(async move { handle_conn(socket, &server, "127.0.0.1").await });
+        for text in ["first command", "second command"] {
+            let request =
+                json!({ "command": "setClipboard", "args": { "text": text }, "token": token });
+            peer.write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        peer.shutdown().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("a response error must terminate the connection")
+            .unwrap();
+        assert_eq!(*clipboard.text.lock().unwrap(), "first command");
+        assert_eq!(
+            clipboard.writes.load(Ordering::SeqCst),
+            1,
+            "the queued second command must not run after a failed response"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_response_device_disconnect_interrupts_backpressure() {
+        use tokio::io::AsyncReadExt;
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let (killed, _lease) = server.register_authed_conn("revoked-viewer");
+        let mut shutdown = server.connection_shutdown.subscribe();
+        let (mut writer, mut peer) = tokio::io::duplex(1);
+        let send = async {
+            write_response(
+                &mut writer,
+                &mut ConnCrypto::Plain,
+                "response",
+                Some(&killed),
+                &mut shutdown,
+            )
+            .await
+        };
+        let revoke = async {
+            let mut byte = [0];
+            peer.read_exact(&mut byte).await.unwrap();
+            server.disconnect_device_conns("revoked-viewer");
+        };
+
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(send, revoke)
+        })
+        .await
+        .expect(
+            "device revocation must interrupt a blocked response without waiting for its deadline",
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn control_response_host_shutdown_interrupts_backpressure() {
+        use tokio::io::AsyncReadExt;
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let mut shutdown = server.connection_shutdown.subscribe();
+        let (mut writer, mut peer) = tokio::io::duplex(1);
+        let send = async {
+            write_response(
+                &mut writer,
+                &mut ConnCrypto::Plain,
+                "response",
+                None,
+                &mut shutdown,
+            )
+            .await
+        };
+        let stop = async {
+            let mut byte = [0];
+            peer.read_exact(&mut byte).await.unwrap();
+            server.shutdown_source_access().unwrap();
+        };
+
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(send, stop) })
+                .await
+                .expect(
+                    "Host shutdown must interrupt unauthenticated blocked responses immediately",
+                );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn control_shutdown_closes_idle_connections_and_stops_accepting() {
+        use tokio::io::AsyncReadExt;
+        let (server, addr) = spawn_server_with_pairing_and_handle(test_pairing()).await;
+        let mut peer = TcpStream::connect(addr).await.unwrap();
+        wait_until(|| server.conn_permits.available_permits() == MAX_CONCURRENT_CONNS - 2).await;
+
+        server.shutdown_source_access().unwrap();
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(2), peer.read(&mut byte))
+            .await
+            .expect("shutdown must close a pre-authentication socket promptly")
+            .unwrap();
+        assert_eq!(closed, 0);
+        wait_until(|| server.conn_permits.available_permits() == MAX_CONCURRENT_CONNS).await;
+        assert!(
+            TcpStream::connect(addr).await.is_err(),
+            "shutdown must stop admitting new sockets"
+        );
+    }
 
     #[tokio::test]
     async fn bounded_line_preserves_socket_error_instead_of_reporting_overflow() {

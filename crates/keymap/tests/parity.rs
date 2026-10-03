@@ -180,7 +180,10 @@ fn windows_table_matches_previous_hardcoded_table() {
 fn lookup_never_returns_all_none() {
     for code in 0..=u16::MAX {
         if let Some(KeyMapping { mac, windows }) = keymap::lookup(code) {
-            assert!(mac.is_some() || windows.is_some(), "code {code} maps nothing");
+            assert!(
+                mac.is_some() || windows.is_some(),
+                "code {code} maps nothing"
+            );
         }
     }
 }

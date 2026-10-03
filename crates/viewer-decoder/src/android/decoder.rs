@@ -187,7 +187,8 @@ pub struct AndroidDecoder {
 /// skip into one frame held costs at most a frame period of latency when a
 /// pair arrives together, and the hold disengages the moment arrivals bunch
 /// harder than one frame.
-pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub static PRESENTATION_SMOOTH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// 프레임 스무딩(적응 지터 버퍼) park 깊이 하한/상한(프레임 수). 도착
 /// 지터 p95에 맞춰 그 사이에서 자동 조절한다(상한 10프레임 ≈ 166ms@60fps
@@ -699,8 +700,9 @@ impl AndroidDecoder {
                     Some(output) => output,
                     None => return Ok(false),
                 };
-                let r =
-                    unsafe { AMediaCodec_releaseOutputBufferAtTime(self.codec, output.index, target) };
+                let r = unsafe {
+                    AMediaCodec_releaseOutputBufferAtTime(self.codec, output.index, target)
+                };
                 if r != AMEDIA_OK {
                     return Err(DecoderError::OpFailed { status: r });
                 }

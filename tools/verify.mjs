@@ -50,6 +50,11 @@ export function verify(scope='all', { platform = process.platform, diagnose: doc
       run('bun',['tools/test-media-interop.mjs']);
       run('zsh',['tools/build-macos-capture-shim.zsh','audio-ownership-test',join(dir,'audio-ownership-test')]);
       run(join(dir,'audio-ownership-test'));
+      for (const mode of ['tcp-connection-test','terminal-notice-test','input-heartbeat-test']) {
+        const binary=join(dir,mode);
+        run('zsh',['tools/build-macos-capture-shim.zsh',mode,binary]);
+        run(binary);
+      }
       console.log('Swift: full shim and existing adapter test binaries COMPILED ONLY; production split, RTX, media interoperability and audio opt-in policies EXECUTED. Hardware adapters/encoder/capture UNVERIFIED.');
     }
   }

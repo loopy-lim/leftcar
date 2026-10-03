@@ -1,8 +1,8 @@
 use super::*;
 use crate::cursor_protocol::{parse_cursor_sample, CursorSample};
 
+#[cfg(test)]
 mod control_response;
-pub(super) use control_response::consume_control_datagram;
 
 pub(super) struct MediaBatch {
     pub(super) count: usize,

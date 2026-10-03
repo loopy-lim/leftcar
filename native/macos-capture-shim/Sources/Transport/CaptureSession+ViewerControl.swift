@@ -31,6 +31,9 @@ extension CaptureSession {
             receiverHeartbeatNs = DispatchTime.now().uptimeNanoseconds
             stateLock.unlock()
             armReceiverHealthCheck()
+            // A locked Viewer sends no key events. Periodic authenticated
+            // heartbeats also repair a lost toggle/ACK without an IDR or key.
+            sendInputStatus(fd: fd)
             return .handled
         }
         if message == Data("LCL?".utf8) {

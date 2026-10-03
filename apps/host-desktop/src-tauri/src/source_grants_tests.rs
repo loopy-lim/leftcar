@@ -249,7 +249,10 @@ async fn task10_new_devices_have_no_catalog_or_start_access_and_two_devices_are_
     // 첫 세션 끄기 호출이 추가될 수 있다 — 세션 수만큼의 enable만 센다.
     let input = io.input.lock().unwrap();
     let enabled = input.iter().filter(|(_, on)| *on).count();
-    assert_eq!(enabled, 2, "both sessions enable input by default: {input:?}");
+    assert_eq!(
+        enabled, 2,
+        "both sessions enable input by default: {input:?}"
+    );
 }
 #[tokio::test]
 async fn task10_catalog_reorder_legacy_snapshot_disappearance_and_ambiguity_never_switch_identity()

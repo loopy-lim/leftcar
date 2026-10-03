@@ -1,23 +1,9 @@
-use crate::media_crypto::MediaSessionCrypto;
-
-pub(crate) fn consume_control_datagram(
-    crypto: &MediaSessionCrypto,
-    packet: &mut [u8],
-    consume_plaintext: impl FnOnce(&[u8]) -> bool,
-) -> bool {
-    // Use the media receiver's same crypto/window: control replies can arrive
-    // on either socket, and neither path may parse unauthenticated bytes.
-    let Some(plaintext) = crypto.open_into(packet) else {
-        return false;
-    };
-    consume_plaintext(plaintext)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::input_protocol::{parse_ack, parse_latency_probe_response, InputAck};
     use crate::media_crypto::test_media_key;
+    use crate::media_crypto::MediaSessionCrypto;
+    use crate::renderer::control_ingress::consume_control_datagram;
     use crate::renderer::single_session::health::ControlHealthState;
     use secure_channel::DatagramSealer;
     use std::net::UdpSocket;

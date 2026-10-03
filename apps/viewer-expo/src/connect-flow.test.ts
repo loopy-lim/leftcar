@@ -101,6 +101,9 @@ beforeEach(() => {
 
 describe("unauthorized request origin", () => {
   it("screen departure during credential retirement prevents late navigation", async () => {
+    store.set("leftcar.recent_hosts", JSON.stringify([
+      { host: "10.0.0.1", port: 7777, hostKey: HOST_KEY_A, lastConnected: 1 },
+    ]));
     store.set("leftcar.token.v2.10.0.0.1.7777", TOKEN_A);
     const client = makeClient();
     connectMock.mockResolvedValueOnce(client);
@@ -124,6 +127,10 @@ describe("unauthorized request origin", () => {
   });
 
   it("uses the actual A to B session transition before retiring only A", async () => {
+    store.set("leftcar.recent_hosts", JSON.stringify([
+      { host: "10.0.0.1", port: 7777, hostKey: HOST_KEY_A, lastConnected: 1 },
+      { host: "10.0.0.2", port: 7777, hostKey: HOST_KEY_B, lastConnected: 1 },
+    ]));
     store.set("leftcar.token.v2.10.0.0.1.7777", TOKEN_A);
     store.set("leftcar.token.v2.10.0.0.2.7777", TOKEN_B);
     const clientA = makeClient();

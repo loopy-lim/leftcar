@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   VIEWER_UDP_CAPABILITIES,
   availableUdpStabilityOptions,
+  readUdpStabilitySelection,
   resolveUdpStabilitySelection,
+  writeUdpStabilitySelection,
 } from "./udp-stability";
+import { PreferencePersistenceController } from "./preference-persistence";
 
 const advertised = {
   version: 1,
@@ -102,4 +105,44 @@ describe("UDP stability capability intersection", () => {
       splitFeedbackBytes: 120,
     });
   });
+});
+
+describe("UDP preference persistence", () => {
+  it("preserves the stored selection after a failed read and restores it on retry", async () => {
+    let raw = '{"profile":"stable"}';
+    let failRead = true;
+    const store = {
+      async getItemAsync() {
+        if (failRead) throw new Error("secure storage unavailable");
+        return raw;
+      },
+      async setItemAsync(_key: string, value: string) { raw = value; },
+    };
+    const controller = new PreferencePersistenceController({
+      initialValue: { profile: "auto" } as const,
+      load: () => readUdpStabilitySelection(store),
+      save: (value) => writeUdpStabilitySelection(store, value),
+      storageKey: "leftcar.udpStability",
+      storageOwner: store,
+    });
+
+    await controller.load();
+    expect(controller.state.status).toBe("load-error");
+    expect(raw).toBe('{"profile":"stable"}');
+
+    failRead = false;
+    await controller.retry();
+    expect(controller.state).toEqual({ status: "ready", value: { profile: "stable" } });
+    expect(raw).toBe('{"profile":"stable"}');
+  });
+
+  it.each(["broken", "[]", '{"profile":"unknown"}', '{"profile":"custom","burstDatagrams":3}'])(
+    "reports malformed saved UDP preference instead of accepting a replacement default: %s",
+    async (raw) => {
+      await expect(readUdpStabilitySelection({
+        getItemAsync: async () => raw,
+        setItemAsync: async () => undefined,
+      })).rejects.toThrow();
+    },
+  );
 });

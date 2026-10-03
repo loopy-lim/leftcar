@@ -1,32 +1,34 @@
 import { Laptop, Smartphone } from "lucide-react";
-import { interpolate, type SupportedLanguage, type TranslationSchema } from "@leftcar/ui-tokens";
-import { buttonVariants } from "../lib/variants";
+import {
+  interpolate,
+  type SupportedLanguage,
+  type TranslationSchema,
+} from "@leftcar/ui-tokens";
 import type { PairedDevice } from "../paired-device-state";
-
+import { Button, Text } from "../ui/primitives";
 function formatPairedAt(pairedAt: string, language: SupportedLanguage): string {
   const secs = Number(pairedAt.replace(/^unix:/, ""));
   if (!Number.isFinite(secs) || secs <= 0) return pairedAt;
   return new Date(secs * 1000).toLocaleString(
     language === "ko" ? "ko-KR" : "en-US",
-    {
-      month: "numeric",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    },
+    { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" },
   );
 }
-
-function grantsSummary(grants: PairedDevice["source_grants"], t: TranslationSchema): string {
+function grantsSummary(
+  grants: PairedDevice["source_grants"],
+  t: TranslationSchema,
+): string {
   const screens = grants.reviewRequired
     ? t.host.deviceGrantsPending
     : grants.sourceIds.length > 0
-      ? interpolate(t.host.deviceGrantsScreens, { count: grants.sourceIds.length })
+      ? interpolate(t.host.deviceGrantsScreens, {
+          count: grants.sourceIds.length,
+        })
       : t.host.deviceGrantsNone;
   return grants.input ? `${screens} · ${t.host.deviceGrantsInputOn}` : screens;
 }
-
 interface PairedDeviceRowProps {
+  disabled?: boolean;
   device: PairedDevice;
   language: SupportedLanguage;
   t: TranslationSchema;
@@ -35,80 +37,74 @@ interface PairedDeviceRowProps {
   onRevoke: (deviceId: string) => void;
   onApproveScreens: (device: PairedDevice) => void;
 }
-
 export default function PairedDeviceRow({
   device,
   language,
   t,
   revoking,
   approvingScreens,
+  disabled = false,
   onRevoke,
   onApproveScreens,
 }: PairedDeviceRowProps) {
   const isComputer =
     device.name.toLowerCase().includes("pc") ||
     device.name.toLowerCase().includes("mac");
-
+  const busy = disabled || revoking !== null || approvingScreens !== null;
   return (
-    <div className="device-row-item">
-      <div className="device-row-left">
-        <div className="device-icon-box">
-          {isComputer ? (
-            <Laptop size={18} strokeWidth={2} />
-          ) : (
-            <Smartphone size={18} strokeWidth={2} />
-          )}
-        </div>
-        <div className="device-row-main">
-          <div className="device-row-header">
-            <span className="device-row-name">{device.name}</span>
+    <li className="flex flex-wrap items-center gap-3 p-4">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        {isComputer ? (
+          <Laptop size={20} className="shrink-0 text-muted" />
+        ) : (
+          <Smartphone size={20} className="shrink-0 text-muted" />
+        )}
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <Text className="break-words font-semibold">{device.name}</Text>
             {device.connected && (
-              <span className="device-live-badge">
-                <span
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    background: "currentColor",
-                  }}
-                />
+              <Text variant="caption" tone="muted">
                 {t.host.deviceLiveLabel}
-              </span>
+              </Text>
             )}
           </div>
-          <div className="device-row-meta">
-            <span className="device-row-date">
-              {formatPairedAt(device.paired_at, language)}
-            </span>
-            <span className="device-row-date">
-              {grantsSummary(device.source_grants, t)}
-            </span>
-          </div>
+          <Text variant="caption" tone="muted" className="block tabular-nums">
+            {formatPairedAt(device.paired_at, language)}
+          </Text>
+          <Text variant="caption" tone="muted" className="block">
+            {grantsSummary(device.source_grants, t)}
+          </Text>
         </div>
       </div>
-
-      <div className="device-row-actions">
+      <div className="flex flex-wrap gap-2">
         {device.source_grants.reviewRequired && (
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="compact"
+            busy={approvingScreens === device.device_id}
+            disabled={busy}
             onClick={() => onApproveScreens(device)}
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-            disabled={approvingScreens === device.device_id}
             title={t.host.sourceReviewRequired}
+            aria-label={`${device.name}: ${t.host.deviceGrantsApprove}`}
           >
-            {t.host.deviceGrantsApprove}
-          </button>
+            {approvingScreens === device.device_id
+              ? t.host.remoteInputProcessing
+              : t.host.deviceGrantsApprove}
+          </Button>
         )}
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="compact"
+          busy={revoking === device.device_id || revoking === "all"}
+          disabled={busy}
           onClick={() => onRevoke(device.device_id)}
-          className={buttonVariants({ variant: "outlineDanger", size: "sm" })}
-          disabled={revoking === device.device_id}
-          title={t.host.revoke}
+          aria-label={`${device.name}: ${t.host.revoke}`}
         >
-          {t.host.revoke}
-        </button>
+          {revoking === device.device_id || revoking === "all"
+            ? t.host.revoking
+            : t.host.revoke}
+        </Button>
       </div>
-    </div>
+    </li>
   );
 }

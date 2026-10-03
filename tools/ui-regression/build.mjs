@@ -1,12 +1,15 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { compileUiStyles } from "./styles.mjs";
 const outdir = process.env.UI_TEST_DIR ?? "/tmp/leftcar-task4-ui";
 await mkdir(outdir, { recursive: true });
+await compileUiStyles(outdir);
 const reactPath = resolve(import.meta.dir, "../../node_modules/.bun/react@19.2.3/node_modules/react");
 const reactDomPath = resolve(import.meta.dir, "../../node_modules/.bun/react-dom@19.2.3+83d5fd7b249dbeef/node_modules/react-dom");
 const reactPlugin = {
   name: "react-singleton",
   setup(build) {
+    build.onResolve({ filter: /^uniwind$/ }, () => ({ path: `${import.meta.dir}/uniwind-io.jsx` }));
     build.onResolve({ filter: /^react$/ }, () => ({ path: `${reactPath}/index.js` }));
     build.onResolve({ filter: /^react\/jsx-runtime$/ }, () => ({ path: `${reactPath}/jsx-runtime.js` }));
     build.onResolve({ filter: /^react\/jsx-dev-runtime$/ }, () => ({ path: `${reactPath}/jsx-dev-runtime.js` }));
@@ -22,6 +25,15 @@ const result = await Bun.build({
   plugins: [reactPlugin],
 });
 if (!result.success) throw new Error(result.logs.join("\n"));
+const designSystem = await Bun.build({ entrypoints: [`${import.meta.dir}/design-system.jsx`], outdir, target: "browser", format: "iife", plugins: [reactPlugin, {
+  name: "design-system-platform-boundary", setup(build) {
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context)$/ }, () => ({ path: `${import.meta.dir}/camera-io.jsx` }));
+  },
+}] });
+if (!designSystem.success) throw new Error(designSystem.logs.join("\n"));
+for (const platform of ["host", "viewer"]) {
+  await writeFile(`${outdir}/design-system-${platform}.html`, `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="${platform}.css"><div id="root"></div><script src="design-system.js"></script>`);
+}
 const extendedDisplay = await Bun.build({ entrypoints: [`${import.meta.dir}/extended-display.jsx`], outdir, target: "browser", format: "iife", plugins: [reactPlugin] });
 if (!extendedDisplay.success) throw new Error(extendedDisplay.logs.join("\n"));
 await writeFile(`${outdir}/extended-display.html`, '<!doctype html><meta charset="utf-8"><div id="root"></div><script src="extended-display.js"></script>');
@@ -40,6 +52,10 @@ await writeFile(
   `${outdir}/index.html`,
   '<!doctype html><html><head><meta charset="utf-8"><title>Isolated UI regression</title></head><body><div id="root"></div><script src="entry.js"></script></body></html>',
 );
+const hostConfig = JSON.parse(await readFile(resolve(import.meta.dir, "../../apps/host-desktop/src-tauri/tauri.conf.json"), "utf8"));
+const csp = hostConfig.app.security.csp;
+const policy = typeof csp === "string" ? csp : csp ? Object.entries(csp).map(([directive, sources]) => `${directive} ${Array.isArray(sources) ? sources.join(" ") : sources}`).join("; ") : "";
+await writeFile(`${outdir}/host-csp.html`, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy.replaceAll('"', '&quot;')}"></head><body><div id="root"></div><script src="entry.js"></script></body></html>`);
 
 const viewer = await Bun.build({
   entrypoints: [`${import.meta.dir}/catalog.jsx`],
@@ -107,3 +123,23 @@ const hubConnect = await Bun.build({ entrypoints: [`${import.meta.dir}/hub-conne
 } }] });
 if (!hubConnect.success) throw new Error(hubConnect.logs.join('\n'));
 await writeFile(`${outdir}/hub-connect.html`, '<!doctype html><meta charset="utf-8"><div id="root"></div><script src="hub-connect.js"></script>');
+
+const screens = await Bun.build({ entrypoints: [`${import.meta.dir}/viewer-screens.jsx`], outdir, target: "browser", format: "iife", plugins: [reactPlugin, {
+  name: "whole-viewer-device-boundary", setup(build) {
+    build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(import.meta.dir, "../../apps/viewer-expo/node_modules/@tanstack/react-query/build/modern/index.js") }));
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|expo-router|@expo\/vector-icons)$/ }, () => ({ path: `${import.meta.dir}/camera-io.jsx` }));
+    build.onResolve({ filter: /^(expo-secure-store|expo-clipboard|expo-constants|expo-crypto)$/ }, () => ({ path: `${import.meta.dir}/viewer-io.js` }));
+    build.onResolve({ filter: /^react-native-tcp-socket$/ }, () => ({ path: `${import.meta.dir}/tcp-io.js` }));
+  },
+}] });
+if (!screens.success) throw new Error(screens.logs.join("\n"));
+await writeFile(`${outdir}/viewer-screens.html`, '<!doctype html><meta charset="utf-8"><div id="root"></div><script src="viewer-screens.js"></script>');
+
+for (const [file, style] of [
+  ["index", "host"], ["host-csp", "host"], ["pairing-grants", "host"], ["extended-display", "host"],
+  ["viewer-screens", "viewer"], ["extension-viewer", "viewer"], ["catalog", "viewer"], ["camera", "viewer"], ["host", "viewer"], ["hub-connect", "viewer"],
+]) {
+  const path = `${outdir}/${file}.html`;
+  const html = await readFile(path, "utf8");
+  await writeFile(path, html.replace('<div id="root">', `<link rel="stylesheet" href="${style}.css"><div id="root">`));
+}

@@ -10,8 +10,8 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::os::fd::FromRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -65,21 +65,40 @@ pub(crate) fn fragment_au_frame(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(datagrams)
 }
 
+#[derive(Clone)]
+struct MediaRoute {
+    generation: u64,
+    crypto: SharedMediaCrypto,
+    media_tx: SyncSender<Vec<u8>>,
+    udp: Arc<UdpSocket>,
+}
+
+/// One physical accessory owner. Logical renderer cancellation must not
+/// duplicate or detach its blocking Android driver reader.
 pub struct UsbBridge {
     stop: Arc<AtomicBool>,
-    control_addr: std::net::SocketAddr,
     control_port: u16,
-    media_rx: Receiver<Vec<u8>>,
-    /// Session media crypto shared with the renderer. Installed at bridge
-    /// start from the prepare call and re-pointed at the per-port instance by
-    /// `prepare_udp_receiver` so the challenge echo and every later renderer
-    /// send share one AEAD counter sequence.
-    media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>>,
+    route: Arc<Mutex<Option<MediaRoute>>>,
+    generation: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
 }
 
+/// Only this incarnation can consume media or send renderer feedback. The
+/// physical service outlives the lease and can be reused by the next session.
+pub struct UsbMediaLease {
+    bridge: Arc<UsbBridge>,
+    generation: u64,
+    control_addr: std::net::SocketAddr,
+    media_rx: Receiver<Vec<u8>>,
+    media_port: Option<u16>,
+}
+
 impl UsbBridge {
-    pub fn start(fd: i32, media_key: [u8; 32]) -> io::Result<Self> {
+    pub fn start(fd: i32) -> io::Result<Self> {
+        Self::start_with_control_limit(fd, MAX_FRAME_BYTES)
+    }
+
+    fn start_with_control_limit(fd: i32, max_control_line_bytes: usize) -> io::Result<Self> {
         if fd < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -94,79 +113,157 @@ impl UsbBridge {
         let writer = Arc::new(Mutex::new(file.try_clone()?));
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
-        let udp = UdpSocket::bind("127.0.0.1:0")?;
-        udp.set_read_timeout(Some(Duration::from_millis(50)))?;
-        let control_addr = udp.local_addr()?;
         let control_port = listener.local_addr()?.port();
-        let (media_tx, media_rx) = mpsc::sync_channel(MEDIA_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(64);
-        let media_crypto: Arc<Mutex<Option<SharedMediaCrypto>>> = Arc::new(Mutex::new(Some(
-            Arc::new(crate::media_crypto::MediaSessionCrypto::new(media_key)),
-        )));
+        let route = Arc::new(Mutex::new(None));
+        let generation = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let reader_crypto = Arc::clone(&media_crypto);
+        let worker_route = Arc::clone(&route);
+        let worker_generation = Arc::clone(&generation);
         let worker = thread::Builder::new()
             .name(format!("leftcar-usb-bridge-{control_port}"))
             .spawn(move || {
                 let reader_stop = Arc::clone(&worker_stop);
                 let reader_writer = Arc::clone(&writer);
+                let reader_route = Arc::clone(&worker_route);
+                let reader_generation = Arc::clone(&worker_generation);
                 let reader = thread::spawn(move || {
                     read_accessory(
                         file,
                         reader_writer,
-                        media_tx,
                         control_tx,
                         reader_stop,
-                        &reader_crypto,
+                        &reader_route,
+                        &reader_generation,
                     );
                 });
                 let writer_stop = Arc::clone(&worker_stop);
                 let udp_writer = Arc::clone(&writer);
+                let writer_route = Arc::clone(&worker_route);
                 let writer_thread = thread::spawn(move || {
-                    write_udp_media(udp, udp_writer, writer_stop);
+                    write_udp_media(writer_route, udp_writer, writer_stop);
                 });
-                run_control_proxy(listener, writer, control_rx, &worker_stop);
+                run_control_proxy(
+                    listener,
+                    writer,
+                    control_rx,
+                    &worker_stop,
+                    &worker_generation,
+                    max_control_line_bytes,
+                );
                 worker_stop.store(true, Ordering::SeqCst);
                 let _ = reader.join();
                 let _ = writer_thread.join();
             })?;
         Ok(Self {
             stop,
-            control_addr,
             control_port,
-            media_rx,
-            media_crypto,
+            route,
+            generation,
             worker: Some(worker),
         })
     }
 
-    /// Re-point the reader's crypto at a shared instance (same key, so no
-    /// host-visible state changes; the counter sequence simply continues).
+    pub fn prepare_media(self: &Arc<Self>, media_key: [u8; 32]) -> io::Result<UsbMediaLease> {
+        if !self.is_running() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "USB accessory disconnected",
+            ));
+        }
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        udp.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let control_addr = udp.local_addr()?;
+        let (media_tx, media_rx) = mpsc::sync_channel(MEDIA_CHANNEL_CAPACITY);
+        let mut route = self.route.lock().unwrap();
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *route = Some(MediaRoute {
+            generation,
+            crypto: Arc::new(crate::media_crypto::MediaSessionCrypto::new(media_key)),
+            media_tx,
+            udp: Arc::new(udp),
+        });
+        drop(route);
+        Ok(UsbMediaLease {
+            bridge: Arc::clone(self),
+            generation,
+            control_addr,
+            media_rx,
+            media_port: None,
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.stop.load(Ordering::SeqCst)
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished())
+    }
+
+    pub fn stop_after_detach(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.route.lock().unwrap().take();
+    }
+
+    /// The prepared UDP listener and this physical reader use one counter
+    /// sequence for the current media incarnation.
     pub fn set_media_crypto(&self, crypto: SharedMediaCrypto) {
-        if let Ok(mut slot) = self.media_crypto.lock() {
-            *slot = Some(crypto);
+        if let Some(route) = self.route.lock().unwrap().as_mut() {
+            route.crypto = crypto;
         }
     }
 
     pub fn shared_crypto(&self) -> Option<SharedMediaCrypto> {
-        self.media_crypto
+        self.route
             .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(Arc::clone))
+            .unwrap()
+            .as_ref()
+            .map(|route| Arc::clone(&route.crypto))
+    }
+
+    pub fn control_port(&self) -> u16 {
+        self.control_port
+    }
+}
+
+impl UsbMediaLease {
+    pub fn bind_media_port(&mut self, port: u16) {
+        self.media_port = Some(port);
+    }
+
+    pub fn matches_media_port(&self, port: u16) -> bool {
+        self.media_port.unwrap_or(0) == port
+    }
+
+    pub fn is_unbound(&self) -> bool {
+        self.media_port.is_none()
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.bridge.is_running() && route_is_current(&self.bridge.route, self.generation)
     }
 
     pub fn control_addr(&self) -> std::net::SocketAddr {
         self.control_addr
     }
 
-    pub fn control_port(&self) -> u16 {
-        self.control_port
-    }
-
     pub fn recv_media_timeout(&self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
+        if !self.is_current() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "USB media lease superseded",
+            ));
+        }
         match self.media_rx.recv_timeout(timeout) {
-            Ok(payload) => Ok(Some(payload)),
+            Ok(payload) if self.is_current() => Ok(Some(payload)),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "USB media lease superseded",
+            )),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -180,26 +277,86 @@ impl UsbBridge {
     }
 }
 
+impl Drop for UsbMediaLease {
+    fn drop(&mut self) {
+        let mut route = self.bridge.route.lock().unwrap();
+        if route
+            .as_ref()
+            .is_some_and(|route| route.generation == self.generation)
+        {
+            route.take();
+        }
+    }
+}
+
 impl Drop for UsbBridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // The reader is intentionally not joined here: a blocking read on a
-        // detached Android accessory may only wake after the OS closes fd.
+        // Android accessory drivers can ignore O_NONBLOCK and have no poll
+        // callback. Detach wakes their interruptible driver read; joining a
+        // still-attached fd here would block the UI. Keep one process owner
+        // across logical sessions and retire this worker on physical detach.
         let _ = self.worker.take();
     }
+}
+
+fn route_is_current(route: &Mutex<Option<MediaRoute>>, generation: u64) -> bool {
+    route
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|route| route.generation == generation)
+}
+
+fn forward_media(
+    payload: Vec<u8>,
+    generation: u64,
+    route: &Mutex<Option<MediaRoute>>,
+    stop: &AtomicBool,
+) {
+    let Some(current) = route.lock().unwrap().clone() else {
+        return;
+    };
+    if current.generation != generation {
+        return;
+    }
+    let mut payload = payload;
+    while !stop.load(Ordering::SeqCst) && route_is_current(route, current.generation) {
+        match current.media_tx.try_send(payload) {
+            Ok(()) | Err(TrySendError::Disconnected(_)) => return,
+            Err(TrySendError::Full(returned)) => {
+                payload = returned;
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+fn send_until_stopped<T>(sender: &SyncSender<T>, mut payload: T, stop: &AtomicBool) -> bool {
+    while !stop.load(Ordering::SeqCst) {
+        match sender.try_send(payload) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(returned)) => {
+                payload = returned;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    false
 }
 
 fn read_accessory(
     mut file: File,
     writer: Arc<Mutex<File>>,
-    media_tx: SyncSender<Vec<u8>>,
-    control_tx: SyncSender<Vec<u8>>,
+    control_tx: SyncSender<(u64, Vec<u8>)>,
     stop: Arc<AtomicBool>,
-    media_crypto: &Mutex<Option<SharedMediaCrypto>>,
+    route: &Mutex<Option<MediaRoute>>,
+    control_generation: &AtomicU64,
 ) {
     let mut decoder = usb_mux::MuxDecoder::new();
     let mut buffer = [0u8; READ_BUFFER_BYTES];
-    while !stop.load(Ordering::SeqCst) {
+    'accessory: while !stop.load(Ordering::SeqCst) {
         let size = match file.read(&mut buffer) {
             Ok(0) => break,
             Ok(size) => size,
@@ -210,10 +367,18 @@ fn read_accessory(
             Err(_) => break,
         };
         for frame in frames {
-            let target = match frame.channel {
-                usb_mux::CHANNEL_CONTROL => &control_tx,
-                usb_mux::CHANNEL_MEDIA => &media_tx,
-                _ => unreachable!(),
+            if frame.channel == usb_mux::CHANNEL_CONTROL {
+                if !send_until_stopped(
+                    &control_tx,
+                    (control_generation.load(Ordering::SeqCst), frame.payload),
+                    &stop,
+                ) {
+                    break 'accessory;
+                }
+                continue;
+            }
+            let Some(current) = route.lock().unwrap().clone() else {
+                continue;
             };
             if frame.channel == usb_mux::CHANNEL_MEDIA {
                 // Only a sealed frame that opens under the session key with
@@ -226,33 +391,35 @@ fn read_accessory(
                 // same sealed frame again — every media datagram would then
                 // die as a replay. After establishment, forward every
                 // channel-1 frame sealed.
-                let crypto = media_crypto.lock().ok().and_then(|slot| slot.clone());
-                if let Some(crypto) = crypto {
-                    if !crypto.is_established() {
-                        if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
-                            // The UDP preflight receiver marks the shared
-                            // instance established when it verifies the
-                            // sealed challenge (prepared_udp). The USB bridge
-                            // answers the same handshake, so it must set the
-                            // same gate here — without it every renderer
-                            // control send (initial IDR request, feedback,
-                            // probes) stays gated off and the host health
-                            // check kills the session at 6s.
-                            crypto.establish();
-                            if let Some(reply) = crypto.seal(&plaintext) {
-                                let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply)
-                                else {
-                                    break;
-                                };
-                                let Ok(mut output) = writer.lock() else { break };
-                                if output.write_all(&bytes).is_err() {
-                                    break;
-                                }
+                let crypto = Arc::clone(&current.crypto);
+                if !crypto.is_established() {
+                    if let Some(plaintext) = crypto.open_challenge(&frame.payload) {
+                        // The UDP preflight receiver marks the shared
+                        // instance established when it verifies the
+                        // sealed challenge (prepared_udp). The USB bridge
+                        // answers the same handshake, so it must set the
+                        // same gate here — without it every renderer
+                        // control send (initial IDR request, feedback,
+                        // probes) stays gated off and the host health
+                        // check kills the session at 6s.
+                        crypto.establish();
+                        if let Some(reply) = crypto.seal(&plaintext) {
+                            let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &reply) else {
+                                break 'accessory;
+                            };
+                            let Ok(mut output) = writer.lock() else {
+                                break 'accessory;
+                            };
+                            if !route_is_current(route, current.generation) {
+                                continue;
                             }
-                            // The echoed challenge is a control exchange, not
-                            // renderer media.
-                            continue;
+                            if output.write_all(&bytes).is_err() {
+                                break 'accessory;
+                            }
                         }
+                        // The echoed challenge is a control exchange, not
+                        // renderer media.
+                        continue;
                     }
                 }
             }
@@ -261,25 +428,29 @@ fn read_accessory(
             if frame.channel == usb_mux::CHANNEL_MEDIA {
                 if let Some(datagrams) = fragment_au_frame(&frame.payload) {
                     for datagram in datagrams {
-                        if media_tx.send(datagram).is_err() {
-                            return;
-                        }
+                        forward_media(datagram, current.generation, route, &stop);
                     }
                     continue;
                 }
             }
-            if target.send(frame.payload).is_err() {
-                return;
-            }
+            forward_media(frame.payload, current.generation, route, &stop);
         }
     }
     stop.store(true, Ordering::SeqCst);
 }
 
-fn write_udp_media(udp: UdpSocket, writer: Arc<Mutex<File>>, stop: Arc<AtomicBool>) {
+fn write_udp_media(
+    route: Arc<Mutex<Option<MediaRoute>>>,
+    writer: Arc<Mutex<File>>,
+    stop: Arc<AtomicBool>,
+) {
     let mut packet = vec![0u8; MAX_FRAME_BYTES.min(64 * 1024)];
     while !stop.load(Ordering::SeqCst) {
-        let size = match udp.recv(&mut packet) {
+        let Some(current) = route.lock().unwrap().clone() else {
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let size = match current.udp.recv(&mut packet) {
             Ok(size) if size > 0 && size <= MAX_FRAME_BYTES => size,
             Ok(_) => continue,
             Err(error)
@@ -292,26 +463,44 @@ fn write_udp_media(udp: UdpSocket, writer: Arc<Mutex<File>>, stop: Arc<AtomicBoo
             }
             Err(_) => break,
         };
+        if !route_is_current(&route, current.generation) {
+            continue;
+        }
         let Ok(bytes) = usb_mux::encode(usb_mux::CHANNEL_MEDIA, &packet[..size]) else {
             continue;
         };
         let Ok(mut output) = writer.lock() else { break };
+        if !route_is_current(&route, current.generation) {
+            continue;
+        }
         if output.write_all(&bytes).is_err() {
             break;
         }
     }
+    stop.store(true, Ordering::SeqCst);
 }
 
 fn run_control_proxy(
     listener: TcpListener,
     writer: Arc<Mutex<File>>,
-    control_rx: Receiver<Vec<u8>>,
+    control_rx: Receiver<(u64, Vec<u8>)>,
     stop: &AtomicBool,
+    control_generation: &AtomicU64,
+    max_control_line_bytes: usize,
 ) {
     let mut stream: Option<TcpStream> = None;
     let mut input = Vec::new();
-    let mut buffer = [0u8; 4096];
+    let mut buffer = [0u8; READ_BUFFER_BYTES];
+    let mut scanned = 0;
+    let mut generation = control_generation.load(Ordering::SeqCst);
     while !stop.load(Ordering::SeqCst) {
+        let current_generation = control_generation.load(Ordering::SeqCst);
+        if generation != current_generation {
+            stream = None;
+            input.clear();
+            scanned = 0;
+            generation = current_generation;
+        }
         if stream.is_none() {
             if let Ok((candidate, _)) = listener.accept() {
                 let _ = candidate.set_nonblocking(true);
@@ -320,11 +509,25 @@ fn run_control_proxy(
         }
         if let Some(current) = stream.as_mut() {
             match current.read(&mut buffer) {
-                Ok(0) => stream = None,
+                Ok(0) => {
+                    stream = None;
+                    input.clear();
+                    scanned = 0;
+                }
                 Ok(size) => {
                     input.extend_from_slice(&buffer[..size]);
-                    while let Some(newline) = input.iter().position(|byte| *byte == b'\n') {
+                    while let Some(newline) = input[scanned..]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map(|offset| scanned + offset)
+                    {
+                        if newline > max_control_line_bytes {
+                            stream = None;
+                            input.clear();
+                            break;
+                        }
                         let line: Vec<u8> = input.drain(..=newline).collect();
+                        scanned = 0;
                         let payload = line.strip_suffix(b"\n").unwrap_or(&line).to_vec();
                         if let Ok(frame) = usb_mux::encode(usb_mux::CHANNEL_CONTROL, &payload) {
                             let Ok(mut output) = writer.lock() else {
@@ -335,21 +538,35 @@ fn run_control_proxy(
                             }
                         }
                     }
+                    if input.len() > max_control_line_bytes {
+                        stream = None;
+                        input.clear();
+                    }
+                    scanned = input.len();
                 }
                 Err(error)
                     if matches!(
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) => {}
-                Err(_) => stream = None,
+                Err(_) => {
+                    stream = None;
+                    input.clear();
+                    scanned = 0;
+                }
             }
         }
         loop {
             match control_rx.try_recv() {
-                Ok(payload) => {
+                Ok((response_generation, payload)) => {
+                    if response_generation != generation {
+                        continue;
+                    }
                     if let Some(current) = stream.as_mut() {
                         if current.write_all(&payload).is_err() {
                             stream = None;
+                            input.clear();
+                            scanned = 0;
                             break;
                         }
                         let _ = current.flush();
@@ -368,6 +585,217 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stale_media_lease_cannot_cancel_or_consume_the_next_session() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (viewer, mut host) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let key = crate::media_crypto::test_media_key(9);
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let old = bridge.prepare_media(key).unwrap();
+        let current = bridge.prepare_media(key).unwrap();
+        assert_ne!(old.control_addr(), current.control_addr());
+        assert!(old.recv_media_timeout(Duration::ZERO).is_err());
+        drop(old);
+        assert!(current.is_current());
+        let host_tx = secure_channel::DatagramSealer::new(secure_channel::media_keys(&key).s2c);
+        let challenge = host_tx.seal(b"LCH1quiet-accessory").unwrap();
+        host.write_all(&usb_mux::encode(usb_mux::CHANNEL_MEDIA, &challenge).unwrap())
+            .unwrap();
+        let mut header = [0u8; 5];
+        host.read_exact(&mut header).unwrap();
+        let mut reply = vec![0u8; u32::from_be_bytes(header[1..].try_into().unwrap()) as usize];
+        host.read_exact(&mut reply).unwrap();
+        assert!(bridge.is_running());
+        bridge.stop_after_detach();
+        drop(host); // Physical disconnect releases the driver's blocking read.
+    }
+
+    #[test]
+    fn a_new_session_releases_old_queue_backpressure_and_rejects_old_udp_feedback() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, mut host) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let old_key = crate::media_crypto::test_media_key(4);
+        let old = bridge.prepare_media(old_key).unwrap();
+        let old_tx = secure_channel::DatagramSealer::new(secure_channel::media_keys(&old_key).s2c);
+        let send = |host: &mut UnixStream, tx: &secure_channel::DatagramSealer, data: &[u8]| {
+            host.write_all(
+                &usb_mux::encode(usb_mux::CHANNEL_MEDIA, &tx.seal(data).unwrap()).unwrap(),
+            )
+            .unwrap();
+        };
+        let receive = |host: &mut UnixStream| {
+            let mut header = [0u8; 5];
+            host.read_exact(&mut header).unwrap();
+            let mut payload =
+                vec![0u8; u32::from_be_bytes(header[1..].try_into().unwrap()) as usize];
+            host.read_exact(&mut payload).unwrap();
+            payload
+        };
+        send(&mut host, &old_tx, b"LCH1old");
+        receive(&mut host);
+        for _ in 0..3 {
+            send(&mut host, &old_tx, b"old media");
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        let new_key = crate::media_crypto::test_media_key(5);
+        let current = bridge.prepare_media(new_key).unwrap();
+        let new_tx = secure_channel::DatagramSealer::new(secure_channel::media_keys(&new_key).s2c);
+        send(&mut host, &new_tx, b"LCH1new");
+        let new_rx = secure_channel::DatagramSealer::new(secure_channel::media_keys(&new_key).c2s);
+        assert_eq!(new_rx.open(&receive(&mut host)).unwrap(), b"LCH1new");
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"old feedback", old.control_addr()).unwrap();
+        sender
+            .send_to(b"current feedback", current.control_addr())
+            .unwrap();
+        assert_eq!(receive(&mut host), b"current feedback");
+        assert!(old.recv_media_timeout(Duration::ZERO).is_err());
+        bridge.stop_after_detach();
+        drop(host);
+    }
+
+    #[test]
+    fn a_new_control_connection_never_inherits_an_unfinished_line() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, mut host) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let _lease = bridge
+            .prepare_media(crate::media_crypto::test_media_key(7))
+            .unwrap();
+        let mut old = TcpStream::connect(("127.0.0.1", bridge.control_port())).unwrap();
+        old.write_all(b"unfinished-old-request").unwrap();
+        old.shutdown(std::net::Shutdown::Both).unwrap();
+        let mut current = TcpStream::connect(("127.0.0.1", bridge.control_port())).unwrap();
+        current.write_all(b"current-request\n").unwrap();
+        let mut header = [0u8; 5];
+        host.read_exact(&mut header).unwrap();
+        let mut request = vec![0u8; u32::from_be_bytes(header[1..].try_into().unwrap()) as usize];
+        host.read_exact(&mut request).unwrap();
+        assert_eq!(request, b"current-request");
+        bridge.stop_after_detach();
+        drop(host);
+    }
+
+    #[test]
+    fn an_oversized_unterminated_control_line_is_rejected() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let bridge = Arc::new(UsbBridge::start_with_control_limit(viewer.as_raw_fd(), 32).unwrap());
+        let _lease = bridge
+            .prepare_media(crate::media_crypto::test_media_key(7))
+            .unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", bridge.control_port())).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        // A peer may never delimit its first command. The native loopback
+        // proxy still needs a byte bound before the Host sees that command.
+        let _ = client.write_all(&[b'x'; 33]);
+        let result = client.read(&mut [0u8; 1]);
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset),
+            "oversized partial commands must close the connection"
+        );
+        bridge.stop_after_detach();
+        drop(host);
+    }
+
+    #[test]
+    fn accessory_write_failure_marks_the_physical_owner_unavailable() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let lease = bridge
+            .prepare_media(crate::media_crypto::test_media_key(3))
+            .unwrap();
+        viewer.shutdown(std::net::Shutdown::Write).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"feedback", lease.control_addr()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while bridge.is_running() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            !bridge.is_running(),
+            "a stopped writer must not be reused as a live accessory"
+        );
+        drop(host);
+    }
+
+    #[test]
+    fn challenge_echo_failure_marks_the_physical_owner_unavailable() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, mut host) = UnixStream::pair().unwrap();
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let key = crate::media_crypto::test_media_key(2);
+        let _lease = bridge.prepare_media(key).unwrap();
+        viewer.shutdown(std::net::Shutdown::Write).unwrap();
+        let host_tx = secure_channel::DatagramSealer::new(secure_channel::media_keys(&key).s2c);
+        host.write_all(
+            &usb_mux::encode(
+                usb_mux::CHANNEL_MEDIA,
+                &host_tx.seal(b"LCH1failed-echo").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while bridge.is_running() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            !bridge.is_running(),
+            "a failed challenge write must retire its physical reader"
+        );
+        drop(host);
+    }
+
+    #[test]
+    fn control_plane_survives_logical_media_cancellation() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (viewer, mut host) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let bridge = Arc::new(UsbBridge::start(viewer.as_raw_fd()).unwrap());
+        let lease = bridge
+            .prepare_media(crate::media_crypto::test_media_key(7))
+            .unwrap();
+        drop(lease);
+        let mut client = TcpStream::connect(("127.0.0.1", bridge.control_port())).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client.write_all(b"catalog-request\n").unwrap();
+        let mut header = [0u8; 5];
+        host.read_exact(&mut header).unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes(header[1..].try_into().unwrap()) as usize];
+        host.read_exact(&mut payload).unwrap();
+        assert_eq!(payload, b"catalog-request");
+        host.write_all(&usb_mux::encode(usb_mux::CHANNEL_CONTROL, b"catalog-response\n").unwrap())
+            .unwrap();
+        let mut response = [0u8; 17];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"catalog-response\n");
+        bridge.stop_after_detach();
+        drop(host);
+    }
+
+    #[test]
     fn aoap_media_memory_is_bounded_for_4k() {
         assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
         assert_eq!(MEDIA_CHANNEL_CAPACITY, 2);
@@ -376,7 +804,7 @@ mod tests {
 
     #[test]
     fn start_rejects_invalid_fd() {
-        assert!(UsbBridge::start(-1, [0u8; 32]).is_err());
+        assert!(UsbBridge::start(-1).is_err());
     }
 
     fn l2_frame(body_len: usize) -> Vec<u8> {

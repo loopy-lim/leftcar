@@ -5,6 +5,10 @@
 
 export const colors = {
   light: {
+    curtain: "#000000",
+    curtainInk: "#A1A1AA",
+    qr: "#FFFFFF",
+    scrim: "rgba(0, 0, 0, 0.48)",
     bgCanvas: "#FAFAFA",
     bgSurface: "#FFFFFF",
     bgSubtle: "#F4F4F5",
@@ -24,8 +28,8 @@ export const colors = {
 
     textPrimary: "#09090B",
     textSecondary: "#52525B",
-    textMuted: "#71717A",
-    textDim: "#A1A1AA",
+    textMuted: "#62626C",
+    textDim: "#62626C",
 
     brandPrimary: "#09090B",
     brandHover: "#27272A",
@@ -45,11 +49,15 @@ export const colors = {
     chipText: "#52525B",
   },
   dark: {
+    curtain: "#000000",
+    curtainInk: "#A1A1AA",
+    qr: "#FFFFFF",
+    scrim: "rgba(0, 0, 0, 0.48)",
     bgCanvas: "#09090B",
-    bgSurface: "#141417",
-    bgSubtle: "#1E1E24",
-    bgHover: "#2A2A32",
-    bgActive: "#383844",
+    bgSurface: "#18181B",
+    bgSubtle: "#27272A",
+    bgHover: "#3F3F46",
+    bgActive: "#3F3F46",
 
     borderSubtle: "rgba(255, 255, 255, 0.08)",
     borderCard: "rgba(255, 255, 255, 0.14)",
@@ -58,18 +66,18 @@ export const colors = {
 
     btnPrimaryBg: "#FAFAFA",
     btnPrimaryText: "#09090B",
-    btnSecondaryBg: "#1E1E24",
+    btnSecondaryBg: "#27272A",
     btnSecondaryText: "#FAFAFA",
     btnSecondaryBorder: "rgba(255, 255, 255, 0.14)",
 
     textPrimary: "#FAFAFA",
     textSecondary: "#A1A1AA",
-    textMuted: "#71717A",
-    textDim: "#52525B",
+    textMuted: "#A1A1AA",
+    textDim: "#A1A1AA",
 
     brandPrimary: "#FAFAFA",
     brandHover: "#E4E4E7",
-    brandSubtle: "#1E1E24",
+    brandSubtle: "#27272A",
 
     statusLive: "#10B981",
     statusLiveSubtle: "rgba(16, 185, 129, 0.14)",
@@ -80,7 +88,7 @@ export const colors = {
     statusDangerSubtle: "rgba(239, 68, 68, 0.15)",
 
     statusDot: "#10B981",
-    chipBg: "#1E1E24",
+    chipBg: "#27272A",
     chipBorder: "rgba(255, 255, 255, 0.12)",
     chipText: "#A1A1AA",
   },
@@ -166,6 +174,6 @@ export const radii = {
 export const hitTargets = {
   /** 44x44pt: Apple HIG and Material minimum touch target for mobile */
   mobileMin: 44,
-  /** 32x32px: Standard desktop mouse click target for compact controls */
-  desktopMin: 32,
+  /** Controls remain reachable on touch-enabled desktop displays. */
+  desktopMin: 44,
 } as const;

@@ -1,22 +1,15 @@
-import { useEffect, useState } from "react";
+import { useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
-import type { TranslationSchema } from "@leftcar/ui-tokens";
-import { buttonVariants } from "./lib/variants";
+import { cn, interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
+import { Button, Field, Notice, Surface, Text, Toggle } from "./ui/primitives";
 import { useExperiments, type ViewerExperiments } from "./Privacy";
 
-/**
- * 설정 모달의 실험 섹션. 페이싱 A/B 환경변수들을 앱 안에서 저장한다 — 값은
- * settings.json에 영속되고 호스트가 프로세스 환경변수로 주입하므로 다음
- * 스트림부터 효력을 가진다(앱 재시작 불필요). 데이터는 섹션이 스스로
- * 불러오고 저장한다(모달 prop 확장 없이).
- */
 type NumericExperimentKey =
   | "maxEncodeInFlight"
   | "queueMaxAgeMs"
   | "sndbufBytes"
   | "drlWindowMs"
   | "pacingBudgetPct";
-
 interface NumericRowSpec {
   key: NumericExperimentKey;
   label: string;
@@ -26,17 +19,6 @@ interface NumericRowSpec {
   placeholder: string;
 }
 
-const inputStyle = {
-  width: 96,
-  padding: "4px 8px",
-  fontSize: 12,
-  textAlign: "right" as const,
-  color: "var(--text-primary)",
-  background: "var(--bg-surface-subtle)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: 7,
-};
-
 function ExperimentNumberRow({
   label,
   desc,
@@ -45,6 +27,7 @@ function ExperimentNumberRow({
   placeholder,
   value,
   disabled,
+  validationMessage,
   onCommit,
 }: {
   label: string;
@@ -54,75 +37,73 @@ function ExperimentNumberRow({
   placeholder: string;
   value: number | null;
   disabled: boolean;
+  validationMessage: string;
   onCommit: (next: number | null) => void;
 }) {
-  const [draft, setDraft] = useState(() => (value === null ? "" : String(value)));
-  // 저장이 확정되어 호스트 값이 바뀌면(되돌림 포함) 입력을 원점에 맞춘다.
-  useEffect(() => {
-    setDraft(value === null ? "" : String(value));
-  }, [value]);
+  const id = useId();
+  const [draft, setDraft] = useState(() =>
+    value === null ? "" : String(value),
+  );
+  const [invalid, setInvalid] = useState(false);
   const commit = () => {
+    if (disabled) return;
     const trimmed = draft.trim();
-    if (trimmed === "") {
-      if (value !== null) onCommit(null);
+    const parsed = trimmed === "" ? null : Number(trimmed);
+    if (
+      parsed !== null &&
+      (!Number.isInteger(parsed) || parsed < min || parsed > max)
+    ) {
+      setInvalid(true);
       return;
     }
-    const parsed = Number(trimmed);
-    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-      setDraft(value === null ? "" : String(value));
-      return;
-    }
+    setInvalid(false);
     if (parsed !== value) onCommit(parsed);
   };
   return (
-    <div className="settings-item-row">
-      <div className="settings-item-info">
-        <span className="settings-item-name">{label}</span>
-        <p className="settings-item-desc">{desc}</p>
+    <div className="space-y-2 p-4">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <label htmlFor={id} className="text-body text-ink font-semibold">
+            {label}
+          </label>
+          <p id={`${id}-help`} className="text-caption text-muted mt-1">
+            {desc}
+          </p>
+        </div>
+        <Field
+          id={id}
+          type="number"
+          min={min}
+          max={max}
+          value={draft}
+          placeholder={placeholder}
+          disabled={disabled}
+          invalid={invalid}
+          aria-describedby={`${id}-help${invalid ? ` ${id}-error` : ""}`}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setInvalid(false);
+          }}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+          className="w-28 shrink-0 text-right tabular-nums"
+        />
       </div>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        value={draft}
-        placeholder={placeholder}
-        disabled={disabled}
-        aria-label={label}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
-        }}
-        style={inputStyle}
-      />
+      {invalid && (
+        <Text id={`${id}-error`} variant="caption" role="alert">
+          {validationMessage}
+        </Text>
+      )}
     </div>
   );
 }
 
 export function ExperimentsSection({ t }: { t: TranslationSchema }) {
   const { experiments, error, saving, retry, save } = useExperiments();
-  // 전송 계층 A/B 노브는 사용자 설정이 아니라 개발자 값이므로 기본은 접는다(DESIGN-REVIEW X-2).
   const [expanded, setExpanded] = useState(false);
-
-  if (!experiments) {
-    if (!error) return null;
-    return (
-      <div className="settings-section">
-        <span className="settings-section-title">{t.host.experimentSection}</span>
-        <div className="settings-item-error" role="alert">
-          <span>{error}</span>
-          <button
-            type="button"
-            className={buttonVariants({ variant: "ghost", size: "sm" })}
-            onClick={retry}
-          >
-            {t.common.retry}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  const panelId = useId();
   const numericRows: NumericRowSpec[] = [
     {
       key: "maxEncodeInFlight",
@@ -167,82 +148,102 @@ export function ExperimentsSection({ t }: { t: TranslationSchema }) {
   ];
 
   const update = (patch: Partial<ViewerExperiments>) => {
-    void save({ ...experiments, ...patch });
+    if (experiments && !saving) void save({ ...experiments, ...patch });
   };
-
   return (
-    <div className="settings-section">
-      <div className="settings-section-header">
-        <span className="settings-section-title">{t.host.experimentSection}</span>
-        <button
-          type="button"
-          className="settings-section-toggle"
+    <section className="space-y-2" aria-label={t.host.experimentSection}>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-caption text-muted font-semibold">
+          {t.host.experimentSection}
+        </h3>
+        <Button
+          variant="ghost"
+          size="compact"
           aria-expanded={expanded}
-          onClick={() => setExpanded((prev) => !prev)}
+          aria-controls={panelId}
+          onClick={() => setExpanded((previous) => !previous)}
         >
           {t.viewer.advancedSettingsToggle}
           <ChevronDown
-            size={12}
-            style={{ transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
+            size={16}
+            className={cn(
+              "motion-reduce:transition-none",
+              expanded && "rotate-180",
+            )}
           />
-        </button>
+        </Button>
       </div>
       {expanded && (
-        <>
-          <div className="settings-group-container">
-            {numericRows.map((spec) => (
-              <ExperimentNumberRow
-                key={spec.key}
-                label={spec.label}
-                desc={spec.desc}
-                min={spec.min}
-                max={spec.max}
-                placeholder={spec.placeholder}
-                value={experiments[spec.key]}
-                disabled={saving}
-                onCommit={(next) => update({ [spec.key]: next })}
-              />
-            ))}
-            <div className="settings-item-row">
-              <div className="settings-item-info">
-                <span className="settings-item-name">{t.host.experimentTraceLabel}</span>
-                <p className="settings-item-desc">{t.host.experimentTraceDesc}</p>
+        <div id={panelId} className="space-y-2">
+          {!experiments && !error && <Notice>{t.host.checkingSettings}</Notice>}
+          {experiments && (
+            <Surface variant="card" className="divide-y divide-outline p-0">
+              {numericRows.map(({ key, ...spec }) => (
+                <ExperimentNumberRow
+                  key={`${key}:${experiments[key] ?? "default"}`}
+                  {...spec}
+                  value={experiments[key]}
+                  disabled={saving}
+                  validationMessage={interpolate(t.host.experimentValueError, {
+                    min: spec.min,
+                    max: spec.max,
+                  })}
+                  onCommit={(next) => update({ [key]: next })}
+                />
+              ))}
+              <div className="flex items-start gap-3 p-4">
+                <div className="min-w-0 flex-1">
+                  <Text className="block font-semibold">
+                    {t.host.experimentTraceLabel}
+                  </Text>
+                  <p className="text-caption text-muted mt-1">
+                    {t.host.experimentTraceDesc}
+                  </p>
+                </div>
+                <Toggle
+                  checked={experiments.frameTrace}
+                  busy={saving}
+                  aria-label={t.host.experimentTraceLabel}
+                  onClick={() =>
+                    update({ frameTrace: !experiments.frameTrace })
+                  }
+                />
               </div>
-              <button
-                type="button"
-                className={`ui-switch ${experiments.frameTrace ? "switch-active" : ""}`}
-                onClick={() => update({ frameTrace: !experiments.frameTrace })}
-                aria-pressed={experiments.frameTrace}
-                aria-label={t.host.experimentTraceLabel}
-              >
-                <span className="ui-switch-thumb" />
-              </button>
-            </div>
-          </div>
-          <div
-            style={{
-              color: "var(--text-muted)",
-              fontSize: 12,
-              lineHeight: "16px",
-            }}
-          >
+            </Surface>
+          )}
+          <Text variant="caption" tone="muted">
             {t.host.experimentApplyHint}
-          </div>
-        </>
-      )}
-      {error && (
-        <div className="settings-item-error" role="alert">
-          <span>{error}</span>
-          <button
-            type="button"
-            className={buttonVariants({ variant: "ghost", size: "sm" })}
-            onClick={retry}
-            disabled={saving}
-          >
-            {t.common.retry}
-          </button>
+          </Text>
+          {saving && (
+            <Text variant="caption" tone="muted" role="status">
+              {t.host.savingSettings}
+            </Text>
+          )}
         </div>
       )}
-    </div>
+      {error && (
+        <Notice
+          tone="error"
+          className="flex flex-wrap items-center justify-between gap-2"
+        >
+          <Text variant="caption">
+            {error.operation === "load"
+              ? t.host.settingsLoadError
+              : t.host.settingsSaveError}
+          </Text>
+          <Button
+            variant="secondary"
+            size="compact"
+            busy={saving}
+            onClick={retry}
+          >
+            {t.common.retry}
+          </Button>
+          <Text variant="caption" className="basis-full break-words">
+            {error.detail}
+          </Text>
+        </Notice>
+      )}
+    </section>
   );
 }

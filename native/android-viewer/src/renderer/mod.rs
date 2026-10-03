@@ -1,6 +1,8 @@
 #[cfg(any(target_os = "android", test))]
 pub(crate) mod control_ingress;
 pub mod fec_stats;
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod media_ingress;
 pub mod output_metadata;
 pub mod presentation_sync;
 pub mod recovery;

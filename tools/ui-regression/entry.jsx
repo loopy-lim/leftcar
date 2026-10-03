@@ -10,6 +10,7 @@ import {
 // Control only the Tauri transport; all hook and dialog behavior is production.
 const pending = new Map();
 Object.assign(window, {
+  pendingCount(command) { return pending.get(command)?.length ?? 0; },
   __TAURI_INTERNALS__: {
     invoke(command) {
       return new Promise((resolve, reject) => {
@@ -69,7 +70,7 @@ function App() {
     </main>
   );
 }
-localStorage.setItem("leftcar_lang", "en");
+localStorage.setItem("leftcar_lang", new URLSearchParams(location.search).get("lang") === "ko" ? "ko" : "en");
 createRoot(document.getElementById("root")).render(
   location.search.includes("dashboard") ? <HostApp /> : <App />,
 );

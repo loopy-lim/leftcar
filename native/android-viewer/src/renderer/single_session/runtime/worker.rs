@@ -780,14 +780,18 @@ fn run(launch: SingleRendererLaunch) {
                 continue;
             };
 
-            if !peer_allowed(Some(peer), &expected_host) {
-                log_info!("rejected media datagram from {peer}: not the paired host");
+            let Some(admitted) = crate::renderer::media_ingress::admit_media_datagram(
+                &crypto,
+                &mut media_buffer[..received],
+                peer,
+                &expected_host,
+                &mut host_peer,
+                Some(&mut media_since_probe),
+            ) else {
                 continue;
-            }
-            media_since_probe = true;
-            if host_peer != Some(peer) {
+            };
+            if admitted.peer_changed {
                 log_info!("UDP sender active: {peer}");
-                host_peer = Some(peer);
                 *input_endpoint.lock().unwrap() = Some((peer, Arc::clone(&crypto)));
                 reassembler.clear();
                 frame_sequencer.clear();
@@ -836,15 +840,7 @@ fn run(launch: SingleRendererLaunch) {
                 }
             }
 
-            let packet_slot = &mut media_buffer[..received];
-            // Open before parsing: a datagram that fails to open under the
-            // session media key is dropped without any parsing. The in-place
-            // variant decrypts inside the recvmmsg buffer — no per-datagram
-            // Vec on the RX hot path.
-            let Some(opened) = crypto.open_into(packet_slot) else {
-                continue;
-            };
-            let packet: &[u8] = opened;
+            let packet = admitted.plaintext;
             if let Some(challenge) = crate::prepared_udp::is_challenge_packet(packet) {
                 crypto.establish();
                 control_health = ControlHealthState::default();

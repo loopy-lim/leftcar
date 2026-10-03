@@ -1,4 +1,4 @@
-import { saveRecentHostStrict, getRecentHosts } from "./recent-hosts";
+import { saveRecentHostStrict, getRecentHosts, getRecentHostsStrict } from "./recent-hosts";
 
 /**
  * 호스트 공개키 핀 저장소(프로세스 메모리). QR 스캔·recent hosts 로드 시
@@ -45,6 +45,17 @@ export async function rememberPinnedHostKey(
 
 export function getPinnedHostKey(host: string, port: number): string | null {
   return pinned.get(keyOf(host, port)) ?? null;
+}
+
+/** Read persistent trust before opening a network socket, including saved aliases. */
+export async function getStoredPinnedHostKey(host: string, port: number): Promise<string | null> {
+  const normalized = host.trim().toLowerCase();
+  const hosts = await getRecentHostsStrict();
+  const keys = new Set(hosts.filter((item) => item.port === port &&
+    [item.host, ...(item.aliases ?? [])].some((route) => route.trim().toLowerCase() === normalized))
+    .flatMap((item) => item.hostKey ? [item.hostKey] : []));
+  if (keys.size > 1) throw new Error("Conflicting saved host identities");
+  return keys.values().next().value ?? null;
 }
 
 /** Restore the in-memory endpoint alias during a failed credential transaction. */

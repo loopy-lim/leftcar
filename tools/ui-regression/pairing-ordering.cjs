@@ -5,17 +5,20 @@ const {chromium}=require('playwright-core');const assert=require('node:assert/st
 // 화면 접근: 0 → 화면 권한 없음. 저장 지연·실패 재시도·stale 스냅샷 펜스
 // 시맨틱은 paired-device-state의 revision 규칙으로 그대로 검증한다.
 const root=`file://${process.env.UI_TEST_DIR||'/tmp/leftcar-task4-ui'}/pairing-grants.html`;
-const row=(page,name='Fixture device')=>page.locator('.device-row-item').filter({has:page.getByText(name,{exact:true})});
-const approve=(page,name)=>row(page,name).getByRole('button',{name:'화면 허용',exact:true}).click();
-const revokeViaDialog=async(page,name)=>{await row(page,name).getByRole('button',{name:'삭제',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'삭제',exact:true}).click();};
+const row=(page,name='Fixture device')=>page.getByRole('listitem').filter({has:page.getByText(name,{exact:true})});
+const approve=(page,name='Fixture device')=>row(page,name).getByRole('button',{name:`${name}: 화면 허용`,exact:true}).click();
+const revokeViaDialog=async(page,name)=>{await row(page,name).getByRole('button',{name:`${name}: 삭제`,exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'삭제',exact:true}).click();};
 async function remount(page){await page.evaluate(()=>window.mountPairing(false));await page.waitForTimeout(20);await page.evaluate(()=>window.mountPairing(true));}
 async function settle(page,deviceId,stateRevision,revision=2,sourceIds=[]){await page.evaluate(({deviceId,stateRevision,revision,sourceIds})=>{const io=window.pairingIo;const index=io.pending.findIndex(p=>p.args.deviceId===deviceId);io.pending.splice(index,1)[0].resolve({credentialId:deviceId==='fixture-b'?'credential-B':'credential-A',stateRevision,revision,sourceIds,reviewRequired:false,persistenceError:null});},{deviceId,stateRevision,revision,sourceIds});}
-(async()=>{const browser=await chromium.launch({headless:true});let failures=0;async function test(name,body){const page=await browser.newPage();try{await body(page);console.log('PASS '+name);}catch(error){failures++;console.error('FAIL '+name+': '+error.stack);}finally{await page.close();}}
+(async()=>{const browser=await chromium.launch({headless:true});let failures=0;async function test(name,body){const page=await browser.newPage();page.setDefaultTimeout(4000);try{await body(page);console.log('PASS '+name);}catch(error){failures++;console.error('FAIL '+name+': '+error.stack);}finally{await page.close();}}
 try{
 for(const revoke of [false,true])await test(`actual parent reversed two-device ${revoke?'revoke':'approval'} results, failed refresh/remount/stale snapshot`,async page=>{
  await page.goto(root+'?two=1&review=1');await row(page).getByText('승인 대기',{exact:true}).waitFor();
  await page.evaluate(()=>{window.pairingIo.refreshFails=true;window.pairingIo.deferRevoke=true;});
  if(revoke)await revokeViaDialog(page,'Fixture device');else await approve(page);
+ // Pending native policy writes outlive the originating WebView. A replacement
+ // view may submit another device mutation while that old response is delayed.
+ await remount(page);
  await approve(page,'Fixture B');await settle(page,'fixture-b',3);
  await row(page,'Fixture B').getByText('화면 권한 없음',{exact:true}).waitFor();
  if(revoke)await page.evaluate(()=>window.pairingIo.pendingRevokes.shift().resolve({removedDevices:[{deviceId:'fixture-device',credentialId:'credential-A'}],stateRevision:2,persistenceErrors:[]}));else await settle(page,'fixture-device',2);

@@ -260,9 +260,7 @@ fn real_output_drain_paces_one_release_per_vsync_slot() {
     decoder.set_output_target(Some(next_target));
     assert!(decoder.pump_latest_output(0).unwrap());
     assert_eq!(decoder.last_released_pts_us, Some(9012));
-    PROBE.with_borrow(|p| {
-        assert_eq!(p.releases.last(), Some(&(42, Some(next_target), true)))
-    });
+    PROBE.with_borrow(|p| assert_eq!(p.releases.last(), Some(&(42, Some(next_target), true))));
 
     // Dropping back to freshness mode collapses the parked tail to the newest
     // image and renders it immediately.
@@ -271,10 +269,7 @@ fn real_output_drain_paces_one_release_per_vsync_slot() {
     assert!(decoder.pump_latest_output(0).unwrap());
     assert_eq!(decoder.last_released_pts_us, Some(20000));
     PROBE.with_borrow(|p| {
-        assert_eq!(
-            p.releases.last(),
-            Some(&(44, None, true))
-        );
+        assert_eq!(p.releases.last(), Some(&(44, None, true)));
         assert_eq!(p.releases[3], (43, None, false));
     });
     assert_eq!(decoder.frames_discarded, 2);
@@ -291,9 +286,7 @@ fn real_output_drain_flush_forgets_parked_outputs() {
     assert!(decoder.pump_latest_output(0).unwrap());
     // Two outputs fit the park budget: the oldest (50) takes the slot and 51
     // stays parked for the next one.
-    PROBE.with_borrow(|p| {
-        assert_eq!(p.releases, vec![(50, Some(target), true)])
-    });
+    PROBE.with_borrow(|p| assert_eq!(p.releases, vec![(50, Some(target), true)]));
     // A codec flush reclaims parked indices; the next slot must not release
     // the stale index of the parked 51.
     decoder.flush().unwrap();
@@ -305,10 +298,7 @@ fn real_output_drain_flush_forgets_parked_outputs() {
     PROBE.with_borrow(|p| {
         assert_eq!(
             p.releases,
-            vec![
-                (50, Some(target), true),
-                (52, Some(next_target), true)
-            ]
+            vec![(50, Some(target), true), (52, Some(next_target), true)]
         )
     });
 }

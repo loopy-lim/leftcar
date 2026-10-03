@@ -207,7 +207,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         terminationHandled = true
         val message = ViewerStrings.terminationMessage(reason)
         if (reason == 1 || reason == 4) {
-            StreamLauncherModule.emitTermination(port, reason)
+            StreamLauncherModule.emitTermination(port, reason, ownershipGeneration)
         }
         android.util.Log.i("LeftcarStream", "stream termination reason=$reason: $message")
         if (isSameWindowRecoveryReason(reason)) {
@@ -248,7 +248,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         val runnable = object : Runnable {
             override fun run() {
                 if (released || isFinishing || isDestroyed || !terminationHandled) return
-                StreamLauncherModule.emitTermination(port, reason)
+                StreamLauncherModule.emitTermination(port, reason, ownershipGeneration)
                 recoveryHandler.postDelayed(this, TERMINATION_REEMIT_INTERVAL_MS)
             }
         }
@@ -276,7 +276,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                     "split render recovery requires React/Host re-preparation; " +
                         "instanceId=$instanceId port=$port",
                 )
-                StreamLauncherModule.emitTermination(port, 5)
+                StreamLauncherModule.emitTermination(port, 5, ownershipGeneration)
             }
             return
         }
@@ -289,23 +289,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                     "local render recovery exhausted; requesting React/Host retry " +
                         "instanceId=$instanceId port=$port",
                 )
-                StreamLauncherModule.emitTermination(port, 5)
+                StreamLauncherModule.emitTermination(port, 5, ownershipGeneration)
             }
-            if (StreamLauncherModule.activeRegisteredReactContext() == null) {
-                android.util.Log.i(
-                    "LeftcarStream",
-                    "React context unavailable (MainActivity closed); resetting recovery retry policy after delay",
-                )
-                recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
-                val selfHeal = Runnable {
-                    recoveryRetryRunnable = null
-                    recoveryFallbackEmitted = false
-                    recoveryRetryPolicy.reset()
-                    scheduleRenderRecovery()
-                }
-                recoveryRetryRunnable = selfHeal
-                recoveryHandler.postDelayed(selfHeal, 5_000L)
-            }
+            // The Launcher retains this handoff until React subscribes again.
+            // Absence of React must not replenish the local retry budget.
             return
         }
         recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
@@ -448,8 +435,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         inputLanguageMonitor.reset()
         if (result == 0) {
             terminationHandled = false
-            recoveryFallbackEmitted = false
-            recoveryRetryPolicy.reset()
+            // JNI success only proves Surface attachment. Preserve the retry
+            // budget until markRenderHealthy observes forward frame progress.
             cancelTerminationReemit()
             // A rebind builds a fresh renderer session, so the cursor stream
             // subscription must ride again with the new control channel.
@@ -461,13 +448,22 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun markRenderHealthy() {
-        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
-        recoveryRetryRunnable = null
+        StreamLauncherModule.cancelPendingRecovery(instanceId, ownershipGeneration)
+        cancelRecoveryCallbacks()
         recoveryRetryPolicy.reset()
         recoveryFallbackEmitted = false
-        cancelRecoveryFlowWatchdog()
+    }
+
+    private fun cancelRecoveryCallbacks() {
+        cancelRenderRecoveryCallbacks()
         cancelAttachFlowWatchdog()
         cancelTerminationReemit()
+    }
+
+    private fun cancelRenderRecoveryCallbacks() {
+        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+        recoveryRetryRunnable = null
+        cancelRecoveryFlowWatchdog()
     }
 
     // 스트림 수신 중 라디오 절전이 프레임 유실의 주원인 — low-latency Wi-Fi lock 유지
@@ -1375,20 +1371,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
     }
 
-    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        // 잠금 배너 탭(2026-09-21): HUD 배너 팝업은 터치를 받지 않으므로
-        // 배지 영역 히트 테스트를 여기서 대행한다. 요청을 보내면 탭을 소비해
-        // 스트림 입력(원격 클릭)으로 새지 않게 한다.
-        if (event.action == MotionEvent.ACTION_DOWN &&
-            hud?.consumeInputRequestTap(event.x, event.y) == true
-        ) {
-            StreamLauncherModule.emitInputEnableRequested(port)
-            hud?.onInputRequestSent()
-            return true
-        }
-        return super.dispatchTouchEvent(event)
-    }
-
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         StreamPointerDiagnostics.recordLanguageKey(event)
         // Read actual IME state before the next letter joins the reliable queue.
@@ -1459,6 +1441,11 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             event.repeatCount,
         )
         return result || super.dispatchKeyEvent(event)
+    }
+
+    internal fun reportInputRequestResult(generation: String, requestId: String, error: String?): Boolean {
+        if (released || ownershipGeneration.toString() != generation) return false
+        return hud?.onInputRequestResult(requestId, error) == true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1552,6 +1539,22 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             onInputStatusChanged = { status ->
                 if (status == 0) forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
             },
+            onInputRequest = { requestId ->
+                if (released || StreamLauncherModule.activeRegisteredReactContext() == null) false
+                else {
+                    StreamLauncherModule.emitInputEnableRequested(port, instanceId, ownershipGeneration.toString(), requestId)
+                    true
+                }
+            },
+            onRetryRebind = {
+                if (!released && !isFinishing && !isDestroyed) {
+                    recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
+                    recoveryRetryRunnable = null
+                    recoveryRetryPolicy.reset()
+                    recoveryFallbackEmitted = false
+                    scheduleRenderRecovery()
+                }
+            },
         )
         hud?.show()
         // 첫 레이아웃 이후 저장되지 않은 크기(저장값 없음 포함)면 칩을 보인다.
@@ -1612,6 +1615,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (newIntent.hasExtra("ownershipGeneration")) {
             val nextGeneration = newIntent.getLongExtra("ownershipGeneration", ownershipGeneration)
             if (!StreamLauncherModule.registerStreamActivity(instanceId, nextGeneration, this)) return
+            if (ownershipGeneration != nextGeneration) {
+                cancelRecoveryCallbacks()
+                hud?.invalidateInputRequests()
+            }
             ownershipGeneration = nextGeneration
         }
         // Preserve start configuration through partial controls. Keep the
@@ -1634,6 +1641,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         if (streamConfigurationChanged || reconnectRequested) {
+            // Delayed work owns the incumbent configuration and may not read
+            // the successor's mutable host, port or native renderer state.
+            cancelRecoveryCallbacks()
             forceReleaseInput(InputOwnershipEvent.Disconnected)
             splitNeedsPreparation = false
             terminationHandled = false
@@ -1932,6 +1942,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         cancelPendingSurfaceAttach()
+        // Losing a Surface is a lifecycle pause, not a failed render attempt.
+        // Fresh Surface creation owns the next attach and health watchdog.
+        cancelRenderRecoveryCallbacks()
         cancelAttachFlowWatchdog()
         displayClock.stop()
         ViewerNative.displayFrame(nativeState, instanceId, balancedPresentation || presentationSmooth, -1, 0, 0)
@@ -2014,10 +2027,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         keyBridgeInput = null
         surfaceLifecycle.invalidate()
         cancelPendingSurfaceAttach()
-        recoveryRetryRunnable?.let(recoveryHandler::removeCallbacks)
-        recoveryRetryRunnable = null
-        cancelRecoveryFlowWatchdog()
-        cancelAttachFlowWatchdog()
+        cancelRecoveryCallbacks()
         tabletCursorHandler.removeCallbacks(hideTabletCursorRunnable)
         gestureHandler.removeCallbacksAndMessages(null)
         cursorOverlay?.stop()

@@ -20,28 +20,37 @@ export const RECENT_HOSTS_KEY = "leftcar.recent_hosts";
 export const MAX_RECENT_HOSTS = 5;
 export const MAX_HOST_ALIASES = 4;
 
+function isRecentHostItem(item: unknown): item is RecentHostItem {
+  if (typeof item !== "object" || item === null) return false;
+  const candidate = item as Record<string, unknown>;
+  return typeof candidate.host === "string" && candidate.host.trim().length > 0 &&
+    typeof candidate.port === "number" && Number.isInteger(candidate.port) &&
+    candidate.port > 0 && candidate.port <= 65535 &&
+    typeof candidate.lastConnected === "number" && Number.isFinite(candidate.lastConnected) &&
+    (!("hostKey" in candidate) || typeof candidate.hostKey === "string") &&
+    (!("aliases" in candidate) || isValidAliases(candidate.aliases));
+}
+
+/** Identity reads must not turn corrupt persisted pins into first-use trust. */
+function parseRecentHostsStrict(raw: string | null): RecentHostItem[] {
+  if (raw === null) return [];
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.every(isRecentHostItem)) {
+    throw new Error("Invalid saved host identities");
+  }
+  if (parsed.some((item) => item.hostKey !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(item.hostKey))) {
+    throw new Error("Invalid saved host identity key");
+  }
+  return parsed.slice(0, MAX_RECENT_HOSTS);
+}
+
 export function parseRecentHosts(raw: string | null): RecentHostItem[] {
   if (!raw || typeof raw !== "string") return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((item): item is RecentHostItem => {
-        return (
-          typeof item === "object" &&
-          item !== null &&
-          typeof item.host === "string" &&
-          item.host.trim().length > 0 &&
-          typeof item.port === "number" &&
-          Number.isInteger(item.port) &&
-          item.port > 0 &&
-          item.port <= 65535 &&
-          typeof item.lastConnected === "number" &&
-          (!("hostKey" in item) ||
-            typeof (item as { hostKey?: unknown }).hostKey === "string") &&
-          (!("aliases" in item) || isValidAliases((item as { aliases?: unknown }).aliases))
-        );
-      })
+      .filter(isRecentHostItem)
       .slice(0, MAX_RECENT_HOSTS);
   } catch {
     return [];
@@ -283,7 +292,7 @@ export async function getRecentHosts(): Promise<RecentHostItem[]> {
 /** Read the persisted list without converting provider failures into an empty list. */
 export async function getRecentHostsStrict(): Promise<RecentHostItem[]> {
   const stored = await SecureStore.getItemAsync(RECENT_HOSTS_KEY);
-  return parseRecentHosts(stored);
+  return parseRecentHostsStrict(stored);
 }
 
 export async function saveRecentHost(

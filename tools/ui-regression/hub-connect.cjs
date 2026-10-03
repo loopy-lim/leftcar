@@ -1,5 +1,6 @@
 const { chromium } = require('playwright-core');
 const assert = require('node:assert/strict');
+const { getTranslation } = require('../../packages/ui-tokens/src');
 (async () => {
   const browser = await chromium.launch({headless:true});
   let failures = 0;
@@ -64,8 +65,26 @@ const assert = require('node:assert/strict');
     assert.equal(await page.evaluate(() => session.controlClient().closed), false);
   };
   try {
+    await test('actual Hub credential retirement failure stays visible without an unhandled error', async page => {
+      await start(page, 'focus');
+      await page.evaluate(() => { viewerIo.failStorageDeletes = new Set(['leftcar.token.v2.127.0.0.1.44711']); });
+      await settleCatalog(page, 0, 'unauthorized');
+      await page.getByText(/연결할 수 없습니다|다시 시도|설정을|저장/).first().waitFor();
+    });
+    for (const mode of ['auto', 'quick']) await test(`actual Hub ${mode} departure cancels pending catalog without navigation`, async page => {
+      await start(page, mode);
+      await page.evaluate(() => showScreen('host'));
+      await page.getByRole('button',{name:getTranslation('ko').viewer.manualTitle,exact:true}).click();
+      await page.locator('input').waitFor();
+      await settleCatalog(page, 0, 'success');
+      await page.waitForTimeout(500);
+      assert.equal(await page.evaluate(() => session.controlClient()), null);
+      assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
+      assert.deepEqual(await page.evaluate(() => hostIo.navigations), []);
+    });
     await test('actual failed Host to Hub transition never advertises the dead loopback endpoint', async page => {
       await page.evaluate(() => showScreen('host'));
+      await page.getByRole('button',{name:getTranslation('ko').viewer.manualTitle,exact:true}).click();
       await page.locator('input').fill('127.0.0.1:44711');
       await page.getByRole('button', {name:/^(연결하기|Connect)$/}).dispatchEvent('click');
       await page.waitForFunction(() => transport.attempts.length === 1);
@@ -108,7 +127,7 @@ const assert = require('node:assert/strict');
         await settleCatalog(page, 0, 'success');
         await connected(page);
         assert.equal(await page.evaluate(() => transport.clients[0].closeCount), 0);
-        assert.deepEqual(await page.evaluate(() => hostIo.navigations), mode === 'quick' ? ['/catalog'] : []);
+        assert.deepEqual(await page.evaluate(() => hostIo.navigations), mode === 'focus' ? [] : ['/catalog']);
       });
       await test(`actual Hub ${mode} 401 retains credential retirement behavior`, async page => {
         await start(page, mode);
@@ -135,40 +154,6 @@ const assert = require('node:assert/strict');
             await connected(page, '192.168.0.20');
           }
           await settleCatalog(page, 0, result);
-          if (bState === 'in-flight' && result === 'transport' && mode !== 'auto') {
-            // A 소켓의 죽음(transport 실패 = socket.destroy)은 자동 재연결을
-            // 깨워 사용자의 B 선택과 경합할 수 있다. 어느 쪽이 이기든 시작된
-            // 모든 시도를 transport로 정리하면 앱은 대기로 수렴하고 죽은
-            // 클라이언트는 되살아나지 않는다.
-            await page.evaluate(() => { window.b.catch(() => {}); });
-            let catalogsSettled = 1;
-            let quiescent = 0;
-            for (let guard = 0; guard < 12 && quiescent < 2; guard++) {
-              const index = await page.evaluate(() => transport.attempts.findIndex(x => !x.settled));
-              if (index === -1) { quiescent++; await page.waitForTimeout(100); continue; }
-              quiescent = 0;
-              await page.evaluate(index => transport.attempts[index].resolve(), index);
-              await page.waitForTimeout(60);
-              const total = await page.evaluate(() => transport.catalogs.length);
-              while (catalogsSettled < total) { await settleCatalog(page, catalogsSettled, 'transport'); catalogsSettled++; await page.waitForTimeout(40); }
-            }
-            await disconnected(page);
-            assert.equal(await page.evaluate(() => transport.clients.every(x => x.closed)), true);
-            assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
-            assert.equal(await page.evaluate(() => hostIo.navigations.some(x => x && x.pathname === '/pairing')), false);
-            return;
-          }
-          if (bState === 'in-flight' && result === 'transport' && mode === 'auto') {
-            // auto(게이트 님힘): A의 사망 뒤 처리는 새 selection(B)을 존중해
-            // teardown이 no-op이고, B가 그대로 이어진다. 죽은 A는 버려진다.
-            await page.evaluate(async () => { transport.attempts[1].resolve(); try { await window.b; } catch {} });
-            await connected(page, '192.168.0.20');
-            assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
-            assert.equal(await page.evaluate(() => transport.clients[1].closed), false);
-            assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
-            assert.equal(await page.evaluate(() => hostIo.navigations.some(x => x && x.pathname === '/pairing')), false);
-            return;
-          }
           await page.waitForTimeout(50);
           if (bState === 'in-flight') {
             await page.evaluate(async () => { transport.attempts[1].resolve(); await window.b; refocus(); });
@@ -176,7 +161,7 @@ const assert = require('node:assert/strict');
             await settleCatalog(page, 1, 'success');
           }
           await connected(page, '192.168.0.20');
-          assert.equal(await page.evaluate(() => transport.clients[0].closeCount), 1);
+          assert.equal(await page.evaluate(() => transport.clients[0].closed), true);
           assert.equal(await page.evaluate(() => transport.clients[1].closeCount), 0);
           assert.equal(await page.evaluate(() => viewerIo.storage.get('leftcar.token.v2.192.168.0.20.7777')), 'synthetic-B');
           assert.deepEqual(await page.evaluate(() => hostIo.navigations), []);

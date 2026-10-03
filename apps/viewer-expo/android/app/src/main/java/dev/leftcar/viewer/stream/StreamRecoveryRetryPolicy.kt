@@ -13,8 +13,8 @@ internal data class RebindRetryAttempt(
 internal fun isSameWindowRecoveryReason(reason: Int): Boolean = reason == 1 || reason == 4 || reason == 5
 
 /**
- * Short, bounded same-window recovery attempts. A successful rebind resets
- * this budget; if all local attempts fail, the React/Host recovery path gets
+ * Short, bounded same-window recovery attempts. Verified rendered progress
+ * resets this budget; if all local attempts fail, the React/Host recovery path gets
  * a chance to recreate the session.
  */
 internal class StreamRecoveryRetryPolicy(

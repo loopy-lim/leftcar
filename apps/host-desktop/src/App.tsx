@@ -5,20 +5,29 @@ import { getTranslation, type SupportedLanguage } from "@leftcar/ui-tokens";
 import { formatHostAddress } from "./hostState";
 import PairingPanel from "./PairingPanel";
 import Indicator from "./Indicator";
-import { Curtain, useClipboardShare, usePrivacySettings, useStreamingBadge, useWanAccess } from "./Privacy";
+import {
+  Curtain,
+  useClipboardShare,
+  usePrivacySettings,
+  useStreamingBadge,
+  useWanAccess,
+} from "./Privacy";
 import { useHostStatus } from "./hooks/useHostStatus";
 import { useSessionActions } from "./hooks/useSessionActions";
 import { DashboardHeader, type ThemeMode } from "./components/DashboardHeader";
 import { DashboardFooter } from "./components/DashboardFooter";
 import { IdleStudioView } from "./components/IdleStudioView";
 import { StreamsListView } from "./components/StreamsListView";
-import { SystemAlertBanners, TerminationBanner } from "./components/SystemAlertBanners";
+import {
+  SystemAlertBanners,
+  TerminationBanner,
+} from "./components/SystemAlertBanners";
 import { DashboardModals } from "./modals/DashboardModals";
 
 export default function App() {
   if (window.location.hash === "#/pairing") {
     return (
-      <div className="pairing-standalone-view">
+      <div className="h-dvh w-full overflow-y-auto bg-canvas p-4">
         <PairingPanel />
       </div>
     );
@@ -53,7 +62,9 @@ function useIndicatorWindow(isStreaming: boolean) {
 
 function Dashboard() {
   const [language, setLanguage] = useState<SupportedLanguage>(() => {
-    const saved = localStorage.getItem("leftcar_lang") as SupportedLanguage | null;
+    const saved = localStorage.getItem(
+      "leftcar_lang",
+    ) as SupportedLanguage | null;
     if (saved === "ko" || saved === "en") return saved;
     const navLang = navigator.language?.toLowerCase() || "ko";
     return navLang.startsWith("en") ? "en" : "ko";
@@ -77,6 +88,7 @@ function Dashboard() {
     terminationNotice,
     dismissTerminationNotice,
     error,
+    ready,
     inputPermission,
     screenPermission,
     platform,
@@ -87,9 +99,13 @@ function Dashboard() {
 
   const {
     inputActionError,
+    stopError,
     setInputActionError,
     inputBusy,
     qualityBusy,
+    actionsBusy,
+    actionErrors,
+    retrySessionAction,
     pendingStopSession,
     setPendingStopSession,
     openAccessibilitySettings,
@@ -111,16 +127,27 @@ function Dashboard() {
   const isStreaming = sessions.length > 0;
   useIndicatorWindow(isStreaming);
 
-  const { clipboardShare, toggleClipboardShare, pending: clipboardPending, error: clipboardError, retryClipboard } = useClipboardShare();
+  const {
+    clipboardShare,
+    toggleClipboardShare,
+    pending: clipboardPending,
+    ready: clipboardReady,
+    error: clipboardError,
+    retryClipboard,
+  } = useClipboardShare();
   const {
     privacyCurtain,
     togglePrivacyCurtain,
-    curtainPending, curtainError, retryCurtain,
+    curtainPending,
+    curtainReady,
+    curtainError,
+    retryCurtain,
   } = usePrivacySettings();
   const {
     streamingBadge,
     toggleStreamingBadge,
     pending: badgePending,
+    ready: badgeReady,
     error: badgeError,
     retryBadge,
   } = useStreamingBadge();
@@ -128,6 +155,7 @@ function Dashboard() {
     wanAccess,
     toggleWanAccess,
     pending: wanPending,
+    ready: wanReady,
     error: wanError,
     retryWan,
   } = useWanAccess();
@@ -187,7 +215,7 @@ function Dashboard() {
   }[theme];
 
   return (
-    <div className="host-window">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-canvas">
       <DashboardHeader
         isStreaming={isStreaming}
         sessionCount={sessions.length}
@@ -201,7 +229,7 @@ function Dashboard() {
         onOpenSettings={() => setShowSettingsModal(true)}
       />
 
-      <main className="host-body">
+      <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden p-4">
         {terminationNotice && (
           <TerminationBanner
             notice={terminationNotice}
@@ -212,6 +240,8 @@ function Dashboard() {
         )}
 
         <SystemAlertBanners
+          ready={ready}
+          onRefresh={() => void refresh()}
           error={error}
           inputActionError={inputActionError}
           inputPermission={inputPermission}
@@ -229,16 +259,22 @@ function Dashboard() {
             inputPermission={inputPermission}
             inputBusy={inputBusy}
             showInspector={showInspector}
-            inputRequestSessions={inputRequests.map((request) => request.session)}
+            inputRequestSessions={inputRequests.map(
+              (request) => request.session,
+            )}
             t={t}
             onToggleInspector={() => setShowInspector((prev) => !prev)}
             onToggleInput={toggleSessionInput}
             onSetQuality={setSessionQuality}
             qualityBusy={qualityBusy}
+            actionsBusy={actionsBusy}
+            actionErrors={actionErrors}
+            onRetryAction={retrySessionAction}
             onForceStop={setPendingStopSession}
           />
         ) : (
           <IdleStudioView
+            screenReady={ready && (platform !== "macos" || screenPermission)}
             t={t}
             onOpenPairing={() => setShowPairingModal(true)}
           />
@@ -249,14 +285,10 @@ function Dashboard() {
         controlPort={controlPort}
         lanIp={lanIp}
         copiedToast={copiedToast}
-        inputPermission={inputPermission}
         clipboardShare={clipboardShare}
         privacyCurtain={privacyCurtain}
-        platform={platform}
         t={t}
         onCopyAddress={copyAddressInfo}
-        onRequestPermission={requestInputPermission}
-        onOpenSettings={() => setShowSettingsModal(true)}
       />
 
       <DashboardModals
@@ -264,12 +296,23 @@ function Dashboard() {
         showHelpModal={showHelpModal}
         showSettingsModal={showSettingsModal}
         pendingStopSession={pendingStopSession}
+        stopError={stopError}
+        stopBusy={
+          pendingStopSession
+            ? actionsBusy[pendingStopSession.session] === "stop"
+            : false
+        }
         inputBusy={inputBusy}
         language={language}
+        platform={platform}
         t={t}
         clipboardShare={clipboardShare}
         privacyCurtain={privacyCurtain}
         streamingBadge={streamingBadge}
+        clipboardReady={clipboardReady}
+        curtainReady={curtainReady}
+        badgeReady={badgeReady}
+        wanReady={wanReady}
         clipboardPending={clipboardPending}
         curtainPending={curtainPending}
         badgePending={badgePending}

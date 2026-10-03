@@ -35,6 +35,20 @@ const assert = require("node:assert/strict");
         console.error(`FAIL ${name}: ${e.message}`);
       }
     };
+    await check("privacy settings cannot change before the stored value is known", async () => {
+      await page.goto(`file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html`);
+      await page.locator("#curtain-toggle").click();
+      assert.equal(await page.evaluate(() => window.pendingCount("set_privacy_curtain")), 0);
+      assert.equal(await page.evaluate(() => window.settings.curtainPending), true);
+      await page.evaluate(() => window.settle("get_privacy_settings", true));
+      await page.waitForFunction(() => window.settings.curtainPending === false);
+      await page.locator("#curtain-toggle").click();
+      // The curtain remains confirmed on until the disable command succeeds.
+      assert.equal(await page.locator("#curtain").textContent(), "true");
+      await page.evaluate(() => window.settle("set_privacy_curtain", null));
+      await page.waitForFunction(() => window.settings.privacyCurtain === false);
+      await page.goto(`file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html`);
+    });
     await check("initial privacy curtain read", async () => {
       await page.evaluate(() =>
         window.settle("get_privacy_settings", true),
@@ -46,8 +60,9 @@ const assert = require("node:assert/strict");
       "pending privacy curtain and actionable save failure",
       async () => {
         await page.goto(`file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/index.html`);
+        await page.evaluate(() => window.settle("get_privacy_settings", false));
+        await page.waitForFunction(() => window.settings.curtainPending === false);
         await page.locator("#curtain-toggle").click();
-        await page.evaluate(() => window.settle("get_privacy_settings", true));
         await page.waitForTimeout(30);
         assert.equal(await page.evaluate(() => window.settings.curtainPending), true);
         await page.evaluate(() =>
@@ -105,9 +120,12 @@ const assert = require("node:assert/strict");
         await page
           .getByRole("button", { name: "Host Settings", exact: true })
           .click();
-        const curtain = page.getByRole("button", {
-          name: /^Privacy Curtain (On|Off)$/,
+        const curtain = page.getByRole("switch", {
+          name: "Privacy Curtain", exact: true,
         });
+        assert.equal(await curtain.isDisabled(), true);
+        await page.evaluate(() => window.settle("get_privacy_settings", false));
+        await page.waitForFunction(() => document.querySelector('button[role="switch"][aria-label="Privacy Curtain"]')?.disabled === false);
         await curtain.click();
         assert.equal(await curtain.isDisabled(), true);
         assert.equal(await curtain.getAttribute("aria-busy"), "true");
@@ -115,7 +133,7 @@ const assert = require("node:assert/strict");
           window.settle("set_privacy_curtain", "permission denied", true),
         );
         await page.waitForTimeout(30);
-        assert.equal(await curtain.isDisabled(), false);
+        assert.equal(await curtain.isDisabled(), true);
         assert.match(
           await page.getByRole("alert").textContent(),
           /permission denied/,
@@ -126,7 +144,7 @@ const assert = require("node:assert/strict");
           window.settle("set_privacy_curtain", null),
         );
         await page.waitForTimeout(30);
-        assert.equal(await curtain.getAttribute("aria-pressed"), "true");
+        assert.equal(await curtain.getAttribute("aria-checked"), "true");
         await page.evaluate(() =>
           window.settle("get_clipboard_share", "settings read failed", true),
         );
@@ -141,8 +159,8 @@ const assert = require("node:assert/strict");
         await page.waitForTimeout(30);
         assert.equal(
           await page
-            .getByRole("button", { name: /^Clipboard Sharing (On|Off)$/ })
-            .getAttribute("aria-pressed"),
+            .getByRole("switch", { name: "Clipboard Sharing", exact: true })
+            .getAttribute("aria-checked"),
           "true",
         );
         // 모달 밖 대시보드 버튼(Help·페어링)은 설정 모달을 닫은 뒤 누른다.
@@ -167,6 +185,54 @@ const assert = require("node:assert/strict");
         );
       },
     );
+    await check("actual catalog preserves preferences when storage reads fail", async () => {
+      const catalogPage = await browser.newPage();
+      try {
+        await catalogPage.addInitScript(() => {
+          window.__viewerStorageReadFailures = ["leftcar.viewerPreferences", "leftcar.clipboardShare", "leftcar.udpStability"];
+          window.__viewerStoredValues = {
+            "leftcar.viewerPreferences": JSON.stringify({ profileId: "balanced", localAudio: false, localCursor: false, showFps: true }),
+            "leftcar.clipboardShare": "1",
+            "leftcar.udpStability": JSON.stringify({ profile: "stable" }),
+          };
+        });
+        await catalogPage.goto(`file://${process.env.UI_TEST_DIR || "/tmp/leftcar-task4-ui"}/catalog.html`);
+        await catalogPage.waitForFunction(() => window.model?.displays.length === 1);
+        await catalogPage.waitForTimeout(50);
+        assert.deepEqual(await catalogPage.evaluate(() => window.viewerIo.storageWrites), []);
+        assert.equal(await catalogPage.evaluate(() => window.model.viewerPreferenceControlsDisabled), true);
+        assert.equal(await catalogPage.evaluate(() => window.model.clipboardPreferenceControlDisabled), true);
+        assert.equal(await catalogPage.evaluate(() => window.model.udpPreferenceControlsDisabled), true);
+        await catalogPage.evaluate(() => {
+          window.model.handleToggleFps(false);
+          window.model.handleToggleClipboardShare(false);
+          window.model.handleSelectUdpStability({ profile: "auto" });
+        });
+        assert.deepEqual(await catalogPage.evaluate(() => window.viewerIo.storageWrites), []);
+        await catalogPage.evaluate(() => {
+          window.viewerIo.failStorageReads.clear();
+          window.model.retryPersistence();
+        });
+        await catalogPage.waitForFunction(() => !window.model.viewerPreferenceControlsDisabled && !window.model.clipboardPreferenceControlDisabled && !window.model.udpPreferenceControlsDisabled);
+        assert.equal(await catalogPage.evaluate(() => window.model.profileId), "balanced");
+        assert.equal(await catalogPage.evaluate(() => window.model.showFps), true);
+        assert.equal(await catalogPage.evaluate(() => window.model.clipboardShare), true);
+        assert.equal(await catalogPage.evaluate(() => JSON.parse(window.viewerIo.storage.get("leftcar.udpStability")).profile), "stable");
+        assert.deepEqual(await catalogPage.evaluate(() => window.viewerIo.storageWrites), []);
+        await catalogPage.evaluate(() => {
+          window.viewerIo.failStorageWrites.add("leftcar.viewerPreferences");
+          window.model.handleToggleFps(false);
+        });
+        await catalogPage.waitForFunction(() => window.model.preferencePersistenceIssue === "viewer-save");
+        assert.equal(await catalogPage.evaluate(() => JSON.parse(window.viewerIo.storage.get("leftcar.viewerPreferences")).showFps), true);
+        await catalogPage.evaluate(() => {
+          window.viewerIo.failStorageWrites.clear();
+          window.model.retryPersistence();
+        });
+        await catalogPage.waitForFunction(() => window.model.preferencePersistenceIssue === null);
+        assert.equal(await catalogPage.evaluate(() => JSON.parse(window.viewerIo.storage.get("leftcar.viewerPreferences")).showFps), false);
+      } finally { await catalogPage.close(); }
+    });
     await check(
       "actual catalog admission survives overlapping starts, unmount and late native cleanup",
       async () => {
@@ -315,7 +381,7 @@ const assert = require("node:assert/strict");
       await page.evaluate(() => window.model.handleToggleBalancedPresentation(false));
       await settlePresentation(1, true);
       assert.deepEqual(await presentationState(), {requested: false, effective: [true]});
-      assert.match(await page.evaluate(() => window.model.visibleError), /presentation rejected/);
+      assert.match(await page.evaluate(() => window.model.nativeSettingsFailures.find(failure => failure.key === "balanced")?.error), /presentation rejected/);
       assert.equal(await page.evaluate(() => [...window.viewerIo.storage.values()].some((value) => value.includes('"balancedPresentation":false'))), true);
     });
     await check("actual catalog presentation mixed stream results commit independently", async () => {
@@ -338,6 +404,7 @@ const assert = require("node:assert/strict");
       await settlePresentation(2, true);
       assert.deepEqual(await presentationState(), {requested: false, effective: [false]});
       assert.equal(await page.evaluate(() => window.model.visibleError), null);
+      assert.deepEqual(await page.evaluate(() => window.model.nativeSettingsFailures), []);
     });
     for (const earlierSuccessFirst of [true, false]) {
       await check(`actual catalog overlapping presentation success survives newer failure (${earlierSuccessFirst ? "success then failure" : "failure then success"})`, async () => {
@@ -356,7 +423,7 @@ const assert = require("node:assert/strict");
           if (successFirst) newer.reject(new Error("newer presentation rejected"));
           else earlier.resolve();
         }, earlierSuccessFirst);
-        await page.waitForFunction(() => window.model.visibleError?.includes("newer presentation rejected"));
+        await page.waitForFunction(() => window.model.nativeSettingsFailures.some(failure => failure.key === "balanced" && failure.error.includes("newer presentation rejected")));
         // Error observation proves settled callbacks committed; this assertion
         // cannot pass by waiting for an arbitrary inter-request delay.
         assert.deepEqual(await presentationState(), {requested: false, effective: [true]});
@@ -378,7 +445,7 @@ const assert = require("node:assert/strict");
             await Promise.resolve();
             if (successFirst) newer.reject(new Error("newer audio rejected")); else earlier.resolve();
           }, successFirst);
-          await page.waitForFunction(() => window.model.visibleError?.includes("newer audio rejected"));
+          await page.waitForFunction(key => window.model.nativeSettingsFailures.some(failure => failure.key === key && failure.error.includes("newer audio rejected")), kind === "localAudio" ? "audio" : "opus");
           const state = await page.evaluate((kind) => ({ requested: window.model[kind], effective: window.model.streams[0][kind] }), kind);
           assert.deepEqual(state, { requested: kind === "localAudio", effective: kind !== "localAudio" });
         });

@@ -645,7 +645,7 @@ mod tests {
     #[test]
     #[ignore = "vector printer: run with --ignored --nocapture"]
     fn print_media_vector() {
-        let mut sealer = DatagramSealer::with_counter_start(fixed(0), 0x0102_0304_0506_0708);
+        let sealer = DatagramSealer::with_counter_start(fixed(0), 0x0102_0304_0506_0708);
         let frame = sealer.seal(b"leftcar media vector v1").unwrap();
         println!("media_frame1 = {}", hex::encode(&frame));
     }
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn media_sealer_cross_language_vector() {
         let start = 0x0102_0304_0506_0708u64;
-        let mut sealer = DatagramSealer::with_counter_start(fixed(0), start);
+        let sealer = DatagramSealer::with_counter_start(fixed(0), start);
         let frame = sealer.seal(b"leftcar media vector v1").unwrap();
         // 첫 프레임 카운터는 지정 시작값 그대로다.
         assert_eq!(frame_counter(&frame).unwrap(), start);
@@ -685,7 +685,7 @@ mod tests {
             "01020304050607088383c38cc6eddabc7dda8cbfebcc513bf6f80b233c3b19da38079749aaf6baa652f6b5c2877468"
         );
         // 자기 수신 창은 시작 카운터 아래를 거부하므로 짝을 맞춰 연다.
-        let mut receiver = DatagramSealer::with_counter_start(fixed(0), start);
+        let receiver = DatagramSealer::with_counter_start(fixed(0), start);
         receiver.reset_receive_window();
         assert_eq!(
             receiver.open(&frame).unwrap(),

@@ -3,38 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0b0f17" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
     <title>Leftcar</title>
     <style>
       html, body, #root { min-height: 100%; margin: 0; }
-      body { background: #f8fafc; color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      body { background: #fafafa; color: #09090b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
       @media (prefers-color-scheme: dark) {
-        body { background: #0b0f17; color: #f8fafc; }
+        body { background: #09090b; color: #fafafa; }
       }
       .leftcar-boot {
         box-sizing: border-box;
         width: min(500px, calc(100% - 48px));
         margin: 64px auto;
-        padding: 28px;
-        border: 1px solid rgba(0, 0, 0, 0.08);
-        border-radius: 14px;
-        background: #ffffff;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+        padding: 16px 0;
         font: 500 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
+      .leftcar-boot strong { display: block; margin-bottom: 6px; font-size: 18px; font-weight: 600; color: #09090b; }
       @media (prefers-color-scheme: dark) {
-        .leftcar-boot {
-          background: #111827;
-          border-color: rgba(255, 255, 255, 0.08);
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-        }
+        .leftcar-boot strong { color: #fafafa; }
       }
-      .leftcar-boot strong { display: block; margin-bottom: 6px; font-size: 18px; font-weight: 600; color: #0f172a; }
+      .leftcar-boot span { color: #52525b; }
       @media (prefers-color-scheme: dark) {
-        .leftcar-boot strong { color: #f9fafb; }
+        .leftcar-boot span { color: #a1a1aa; }
       }
-      .leftcar-boot span { color: #64748b; }
     </style>
   </head>
   <body>

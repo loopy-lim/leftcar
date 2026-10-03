@@ -5,7 +5,7 @@ const open=(page,file)=>page.goto(`file://${process.env.UI_TEST_DIR||'/tmp/leftc
 try{
 await test('actual Host clipboard rejection and deferred success',async page=>{
  await page.addInitScript(()=>{window.copyRequests=[];Object.defineProperty(navigator,'clipboard',{value:{writeText(text){return new Promise((resolve,reject)=>window.copyRequests.push({text,resolve,reject}));}}});});
- await open(page,'index.html?dashboard');await page.getByRole('button',{name:/Computer address/i}).click();
+ await open(page,'index.html?dashboard');await page.waitForFunction(()=>window.pendingCount('get_lan_ip')===1);await page.evaluate(()=>{window.settle('get_lan_ip','192.168.0.42');window.settle('get_control_port',7777);window.settle('get_status',{sessions:[]});window.settle('get_input_permission',true);window.settle('get_screen_permission',true);window.settle('get_host_platform','macos');window.settle('list_input_requests',[]);});await page.getByRole('button',{name:/Computer address/i}).click();
  assert.equal(await page.getByText(/Address .* Copied!/).count(),0);
  await page.evaluate(()=>window.copyRequests.shift().reject(new Error('Synthetic denied')));await page.getByText('Copy failed',{exact:true}).waitFor();
  await page.getByRole('button',{name:/Computer address/i}).click();assert.equal(await page.getByText(/Address .* Copied!/).count(),0);
@@ -13,7 +13,7 @@ await test('actual Host clipboard rejection and deferred success',async page=>{
 });
 for(const decision of ['허용','거절'])await test(`actual PairingPanel ${decision} failure retains row and retries`,async page=>{
  await open(page,'pairing-grants.html?offer');await page.getByText('Synthetic pending viewer',{exact:true}).waitFor();
- const button=page.getByRole('button',{name:decision,exact:true});await button.click();assert.equal(await button.isDisabled(),true);
+ const button=page.getByRole('button',{name:`Synthetic pending viewer: ${decision}`,exact:true});await button.click();assert.equal(await button.isDisabled(),true);
  await page.evaluate(()=>window.pairingIo.decisions.shift().reject('Synthetic approval failure'));await page.getByText(/연결 상태를 확인하지 못했습니다/).waitFor();
  assert.equal(await page.getByText('Synthetic pending viewer',{exact:true}).count(),1);await button.click();
  await page.evaluate(()=>{window.pairingIo.pendingOffers=[];window.pairingIo.decisions.shift().resolve();});await page.getByText('Synthetic pending viewer',{exact:true}).waitFor({state:'detached'});

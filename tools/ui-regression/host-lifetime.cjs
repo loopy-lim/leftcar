@@ -1,5 +1,6 @@
 const { chromium } = require('playwright-core');
 const assert = require('node:assert/strict');
+const { getTranslation } = require('../../packages/ui-tokens/src');
 (async () => {
   const browser = await chromium.launch({headless:true});
   let failures = 0;
@@ -9,6 +10,7 @@ const assert = require('node:assert/strict');
       page.setDefaultTimeout(3000);
       await page.addInitScript(() => { window.__DEV__ = false; });
       await page.goto(`file://${process.env.UI_TEST_DIR || '/tmp/leftcar-task4-ui'}/host.html`);
+      await page.getByRole('button',{name:getTranslation('ko').viewer.manualTitle,exact:true}).click();
       await page.locator('input').waitFor();
       await run(page);
       console.log(`PASS ${name}`);
@@ -130,8 +132,11 @@ const assert = require('node:assert/strict');
       await page.waitForFunction(() => transport.catalogs.length === 1);
       await page.evaluate(() => { storageIo.holdRecentRead = true; transport.catalogs[0].resolve({}); });
       await page.waitForFunction(() => storageIo.reads.length === 1);
-      if (after === 'selection') await selectB(page);
-      else await page.evaluate(() => hostIo.blur.forEach(fn => fn?.()));
+      if (after === 'selection') {
+        // Only the old screen's read remains delayed; B must verify its own persisted identity.
+        await page.evaluate(() => { storageIo.holdRecentRead = false; });
+        await selectB(page);
+      } else await page.evaluate(() => hostIo.blur.forEach(fn => fn?.()));
       await page.evaluate(() => storageIo.reads.shift()());
       await page.waitForTimeout(100);
       assert.deepEqual(await page.evaluate(() => hostIo.navigations), []);

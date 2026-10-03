@@ -1,79 +1,90 @@
 import {
-  cn,
   getTranslation,
   interpolate,
   type SupportedLanguage,
-  type TranslationSchema,
 } from "@leftcar/ui-tokens";
 import { encoderDiagnosticsView } from "./encoderDiagnostics";
-import { inspectorButtonVariants } from "./lib/variants";
+import { Button, Text } from "./ui/primitives";
 import type { SessionRow } from "./sessionTypes";
-
-type InspectorStrings = TranslationSchema["host"]["inspector"];
-
-function inspectorLanguage(saved: string | null): SupportedLanguage {
-  return saved === "en" ? "en" : "ko";
-}
-
 interface Props {
   session: SessionRow;
   qualitySupported: boolean;
   qualityPercent: number;
   qualityBusy: boolean;
+  blocked?: boolean;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
+  language?: SupportedLanguage;
 }
-
-/**
- * 세션 카드 본체의 수동 화질 상한 제어(DESIGN-REVIEW X-1). 개발자 인스펙터
- * 안에 갇혀 있던 사용자 제어를 카드 2차 행으로 승격했다. 슬라이더·자동 복귀의
- * 동작과 props 계약은 이동 전과 동일하다 — 렌더 위치만 바뀌었다.
- */
 export default function QualityOverride({
   session,
   qualitySupported,
   qualityPercent,
   qualityBusy,
+  blocked = false,
   onSetQuality,
+  language: propLanguage,
 }: Props) {
-  const saved = typeof localStorage === "undefined" ? null : localStorage.getItem("leftcar_lang");
-  const language = inspectorLanguage(saved);
-  const t: InspectorStrings = getTranslation(language).host.inspector;
+  const language =
+    propLanguage ??
+    (typeof localStorage !== "undefined" &&
+    localStorage.getItem("leftcar_lang") === "en"
+      ? "en"
+      : "ko");
+  const t = getTranslation(language).host.inspector;
   const { qualityBasis } = encoderDiagnosticsView(session, language);
-
   return (
-    <div className="quality-override-item">
-      <div className="quality-override-heading">
-        <span className="quality-override-label">{t.manualQualityCeilingLabel}</span>
-        <span className="quality-override-value">
+    <div className="space-y-2" aria-busy={qualityBusy}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <Text variant="caption" className="font-semibold">
+          {t.manualQualityCeilingLabel}
+        </Text>
+        <Text variant="code" tone="muted">
           {session.qualityOverride != null
             ? interpolate(t.fixedQualityPercent, { percent: qualityPercent })
             : t.auto}
           {qualityBasis !== null ? ` · ${qualityBasis}` : null}
-        </span>
+        </Text>
       </div>
-      <div className="quality-override-controls">
-        <span className="quality-override-endpoint">{t.lowEndpoint}</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <Text variant="caption" tone="muted">
+          {t.lowEndpoint}
+        </Text>
         <input
-          key={`${session.session}-${session.qualityOverride ?? "auto"}-${Math.round((session.qualityHint ?? 0.5) * 100)}`}
           type="range"
           min="25"
           max="50"
           step="5"
-          defaultValue={qualityPercent}
-          disabled={!qualitySupported || session.state !== "running" || qualityBusy}
+          value={Math.max(25, Math.min(50, qualityPercent))}
+          disabled={
+            !qualitySupported || session.state !== "running" || qualityBusy || blocked
+          }
           aria-label={t.manualQualityCeilingLabel}
-          onChange={(event) => void onSetQuality(session, Number(event.currentTarget.value) / 100)}
+          aria-valuetext={interpolate(t.fixedQualityPercent, {
+            percent: qualityPercent,
+          })}
+          className="h-11 min-w-28 flex-1 accent-action focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          onChange={(event) =>
+            void onSetQuality(session, Number(event.currentTarget.value) / 100)
+          }
         />
-        <span className="quality-override-endpoint">{t.defaultEndpoint}</span>
-        <button
-          className={cn("btn-ghost btn-sm quality-auto-button", inspectorButtonVariants())}
-          disabled={!qualitySupported || session.qualityOverride == null || qualityBusy}
+        <Text variant="caption" tone="muted">
+          {t.defaultEndpoint}
+        </Text>
+        <Button
+          variant="secondary"
+          size="compact"
+          disabled={
+            !qualitySupported || session.qualityOverride == null || qualityBusy || blocked
+          }
           onClick={() => void onSetQuality(session, null)}
         >
           {t.autoRevertButton}
-        </button>
+        </Button>
       </div>
-      <span className="quality-override-help">{t.qualityOverrideHelp}</span>
+      <Text variant="caption" tone="muted" className="block">
+        {t.qualityOverrideHelp}
+      </Text>
+      {qualityBusy && <Text variant="caption" tone="muted" role="status" className="block">{t.qualityApplying}</Text>}
     </div>
   );
 }

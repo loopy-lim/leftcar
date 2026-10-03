@@ -2,13 +2,15 @@ mod capture;
 mod input;
 
 use crate::backend::CaptureBackend;
+use crate::input_gate::InputGate;
+use crate::media_sender::{MediaSender, MediaSocket, TerminationReason};
+use crate::tcp_media::{self, FrameRead};
 use crate::wire::{self, InputDecision, InputSequencer};
 use control_contract::host::{CaptureBackendInfo, DisplayInfo, EncoderExperiment, StatsInfo};
 use control_contract::udp_stability::AppliedUdpStability;
 use input::InputInjector;
 use secure_channel::DatagramSealer;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,8 +29,6 @@ pub(super) struct Monitor {
     pub rect: RECT,
     pub name: String,
 }
-
-const MAX_TCP_MEDIA_FRAME: usize = 16 * 1024 * 1024;
 
 /// 스레드 생존 중 절전을 막는 SetThreadExecutionState 가드. 스트리밍 중
 /// 시스템·디스플레이가 유휴 절전에 들어가면 캡처가 끊긴다 — 세션 스레드
@@ -59,84 +59,6 @@ impl Drop for ExecutionGuard {
     }
 }
 
-#[derive(Clone)]
-pub(super) enum MediaSocket {
-    Udp(Arc<UdpSocket>),
-    Tcp(Arc<Mutex<TcpStream>>),
-}
-
-/// Every host → viewer media send is sealed here — the lowest-level sender —
-/// so capture output, input acks, and termination notices share one AEAD
-/// boundary. TCP keeps its plaintext 4-byte length prefix; only the payload
-/// is sealed.
-#[derive(Clone)]
-pub(super) struct MediaSender {
-    socket: MediaSocket,
-    /// s2c sealer under the HKDF-derived directional key — the raw session
-    /// key is never used directly, so the two directions can never collide
-    /// on a (key, nonce) pair. Counters start at a random point per instance
-    /// (secure-channel), which also keeps the main sender and this notice
-    /// sender from sharing a counter range.
-    tx: Arc<DatagramSealer>,
-    access: Option<Arc<crate::source_grants::SourceLease>>,
-}
-
-impl MediaSender {
-    pub(super) fn new(socket: MediaSocket, media_key: &[u8; 32]) -> Self {
-        let keys = secure_channel::media_keys(media_key);
-        Self {
-            socket,
-            tx: Arc::new(DatagramSealer::new(keys.s2c)),
-            access: None,
-        }
-    }
-
-    fn with_access(mut self, access: &crate::source_grants::CaptureAccess) -> Self {
-        self.access = Some(access.lease.clone());
-        self
-    }
-
-    fn is_tcp(&self) -> bool {
-        matches!(self.socket, MediaSocket::Tcp(_))
-    }
-
-    fn prepare(&self, packet: &[u8]) -> std::io::Result<Vec<u8>> {
-        wire::seal_media_packet(&self.tx, packet, self.is_tcp())
-    }
-
-    /// One ordinary datagram, or one existing length-prefixed TCP frame.
-    /// No GSO, scatter/gather-as-batch or uncertain automatic resend.
-    fn submit_sealed(&self, envelope: &[u8]) -> std::io::Result<usize> {
-        let _permission = self
-            .access
-            .as_ref()
-            .map(|lease| {
-                lease.enter().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "source authorization revoked",
-                    )
-                })
-            })
-            .transpose()?;
-        match &self.socket {
-            MediaSocket::Udp(socket) => socket.send(envelope),
-            MediaSocket::Tcp(stream) => stream
-                .lock()
-                .map_err(|_| std::io::Error::other("TCP media writer lock poisoned"))?
-                .write_all(envelope)
-                .map(|_| envelope.len()),
-        }
-    }
-
-    /// Input acknowledgements/notices retain the plaintext return contract.
-    fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
-        let envelope = self.prepare(packet)?;
-        let submitted = self.submit_sealed(&envelope)?;
-        wire::complete_plaintext_send(packet.len(), envelope.len(), submitted)
-    }
-}
-
 pub(super) enum MediaReceiver {
     Udp(UdpSocket),
     Tcp(TcpStream),
@@ -150,7 +72,7 @@ pub struct WindowsBackend {
 pub(super) struct WindowsSession {
     access: crate::source_grants::CaptureAccess,
     stop: AtomicBool,
-    input_enabled: AtomicBool,
+    input_gate: InputGate,
     force_keyframe: AtomicBool,
     /// Milliseconds since process start of the last authenticated viewer
     /// datagram (feedback, probe, input, or BYE). Zero until first contact.
@@ -158,10 +80,8 @@ pub(super) struct WindowsSession {
     pub stats: Mutex<StatsInfo>,
     injector: Mutex<InputInjector>,
     threads: Mutex<Vec<JoinHandle<()>>>,
-    /// Clone of the media socket used only for termination notices, so the
-    /// input receiver can notify a dying viewer before the capture thread's
-    /// socket is torn down. `None` on Windows builds where cloning failed.
-    notice_sender: Mutex<Option<MediaSender>>,
+    /// Shares this exact session's endpoint, writer lock and nonce sequence.
+    notice_sender: MediaSender,
     /// c2s opener for every viewer datagram (input, feedback, probes, BYE).
     /// Same key as the sender's sealer; only the replay window is separate.
     crypto_rx: DatagramSealer,
@@ -200,6 +120,25 @@ impl WindowsBackend {
             sessions: Mutex::new(HashMap::new()),
         })
     }
+
+    fn retire(&self, handle: u32, reason: Option<TerminationReason>) -> Result<(), String> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(&handle)
+            .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
+        session.stop.store(true, Ordering::Release);
+        session.input_gate.retire();
+        let _ = session.notice_sender.notify_retirement(reason);
+        let released_input = session.injector.lock().unwrap().release_all();
+        let threads = std::mem::take(&mut *session.threads.lock().unwrap());
+        for thread in threads {
+            let _ = thread.join();
+        }
+        session.stats.lock().unwrap().state = "stopped".into();
+        released_input
+    }
 }
 
 impl CaptureBackend for WindowsBackend {
@@ -208,24 +147,7 @@ impl CaptureBackend for WindowsBackend {
     }
 
     fn stop_with_reason(&self, handle: u32, reason_code: u8) -> Result<(), String> {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap()
-            .remove(&handle)
-            .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
-        if let Some(sender) = session.notice_sender.lock().unwrap().as_ref() {
-            let _ = sender.send(&wire::termination(reason_code));
-        }
-        session.stop.store(true, Ordering::Release);
-        session.input_enabled.store(false, Ordering::Release);
-        let released_input = session.injector.lock().unwrap().release_all();
-        let threads = std::mem::take(&mut *session.threads.lock().unwrap());
-        for thread in threads {
-            let _ = thread.join();
-        }
-        session.stats.lock().unwrap().state = "stopped".into();
-        released_input
+        self.retire(handle, Some(TerminationReason::try_from(reason_code)?))
     }
 
     fn capture_backends(&self) -> Vec<CaptureBackendInfo> {
@@ -286,7 +208,7 @@ impl CaptureBackend for WindowsBackend {
         secure_channel::random_bytes(&mut nonce);
         let challenge = wire::challenge(&nonce);
         let crypto_rx = DatagramSealer::new(secure_channel::media_keys(media_key).c2s);
-        let (media_sender, media_receiver, notice_sender) = if media_transport == "usb" {
+        let (media_sender, media_receiver) = if media_transport == "usb" {
             let stream = TcpStream::connect(("127.0.0.1", port))
                 .map_err(|error| format!("connect USB media proxy {port}: {error}"))?;
             stream
@@ -308,7 +230,7 @@ impl CaptureBackend for WindowsBackend {
             )
             .with_access(access);
             prove_tcp_reachability(&stream, &sender, &crypto_rx, &challenge)?;
-            (sender, MediaReceiver::Tcp(stream), None)
+            (sender, MediaReceiver::Tcp(stream))
         } else {
             let socket = UdpSocket::bind(("0.0.0.0", 0))
                 .map_err(|error| format!("bind media socket: {error}"))?;
@@ -325,17 +247,7 @@ impl CaptureBackend for WindowsBackend {
             let input_socket = socket
                 .try_clone()
                 .map_err(|error| format!("clone Windows input socket: {error}"))?;
-            let notice_socket = socket
-                .try_clone()
-                .map_err(|error| format!("clone Windows notice socket: {error}"))?;
-            (
-                sender,
-                MediaReceiver::Udp(input_socket),
-                Some(
-                    MediaSender::new(MediaSocket::Udp(Arc::new(notice_socket)), media_key)
-                        .with_access(access),
-                ),
-            )
+            (sender, MediaReceiver::Udp(input_socket))
         };
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed).max(1);
@@ -344,16 +256,17 @@ impl CaptureBackend for WindowsBackend {
         let session = Arc::new(WindowsSession {
             access: access.clone(),
             stop: AtomicBool::new(false),
-            input_enabled: AtomicBool::new(false),
+            input_gate: InputGate::new(media_sender.clone()),
             force_keyframe: AtomicBool::new(true),
             last_viewer_contact_ms: AtomicU64::new(0),
             stats: Mutex::new(initial_stats),
             injector: Mutex::new(InputInjector::new(monitor.rect)),
             threads: Mutex::new(Vec::new()),
-            notice_sender: Mutex::new(notice_sender),
+            notice_sender: media_sender.clone(),
             crypto_rx,
         });
 
+        let _ = session.input_gate.publish();
         let input_session = session.clone();
         let input_sender = media_sender.clone();
         let input_thread = std::thread::Builder::new()
@@ -391,26 +304,8 @@ impl CaptureBackend for WindowsBackend {
     }
 
     fn stop(&self, handle: u32) -> Result<(), String> {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap()
-            .remove(&handle)
-            .ok_or_else(|| format!("no such Windows capture handle {handle}"))?;
-        // Let a live viewer close its window immediately; a dead one never
-        // receives this and the terminal-state GC reaps the session anyway.
-        if let Some(sender) = session.notice_sender.lock().unwrap().as_ref() {
-            let _ = sender.send(&wire::termination(wire::TERMINATION_STOPPED));
-        }
-        session.stop.store(true, Ordering::Release);
-        session.input_enabled.store(false, Ordering::Release);
-        let released_input = session.injector.lock().unwrap().release_all();
-        let threads = std::mem::take(&mut *session.threads.lock().unwrap());
-        for thread in threads {
-            let _ = thread.join();
-        }
-        session.stats.lock().unwrap().state = "stopped".into();
-        released_input
+        // Reconfigure/ordinary retirement leaves the existing Viewer window.
+        self.retire(handle, None)
     }
 
     fn stats(&self, handle: u32) -> Result<StatsInfo, String> {
@@ -451,7 +346,7 @@ impl CaptureBackend for WindowsBackend {
         } else {
             None
         };
-        session.input_enabled.store(enabled, Ordering::Release);
+        session.input_gate.set_enabled(enabled);
         if !enabled {
             session.injector.lock().unwrap().release_all()?;
         }
@@ -503,16 +398,20 @@ fn prove_tcp_reachability(
     crypto_rx: &DatagramSealer,
     challenge: &[u8],
 ) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
     sender
         .send(challenge)
         .map_err(|error| format!("send USB media reachability proof: {error}"))?;
-    for _ in 0..20 {
-        match read_tcp_frame(
-            &mut stream
-                .try_clone()
-                .map_err(|error| format!("clone USB challenge reader: {error}"))?,
+    let mut reader = stream
+        .try_clone()
+        .map_err(|error| format!("clone USB challenge reader: {error}"))?;
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match tcp_media::read_frame(
+            &mut reader,
+            remaining.min(Duration::from_millis(200)),
+            remaining,
         ) {
-            Ok(Some(response)) => {
+            Ok(FrameRead::Frame(response)) => {
                 if crypto_rx
                     .open(&response)
                     .is_ok_and(|opened| opened == challenge)
@@ -520,35 +419,12 @@ fn prove_tcp_reachability(
                     return Ok(());
                 }
             }
-            Ok(None) => break,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
+            Ok(FrameRead::Idle) => {}
+            Ok(FrameRead::Closed) => break,
             Err(error) => return Err(format!("read USB media reachability proof: {error}")),
         }
     }
     Err("USB media reachability proof failed".into())
-}
-
-fn read_tcp_frame(stream: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
-    let mut header = [0u8; 4];
-    match stream.read_exact(&mut header) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    let length = u32::from_be_bytes(header) as usize;
-    if length == 0 || length > MAX_TCP_MEDIA_FRAME {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid TCP media frame length",
-        ));
-    }
-    let mut payload = vec![0u8; length];
-    stream.read_exact(&mut payload)?;
-    Ok(Some(payload))
 }
 
 fn run_input(receiver: MediaReceiver, sender: MediaSender, session: Arc<WindowsSession>) {
@@ -597,6 +473,8 @@ fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSes
         }
         if message == b"IDR" {
             session.force_keyframe.store(true, Ordering::Release);
+        }
+        if session.input_gate.refresh_on_control(&message) {
             continue;
         }
         let Some(_permission) = session.access.lease.enter() else {
@@ -605,27 +483,29 @@ fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSes
         match sequencer.accept(&message) {
             InputDecision::Ignore => {}
             InputDecision::AckDuplicate(sequence) => {
-                let enabled = session.input_enabled.load(Ordering::Acquire);
+                let enabled = session.input_gate.enabled();
                 let _ = sender.send(&wire::input_ack(sequence, enabled));
             }
             InputDecision::Apply(event) => {
-                if session.input_enabled.load(Ordering::Acquire) {
+                if session.input_gate.enabled() {
                     if let Err(error) = session.injector.lock().unwrap().apply(event) {
                         set_session_error(&session, error);
                     }
                 }
             }
             InputDecision::ApplyAndAck { sequence, event } => {
-                if session.input_enabled.load(Ordering::Acquire) {
+                if session.input_gate.enabled() {
                     if let Err(error) = session.injector.lock().unwrap().apply(event) {
                         set_session_error(&session, error);
                     }
                 }
-                let enabled = session.input_enabled.load(Ordering::Acquire);
+                let enabled = session.input_gate.enabled();
                 let _ = sender.send(&wire::input_ack(sequence, enabled));
             }
         }
     }
+    session.stop.store(true, Ordering::Release);
+    session.input_gate.retire();
     let _ = session.injector.lock().unwrap().release_all();
 }
 
@@ -633,29 +513,19 @@ fn run_tcp_input(mut stream: TcpStream, sender: MediaSender, session: Arc<Window
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
     let started = std::time::Instant::now();
-    while !session.stop.load(Ordering::Acquire) {
-        let packet = match read_tcp_frame(&mut stream) {
-            Ok(Some(packet)) => packet,
-            Ok(None) => break,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                check_viewer_health(&session, started);
-                continue;
-            }
-            Err(error) => {
-                set_session_error(
-                    &session,
-                    format!("Windows USB input receive failed: {error}"),
-                );
-                break;
-            }
-        };
-        process_input_packet(&packet, &session, &mut sequencer, &sender, started);
-    }
+    tcp_media::run_frames(
+        &mut stream,
+        &session.stop,
+        &session.input_gate,
+        |packet| process_input_packet(packet, &session, &mut sequencer, &sender, started),
+        || check_viewer_health(&session, started),
+        |error| {
+            set_session_error(
+                &session,
+                format!("Windows USB input receive failed: {error}"),
+            )
+        },
+    );
     let _ = session.injector.lock().unwrap().release_all();
 }
 
@@ -681,28 +551,30 @@ fn process_input_packet(
     }
     if message == b"IDR" {
         session.force_keyframe.store(true, Ordering::Release);
+    }
+    if session.input_gate.refresh_on_control(&message) {
         return;
     }
     match sequencer.accept(&message) {
         InputDecision::Ignore => {}
         InputDecision::AckDuplicate(sequence) => {
-            let enabled = session.input_enabled.load(Ordering::Acquire);
+            let enabled = session.input_gate.enabled();
             let _ = sender.send(&wire::input_ack(sequence, enabled));
         }
         InputDecision::Apply(event) => {
-            if session.input_enabled.load(Ordering::Acquire) {
+            if session.input_gate.enabled() {
                 if let Err(error) = session.injector.lock().unwrap().apply(event) {
                     set_session_error(session, error);
                 }
             }
         }
         InputDecision::ApplyAndAck { sequence, event } => {
-            if session.input_enabled.load(Ordering::Acquire) {
+            if session.input_gate.enabled() {
                 if let Err(error) = session.injector.lock().unwrap().apply(event) {
                     set_session_error(session, error);
                 }
             }
-            let enabled = session.input_enabled.load(Ordering::Acquire);
+            let enabled = session.input_gate.enabled();
             let _ = sender.send(&wire::input_ack(sequence, enabled));
         }
     }
@@ -725,29 +597,15 @@ fn check_viewer_health(session: &Arc<WindowsSession>, started: std::time::Instan
     if session.stop.swap(true, Ordering::AcqRel) {
         return;
     }
-    let notice = wire::termination(wire::TERMINATION_HEALTH);
-    // Two attempts: the loss that killed the feedback stream may also take
-    // the notice itself.
-    let _ = socket_attempt_send(session, &notice);
-    std::thread::sleep(Duration::from_millis(20));
-    let _ = socket_attempt_send(session, &notice);
+    let _ = session
+        .notice_sender
+        .send_terminal(TerminationReason::Health);
     {
         let mut stats = session.stats.lock().unwrap();
         stats.state = "error".into();
         stats.error = Some("viewer connection lost (feedback timeout)".into());
     }
     let _ = session.injector.lock().unwrap().release_all();
-}
-
-fn socket_attempt_send(session: &Arc<WindowsSession>, notice: &[u8]) -> std::io::Result<()> {
-    let sender = session.notice_sender.lock().unwrap();
-    match sender.as_ref() {
-        Some(sender) => sender.send(notice).map(|_| ()),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "no notice socket",
-        )),
-    }
 }
 
 fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {

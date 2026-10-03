@@ -3,6 +3,7 @@ import * as SecureStore from "expo-secure-store";
 import { connect, ControlRequestError } from "./control";
 import {
   getPinnedHostKey,
+  getStoredPinnedHostKey,
   rememberPinnedHostKey,
   restorePinnedHostKey,
 } from "./pinned-host-keys";
@@ -273,6 +274,7 @@ export async function getStoredCredential(
   target: HostEndpoint,
   verifiedHostKey: string | null = null,
   signal?: AbortSignal,
+  options: { allowEndpointCredential?: boolean } = {},
 ): Promise<StoredCredential | null> {
   return serializeCredentialMutation(async () => {
     throwIfAborted(signal);
@@ -284,6 +286,7 @@ export async function getStoredCredential(
         return { token: identityToken, target, hostKey: verifiedHostKey };
       }
     }
+    if (options.allowEndpointCredential === false) return null;
     const endpointToken = await getStoredToken(target);
     throwIfAborted(signal);
     if (!endpointToken) return null;
@@ -519,8 +522,10 @@ async function pairAndStore(
   }
   const signal = options?.attempt?.signal ?? options?.signal;
   throwIfAborted(signal);
+  const pinnedHostKey = options?.pinnedHostKey ?? await getStoredPinnedHostKey(host, port);
+  throwIfAborted(signal);
   const client = await connect(host, port, 5000, undefined, {
-    pinnedHostKey: options?.pinnedHostKey ?? null,
+    pinnedHostKey,
   });
   try {
     throwIfAborted(signal);

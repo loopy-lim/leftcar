@@ -1,15 +1,20 @@
 package dev.leftcar.viewer.stream
 
 import android.app.Activity
+import android.animation.ValueAnimator
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
+import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
@@ -17,8 +22,27 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
+import android.widget.Button
+import android.widget.ProgressBar
 import dev.leftcar.viewer.R
 import dev.leftcar.viewer.shim.ViewerNative
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+
+internal fun streamChromeInsets(activity: Activity): Rect {
+    val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)?.getInsets(
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or
+            WindowInsetsCompat.Type.mandatorySystemGestures(),
+    )
+    return Rect(insets?.left ?: 0, insets?.top ?: 0, insets?.right ?: 0, insets?.bottom ?: 0)
+}
+
+internal fun streamChromeWidth(activity: Activity): Int {
+    val insets = streamChromeInsets(activity)
+    val width = activity.window.decorView.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
+    val padding = StreamPanelDensity.dp(32f, activity.resources.displayMetrics.density, StreamPanelDensity.scaleOf(activity))
+    return (width - insets.left - insets.right - padding).coerceAtLeast(1)
+}
 
 internal class TerminationPollGate {
     private var armed = false
@@ -40,6 +64,18 @@ internal class TerminationPollGate {
     }
 }
 
+/** Pointer, keyboard and screen-reader clicks share one request cooldown. */
+internal class InputApprovalRequestGate(private val cooldownMs: Long = 3_000L) {
+    private var lastRequestAt: Long? = null
+
+    fun claim(status: Int, nowMs: Long): Boolean {
+        if (status != 0) return false
+        if (lastRequestAt?.let { nowMs - it < cooldownMs } == true) return false
+        lastRequestAt = nowMs
+        return true
+    }
+}
+
 internal class StreamHudController(
     private val activity: Activity,
     private val instanceId: String,
@@ -48,19 +84,18 @@ internal class StreamHudController(
     private val onTermination: (Int) -> Unit,
     private val onRenderedFrame: () -> Unit = {},
     private val onInputStatusChanged: (Int) -> Unit = {},
+    private val onInputRequest: (String) -> Boolean = { false },
+    private val onRetryRebind: () -> Unit = {},
 ) {
     companion object {
         private const val INPUT_STATUS_VISIBLE_MS = 900L
         private const val INPUT_STATUS_FADE_MS = 320L
-        /** 입력이 켜져 있는 동안 유지하는 은은한 배지 투명도 — 꺼짐과 구분되되
-         * 잠금 배너보다 조용한다. */
-        private const val INPUT_ALLOWED_IDLE_ALPHA = 0.38f
+        /** Opaque chrome keeps its contrast independent of the video pixels. */
+        private const val INPUT_ALLOWED_IDLE_ALPHA = 1f
         private const val DEBUG_STATS_VISIBLE_MS = 6_000L
         private const val DEBUG_STATS_FADE_MS = 420L
-        /** 잠금 배너 탭 재요청 냉각 — 연타가 호스트에 알림 노이즈를 만들지
-         * 않게 한다. 냉각 중 탭은 배너를 지나 스트림 입력으로 간다. */
-        private const val INPUT_REQUEST_COOLDOWN_MS = 3_000L
         private const val INPUT_REQUEST_FEEDBACK_MS = 1_600L
+        private const val INPUT_REQUEST_TIMEOUT_MS = 8_000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -74,6 +109,17 @@ internal class StreamHudController(
     private var rebindPopup: PopupWindow? = null
     private var rebindView: View? = null
     private var rebindText: TextView? = null
+    private var rebindSpinner: ProgressBar? = null
+    private var rebindRetry: Button? = null
+    private val inputRequestGate = InputApprovalRequestGate()
+    // Activity recreation can retain the logical stream generation. Its new
+    // HUD must still reject replies to requests from the previous physical view.
+    private val inputRequestScope = java.util.UUID.randomUUID().toString()
+    private var inputRequestSerial = 0L
+    private var pendingInputRequest: String? = null
+    private val inputRequestTimeout = Runnable {
+        pendingInputRequest?.let { onInputRequestResult(it, ViewerStrings.inputRequestTimeout) }
+    }
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
     private var terminationHandled = false
@@ -85,14 +131,14 @@ internal class StreamHudController(
     private val fadeInput = Runnable {
         inputView?.animate()
             ?.alpha(if (lastInputStatus == 1) INPUT_ALLOWED_IDLE_ALPHA else 0f)
-            ?.setDuration(INPUT_STATUS_FADE_MS)
+            ?.setDuration(animationDuration(INPUT_STATUS_FADE_MS))
             ?.setInterpolator(AccelerateDecelerateInterpolator())
             ?.start()
     }
     private val fadeStats = Runnable {
         statsView?.animate()
             ?.alpha(0f)
-            ?.setDuration(DEBUG_STATS_FADE_MS)
+            ?.setDuration(animationDuration(DEBUG_STATS_FADE_MS))
             ?.setInterpolator(AccelerateDecelerateInterpolator())
             ?.start()
     }
@@ -139,22 +185,43 @@ internal class StreamHudController(
     }
 
     fun showRebindIndicator(message: String) {
-        // 정적 텍스트는 멈춤처럼 보인다 — 인디케이터 회전 스피너가 진행 중임을
-        // 즉시 전달한다.
+        showRebindState(message, busy = true)
+    }
+
+    private fun showRebindState(message: String, busy: Boolean) {
         val container = rebindView as? LinearLayout
         if (container == null) {
-            val spinner = android.widget.ProgressBar(activity).apply {
+            val spinner = ProgressBar(activity).apply {
                 isIndeterminate = true
                 val size = dp(16)
                 layoutParams = LinearLayout.LayoutParams(size, size)
                 indeterminateTintList = android.content.res.ColorStateList.valueOf(
-                    Color.argb(224, 255, 255, 255),
+                    StreamUiTokens.INK,
                 )
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }
             val text = TextView(activity).apply {
-                setTextColor(Color.argb(224, 255, 255, 255))
-                textSize = 12f * panelScale
-                contentDescription = ViewerStrings.rebindDescription
+                setTextColor(StreamUiTokens.INK)
+                textSize = StreamUiTokens.BODY_SP * panelScale
+                maxWidth = (chromeWidth() - dp(84)).coerceAtLeast(1)
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(8) }
+            }
+            val retry = Button(activity).apply {
+                this.text = ViewerStrings.retry
+                contentDescription = ViewerStrings.retryRebind
+                textSize = StreamUiTokens.CAPTION_SP * panelScale
+                setTextColor(StreamUiTokens.INK)
+                minWidth = dp(StreamUiTokens.MIN_TARGET_DP)
+                minimumHeight = dp(StreamUiTokens.MIN_TARGET_DP)
+                background = badgeBackground(StreamUiTokens.SUBTLE)
+                setOnClickListener {
+                    showRebindIndicator(ViewerStrings.rebindReconnecting)
+                    onRetryRebind()
+                }
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -164,12 +231,15 @@ internal class StreamHudController(
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), dp(7), dp(12), dp(7))
-                background = badgeBackground(Color.argb(168, 15, 23, 42))
+                background = badgeBackground(StreamUiTokens.SURFACE)
                 addView(spinner)
                 addView(text)
+                addView(retry)
             }
             rebindView = row
             rebindText = text
+            rebindSpinner = spinner
+            rebindRetry = retry
             rebindPopup = PopupWindow(
                 row,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -179,11 +249,17 @@ internal class StreamHudController(
                 isTouchable = false
                 isFocusable = false
                 isOutsideTouchable = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setTouchModal(false)
+                animationStyle = 0
                 setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
                 elevation = dp(2).toFloat()
             }
         }
         rebindText?.text = message
+        rebindSpinner?.visibility = if (busy && animationsEnabled()) View.VISIBLE else View.GONE
+        rebindRetry?.visibility = if (busy) View.GONE else View.VISIBLE
+        rebindPopup?.isTouchable = !busy
+        rebindPopup?.update()
         rebindView?.alpha = 1f
         activity.window.decorView.post {
             val popup = rebindPopup ?: return@post
@@ -202,6 +278,9 @@ internal class StreamHudController(
         rebindPopup?.dismiss()
         rebindPopup = null
         rebindView = null
+        rebindText = null
+        rebindSpinner = null
+        rebindRetry = null
     }
 
     fun onRebindFinished(success: Boolean) {
@@ -210,7 +289,7 @@ internal class StreamHudController(
             armTerminationPolling()
             clearRebindIndicator()
         } else {
-            showRebindIndicator(ViewerStrings.rebindFailed)
+            showRebindState(ViewerStrings.rebindFailed, busy = false)
         }
         handler.removeCallbacks(poll)
         handler.post(poll)
@@ -221,8 +300,8 @@ internal class StreamHudController(
         handler.removeCallbacks(fadeInput)
         badge.animate().cancel()
         badge.animate()
-            .alpha(0.82f)
-            .setDuration(110L)
+            .alpha(1f)
+            .setDuration(animationDuration(110L))
             .setInterpolator(DecelerateInterpolator())
             .withEndAction { handler.postDelayed(fadeInput, INPUT_STATUS_VISIBLE_MS) }
             .start()
@@ -233,38 +312,54 @@ internal class StreamHudController(
         handler.removeCallbacks(fadeStats)
         stats.animate().cancel()
         stats.animate()
-            .alpha(0.76f)
-            .setDuration(130L)
+            .alpha(1f)
+            .setDuration(animationDuration(130L))
             .setInterpolator(DecelerateInterpolator())
             .withEndAction { handler.postDelayed(fadeStats, DEBUG_STATS_VISIBLE_MS) }
             .start()
     }
 
-    /** 잠금 배너 탭 → 입력 허용 요청(2026-09-21). 배너 팝업은 터치를 받지
-     * 않으므로 액티비티 dispatchTouchEvent가 이 히트 테스트를 대행한다.
-     * 참을 반환하면 호출자가 요청을 보내고 탭을 소비한다. 냉각 중이면
-     * 거짓 — 탭은 배너를 지나 스트림 입력으로 간다. */
-    fun consumeInputRequestTap(x: Float, y: Float): Boolean {
-        if (lastInputStatus != 0) return false
-        val badge = inputView ?: return false
-        if (!badge.isAttachedToWindow) return false
-        val location = IntArray(2)
-        badge.getLocationInWindow(location)
-        val within = x >= location[0] && x <= location[0] + badge.width &&
-            y >= location[1] && y <= location[1] + badge.height
-        if (!within) return false
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastInputRequestAt < INPUT_REQUEST_COOLDOWN_MS) return false
-        lastInputRequestAt = now
+    private fun requestInputApproval() {
+        if (pendingInputRequest != null) return
+        if (!inputRequestGate.claim(lastInputStatus, SystemClock.elapsedRealtime())) return
+        val requestId = "$inputRequestScope:${++inputRequestSerial}"
+        pendingInputRequest = requestId
+        handler.removeCallbacks(restoreInputBanner)
+        setInputRequestMessage(ViewerStrings.inputRequestPending)
+        inputView?.isEnabled = false
+        handler.postDelayed(inputRequestTimeout, INPUT_REQUEST_TIMEOUT_MS)
+        if (!onInputRequest(requestId)) onInputRequestResult(requestId, ViewerStrings.inputRequestUnavailable)
+    }
+
+    fun onInputRequestResult(requestId: String, error: String?): Boolean {
+        if (pendingInputRequest != requestId || lastInputStatus != 0) return false
+        handler.removeCallbacks(inputRequestTimeout)
+        pendingInputRequest = null
+        inputView?.isEnabled = true
+        if (error == null) onInputRequestSent()
+        else setInputRequestMessage("${error.trim().take(160)}\n${ViewerStrings.inputRequestRetry}")
         return true
+    }
+
+    fun invalidateInputRequests() {
+        pendingInputRequest = null
+        handler.removeCallbacks(inputRequestTimeout)
+        handler.removeCallbacks(restoreInputBanner)
+        inputView?.isEnabled = true
+        if (lastInputStatus == 0) setInputRequestMessage(ViewerStrings.inputLockedBanner)
+    }
+
+    private fun setInputRequestMessage(message: String) {
+        inputLabel?.text = message
+        inputView?.contentDescription = message
+        inputView?.animate()?.cancel()
+        inputView?.alpha = 1f
     }
 
     /** 요청 전송 피드백 — 배너 문구를 잠시 바꿔 탭이 닿았음을 보여 준 뒤
      * 원래 잠금 문구로 돌아온다(상태가 풀리면 updateInput이 덮어쓴다). */
     fun onInputRequestSent() {
-        inputLabel?.text = ViewerStrings.inputRequestSent
-        inputView?.animate()?.cancel()
-        inputView?.alpha = 1f
+        setInputRequestMessage(ViewerStrings.inputRequestSent)
         handler.removeCallbacks(restoreInputBanner)
         handler.postDelayed(restoreInputBanner, INPUT_REQUEST_FEEDBACK_MS)
     }
@@ -272,12 +367,12 @@ internal class StreamHudController(
     private val restoreInputBanner = Runnable {
         if (lastInputStatus == 0) {
             inputLabel?.text = ViewerStrings.inputLockedBanner
+            inputView?.contentDescription = ViewerStrings.inputLockedBanner
         }
     }
 
-    private var lastInputRequestAt = 0L
-
     fun stop() {
+        invalidateInputRequests()
         handler.removeCallbacks(poll)
         handler.removeCallbacks(fadeInput)
         handler.removeCallbacks(fadeStats)
@@ -296,6 +391,8 @@ internal class StreamHudController(
         statsView = null
         rebindView = null
         rebindText = null
+        rebindSpinner = null
+        rebindRetry = null
         persistentFpsOverlay.stop()
     }
 
@@ -309,16 +406,25 @@ internal class StreamHudController(
     /** 창 폭 기반 HUD 배율 — XR 대형 패널에서 배지가 확대된다. */
     private val panelScale = StreamPanelDensity.scaleOf(activity)
 
+    private fun chromeWidth(): Int = streamChromeWidth(activity)
+
+    private fun animationsEnabled(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ValueAnimator.areAnimatorsEnabled()
+        else Settings.Global.getFloat(activity.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+
+    private fun animationDuration(requestedMs: Long): Long = if (animationsEnabled()) requestedMs else 0L
+
     private fun badgeBackground(color: Int): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(10).toFloat()
+        cornerRadius = dp(StreamUiTokens.RADIUS_DP).toFloat()
         setColor(color)
-        setStroke(dp(1), Color.argb(36, 255, 255, 255))
+        setStroke(dp(1), StreamUiTokens.OUTLINE)
     }
 
     private fun updateInput(status: Int) {
         if (status == lastInputStatus) return
         lastInputStatus = status
+        if (status != 0) invalidateInputRequests()
         onInputStatusChanged(status)
         val icon = inputIcon ?: return
         when (status) {
@@ -338,7 +444,13 @@ internal class StreamHudController(
                 inputView?.contentDescription = ViewerStrings.inputChecking
             }
         }
-        inputView?.background = badgeBackground(Color.argb(118, 15, 23, 42))
+        inputView?.background = badgeBackground(StreamUiTokens.SURFACE)
+        inputView?.isClickable = status == 0
+        inputView?.isFocusable = status == 0
+        inputPopup?.isTouchable = status == 0
+        // Keep the stream window's Back/keyboard routing. Native click actions
+        // and accessibility focus work without making this popup a key window.
+        inputPopup?.update()
         if (status == 0) {
             // 잠김 동안은 배너를 유지한다 — 입력이 죽은 이유와 승인 장소를
             // 알려 주는 유일한 창구다.
@@ -362,15 +474,38 @@ internal class StreamHudController(
             scaleType = ImageView.ScaleType.CENTER
             minimumWidth = dp(20)
             minimumHeight = dp(20)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         val label = TextView(activity).apply {
-            setTextColor(Color.argb(224, 255, 255, 255))
-            textSize = 11f * panelScale
+            setTextColor(StreamUiTokens.INK)
+            textSize = StreamUiTokens.BODY_SP * panelScale
+            maxWidth = (chromeWidth() - dp(48)).coerceAtLeast(1)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         val badge = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(6), dp(5), dp(8), dp(5))
+            minimumHeight = dp(StreamUiTokens.MIN_TARGET_DP)
+            minimumWidth = dp(StreamUiTokens.MIN_TARGET_DP)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setOnClickListener { requestInputApproval() }
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.className = if (lastInputStatus == 0) Button::class.java.name else TextView::class.java.name
+                    info.isEnabled = pendingInputRequest == null
+                }
+            }
+            setOnFocusChangeListener { _, focused ->
+                background = badgeBackground(StreamUiTokens.SURFACE).apply {
+                    if (focused) setStroke(dp(2), StreamUiTokens.INK)
+                }
+            }
+            addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                statsPopup?.takeIf { it.isShowing }?.update(0, statsTopOffset(), -1, -1)
+            }
             addView(icon)
             addView(label)
             alpha = 0f
@@ -389,17 +524,20 @@ internal class StreamHudController(
             isTouchable = false
             isFocusable = false
             isOutsideTouchable = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setTouchModal(false)
+            animationStyle = 0
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(2).toFloat()
         }
         inputPopup = popup
         activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed) {
+            if (inputPopup === popup && !activity.isFinishing && !activity.isDestroyed) {
+                val insets = streamChromeInsets(activity)
                 popup.showAtLocation(
                     activity.window.decorView,
                     Gravity.TOP or Gravity.END,
-                    dp(12),
-                    dp(12),
+                    dp(12) + insets.right,
+                    dp(12) + insets.top,
                 )
                 handler.removeCallbacks(poll)
                 handler.post(poll)
@@ -408,12 +546,11 @@ internal class StreamHudController(
     }
 
     private fun updateStats(packed: Long, latency: Long, surfaceReleaseLatency: Int) {
-        val stats = statsView ?: return
         if (packed == -1L) {
             lastRenderedFrames = null
             renderedFpsSample = null
             persistentFpsOverlay.update(null)
-            stats.text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
+            statsView?.text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
             return
         }
         val rendered = packed and ((1L shl 28) - 1)
@@ -421,6 +558,8 @@ internal class StreamHudController(
             if (rendered > previous) onRenderedFrame()
         }
         lastRenderedFrames = rendered
+        // Renderer health is independent of whether diagnostic chrome exists.
+        val stats = statsView ?: return
         val stale = (packed ushr 28) and 0x0fff
         val inputDrops = (packed ushr 40) and 0xff
         val frameGaps = (packed ushr 48) and 0xff
@@ -460,11 +599,12 @@ internal class StreamHudController(
     private fun showStats() {
         if (statsPopup != null) return
         val stats = TextView(activity).apply {
-            setTextColor(Color.argb(196, 255, 255, 255))
-            textSize = 10f * panelScale
+            setTextColor(StreamUiTokens.INK)
+            textSize = StreamUiTokens.CAPTION_SP * panelScale
             typeface = Typeface.MONOSPACE
             setPadding(dp(9), dp(4), dp(9), dp(4))
-            background = badgeBackground(Color.argb(92, 15, 23, 42))
+            background = badgeBackground(StreamUiTokens.SURFACE)
+            maxWidth = chromeWidth()
             alpha = 0f
             text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
             contentDescription = ViewerStrings.statsDescription
@@ -479,20 +619,24 @@ internal class StreamHudController(
             isTouchable = false
             isFocusable = false
             isOutsideTouchable = false
+            animationStyle = 0
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             elevation = dp(1).toFloat()
         }
         statsPopup = popup
         activity.window.decorView.post {
-            if (!activity.isFinishing && !activity.isDestroyed) {
+            if (statsPopup === popup && !activity.isFinishing && !activity.isDestroyed) {
                 popup.showAtLocation(
                     activity.window.decorView,
                     Gravity.TOP or Gravity.CENTER_HORIZONTAL,
                     0,
-                    dp(12),
+                    statsTopOffset(),
                 )
                 revealStats()
             }
         }
     }
+
+    private fun statsTopOffset(): Int = streamChromeInsets(activity).top +
+        maxOf(dp(84), (inputView?.height ?: 0) + dp(24))
 }

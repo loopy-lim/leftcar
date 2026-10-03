@@ -3,11 +3,11 @@ const {chromium}=require('playwright-core');const assert=require('node:assert/st
 // 저장으로 치환됐고, 지연 저장·스테일 스냅샷 배제는 paired-device-state의
 // complete-snapshot revision 펜스가 담당한다. 따라서 먼저 더 새 revision의
 // 완전 스냅샷을 승인(ack)시킨 뒤 늦은 저장과 구 snapshot을 주입한다.
-(async()=>{const browser=await chromium.launch({headless:true});try{for(const remove of [false,true]){const page=await browser.newPage();try{
+(async()=>{const browser=await chromium.launch({headless:true});try{for(const remove of [false,true]){const page=await browser.newPage();page.setDefaultTimeout(4000);try{
  await page.goto(`file://${process.env.UI_TEST_DIR||'/tmp/leftcar-task4-ui'}/pairing-grants.html?review=1`);
  await page.getByText('승인 대기',{exact:true}).waitFor();
  await page.evaluate(()=>{window.pairingIo.refreshFails=true;});
- await page.getByRole('button',{name:'화면 허용',exact:true}).click();
+ await page.getByRole('button',{name:'Fixture device: 화면 허용',exact:true}).click();
  assert.equal(await page.evaluate(()=>window.pairingIo.pending[0].args.credentialId),'credential-A','actual save binds expected credential');
  await page.evaluate(remove=>{const io=window.pairingIo;io.old=structuredClone(io.devices);io.revision=3;io.devices=remove?[]:[{...io.devices[0],name:'Repaired fixture',source_grants:{credentialId:'credential-B',stateRevision:3,sourceIds:[],revision:0,reviewRequired:true,persistenceError:null}}];},remove);
  await page.evaluate(()=>window.pairingIo.pending.shift().resolve({credentialId:'credential-A',stateRevision:2,sourceIds:['display:A'],revision:2,reviewRequired:false,persistenceError:null}));

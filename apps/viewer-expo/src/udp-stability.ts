@@ -111,7 +111,7 @@ export function resolveUdpStabilitySelection(
   };
 }
 
-const UDP_STABILITY_KEY = "leftcar.udpStability";
+export const UDP_STABILITY_KEY = "leftcar.udpStability";
 
 interface UdpStabilityStore {
   getItemAsync(key: string): Promise<string | null>;
@@ -119,28 +119,19 @@ interface UdpStabilityStore {
 }
 
 function parseUdpStabilitySelection(raw: string | null): UdpStabilitySelection {
-  if (!raw) return { profile: "auto" };
-  try {
-    const parsed = JSON.parse(raw) as Partial<UdpStabilitySelection> | null;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.profile !== "string") {
-      return { profile: "auto" };
-    }
-    const selection: UdpStabilitySelection = {
-      profile: parsed.profile as UdpStabilityProfileId,
-    };
-    if (typeof parsed.burstDatagrams === "number") {
-      selection.burstDatagrams = parsed.burstDatagrams as UdpBurstDatagrams;
-    }
-    if (typeof parsed.fecParityShards === "number") {
-      selection.fecParityShards = parsed.fecParityShards as UdpFecParityShards;
-    }
-    if (typeof parsed.adaptivePacing === "boolean") {
-      selection.adaptivePacing = parsed.adaptivePacing;
-    }
-    return selection;
-  } catch {
-    return { profile: "auto" };
+  if (raw === null) return { profile: "auto" };
+  const parsed: unknown = JSON.parse(raw);
+  if (!isRecord(parsed)) throw new Error("Invalid UDP preference");
+  const profile = PRESET_IDS.find((candidate) => candidate === parsed.profile)
+    ?? (parsed.profile === "custom" ? "custom" : null);
+  if (!profile) throw new Error("Invalid UDP preference");
+  if (profile !== "custom") return { profile };
+  const burstDatagrams = BURST_OPTIONS.find((candidate) => candidate === parsed.burstDatagrams);
+  const fecParityShards = PARITY_OPTIONS.find((candidate) => candidate === parsed.fecParityShards);
+  if (!burstDatagrams || !fecParityShards || typeof parsed.adaptivePacing !== "boolean") {
+    throw new Error("Invalid UDP preference");
   }
+  return { profile, burstDatagrams, fecParityShards, adaptivePacing: parsed.adaptivePacing };
 }
 
 /**
@@ -150,11 +141,7 @@ function parseUdpStabilitySelection(raw: string | null): UdpStabilitySelection {
 export async function readUdpStabilitySelection(
   store: UdpStabilityStore,
 ): Promise<UdpStabilitySelection> {
-  try {
-    return parseUdpStabilitySelection(await store.getItemAsync(UDP_STABILITY_KEY));
-  } catch {
-    return { profile: "auto" };
-  }
+  return parseUdpStabilitySelection(await store.getItemAsync(UDP_STABILITY_KEY));
 }
 
 export async function writeUdpStabilitySelection(

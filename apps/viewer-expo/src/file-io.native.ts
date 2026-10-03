@@ -27,13 +27,13 @@ function dedupedName(name: string, index: number): string {
  */
 async function firstFreeTarget(name: string): Promise<string> {
   const directory = FileSystem.documentDirectory ?? "";
-  for (let index = 1; index <= 100; index += 1) {
+  for (let index = 1; index <= 101; index += 1) {
     const candidate = index === 1 ? name : dedupedName(name, index);
     const target = `${directory}${candidate}`;
     const info = await FileSystem.getInfoAsync(target);
     if (!info.exists) return target;
   }
-  return `${directory}${dedupedName(name, 101)}`;
+  throw new Error("file name candidates exhausted");
 }
 
 const fileIo: FileIo = {
@@ -96,3 +96,8 @@ function sanitizeFileName(name: string): string {
 }
 
 globalThis.__leftcarFileIo = fileIo;
+
+/** Metro selects this module in place of file-io.ts on Android. */
+export function getFileIo(): FileIo {
+  return fileIo;
+}

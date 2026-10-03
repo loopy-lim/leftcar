@@ -61,7 +61,7 @@ export default function Modal({
   return (
     <dialog
       ref={dialogRef}
-      className="modal-overlay"
+      className="fixed inset-0 m-0 flex h-full max-h-none w-full max-w-none items-center justify-center border-0 bg-transparent p-4 text-ink backdrop:bg-black/40"
       aria-labelledby={labelledBy}
       aria-label={ariaLabel}
       onCancel={(event) => {

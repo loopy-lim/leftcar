@@ -1,38 +1,37 @@
+import { Button, Notice, Surface, Text, Toggle } from "../ui/primitives";
 import {
   AlertTriangle,
   AppWindow,
-  ClipboardCheck,
-  Eye,
-  EyeOff,
-  Globe,
   Monitor,
-  QrCode,
-  Settings,
   ShieldCheck,
   Square,
   Wifi,
-  X,
 } from "lucide-react";
 import {
   interpolate,
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
+import type { HostSnapshotView } from "../hostState";
 import type { SessionRow } from "../sessionTypes";
 import Modal from "../Modal";
 import PairingPanel from "../PairingPanel";
-import { buttonVariants } from "../lib/variants";
 import { ExperimentsSection } from "../ExperimentsSection";
 import FileShareCard from "../components/FileShareCard";
 import ExtendedDisplayCard from "../components/ExtendedDisplayCard";
 
 export interface HostSettingsModalProps {
   onClose: () => void;
+  platform?: HostSnapshotView["platform"];
   t: TranslationSchema;
   clipboardShare: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
   wanAccess: boolean;
+  clipboardReady?: boolean;
+  curtainReady?: boolean;
+  badgeReady?: boolean;
+  wanReady?: boolean;
   clipboardPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
@@ -51,176 +50,125 @@ export interface HostSettingsModalProps {
   retryWan: () => void;
 }
 
+import { DialogPanel } from "./DialogPanel";
 export function HostSettingsModal(props: HostSettingsModalProps) {
   const { t, onClose } = props;
-
   const settingsItems = [
     {
-      icon: ClipboardCheck,
       title: t.host.clipboardShareLabel,
       desc: t.host.clipboardShareDesc,
       active: props.clipboardShare,
+      ready: props.clipboardReady,
       pending: props.clipboardPending,
       error: props.clipboardError,
       onToggle: props.onToggleClipboardShare,
       onRetry: props.retryClipboard,
     },
     {
-      icon: EyeOff,
       title: t.host.privacyCurtainLabel,
       desc: t.host.privacyCurtainDesc,
       active: props.privacyCurtain,
+      supported: props.platform !== "windows",
+      ready: props.curtainReady,
       pending: props.curtainPending,
       error: props.curtainError,
       onToggle: props.onTogglePrivacyCurtain,
       onRetry: props.retryCurtain,
     },
     {
-      icon: Eye,
       title: t.host.streamingBadgeLabel,
       desc: t.host.streamingBadgeDesc,
       active: props.streamingBadge,
+      ready: props.badgeReady,
       pending: props.badgePending,
       error: props.badgeError,
       onToggle: props.onToggleStreamingBadge,
       onRetry: props.retryBadge,
     },
     {
-      icon: Globe,
       title: t.host.wanAccessLabel,
       desc: t.host.wanAccessDesc,
       active: props.wanAccess,
+      ready: props.wanReady,
       pending: props.wanPending,
       error: props.wanError,
       onToggle: props.onToggleWanAccess,
       onRetry: props.retryWan,
     },
   ];
-
   return (
-    <Modal ariaLabel={t.host.settingsTitle} onClose={onClose} closeOnOverlayClick>
-      <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 540 }}>
-        <div className="modal-title-bar">
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 7,
-                background: "var(--bg-surface-subtle)",
-                border: "1px solid var(--border-subtle)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "var(--text-primary)",
-              }}
-            >
-              <Settings size={15} />
-            </div>
-            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>{t.host.settingsTitle}</h3>
-          </div>
-          <button
-            className={buttonVariants({ variant: "close" })}
-            onClick={onClose}
-            aria-label={t.host.settingsModalClose}
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        <div className="modal-scroll-area" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
-          <div className="settings-section">
-            <span className="settings-section-title">{t.host.privacySection}</span>
-            <div className="settings-group-container">
-              {settingsItems.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <div
-                    className="settings-item-row"
-                    key={item.title}
-                    role="button"
-                    tabIndex={item.pending ? -1 : 0}
-                    aria-disabled={item.pending}
-                    onClick={() => {
-                      if (!item.pending) item.onToggle();
-                    }}
-                    onKeyDown={(e) => {
-                      if ((e.key === "Enter" || e.key === " ") && !item.pending) {
-                        e.preventDefault();
-                        item.onToggle();
-                      }
-                    }}
-                  >
-                    <div className="settings-item-icon-box">
-                      <Icon size={16} />
-                    </div>
-                    <div className="settings-item-info">
-                      <span className="settings-item-name">{item.title}</span>
-                      <p className="settings-item-desc">{item.desc}</p>
-                      {item.error && (
-                        <div
-                          className="settings-item-error"
-                          role="alert"
-                          onClick={(e) => e.stopPropagation()}
+    <Modal
+      ariaLabel={t.host.settingsTitle}
+      onClose={onClose}
+      closeOnOverlayClick
+    >
+      <DialogPanel
+        title={t.host.settingsTitle}
+        closeLabel={t.host.settingsModalClose}
+        onClose={onClose}
+      >
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+          <section className="space-y-2" aria-label={t.host.privacySection}>
+            <h3 className="text-caption text-muted font-semibold">
+              {t.host.privacySection}
+            </h3>
+            <Surface variant="card" className="divide-y divide-outline p-0">
+              {settingsItems.map((item) => (
+                <div key={item.title} className="flex items-start gap-3 p-4">
+                  <div className="min-w-0 flex-1">
+                    <Text className="block font-semibold">{item.title}</Text>
+                    <p className="text-caption text-muted mt-1">{item.desc}</p>
+                    {item.pending && (
+                      <Text
+                        variant="caption"
+                        tone="muted"
+                        role="status"
+                        className="block mt-1"
+                      >
+                        {item.ready
+                          ? t.host.savingSettings
+                          : t.host.checkingSettings}
+                      </Text>
+                    )}
+                    {item.error && (
+                      <Notice tone="error" className="mt-2 space-y-2">
+                        <Text variant="caption" className="block">
+                          {item.ready
+                            ? t.host.settingsSaveError
+                            : t.host.settingsLoadError}
+                        </Text>
+                        <Text variant="caption" className="block break-words">
+                          {item.error}
+                        </Text>
+                        <Button
+                          variant="secondary"
+                          size="compact"
+                          onClick={item.onRetry}
+                          busy={item.pending}
                         >
-                          <span>{item.error}</span>
-                          <button
-                            type="button"
-                            className={buttonVariants({ variant: "ghost", size: "sm" })}
-                            onClick={item.onRetry}
-                            disabled={item.pending}
-                          >
-                            {t.common.retry}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      disabled={item.pending}
-                      aria-busy={item.pending}
-                      aria-label={`${item.title} ${item.active ? t.host.clipboardShareOn : t.host.clipboardShareOff}`}
-                      className={`ui-switch ${item.active ? "switch-active" : ""}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        item.onToggle();
-                      }}
-                      aria-pressed={item.active}
-                    >
-                      <span className="ui-switch-thumb" />
-                    </button>
+                          {t.common.retry}
+                        </Button>
+                      </Notice>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="settings-section">
-            <span className="settings-section-title">{t.host.extDisplaySection}</span>
-            <ExtendedDisplayCard t={t} />
-          </div>
-
-          <div className="settings-section">
-            <span className="settings-section-title">{t.host.fileShareSection}</span>
-            <FileShareCard t={t} />
-          </div>
-
+                  <Toggle
+                    checked={item.active}
+                    busy={item.pending}
+                    disabled={
+                      !!item.error || ("supported" in item && !item.supported)
+                    }
+                    aria-label={item.title}
+                    onClick={item.onToggle}
+                  />
+                </div>
+              ))}
+            </Surface>
+          </section>
+          <ExtendedDisplayCard t={t} />
+          <FileShareCard t={t} />
           <ExperimentsSection t={t} />
         </div>
-        <div
-          style={{
-            padding: "0 18px 16px",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            color: "var(--text-muted)",
-            fontSize: 12,
-          }}
-        >
-          <ShieldCheck size={14} style={{ flexShrink: 0 }} />
-          <span>{t.host.settingsTitle} · {t.host.autoCleanupPolicy}</span>
-        </div>
-      </div>
+      </DialogPanel>
     </Modal>
   );
 }
@@ -233,36 +181,56 @@ export function TroubleshootingModal({
   t: TranslationSchema;
 }) {
   return (
-    <Modal ariaLabel={t.host.troubleshootTitle} onClose={onClose} closeOnOverlayClick>
-      <div className="modal-window" onClick={(event) => event.stopPropagation()} style={{ maxWidth: 480 }}>
-        <div className="modal-title-bar">
-          <h3>{t.host.troubleshootTitle}</h3>
-          <button className={buttonVariants({ variant: "close" })} onClick={onClose} aria-label={t.host.troubleshootCloseAria}>
-            <X size={15} />
-          </button>
-        </div>
-        <div className="modal-scroll-area" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+    <Modal
+      ariaLabel={t.host.troubleshootTitle}
+      onClose={onClose}
+      closeOnOverlayClick
+    >
+      <DialogPanel
+        title={t.host.troubleshootTitle}
+        closeLabel={t.host.troubleshootCloseAria}
+        onClose={onClose}
+      >
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {(
             [
-              { icon: Wifi, title: t.host.troubleshootWifi, desc: t.host.troubleshootWifiDesc },
-              { icon: AlertTriangle, title: t.host.troubleshootAp, desc: t.host.troubleshootApDesc },
-              { icon: ShieldCheck, title: t.host.troubleshootFirewall, desc: t.host.troubleshootFirewallDesc },
-              { icon: Monitor, title: t.host.troubleshootPerm, desc: t.host.troubleshootPermDesc },
-              { icon: AppWindow, title: t.host.troubleshootHiddenWindow, desc: t.host.troubleshootHiddenWindowDesc },
+              {
+                icon: Wifi,
+                title: t.host.troubleshootWifi,
+                desc: t.host.troubleshootWifiDesc,
+              },
+              {
+                icon: AlertTriangle,
+                title: t.host.troubleshootAp,
+                desc: t.host.troubleshootApDesc,
+              },
+              {
+                icon: ShieldCheck,
+                title: t.host.troubleshootFirewall,
+                desc: t.host.troubleshootFirewallDesc,
+              },
+              {
+                icon: Monitor,
+                title: t.host.troubleshootPerm,
+                desc: t.host.troubleshootPermDesc,
+              },
+              {
+                icon: AppWindow,
+                title: t.host.troubleshootHiddenWindow,
+                desc: t.host.troubleshootHiddenWindowDesc,
+              },
             ] as const
           ).map(({ icon: Icon, title, desc }) => (
-            <div className="troubleshoot-card" key={title}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <Icon size={16} />
-                <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text-primary)" }}>{title}</span>
-              </div>
-              <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                {desc}
-              </p>
-            </div>
+            <Surface variant="card" key={title} className="space-y-2">
+              <h3 className="text-body text-ink flex items-center gap-2 font-semibold">
+                <Icon size={16} className="shrink-0" />
+                {title}
+              </h3>
+              <p className="text-caption text-muted">{desc}</p>
+            </Surface>
           ))}
         </div>
-      </div>
+      </DialogPanel>
     </Modal>
   );
 }
@@ -277,45 +245,21 @@ export function PairingModal({
   t: TranslationSchema;
 }) {
   return (
-    <Modal ariaLabel={t.host.pairingModalTitle} onClose={onClose} closeOnOverlayClick>
-      <div
-        className="modal-window modal-wide"
-        onClick={(event) => event.stopPropagation()}
-        style={{ maxWidth: 620 }}
+    <Modal
+      ariaLabel={t.host.pairingModalTitle}
+      onClose={onClose}
+      closeOnOverlayClick
+    >
+      <DialogPanel
+        title={t.host.pairingModalTitle}
+        closeLabel={t.host.pairingModalCloseAria}
+        onClose={onClose}
+        size="wide"
       >
-        <div className="modal-title-bar">
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 7,
-                background: "var(--bg-surface-subtle)",
-                border: "1px solid var(--border-subtle)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "var(--text-primary)",
-              }}
-            >
-              <QrCode size={15} />
-            </div>
-            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>
-              {t.host.pairingModalTitle}
-            </h3>
-          </div>
-          <button
-            className={buttonVariants({ variant: "close" })}
-            onClick={onClose}
-            aria-label={t.host.pairingModalCloseAria}
-          >
-            <X size={15} />
-          </button>
-        </div>
-        <div className="modal-scroll-area">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <PairingPanel language={language} />
         </div>
-      </div>
+      </DialogPanel>
     </Modal>
   );
 }
@@ -323,12 +267,14 @@ export function PairingModal({
 export function StopStreamModal({
   session,
   busy,
+  error,
   t,
   onCancel,
   onConfirm,
 }: {
   session: SessionRow;
   busy: boolean;
+  error?: string | null;
   t: TranslationSchema;
   onCancel: () => void;
   onConfirm: () => void;
@@ -340,30 +286,42 @@ export function StopStreamModal({
         if (!busy) onCancel();
       }}
     >
-      <div className="modal-window stop-stream-modal">
-        <div className="modal-title-bar">
-          <h3 id="stop-stream-title">{t.host.stopModalTitle}</h3>
-          <button className={buttonVariants({ variant: "close" })} disabled={busy} onClick={onCancel} aria-label={t.common.close}>
-            <X size={15} />
-          </button>
-        </div>
-        <div className="stop-stream-modal-body">
-          <div className="stop-stream-target">
-            <strong>{session.sourceName}</strong>
-            <span>{interpolate(t.host.stopModalConnectedDevice, { addr: session.viewerAddr })}</span>
+      <DialogPanel
+        title={t.host.stopModalTitle}
+        titleId="stop-stream-title"
+        closeLabel={t.common.close}
+        onClose={onCancel}
+        busy={busy}
+        size="compact"
+      >
+        <div className="min-h-0 space-y-4 overflow-y-auto p-4">
+          <Surface variant="inset" className="space-y-1">
+            <Text className="block break-words font-semibold">
+              {session.sourceName}
+            </Text>
+            <Text variant="code" tone="muted" className="block break-all">
+              {interpolate(t.host.stopModalConnectedDevice, {
+                addr: session.viewerAddr,
+              })}
+            </Text>
+          </Surface>
+          <p className="text-body text-muted">{t.host.stopModalSummary}</p>
+          {error && <Notice tone="error">{error}</Notice>}
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" disabled={busy} onClick={onCancel}>
+              {t.host.btnKeepStreaming}
+            </Button>
+            <Button variant="danger" busy={busy} onClick={onConfirm}>
+              <Square size={16} fill="currentColor" />
+              {busy
+                ? t.host.stopping
+                : error
+                  ? t.common.retry
+                  : t.host.btnConfirmStop}
+            </Button>
           </div>
-          <p className="stop-stream-summary">
-            {t.host.stopModalSummary}
-          </p>
-          <div className="stop-stream-actions">
-            <button className={buttonVariants({ variant: "ghost" })} disabled={busy} onClick={onCancel}>{t.host.btnKeepStreaming}</button>
-            <button className={buttonVariants({ variant: "danger" })} disabled={busy} onClick={onConfirm}>
-              <Square size={13} fill="currentColor" />
-              {busy ? t.host.stopping : t.host.btnConfirmStop}
-            </button>
-          </div>
         </div>
-      </div>
+      </DialogPanel>
     </Modal>
   );
 }
@@ -373,13 +331,20 @@ export interface DashboardModalsProps {
   showHelpModal: boolean;
   showSettingsModal: boolean;
   pendingStopSession: SessionRow | null;
+  stopError: string | null;
+  stopBusy: boolean;
   inputBusy: number | "permission" | null;
   language: SupportedLanguage;
+  platform?: HostSnapshotView["platform"];
   t: TranslationSchema;
   clipboardShare: boolean;
   privacyCurtain: boolean;
   streamingBadge: boolean;
   wanAccess: boolean;
+  clipboardReady?: boolean;
+  curtainReady?: boolean;
+  badgeReady?: boolean;
+  wanReady?: boolean;
   clipboardPending: boolean;
   curtainPending: boolean;
   badgePending: boolean;
@@ -414,19 +379,21 @@ export function DashboardModals(props: DashboardModalsProps) {
         />
       )}
       {props.showHelpModal && (
-        <TroubleshootingModal
-          onClose={props.onCloseHelp}
-          t={props.t}
-        />
+        <TroubleshootingModal onClose={props.onCloseHelp} t={props.t} />
       )}
       {props.showSettingsModal && (
         <HostSettingsModal
           onClose={props.onCloseSettings}
+          platform={props.platform}
           t={props.t}
           clipboardShare={props.clipboardShare}
           privacyCurtain={props.privacyCurtain}
           streamingBadge={props.streamingBadge}
           wanAccess={props.wanAccess}
+          clipboardReady={props.clipboardReady}
+          curtainReady={props.curtainReady}
+          badgeReady={props.badgeReady}
+          wanReady={props.wanReady}
           clipboardPending={props.clipboardPending}
           curtainPending={props.curtainPending}
           badgePending={props.badgePending}
@@ -448,7 +415,8 @@ export function DashboardModals(props: DashboardModalsProps) {
       {props.pendingStopSession && (
         <StopStreamModal
           session={props.pendingStopSession}
-          busy={props.inputBusy === props.pendingStopSession.session}
+          error={props.stopError}
+          busy={props.stopBusy}
           t={props.t}
           onCancel={props.onCancelStopSession}
           onConfirm={() => {

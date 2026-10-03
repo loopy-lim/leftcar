@@ -1,6 +1,6 @@
 //! 호스트 설정 영속화(파일 공유 게이트 등). `data_dir/leftcar-host/settings.json`
-//! (0600)에 저장하며, 없으면 기본값으로 만든다. 파일이 깨졌다면
-//! 기본값으로 되돌린다 — 승인 토글은 안전 쪽으로 실패해야 한다.
+//! (0600)에 저장하며, 없으면 기본값으로 만든다. 읽지 못한 설정은
+//! 승인 토글을 끈 채 시작하되 원본을 보존하고 변경 저장을 거부한다.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ pub struct ExperimentSettings {
 /// 공인 인터넷에 포트를 노출하는 행위라 기본은 꺼짐이고, 외부 접속의 정식
 /// 경로는 Tailscale 같은 오버레이 네트워크다. 켜면 라우터 포트 매핑이 UPnP로
 /// 등록되고 종료 때 제거되며 토글로 즉시 끌 수 있다.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct HostSettings {
     pub clipboard_share: bool,
     pub file_share: bool,
@@ -57,20 +57,6 @@ pub struct HostSettings {
     pub language: HostLanguage,
     /// 실험 스위치 — 기본은 전부 미설정이다.
     pub experiment: ExperimentSettings,
-}
-
-impl Default for HostSettings {
-    fn default() -> Self {
-        Self {
-            clipboard_share: false,
-            file_share: false,
-            privacy_curtain: false,
-            streaming_badge: false,
-            wan_access: false,
-            language: HostLanguage::default(),
-            experiment: ExperimentSettings::default(),
-        }
-    }
 }
 
 /// 호스트 UI 언어. 웹뷰의 `leftcar_lang`(localStorage)과 같은 "ko"/"en" 값을
@@ -97,20 +83,36 @@ pub fn default_settings_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("leftcar-host").join("settings.json"))
 }
 
-/// 설정 파일을 읽거나 기본값으로 만든다. 깨진 파일은 기본값으로 대체한다
-/// (로그만 남기고 실패시키지 않는다 — 토글이 고착되면 회복 경로가 없다).
+/// 읽기 실패 시 안전한 메모리 기본값으로 시작한다. 원본 파일은 바꾸지 않는다.
 pub fn load_or_default(path: Option<&Path>) -> HostSettings {
+    read_settings(path).unwrap_or_else(|error| {
+        eprintln!("leftcar: {error}; using safe defaults without changing the settings file");
+        HostSettings::default()
+    })
+}
+
+fn read_settings(path: Option<&Path>) -> Result<HostSettings, String> {
     let Some(path) = path else {
-        return HostSettings::default();
+        return Ok(HostSettings::default());
     };
-    let Some(body) = std::fs::read_to_string(path).ok() else {
-        return HostSettings::default();
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(error) => {
+            // A missing file is a fresh configuration; an existing unreadable
+            // source (including a dangling symlink) must never be replaced.
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(path).is_err_and(|metadata_error| {
+                    metadata_error.kind() == std::io::ErrorKind::NotFound
+                })
+            {
+                return Ok(HostSettings::default());
+            }
+            return Err(format!("cannot read settings file: {error}"));
+        }
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
-        eprintln!("leftcar: settings file is corrupt, resetting to defaults");
-        return HostSettings::default();
-    };
-    HostSettings {
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("cannot parse settings file: {error}"))?;
+    Ok(HostSettings {
         clipboard_share: parsed
             .get("clipboardShare")
             .and_then(|v| v.as_bool())
@@ -169,7 +171,7 @@ pub fn load_or_default(path: Option<&Path>) -> HostSettings {
             Some("en") => HostLanguage::En,
             _ => HostLanguage::Ko,
         },
-    }
+    })
 }
 
 fn persist(path: &Path, settings: &HostSettings) -> Result<(), String> {
@@ -282,14 +284,22 @@ pub fn experiment_env_vars(experiment: &ExperimentSettings) -> Vec<(&'static str
 /// 제어 명령 게이트와 Tauri UI 명령이 같은 인스턴스를 나눠 쓴다.
 pub struct SharedSettings {
     path: Option<PathBuf>,
+    load_error: Option<String>,
     settings: Mutex<HostSettings>,
 }
 
 impl SharedSettings {
     pub fn load_or_default(path: Option<PathBuf>) -> Self {
-        let settings = load_or_default(path.as_deref());
+        let (settings, load_error) = match read_settings(path.as_deref()) {
+            Ok(settings) => (settings, None),
+            Err(error) => {
+                eprintln!("leftcar: {error}; using safe defaults and preserving the settings file");
+                (HostSettings::default(), Some(error))
+            }
+        };
         Self {
             path,
+            load_error,
             settings: Mutex::new(settings),
         }
     }
@@ -359,6 +369,18 @@ impl SharedSettings {
         // 잠금을 쥐고 있어도 충분하다. 실패한 토글이 메모리 값을 바꿔 놓으면
         // UI가 실패 값을 보여 주므로, 디스크 쓰기가 성공한 뒤에만 반영한다.
         let mut settings = self.settings.lock().unwrap();
+        if let Some(error) = &self.load_error {
+            return Err(format!(
+                "settings were not loaded; preserving the original file: {error}. Restore access or repair the file, then restart Leftcar Host"
+            ));
+        }
+        if let Some(path) = &self.path {
+            // Also preserve a source that became unreadable/corrupt after
+            // startup. Validate before creating or truncating a temporary file.
+            read_settings(Some(path)).map_err(|error| {
+                format!("cannot save settings; preserving the original file: {error}")
+            })?;
+        }
         let mut next = *settings;
         mutate(&mut next);
         if let Some(path) = &self.path {
@@ -568,34 +590,89 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_settings_reset_to_defaults() {
+    fn corrupt_settings_use_safe_defaults_without_overwriting_the_source() {
         let path = temp_path("corrupt");
-        std::fs::write(&path, b"{not json").unwrap();
+        let original = b"{not json";
+        std::fs::write(&path, original).unwrap();
         let shared = SharedSettings::load_or_default(Some(path.clone()));
-        assert!(!shared.file_share());
-        // 다시 쓰면 유효한 파일로 회복된다.
-        shared.set_file_share(true).unwrap();
-        assert!(load_or_default(Some(&path)).file_share);
+        let snapshot = shared.get();
+        assert_eq!(snapshot, HostSettings::default());
+        let error = shared.set_file_share(true).unwrap_err();
+        assert!(error.contains("settings were not loaded"), "{error}");
+        assert_eq!(shared.get(), snapshot);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
+    fn unreadable_settings_bytes_are_preserved_on_mutation() {
+        let path = temp_path("invalid-utf8");
+        let original = [0xff, 0xfe, 0x80];
+        std::fs::write(&path, original).unwrap();
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        let snapshot = shared.get();
+        assert_eq!(snapshot, HostSettings::default());
+        let error = shared.set_clipboard_share(true).unwrap_err();
+        assert!(error.contains("settings were not loaded"), "{error}");
+        assert_eq!(shared.get(), snapshot);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_settings_directory_is_rejected_before_creating_a_temporary_file() {
+        let path = temp_path("read-error-directory");
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap();
+        let marker = path.join("keep.txt");
+        std::fs::write(&marker, b"original").unwrap();
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        let snapshot = shared.get();
+        let error = shared.set_privacy_curtain(true).unwrap_err();
+        assert!(error.contains("settings were not loaded"), "{error}");
+        assert_eq!(shared.get(), snapshot);
+        assert_eq!(std::fs::read(marker).unwrap(), b"original");
+        assert!(path.is_dir());
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn corruption_after_startup_is_not_replaced_by_a_later_mutation() {
+        let path = temp_path("late-corruption");
+        std::fs::write(&path, br#"{"clipboardShare":true}"#).unwrap();
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        let snapshot = shared.get();
+        assert!(snapshot.clipboard_share);
+        let original = b"saved settings became unreadable JSON";
+        std::fs::write(&path, original).unwrap();
+        assert!(shared.set_streaming_badge(true).is_err());
+        assert_eq!(shared.get(), snapshot);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn persist_failure_leaves_memory_unchanged() {
-        // persist 경로가 디렉터리면 create_dir_all은 통과해도 쓰기가 실패한다.
-        let dir =
-            std::env::temp_dir().join(format!("leftcar-settings-faildir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let shared = SharedSettings::load_or_default(Some(dir.clone()));
-        assert!(!shared.file_share());
+        // Keep the source readable so the failure occurs in persistence, not
+        // the read guard. A directory at the temporary-file path blocks writes.
+        let path = temp_path("persist-failure");
+        std::fs::write(&path, br#"{"privacyCurtain":true}"#).unwrap();
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        let shared = SharedSettings::load_or_default(Some(path.clone()));
+        let snapshot = shared.get();
         assert!(shared.set_file_share(true).is_err());
-        assert!(
-            !shared.file_share(),
-            "failed persist must not flip the in-memory value the UI reads"
-        );
         assert!(shared.set_clipboard_share(true).is_err());
-        assert!(!shared.clipboard_share());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(shared.get(), snapshot);
+        assert_eq!(load_or_default(Some(&path)), snapshot);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

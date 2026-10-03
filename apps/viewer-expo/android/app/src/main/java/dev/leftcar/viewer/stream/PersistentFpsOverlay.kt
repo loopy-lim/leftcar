@@ -59,9 +59,9 @@ internal fun nextRenderedFpsSample(
 }
 
 internal data class PersistentFpsOverlayPolicy(
-    val textSizeSp: Float = 13f,
-    val textColorAlpha: Int = 235,
-    val backgroundAlpha: Int = 144,
+    val textSizeSp: Float = StreamUiTokens.BODY_SP,
+    val textColorAlpha: Int = 255,
+    val backgroundAlpha: Int = 255,
     val horizontalPaddingDp: Int = 8,
     val verticalPaddingDp: Int = 4,
     val cornerRadiusDp: Int = 5,
@@ -99,7 +99,7 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
         if (popup != null) return
         val policy = persistentFpsOverlayPolicy
         val view = TextView(activity).apply {
-            setTextColor(Color.argb(policy.textColorAlpha, 255, 255, 255))
+            setTextColor(StreamUiTokens.INK)
             textSize = policy.textSizeSp
             typeface = Typeface.MONOSPACE
             setPadding(
@@ -111,7 +111,8 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(policy.cornerRadiusDp).toFloat()
-                setColor(Color.argb(policy.backgroundAlpha, 15, 23, 42))
+                setColor(StreamUiTokens.SURFACE)
+                setStroke(dp(1), StreamUiTokens.OUTLINE)
             }
             elevation = 0f
             text = persistentFpsText(displayedFps)
@@ -179,7 +180,7 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
         val rightInset: Int
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val insets = decor.rootWindowInsets?.getInsets(
-                WindowInsets.Type.systemBars() or WindowInsets.Type.mandatorySystemGestures(),
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.mandatorySystemGestures(),
             )
             bottomInset = insets?.bottom ?: 0
             rightInset = insets?.right ?: 0

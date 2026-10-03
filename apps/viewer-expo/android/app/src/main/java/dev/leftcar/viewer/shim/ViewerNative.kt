@@ -36,6 +36,8 @@ object ViewerNative {
     external fun setSessionMediaKey(mediaKey: ByteArray): Int
     /** Loopback TCP port used by the JS control client for USB sessions. */
     external fun usbControlPort(): Int
+    /** Retire the physical bridge only when the accessory has detached. */
+    external fun detachUsb(): Int
     /** Roll back a prepared port when Host start or Activity launch fails. */
     external fun cancelPreparedStream(port: Int): Int
     external fun cancelPreparedSplitStream(port: Int): Int

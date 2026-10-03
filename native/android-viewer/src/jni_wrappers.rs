@@ -104,6 +104,7 @@ extern "C" {
     fn leftcar_jni_prepare_usb(fd: i32, key: *const u8, key_len: usize) -> i32;
     fn leftcar_jni_set_usb_media_key(key: *const u8, key_len: usize) -> i32;
     fn leftcar_jni_usb_control_port() -> i32;
+    fn leftcar_jni_detach_usb() -> i32;
     fn leftcar_jni_cancel_prepared_port(port: u16) -> i32;
     fn leftcar_jni_cancel_prepared_split(port: u16) -> i32;
     fn leftcar_jni_attach_port_presentation(
@@ -339,6 +340,14 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_setSessionMed
         unsafe { leftcar_jni_set_usb_media_key(key.as_ptr(), key.len()) }
     })
     .unwrap_or(3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_detachUsb(
+    _env: *mut JNIEnv,
+    _class: *mut jobject,
+) -> i32 {
+    std::panic::catch_unwind(|| unsafe { leftcar_jni_detach_usb() }).unwrap_or(3)
 }
 
 #[no_mangle]

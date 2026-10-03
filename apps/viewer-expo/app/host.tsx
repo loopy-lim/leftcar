@@ -1,21 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   NativeEventEmitter,
   NativeModules,
-  Pressable,
   ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
   View,
-  useWindowDimensions,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
-import { applyPanelDensity, panelDensityScale } from "../src/panel-density";
 import {
   beginHostSelection,
   isHostSelectionCurrent,
@@ -52,9 +44,16 @@ import {
   DISCOVERY_HINT_DELAY_MS,
   shouldShowDiscoveryHint,
 } from "../src/discovery-hint";
-import { useAppTheme, type ThemeTokens } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
-import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
+import { interpolate } from "@leftcar/ui-tokens";
+import {
+  SafeArea,
+  Action,
+  Field,
+  Label,
+  Notice,
+  Surface,
+} from "../src/ui/primitives";
 
 interface HostConnectionAction {
   controller: AbortController;
@@ -92,460 +91,8 @@ function formatRelativeTime(timestamp: number, language: "ko" | "en"): string {
   return language === "ko" ? `${diffDays}일 전` : `${diffDays}d ago`;
 }
 
-interface DiscoveredHostsSectionProps {
-  hosts: FoundHost[];
-  busy: boolean;
-  connectingTarget: string | null;
-  nsdAvailable: boolean;
-  emptyHint?: ReactNode;
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onConnect: (target: string, port?: number) => void;
-}
-
-function DiscoveredHostsSection({
-  hosts,
-  busy,
-  connectingTarget,
-  nsdAvailable,
-  emptyHint,
-  t,
-  styles,
-  colors,
-  onConnect,
-}: DiscoveredHostsSectionProps) {
-  return (
-    <View style={styles.sectionCard}>
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>{t.viewer.searchTitle}</Text>
-        {nsdAvailable && (
-          <View style={styles.scanningBadge}>
-            <ActivityIndicator size="small" color={colors.textPrimary} />
-            <Text style={styles.scanningText}>{t.viewer.searching}</Text>
-          </View>
-        )}
-      </View>
-
-      {hosts.length > 0 ? (
-        <View style={styles.hostList}>
-          {hosts.map((h) => {
-            const connecting = connectingTarget === h.host;
-            return (
-              <Pressable
-                key={h.host}
-                style={({ pressed }) => [
-                  styles.hostItem,
-                  pressed && styles.itemPressed,
-                ]}
-                onPress={() => onConnect(h.host, h.port)}
-                disabled={busy}
-              >
-                <View style={styles.hostIconBox}>
-                  <Ionicons name="laptop-outline" size={18} color={colors.textPrimary} />
-                </View>
-                <View style={styles.hostInfo}>
-                  <Text style={styles.hostName} numberOfLines={1}>
-                    {h.name || t.common.myComputer}
-                  </Text>
-                  <Text style={styles.hostAddr} numberOfLines={1}>
-                    {h.port === DEFAULT_CONTROL_PORT ? h.host : `${h.host}:${h.port}`}
-                  </Text>
-                </View>
-                {connecting ? (
-                  <View style={styles.connectChip}>
-                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
-                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
-                  </View>
-                ) : (
-                  <View style={styles.connectChip}>
-                    <Text style={styles.connectChipText}>{t.common.connect}</Text>
-                  </View>
-                )}
-              </Pressable>
-            );
-          })}
-        </View>
-      ) : (
-        <>
-          <View style={styles.emptyBox}>
-            <Ionicons name="wifi-outline" size={24} color={colors.textDim} style={{ marginBottom: 4 }} />
-            <Text style={styles.emptyTitle}>{t.viewer.emptyHostsTitle}</Text>
-            {!emptyHint && (
-              <Text style={styles.emptyText}>
-                {t.viewer.emptyHostsDesc}
-              </Text>
-            )}
-          </View>
-          {emptyHint}
-        </>
-      )}
-    </View>
-  );
-}
-
-interface RecentHostsSectionProps {
-  recentHosts: RecentHostItem[];
-  busy: boolean;
-  connectingTarget: string | null;
-  /** NSD로 지금 발견되는 호스트 키(host:port) — 최근 목록의 생존 상태 표시에 쓴다. */
-  discoveredKeys: Set<string>;
-  language: "ko" | "en";
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onConnect: (target: string, port?: number) => void;
-  onRemoveHost: (item: RecentHostItem) => void;
-  onClearAll: () => void;
-}
-
-function RecentHostsSection({
-  recentHosts,
-  busy,
-  connectingTarget,
-  discoveredKeys,
-  language,
-  t,
-  styles,
-  colors,
-  onConnect,
-  onRemoveHost,
-  onClearAll,
-}: RecentHostsSectionProps) {
-  if (recentHosts.length === 0) return null;
-
-  return (
-    <View style={styles.sectionCard}>
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>{t.viewer.recentHostsTitle}</Text>
-        <Pressable onPress={onClearAll} hitSlop={6}>
-          <Text style={styles.clearAllText}>{t.viewer.clearRecentHosts}</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.hostList}>
-        {recentHosts.map((item) => {
-          const key = `${item.host}:${item.port}`;
-          const connecting = connectingTarget === item.host;
-          const reachable = discoveredKeys.has(key);
-          return (
-            <View key={key} style={styles.recentItem}>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.recentItemClickable,
-                  pressed && styles.itemPressed,
-                ]}
-                onPress={() => onConnect(item.host, item.port)}
-                disabled={busy}
-              >
-                <View style={styles.recentIconBox}>
-                  <Ionicons name="time-outline" size={17} color={colors.textSecondary} />
-                </View>
-                <View style={styles.hostInfo}>
-                  <Text style={styles.hostName} numberOfLines={1}>
-                    {item.name || item.host}
-                  </Text>
-                  <Text style={styles.hostAddr} numberOfLines={1}>
-                    {item.port === DEFAULT_CONTROL_PORT ? item.host : `${item.host}:${item.port}`} ·{" "}
-                    {interpolate(t.viewer.lastConnected, {
-                      time: formatRelativeTime(item.lastConnected, language),
-                    })}
-                  </Text>
-                </View>
-                {connecting ? (
-                  <View style={styles.connectChip}>
-                    <ActivityIndicator size="small" color={colors.btnPrimaryText} />
-                    <Text style={styles.connectChipText}>{t.viewer.connectingToHost}</Text>
-                  </View>
-                ) : (
-                  <View style={[styles.connectChip, !reachable && styles.connectChipDim]}>
-                    <Text style={[styles.connectChipText, !reachable && styles.connectChipDimText]}>
-                      {t.common.connect}
-                    </Text>
-                  </View>
-                )}
-              </Pressable>
-              <Pressable
-                onPress={() => onRemoveHost(item)}
-                style={styles.recentDeleteBtn}
-                accessibilityLabel={t.viewer.deleteHost}
-                hitSlop={8}
-              >
-                <Ionicons name="close" size={15} color={colors.textDim} />
-              </Pressable>
-            </View>
-          );
-        })}
-      </View>
-    </View>
-  );
-}
-
-interface ManualIpSectionProps {
-  ip: string;
-  busy: boolean;
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onChangeIp: (text: string) => void;
-  onClearIp: () => void;
-  onConnect: () => void;
-}
-
-function ManualIpSection({
-  ip,
-  busy,
-  t,
-  styles,
-  colors,
-  onChangeIp,
-  onClearIp,
-  onConnect,
-}: ManualIpSectionProps) {
-  return (
-    <View style={styles.sectionCard}>
-      <Text style={styles.sectionTitle}>{t.viewer.manualTitle}</Text>
-
-      <View style={styles.inputRow}>
-        <TextInput
-          style={styles.textInput}
-          placeholder={t.viewer.manualPlaceholder}
-          placeholderTextColor={colors.textDim}
-          keyboardType="url"
-          autoCapitalize="none"
-          autoCorrect={false}
-          value={ip}
-          onChangeText={onChangeIp}
-        />
-        {ip.length > 0 && (
-          <Pressable onPress={onClearIp} style={styles.clearBtn} aria-label={t.common.cancel}>
-            <Ionicons name="close-circle" size={16} color={colors.textDim} />
-          </Pressable>
-        )}
-      </View>
-
-      {__DEV__ && (
-        <View style={styles.quickChipsRow}>
-          <Pressable onPress={() => onChangeIp("localhost")} style={styles.quickChip}>
-            <Text style={styles.quickChipText}>+ localhost (ADB)</Text>
-          </Pressable>
-          <Pressable onPress={() => onChangeIp("10.0.2.2")} style={styles.quickChip}>
-            <Text style={styles.quickChipText}>+ 10.0.2.2 (에뮬레이터)</Text>
-          </Pressable>
-        </View>
-      )}
-
-      <Pressable
-        style={({ pressed }) => [
-          styles.primaryBtn,
-          (!ip.trim() || busy) && styles.btnDisabled,
-          pressed && ip.trim() && !busy && styles.btnPressed,
-        ]}
-        onPress={onConnect}
-        disabled={busy || !ip.trim()}
-      >
-        {busy ? (
-          <ActivityIndicator color={colors.btnPrimaryText} size="small" />
-        ) : (
-          <Text style={styles.primaryBtnText}>{t.viewer.btnConnectAction}</Text>
-        )}
-      </Pressable>
-    </View>
-  );
-}
-
-// "안내는 실패 지점에서 한 번" — compact hint shown at failure points (empty
-// discovery, connect error). Reuses the existing troubleshooting accordion
-// instead of duplicating its content.
-function ConnectHintCard({
-  showDetailsToggle,
-  t,
-  styles,
-  colors,
-  onExpandDetails,
-}: {
-  showDetailsToggle: boolean;
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onExpandDetails: () => void;
-}) {
-  return (
-    <View style={styles.connectHintCard}>
-      <View style={styles.connectHintRow}>
-        <Ionicons
-          name="information-circle-outline"
-          size={14}
-          color={colors.textSecondary}
-        />
-        <Text style={styles.connectHintText}>{t.viewer.connectHintBody}</Text>
-      </View>
-      {showDetailsToggle && (
-        <Pressable
-          style={styles.connectHintToggle}
-          onPress={onExpandDetails}
-          accessibilityRole="button"
-        >
-          <Text style={styles.connectHintToggleText}>
-            {t.viewer.connectHintDetailsToggle}
-          </Text>
-          <Ionicons name="chevron-down" size={12} color={colors.textMuted} />
-        </Pressable>
-      )}
-    </View>
-  );
-}
-
-function TroubleshootingSection({
-  showTroubleshoot,
-  t,
-  styles,
-  colors,
-  onToggle,
-}: {
-  showTroubleshoot: boolean;
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onToggle: () => void;
-}) {
-  return (
-    <View style={styles.sectionCard}>
-      <Pressable
-        style={styles.troubleshootToggle}
-        onPress={onToggle}
-        accessibilityRole="button"
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
-          <Ionicons name="help-circle-outline" size={16} color={colors.textSecondary} />
-          <Text style={styles.troubleshootToggleText}>
-            {t.viewer.troubleshootGuideToggle}
-          </Text>
-        </View>
-        <Ionicons
-          name={showTroubleshoot ? "chevron-up" : "chevron-down"}
-          size={15}
-          color={colors.textMuted}
-        />
-      </Pressable>
-
-      {showTroubleshoot && (
-        <View style={styles.troubleshootContent}>
-          <View style={styles.troubleshootItem}>
-            <View style={styles.bulletDot} />
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootWifi}</Text>
-              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootWifiDesc}</Text>
-            </View>
-          </View>
-
-          <View style={styles.troubleshootItem}>
-            <View style={styles.bulletDot} />
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootAp}</Text>
-              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootApDesc}</Text>
-            </View>
-          </View>
-
-          <View style={styles.troubleshootItem}>
-            <View style={styles.bulletDot} />
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootManual}</Text>
-              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootManualDesc}</Text>
-            </View>
-          </View>
-
-          <View style={styles.troubleshootItem}>
-            <View style={styles.bulletDot} />
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={styles.troubleshootItemTitle}>{t.viewer.troubleshootHiddenWindow}</Text>
-              <Text style={styles.troubleshootItemDesc}>{t.viewer.troubleshootHiddenWindowDesc}</Text>
-            </View>
-          </View>
-        </View>
-      )}
-    </View>
-  );
-}
-
-function PairingManagementSection({
-  hasStoredToken,
-  t,
-  styles,
-  colors,
-  onClearToken,
-  onOpenPairing,
-}: {
-  hasStoredToken: boolean;
-  t: TranslationSchema;
-  styles: ReturnType<typeof createStyles>;
-  colors: ThemeTokens;
-  onClearToken: () => void;
-  onOpenPairing: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <View style={styles.sectionCard}>
-      <Pressable
-        style={styles.troubleshootToggle}
-        onPress={() => setOpen((prev) => !prev)}
-        accessibilityRole="button"
-        accessibilityLabel={t.viewer.rememberTitle}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
-          <Ionicons name="key-outline" size={16} color={colors.textSecondary} />
-          <Text style={styles.troubleshootToggleText}>{t.viewer.rememberTitle}</Text>
-        </View>
-        <Ionicons
-          name={open ? "chevron-up" : "chevron-down"}
-          size={15}
-          color={colors.textMuted}
-        />
-      </Pressable>
-
-      {open && (
-        <View style={styles.pairingActionRow}>
-          {hasStoredToken && (
-            <Pressable
-              style={({ pressed }) => [
-                styles.dangerBtn,
-                pressed && styles.btnPressed,
-              ]}
-              onPress={onClearToken}
-            >
-              <Text style={styles.dangerBtnText}>{t.viewer.btnClearToken}</Text>
-            </Pressable>
-          )}
-          <Pressable
-            style={({ pressed }) => [
-              styles.secondaryBtn,
-              pressed && styles.btnPressed,
-            ]}
-            onPress={onOpenPairing}
-          >
-            <Ionicons
-              name="qr-code-outline"
-              size={14}
-              color={colors.textPrimary}
-              style={{ marginRight: 4 }}
-            />
-            <Text style={styles.secondaryBtnText}>{t.viewer.btnNewPair}</Text>
-          </Pressable>
-        </View>
-      )}
-    </View>
-  );
-}
-
-export default function Host() {
-  const { colors, isDark } = useAppTheme();
+function useHostModel() {
   const { t, language } = useAppLanguage();
-  const { width } = useWindowDimensions();
-  const density = panelDensityScale(width);
-  const styles = useMemo(
-    () => applyPanelDensity(createStyles(colors, isDark), density),
-    [colors, isDark, density],
-  );
 
   const [ip, setIp] = useState("");
   const [connectingTarget, setConnectingTarget] = useState<string | null>(null);
@@ -556,24 +103,33 @@ export default function Host() {
   const [recentHosts, setRecentHosts] = useState<RecentHostItem[]>([]);
   const [showTroubleshoot, setShowTroubleshoot] = useState(false);
   const [discoverySettled, setDiscoverySettled] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState(false);
+  const discoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const connectionAction = useRef<HostConnectionAction | null>(null);
-  useFocusEffect(useCallback(() => {
-    setConnectingTarget(null);
-    return () => {
-      const action = connectionAction.current;
-      connectionAction.current = null;
-      action?.controller.abort();
-      if (action?.context && !action.completed) disconnectHost(action.context);
-    };
-  }, []));
+  useFocusEffect(
+    useCallback(() => {
+      setConnectingTarget(null);
+      return () => {
+        const action = connectionAction.current;
+        connectionAction.current = null;
+        action?.controller.abort();
+        if (action?.context && !action.completed)
+          disconnectHost(action.context);
+      };
+    }, []),
+  );
 
   useEffect(() => {
-    const timer = setTimeout(
+    discoveryTimer.current = setTimeout(
       () => setDiscoverySettled(true),
       DISCOVERY_HINT_DELAY_MS,
     );
-    return () => clearTimeout(timer);
+    return () => {
+      if (discoveryTimer.current) clearTimeout(discoveryTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -581,141 +137,213 @@ export default function Host() {
     // identity가 없을 때만 엔드포인트 저장소를 조회한다.
     const context = captureRequestContext();
     const target = controlTarget();
+    let active = true;
     if (context?.credential) setHasStoredToken(true);
-    else if (target) void getStoredToken(target).then((token) => setHasStoredToken(!!token));
-    void getRecentHosts().then(setRecentHosts);
+    else if (target)
+      void getStoredToken(target)
+        .then((token) => {
+          if (active) setHasStoredToken(!!token);
+        })
+        .catch((cause) => {
+          if (active) setError(formatErrorMessage(cause));
+        });
+    void getRecentHosts()
+      .then((hosts) => {
+        if (active) setRecentHosts(hosts);
+      })
+      .catch((cause) => {
+        if (active) setError(formatErrorMessage(cause));
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // 파괴적 동작은 실행 전에 한 번 확인한다 — 뒤늦은 "삭제했습니다" 알림은
   // 되돌릴 수 없다. 지우기는 확인 다이얼로그의 [지우기]에서만 일어난다.
   const handleClearToken = useCallback(() => {
+    const origin = captureRequestContext();
+    const originalTarget = controlTarget();
     Alert.alert(t.viewer.clearTokenAlertTitle, t.viewer.clearTokenAlertDesc, [
       { text: t.common.cancel, style: "cancel" },
       {
         text: t.viewer.deleteHost,
         style: "destructive",
         onPress: () => {
-          const context = captureRequestContext();
-          const target = controlTarget();
+          const context = origin;
+          const target = originalTarget;
+          if (context && !isRequestContextCurrent(context)) return;
           const clear = context?.credential
             ? clearStoredCredential(context.credential)
             : target
               ? clearToken(target)
               : Promise.resolve();
-          void clear.then(() => {
-            disconnectHost(context ?? undefined);
-            setHasStoredToken(false);
-          });
+          void clear
+            .then(() => {
+              disconnectHost(context ?? undefined);
+              setHasStoredToken(false);
+            })
+            .catch((cause) => {
+              if (!context || isRequestContextCurrent(context)) {
+                setError(formatErrorMessage(cause));
+              }
+            });
         },
       },
     ]);
   }, [t]);
 
-  const handleRemoveRecentHost = useCallback(async (hostItem: RecentHostItem) => {
-    const updated = await removeRecentHost(hostItem.host, hostItem.port);
-    setRecentHosts(updated);
-  }, []);
-
+  const handleRemoveRecentHost = useCallback(
+    async (hostItem: RecentHostItem) => {
+      if (deleting) return;
+      setDeleting(true);
+      try {
+        setRecentHosts(await removeRecentHost(hostItem.host, hostItem.port));
+      } catch (cause) {
+        setError(formatErrorMessage(cause));
+      } finally {
+        setDeleting(false);
+      }
+    },
+    [deleting],
+  );
   const handleClearAllRecent = useCallback(async () => {
-    await clearRecentHosts();
-    setRecentHosts([]);
-  }, []);
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await clearRecentHosts();
+      setRecentHosts([]);
+    } catch (cause) {
+      setError(formatErrorMessage(cause));
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleting]);
 
-  useEffect(() => {
-    if (!nsd) return;
-    const emitter = new NativeEventEmitter(nsd as never);
-    const sub1 = emitter.addListener("leftcar:host-found", (raw) => {
-      const h = raw as FoundHost;
-      setFound((prev) => ({ ...prev, [h.host]: h }));
-    });
-    const sub2 = emitter.addListener("leftcar:host-lost", (serviceName) => {
-      setFound((prev) =>
-        Object.fromEntries(
-          Object.entries(prev).filter(([, host]) => host.name !== String(serviceName)),
-        ),
+  useFocusEffect(
+    useCallback(() => {
+      if (!nsd) return;
+      const emitter = new NativeEventEmitter(nsd as never);
+      const sub1 = emitter.addListener("leftcar:host-found", (raw) => {
+        const h = raw as FoundHost;
+        setFound((prev) => ({ ...prev, [h.host]: h }));
+      });
+      const sub2 = emitter.addListener("leftcar:host-lost", (serviceName) => {
+        setFound((prev) =>
+          Object.fromEntries(
+            Object.entries(prev).filter(
+              ([, host]) => host.name !== String(serviceName),
+            ),
+          ),
+        );
+      });
+      const failed = emitter.addListener("leftcar:discovery-failed", () =>
+        setDiscoveryError(true),
       );
-    });
-    nsd.startDiscovery();
-    return () => {
-      nsd.stopDiscovery();
-      sub1.remove();
-      sub2.remove();
-    };
-  }, []);
+      setDiscoveryError(false);
+      nsd.startDiscovery();
+      return () => {
+        nsd.stopDiscovery();
+        sub1.remove();
+        sub2.remove();
+        failed.remove();
+      };
+    }, []),
+  );
 
   useEffect(() => {
     setError(null);
   }, [ip]);
 
-  const doConnect = useCallback(async (target: string, port = DEFAULT_CONTROL_PORT) => {
-    connectionAction.current?.controller.abort();
-    const action: HostConnectionAction = { controller: new AbortController(), context: null, completed: false };
-    connectionAction.current = action;
-    const selection = beginHostSelection();
-    const cancelSelection = () => action.controller.abort();
-    selection.signal.addEventListener("abort", cancelSelection, { once: true });
-    const isCurrent = () => connectionAction.current === action &&
-      !action.controller.signal.aborted && isHostSelectionCurrent(selection);
-    setConnectingTarget(target);
-    setError(null);
-    try {
-      if (!isTrustedHost(target)) throw new Error(t.viewer.trustedHostError);
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (!isCurrent()) return;
-        try {
-          await connectHost(target, port, { selection, signal: action.controller.signal });
-          break;
-        } catch (e) {
-          if (!isCurrent() || (e instanceof Error && e.name === "AbortError")) return;
-          if (attempt === 2) throw e;
-          await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-        }
-      }
-      if (!isCurrent()) return;
-      const context = captureRequestContext();
-      if (!context || !isRequestContextCurrent(context)) return;
-      action.context = context;
+  const doConnect = useCallback(
+    async (target: string, port = DEFAULT_CONTROL_PORT) => {
+      connectionAction.current?.controller.abort();
+      const action: HostConnectionAction = {
+        controller: new AbortController(),
+        context: null,
+        completed: false,
+      };
+      connectionAction.current = action;
+      const selection = beginHostSelection();
+      const cancelSelection = () => action.controller.abort();
+      selection.signal.addEventListener("abort", cancelSelection, {
+        once: true,
+      });
+      const isCurrent = () =>
+        connectionAction.current === action &&
+        !action.controller.signal.aborted &&
+        isHostSelectionCurrent(selection);
+      setConnectingTarget(target);
+      setError(null);
       try {
-        await context.client.request<CatalogView>("getCatalog");
-      } catch (e) {
-        if (!isCurrent() || !isRequestContextCurrent(context)) return;
-        if (isUnauthorizedError(e)) {
-          await handleUnauthorized({
-            context,
-            signal: action.controller.signal,
-            beforeNavigate: () => setHasStoredToken(false),
-            navigate: { endpoint: formatHostEndpoint(target, port) },
-          });
-          return;
+        if (!isTrustedHost(target)) throw new Error(t.viewer.trustedHostError);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (!isCurrent()) return;
+          try {
+            await connectHost(target, port, {
+              selection,
+              signal: action.controller.signal,
+            });
+            break;
+          } catch (e) {
+            if (!isCurrent() || (e instanceof Error && e.name === "AbortError"))
+              return;
+            if (attempt === 2) throw e;
+            await new Promise((resolve) =>
+              setTimeout(resolve, 300 * (attempt + 1)),
+            );
+          }
         }
-        throw e;
+        if (!isCurrent()) return;
+        const context = captureRequestContext();
+        if (!context || !isRequestContextCurrent(context)) return;
+        action.context = context;
+        try {
+          await context.client.request<CatalogView>("getCatalog");
+        } catch (e) {
+          if (!isCurrent() || !isRequestContextCurrent(context)) return;
+          if (isUnauthorizedError(e)) {
+            await handleUnauthorized({
+              context,
+              signal: action.controller.signal,
+              beforeNavigate: () => setHasStoredToken(false),
+              navigate: { endpoint: formatHostEndpoint(target, port) },
+            });
+            return;
+          }
+          throw e;
+        }
+        if (!isCurrent() || !isRequestContextCurrent(context)) return;
+        const matched = Object.values(found).find((h) => h.host === target);
+        // Recent-host persistence is best effort, but its late UI publication and
+        // navigation still belong to this exact action and authenticated context.
+        const recent = await saveRecentHostStrict(
+          target,
+          port,
+          matched?.name,
+          undefined,
+          action.controller.signal,
+        ).catch(() => null);
+        if (!isCurrent() || !isRequestContextCurrent(context)) return;
+        if (recent) setRecentHosts(recent);
+        setHasStoredToken(true);
+        action.completed = true;
+        router.push("/catalog");
+      } catch (e) {
+        if (isCurrent()) setError(formatErrorMessage(e));
+      } finally {
+        selection.signal.removeEventListener("abort", cancelSelection);
+        if (action.context && !action.completed) disconnectHost(action.context);
+        if (connectionAction.current === action) {
+          connectionAction.current = null;
+          setConnectingTarget(null);
+        }
       }
-      if (!isCurrent() || !isRequestContextCurrent(context)) return;
-      const matched = Object.values(found).find((h) => h.host === target);
-      // Recent-host persistence is best effort, but its late UI publication and
-      // navigation still belong to this exact action and authenticated context.
-      const recent = await saveRecentHostStrict(target, port, matched?.name, undefined, action.controller.signal)
-        .catch(() => null);
-      if (!isCurrent() || !isRequestContextCurrent(context)) return;
-      if (recent) setRecentHosts(recent);
-      setHasStoredToken(true);
-      action.completed = true;
-      router.push("/catalog");
-    } catch (e) {
-      if (isCurrent()) setError(formatErrorMessage(e));
-    } finally {
-      selection.signal.removeEventListener("abort", cancelSelection);
-      if (action.context && !action.completed) disconnectHost(action.context);
-      if (connectionAction.current === action) {
-        connectionAction.current = null;
-        setConnectingTarget(null);
-      }
-    }
-  }, [found, t]);
+    },
+    [found, t],
+  );
 
   const hosts = Object.values(found);
-
-  const expandTroubleshoot = useCallback(() => setShowTroubleshoot(true), []);
 
   const showDiscoveryHint = shouldShowDiscoveryHint({
     hostCount: hosts.length,
@@ -731,457 +359,350 @@ export default function Host() {
     void doConnect(endpoint.host, endpoint.port);
   }, [doConnect, ip, t]);
 
+  const retryDiscovery = () => {
+    setDiscoveryError(false);
+    setDiscoverySettled(false);
+    nsd?.stopDiscovery();
+    nsd?.startDiscovery();
+    if (discoveryTimer.current) clearTimeout(discoveryTimer.current);
+    discoveryTimer.current = setTimeout(
+      () => setDiscoverySettled(true),
+      DISCOVERY_HINT_DELAY_MS,
+    );
+  };
+  const cancelConnection = () => {
+    const action = connectionAction.current;
+    connectionAction.current = null;
+    action?.controller.abort();
+    if (action?.context && !action.completed) disconnectHost(action.context);
+    setConnectingTarget(null);
+  };
+  const discoveredKeys = new Set(hosts.map((h) => `${h.host}:${h.port}`));
+  return {
+    t,
+    language,
+    hosts,
+    recentHosts,
+    busy,
+    connectingTarget,
+    error,
+    discoveryError,
+    showDiscoveryHint,
+    discoverySettled,
+    manualOpen,
+    ip,
+    deleting,
+    showTroubleshoot,
+    hasStoredToken,
+    discoveredKeys,
+    doConnect,
+    cancelConnection,
+    retryDiscovery,
+    handleClearAllRecent,
+    handleRemoveRecentHost,
+    setManualOpen,
+    setIp,
+    connectManual,
+    setShowTroubleshoot,
+    handleClearToken,
+  };
+}
+type HostModel = ReturnType<typeof useHostModel>;
+
+function HostRow({
+  item,
+  recent,
+  model,
+}: {
+  item: FoundHost | RecentHostItem;
+  recent: boolean;
+  model: HostModel;
+}) {
+  const {
+    t,
+    language,
+    connectingTarget,
+    busy,
+    deleting,
+    doConnect,
+    handleRemoveRecentHost,
+    discoveredKeys,
+  } = model;
   return (
-    <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
-      <ScrollView
-        style={styles.root}
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {error && (
-          <View style={styles.errorBlock}>
-            <View style={styles.errorCard}>
-              <Ionicons name="alert-circle" size={16} color={colors.textPrimary} />
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-            <ConnectHintCard
-              showDetailsToggle={!showTroubleshoot}
-              t={t}
-              styles={styles}
-              colors={colors}
-              onExpandDetails={expandTroubleshoot}
-            />
-          </View>
-        )}
-
-        <DiscoveredHostsSection
-          hosts={hosts}
-          busy={busy}
-          connectingTarget={connectingTarget}
-          nsdAvailable={Boolean(nsd)}
-          emptyHint={
-            showDiscoveryHint ? (
-              <ConnectHintCard
-                showDetailsToggle={!showTroubleshoot}
-                t={t}
-                styles={styles}
-                colors={colors}
-                onExpandDetails={expandTroubleshoot}
-              />
-            ) : undefined
-          }
-          t={t}
-          styles={styles}
-          colors={colors}
-          onConnect={doConnect}
+    <Surface
+      variant="inset"
+      key={`${item.host}:${item.port}`}
+      className="gap-2"
+    >
+      <View className="flex-row items-center gap-2">
+        <Action
+          variant="secondary"
+          className="flex-1"
+          label={item.name || t.common.myComputer}
+          accessibilityLabel={`${t.common.connect}: ${item.name || item.host}, ${formatHostEndpoint(item.host, item.port)}`}
+          busy={connectingTarget === item.host}
+          disabled={busy}
+          onPress={() => void doConnect(item.host, item.port)}
         />
-
-        <RecentHostsSection
-          recentHosts={recentHosts}
-          busy={busy}
-          connectingTarget={connectingTarget}
-          discoveredKeys={new Set(hosts.map((h) => `${h.host}:${h.port}`))}
-          language={language}
-          t={t}
-          styles={styles}
-          colors={colors}
-          onConnect={doConnect}
-          onRemoveHost={handleRemoveRecentHost}
-          onClearAll={handleClearAllRecent}
-        />
-
-        <ManualIpSection
-          ip={ip}
-          busy={busy}
-          t={t}
-          styles={styles}
-          colors={colors}
-          onChangeIp={setIp}
-          onClearIp={() => setIp("")}
-          onConnect={connectManual}
-        />
-
-        <TroubleshootingSection
-          showTroubleshoot={showTroubleshoot}
-          t={t}
-          styles={styles}
-          colors={colors}
-          onToggle={() => setShowTroubleshoot((prev) => !prev)}
-        />
-
-        <PairingManagementSection
-          hasStoredToken={hasStoredToken}
-          t={t}
-          styles={styles}
-          colors={colors}
-          onClearToken={handleClearToken}
-          onOpenPairing={() => router.push("/pairing")}
-        />
-      </ScrollView>
-    </SafeAreaView>
+        {recent ? (
+          <Action
+            variant="ghost"
+            size="icon"
+            label="×"
+            disabled={deleting || busy}
+            accessibilityLabel={`${t.viewer.deleteHost}: ${item.name || item.host}`}
+            onPress={() => void handleRemoveRecentHost(item as RecentHostItem)}
+          />
+        ) : null}
+      </View>
+      <Label variant="code" tone="muted" selectable>
+        {formatHostEndpoint(item.host, item.port)}
+      </Label>
+      {recent && "lastConnected" in item ? (
+        <Label variant="caption" tone="muted">
+          {interpolate(t.viewer.lastConnected, {
+            time: formatRelativeTime(item.lastConnected, language),
+          })}
+          {discoveredKeys.has(`${item.host}:${item.port}`)
+            ? ` · ${t.viewer.discoveredNow}`
+            : ""}
+        </Label>
+      ) : null}
+    </Surface>
   );
 }
 
-function createStyles(colors: ThemeTokens, isDark: boolean) {
-  return StyleSheet.create({
-    safeArea: {
-      flex: 1,
-      backgroundColor: colors.bgCanvas,
-    },
-    root: {
-      flex: 1,
-      backgroundColor: colors.bgCanvas,
-    },
-    content: {
-      paddingHorizontal: 18,
-      paddingTop: 14,
-      paddingBottom: 32,
-      gap: 14,
-      width: "100%",
-      maxWidth: 840,
-      alignSelf: "center",
-    },
-    errorCard: {
-      backgroundColor: colors.bgSurface,
-      borderWidth: 1,
-      borderColor: colors.borderStrong,
-      borderRadius: 10,
-      padding: 12,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
-    },
-    errorText: {
-      color: colors.textPrimary,
-      fontSize: 12,
-      lineHeight: 16,
-      flex: 1,
-      fontWeight: "500",
-    },
-    errorBlock: {
-      gap: 8,
-    },
-    connectHintCard: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 10,
-      padding: 10,
-      gap: 6,
-    },
-    connectHintRow: {
-      flexDirection: "row",
-      alignItems: "flex-start",
-      gap: 6,
-    },
-    connectHintText: {
-      color: colors.textSecondary,
-      fontSize: 12,
-      lineHeight: 16,
-      flex: 1,
-    },
-    connectHintToggle: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 4,
-      alignSelf: "flex-start",
-      paddingVertical: 6,
-      paddingHorizontal: 2,
-    },
-    connectHintToggleText: {
-      color: colors.textPrimary,
-      fontSize: 12,
-      fontWeight: "600",
-    },
-    sectionCard: {
-      backgroundColor: colors.bgSurface,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      padding: 16,
-      gap: 12,
-    },
-    sectionHeaderRow: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-    },
-    sectionTitle: {
-      fontSize: 12,
-      fontWeight: "600",
-      color: colors.textSecondary,
-    },
-    clearAllText: {
-      fontSize: 12,
-      fontWeight: "600",
-      color: colors.textSecondary,
-    },
-    scanningBadge: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    scanningText: {
-      color: colors.textPrimary,
-      fontSize: 12,
-      fontWeight: "600",
-    },
-    hostList: {
-      gap: 8,
-    },
-    hostItem: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 10,
-      padding: 12,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 12,
-    },
-    recentItem: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 10,
-      flexDirection: "row",
-      alignItems: "center",
-      overflow: "hidden",
-    },
-    recentItemClickable: {
-      flex: 1,
-      padding: 12,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-    },
-    recentDeleteBtn: {
-      paddingHorizontal: 12,
-      paddingVertical: 14,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    hostIconBox: {
-      width: 36,
-      height: 36,
-      borderRadius: 8,
-      backgroundColor: colors.bgSurface,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: 0,
-    },
-    recentIconBox: {
-      width: 32,
-      height: 32,
-      borderRadius: 7,
-      backgroundColor: colors.bgSurface,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: 0,
-    },
-    hostInfo: {
-      flex: 1,
-      minWidth: 0,
-      gap: 3,
-    },
-    hostName: {
-      color: colors.textPrimary,
-      fontSize: 14,
-      fontWeight: "700",
-    },
-    hostAddr: {
-      color: colors.textSecondary,
-      fontSize: 12,
-      fontFamily: "monospace",
-      fontVariant: ["tabular-nums"],
-    },
-    connectChip: {
-      backgroundColor: colors.btnPrimaryBg,
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-      borderRadius: 8,
-      minHeight: 36,
-      flexShrink: 0,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    connectChipDim: {
-      backgroundColor: colors.bgSurface,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-    },
-    connectChipDimText: {
-      color: colors.textSecondary,
-    },
-    connectChipText: {
-      color: colors.btnPrimaryText,
-      fontSize: 12,
-      fontWeight: "600",
-    },
-    emptyBox: {
-      padding: 24,
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 6,
-    },
-    emptyTitle: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: colors.textPrimary,
-    },
-    emptyText: {
-      color: colors.textSecondary,
-      fontSize: 12,
-      textAlign: "center",
-      lineHeight: 18,
-    },
-    inputRow: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 8,
-      paddingHorizontal: 12,
-      flexDirection: "row",
-      alignItems: "center",
-    },
-    textInput: {
-      color: colors.textPrimary,
-      paddingVertical: 10,
-      fontSize: 13,
-      fontFamily: "monospace",
-      fontVariant: ["tabular-nums"],
-      flex: 1,
-    },
-    clearBtn: {
-      padding: 4,
-    },
-    quickChipsRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 6,
-    },
-    quickChip: {
-      backgroundColor: colors.bgSubtle,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 8,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      minHeight: 32,
-      justifyContent: "center",
-    },
-    quickChipText: {
-      color: colors.textSecondary,
-      fontSize: 12,
-      fontFamily: "monospace",
-    },
-    primaryBtn: {
-      backgroundColor: colors.btnPrimaryBg,
-      borderRadius: 10,
-      minHeight: 44,
-      paddingVertical: 12,
-      alignItems: "center",
-      justifyContent: "center",
-      marginTop: 2,
-    },
-    btnDisabled: {
-      opacity: 0.4,
-    },
-    primaryBtnText: {
-      color: colors.btnPrimaryText,
-      fontSize: 14,
-      fontWeight: "600",
-    },
-    troubleshootToggle: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      paddingVertical: 2,
-    },
-    troubleshootToggleText: {
-      color: colors.textPrimary,
-      fontSize: 12,
-      fontWeight: "700",
-    },
-    troubleshootContent: {
-      gap: 10,
-      paddingTop: 6,
-      borderTopWidth: 1,
-      borderTopColor: colors.borderSubtle,
-    },
-    troubleshootItem: {
-      flexDirection: "row",
-      alignItems: "flex-start",
-      gap: 8,
-    },
-    bulletDot: {
-      width: 5,
-      height: 5,
-      borderRadius: 2.5,
-      backgroundColor: colors.textPrimary,
-      marginTop: 6,
-    },
-    troubleshootItemTitle: {
-      color: colors.textPrimary,
-      fontSize: 13,
-      fontWeight: "600",
-    },
-    troubleshootItemDesc: {
-      color: colors.textSecondary,
-      fontSize: 12,
-      lineHeight: 17,
-    },
-    pairingActionRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginTop: 4,
-    },
-    dangerBtn: {
-      backgroundColor: colors.bgSurface,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      borderRadius: 8,
-      minHeight: 44,
-      paddingVertical: 11,
-      paddingHorizontal: 14,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    dangerBtnText: {
-      color: colors.textSecondary,
-      fontSize: 13,
-      fontWeight: "600",
-    },
-    secondaryBtn: {
-      backgroundColor: colors.btnSecondaryBg,
-      borderWidth: 1,
-      borderColor: colors.btnSecondaryBorder,
-      borderRadius: 8,
-      minHeight: 44,
-      paddingVertical: 11,
-      paddingHorizontal: 14,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    secondaryBtnText: {
-      color: colors.btnSecondaryText,
-      fontSize: 13,
-      fontWeight: "600",
-    },
-    btnPressed: {
-      opacity: 0.8,
-      transform: [{ scale: 0.98 }],
-    },
-    itemPressed: {
-      opacity: 0.7,
-    },
-  });
+function DiscoverySection({ model }: { model: HostModel }) {
+  const {
+    t,
+    discoveryError,
+    hosts,
+    discoverySettled,
+    showDiscoveryHint,
+    retryDiscovery,
+  } = model;
+  if (discoveryError || !nsd)
+    return (
+      <Surface className="gap-3">
+        <Label variant="title">{t.viewer.searchTitle}</Label>
+        <Notice>
+          <Label>
+            {discoveryError
+              ? t.viewer.discoveryFailed
+              : t.viewer.discoveryUnavailable}
+          </Label>
+          {nsd ? (
+            <Action
+              variant="secondary"
+              onPress={retryDiscovery}
+              label={t.common.retry}
+            />
+          ) : null}
+        </Notice>
+      </Surface>
+    );
+  return (
+    <Surface className="gap-3">
+      <Label variant="title">{t.viewer.searchTitle}</Label>
+      {hosts.length ? (
+        hosts.map((item) => (
+          <HostRow
+            key={`${item.host}:${item.port}`}
+            item={item}
+            recent={false}
+            model={model}
+          />
+        ))
+      ) : (
+        <View className="gap-3 py-4">
+          {!discoverySettled ? (
+            <ActivityIndicator accessibilityLabel={t.viewer.searching} />
+          ) : null}
+          <Label accessibilityLiveRegion="polite">
+            {showDiscoveryHint ? t.viewer.discoveryEmpty : t.viewer.searching}
+          </Label>
+          <Label tone="muted">
+            {showDiscoveryHint
+              ? t.viewer.connectHintBody
+              : t.viewer.emptyHostsDesc}
+          </Label>
+          {showDiscoveryHint ? (
+            <Action
+              variant="secondary"
+              onPress={retryDiscovery}
+              label={t.common.refresh}
+            />
+          ) : null}
+        </View>
+      )}
+    </Surface>
+  );
+}
+function RecentSection({ model }: { model: HostModel }) {
+  const { t, recentHosts, deleting, handleClearAllRecent } = model;
+  if (!recentHosts.length) return null;
+  return (
+    <Surface className="gap-3">
+      <View className="flex-row items-center justify-between gap-2">
+        <Label variant="title" className="flex-1">
+          {t.viewer.recentHostsTitle}
+        </Label>
+        <Action
+          variant="ghost"
+          size="compact"
+          busy={deleting}
+          onPress={() => void handleClearAllRecent()}
+          label={t.viewer.clearRecentHosts}
+        />
+      </View>
+      {recentHosts.map((item) => (
+        <HostRow
+          key={`${item.host}:${item.port}`}
+          item={item}
+          recent
+          model={model}
+        />
+      ))}
+    </Surface>
+  );
+}
+function ManualSection({ model }: { model: HostModel }) {
+  const { t, ip, busy, manualOpen, setManualOpen, setIp, connectManual } =
+    model;
+  return (
+    <Surface className="gap-3">
+      <Action
+        variant="secondary"
+        onPress={() => router.push("/pairing")}
+        label={t.viewer.btnQrConnect}
+      />
+      <Action
+        variant="ghost"
+        accessibilityState={{ expanded: manualOpen }}
+        onPress={() => setManualOpen(!manualOpen)}
+        label={t.viewer.manualTitle}
+      />
+      {manualOpen ? (
+        <View className="gap-3">
+          <Label tone="muted">{t.viewer.manualDesc}</Label>
+          <View className="flex-row items-center gap-2">
+            <Field
+              className="flex-1"
+              value={ip}
+              onChangeText={setIp}
+              accessibilityLabel={t.viewer.manualTitle}
+              placeholder={t.viewer.manualPlaceholder}
+              keyboardType="url"
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!busy}
+              onSubmitEditing={connectManual}
+              returnKeyType="go"
+            />
+            {ip ? (
+              <Action
+                variant="ghost"
+                size="icon"
+                label="×"
+                accessibilityLabel={t.common.cancel}
+                onPress={() => setIp("")}
+              />
+            ) : null}
+          </View>
+          <Action
+            onPress={connectManual}
+            busy={busy}
+            disabled={!ip.trim()}
+            label={t.viewer.btnConnectAction}
+          />
+        </View>
+      ) : null}
+    </Surface>
+  );
+}
+function ConnectionHelp({ model }: { model: HostModel }) {
+  const { t, showTroubleshoot, setShowTroubleshoot } = model;
+  return (
+    <Surface className="gap-3">
+      <Action
+        variant="ghost"
+        accessibilityState={{ expanded: showTroubleshoot }}
+        onPress={() => setShowTroubleshoot(!showTroubleshoot)}
+        label={t.viewer.troubleshootTitle}
+      />
+      {showTroubleshoot ? (
+        <View className="gap-4">
+          {[
+            [t.viewer.troubleshootWifi, t.viewer.troubleshootWifiDesc],
+            [t.viewer.troubleshootAp, t.viewer.troubleshootApDesc],
+            [t.viewer.troubleshootManual, t.viewer.troubleshootManualDesc],
+            [
+              t.viewer.troubleshootHiddenWindow,
+              t.viewer.troubleshootHiddenWindowDesc,
+            ],
+          ].map(([title, description]) => (
+            <View key={title} className="gap-1">
+              <Label>{title}</Label>
+              <Label variant="caption" tone="muted">
+                {description}
+              </Label>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </Surface>
+  );
+}
+export default function Host() {
+  const model = useHostModel();
+  const { t } = model;
+  return (
+    <SafeArea className="flex-1 bg-canvas" edges={["left", "right", "bottom"]}>
+      <ScrollView
+        className="flex-1"
+        contentContainerClassName="mx-auto w-full max-w-3xl gap-5 px-4 pb-8 pt-4"
+        keyboardShouldPersistTaps="handled"
+      >
+        {model.busy ? (
+          <Notice>
+            <View className="flex-row items-center gap-3">
+              <ActivityIndicator />
+              <Label className="flex-1" accessibilityLiveRegion="polite">
+                {t.viewer.connectingToHost}
+              </Label>
+            </View>
+            <Action
+              variant="secondary"
+              onPress={model.cancelConnection}
+              label={t.common.cancel}
+            />
+          </Notice>
+        ) : null}
+        {model.error ? (
+          <Notice tone="error">
+            <Label>{model.error}</Label>
+            <Action
+              variant="secondary"
+              onPress={() => model.setShowTroubleshoot(true)}
+              label={t.viewer.troubleshootTitle}
+            />
+          </Notice>
+        ) : null}
+        <DiscoverySection model={model} />
+        <RecentSection model={model} />
+        <ManualSection model={model} />
+        <ConnectionHelp model={model} />
+        {model.hasStoredToken ? (
+          <Surface className="gap-2">
+            <Label variant="title">{t.viewer.rememberTitle}</Label>
+            <Action
+              variant="ghost"
+              onPress={model.handleClearToken}
+              label={t.viewer.btnClearToken}
+            />
+          </Surface>
+        ) : null}
+      </ScrollView>
+    </SafeArea>
+  );
 }

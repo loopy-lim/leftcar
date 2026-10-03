@@ -1,51 +1,36 @@
-import { Info, Monitor, QrCode } from "lucide-react";
 import type { TranslationSchema } from "@leftcar/ui-tokens";
-import { buttonVariants } from "../lib/variants";
-
+import { Button, Text } from "../ui/primitives";
 export interface IdleStudioViewProps {
   t: TranslationSchema;
   onOpenPairing: () => void;
+  screenReady?: boolean;
 }
-
-export function IdleStudioView({ t, onOpenPairing }: IdleStudioViewProps) {
+export function IdleStudioView({
+  t,
+  onOpenPairing,
+  screenReady = true,
+}: IdleStudioViewProps) {
   return (
-    <div className="idle-center-container">
-      <div className="idle-center-card">
-        <div className="idle-center-icon-box">
-          <Monitor size={28} strokeWidth={2} />
+    <div className="flex min-h-60 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
+      <div className="flex w-full max-w-md flex-col items-center gap-4">
+        <div className="space-y-2">
+          <h2 className="text-heading text-ink font-semibold">
+            {t.host.idleTitle}
+          </h2>
+          <p className="text-body text-muted">{t.host.idleDesc}</p>
         </div>
-        <div className="idle-center-text">
-          <h2>{t.host.idleTitle}</h2>
-          <p>{t.host.idleDesc}</p>
-        </div>
-
-        <button
-          className={buttonVariants({ variant: "primary", size: "lg" })}
+        <Button
+          variant={screenReady ? "primary" : "secondary"}
           onClick={onOpenPairing}
-          title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})`}
+          title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})}`}
         >
-          <QrCode size={16} />
-          <span>{t.host.btnCreatePairing}</span>
-          <span
-            className="kbd-shortcut"
-            style={{
-              marginLeft: 6,
-              background: "rgba(255,255,255,0.2)",
-              color: "inherit",
-              borderColor: "rgba(255,255,255,0.3)",
-            }}
-          >
-            {t.host.shortcutPair}
-          </span>
-        </button>
-
-        <span className="idle-center-hint">
-          <Info size={13} />
-          {t.host.idleHint}
-        </span>
+          {t.host.btnCreatePairing}
+        </Button>
+        <Text variant="caption" tone="muted">
+          {t.host.setupPairStep}
+        </Text>
       </div>
     </div>
   );
 }
-
 export default IdleStudioView;

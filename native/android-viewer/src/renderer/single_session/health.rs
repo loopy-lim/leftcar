@@ -139,13 +139,22 @@ impl ControlHealthState {
         sent: bool,
         media_since_previous_probe: bool,
     ) -> ControlHealthAction {
-        if !sent {
+        if self.terminated {
             return ControlHealthAction::None;
         }
         if media_since_previous_probe {
             self.consecutive_misses = 0;
-            self.outstanding_sequence = Some(sequence);
+            if sent {
+                self.outstanding_sequence = Some(sequence);
+            }
             return ControlHealthAction::None;
+        }
+        if !sent {
+            // A disappeared route can fail every send before any reply is
+            // possible. Preserve the last sent probe for a late ACK, while
+            // bounding the silent failure episode just like missing replies.
+            self.consecutive_misses = self.consecutive_misses.saturating_add(1);
+            return self.missed_probe_action();
         }
         self.probe_sent(sequence)
     }
@@ -158,6 +167,10 @@ impl ControlHealthState {
             self.consecutive_misses = self.consecutive_misses.saturating_add(1);
         }
         self.outstanding_sequence = Some(sequence);
+        self.missed_probe_action()
+    }
+
+    fn missed_probe_action(&mut self) -> ControlHealthAction {
         if self.consecutive_misses >= MISSED_CONTROL_PROBE_LIMIT {
             self.terminated = true;
             ControlHealthAction::TerminateHostUnreachable
@@ -494,6 +507,93 @@ mod tests {
             health.probe_send_completed(45, true, false),
             ControlHealthAction::None
         );
+    }
+
+    #[test]
+    fn connection_health_exits_after_repeated_local_send_failures_without_media() {
+        let mut health = ControlHealthState::default();
+        for sequence in 1..MISSED_CONTROL_PROBE_LIMIT.into() {
+            assert_eq!(
+                run_control_probe_cycle(&mut health, Some(sequence), false, |_| {}, |_| false),
+                ControlHealthAction::None
+            );
+        }
+        assert_eq!(
+            run_control_probe_cycle(
+                &mut health,
+                Some(MISSED_CONTROL_PROBE_LIMIT.into()),
+                false,
+                |_| {},
+                |_| false
+            ),
+            ControlHealthAction::TerminateHostUnreachable,
+            "a removed network route must not leave a silent stream alive forever"
+        );
+        assert_eq!(
+            health.probe_send_completed(10, false, false),
+            ControlHealthAction::None,
+            "termination is emitted once"
+        );
+    }
+
+    #[test]
+    fn connection_health_uses_live_media_even_when_every_control_send_fails() {
+        let mut health = ControlHealthState::default();
+        health.probe_send_completed(1, true, false);
+        health.probe_send_completed(2, true, false);
+        health.probe_send_completed(3, true, false);
+        for sequence in 4..=10 {
+            assert_eq!(
+                health.probe_send_completed(sequence, false, true),
+                ControlHealthAction::None,
+                "authenticated incoming media is positive connection evidence"
+            );
+        }
+        assert!(health.probe_acknowledged(3));
+        for sequence in 11..13 {
+            assert_eq!(
+                health.probe_send_completed(sequence, false, false),
+                ControlHealthAction::None
+            );
+        }
+        assert_eq!(
+            health.probe_send_completed(13, false, false),
+            ControlHealthAction::TerminateHostUnreachable
+        );
+    }
+
+    #[test]
+    fn forged_media_does_not_mask_three_failed_control_sends() {
+        let key = [84; 32];
+        let crypto = crate::media_crypto::MediaSessionCrypto::new(key);
+        let sender = secure_channel::DatagramSealer::new(secure_channel::media_keys(&key).s2c);
+        let peer = "127.0.0.1:11000".parse().unwrap();
+        let mut host_peer = Some(peer);
+        let mut health = ControlHealthState::default();
+        for sequence in 1..=3 {
+            let mut forged = sender.seal(b"G media").unwrap();
+            *forged.last_mut().unwrap() ^= 1;
+            let mut media_seen = false;
+            assert!(crate::renderer::media_ingress::admit_media_datagram(
+                &crypto,
+                &mut forged,
+                peer,
+                "127.0.0.1",
+                &mut host_peer,
+                Some(&mut media_seen)
+            )
+            .is_none());
+            let action =
+                run_control_probe_cycle(&mut health, Some(sequence), media_seen, |_| {}, |_| false);
+            assert_eq!(
+                action,
+                if sequence == 3 {
+                    ControlHealthAction::TerminateHostUnreachable
+                } else {
+                    ControlHealthAction::None
+                }
+            );
+        }
     }
 
     #[test]

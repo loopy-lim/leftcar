@@ -30,18 +30,30 @@ extension CaptureSession {
      func sendTCPBytes(_ data: Data, fd: Int32) -> Int {
         guard sourceAuthorization?.begin() ?? true else { return -1 }
         defer { sourceAuthorization?.end() }
+        let deadline = DispatchTime.now().uptimeNanoseconds + 100_000_000
         return data.withUnsafeBytes { raw in
             guard let baseAddress = raw.baseAddress else { return 0 }
             var offset = 0
             while offset < raw.count {
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard now < deadline else { return offset }
                 let sent = Darwin.send(
                     fd,
                     baseAddress.advanced(by: offset),
                     raw.count - offset,
-                    0
+                    MSG_DONTWAIT
                 )
-                guard sent > 0 else { return offset }
-                offset += sent
+                if sent > 0 {
+                    offset += sent
+                    continue
+                }
+                if sent < 0 && errno == EINTR { continue }
+                guard sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) else { return offset }
+                let remainingMs = Int32((deadline - now + 999_999) / 1_000_000)
+                var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let ready = poll(&descriptor, 1, remainingMs)
+                if ready < 0 && errno == EINTR { continue }
+                guard ready > 0 else { return offset }
             }
             return offset
         }
@@ -60,8 +72,37 @@ extension CaptureSession {
         withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
         framed.append(sealed)
         tcpWriteLock.lock()
-        defer { tcpWriteLock.unlock() }
-        return sendTCPBytes(framed, fd: fd) == framed.count ? data.count : -1
+        // Pin this session's socket so a concurrent stop cannot reuse the
+        // descriptor for an unrelated connection during a partial write.
+        stateLock.lock()
+        let pinned = sock == fd && fd >= 0 && !stopRequested ? dup(fd) : -1
+        stateLock.unlock()
+        guard pinned >= 0 else { tcpWriteLock.unlock(); return -1 }
+        let sent = sendTCPBytes(framed, fd: pinned)
+        close(pinned)
+        if sent == framed.count { tcpWriteLock.unlock(); return data.count }
+        // A denied source lease sends no bytes. Actual transport failures
+        // cannot be treated as UDP loss: the receiver already consumed a
+        // prefix or partial payload and must never see a following frame.
+        if sent >= 0 { retireFailedTCPTransport(fd: fd) }
+        tcpWriteLock.unlock()
+        return -1
+    }
+
+    private func retireFailedTCPTransport(fd: Int32) {
+        stateLock.lock()
+        guard sock == fd, fd >= 0, !stopRequested else { stateLock.unlock(); return }
+        stoppedReason = "TCP media send failed"
+        lifecycleState = "error"
+        stopRequested = true
+        running = false
+        sock = -1
+        stateLock.unlock()
+        _ = shutdown(fd, SHUT_RDWR)
+        close(fd)
+        // Replies can be sent from inputQueue; stopping its DispatchSource
+        // synchronously here would wait on the same queue.
+        queue.async { [weak self] in self?.stop() }
     }
 
     /// Lowest-level UDP sender. Sealing happens exactly here so every
@@ -197,12 +238,18 @@ extension CaptureSession {
     }
 
      func receiveTCPFrame(fd: Int32, timeoutMs: Int32) -> Data? {
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(0, timeoutMs)) * 1_000_000
         func readExactly(_ length: Int) -> Data? {
             var result = Data(count: length)
             var offset = 0
             while offset < length {
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard now < deadline else { return nil }
+                let remainingMs = Int32(min(UInt64(Int32.max), (deadline - now + 999_999) / 1_000_000))
                 var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-                guard poll(&descriptor, 1, timeoutMs) > 0 else { return nil }
+                let ready = poll(&descriptor, 1, remainingMs)
+                if ready < 0 && errno == EINTR { continue }
+                guard ready > 0 else { return nil }
                 let received = result.withUnsafeMutableBytes { raw in
                     Darwin.recv(
                         fd,
@@ -211,6 +258,7 @@ extension CaptureSession {
                         MSG_DONTWAIT
                     )
                 }
+                if received < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) { continue }
                 guard received > 0 else { return nil }
                 offset += received
             }
@@ -240,6 +288,7 @@ extension CaptureSession {
         }
         var noDelay: Int32 = 1
         _ = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+        _ = setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noDelay, socklen_t(MemoryLayout<Int32>.size))
         var receiveTimeout = timeval(tv_sec: 2, tv_usec: 0)
         _ = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, socklen_t(MemoryLayout<timeval>.size))
         var sendTimeout = timeval(tv_sec: 0, tv_usec: 100_000)

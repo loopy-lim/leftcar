@@ -240,14 +240,33 @@ pub extern "C" fn leftcar_jni_prepare_usb(fd: i32, key: *const u8, key_len: usiz
         let Some(media_key) = media_key_from_parts(key, key_len) else {
             return LEFTCAR_ERR_INVALID;
         };
-        let bridge = match UsbBridge::start(fd, media_key) {
-            Ok(bridge) => bridge,
+        let mut physical = USB_ACCESSORY_BRIDGE.lock().unwrap();
+        if physical
+            .as_ref()
+            .is_some_and(|bridge| !bridge.is_running() && !bridge.is_retired())
+        {
+            log_info!("previous USB accessory cleanup is incomplete; reconnect the accessory");
+            return LEFTCAR_ERR_STATE;
+        }
+        let bridge = match physical.as_ref().filter(|bridge| bridge.is_running()) {
+            Some(bridge) => std::sync::Arc::clone(bridge),
+            None => match UsbBridge::start(fd) {
+                Ok(bridge) => std::sync::Arc::new(bridge),
+                Err(error) => {
+                    log_info!("failed to prepare USB bridge: {error}");
+                    return LEFTCAR_ERR_STATE;
+                }
+            },
+        };
+        let lease = match bridge.prepare_media(media_key) {
+            Ok(lease) => lease,
             Err(error) => {
-                log_info!("failed to prepare USB bridge: {error}");
+                log_info!("failed to prepare USB media lease: {error}");
                 return LEFTCAR_ERR_STATE;
             }
         };
-        *PREPARED_USB_BRIDGE.lock().unwrap() = Some(bridge);
+        *physical = Some(bridge);
+        *PREPARED_USB_BRIDGE.lock().unwrap() = Some(lease);
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -261,12 +280,20 @@ pub extern "C" fn leftcar_jni_set_usb_media_key(key: *const u8, key_len: usize) 
         let Some(key) = media_key_from_parts(key, key_len) else {
             return LEFTCAR_ERR_INVALID;
         };
-        let bridge = PREPARED_USB_BRIDGE.lock().unwrap();
+        let bridge = USB_ACCESSORY_BRIDGE.lock().unwrap();
         match bridge.as_ref() {
             Some(bridge) => {
-                bridge.set_media_crypto(std::sync::Arc::new(
-                    crate::media_crypto::MediaSessionCrypto::new(key),
-                ));
+                if bridge
+                    .shared_crypto()
+                    .is_some_and(|crypto| crypto.session_key() == key)
+                {
+                    return LEFTCAR_OK;
+                }
+                let lease = match bridge.prepare_media(key) {
+                    Ok(lease) => lease,
+                    Err(_) => return LEFTCAR_ERR_STATE,
+                };
+                *PREPARED_USB_BRIDGE.lock().unwrap() = Some(lease);
                 LEFTCAR_OK
             }
             None => LEFTCAR_ERR_STATE,
@@ -278,10 +305,11 @@ pub extern "C" fn leftcar_jni_set_usb_media_key(key: *const u8, key_len: usize) 
 #[no_mangle]
 pub extern "C" fn leftcar_jni_usb_control_port() -> i32 {
     let guard = std::panic::catch_unwind(|| {
-        PREPARED_USB_BRIDGE
+        USB_ACCESSORY_BRIDGE
             .lock()
             .unwrap()
             .as_ref()
+            .filter(|bridge| bridge.is_running())
             .map(|bridge| bridge.control_port() as i32)
             .unwrap_or(0)
     });
@@ -298,7 +326,25 @@ pub extern "C" fn leftcar_jni_cancel_prepared_port(port: u16) -> i32 {
         if cancel_tcp_bridge(port) {
             log_info!("cancelled prepared ADB TCP bridge on port {port}");
         }
+        let mut usb = PREPARED_USB_BRIDGE.lock().unwrap();
+        if usb
+            .as_ref()
+            .is_some_and(|lease| lease.matches_media_port(port))
+        {
+            usb.take();
+        }
+        LEFTCAR_OK
+    });
+    guard.unwrap_or(LEFTCAR_ERR_PANIC)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_detach_usb() -> i32 {
+    let guard = std::panic::catch_unwind(|| {
         PREPARED_USB_BRIDGE.lock().unwrap().take();
+        if let Some(bridge) = USB_ACCESSORY_BRIDGE.lock().unwrap().take() {
+            bridge.stop_after_detach();
+        }
         LEFTCAR_OK
     });
     guard.unwrap_or(LEFTCAR_ERR_PANIC)
@@ -719,6 +765,157 @@ pub extern "C" fn leftcar_jni_surface_ref(surface: *mut c_void, acquire: bool) {
         } else {
             ANativeWindow_release(surface);
         }
+    }
+}
+
+#[cfg(test)]
+mod usb_ownership_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn logical_cancel_keeps_one_physical_owner_for_repeated_sessions() {
+        let _serial = crate::jni::TEST_STORE_LOCK.lock().unwrap();
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let key = crate::media_crypto::test_media_key(8);
+        assert_eq!(
+            leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len()),
+            LEFTCAR_OK
+        );
+        let port = leftcar_jni_usb_control_port();
+        let physical = USB_ACCESSORY_BRIDGE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(port > 0);
+        for _ in 0..20 {
+            assert_eq!(leftcar_jni_cancel_prepared_port(0), LEFTCAR_OK);
+            assert_eq!(
+                leftcar_jni_usb_control_port(),
+                port,
+                "logical stream cancellation must retain the accessory owner"
+            );
+            assert_eq!(
+                leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len()),
+                LEFTCAR_OK
+            );
+            assert!(Arc::ptr_eq(
+                &physical,
+                USB_ACCESSORY_BRIDGE.lock().unwrap().as_ref().unwrap()
+            ));
+        }
+        PREPARED_USB_BRIDGE.lock().unwrap().take();
+        USB_ACCESSORY_BRIDGE.lock().unwrap().take();
+        physical.stop_after_detach();
+        drop(host);
+    }
+
+    #[test]
+    fn usb_reprepare_restores_a_media_lease_after_renderer_exit() {
+        let _serial = crate::jni::TEST_STORE_LOCK.lock().unwrap();
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let key = crate::media_crypto::test_media_key(6);
+        assert_eq!(
+            leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len()),
+            LEFTCAR_OK
+        );
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        prepare_udp_receiver(port, "127.0.0.1", "usb", &key).unwrap();
+        let old = take_media_bridge(port).unwrap();
+        drop(old);
+        prepare_udp_receiver(port, "127.0.0.1", "usb", &key).unwrap();
+        assert!(
+            take_media_bridge(port).is_some(),
+            "reconfiguring USB must create a new logical lease"
+        );
+        cancel_prepared_receiver(port);
+        take_media_crypto(port);
+        leftcar_jni_detach_usb();
+        drop(host);
+    }
+
+    #[test]
+    fn a_late_usb_rebind_cannot_replace_a_newly_published_lease() {
+        let _serial = crate::jni::TEST_STORE_LOCK.lock().unwrap();
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let key = crate::media_crypto::test_media_key(6);
+        assert_eq!(
+            leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len()),
+            LEFTCAR_OK
+        );
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        prepare_udp_receiver(port, "127.0.0.1", "usb", &key).unwrap();
+        let old = take_media_bridge(port).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *TEST_USB_REBIND_BARRIER.lock().unwrap() = Some(Arc::clone(&barrier));
+        let returning = std::thread::spawn(move || return_media_bridge_for_rebind(port, old));
+        barrier.wait();
+        let new_key = crate::media_crypto::test_media_key(7);
+        assert_eq!(
+            leftcar_jni_set_usb_media_key(new_key.as_ptr(), new_key.len()),
+            LEFTCAR_OK
+        );
+        barrier.wait();
+        returning.join().unwrap();
+        TEST_USB_REBIND_BARRIER.lock().unwrap().take();
+        let preserved = PREPARED_USB_BRIDGE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|lease| lease.is_current());
+        cancel_prepared_receiver(port);
+        take_media_crypto(port);
+        leftcar_jni_detach_usb();
+        drop(host);
+        assert!(
+            preserved,
+            "late renderer return must preserve the successor's USB route"
+        );
+    }
+
+    #[test]
+    fn a_failed_accessory_owner_must_retire_before_another_reader_is_admitted() {
+        let _serial = crate::jni::TEST_STORE_LOCK.lock().unwrap();
+        let (viewer, host) = UnixStream::pair().unwrap();
+        let key = crate::media_crypto::test_media_key(3);
+        assert_eq!(
+            leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len()),
+            LEFTCAR_OK
+        );
+        let physical = USB_ACCESSORY_BRIDGE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let address = PREPARED_USB_BRIDGE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .control_addr();
+        viewer.shutdown(std::net::Shutdown::Write).unwrap();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"feedback", address).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while physical.is_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!physical.is_running());
+        let result = leftcar_jni_prepare_usb(viewer.as_raw_fd(), key.as_ptr(), key.len());
+        leftcar_jni_detach_usb();
+        drop(host);
+        assert_eq!(
+            result, LEFTCAR_ERR_STATE,
+            "a blocked retired reader must not multiply on retry"
+        );
     }
 }
 

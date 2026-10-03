@@ -116,5 +116,6 @@ class StreamSplitResumeTest {
 class SplitRecoveryEventsShadow {
     companion object { val events = mutableListOf<Pair<Int, Int>>() }
     @Implementation fun emitTermination(port: Int, reason: Int) { events += port to reason }
+    @Implementation fun emitTermination(port: Int, reason: Int, generation: Long) { events += port to reason }
     @Implementation fun emitWindowClosed(instanceId: String, generation: Long, port: Int) { events += port to 0 }
 }

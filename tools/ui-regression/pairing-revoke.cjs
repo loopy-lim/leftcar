@@ -8,7 +8,7 @@ try {for(const all of [false,true])for(const fail of [true,false]){const page=aw
  await page.getByText('Fixture device',{exact:true}).waitFor();
  await page.evaluate(fail=>{window.pairingIo.refreshFails=true;window.pairingIo.revokeError=fail?'grant journal write failed; access blocked':null;},fail);
  if(all)await page.getByRole('button',{name:'모든 기기 연결 삭제',exact:true}).click();
- else await page.locator('.device-row-item').filter({has:page.getByText('Fixture device',{exact:true})}).getByRole('button',{name:'삭제',exact:true}).click();
+ else await page.getByRole('listitem').filter({has:page.getByText('Fixture device',{exact:true})}).getByRole('button',{name:'Fixture device: 삭제',exact:true}).click();
  await page.getByRole('dialog').getByRole('button',{name:'삭제',exact:true}).click();
  if(fail)await page.getByText('grant journal write failed; access blocked',{exact:true}).waitFor({timeout:2000});
  await page.waitForFunction(()=>!document.body.textContent.includes('Fixture device'),null,{timeout:2000});

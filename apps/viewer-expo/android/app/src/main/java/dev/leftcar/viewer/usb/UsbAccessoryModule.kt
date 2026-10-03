@@ -58,7 +58,7 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
     private val detachReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == UsbManager.ACTION_USB_ACCESSORY_DETACHED) {
-                closeAccessory()
+                closeAccessory(detached = true)
             }
         }
     }
@@ -117,10 +117,10 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
         val accessory = manager.accessoryList
             ?.firstOrNull(::isLeftcarAccessory)
         if (accessory == null) {
-            closeAccessory()
+            closeAccessory(detached = true)
             return
         }
-        if (attached && descriptor != null) return
+        if (attached && ViewerNative.usbControlPort() > 0) return
         openAccessory(accessory)
     }
 
@@ -165,6 +165,20 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
             requestAccessoryPermission(manager, accessory)
             return false
         }
+        // The native process owns the driver's one exclusive open across
+        // stream cancellation and React module recreation. Reuse that owner
+        // before trying to open a second descriptor.
+        val existingPort = ViewerNative.usbControlPort()
+        if (attached && currentAccessory == accessory && existingPort > 0) return true
+        if (existingPort > 0) {
+            currentAccessory = accessory
+            permissionPending = false
+            attached = true
+            emitState(true, existingPort)
+            return true
+        }
+        descriptor?.close()
+        descriptor = null
         val opened = manager.openAccessory(accessory) ?: return false
         val key = sessionMediaKey
         if (key == null) {
@@ -185,7 +199,8 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
         return true
     }
 
-    private fun closeAccessory() {
+    private fun closeAccessory(detached: Boolean = false) {
+        if (detached) ViewerNative.detachUsb()
         descriptor?.close()
         descriptor = null
         currentAccessory = null
@@ -227,9 +242,10 @@ class UsbAccessoryModule(reactContext: ReactApplicationContext) :
         val manager = reactApplicationContext.getSystemService(Context.USB_SERVICE) as UsbManager
         val accessoryPresent = manager.accessoryList?.any(::isLeftcarAccessory) == true
         refreshAccessory()
+        val port = if (attached) ViewerNative.usbControlPort() else 0
         val body = Arguments.createMap().apply {
-            putBoolean("attached", attached && descriptor != null)
-            putInt("controlPort", if (attached) ViewerNative.usbControlPort() else 0)
+            putBoolean("attached", port > 0)
+            putInt("controlPort", port)
             putBoolean("accessoryPresent", accessoryPresent)
             putBoolean("permissionPending", permissionPending)
         }

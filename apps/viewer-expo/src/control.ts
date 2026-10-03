@@ -1,4 +1,5 @@
 import TcpSocket from "react-native-tcp-socket";
+import { ControlRequestError } from "./control-error";
 import type { AdaptiveQualityState } from "./adaptive-resolution";
 import {
   StreamSealer,
@@ -271,17 +272,7 @@ export interface ControlClient {
   whenClosed(listener: () => void): void;
 }
 
-export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized";
-
-export class ControlRequestError extends Error {
-  constructor(
-    message: string,
-    readonly kind: ControlErrorKind,
-  ) {
-    super(message);
-    this.name = "ControlRequestError";
-  }
-}
+export { ControlRequestError, type ControlErrorKind } from "./control-error";
 
 export function formatErrorMessage(err: unknown): string {
   const t = currentTranslation().viewer;
@@ -506,26 +497,15 @@ export function connect(
                 : payload;
             socket.write(wire, "utf8", (writeError) => {
               if (!writeError) {
-                onWritten?.();
+                if (!terminalError) onWritten?.();
                 return;
               }
-              if (!pending.has(id)) return;
-              const handler = pending.get(id);
-              pending.delete(id);
-              clearTimeout(handler?.timer);
-              armFrontDeadline();
-              const msg = formatErrorMessage(writeError);
-              (handler?.reject ?? rej)(
-                new ControlRequestError(`control write error: ${msg}`, "transport"),
-              );
+              // No response IDs exist on this FIFO channel. Even a failed
+              // write may have reached the Host; retire every pending reply.
+              if (!terminalError) fail(`control write error: ${formatErrorMessage(writeError)}`);
             });
           } catch (e) {
-            const handler = pending.get(id);
-            pending.delete(id);
-            clearTimeout(handler?.timer);
-              armFrontDeadline();
-            const msg = formatErrorMessage(e);
-            rej(new ControlRequestError(`control write error: ${msg}`, "transport"));
+            if (!terminalError) fail(`control write error: ${formatErrorMessage(e)}`);
           }
         });
         if (cachedToken !== undefined) {

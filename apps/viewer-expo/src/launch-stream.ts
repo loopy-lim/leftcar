@@ -1,6 +1,7 @@
 import type { ControlClient, ReconfigureStreamOutput } from "./control";
 import { currentLanguage } from "./language-store";
 import { LocalizedError } from "./localized-error";
+import { AmbiguousControlError, ControlRequestError, isAbsentControlSession } from "./control-error";
 import {
   getUsbState,
   resolveTransport,
@@ -472,13 +473,21 @@ export async function startPreparedStream({
       ...(udpStability ? { udpStability } : {}),
     };
   } catch (error) {
+    let failure = error;
     if (session !== null) {
-      await request("stopStream", { session }).catch(() => undefined);
+      await request("stopStream", { session }).catch((stopError: unknown) => {
+        if (isAbsentControlSession(stopError)) return;
+        // Preserve rollback uncertainty even for callers using a raw client.
+        // Another automatic start could duplicate this acknowledged session.
+        failure = stopError instanceof ControlRequestError &&
+          (stopError.kind === "transport" || stopError.kind === "timeout")
+          ? new AmbiguousControlError("stopStream", stopError) : stopError;
+      });
     }
     await launcher
       .cancelPreparedStream(args.viewerPort, encoderExperiment)
       .catch(() => undefined);
-    throw error;
+    throw failure;
   }
 }
 

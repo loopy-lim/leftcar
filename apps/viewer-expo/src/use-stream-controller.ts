@@ -7,7 +7,8 @@ const subscribeVisibility = (listener: () => void) => {
   return () => subscription.remove();
 };
 const isCatalogVisible = () => AppState.currentState === null || AppState.currentState === "active";
-import { replaceRestartedStreamState } from "./launch-stream";
+import type { StreamControlRequest } from "./launch-stream";
+import { sameStreamLifetime, captureStreamSelection, isStreamOperationCancelled } from "./stream-lifetime-operation";
 import {
   observeAdaptiveResolution,
   recordAdaptiveResolutionResult,
@@ -32,7 +33,8 @@ import {
   subscribeStreamTermination,
   type RestartRequest,
 } from "./stream-termination";
-import { subscribeInputEnableRequested } from "./stream-input-request";
+import { reportInputEnableRequestResult, subscribeInputEnableRequested } from "./stream-input-request";
+import { requestStreamInputApproval } from "./input-approval-request";
 import { subscribeWindowSizeChanged } from "./stream-window-size";
 import {
   getUsbState,
@@ -71,17 +73,27 @@ export function useStreamController(
   const adaptiveLoss = useRef(new Map<number, number>());
   const adaptiveRecovery = useRef(new Map<number, number>());
   const adaptiveFloorCollapse = useRef(new Map<number, number>());
-  const adaptiveRebinds = useRef(new Set<number>());
+  const adaptiveRebinds = useRef(new Map<number, ActiveStream>());
+  const adaptiveLifetimes = useRef(new Map<number, ActiveStream>());
   const reconfigureStreamRef = useRef(reconfigureStream);
   const updateStreams = store.update;
   const endUnownedRestart = useCallback(
-    (session: number) => {
-      void requestWithReconnect("stopStream", { session }).catch((cause) => {
+    (session: number, request: StreamControlRequest) => {
+      if (streamsRef.current.some(stream => stream.session === session)) return;
+      void request("stopStream", { session }).catch((cause) => {
         setStreamError(interpolate(currentTranslation().viewer.errStopOrphaned, { detail: formatErrorMessage(cause) }));
       });
     },
-    [],
+    [streamsRef],
   );
+  const applyRestartedStream = useCallback((active: ActiveStream, restarted: RestoredStream, cleanupRequest: StreamControlRequest) => {
+    if (!streamsRef.current.some(current => sameStreamLifetime(current, active))) {
+      endUnownedRestart(restarted.session, cleanupRequest);
+      return;
+    }
+    const startedAt = Date.now();
+    updateStreams(previous => previous.map(current => sameStreamLifetime(current, active) ? { ...current, ...restarted, startedAt } : current));
+  }, [endUnownedRestart, streamsRef, updateStreams]);
   const queryClient = useQueryClient();
   const visible = useSyncExternalStore(subscribeVisibility, isCatalogVisible, () => true);
   const statusQuery = useQuery({
@@ -110,24 +122,27 @@ export function useStreamController(
   const restartMutationOptions = (
     errorKey: "errRestoreFailed" | "errTransportSwitchFailed",
   ) => ({
+    onMutate: () => ({ ownsSelection: captureStreamSelection(host) }),
     mutationFn: async (request: RestartRequest) => {
+      const ownsSelection = captureStreamSelection(host);
+      const cleanupRequest = requestForCurrentSelection(host);
       const restarted = await restoreStream(request.active);
-      return { ...request, restarted };
+      return { ...request, restarted, cleanupRequest, ownsSelection };
     },
-    onSuccess: ({ active, restarted }: RestartRequest & { restarted: RestoredStream }) => {
-      updateStreams((previous) =>
-        replaceRestartedStreamState(
-          previous,
-          active.session,
-          restarted,
-          Date.now(),
-          endUnownedRestart,
-        ),
-      );
+    onSuccess: ({ active, restarted, cleanupRequest, ownsSelection }: RestartRequest & {
+      restarted: RestoredStream; cleanupRequest: StreamControlRequest; ownsSelection: () => boolean;
+    }) => {
+      if (!ownsSelection()) {
+        endUnownedRestart(restarted.session, cleanupRequest);
+        return;
+      }
+      applyRestartedStream(active, restarted, cleanupRequest);
       setStreamError(null);
       void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, request: RestartRequest, owner?: { ownsSelection: () => boolean }) => {
+      if (!owner?.ownsSelection() || isStreamOperationCancelled(error) ||
+          !streamsRef.current.some(stream => sameStreamLifetime(stream, request.active))) return;
       console.warn("[leftcar] stream restore failed", error instanceof Error ? error.stack : typeof error);
       // A failed bounded rebind keeps the existing logical stream visible so
       // the same Activity can retry on its current Surface; the caller owns
@@ -139,13 +154,12 @@ export function useStreamController(
     },
   });
 
-  const { mutate: restartStream } = useMutation(restartMutationOptions("errRestoreFailed"));
-
   useEffect(() => {
     const request = requestForCurrentSelection(host);
     store.configureRecovery({
       subscribe: subscribeStreamTermination,
       restore: restoreStream,
+      captureOwner: () => captureStreamSelection(host),
       formatError: formatErrorMessage,
       stop: async session => { await request("stopStream", { session }); },
     });
@@ -167,16 +181,14 @@ export function useStreamController(
   }, [host]);
 
   useEffect(() => {
-    // 입력 잠금 배너 탭(2026-09-21): 네이티브 창이 탭을 보고하면 그 포트의
-    // 세션으로 requestInputEnable을 보낸다. 호스트 UI에 승인 알림이 뜨고,
-    // 승인되면 기존 입력 상태 패킷(LCS1)이 배지를 자동으로 푼다. 요청 실패는
-    // 콘솔만 남긴다 — 배너 탭의 시각 피드백은 이미 지나갔고 재탭이 재시도다.
-    const request = requestForCurrentSelection(host);
-    const subscription = subscribeInputEnableRequested(({ port }) => {
-      const active = streamsRef.current.find((stream) => stream.port === port);
-      if (!active) return;
-      void request("requestInputEnable", { session: active.session }).catch((error: unknown) => {
-        console.warn("[leftcar] input enable request failed", error);
+    // Delivery feedback belongs to the requesting native window. Only the
+    // Host's existing permission packet can enable remote input after approval.
+    const subscription = subscribeInputEnableRequested((event) => {
+      void requestStreamInputApproval({
+        host,
+        event,
+        getSnapshot: () => streamsRef.current,
+        reportResult: reportInputEnableRequestResult,
       });
     });
     return () => subscription.remove();
@@ -189,7 +201,13 @@ export function useStreamController(
   useEffect(() => {
     const activeIds = new Set(streams.map((stream) => stream.session));
     for (const active of streams) {
-      if (!adaptiveStates.current.has(active.session)) {
+      const lifetime = adaptiveLifetimes.current.get(active.session);
+      if (!lifetime || !sameStreamLifetime(lifetime, active)) {
+        adaptiveLifetimes.current.set(active.session, active);
+        adaptiveLoss.current.delete(active.session);
+        adaptiveRecovery.current.delete(active.session);
+        adaptiveFloorCollapse.current.delete(active.session);
+        adaptiveRebinds.current.delete(active.session);
         // Seed from what is actually running (responsive starts sit below the
         // source maximum), not from the maximum itself. Seeding only happens
         // when a session appears — never per sample, so hysteresis keeps
@@ -207,6 +225,7 @@ export function useStreamController(
     for (const session of adaptiveStates.current.keys()) {
       if (!activeIds.has(session)) {
         adaptiveStates.current.delete(session);
+        adaptiveLifetimes.current.delete(session);
         adaptiveLoss.current.delete(session);
         adaptiveRecovery.current.delete(session);
         adaptiveFloorCollapse.current.delete(session);
@@ -236,10 +255,14 @@ export function useStreamController(
       const terminalMessage = session?.error ?? "";
       const hostTermination = classifyHostTermination(terminalMessage);
       if (hostTermination) {
+        // Host stop retires logical ownership immediately. A pending restore
+        // cannot publish a replacement while native close ACK is delayed.
+        updateStreams(previous => previous.filter(item => !sameStreamLifetime(item, active)));
+        const ownsSelection = captureStreamSelection(host);
         const cleanup = active.reservation?.close() ?? Promise.resolve();
-        void cleanup.then(() => {
-          updateStreams((previous) => previous.filter((item) => item !== active));
-        }).catch((cause) => setStreamError(formatErrorMessage(cause)));
+        void cleanup.catch((cause) => {
+          if (ownsSelection() && !isStreamOperationCancelled(cause)) setStreamError(formatErrorMessage(cause));
+        });
         lastRestartAt.current.delete(active.session);
         // 알림은 한 채널만: 네이티브 스트림 창이 살아 있으면 창이 종료 사유를
         // 이미 보여 준다(토스트/HUD). 창이 없을 때만 앱 쪽 Alert가 알린다.
@@ -266,13 +289,10 @@ export function useStreamController(
         continue;
       }
 
-      if (!claimStreamRestore(recoveryInFlight, active.session)) {
-        continue;
-      }
       lastRestartAt.current.set(active.session, now);
-      restartStream({ active, trigger: "hostStatus" });
+      store.recover(active);
     }
-  }, [hasFreshStatus, recoveryInFlight, restartStream, statusView, streams, updateStreams]);
+  }, [hasFreshStatus, host, recoveryInFlight, statusView, store, streams, updateStreams]);
 
   const runAdaptiveRebind = useCallback(
     async (
@@ -285,14 +305,17 @@ export function useStreamController(
       // A pending restart/transport switch owns the session; an adaptive
       // reconfigure issued underneath it would race the replacement.
       if (recoveryInFlight.has(active.session)) return;
-      adaptiveRebinds.current.add(active.session);
+      const ownsSelection = captureStreamSelection(host);
+      const isCurrent = () => ownsSelection() && streamsRef.current.some(item => sameStreamLifetime(item, active));
+      if (!isCurrent()) return;
+      adaptiveRebinds.current.set(active.session, active);
       const pendingQualityState: AdaptiveQualityState =
         action.kind === "downshift" ? "fallback" : "native";
       try {
-          const restarted = await reconfigure(active, action.target, pendingQualityState);
+        const restarted = await reconfigure(active, action.target, pendingQualityState);
         // The session may have been replaced/removed while the reconfigure
         // was in flight; only apply results to the stream that still exists.
-        if (!streamsRef.current.some((item) => item.session === active.session)) {
+        if (!isCurrent()) {
           return;
         }
         const acceptedTarget = {
@@ -309,7 +332,7 @@ export function useStreamController(
         );
         adaptiveStates.current.set(active.session, result.state);
         updateStreams((previous) => previous.map((item) => {
-          if (item.session !== active.session) return item;
+          if (!sameStreamLifetime(item, active)) return item;
           return {
             ...item,
             ...restarted,
@@ -322,6 +345,7 @@ export function useStreamController(
         }));
         setStreamError(null);
       } catch (error) {
+        if (!isCurrent() || isStreamOperationCancelled(error)) return;
         const result = recordAdaptiveResolutionResult(
           state,
           action,
@@ -331,10 +355,10 @@ export function useStreamController(
         adaptiveStates.current.set(active.session, result.state);
         setStreamError(interpolate(currentTranslation().viewer.errAdaptiveResize, { detail: formatErrorMessage(error) }));
       } finally {
-        adaptiveRebinds.current.delete(active.session);
+        if (adaptiveRebinds.current.get(active.session) === active) adaptiveRebinds.current.delete(active.session);
       }
     },
-    [recoveryInFlight, streamsRef, updateStreams],
+    [host, recoveryInFlight, streamsRef, updateStreams],
   );
 
   useEffect(() => {
@@ -464,29 +488,33 @@ export function useStreamController(
     [],
   );
   const applyUdpStability = useCallback(
-    async (udpStability: UdpStabilitySelection) => {
-      const activeStreams = [...streamsRef.current];
+    async (udpStability: UdpStabilitySelection, scope?: {
+      activeStreams: readonly ActiveStream[];
+      isCurrent: () => boolean;
+    }) => {
+      const activeStreams = [...(scope?.activeStreams ?? streamsRef.current)];
       const reconnectAt = async (index: number): Promise<void> => {
         const active = activeStreams[index];
         if (!active) return;
+        if (scope && !scope.isCurrent()) return;
+        if (!streamsRef.current.some(current => sameStreamLifetime(current, active))) return reconnectAt(index + 1);
         const configured = { ...active, udpStability };
         if (!claimStreamRestore(recoveryInFlight, active.session)) {
+          if (scope) throw new Error(currentTranslation().viewer.udpReconnecting);
           return reconnectAt(index + 1);
         }
         try {
+          const ownsSelection = captureStreamSelection(host);
+          const cleanupRequest = requestForCurrentSelection(host);
           const restarted = await restoreStream(configured);
-          updateStreams((previous) =>
-            replaceRestartedStreamState(
-              previous,
-              active.session,
-              restarted,
-              Date.now(),
-              endUnownedRestart,
-            ),
-          );
+          if (!ownsSelection() || (scope && !scope.isCurrent())) {
+            endUnownedRestart(restarted.session, cleanupRequest);
+            return;
+          }
+          applyRestartedStream(active, restarted, cleanupRequest);
           void queryClient.invalidateQueries({ queryKey: ["host-status", host] });
         } catch (cause) {
-          setStreamError(interpolate(currentTranslation().viewer.errUdpApply, { detail: formatErrorMessage(cause) }));
+          if (!scope) setStreamError(interpolate(currentTranslation().viewer.errUdpApply, { detail: formatErrorMessage(cause) }));
           throw cause;
         } finally {
           releaseStreamRestore(recoveryInFlight, active.session);
@@ -494,9 +522,9 @@ export function useStreamController(
         return reconnectAt(index + 1);
       };
       await reconnectAt(0);
-      setStreamError(null);
+      if (!scope) setStreamError(null);
     },
-    [endUnownedRestart, host, queryClient, recoveryInFlight, restoreStream, streamsRef, updateStreams],
+    [applyRestartedStream, endUnownedRestart, host, queryClient, recoveryInFlight, restoreStream, streamsRef],
   );
 
   return {

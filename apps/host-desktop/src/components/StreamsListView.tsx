@@ -1,24 +1,26 @@
+import { useId } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import type { SessionRow } from "../sessionTypes";
-import { buttonVariants } from "../lib/variants";
+import type { SessionActionKind } from "../hooks/useSessionActions";
+import { Button } from "../ui/primitives";
 import { SessionCard } from "./SessionCard";
-
 export interface StreamsListViewProps {
   sessions: SessionRow[];
   inputPermission: boolean;
   inputBusy: number | "permission" | null;
   showInspector: boolean;
-  /** 입력 허용을 요청 중인 세션 id(뷰어 잠금 배너 탭). */
   inputRequestSessions?: number[];
   t: TranslationSchema;
   onToggleInspector: () => void;
   onToggleInput: (session: SessionRow) => Promise<void>;
   onSetQuality: (session: SessionRow, quality: number | null) => Promise<void>;
   qualityBusy: number | null;
+  actionsBusy?: Record<number, SessionActionKind>;
+  actionErrors?: Record<number, string>;
+  onRetryAction?: (session: number) => void;
   onForceStop: (session: SessionRow) => void;
 }
-
 export function StreamsListView({
   sessions,
   inputPermission,
@@ -30,49 +32,64 @@ export function StreamsListView({
   onToggleInput,
   onSetQuality,
   qualityBusy,
+  actionsBusy = {},
+  actionErrors = {},
+  onRetryAction,
   onForceStop,
 }: StreamsListViewProps) {
+  const requestedSessions = new Set(inputRequestSessions);
+  const panelId = useId();
   return (
-    <div className="streams-section">
-      <div className="streams-section-header">
-        <div className="streams-header-left">
-          <h2>{interpolate(t.host.activeSectionTitle, { count: sessions.length })}</h2>
-        </div>
-        <button
-          className={buttonVariants({ variant: "link" })}
+    <section
+      className="space-y-3"
+      aria-label={interpolate(t.host.activeSectionTitle, {
+        count: sessions.length,
+      })}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-title text-ink font-semibold">
+          {interpolate(t.host.activeSectionTitle, { count: sessions.length })}
+        </h2>
+        <Button
+          variant="ghost"
+          size="compact"
           onClick={onToggleInspector}
-          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          aria-expanded={showInspector}
+          aria-controls={panelId}
         >
-          {showInspector ? (
-            <>{t.host.hideMetrics} <ChevronUp size={14} /></>
-          ) : (
-            <>{t.host.showMetrics} <ChevronDown size={14} /></>
-          )}
-        </button>
+          {showInspector ? t.host.hideMetrics : t.host.showMetrics}
+          {showInspector ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </Button>
       </div>
-
-      <div className="stream-cards-container">
-        {(() => {
-          const requestedSessions = new Set(inputRequestSessions);
-          return sessions.map((session) => (
+      <div id={panelId}>
+        {sessions.map((session) => (
           <SessionCard
             key={session.session}
             session={session}
             inputPermission={inputPermission}
-            inputBusy={inputBusy === session.session}
+            inputBusy={
+              actionsBusy[session.session] === "input" ||
+              inputBusy === session.session
+            }
             showInspector={showInspector}
             inputRequested={requestedSessions.has(session.session)}
             t={t}
             onToggleInput={onToggleInput}
             onSetQuality={onSetQuality}
-            qualityBusy={qualityBusy === session.session}
+            qualityBusy={
+              actionsBusy[session.session] === "quality" ||
+              qualityBusy === session.session
+            }
+            stopping={actionsBusy[session.session] === "stop"}
+            actionError={actionErrors[session.session]}
+            onRetry={
+              onRetryAction ? () => onRetryAction(session.session) : undefined
+            }
             onForceStop={onForceStop}
           />
-          ));
-        })()}
+        ))}
       </div>
-    </div>
+    </section>
   );
 }
-
 export default StreamsListView;

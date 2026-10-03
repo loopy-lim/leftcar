@@ -42,10 +42,6 @@ function renderInspector(currentSession: SessionRow): string {
     createElement(SessionInspector, {
       session: currentSession,
       transportLabel: "Wi-Fi UDP",
-      qualitySupported: true,
-      qualityPercent: 40,
-      qualityBusy: false,
-      onSetQuality: async () => {},
     }),
   );
 }
@@ -93,46 +89,55 @@ describe("encoder diagnostics", () => {
     ["encoderPool", "인코더 풀"],
     ["splitVertical", "4K 수직 분할"],
   ])("maps the known %s experiment label", (experimentId, expectedLabel) => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderExperimentApplied: experimentId,
-    }).experiment).toBe(expectedLabel);
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderExperimentApplied: experimentId,
+      }).experiment,
+    ).toBe(expectedLabel);
   });
 
   it("keeps the existing quality wording outside adaptive QP", () => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderExperimentApplied: "rateControl",
-    }).qualityBasis).toBeNull();
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderExperimentApplied: "rateControl",
+      }).qualityBasis,
+    ).toBeNull();
   });
 
   it("preserves unknown requested and applied experiment IDs", () => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderExperimentRequested: "futureRequested",
-      encoderExperimentApplied: "futureApplied",
-    })).toMatchObject({
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderExperimentRequested: "futureRequested",
+        encoderExperimentApplied: "futureApplied",
+      }),
+    ).toMatchObject({
       experiment: "futureApplied",
-      experimentDetail: "요청 futureRequested · 적용 futureApplied · QP 34 (2회 조정)",
+      experimentDetail:
+        "요청 futureRequested · 적용 futureApplied · QP 34 (2회 조정)",
     });
   });
 
   it("shows measuring states for old-shim defaults when diagnostics are unavailable", () => {
-    expect(encoderDiagnosticsView({
-      ...session,
-      encoderExperimentDiagnosticsAvailable: false,
-      encoderExperimentRequested: "auto",
-      encoderExperimentApplied: "rateControl",
-      encoderExperimentFallbackReason: null,
-      encoderFrameDrops: 0,
-      validEncodeOutputFps: 0,
-      encodeSubmitCallP95Us: 0,
-      encoderCallbackP95Us: 0,
-      encodeInFlight: 0,
-      packetizationInFlight: 0,
-      baseFrameQp: null,
-      baseFrameQpChanges: 0,
-    } as SessionRow)).toMatchObject({
+    expect(
+      encoderDiagnosticsView({
+        ...session,
+        encoderExperimentDiagnosticsAvailable: false,
+        encoderExperimentRequested: "auto",
+        encoderExperimentApplied: "rateControl",
+        encoderExperimentFallbackReason: null,
+        encoderFrameDrops: 0,
+        validEncodeOutputFps: 0,
+        encodeSubmitCallP95Us: 0,
+        encoderCallbackP95Us: 0,
+        encodeInFlight: 0,
+        packetizationInFlight: 0,
+        baseFrameQp: null,
+        baseFrameQpChanges: 0,
+      } as SessionRow),
+    ).toMatchObject({
       experiment: "측정 중",
       experimentDetail: "요청 측정 중 · 적용 측정 중 · QP 측정 중",
       experimentFallback: "측정 중",
@@ -146,19 +151,21 @@ describe("encoder diagnostics", () => {
   });
 
   it("renders legitimate zero measurements when diagnostics are available", () => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderExperimentRequested: "rateControl",
-      encoderExperimentApplied: "rateControl",
-      encoderFrameDrops: 0,
-      validEncodeOutputFps: 0,
-      encodeSubmitCallP95Us: 0,
-      encoderCallbackP95Us: 0,
-      encodeInFlight: 0,
-      packetizationInFlight: 0,
-      baseFrameQp: null,
-      baseFrameQpChanges: 0,
-    })).toMatchObject({
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderExperimentRequested: "rateControl",
+        encoderExperimentApplied: "rateControl",
+        encoderFrameDrops: 0,
+        validEncodeOutputFps: 0,
+        encodeSubmitCallP95Us: 0,
+        encoderCallbackP95Us: 0,
+        encodeInFlight: 0,
+        packetizationInFlight: 0,
+        baseFrameQp: null,
+        baseFrameQpChanges: 0,
+      }),
+    ).toMatchObject({
       experiment: "레이트 컨트롤",
       experimentDetail: "요청 rateControl · 적용 rateControl · QP 적용 안 됨",
       experimentFallback: "없음",
@@ -172,28 +179,34 @@ describe("encoder diagnostics", () => {
   });
 
   it("shows no experiment fallback when the Host reports none", () => {
-    expect(encoderDiagnosticsView(adaptiveSession).experimentFallback).toBe("없음");
+    expect(encoderDiagnosticsView(adaptiveSession).experimentFallback).toBe(
+      "없음",
+    );
   });
 
   it("shows an explicit experiment fallback independently from encoder identity fallback", () => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderExperimentFallbackReason: "RTVC adaptive QP unavailable",
-      encoderFallbackReason: "AVE identity unavailable",
-    })).toMatchObject({
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderExperimentFallbackReason: "RTVC adaptive QP unavailable",
+        encoderFallbackReason: "AVE identity unavailable",
+      }),
+    ).toMatchObject({
       experimentFallback: "RTVC adaptive QP unavailable",
       fallback: "AVE identity unavailable",
     });
   });
 
   it("never folds network or recovery loss into encoder drops", () => {
-    expect(encoderDiagnosticsView({
-      ...adaptiveSession,
-      encoderFrameDrops: 0,
-      networkDropped: 99,
-      networkQueueDropped: 88,
-      recoveryFramesDropped: 77,
-    }).pressure).toBe("드롭 0 · 제출 p95 17.2ms · callback p95 18.1ms");
+    expect(
+      encoderDiagnosticsView({
+        ...adaptiveSession,
+        encoderFrameDrops: 0,
+        networkDropped: 99,
+        networkQueueDropped: 88,
+        recoveryFramesDropped: 77,
+      }).pressure,
+    ).toBe("드롭 0 · 제출 p95 17.2ms · callback p95 18.1ms");
   });
 
   it("renders the experiment and encoder-pressure rows as read-only diagnostics", () => {
@@ -213,9 +226,9 @@ describe("encoder diagnostics", () => {
     expect(html).toContain("58 FPS");
     // 수동 화질 상한 제어는 인스펙터 밖(세션 카드 본체)에 렌더링된다.
     expect(html).not.toContain("40% 고정");
-    expect(renderQualityOverride({ ...adaptiveSession, qualityOverride: 0.4 })).toContain(
-      "40% 고정 · Base QP 기반",
-    );
+    expect(
+      renderQualityOverride({ ...adaptiveSession, qualityOverride: 0.4 }),
+    ).toContain("40% 고정 · Base QP 기반");
   });
 
   it("keeps the existing quality result wording for non-adaptive profiles", () => {
@@ -269,7 +282,8 @@ describe("encoder diagnostics", () => {
       splitLoss: "L 2 / R 3",
       splitLatency: "1.8ms / 41.2ms",
       splitFlow: "lease 3/5 · queue 1 · oldest 12.3ms",
-      splitRecovery: "capture 8 · boundary 4 · post-encode 0 · wire 600/0 · gap IDR 1 / delta 1",
+      splitRecovery:
+        "capture 8 · boundary 4 · post-encode 0 · wire 600/0 · gap IDR 1 / delta 1",
     });
     const html = renderInspector(splitSession);
     expect(html).toContain("타일 출력/표시");

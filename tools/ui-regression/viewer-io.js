@@ -4,14 +4,26 @@ export const io = {
   preparations: [],
   controlCalls: [],
   emptyCatalog: false,
+  statusView: null,
   closes: [],
   opened: [],
   replies: [],
   presentationRequests: [],
   audioRequests: [],
   deferAudio: false,
-  storage: new Map(),
+  storage: new Map(Object.entries(globalThis.__viewerStoredValues ?? {})),
+  failStorageReads: new Set(globalThis.__viewerStorageReadFailures ?? []),
+  failStorageWrites: new Set(),
+  storageWrites: [],
   generation: new Map(),
+  clipboard: globalThis.__viewerClipboard ?? "",
+  clipboardReads: [],
+  deferClipboard: false,
+  deferredCommands: new Set(),
+  pendingCommands: [],
+  nativeListeners: new Map(),
+  discoveryStarts: 0,
+  discoveryStops: 0,
 };
 export const NativeModules = {
   StreamLauncher: {
@@ -44,13 +56,30 @@ export const NativeModules = {
     },
   },
 };
+if (globalThis.__viewerNsdEnabled) NativeModules.NsdDiscovery = {
+  startDiscovery() { io.discoveryStarts++; }, stopDiscovery() { io.discoveryStops++; },
+};
+export const NativeEventEmitter = class {
+  addListener(event, listener) {
+    const listeners = io.nativeListeners.get(event) ?? new Set();
+    listeners.add(listener); io.nativeListeners.set(event, listeners);
+    return { remove() { listeners.delete(listener); } };
+  }
+};
 export const Alert = { alert() {} };
 export const Platform = { OS: "android" };
 export const router = { replace() {}, push() {} };
-export const getItemAsync = async (key) => io.storage.get(key) ?? null;
-export const setItemAsync = async (key, value) => { io.storage.set(key, value); };
+export const getItemAsync = async (key) => {
+  if (io.failStorageReads.has(key)) throw new Error('SecureStore read failed');
+  return io.storage.get(key) ?? null;
+};
+export const setItemAsync = async (key, value) => {
+  io.storageWrites.push({ key, value });
+  if (io.failStorageWrites.has(key)) throw new Error('SecureStore write failed');
+  io.storage.set(key, value);
+};
 export const deleteItemAsync = async () => {};
-export const getStringAsync = async () => "";
+export const getStringAsync = async () => io.deferClipboard ? new Promise(resolve => io.clipboardReads.push(resolve)) : io.clipboard;
 export const setStringAsync = async () => true;
 export const getImageAsync = async () => null;
 export const setImageAsync = async () => {};

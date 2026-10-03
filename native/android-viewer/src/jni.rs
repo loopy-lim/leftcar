@@ -15,7 +15,7 @@ use crate::media_crypto::{MediaSessionCrypto, SharedMediaCrypto};
 use crate::net_guard::host_is_valid;
 use crate::prepared_tcp::PreparedTcpBridge;
 use crate::prepared_udp::PreparedUdpReceiver;
-use crate::usb_bridge::UsbBridge;
+use crate::usb_bridge::{UsbBridge, UsbMediaLease};
 
 pub(crate) const LEFTCAR_OK: i32 = 0;
 pub(crate) const LEFTCAR_ERR_NULL: i32 = 1;
@@ -438,7 +438,11 @@ pub(crate) static PREPARED_RECEIVERS: Mutex<Option<HashMap<u16, PreparedUdpRecei
     Mutex::new(None);
 pub(crate) static PREPARED_TCP_BRIDGES: Mutex<Option<HashMap<u16, PreparedTcpBridge>>> =
     Mutex::new(None);
-pub(crate) static PREPARED_USB_BRIDGE: Mutex<Option<UsbBridge>> = Mutex::new(None);
+pub(crate) static USB_ACCESSORY_BRIDGE: Mutex<Option<Arc<UsbBridge>>> = Mutex::new(None);
+pub(crate) static PREPARED_USB_BRIDGE: Mutex<Option<UsbMediaLease>> = Mutex::new(None);
+#[cfg(test)]
+pub(crate) static TEST_USB_REBIND_BARRIER: Mutex<Option<Arc<std::sync::Barrier>>> =
+    Mutex::new(None);
 
 fn remove_prepared(port: u16) -> Option<PreparedUdpReceiver> {
     PREPARED_RECEIVERS
@@ -472,7 +476,7 @@ fn remove_tcp_bridge(port: u16) -> Option<PreparedTcpBridge> {
 pub(crate) static MEDIA_CRYPTO: Mutex<Option<HashMap<u16, SharedMediaCrypto>>> = Mutex::new(None);
 pub(crate) enum MediaBridge {
     Tcp(PreparedTcpBridge),
-    Usb(UsbBridge),
+    Usb(UsbMediaLease),
 }
 
 impl MediaBridge {
@@ -719,11 +723,15 @@ pub(crate) fn cancel_tcp_bridge(port: u16) -> bool {
 
 pub(crate) fn take_media_bridge(port: u16) -> Option<MediaBridge> {
     remove_tcp_bridge(port).map(MediaBridge::Tcp).or_else(|| {
-        PREPARED_USB_BRIDGE
-            .lock()
-            .unwrap()
-            .take()
-            .map(MediaBridge::Usb)
+        let mut prepared = PREPARED_USB_BRIDGE.lock().unwrap();
+        if prepared
+            .as_ref()
+            .is_some_and(|lease| lease.is_current() && lease.matches_media_port(port))
+        {
+            prepared.take().map(MediaBridge::Usb)
+        } else {
+            None
+        }
     })
 }
 
@@ -741,7 +749,18 @@ pub(crate) fn return_media_bridge_for_rebind(port: u16, bridge: MediaBridge) {
                 .insert(port, tcp);
         }
         MediaBridge::Usb(usb) => {
-            *PREPARED_USB_BRIDGE.lock().unwrap() = Some(usb);
+            #[cfg(test)]
+            {
+                let barrier = TEST_USB_REBIND_BARRIER.lock().unwrap().clone();
+                if let Some(barrier) = barrier {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+            let mut prepared = PREPARED_USB_BRIDGE.lock().unwrap();
+            if usb.is_current() && usb.matches_media_port(port) {
+                *prepared = Some(usb);
+            }
         }
     }
 }
@@ -818,14 +837,6 @@ pub(crate) fn prepare_udp_receiver(
     // One shared instance per logical stream: the listener worker answers the
     // sealed challenge through it and hands the same Arc to the renderer.
     let crypto = register_media_crypto(port, media_key);
-    if matches!(transport, "usb") {
-        // The AOAP bridge echo path must stay inside the same counter
-        // sequence, so hand the prepared instance to the live bridge.
-        if let Some(bridge) = PREPARED_USB_BRIDGE.lock().unwrap().as_ref() {
-            bridge.set_media_crypto(Arc::clone(&crypto));
-        }
-    }
-
     // A Host restart does not send a terminal packet to an existing UDP
     // renderer. The old Activity therefore keeps the media port and its
     // decoder alive while the control-plane recovery tries to prepare the
@@ -852,6 +863,29 @@ pub(crate) fn prepare_udp_receiver(
     // Drop outside the map lock because the worker has a bounded join.
     let stale = remove_prepared(port);
     drop(stale);
+
+    if transport == "usb" {
+        let physical = USB_ACCESSORY_BRIDGE.lock().unwrap();
+        let bridge = physical
+            .as_ref()
+            .filter(|bridge| bridge.is_running())
+            .ok_or("USB accessory is not prepared")?;
+        let mut prepared = PREPARED_USB_BRIDGE.lock().unwrap();
+        let reusable = prepared.as_ref().is_some_and(|lease| {
+            lease.is_current() && (lease.is_unbound() || lease.matches_media_port(port))
+        }) && bridge
+            .shared_crypto()
+            .is_some_and(|shared| shared.session_key() == *media_key);
+        if !reusable {
+            *prepared = Some(
+                bridge
+                    .prepare_media(*media_key)
+                    .map_err(|error| format!("failed to prepare USB media lease: {error}"))?,
+            );
+        }
+        bridge.set_media_crypto(Arc::clone(&crypto));
+        prepared.as_mut().unwrap().bind_media_port(port);
+    }
 
     let prepared_hosts = if matches!(transport, "tcp" | "adbTcp" | "usb" | "auto") {
         format!("{expected_host},127.0.0.1")

@@ -1,8 +1,7 @@
 import { useExtensionDisplay } from "./use-extension-display";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { NativeModules } from "react-native";
-import * as SecureStore from "expo-secure-store";
 import { router } from "expo-router";
 import { LocalizedError } from "./localized-error";
 import { currentTranslation } from "./language-store";
@@ -13,8 +12,10 @@ import {
   resolveReconfigureExperiment,
   reconfigurePreparedStream,
   startPreparedStream,
+  type StreamControlRequest,
   type StreamLauncher,
 } from "./launch-stream";
+import { isAbsentControlSession } from "./control-error";
 import { handleUnauthorized } from "./connect-flow";
 import {
   formatErrorMessage,
@@ -32,11 +33,9 @@ import {
   reconnectHost,
   requestContextForError,
   captureRequestContext,
+  isRequestContextCurrent,
 } from "./session";
-import {
-  STREAM_PROFILES,
-  is4KResolution,
-} from "./stream-profile";
+import { STREAM_PROFILES, is4KResolution } from "./stream-profile";
 import {
   capTargetToPanelShortSide,
   panelShortSideCap,
@@ -50,9 +49,7 @@ import {
 } from "./encoder-experiment";
 import {
   availableUdpStabilityOptions,
-  readUdpStabilitySelection,
   resolveUdpStabilitySelection,
-  writeUdpStabilitySelection,
   type UdpStabilitySelection,
 } from "./udp-stability";
 import {
@@ -65,14 +62,15 @@ import {
 } from "./catalog-helpers";
 import { mergeAdvertisedRoutes } from "./recent-hosts";
 import { resolveStreamResolution } from "./stream-resolution";
-import {
-  streamTargetAfterResize,
-} from "./display-resize";
+import { streamTargetAfterResize } from "./display-resize";
 import {
   deviceDecoderReservations,
   requestedDecoderShape,
 } from "./decoder-budget";
-import { ReservedStream, retryAbandonedDecoderCleanup } from "./reserved-stream";
+import {
+  ReservedStream,
+  retryAbandonedDecoderCleanup,
+} from "./reserved-stream";
 import { streamSessionStore } from "./stream-session-store";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
@@ -83,28 +81,18 @@ import {
 } from "./adaptive-resolution";
 import { useStreamController } from "./use-stream-controller";
 import {
-  DEFAULT_VIEWER_PREFERENCES,
-  readViewerPreferences,
   resolveStreamMaximum,
   resolveViewerProfileId,
-  writeViewerPreferences,
   type ViewerProfileSelection,
-  type ViewerPreferences,
 } from "./viewer-preferences";
+import { useCatalogPreferences } from "./use-catalog-preferences";
 import {
-  deviceClipboardIo,
-  loadClipboardShare,
-  saveClipboardShare,
-  startClipboardSync,
-  type ClipboardSyncLoop,
-} from "./clipboard-sync";
+  runStreamLifetimeOperation,
+  sameStreamLifetime,
+} from "./stream-lifetime-operation";
+import { NativeSettingsController, type NativeSettingsKey } from "./native-settings";
 
 const launcher = NativeModules.StreamLauncher as StreamLauncher | undefined;
-
-function sameStreamLifetime(left: ActiveStream, right: ActiveStream): boolean {
-  return left.session === right.session && left.port === right.port &&
-    left.startedAt === right.startedAt && left.reservation === right.reservation;
-}
 
 export function useCatalogModel() {
   // 오류 문구는 발생 시점 언어를 따른다 — 훅 t를 넣으면 언어 전환마다
@@ -121,34 +109,67 @@ export function useCatalogModel() {
     // run between a capability await and publication of native ownership.
     if (launcher) void deviceDecoderReservations.refreshCapability(launcher);
   }, []);
-  const [preferences, setPreferences] = useState<ViewerPreferences>(
-    DEFAULT_VIEWER_PREFERENCES,
-  );
-  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const {
+    preferences,
+    updateViewerPreferences: setPreferences,
+    viewerPreferenceControlsDisabled,
+    clipboardPreferenceControlDisabled,
+    clipboardShare,
+    updateClipboardPreference,
+    udpStability,
+    updateUdpPreference,
+    udpPreferenceControlsDisabled,
+    preferencePersistenceIssue,
+    preferenceLoading,
+    preferenceSaving,
+    retryPersistence,
+  } = useCatalogPreferences();
   const [encoderExperiment, setEncoderExperiment] =
     useState<EncoderExperimentId>("auto");
-  const [udpStability, setUdpStability] = useState<UdpStabilitySelection>({
-    profile: "auto",
-  });
   const [udpSettingsDirty, setUdpSettingsDirty] = useState(false);
-  const [udpReconnecting, setUdpReconnecting] = useState(false);
+  const udpPreferenceRevision = useRef(0);
   const host = controlHost();
+  const nativeSettings = useMemo(() => new NativeSettingsController(), [host]);
+  const nativeSettingsStatus = useSyncExternalStore(
+    nativeSettings.subscribe, nativeSettings.getSnapshot, nativeSettings.getSnapshot,
+  );
+  useEffect(() => {
+    nativeSettings.activate();
+    return () => nativeSettings.dispose();
+  }, [nativeSettings]);
+  const nativeSettingsApplying = nativeSettingsStatus.pending.length > 0;
+  const udpReconnecting = nativeSettingsStatus.pending.includes("udp");
+  const handleRetryNativeSettings = useCallback((key: NativeSettingsKey) => {
+    void nativeSettings.retry(key);
+  }, [nativeSettings]);
   const audioRequest = useRef(0);
-  const audioLifetimes = useRef(new Map<string, { stream: ActiveStream; successfulRequest: number }>());
+  const audioLifetimes = useRef(
+    new Map<string, { stream: ActiveStream; successfulRequest: number }>(),
+  );
   const presentationRequest = useRef(0);
-  const presentationLifetimes = useRef(new Map<number, {
-    stream: ActiveStream;
-    successfulRequest: number;
-  }>());
-  useEffect(() => () => {
-    audioRequest.current += 1;
-    audioLifetimes.current.clear();
-    presentationRequest.current += 1;
-    presentationLifetimes.current.clear();
-  }, [host]);
+  const presentationLifetimes = useRef(
+    new Map<
+      number,
+      {
+        stream: ActiveStream;
+        successfulRequest: number;
+      }
+    >(),
+  );
+  useEffect(
+    () => () => {
+      audioRequest.current += 1;
+      audioLifetimes.current.clear();
+      presentationRequest.current += 1;
+      presentationLifetimes.current.clear();
+    },
+    [host],
+  );
   // 시작 크기 우선순위는 별도 다이얼 없이 선택한 품질 프로필에서 파생한다
   // (기존 streamingPriority 저장값은 마이그레이션 호환용으로만 남는다).
-  const streamingPriority = streamingPriorityFromProfileId(preferences.profileId);
+  const streamingPriority = streamingPriorityFromProfileId(
+    preferences.profileId,
+  );
   const catalogQuery = useQuery({
     queryKey: ["catalog", host],
     queryFn: () => requestWithReconnect<CatalogView>("getCatalog"),
@@ -156,94 +177,40 @@ export function useCatalogModel() {
   });
   const { refetch: refetchCatalog } = catalogQuery;
 
-  useEffect(() => {
-    let active = true;
-    void readViewerPreferences(SecureStore)
-      .then((stored) => {
-        if (active) setPreferences(stored);
-      })
-      .finally(() => {
-        if (active) setPreferencesLoaded(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!preferencesLoaded) return;
-    void writeViewerPreferences(SecureStore, preferences).catch(() => undefined);
-  }, [preferences, preferencesLoaded]);
-
-  // UDP 안정성 선택도 저장해 다음 세션·카탈로그에서 그대로 쓴다. 호스트가
-  // 지원하지 않는 조합은 effectiveUdpStability의 광고 교집합에서 안전하게
-  // 강등된다. 쓰기는 저장값을 읽은 뒤에만 시작한다(초기값 덮어쓰기 방지 —
-  // viewer-preferences의 loaded 게이트와 같은 패턴).
-  const [udpStabilityLoaded, setUdpStabilityLoaded] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void readUdpStabilitySelection(SecureStore).then((stored) => {
-      if (active) setUdpStability(stored);
-    }).finally(() => {
-      if (active) setUdpStabilityLoaded(true);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-  useEffect(() => {
-    if (!udpStabilityLoaded) return;
-    void writeUdpStabilitySelection(SecureStore, udpStability).catch(() => undefined);
-  }, [udpStability, udpStabilityLoaded]);
-
-  // 클립보드 공유 토글(U5): `leftcar.clipboardShare`(기본 꺼짐)에 저장하고,
-  // 켜져 있으면 제어 세션과 함께 폴링 루프를 돌린다. 호스트 게이트도 기본
-  // 꺼짐이므로 이중 잠금이다(docs/07 §20).
-  const clipboardSyncRef = useRef<ClipboardSyncLoop | null>(null);
-  const [clipboardShare, setClipboardShareState] = useState(false);
   // 디코더 어드미션(M4/R8)이 쓰는 라이브 스트림 스냅숏. reconfigure 콜백은
   // useStreamController보다 먼저 정의되므로 ref로 최신 목록을 운반한다.
   const sessionStore = streamSessionStore(host);
   const ownedReservations = sessionStore.pending;
   useEffect(() => () => sessionStore.detachCatalog(), [sessionStore]);
 
-  useEffect(() => {
-    let active = true;
-    void loadClipboardShare(SecureStore).then((enabled) => {
-      if (active) setClipboardShareState(enabled);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!clipboardSyncRef.current) {
-      clipboardSyncRef.current = startClipboardSync({
-        getClient: () => controlClient(),
-        ...deviceClipboardIo,
-      });
-    }
-    clipboardSyncRef.current.setEnabled(clipboardShare);
-    return () => {
-      clipboardSyncRef.current?.stop();
-      clipboardSyncRef.current = null;
-    };
-  }, [clipboardShare]);
-
-  const handleToggleClipboardShare = useCallback((enabled: boolean) => {
-    setClipboardShareState(enabled);
-    void saveClipboardShare(SecureStore, enabled).catch(() => undefined);
-  }, []);
+  const handleToggleClipboardShare = useCallback(
+    (enabled: boolean) => {
+      if (clipboardPreferenceControlDisabled) return;
+      updateClipboardPreference(() => enabled);
+    },
+    [clipboardPreferenceControlDisabled, updateClipboardPreference],
+  );
 
   useEffect(() => {
     if (catalogQuery.error && isUnauthorizedError(catalogQuery.error)) {
+      const context = requestContextForError(catalogQuery.error);
+      const controller = new AbortController();
       // 연결 해제 전 모듈 게터에서 대상 주소를 꺼려 effect 의존성 없이도
       // 항상 최신 엔드포인트가 페어링 화면으로 전달된다.
       void handleUnauthorized({
-        context: requestContextForError(catalogQuery.error),
+        context,
+        signal: controller.signal,
         navigate: { endpoint: controlHost(), replace: true },
+      }).catch((cause) => {
+        if (
+          !controller.signal.aborted &&
+          context &&
+          isRequestContextCurrent(context)
+        ) {
+          setError(formatErrorMessage(cause));
+        }
       });
+      return () => controller.abort();
     }
   }, [catalogQuery.error]);
 
@@ -252,7 +219,10 @@ export function useCatalogModel() {
   );
   const loading = catalogQuery.isLoading;
   const refreshing = catalogQuery.isRefetching;
-  const effectiveCaptureBackend = preferredCaptureBackend(catalogQuery.data, "");
+  const effectiveCaptureBackend = preferredCaptureBackend(
+    catalogQuery.data,
+    "",
+  );
   const mediaHost = catalogMediaHost(
     host,
     catalogQuery.data?.mediaHost,
@@ -288,8 +258,9 @@ export function useCatalogModel() {
   const advertisedEncoderExperiments = catalogQuery.data?.encoderExperiments;
   const fittedDisplayTargets = displays.map((display) => {
     const profileId = resolveViewerProfileId(preferences.profileId, display);
-    const profile = STREAM_PROFILES.find((candidate) => candidate.id === profileId)
-      ?? selectedProfile;
+    const profile =
+      STREAM_PROFILES.find((candidate) => candidate.id === profileId) ??
+      selectedProfile;
     return resolveStreamResolution(display, profile);
   });
   const hasActual4KTarget = fittedDisplayTargets.some((target) =>
@@ -350,74 +321,91 @@ export function useCatalogModel() {
         ? `${retained.target.host}:${retained.target.port}`
         : "";
       const request = requestForCurrentSelection(host || retainedHost);
-      const demand = reservation.pool.plan({
-        split: active.encoderExperiment === "splitVertical" ||
-          (active.encoderExperiment === "auto" && is4KResolution(active.activeTarget.width, active.activeTarget.height)),
-        target: active.activeTarget,
-      }, reservation.lease);
+      const demand = reservation.pool.plan(
+        {
+          split:
+            active.encoderExperiment === "splitVertical" ||
+            (active.encoderExperiment === "auto" &&
+              is4KResolution(
+                active.activeTarget.width,
+                active.activeTarget.height,
+              )),
+          target: active.activeTarget,
+        },
+        reservation.lease,
+      );
       if (!demand) throw new LocalizedError("errDecoderCapacity");
-      const restored = await reservation.run(demand, async (reservedLauncher) => {
-        // Recovery outlives the catalog's QueryObserver and React surface.
-        const currentCatalog = await request<CatalogView>("getCatalog");
-        if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
-          throw new LocalizedError("errBackendQuery");
-        }
-        const captureBackend = preferredCaptureBackend(
-          currentCatalog,
-          active.captureBackend,
-        );
-        // Re-resolve from the just-fetched catalog: the media host can differ
-        // from the cached `mediaHost` computed at render time.
-        const refreshedMediaHost = catalogMediaHost(
-          host || retainedHost,
-          currentCatalog.mediaHost,
-          captureRequestContext()?.client.remoteAddress,
-          currentCatalog.publicMediaEndpoint,
-        );
-        await request("stopStream", { session: active.session }).catch(
-          () => undefined,
-        );
-        const control = controlClient() ?? (await reconnectHost());
-        const viewerMetrics = await readViewerDisplayMetrics(launcher);
-        const restarted = await startPreparedStream({
-          control,
-          request,
-          launcher: reservedLauncher,
-          decoderReservation: demand,
-          host: refreshedMediaHost,
-          advertisedEncoderExperiments: currentCatalog.encoderExperiments,
-          advertisedUdpStabilityCapabilities:
-            currentCatalog.udpStabilityCapabilities,
-          args: {
-            sourceIndex: active.sourceIndex,
-            sourceId: active.sourceId,
-            viewerPort: active.port,
-            width: demand.target.width,
-            height: demand.target.height,
-            fps: demand.target.fps,
+      const restored = await reservation.run(
+        demand,
+        async (reservedLauncher) => {
+          // Recovery outlives the catalog's QueryObserver and React surface.
+          const currentCatalog = await request<CatalogView>("getCatalog");
+          if (!currentCatalog || currentCatalog.captureBackends.length === 0) {
+            throw new LocalizedError("errBackendQuery");
+          }
+          const captureBackend = preferredCaptureBackend(
+            currentCatalog,
+            active.captureBackend,
+          );
+          // Re-resolve from the just-fetched catalog: the media host can differ
+          // from the cached `mediaHost` computed at render time.
+          const refreshedMediaHost = catalogMediaHost(
+            host || retainedHost,
+            currentCatalog.mediaHost,
+            captureRequestContext()?.client.remoteAddress,
+            currentCatalog.publicMediaEndpoint,
+          );
+          await request("stopStream", { session: active.session }).catch((error: unknown) => {
+            // A restarted Host may have already forgotten this session. Every
+            // other failure retains uncertainty/authorization/cancellation;
+            // starting another session would bypass the recovery fence.
+            if (!isAbsentControlSession(error)) throw error;
+          });
+          const control = controlClient() ?? (await reconnectHost());
+          const viewerMetrics = await readViewerDisplayMetrics(launcher);
+          const restarted = await startPreparedStream({
+            control,
+            request,
+            launcher: reservedLauncher,
+            decoderReservation: demand,
+            host: refreshedMediaHost,
+            advertisedEncoderExperiments: currentCatalog.encoderExperiments,
+            advertisedUdpStabilityCapabilities:
+              currentCatalog.udpStabilityCapabilities,
+            args: {
+              sourceIndex: active.sourceIndex,
+              sourceId: active.sourceId,
+              viewerPort: active.port,
+              width: demand.target.width,
+              height: demand.target.height,
+              fps: demand.target.fps,
+              captureBackend,
+              mediaTransport: "auto",
+              encoderExperiment: active.encoderExperiment,
+              contentMode: active.contentMode,
+              udpStability: active.udpStability,
+              viewerDisplay: viewerMetrics,
+              showFps: active.showFps ?? preferences.showFps,
+              localCursor: active.localCursor ?? preferences.localCursor,
+              localAudio: active.localAudio ?? preferences.localAudio,
+              opusAudio: active.opusAudio ?? preferences.opusAudio,
+              balancedPresentation:
+                active.balancedPresentation ?? preferences.balancedPresentation,
+              presentationSmooth:
+                active.presentationSmooth ?? preferences.presentationSmooth,
+            },
+          });
+          return {
+            ...restarted,
             captureBackend,
-            mediaTransport: "auto",
-            encoderExperiment: active.encoderExperiment,
-            contentMode: active.contentMode,
-            udpStability: active.udpStability,
-            viewerDisplay: viewerMetrics,
-            showFps: active.showFps ?? preferences.showFps,
-            localCursor: active.localCursor ?? preferences.localCursor,
-            localAudio: active.localAudio ?? preferences.localAudio,
-            opusAudio: active.opusAudio ?? preferences.opusAudio,
-            balancedPresentation: active.balancedPresentation ?? preferences.balancedPresentation,
-            presentationSmooth: active.presentationSmooth ?? preferences.presentationSmooth,
-          },
-        });
-        return {
-          ...restarted,
-          captureBackend,
-          width: restarted.width ?? demand.target.width,
-          height: restarted.height ?? demand.target.height,
-          fps: restarted.fps ?? demand.target.fps,
-          qualityState: active.qualityState,
-        };
-      }, request);
+            width: restarted.width ?? demand.target.width,
+            height: restarted.height ?? demand.target.height,
+            fps: restarted.fps ?? demand.target.fps,
+            qualityState: active.qualityState,
+          };
+        },
+        request,
+      );
       return restored;
     },
     [
@@ -440,6 +428,7 @@ export function useCatalogModel() {
       // 세션 창을 다른 호스트 디스플레이로 옮긴다. 능력 플래그가 없는
       // 구버전 호스트에는 절대 보내지 않는다(launch-stream에서 게이트).
       source?: { index: number; sourceId?: string },
+      operationRequest?: StreamControlRequest,
     ): Promise<RestoredStream> => {
       if (!launcher) {
         throw new LocalizedError("errResizeLauncher");
@@ -449,40 +438,50 @@ export function useCatalogModel() {
       // 재구성(reconfigure)도 전송 끊김 후 유지된 대상으로 핀한다 — 위
       // 복구 경로와 같은 이유다(전송 손실은 선택 변경이 아니다).
       const retainedForReconfigure = captureRequestContext();
-      const request = requestForCurrentSelection(
-        host || (retainedForReconfigure
-          ? `${retainedForReconfigure.target.host}:${retainedForReconfigure.target.port}`
-          : ""),
-      );
+      const request =
+        operationRequest ??
+        requestForCurrentSelection(
+          host ||
+            (retainedForReconfigure
+              ? `${retainedForReconfigure.target.host}:${retainedForReconfigure.target.port}`
+              : ""),
+        );
       const requested = {
-        split: resolveReconfigureExperiment(active, target, {
-          reconfigureEncoderExperiment: catalogQuery.data?.reconfigureEncoderExperiment === true,
-          advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
-        }) === "splitVertical",
+        split:
+          resolveReconfigureExperiment(active, target, {
+            reconfigureEncoderExperiment:
+              catalogQuery.data?.reconfigureEncoderExperiment === true,
+            advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
+          }) === "splitVertical",
         target,
       };
       const demand = reservation.pool.plan(requested, reservation.lease);
       if (!demand) throw new LocalizedError("errDecoderCapacity");
-      const reconfigured = await reservation.run(demand, async (reservedLauncher) => {
-        const control = controlClient() ?? (await reconnectHost());
-        return reconfigurePreparedStream({
-          control,
-          request,
-          launcher: reservedLauncher,
-          host: mediaHost,
-          active,
-          target: demand.target,
-          decoderReservation: demand,
-          qualityState,
-          // capability가 있을 때만 인코더 모드 전환(Auto↔Split)을 요청한다.
-          reconfigureEncoderExperiment:
-            catalogQuery.data?.reconfigureEncoderExperiment === true,
-          ...(source ? { sourceIndex: source.index, sourceId: source.sourceId } : {}),
-          reconfigureSource: catalogQuery.data?.reconfigureSource === true,
-          advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
-
-        });
-      }, request);
+      const reconfigured = await reservation.run(
+        demand,
+        async (reservedLauncher) => {
+          const control = controlClient() ?? (await reconnectHost());
+          return reconfigurePreparedStream({
+            control,
+            request,
+            launcher: reservedLauncher,
+            host: mediaHost,
+            active,
+            target: demand.target,
+            decoderReservation: demand,
+            qualityState,
+            // capability가 있을 때만 인코더 모드 전환(Auto↔Split)을 요청한다.
+            reconfigureEncoderExperiment:
+              catalogQuery.data?.reconfigureEncoderExperiment === true,
+            ...(source
+              ? { sourceIndex: source.index, sourceId: source.sourceId }
+              : {}),
+            reconfigureSource: catalogQuery.data?.reconfigureSource === true,
+            advertisedEncoderExperiments: catalogQuery.data?.encoderExperiments,
+          });
+        },
+        request,
+      );
       return {
         ...reconfigured,
         captureBackend: active.captureBackend,
@@ -491,114 +490,183 @@ export function useCatalogModel() {
     [catalogQuery.data, host, mediaHost],
   );
 
-  const { addStream, applyUdpStability, patchStream, removeStream, streamError, streams, syncAdaptiveTarget, updateLocalCursor } =
-    useStreamController(restoreActiveStream, reconfigureActiveStream);
+  const {
+    addStream,
+    applyUdpStability,
+    patchStream,
+    streamError,
+    streams,
+    syncAdaptiveTarget,
+    updateLocalCursor,
+  } = useStreamController(restoreActiveStream, reconfigureActiveStream);
   useEffect(() => {
     for (const [key, lifetime] of audioLifetimes.current) {
-      if (!streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))) audioLifetimes.current.delete(key);
+      if (
+        !streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))
+      )
+        audioLifetimes.current.delete(key);
     }
     for (const [session, lifetime] of presentationLifetimes.current) {
-      if (!streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))) {
+      if (
+        !streams.some((stream) => sameStreamLifetime(stream, lifetime.stream))
+      ) {
         presentationLifetimes.current.delete(session);
       }
     }
   }, [streams]);
   const replaceStreamState = useCallback(
-    (next: ActiveStream) => {
-      patchStream(next.session, () => next);
+    (expected: ActiveStream, next: ActiveStream) => {
+      patchStream(expected.session, (current) =>
+        sameStreamLifetime(current, expected) ? next : current,
+      );
     },
     [patchStream],
   );
 
   const handleRefresh = useCallback(() => {
     setError(null);
-    void retryAbandonedDecoderCleanup().catch((cause) => setError(formatErrorMessage(cause)));
+    void retryAbandonedDecoderCleanup().catch((cause) =>
+      setError(formatErrorMessage(cause)),
+    );
     void refetchCatalog();
   }, [refetchCatalog]);
 
-  const handleSelectProfile = useCallback((id: ViewerProfileSelection) => {
-    setPreferences((current) => ({ ...current, profileId: id }));
-  }, []);
+  const handleSelectProfile = useCallback(
+    (id: ViewerProfileSelection) => {
+      if (viewerPreferenceControlsDisabled) return;
+      setPreferences((current) => ({ ...current, profileId: id }));
+    },
+    [setPreferences, viewerPreferenceControlsDisabled],
+  );
 
-  const handleToggleFps = useCallback((showFps: boolean) => {
-    setPreferences((current) => ({ ...current, showFps }));
-  }, []);
+  const handleToggleFps = useCallback(
+    (showFps: boolean) => {
+      if (viewerPreferenceControlsDisabled) return;
+      setPreferences((current) => ({ ...current, showFps }));
+    },
+    [setPreferences, viewerPreferenceControlsDisabled],
+  );
 
-  const handleToggleCursor = useCallback((localCursor: boolean) => {
-    setPreferences((current) => ({ ...current, localCursor }));
-    updateLocalCursor(localCursor);
-    if (launcher?.setCursorStream) {
-      void Promise.all(
-        streams.map((stream) => launcher.setCursorStream?.(`src-${stream.port}`, localCursor)),
-      ).catch(() => setError(currentTranslation().viewer.errCursorUpdate));
-    }
-  }, [setError, streams, updateLocalCursor]);
-
-  const handleToggleBalancedPresentation = useCallback((balancedPresentation: boolean) => {
-    setPreferences((current) => ({ ...current, balancedPresentation }));
-    const request = ++presentationRequest.current;
-    if (!launcher?.setBalancedPresentation) return;
-    for (const stream of streams) {
-      let lifetime = presentationLifetimes.current.get(stream.session);
-      if (!lifetime || !sameStreamLifetime(lifetime.stream, stream)) {
-        lifetime = { stream, successfulRequest: 0 };
-        presentationLifetimes.current.set(stream.session, lifetime);
-      }
-      const operation = lifetime;
-      void launcher.setBalancedPresentation(`src-${stream.port}`, balancedPresentation).then(() => {
-        // Issuing a newer request does not cancel this native operation. Only
-        // a newer successful request (or a retired lifetime) supersedes it.
-        if (presentationLifetimes.current.get(stream.session) !== operation ||
-            request < operation.successfulRequest) return;
-        patchStream(stream.session, (current) => {
-          if (!sameStreamLifetime(current, stream)) return current;
-          operation.successfulRequest = request;
-          return { ...current, balancedPresentation };
-        });
-      }).catch((reason) => {
-        if (presentationRequest.current === request &&
-            presentationLifetimes.current.get(stream.session) === operation) setError(String(reason));
+  const handleToggleCursor = useCallback(
+    (localCursor: boolean) => {
+      if (viewerPreferenceControlsDisabled) return;
+      setPreferences((current) => ({ ...current, localCursor }));
+      updateLocalCursor(localCursor);
+      const method = launcher?.setCursorStream;
+      void nativeSettings.apply("cursor", {
+        host,
+        getSnapshot: sessionStore.getSnapshot,
+        tasks: streams.map(active => ({
+          active,
+          apply: () => method
+            ? method(`src-${active.port}`, localCursor)
+            : Promise.reject(new LocalizedError("launchFeatureError")),
+        })),
       });
-    }
-  }, [patchStream, streams]);
+    },
+    [
+      host,
+      nativeSettings,
+      sessionStore,
+      setPreferences,
+      streams,
+      updateLocalCursor,
+      viewerPreferenceControlsDisabled,
+    ],
+  );
 
-  const handleTogglePresentationSmooth = useCallback((presentationSmooth: boolean) => {
-    setPreferences((current) => ({ ...current, presentationSmooth }));
-    if (!launcher?.setPresentationSmooth) return;
-    for (const stream of streams) {
-      void launcher
-        .setPresentationSmooth(`src-${stream.port}`, presentationSmooth)
-        .catch(() => {});
-    }
-  }, [streams]);
-
-  const applyAudioSetting = useCallback((key: "localAudio" | "opusAudio", enabled: boolean) => {
-    setPreferences((current) => ({ ...current, [key]: enabled }));
-    const method = key === "localAudio" ? launcher?.setAudioStream : launcher?.setOpusAudio;
-    const request = ++audioRequest.current;
-    if (!method) return;
-    for (const stream of streams) {
-      const lifetimeKey = `${stream.session}:${key}`;
-      let operation = audioLifetimes.current.get(lifetimeKey);
-      if (!operation || !sameStreamLifetime(operation.stream, stream)) {
-        operation = { stream, successfulRequest: 0 };
-        audioLifetimes.current.set(lifetimeKey, operation);
-      }
-      const captured = operation;
-      void method(`src-${stream.port}`, enabled).then(() => {
-        if (audioLifetimes.current.get(lifetimeKey) !== captured || request < captured.successfulRequest) return;
-        patchStream(stream.session, (current) => {
-          if (!sameStreamLifetime(current, stream)) return current;
-          captured.successfulRequest = request;
-          return { ...current, [key]: enabled };
-        });
-      }).catch((reason) => {
-        if (audioRequest.current === request && audioLifetimes.current.get(lifetimeKey) === captured) setError(String(reason));
+  const handleToggleBalancedPresentation = useCallback(
+    (balancedPresentation: boolean) => {
+      if (viewerPreferenceControlsDisabled) return;
+      setPreferences((current) => ({ ...current, balancedPresentation }));
+      const request = ++presentationRequest.current;
+      const method = launcher?.setBalancedPresentation;
+      const tasks = streams.map(stream => {
+        let lifetime = presentationLifetimes.current.get(stream.session);
+        if (!lifetime || !sameStreamLifetime(lifetime.stream, stream)) {
+          lifetime = { stream, successfulRequest: 0 };
+          presentationLifetimes.current.set(stream.session, lifetime);
+        }
+        const operation = lifetime;
+        return {
+          active: stream,
+          apply: () => method
+            ? method(`src-${stream.port}`, balancedPresentation)
+            : Promise.reject(new LocalizedError("launchFeatureError")),
+          commit: () => {
+            // Issuing a newer request does not cancel this native operation. Only
+            // a newer successful request (or a retired lifetime) supersedes it.
+            if (
+              presentationLifetimes.current.get(stream.session) !== operation ||
+              request < operation.successfulRequest
+            )
+              return;
+            patchStream(stream.session, (current) => {
+              if (!sameStreamLifetime(current, stream)) return current;
+              operation.successfulRequest = request;
+              return { ...current, balancedPresentation };
+            });
+          },
+        };
       });
-    }
-  }, [patchStream, streams]);
-  const handleToggleAudio = useCallback((enabled: boolean) => applyAudioSetting("localAudio", enabled), [applyAudioSetting]);
-  const handleToggleOpusAudio = useCallback((enabled: boolean) => applyAudioSetting("opusAudio", enabled), [applyAudioSetting]);
+      void nativeSettings.apply("balanced", { host, getSnapshot: sessionStore.getSnapshot, tasks });
+    },
+    [host, nativeSettings, patchStream, sessionStore, setPreferences, streams, viewerPreferenceControlsDisabled],
+  );
+
+  const applyMediaSetting = useCallback(
+    (key: "localAudio" | "opusAudio" | "presentationSmooth", enabled: boolean) => {
+      if (viewerPreferenceControlsDisabled) return;
+      setPreferences((current) => ({ ...current, [key]: enabled }));
+      const method =
+        key === "localAudio"
+          ? launcher?.setAudioStream
+          : key === "opusAudio" ? launcher?.setOpusAudio : launcher?.setPresentationSmooth;
+      const request = ++audioRequest.current;
+      const tasks = streams.map(stream => {
+        const lifetimeKey = `${stream.session}:${key}`;
+        let operation = audioLifetimes.current.get(lifetimeKey);
+        if (!operation || !sameStreamLifetime(operation.stream, stream)) {
+          operation = { stream, successfulRequest: 0 };
+          audioLifetimes.current.set(lifetimeKey, operation);
+        }
+        const captured = operation;
+        return {
+          active: stream,
+          apply: () => method
+            ? method(`src-${stream.port}`, enabled)
+            : Promise.reject(new LocalizedError("launchFeatureError")),
+          commit: () => {
+            if (
+              audioLifetimes.current.get(lifetimeKey) !== captured ||
+              request < captured.successfulRequest
+            )
+              return;
+            patchStream(stream.session, (current) => {
+              if (!sameStreamLifetime(current, stream)) return current;
+              captured.successfulRequest = request;
+              return { ...current, [key]: enabled };
+            });
+          },
+        };
+      });
+      const settingKey = key === "localAudio" ? "audio" : key === "opusAudio" ? "opus" : "smooth";
+      void nativeSettings.apply(settingKey, { host, getSnapshot: sessionStore.getSnapshot, tasks });
+    },
+    [host, nativeSettings, patchStream, sessionStore, setPreferences, streams, viewerPreferenceControlsDisabled],
+  );
+  const handleToggleAudio = useCallback(
+    (enabled: boolean) => applyMediaSetting("localAudio", enabled),
+    [applyMediaSetting],
+  );
+  const handleToggleOpusAudio = useCallback(
+    (enabled: boolean) => applyMediaSetting("opusAudio", enabled),
+    [applyMediaSetting],
+  );
+  const handleTogglePresentationSmooth = useCallback(
+    (enabled: boolean) => applyMediaSetting("presentationSmooth", enabled),
+    [applyMediaSetting],
+  );
 
   const handleSelectEncoderExperiment = useCallback(
     (id: EncoderExperimentId) => {
@@ -609,18 +677,31 @@ export function useCatalogModel() {
 
   const handleSelectUdpStability = useCallback(
     (selection: UdpStabilitySelection) => {
-      setUdpStability(selection);
+      if (udpPreferenceControlsDisabled) return;
+      udpPreferenceRevision.current += 1;
+      updateUdpPreference(() => selection);
       if (streams.length > 0) setUdpSettingsDirty(true);
     },
-    [streams.length],
+    [streams.length, udpPreferenceControlsDisabled, updateUdpPreference],
   );
 
   const handleApplyUdpStability = useCallback(() => {
-    setUdpReconnecting(true);
-    void applyUdpStability(effectiveUdpStability)
-      .then(() => setUdpSettingsDirty(false))
-      .finally(() => setUdpReconnecting(false));
-  }, [applyUdpStability, effectiveUdpStability]);
+    const desired = { ...effectiveUdpStability };
+    const revision = udpPreferenceRevision.current;
+    void nativeSettings.apply("udp", {
+      host,
+      getSnapshot: sessionStore.getSnapshot,
+      tasks: streams.map(active => ({
+        active,
+        apply: (isCurrent: () => boolean) => applyUdpStability(desired, { activeStreams: [active], isCurrent })
+          .catch(cause => { throw new LocalizedError("errUdpApply", { detail: formatErrorMessage(cause) }); }),
+      })),
+      onApplied: () => {
+        // Retrying an older failed choice must not mark a later choice applied.
+        if (udpPreferenceRevision.current === revision) setUdpSettingsDirty(false);
+      },
+    });
+  }, [applyUdpStability, effectiveUdpStability, host, nativeSettings, sessionStore, streams]);
 
   const openDisplay = useCallback(
     async (display: DisplayInfo) => {
@@ -639,7 +720,10 @@ export function useCatalogModel() {
       // second port belongs to a splitVertical stream's right tile, so a
       // window must never hand base+1 to the next openDisplay.
       const launch = async (port: number) => {
-        const profileId = resolveViewerProfileId(preferences.profileId, display);
+        const profileId = resolveViewerProfileId(
+          preferences.profileId,
+          display,
+        );
         const displayProfile =
           STREAM_PROFILES.find((profile) => profile.id === profileId) ??
           selectedProfile;
@@ -653,7 +737,10 @@ export function useCatalogModel() {
         const viewerMetrics = await readViewerDisplayMetrics(launcher);
         const panelCap = panelShortSideCap(
           viewerMetrics
-            ? { width: viewerMetrics.physicalWidth, height: viewerMetrics.physicalHeight }
+            ? {
+                width: viewerMetrics.physicalWidth,
+                height: viewerMetrics.physicalHeight,
+              }
             : undefined,
         );
         const maximumTarget = capTargetToPanelShortSide(
@@ -673,13 +760,24 @@ export function useCatalogModel() {
         };
         const demand = deviceDecoderReservations.plan({
           target: requestedTarget,
-          split: requestedDecoderShape({encoderExperiment, width: requestedTarget.width,
-            height: requestedTarget.height, advertisedEncoderExperiments}),
+          split: requestedDecoderShape({
+            encoderExperiment,
+            width: requestedTarget.width,
+            height: requestedTarget.height,
+            advertisedEncoderExperiments,
+          }),
         });
         if (!demand) throw new LocalizedError("errDecoderCapacity");
         const launchTarget = demand.target;
         // Reservation is synchronous, before the first native/network await.
-        const reservation = new ReservedStream(port, demand, launcher, client.request.bind(client), deviceDecoderReservations, requestForCurrentSelection(host));
+        const reservation = new ReservedStream(
+          port,
+          demand,
+          launcher,
+          client.request.bind(client),
+          deviceDecoderReservations,
+          requestForCurrentSelection(host),
+        );
         ownedReservations.add(reservation);
         try {
           const { width, height, fps } = launchTarget;
@@ -688,40 +786,42 @@ export function useCatalogModel() {
             height: maximumTarget.height,
             fps: maximumTarget.fps,
           };
-          const started = await reservation.run(demand, (reservedLauncher) => startPreparedStream({
-            control: client,
-            request: reservation.controlRequest,
-            launcher: reservedLauncher,
-            decoderReservation: demand,
-            host: mediaHost,
-            advertisedEncoderExperiments,
-            advertisedUdpStabilityCapabilities:
-              catalogQuery.data?.udpStabilityCapabilities,
-            args: {
-              sourceIndex: display.index,
-              sourceId: display.sourceId,
-              viewerPort: port,
-              width,
-              height,
-              fps,
-              captureBackend: effectiveCaptureBackend,
-              mediaTransport: "auto",
-              encoderExperiment,
-              displayName: display.name,
-              contentMode: displayProfile.contentMode,
-              udpStability: effectiveUdpStability,
-              viewerDisplay: viewerMetrics,
-              // 호스트가 기억한 마지막 창 크기 — 새 창이 같은 크기로 열린다.
-              windowWidthPx: catalogQuery.data?.windowSize?.widthPx ?? 0,
-              windowHeightPx: catalogQuery.data?.windowSize?.heightPx ?? 0,
-              showFps: preferences.showFps,
-              localCursor: preferences.localCursor,
-              localAudio: preferences.localAudio,
-              opusAudio: preferences.opusAudio,
-            balancedPresentation: preferences.balancedPresentation,
-            presentationSmooth: preferences.presentationSmooth,
-            },
-          }));
+          const started = await reservation.run(demand, (reservedLauncher) =>
+            startPreparedStream({
+              control: client,
+              request: reservation.controlRequest,
+              launcher: reservedLauncher,
+              decoderReservation: demand,
+              host: mediaHost,
+              advertisedEncoderExperiments,
+              advertisedUdpStabilityCapabilities:
+                catalogQuery.data?.udpStabilityCapabilities,
+              args: {
+                sourceIndex: display.index,
+                sourceId: display.sourceId,
+                viewerPort: port,
+                width,
+                height,
+                fps,
+                captureBackend: effectiveCaptureBackend,
+                mediaTransport: "auto",
+                encoderExperiment,
+                displayName: display.name,
+                contentMode: displayProfile.contentMode,
+                udpStability: effectiveUdpStability,
+                viewerDisplay: viewerMetrics,
+                // 호스트가 기억한 마지막 창 크기 — 새 창이 같은 크기로 열린다.
+                windowWidthPx: catalogQuery.data?.windowSize?.widthPx ?? 0,
+                windowHeightPx: catalogQuery.data?.windowSize?.heightPx ?? 0,
+                showFps: preferences.showFps,
+                localCursor: preferences.localCursor,
+                localAudio: preferences.localAudio,
+                opusAudio: preferences.opusAudio,
+                balancedPresentation: preferences.balancedPresentation,
+                presentationSmooth: preferences.presentationSmooth,
+              },
+            }),
+          );
           const acceptedTarget = {
             width: started.width ?? width,
             height: started.height ?? height,
@@ -819,15 +919,30 @@ export function useCatalogModel() {
   const stopStream = useCallback(
     async (active: ActiveStream) => {
       try {
-        if (active.reservation) await active.reservation.close();
-        else await requestWithReconnect("stopStream", { session: active.session });
-        removeStream(active.session);
-        if (active.reservation) ownedReservations.delete(active.reservation);
+        return await runStreamLifetimeOperation({
+          host,
+          active,
+          getSnapshot: sessionStore.getSnapshot,
+          work: async (request) => {
+            if (active.reservation) await active.reservation.close();
+            else await request("stopStream", { session: active.session });
+          },
+          commit: () => {
+            sessionStore.update((previous) =>
+              previous.filter(
+                (current) => !sameStreamLifetime(current, active),
+              ),
+            );
+            if (active.reservation)
+              ownedReservations.delete(active.reservation);
+          },
+        });
       } catch (cause) {
         setError(formatErrorMessage(cause));
+        return false;
       }
     },
-    [removeStream, ownedReservations],
+    [host, sessionStore, ownedReservations],
   );
 
   /**
@@ -844,21 +959,46 @@ export function useCatalogModel() {
       setResizingSession(active.session);
       try {
         const target = { width, height, fps };
-        const accepted = await reconfigureActiveStream(active, target, "native");
-        const next = streamTargetAfterResize(active, target, accepted);
-        // 명시적 크기 변경 후 적응 상태를 새 목표로 다시 심는다 — 매 샘플마다가
-        // 아니라 실제 변경 때만 호출되므로 히스테리시스가 보존된다.
-        syncAdaptiveTarget(active.session, next.sourceTarget, next.activeTarget);
-        replaceStreamState(next);
-        return true;
+        return await runStreamLifetimeOperation({
+          host,
+          active,
+          getSnapshot: sessionStore.getSnapshot,
+          work: (request) =>
+            reconfigureActiveStream(
+              active,
+              target,
+              "native",
+              undefined,
+              request,
+            ),
+          commit: (accepted, current) => {
+            const next = streamTargetAfterResize(current, target, accepted);
+            syncAdaptiveTarget(
+              current.session,
+              next.sourceTarget,
+              next.activeTarget,
+            );
+            replaceStreamState(current, next);
+          },
+        });
       } catch (cause) {
-        setError(interpolate(currentTranslation().viewer.errResizeFailed, { detail: formatErrorMessage(cause) }));
+        setError(
+          interpolate(currentTranslation().viewer.errResizeFailed, {
+            detail: formatErrorMessage(cause),
+          }),
+        );
         return false;
       } finally {
         setResizingSession(null);
       }
     },
-    [reconfigureActiveStream, replaceStreamState, syncAdaptiveTarget],
+    [
+      host,
+      sessionStore,
+      reconfigureActiveStream,
+      replaceStreamState,
+      syncAdaptiveTarget,
+    ],
   );
 
   /**
@@ -876,67 +1016,92 @@ export function useCatalogModel() {
         setError(currentTranslation().viewer.launchFeatureError);
         return false;
       }
-      if (display.sourceId && active.sourceId ? display.sourceId === active.sourceId : !display.sourceId && !active.sourceId && display.index === active.sourceIndex) return true;
+      if (
+        display.sourceId && active.sourceId
+          ? display.sourceId === active.sourceId
+          : !display.sourceId &&
+            !active.sourceId &&
+            display.index === active.sourceIndex
+      )
+        return true;
       setSwitchingSession(active.session);
       try {
-        // 새 디스플레이를 새 창을 여는 것과 같은 규칙으로 맞춘다: 스트리밍
-        // 목표는 디스플레이+프로필에서, 적응 상태는 새 디스플레이의 최대
-        // 목표에 다시 심는다(openDisplay의 시딩과 동일).
-        const profileId = resolveViewerProfileId(preferences.profileId, display);
-        const metrics = await readViewerDisplayMetrics(launcher);
-        const panelCap = panelShortSideCap(
-          metrics ? { width: metrics.physicalWidth, height: metrics.physicalHeight } : undefined,
-        );
-        const maximumTarget = capTargetToPanelShortSide(
-          resolveStreamMaximum(display, preferences.profileId),
-          panelCap,
-        );
-        const initialTarget = resolveInitialStreamTarget(
-          display,
-          streamingPriority,
-          maximumTarget,
-          { externalRoute: externalMediaRoute, panelShortSide: panelCap },
-        );
-        const target = {
-          width: initialTarget.width,
-          height: initialTarget.height,
-          fps: initialTarget.fps,
-        };
-        const reconfigured = await reconfigureActiveStream(
+        return await runStreamLifetimeOperation({
+          host,
           active,
-          target,
-          "native",
-          { index: display.index, sourceId: display.sourceId },
-        );
-        const sourceTarget = {
-          width: maximumTarget.width,
-          height: maximumTarget.height,
-          fps: maximumTarget.fps,
-        };
-        const acceptedTarget = {
-          width: reconfigured.width ?? target.width,
-          height: reconfigured.height ?? target.height,
-          fps: reconfigured.fps ?? target.fps,
-        };
-        replaceStreamState({
-          ...streamTargetAfterResize(active, target, reconfigured),
-          sourceIndex: reconfigured.sourceIndex ?? display.index,
-          sourceId: display.sourceId,
-          sourceName: reconfigured.sourceName ?? display.name,
-          width: acceptedTarget.width,
-          height: acceptedTarget.height,
-          fps: acceptedTarget.fps,
-          sourceTarget,
-          activeTarget: acceptedTarget,
-          fallbackTarget: fallbackTargetFor(sourceTarget),
-          qualityState: deriveQualityState(
-            acceptedTarget,
-            sourceTarget,
-            reconfigured.qualityState,
-          ),
+          getSnapshot: sessionStore.getSnapshot,
+          work: async (request) => {
+            // 새 디스플레이를 새 창을 여는 것과 같은 규칙으로 맞춘다: 스트리밍
+            // 목표는 디스플레이+프로필에서, 적응 상태는 새 디스플레이의 최대
+            // 목표에 다시 심는다(openDisplay의 시딩과 동일).
+            const profileId = resolveViewerProfileId(
+              preferences.profileId,
+              display,
+            );
+            const metrics = await readViewerDisplayMetrics(launcher);
+            const panelCap = panelShortSideCap(
+              metrics
+                ? {
+                    width: metrics.physicalWidth,
+                    height: metrics.physicalHeight,
+                  }
+                : undefined,
+            );
+            const maximumTarget = capTargetToPanelShortSide(
+              resolveStreamMaximum(display, preferences.profileId),
+              panelCap,
+            );
+            const initialTarget = resolveInitialStreamTarget(
+              display,
+              streamingPriority,
+              maximumTarget,
+              { externalRoute: externalMediaRoute, panelShortSide: panelCap },
+            );
+            const target = {
+              width: initialTarget.width,
+              height: initialTarget.height,
+              fps: initialTarget.fps,
+            };
+            const reconfigured = await reconfigureActiveStream(
+              active,
+              target,
+              "native",
+              { index: display.index, sourceId: display.sourceId },
+              request,
+            );
+            const sourceTarget = {
+              width: maximumTarget.width,
+              height: maximumTarget.height,
+              fps: maximumTarget.fps,
+            };
+            return { reconfigured, sourceTarget, target };
+          },
+          commit: ({ reconfigured, sourceTarget, target }, current) => {
+            const acceptedTarget = {
+              width: reconfigured.width ?? target.width,
+              height: reconfigured.height ?? target.height,
+              fps: reconfigured.fps ?? target.fps,
+            };
+            replaceStreamState(current, {
+              ...streamTargetAfterResize(current, target, reconfigured),
+              sourceIndex: reconfigured.sourceIndex ?? display.index,
+              sourceId: display.sourceId,
+              sourceName: reconfigured.sourceName ?? display.name,
+              width: acceptedTarget.width,
+              height: acceptedTarget.height,
+              fps: acceptedTarget.fps,
+              sourceTarget,
+              activeTarget: acceptedTarget,
+              fallbackTarget: fallbackTargetFor(sourceTarget),
+              qualityState: deriveQualityState(
+                acceptedTarget,
+                sourceTarget,
+                reconfigured.qualityState,
+              ),
+            });
+            syncAdaptiveTarget(current.session, sourceTarget, acceptedTarget);
+          },
         });
-        syncAdaptiveTarget(active.session, sourceTarget, acceptedTarget);
-        return true;
       } catch (cause) {
         setError(formatErrorMessage(cause));
         return false;
@@ -946,6 +1111,8 @@ export function useCatalogModel() {
     },
     [
       externalMediaRoute,
+      host,
+      sessionStore,
       preferences.profileId,
       reconfigureActiveStream,
       replaceStreamState,
@@ -956,7 +1123,9 @@ export function useCatalogModel() {
 
   /** 클라이언트 패널 단변(물리) — 카드 라벨·시작 크기 계산에 쓰인다. 메트릭이
    * 없거나 비정상이면 undefined(고정 앵커 폴백). */
-  const [panelShortSide, setPanelShortSide] = useState<number | undefined>(undefined);
+  const [panelShortSide, setPanelShortSide] = useState<number | undefined>(
+    undefined,
+  );
   useEffect(() => {
     let cancelled = false;
     void readViewerDisplayMetrics(launcher).then((metrics) => {
@@ -973,15 +1142,24 @@ export function useCatalogModel() {
       cancelled = true;
     };
   }, []);
-  const extension = useExtensionDisplay({ host, catalog: catalogQuery.data, launcher, streams,
-    refetchCatalog, openDisplay, stopStream });
+  const extension = useExtensionDisplay({
+    host,
+    catalog: catalogQuery.data,
+    launcher,
+    streams,
+    refetchCatalog,
+    openDisplay,
+    stopStream,
+  });
 
   const visibleError =
     error ||
     extension.extensionError ||
     streamError ||
     (catalogQuery.error ? catalogErrorMessage(catalogQuery.error) : null) ||
-    (catalogQuery.data && displays.length === 0 ? new LocalizedError("errSourceAccess").format() : null);
+    (catalogQuery.data && displays.length === 0
+      ? new LocalizedError("errSourceAccess").format()
+      : null);
 
   return {
     displays,
@@ -1009,6 +1187,16 @@ export function useCatalogModel() {
     udpReconnecting,
     udpSettingsDirty,
     udpStabilityOptions,
+    viewerPreferenceControlsDisabled,
+    clipboardPreferenceControlDisabled,
+    udpPreferenceControlsDisabled,
+    preferencePersistenceIssue,
+    preferenceLoading,
+    preferenceSaving,
+    retryPersistence,
+    nativeSettingsApplying,
+    nativeSettingsFailures: nativeSettingsStatus.failures,
+    handleRetryNativeSettings,
     visibleError,
     handleToggleFps,
     handleToggleCursor,

@@ -17,7 +17,6 @@ use crate::media_datagram::{
     discard_fec_groups, parse_fragment, parse_parity, CompletedFecGroups, CompletedFrameSequencer,
     FecGroup, FrameFragment, FrameReassembler, ReassembledFrame, RestoredFragment, PARITY_MARKER,
 };
-use crate::net_guard::peer_allowed;
 use crate::prepared_udp::PreparedUdpReceiver;
 use crate::socket_tuning::{configure_split_media_socket, split_media_receive_buffer_bytes};
 use std::collections::{HashMap, VecDeque};
@@ -655,24 +654,22 @@ fn tile_worker(launch: TileWorkerLaunch) {
                         let Some(source) = batch.sources[index] else {
                             continue;
                         };
-                        if !peer_allowed(Some(source), &expected_host) {
+                        let Some(admitted) = crate::renderer::media_ingress::admit_media_datagram(
+                            &crypto,
+                            &mut batch_buffers[index][..size],
+                            source,
+                            &expected_host,
+                            &mut peer,
+                            None,
+                        ) else {
                             continue;
-                        }
-                        peer = Some(source);
+                        };
                         let network_rtt = control.network_rtt_ms.load(Ordering::Relaxed);
                         sequencer.configure_nack_grace(
                             !awaiting_keyframe,
                             (network_rtt != crate::jni::LATENCY_UNKNOWN).then_some(network_rtt),
                         );
-                        // Open before parsing: only datagrams sealed with the
-                        // session media key are trusted on this socket. The
-                        // in-place open decrypts inside the recvmmsg buffer —
-                        // no per-datagram Vec on the RX hot path.
-                        let Some(opened) = crypto.open_into(&mut batch_buffers[index][..size])
-                        else {
-                            continue;
-                        };
-                        let packet: &[u8] = opened;
+                        let packet = admitted.plaintext;
                         if let Some(challenge) = crate::prepared_udp::is_challenge_packet(packet) {
                             crypto.establish();
                             if side == TileSide::Left {

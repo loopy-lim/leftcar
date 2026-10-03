@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // control.ts는 react-native-tcp-socket을 정적 import한다. 소켓 구현은
 // Flow 구문이라 node 변환기가 파싱하지 못하므로 모듈 경계를 가짜로 둔다.
@@ -15,7 +15,9 @@ vi.mock("./session", () => ({
 }));
 
 import { catalogErrorMessage, catalogMediaHost, isExternalRouteAddress, requestWithReconnect, requestForCurrentSelection } from "./catalog-helpers";
-import { bindRequestContext, captureRequestContext, controlHost, isRequestContextCurrent } from "./session";
+import { bindRequestContext, captureRequestContext, controlHost, isRequestContextCurrent, reconnectHost } from "./session";
+import { AmbiguousControlError } from "./control-error";
+import type { SessionRequestContext } from "./session";
 import { setCurrentLanguage } from "./language-store";
 
 describe("external route detection", () => {
@@ -164,4 +166,66 @@ it("a retained window uses its selected target while the connected badge is clea
   vi.mocked(isRequestContextCurrent).mockReturnValueOnce(false);
   await expect(requestForCurrentSelection("10.0.0.1:7777")("startStream")).rejects.toThrow("selection changed");
   expect(requests).toBe(1);
+});
+
+
+describe("transport replay admission", () => {
+  beforeEach(() => {
+    vi.mocked(isRequestContextCurrent).mockReturnValue(true);
+    vi.mocked(reconnectHost).mockReset();
+  });
+
+  async function failedConnection() {
+    const { ControlRequestError } = await import("./control");
+    const failure = new ControlRequestError("control connection closed", "transport");
+    const origin: SessionRequestContext = {
+      client: { request: vi.fn(async () => { throw failure; }), close: vi.fn(), whenClosed: vi.fn(), hostKey: null },
+      target: { host: "10.0.0.1", port: 7777 }, selectionGeneration: 22, identity: null, credential: null,
+    };
+    const replacement: SessionRequestContext = { ...origin, client: { ...origin.client,
+      request: async <T>() => ({ accepted: true }) as T } };
+    vi.spyOn(replacement.client, "request");
+    vi.mocked(captureRequestContext).mockReturnValue(origin);
+    vi.mocked(reconnectHost).mockImplementation(async () => {
+      vi.mocked(captureRequestContext).mockReturnValue(replacement);
+      return replacement.client;
+    });
+    return { failure, origin, replacement };
+  }
+
+  it.each(["startStream", "createVirtualDisplay", "sendFileBegin", "fetchFileBegin", "reconfigureStream", "unknownCommand"])(
+    "does not silently repeat %s after an ambiguous connection failure", async command => {
+      const { origin, replacement } = await failedConnection();
+      setCurrentLanguage("en");
+      const failure = await requestWithReconnect(command).catch(error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(catalogErrorMessage(failure)).toContain("whether the operation completed");
+      expect(replacement.client.request).not.toHaveBeenCalled();
+      expect(origin.client.request).toHaveBeenCalledOnce();
+      expect(bindRequestContext).toHaveBeenCalledWith(failure, origin);
+    },
+  );
+
+  it("classifies a lost start acknowledgement timeout as uncertain without replay", async () => {
+    const { origin, replacement } = await failedConnection();
+    const { ControlRequestError } = await import("./control");
+    const timeout = new ControlRequestError("control request timeout: startStream", "timeout");
+    vi.mocked(origin.client.request).mockRejectedValueOnce(timeout);
+    setCurrentLanguage("en");
+    const error = await requestWithReconnect("startStream").catch(error => error);
+    expect(catalogErrorMessage(error)).toContain("whether the operation completed");
+    if (!(error instanceof AmbiguousControlError)) throw new Error("Expected uncertain completion");
+    expect(error.cause).toBe(timeout);
+    expect(reconnectHost).not.toHaveBeenCalled();
+    expect(replacement.client.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["getCatalog", "getStatus", "getClipboard", "listShareQueue", "fetchFileChunk"])(
+    "replays safe read %s once on the verified replacement connection", async command => {
+      const { origin, replacement } = await failedConnection();
+      await expect(requestWithReconnect(command, { offset: 8 })).resolves.toEqual({ accepted: true });
+      expect(reconnectHost).toHaveBeenCalledWith(origin);
+      expect(replacement.client.request).toHaveBeenCalledExactlyOnceWith(command, { offset: 8 });
+    },
+  );
 });

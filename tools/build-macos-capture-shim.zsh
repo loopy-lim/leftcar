@@ -40,6 +40,19 @@ build_vdisp_object() {
 }
 
 case "$mode" in
+  tcp-connection-test|terminal-notice-test|input-heartbeat-test)
+    if [[ "$mode" == tcp-connection-test ]]; then
+      test_source="$shim_root/Tests/TcpConnectionTests.swift"
+    elif [[ "$mode" == terminal-notice-test ]]; then
+      test_source="$shim_root/Tests/TerminalNoticeTests.swift"
+    else
+      test_source="$shim_root/Tests/InputStatusHeartbeatTests.swift"
+    fi
+    /usr/bin/xcrun swiftc -Onone \
+      -module-cache-path "${TMPDIR:-/tmp}/leftcar-connection-module-cache" \
+      "${shim_sources[@]}" "$test_source" \
+      -o "$output" "${framework_args[@]}"
+    ;;
   udp-frame-budget-test)
     /usr/bin/xcrun swiftc -O \
       "${shim_sources[@]}" \

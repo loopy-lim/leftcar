@@ -268,6 +268,9 @@ class PresentationNativeShadow {
         val releases = java.util.concurrent.CopyOnWriteArrayList<Long>()
         var attachResult = 0
         var splitAttachCalls = 0
+        var rebindCalls = 0
+        var surfaceAttachCalls = 0
+        var renderedFrames = 0L
         val samples = mutableListOf<Triple<Int, Long, Long>>()
         @JvmStatic @Implementation fun __staticInitializer__() {
             ReflectionHelpers.setStaticField(ViewerNative::class.java, "INSTANCE", ReflectionHelpers.callConstructor(ViewerNative::class.java))
@@ -285,6 +288,16 @@ class PresentationNativeShadow {
     @Implementation fun start(): Long = ++nextState
     @Implementation fun release(state: Long, instance: String): Int { releases += state; return 0 }
     @Implementation fun pollAudio(instance: String, bytes: ByteArray): Int = 0
+    @Implementation fun streamStats(instance: String): Long = renderedFrames
+    @Implementation fun terminationReason(instance: String): Int = -1
+    @Implementation fun rebindSurfacePortWithPresentation(state: Long, instance: String, surface: Surface, port: Int, host: String, width: Int, height: Int, fps: Int, balanced: Boolean): Int {
+        rebindCalls++
+        return attachResult
+    }
+    @Implementation fun attachSurfacePortWithPresentation(state: Long, instance: String, surface: Surface, port: Int, host: String, width: Int, height: Int, fps: Int, balanced: Boolean): Int {
+        surfaceAttachCalls++
+        return attachResult
+    }
     @Implementation fun displayFrame(state: Long, instance: String, balanced: Boolean, display: Int, frame: Long, period: Long): Int {
         samples += Triple(display, frame, period)
         return 0

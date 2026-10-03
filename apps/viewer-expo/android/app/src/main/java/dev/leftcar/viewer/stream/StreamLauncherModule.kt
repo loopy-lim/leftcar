@@ -77,6 +77,10 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         private val splitDecoderByPort = ConcurrentHashMap<Int, String>()
         private val launchedInstances = ConcurrentHashMap.newKeySet<String>()
         private val liveStreams = ConcurrentHashMap<String, StreamOwnership>()
+        // One pending render-recovery handoff per live generation. Closed or
+        // superseded leases are removed; there is no independent event queue.
+        private data class PendingRecovery(val port: Int, val generation: Long)
+        private val pendingRecoveries = ConcurrentHashMap<String, PendingRecovery>()
         private val releaseExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
         private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
         private val closeLeases = ConcurrentHashMap<String, StreamCloseLease>()
@@ -103,10 +107,12 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
         }
         private val reactContextLock = Any()
         private var reactContextReference = WeakReference<ReactApplicationContext>(null)
+        private var terminationListenerCount = 0
 
         private fun registerReactContext(context: ReactApplicationContext) {
             synchronized(reactContextLock) {
                 reactContextReference = WeakReference(context)
+                terminationListenerCount = 0
             }
         }
 
@@ -128,16 +134,84 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             synchronized(reactContextLock) {
                 if (reactContextReference.get() === context) {
                     reactContextReference.clear()
+                    terminationListenerCount = 0
                 }
             }
         }
 
         fun emitTermination(port: Int, reason: Int) {
+            emitTerminationEvent(port, reason, liveStreams["src-$port"]?.generation)
+        }
+
+        fun emitTermination(port: Int, reason: Int, generation: Long) {
+            if (liveStreams["src-$port"]?.generation != generation) return
+            emitTerminationEvent(port, reason, generation)
+        }
+
+        private fun isLiveRecovery(instanceId: String, recovery: PendingRecovery): Boolean {
+            val lease = closeLeases[instanceId]
+            return liveStreams[instanceId]?.generation == recovery.generation &&
+                lease?.generation == recovery.generation.toString() && !lease.requested && !lease.released
+        }
+
+        private fun recoveryListenerReady(context: ReactApplicationContext): Boolean =
+            synchronized(reactContextLock) {
+                terminationListenerCount > 0 && reactContextReference.get() === context && context.hasActiveReactInstance()
+            }
+
+        fun cancelPendingRecovery(instanceId: String, generation: Long) {
+            pendingRecoveries[instanceId]?.takeIf { it.generation == generation }?.let {
+                pendingRecoveries.remove(instanceId, it)
+            }
+        }
+
+        private fun flushPendingRecoveries() {
+            val context = activeRegisteredReactContext()
+            pendingRecoveries.forEach { (instanceId, recovery) ->
+                if (!isLiveRecovery(instanceId, recovery)) {
+                    pendingRecoveries.remove(instanceId, recovery)
+                } else if (context != null && recoveryListenerReady(context)) {
+                    try {
+                        context.runOnNativeModulesQueueThread {
+                            if (pendingRecoveries[instanceId] !== recovery) return@runOnNativeModulesQueueThread
+                            if (!isLiveRecovery(instanceId, recovery)) {
+                                pendingRecoveries.remove(instanceId, recovery)
+                                return@runOnNativeModulesQueueThread
+                            }
+                            if (!recoveryListenerReady(context)) return@runOnNativeModulesQueueThread
+                            try {
+                                val payload = Arguments.createMap().apply {
+                                    putInt("port", recovery.port)
+                                    putInt("reason", 5)
+                                    putString("generation", recovery.generation.toString())
+                                }
+                                context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                                    .emit("leftcarStreamTerminated", payload)
+                                pendingRecoveries.remove(instanceId, recovery)
+                            } catch (_: IllegalStateException) {
+                                // Keep it for the replacement context/listener.
+                            }
+                        }
+                    } catch (_: IllegalStateException) {
+                        // The queue disappeared before accepting this request.
+                    }
+                }
+            }
+        }
+
+        private fun emitTerminationEvent(port: Int, reason: Int, generation: Long?) {
+            if (reason == 5) {
+                val instanceId = "src-$port"
+                val recovery = generation?.let { PendingRecovery(port, it) } ?: return
+                if (!isLiveRecovery(instanceId, recovery)) return
+                pendingRecoveries[instanceId] = recovery
+                flushPendingRecoveries()
+                return
+            }
             val context = activeRegisteredReactContext() ?: run {
                 android.util.Log.w("LeftcarStream", "stream event unavailable: React context port=$port reason=$reason")
                 return
             }
-            val generation = liveStreams["src-$port"]?.generation
             try {
                 context.runOnNativeModulesQueueThread {
                     if (!isCurrentActiveReactContext(context)) return@runOnNativeModulesQueueThread
@@ -164,7 +238,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             val current = liveStreams[instanceId]?.generation
             android.util.Log.i("LeftcarStream", "window close event port=$port generation=$generation current=$current")
             if (current != generation) return
-            emitTermination(port, 0)
+            emitTermination(port, 0, generation)
         }
 
         /**
@@ -206,7 +280,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
          * RN은 그 포트의 세션으로 requestInputEnable 제어 명령을 보내고, 호스트
          * UI의 승인 알림으로 이어진다 — 승인 자체는 호스트 운용자만 한다.
          */
-        fun emitInputEnableRequested(port: Int) {
+        fun emitInputEnableRequested(port: Int, instanceId: String, generation: String, requestId: String) {
             val context = activeRegisteredReactContext() ?: run {
                 android.util.Log.w(
                     "LeftcarStream",
@@ -217,9 +291,13 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             try {
                 context.runOnNativeModulesQueueThread {
                     if (!isCurrentActiveReactContext(context)) return@runOnNativeModulesQueueThread
+                    if (closeLeases[instanceId]?.generation != generation) return@runOnNativeModulesQueueThread
                     try {
                         val payload = Arguments.createMap().apply {
                             putInt("port", port)
+                            putString("instanceId", instanceId)
+                            putString("generation", generation)
+                            putString("requestId", requestId)
                         }
                         context
                             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
@@ -239,6 +317,7 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             if (current?.generation == generation) {
                 liveStreams.remove(instanceId, current)
                 launchedInstances.remove(instanceId)
+                cancelPendingRecovery(instanceId, generation)
             }
         }
     }
@@ -255,10 +334,23 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun addListener(eventName: String) {}
+    fun addListener(eventName: String) {
+        if (eventName != "leftcarStreamTerminated") return
+        synchronized(reactContextLock) {
+            if (reactContextReference.get() !== reactApplicationContext) return
+            terminationListenerCount += 1
+        }
+        flushPendingRecoveries()
+    }
 
     @ReactMethod
-    fun removeListeners(count: Int) {}
+    fun removeListeners(count: Int) {
+        synchronized(reactContextLock) {
+            if (reactContextReference.get() === reactApplicationContext) {
+                terminationListenerCount = (terminationListenerCount - count.coerceAtLeast(0)).coerceAtLeast(0)
+            }
+        }
+    }
 
     @ReactMethod
     fun getLocalIpv4Addresses(promise: Promise) {
@@ -390,6 +482,16 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getStreamGeneration(instanceId: String, promise: Promise) {
         promise.resolve(closeLeases[instanceId]?.generation ?: "")
+    }
+
+    @ReactMethod
+    fun reportInputRequestResult(instanceId: String, generation: String, requestId: String, error: String?, promise: Promise) {
+        reactApplicationContext.runOnUiQueueThread {
+            if (closeLeases[instanceId]?.generation == generation) {
+                activityRegistry.current(instanceId)?.reportInputRequestResult(generation, requestId, error)
+            }
+            promise.resolve(null)
+        }
     }
 
     @ReactMethod
@@ -596,11 +698,11 @@ class StreamLauncherModule(reactContext: ReactApplicationContext) :
             promise.reject("ERR_STREAM_NOT_ACTIVE", ViewerStrings.streamNotActive)
             return
         }
-        launchStreamIntent(instanceId, target) { intent ->
-            intent.putExtra(extraKey, enabled)
-            intent.putExtra("reconnect", false)
-        }
         try {
+            launchStreamIntent(instanceId, target) { intent ->
+                intent.putExtra(extraKey, enabled)
+                intent.putExtra("reconnect", false)
+            }
             promise.resolve(null)
         } catch (t: Throwable) {
             promise.reject(errorTag, t.message, t)

@@ -33,6 +33,9 @@ const STALE_TRANSFER: Duration = Duration::from_secs(30 * 60);
 /// 채우는 것을 막는다(만료 스윕과 함께 이중 안전망). 상한 512 MiB와 곱해
 /// 최악의 잔여 스테이징이 4 GiB를 넘지 않게 맞춘 값.
 const MAX_CONCURRENT_INCOMING: usize = 8;
+/// Outgoing tokens retain local path/name state even before a first read.
+/// Bound admission so a paired viewer cannot grow the map with begin requests.
+const MAX_CONCURRENT_OUTGOING: usize = 8;
 
 /// 공유 대기열 항목. `path`는 호스트 로컬 정보라서 직렬화에서 뺀다 — 뷰어와
 /// UI에는 이름·크기·큐 ID만 보인다.
@@ -46,17 +49,30 @@ pub struct ShareQueueEntry {
     pub path: PathBuf,
 }
 
+#[derive(Default, Serialize)]
+pub struct AddShareFilesResult {
+    pub entries: Vec<ShareQueueEntry>,
+    pub rejected: Vec<RejectedShareFile>,
+}
+
+#[derive(Serialize)]
+pub struct RejectedShareFile {
+    pub name: String,
+    pub reason: String,
+}
+
 struct IncomingTransfer {
-    device: String,
+    owner: String,
     name: String,
     size: u64,
     written: u64,
     staging_path: PathBuf,
     last_activity: Instant,
+    retired: bool,
 }
 
 struct OutgoingTransfer {
-    device: String,
+    owner: String,
     name: String,
     path: PathBuf,
     size: u64,
@@ -76,13 +92,13 @@ trait OwnedTransfer {
 
 impl OwnedTransfer for IncomingTransfer {
     fn owned_by(&self, device: &str) -> bool {
-        self.device == device
+        self.owner == device
     }
 }
 
 impl OwnedTransfer for OutgoingTransfer {
     fn owned_by(&self, device: &str) -> bool {
-        self.device == device
+        self.owner == device
     }
 }
 
@@ -97,6 +113,13 @@ fn remove_owned<T: OwnedTransfer>(
         return Err("unknown file token".into());
     }
     Ok(map.remove(token).expect("ownership checked above"))
+}
+
+fn remove_staging(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 /// 제어 평면 파일 전송의 공유 상태. ControlServer가 소유하고, Tauri UI 명령
@@ -138,7 +161,8 @@ const WINDOWS_RESERVED_STEMS: [&str; 22] = [
 
 /// 업로드 파일명 검증. 경로 구분자·`..`·선행 점(숨김 파일)을 거부하고
 /// 길이는 1..=255바이트로 제한한다. Windows 예약 장치 이름과 후행 점·공백도
-/// 거부한다(교차 플랫폼 호스트를 위한 것 — macOS에선 무해하다).
+/// 거부한다. Windows 드라이브 접두사·대체 데이터 스트림·와일드카드도
+/// 차단해 어느 호스트에서든 수신 디렉터리 안의 일반 파일로만 저장한다.
 /// Ok(())면 단일 파일명으로 안전하다.
 pub fn validate_file_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -152,6 +176,12 @@ pub fn validate_file_name(name: &str) -> Result<(), String> {
     }
     if name.contains('/') || name.contains('\\') || name.contains('\0') {
         return Err("file name must not contain path separators".into());
+    }
+    if name
+        .chars()
+        .any(|c| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return Err("file name contains characters reserved on Windows".into());
     }
     if name.contains("..") {
         return Err("file name must not contain '..'".into());
@@ -182,12 +212,25 @@ fn dedupe_final_path(dir: &Path, name: &str) -> PathBuf {
         _ => (name.to_owned(), String::new()),
     };
     for index in 2.. {
-        let candidate = dir.join(format!("{stem} ({index}){extension}"));
+        let suffix = format!(" ({index})");
+        let first_character_bytes = stem.chars().next().map(char::len_utf8).unwrap_or(1);
+        let extension = utf8_prefix(&extension, 255 - suffix.len() - first_character_bytes)
+            .trim_end_matches(['.', ' ']);
+        let stem = utf8_prefix(&stem, 255 - suffix.len() - extension.len());
+        let candidate = dir.join(format!("{stem}{suffix}{extension}"));
         if !candidate.exists() {
             return candidate;
         }
     }
     unreachable!("dedupe loop always returns")
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// 표시용 저장 위치(실제 경로 대신 사용자 친화적 형태만 응답으로 보낸다).
@@ -263,6 +306,22 @@ impl FileTransferState {
         Ok(entry)
     }
 
+    /// The native picker and batch validation share this result boundary.
+    pub fn add_share_files(&self, paths: Vec<PathBuf>) -> AddShareFilesResult {
+        let mut result = AddShareFilesResult::default();
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match self.add_share_file(path) {
+                Ok(entry) => result.entries.push(entry),
+                Err(reason) => result.rejected.push(RejectedShareFile { name, reason }),
+            }
+        }
+        result
+    }
+
     pub fn remove_share_file(&self, queue_id: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let before = inner.queue.len();
@@ -277,14 +336,30 @@ impl FileTransferState {
 
     /// 뷰어의 sendFileBegin — 스테이징 `.part` 파일을 만들고 토큰을 발급한다.
     /// 만료된 버려진 전송을 먼저 치우고, 동시 진행 수를 제한한다.
+    #[cfg(test)]
     pub fn begin_incoming(&self, device: &str, name: &str, size: u64) -> Result<String, String> {
+        self.begin_incoming_for_owner(device, device, name, size)
+    }
+
+    /// The credential incarnation owns the token. The device ID only chooses
+    /// the user-facing directory and must not let a re-paired device claim old
+    /// transfers or let an old revocation cancel the replacement's transfers.
+    pub fn begin_incoming_for_owner(
+        &self,
+        device: &str,
+        owner: &str,
+        name: &str,
+        size: u64,
+    ) -> Result<String, String> {
         validate_file_name(name)?;
         if size > MAX_FILE_SIZE {
             return Err("file is too large".into());
         }
         let dir = self.device_dir(device)?;
         let token = new_token();
-        let staging_path = dir.join(format!("{name}.{token}.part"));
+        // The final name may already occupy the filesystem's full 255-byte
+        // component limit. Keep staging independent of that user filename.
+        let staging_path = dir.join(format!("{token}.part"));
         {
             let mut inner = self.inner.lock().unwrap();
             Self::sweep_with(&mut inner, STALE_TRANSFER);
@@ -296,12 +371,13 @@ impl FileTransferState {
             inner.incoming.insert(
                 token.clone(),
                 IncomingTransfer {
-                    device: device.to_owned(),
+                    owner: owner.to_owned(),
                     name: name.to_owned(),
                     size,
                     written: 0,
                     staging_path,
                     last_activity: Instant::now(),
+                    retired: false,
                 },
             );
         }
@@ -315,11 +391,10 @@ impl FileTransferState {
     }
 
     fn sweep_at(inner: &mut Inner, stale_after: Duration, now: Instant) {
-        let mut stale_parts: Vec<PathBuf> = Vec::new();
         inner.incoming.retain(|_, transfer| {
-            if now.duration_since(transfer.last_activity) > stale_after {
-                stale_parts.push(transfer.staging_path.clone());
-                false
+            if transfer.retired || now.duration_since(transfer.last_activity) > stale_after {
+                transfer.retired = true;
+                remove_staging(&transfer.staging_path).is_err()
             } else {
                 true
             }
@@ -327,9 +402,34 @@ impl FileTransferState {
         inner
             .outgoing
             .retain(|_, transfer| now.duration_since(transfer.last_activity) <= stale_after);
-        for part in stale_parts {
-            let _ = std::fs::remove_file(part);
-        }
+    }
+
+    /// Called after revoked authorization leases are idle. Only the exact
+    /// removed credential owners are retired, including late work already
+    /// admitted before revocation; new pairings and the local queue survive.
+    pub fn retire_owners(&self, owners: &[&str]) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut errors = Vec::new();
+        inner.incoming.retain(|_, transfer| {
+            // Retained cleanup failures are already fenced. A later retry of
+            // revoke (whose removed-device list is now empty) still retries
+            // these parts without touching any newly admitted owner.
+            if !transfer.retired && !owners.contains(&transfer.owner.as_str()) {
+                return true;
+            }
+            transfer.retired = true;
+            match remove_staging(&transfer.staging_path) {
+                Ok(()) => false,
+                Err(error) => {
+                    errors.push(format!("file staging cleanup failed: {error}"));
+                    true
+                }
+            }
+        });
+        inner
+            .outgoing
+            .retain(|_, transfer| !owners.contains(&transfer.owner.as_str()));
+        errors
     }
 
     /// 뷰어의 sendFileChunk — 소유 검사 + 순차 오프셋 강제 + 누적 상한.
@@ -345,7 +445,7 @@ impl FileTransferState {
         let transfer = inner
             .incoming
             .get_mut(token)
-            .filter(|t| t.device == device)
+            .filter(|t| t.owner == device && !t.retired)
             .ok_or("unknown file token")?;
         if offset != transfer.written {
             return Err("chunk offset is out of order".into());
@@ -373,10 +473,29 @@ impl FileTransferState {
     /// 앞에 둔다 — 먼저 지우고 걸러내면 다른 기기의 잘못된 End가 실제
     /// 소유자의 전송 상태까지 파괴한다.
     pub fn finish_incoming(&self, device: &str, token: &str) -> Result<(String, u64), String> {
+        self.finish_incoming_with_rename(device, token, |source, destination| {
+            std::fs::rename(source, destination)
+        })
+    }
+
+    fn finish_incoming_with_rename(
+        &self,
+        device: &str,
+        token: &str,
+        rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<(String, u64), String> {
         let mut inner = self.inner.lock().unwrap();
-        let transfer = remove_owned(&mut inner.incoming, token, device)?;
+        let mut transfer = remove_owned(&mut inner.incoming, token, device)?;
+        if transfer.retired {
+            inner.incoming.insert(token.to_owned(), transfer);
+            return Err("file transfer is cancelled".into());
+        }
         if transfer.written != transfer.size {
-            let _ = std::fs::remove_file(&transfer.staging_path);
+            if let Err(error) = remove_staging(&transfer.staging_path) {
+                transfer.retired = true;
+                inner.incoming.insert(token.to_owned(), transfer);
+                return Err(format!("incomplete file staging cleanup failed: {error}"));
+            }
             return Err("file transfer is incomplete".into());
         }
         let dir = transfer
@@ -385,18 +504,28 @@ impl FileTransferState {
             .ok_or("staging path has no parent")?
             .to_path_buf();
         let final_path = dedupe_final_path(&dir, &transfer.name);
-        std::fs::rename(&transfer.staging_path, &final_path)
-            .map_err(|e| format!("finalize file: {e}"))?;
-        Ok((transfer.name, transfer.written))
+        if let Err(error) = rename(&transfer.staging_path, &final_path) {
+            inner.incoming.insert(token.to_owned(), transfer);
+            return Err(format!("finalize file: {error}"));
+        }
+        let final_name = final_path
+            .file_name()
+            .ok_or("final path has no file name")?
+            .to_string_lossy()
+            .into_owned();
+        Ok((final_name, transfer.written))
     }
 
     /// 뷰어의 sendFileCancel — 진행 중 업로드를 즉시 버리고 스테이징 파일을
     /// 지운다(만료 스윕을 기다리지 않는다).
     pub fn cancel_incoming(&self, device: &str, token: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
-        Self::sweep_with(&mut inner, STALE_TRANSFER);
-        let transfer = remove_owned(&mut inner.incoming, token, device)?;
-        let _ = std::fs::remove_file(&transfer.staging_path);
+        let mut transfer = remove_owned(&mut inner.incoming, token, device)?;
+        if let Err(error) = remove_staging(&transfer.staging_path) {
+            transfer.retired = true;
+            inner.incoming.insert(token.to_owned(), transfer);
+            return Err(format!("file staging cleanup failed: {error}"));
+        }
         Ok(())
     }
 
@@ -409,6 +538,9 @@ impl FileTransferState {
     ) -> Result<(String, String, u64), String> {
         let mut inner = self.inner.lock().unwrap();
         Self::sweep_with(&mut inner, STALE_TRANSFER);
+        if inner.outgoing.len() >= MAX_CONCURRENT_OUTGOING {
+            return Err("too many concurrent file transfers".into());
+        }
         let entry = inner
             .queue
             .iter()
@@ -426,7 +558,7 @@ impl FileTransferState {
         inner.outgoing.insert(
             token.clone(),
             OutgoingTransfer {
-                device: device.to_owned(),
+                owner: device.to_owned(),
                 name: name.clone(),
                 path,
                 size,
@@ -453,7 +585,7 @@ impl FileTransferState {
         let transfer = inner
             .outgoing
             .get_mut(token)
-            .filter(|t| t.device == device)
+            .filter(|t| t.owner == device)
             .ok_or("unknown file token")?;
         if offset >= transfer.size {
             return Err("chunk offset is past the end of the file".into());
@@ -495,6 +627,81 @@ impl FileTransferState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn batch_share_reports_rejected_files_without_losing_accepted_entries() {
+        let root = temp_dir("batch-outcome");
+        let source = root.join("accepted.txt");
+        std::fs::write(&source, b"shared").unwrap();
+        let directory = root.join("folder");
+        std::fs::create_dir(&directory).unwrap();
+        let state = FileTransferState::default();
+        let result = state.add_share_files(vec![source, directory, root.join("missing.txt")]);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(state.queue_entries().len(), 1);
+        assert_eq!(result.rejected.len(), 2);
+        assert_eq!(result.rejected[0].name, "folder");
+        assert_eq!(result.rejected[0].reason, "directories cannot be shared");
+        assert_eq!(result.rejected[1].name, "missing.txt");
+        assert!(!result.rejected[1].reason.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outgoing_admission_is_bounded_and_cancel_reopens_a_slot() {
+        let root = temp_dir("outgoing-admission");
+        let path = root.join("shared.txt");
+        std::fs::write(&path, b"shared").unwrap();
+        let state = FileTransferState::default();
+        let entry = state.add_share_file(path).unwrap();
+        let mut tokens = Vec::new();
+        for _ in 0..8 {
+            tokens.push(state.begin_outgoing("viewer-1", &entry.queue_id).unwrap().0);
+        }
+        assert_eq!(
+            state
+                .begin_outgoing("viewer-1", &entry.queue_id)
+                .unwrap_err(),
+            "too many concurrent file transfers"
+        );
+        state.cancel_outgoing("viewer-1", &tokens[0]).unwrap();
+        assert!(state.begin_outgoing("viewer-1", &entry.queue_id).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_maximum_length_final_name_does_not_overflow_the_staging_name() {
+        let root = temp_dir("long-filename");
+        let state = FileTransferState::default();
+        state.set_incoming_root_for_tests(root.clone());
+        let names = [
+            "x".repeat(255),
+            format!("{}.x", "문".repeat(84)),
+            format!("a.{}", "x".repeat(253)),
+        ];
+        for name in &names {
+            for _ in 0..2 {
+                let token = state.begin_incoming("viewer-1", name, 1).unwrap();
+                state
+                    .append_incoming("viewer-1", &token, "eA==", 0)
+                    .unwrap();
+                state.finish_incoming("viewer-1", &token).unwrap();
+            }
+        }
+        let dir = root.join("viewer-1");
+        for name in &names {
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"x");
+        }
+        let entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 6);
+        for name in entries {
+            validate_file_name(name.to_str().unwrap()).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "leftcar-ft-{tag}-{}-{}",
@@ -515,6 +722,25 @@ mod tests {
         assert_eq!(sanitize_device_name("a/b\\c:d"), "a_b_c_d");
         assert_eq!(sanitize_device_name(""), "device");
         assert_eq!(sanitize_device_name("   "), "device");
+    }
+
+    #[test]
+    fn incoming_names_reject_windows_paths_streams_and_wildcards() {
+        for name in [
+            "C:escape.txt",
+            "report.txt:secret",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+        ] {
+            assert!(
+                validate_file_name(name).is_err(),
+                "accepted unsafe name {name}"
+            );
+        }
     }
 
     #[test]
@@ -561,10 +787,7 @@ mod tests {
         let state = FileTransferState::default();
         state.set_incoming_root_for_tests(root.clone());
         let token = state.begin_incoming("viewer-1", "a.txt", 4).unwrap();
-        assert!(root
-            .join("viewer-1")
-            .join(format!("a.txt.{token}.part"))
-            .exists());
+        assert!(root.join("viewer-1").join(format!("{token}.part")).exists());
 
         // begin 한 번 더 — 스윕은 begin에서 호출된다. stale_after를 0으로
         // 두면 방금 만든 전송이 즉시 만료다.
@@ -573,10 +796,7 @@ mod tests {
             FileTransferState::sweep_with(&mut inner, Duration::ZERO);
         }
         assert!(
-            !root
-                .join("viewer-1")
-                .join(format!("a.txt.{token}.part"))
-                .exists(),
+            !root.join("viewer-1").join(format!("{token}.part")).exists(),
             "stale .part must be deleted by the sweep"
         );
         assert_eq!(
@@ -693,6 +913,53 @@ mod tests {
     }
 
     #[test]
+    fn failed_staging_deletion_remains_retryable_for_cancel_and_incomplete_finish() {
+        for incomplete_finish in [false, true] {
+            let root = temp_dir("delete-retry");
+            let state = FileTransferState::default();
+            state.set_incoming_root_for_tests(root.clone());
+            let token = state.begin_incoming("viewer-1", "partial.txt", 2).unwrap();
+            let part = root.join("viewer-1").join(format!("{token}.part"));
+            // A directory at the staging path makes the actual remove_file
+            // syscall fail independently of user privileges or OS ACLs.
+            std::fs::remove_file(&part).unwrap();
+            std::fs::create_dir(&part).unwrap();
+            if incomplete_finish {
+                assert!(state.finish_incoming("viewer-1", &token).is_err());
+            } else {
+                assert!(state.cancel_incoming("viewer-1", &token).is_err());
+            }
+            std::fs::remove_dir(&part).unwrap();
+            std::fs::write(&part, b"x").unwrap();
+            assert!(state
+                .append_incoming("viewer-1", &token, "eA==", 0)
+                .is_err());
+            state.cancel_incoming("viewer-1", &token).unwrap();
+            assert!(!part.exists());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn failed_stale_staging_deletion_remains_owned_until_a_later_sweep() {
+        let root = temp_dir("sweep-delete-retry");
+        let state = FileTransferState::default();
+        state.set_incoming_root_for_tests(root.clone());
+        let token = state.begin_incoming("viewer-1", "partial.txt", 2).unwrap();
+        let part = root.join("viewer-1").join(format!("{token}.part"));
+        std::fs::remove_file(&part).unwrap();
+        std::fs::create_dir(&part).unwrap();
+        FileTransferState::sweep_with(&mut state.inner.lock().unwrap(), Duration::ZERO);
+        assert!(state.inner.lock().unwrap().incoming.contains_key(&token));
+        std::fs::remove_dir(&part).unwrap();
+        std::fs::write(&part, b"x").unwrap();
+        FileTransferState::sweep_with(&mut state.inner.lock().unwrap(), Duration::ZERO);
+        assert!(!part.exists());
+        assert!(!state.inner.lock().unwrap().incoming.contains_key(&token));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn wrong_device_end_leaves_the_transfer_intact() {
         let root = temp_dir("owner");
         let state = FileTransferState::default();
@@ -748,17 +1015,40 @@ mod tests {
         let root = temp_dir("dedupe");
         let state = FileTransferState::default();
         state.set_incoming_root_for_tests(root.clone());
-        for _ in 0..2 {
+        for index in 0..2 {
             let token = state.begin_incoming("viewer-1", "a.txt", 1).unwrap();
             state
                 .append_incoming("viewer-1", &token, "eA==", 0)
                 .unwrap();
-            state.finish_incoming("viewer-1", &token).unwrap();
+            let (name, size) = state.finish_incoming("viewer-1", &token).unwrap();
+            assert_eq!(name, if index == 0 { "a.txt" } else { "a (2).txt" });
+            assert_eq!(size, 1);
         }
         let dir = root.join("viewer-1");
         assert!(dir.join("a.txt").exists());
         assert!(dir.join("a (2).txt").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_final_rename_keeps_staging_owned_and_cancellable() {
+        let root = temp_dir("rename-failure");
+        let state = FileTransferState::default();
+        state.set_incoming_root_for_tests(root.clone());
+        let token = state.begin_incoming("viewer-1", "file.txt", 1).unwrap();
+        state
+            .append_incoming("viewer-1", &token, "eA==", 0)
+            .unwrap();
+        let result = state.finish_incoming_with_rename("viewer-1", &token, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "filesystem refused final rename",
+            ))
+        });
+        assert!(result.is_err());
+        state.cancel_incoming("viewer-1", &token).unwrap();
+        assert_eq!(std::fs::read_dir(root.join("viewer-1")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

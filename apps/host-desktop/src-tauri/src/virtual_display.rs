@@ -179,8 +179,8 @@ impl DisplayMode {
         if !matches!(self.scale, 1 | 2)
             || !(640..=4096).contains(&self.width)
             || !(480..=4096).contains(&self.height)
-            || self.width % 2 != 0
-            || self.height % 2 != 0
+            || !self.width.is_multiple_of(2)
+            || !self.height.is_multiple_of(2)
         {
             return Err(
                 "invalid display size: use even dimensions 640–4096 by 480–4096, scale 1 or 2"
@@ -229,6 +229,11 @@ pub struct VirtualDisplayManager {
     remove_requests: AtomicUsize,
 }
 
+#[cfg(all(test, target_os = "macos"))]
+type FindStaleDisplay = fn() -> Vec<u32>;
+#[cfg(test)]
+type DestroyDisplay = fn(u32) -> Result<bool, String>;
+
 struct ManagerState {
     #[cfg(target_os = "macos")]
     lib: Option<libloading::Library>,
@@ -244,12 +249,12 @@ struct ManagerState {
     /// 회귀 검사용 find 스텁 — 테스트가 실제 dylib·브리지 없이 "좀비 존재
     /// → 탐지·복구" 전이를 재현하는 수단. 프로덕션 빌드에는 없다.
     #[cfg(all(test, target_os = "macos"))]
-    test_find_stale: std::sync::Mutex<Option<fn() -> Vec<u32>>>,
+    test_find_stale: std::sync::Mutex<Option<FindStaleDisplay>>,
     /// 회귀 검사용 destroy 스텁 — control.rs의 해제 재시도 테스트가
     /// "실패 → 폴링 재시도 → 성공" 전이를 브리지 없이 재현하는 수단.
     /// 프로덕션 빌드에는 존재하지 않는다.
     #[cfg(test)]
-    test_destroy: std::sync::Mutex<Option<fn(u32) -> Result<bool, String>>>,
+    test_destroy: std::sync::Mutex<Option<DestroyDisplay>>,
 }
 
 #[derive(Debug, Clone)]
@@ -466,17 +471,14 @@ impl VirtualDisplayManager {
     /// 회귀 검사용 destroy 스텁 교체. Some이면 실제 dylib 대신 이 함수로
     /// destroy 결과를 만든다(실패→성공 전이 재현용).
     #[cfg(test)]
-    pub(crate) fn set_test_destroy(
-        &self,
-        destroy: Option<fn(u32) -> Result<bool, String>>,
-    ) {
+    pub(crate) fn set_test_destroy(&self, destroy: Option<DestroyDisplay>) {
         *self.state.lock().unwrap().test_destroy.lock().unwrap() = destroy;
     }
 
     /// 회귀 검사용 find_stale 스텁 교체. Some이면 실제 dylib 스캔 대신 이
     /// 함수가 좀비 display id 목록을 반환한다.
     #[cfg(all(test, target_os = "macos"))]
-    pub(crate) fn set_test_find_stale(&self, find: Option<fn() -> Vec<u32>>) {
+    pub(crate) fn set_test_find_stale(&self, find: Option<FindStaleDisplay>) {
         *self.state.lock().unwrap().test_find_stale.lock().unwrap() = find;
     }
 
@@ -628,7 +630,7 @@ impl VirtualDisplayManager {
     }
 
     fn refresh_probe(&self, state: &mut ManagerState) {
-        let retry = state.probed.as_ref().map_or(true, |probe| !probe.supported);
+        let retry = state.probed.as_ref().is_none_or(|probe| !probe.supported);
         if !retry {
             return;
         }
@@ -720,11 +722,15 @@ impl VirtualDisplayManager {
         }
         #[cfg(target_os = "macos")]
         {
-            let Some(lib) = state.lib.as_ref() else { return };
+            let Some(lib) = state.lib.as_ref() else {
+                return;
+            };
             let result = unsafe {
                 let Ok(find) = lib.get::<unsafe extern "C" fn() -> *mut std::ffi::c_char>(
                     b"leftcar_vdisp_find_stale_v1",
-                ) else { return };
+                ) else {
+                    return;
+                };
                 take_json_with(lib, || find())
             };
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&result) else {
@@ -1104,7 +1110,10 @@ mod tests {
         let operation = manager.operation.lock().unwrap();
         let started = std::time::Instant::now();
         let outcome = manager.remove_blocking_within(std::time::Duration::from_millis(200));
-        assert!(outcome.is_none(), "the capped release must report a timeout");
+        assert!(
+            outcome.is_none(),
+            "the capped release must report a timeout"
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert_eq!(manager.remove_request_count(), 0);
         drop(operation);

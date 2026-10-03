@@ -1,166 +1,126 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Text } from "./ui/primitives";
 import { invoke } from "@tauri-apps/api/core";
 import { getTranslation } from "@leftcar/ui-tokens";
-import { createToggleGate, type ToggleGate } from "./toggleGate";
+import { createToggleGate } from "./toggleGate";
 
-/**
- * 공통 낙관적 토글: 값을 즉시 뒤집어 반영하고, 호스트 명령이 실패하면
- * 되돌린다. settings.json 기반 게이트 토글이 모두 이 패턴을 쓴다.
- *
- * 요청이 진행 중인 동안에는 토글을 무시하고(버튼 비활성과 같은 효과),
- * superseded된 요청의 늦은 응답·실패는 최신 토글 상태를 덮지 않는다.
- * `pending`은 진행 중 요청이 있을 때 참이다.
- */
-function useOptimisticToggle(command: string, initial: boolean): {
-  value: boolean;
-  pending: boolean;
-  error: string | null;
-  setError: (error: string | null) => void;
-  toggle: () => void;
-  setValue: (next: boolean) => void;
-  gate: ToggleGate;
-} {
+/** Settings are writable only after a successful read; UI reflects confirmed values. */
+function useConfirmedToggle(
+  getCommand: string,
+  setCommand: string,
+  initial: boolean,
+) {
   const [value, setValue] = useState(initial);
-  const [pending, setPending] = useState(false);
-  const busy = useRef(false);
+  const [pending, setPending] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadAttempt, retryLoad] = useState(0);
+  const ready = useRef(false);
+  const busy = useRef(false);
+  const mounted = useRef(false);
   const [gate] = useState(() => createToggleGate());
+
+  useEffect(() => {
+    mounted.current = true;
+    setPending(true);
+    setError(null);
+    let cancelled = false;
+    void invoke<boolean>(getCommand)
+      .then((loaded) => {
+        if (cancelled) return;
+        setValue(loaded);
+        ready.current = true;
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled)
+          setError(String(cause instanceof Error ? cause.message : cause));
+      })
+      .finally(() => {
+        if (!cancelled) setPending(false);
+      });
+    return () => {
+      cancelled = true;
+      mounted.current = false;
+    };
+  }, [getCommand, loadAttempt]);
+
   const toggle = useCallback(() => {
-    // 진행 중인 요청이 있으면 이번 토글을 무시한다 — 뒤섞인 요청 순서가
-    // 최종 상태를 어기지 않게 한다.
-    if (busy.current) return;
+    if (!ready.current || busy.current || !mounted.current) return;
     busy.current = true;
     setError(null);
+    setPending(true);
     const seq = gate.issue();
     const next = !value;
-    setValue(next);
-    setPending(true);
-    void invoke(command, { enabled: next })
+    void invoke(setCommand, { enabled: next })
+      .then(() => {
+        if (mounted.current && gate.isCurrent(seq)) setValue(next);
+      })
       .catch((cause: unknown) => {
-        // superseded된 요청의 실패는 되돌리지 않는다 — 되돌리면 나중
-        // 토글이 반영한 값을 덮어쓴다.
-        if (gate.isCurrent(seq)) {
-          setValue(!next);
+        if (mounted.current && gate.isCurrent(seq)) {
           setError(String(cause instanceof Error ? cause.message : cause));
         }
       })
       .finally(() => {
         if (gate.isCurrent(seq)) {
           busy.current = false;
-          setPending(false);
+          if (mounted.current) setPending(false);
         }
       });
-  }, [command, gate, value]);
-  return { value, pending, error, setError, toggle, setValue, gate };
+  }, [setCommand, gate, value]);
+
+  const retry = () => {
+    if (busy.current) return;
+    if (ready.current) toggle();
+    else retryLoad((attempt) => attempt + 1);
+  };
+  return { value, pending, error, toggle, retry, loaded: ready.current };
 }
 
-/**
- * 프라이버시 커튼의 대시보드 훅. 0600 settings.json에 살며 토글은 즉시
- * 효력을 가진다. 토글이 발행된 뒤에 늦게 도착한 초기 로드 응답은 무시한다.
- */
 export function usePrivacySettings() {
-  const [loadAttempt, retryLoad] = useState(0);
-  const curtain = useOptimisticToggle("set_privacy_curtain", false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (curtain.gate.allowsInitialLoad()) curtain.setError(null);
-    void invoke<boolean>("get_privacy_settings")
-      .then((curtainOn) => {
-        if (cancelled) return;
-        if (curtain.gate.allowsInitialLoad()) curtain.setValue(curtainOn);
-      })
-      .catch((cause: unknown) => {
-        if (cancelled) return;
-        const message = String(cause instanceof Error ? cause.message : cause);
-        if (curtain.gate.allowsInitialLoad()) curtain.setError(message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [loadAttempt, curtain.gate, curtain.setValue, curtain.setError]);
-
+  const curtain = useConfirmedToggle(
+    "get_privacy_settings",
+    "set_privacy_curtain",
+    false,
+  );
   return {
     privacyCurtain: curtain.value,
+    curtainReady: curtain.loaded,
     togglePrivacyCurtain: curtain.toggle,
     pending: curtain.pending,
     curtainPending: curtain.pending,
     curtainError: curtain.error,
-    retryCurtain: () => curtain.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : curtain.toggle(),
+    retryCurtain: curtain.retry,
   };
 }
 
-/**
- * 클립보드 공유 호스트 게이트(U5)의 대시보드 훅. 0600 settings.json에서
- * 시작하며 토글은 즉시 효력을 가진다. 기본값은 꺼짐이다. 토글이 발행된
- * 뒤에 늦게 도착한 초기 로드 응답은 무시한다.
- */
 export function useClipboardShare() {
-  const [loadAttempt, retryLoad] = useState(0);
-  const clipboard = useOptimisticToggle("set_clipboard_share", false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (clipboard.gate.allowsInitialLoad()) clipboard.setError(null);
-    void invoke<boolean>("get_clipboard_share")
-      .then((enabled) => {
-        if (!cancelled && clipboard.gate.allowsInitialLoad()) {
-          clipboard.setValue(enabled);
-        }
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && clipboard.gate.allowsInitialLoad()) {
-          clipboard.setError(String(cause instanceof Error ? cause.message : cause));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [loadAttempt, clipboard.gate, clipboard.setValue, clipboard.setError]);
-
+  const clipboard = useConfirmedToggle(
+    "get_clipboard_share",
+    "set_clipboard_share",
+    false,
+  );
   return {
     clipboardShare: clipboard.value,
+    ready: clipboard.loaded,
     toggleClipboardShare: clipboard.toggle,
     pending: clipboard.pending,
     error: clipboard.error,
-    retryClipboard: () => clipboard.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : clipboard.toggle(),
+    retryClipboard: clipboard.retry,
   };
 }
 
-/**
- * 스트리밍 배지("N대 연결 중" 표시) 호스트 훅. 개인 기기 조합에서는
- * 소음이므로 기본 꺼짐이며, settings.json에 영속된다. Indicator 라우트가
- * 같은 값을 폴링해 배지 창의 show/hide를 따른다.
- */
 export function useStreamingBadge() {
-  const [loadAttempt, retryLoad] = useState(0);
-  const badge = useOptimisticToggle("set_streaming_badge", false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (badge.gate.allowsInitialLoad()) badge.setError(null);
-    void invoke<boolean>("get_streaming_badge")
-      .then((enabled) => {
-        if (!cancelled && badge.gate.allowsInitialLoad()) {
-          badge.setValue(enabled);
-        }
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && badge.gate.allowsInitialLoad()) {
-          badge.setError(String(cause instanceof Error ? cause.message : cause));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [loadAttempt, badge.gate, badge.setValue, badge.setError]);
-
+  const badge = useConfirmedToggle(
+    "get_streaming_badge",
+    "set_streaming_badge",
+    false,
+  );
   return {
     streamingBadge: badge.value,
+    ready: badge.loaded,
     toggleStreamingBadge: badge.toggle,
     pending: badge.pending,
     error: badge.error,
-    retryBadge: () => badge.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : badge.toggle(),
+    retryBadge: badge.retry,
   };
 }
 
@@ -180,83 +140,83 @@ export interface ViewerExperiments {
 }
 
 export function useExperiments() {
-  const [experiments, setExperiments] = useState<ViewerExperiments | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [experiments, setExperiments] = useState<ViewerExperiments | null>(
+    null,
+  );
+  const [error, setError] = useState<{
+    operation: "load" | "save";
+    detail: string;
+  } | null>(null);
+  const [phase, setPhase] = useState<"idle" | "saving">("idle");
+  const saving = phase === "saving";
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const mounted = useRef(false);
+  const busy = useRef(false);
+  const lastSave = useRef<ViewerExperiments | null>(null);
 
   useEffect(() => {
+    mounted.current = true;
+    setError(null);
     let cancelled = false;
     void invoke<ViewerExperiments>("get_experiments")
       .then((loaded) => {
         if (!cancelled) setExperiments(loaded);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(String(cause instanceof Error ? cause.message : cause));
+        if (!cancelled)
+          setError({
+            operation: "load",
+            detail: String(cause instanceof Error ? cause.message : cause),
+          });
       });
     return () => {
       cancelled = true;
+      mounted.current = false;
     };
   }, [loadAttempt]);
 
   const save = useCallback(async (next: ViewerExperiments) => {
-    setSaving(true);
+    if (busy.current || !mounted.current) return;
+    busy.current = true;
+    lastSave.current = next;
+    setPhase("saving");
     setError(null);
     try {
       const stored = await invoke<ViewerExperiments>("set_experiments", {
         experiment: next,
       });
-      setExperiments(stored);
-    } catch (cause: unknown) {
-      setError(String(cause instanceof Error ? cause.message : cause));
+      if (mounted.current) setExperiments(stored);
+      lastSave.current = null;
+    } catch (cause) {
+      if (mounted.current)
+        setError({
+          operation: "save",
+          detail: String(cause instanceof Error ? cause.message : cause),
+        });
     } finally {
-      setSaving(false);
+      busy.current = false;
+      if (mounted.current) setPhase("idle");
     }
   }, []);
 
-  return {
-    experiments,
-    error,
-    saving,
-    retry: () => setLoadAttempt((attempt) => attempt + 1),
-    save,
+  const retry = () => {
+    if (busy.current) return;
+    if (lastSave.current) void save(lastSave.current);
+    else setLoadAttempt((attempt) => attempt + 1);
   };
+  return { experiments, error, saving, retry, save };
 }
 
-/**
- * 외부 접속(WAN) 허용 훅. UPnP 포트 매핑의 등록·제거는 호스트 명령이
- * 백그라운드에서 즉시 실행하며, 값은 같은 0600 settings.json에 영속된다.
- * 소유자 결정(2026-09-19)에 따라 기본 켜짐이다.
- */
+/** Preserve the saved WAN policy; never issue an inverse command from a placeholder. */
 export function useWanAccess() {
-  const [loadAttempt, retryLoad] = useState(0);
-  const wan = useOptimisticToggle("set_wan_access", true);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (wan.gate.allowsInitialLoad()) wan.setError(null);
-    void invoke<boolean>("get_wan_access")
-      .then((enabled) => {
-        if (!cancelled && wan.gate.allowsInitialLoad()) {
-          wan.setValue(enabled);
-        }
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && wan.gate.allowsInitialLoad()) {
-          wan.setError(String(cause instanceof Error ? cause.message : cause));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [loadAttempt, wan.gate, wan.setValue, wan.setError]);
-
+  const wan = useConfirmedToggle("get_wan_access", "set_wan_access", true);
   return {
     wanAccess: wan.value,
+    ready: wan.loaded,
     toggleWanAccess: wan.toggle,
     pending: wan.pending,
     error: wan.error,
-    retryWan: () => wan.gate.allowsInitialLoad() ? retryLoad((attempt) => attempt + 1) : wan.toggle(),
+    retryWan: wan.retry,
   };
 }
 
@@ -270,17 +230,10 @@ export function Curtain() {
     localStorage.getItem("leftcar_lang") === "en" ? "en" : "ko",
   );
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "#000",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      <span style={{ color: "#666", fontSize: 13 }}>{t.host.curtainHint}</span>
+    <div className="fixed inset-0 flex items-center justify-center bg-curtain">
+      <Text variant="caption" className="text-curtain-ink">
+        {t.host.curtainHint}
+      </Text>
     </div>
   );
 }

@@ -14,3 +14,10 @@ export function subscribeInputEnableRequested(
 ): InputEnableRequestSubscription {
   return { remove() {} };
 }
+
+export function reportInputEnableRequestResult(
+  _event: InputEnableRequestEvent,
+  _error: string | null,
+): Promise<void> {
+  return Promise.resolve();
+}

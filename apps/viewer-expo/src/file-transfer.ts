@@ -37,6 +37,17 @@ export interface TransferProgress {
 
 export type TransferProgressListener = (progress: TransferProgress) => void;
 
+export interface SendFileOptions {
+  signal?: AbortSignal;
+}
+
+function assertTransferActive(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error("file transfer cancelled");
+  error.name = "AbortError";
+  throw error;
+}
+
 // -- 표준 base64 -------------------------------------------------------------
 
 /** 표준 base64 디코딩(패딩 유무 모두 허용). */
@@ -120,7 +131,9 @@ export async function sendFile(
   client: FileTransferClient,
   file: SendFileSource,
   onProgress?: TransferProgressListener,
+  options: SendFileOptions = {},
 ): Promise<SendFileResult> {
+  assertTransferActive(options.signal);
   const totalBytes = file.size;
   if (!Number.isSafeInteger(totalBytes) || totalBytes < 0 || totalBytes > MAX_FILE_SIZE) {
     throw new LocalizedError("fileTooLarge");
@@ -138,17 +151,20 @@ export async function sendFile(
     size: totalBytes,
   });
   const fileToken = begin.fileToken;
-  onProgress?.(progressOf(0, totalBytes));
   try {
+    assertTransferActive(options.signal);
+    onProgress?.(progressOf(0, totalBytes));
     let offset = 0;
     while (offset < totalBytes) {
       const end = Math.min(offset + FILE_CHUNK_SIZE, totalBytes);
       const chunk = await file.readBase64(offset, end - offset);
+      assertTransferActive(options.signal);
       const response = await client.request<{ written: number }>("sendFileChunk", {
         fileToken,
         dataBase64: chunk,
         offset,
       });
+      assertTransferActive(options.signal);
       // 호스트가 순차 오프셋을 강제하므로 written은 end와 일치해야 한다.
       if (response.written !== end) {
         throw new LocalizedError("fileTransferFailed", {
@@ -158,6 +174,7 @@ export async function sendFile(
       offset = end;
       onProgress?.(progressOf(offset, totalBytes));
     }
+    assertTransferActive(options.signal);
     const end = await client.request<{ path: string }>("sendFileEnd", { fileToken });
     return { name, path: end.path };
   } catch (cause) {
@@ -185,6 +202,7 @@ export interface ReceiveFileOptions {
   /** 호스트가 알려 준 이름으로 수신 파일 싱크를 만든다(file-io 제공). */
   createSink(name: string): Promise<ReceiveFileSink>;
   onProgress?: TransferProgressListener;
+  signal?: AbortSignal;
 }
 
 /**
@@ -196,6 +214,7 @@ export async function receiveFile(
   entry: Pick<ShareQueueEntry, "queueId">,
   options: ReceiveFileOptions,
 ): Promise<ReceiveFileResult> {
+  assertTransferActive(options.signal);
   const begin = await client.request<{ fileToken: string; name: string; size: number }>(
     "fetchFileBegin",
     { queueId: entry.queueId },
@@ -207,8 +226,11 @@ export async function receiveFile(
     await client.request("fetchFileCancel", { fileToken: begin.fileToken }).catch(() => undefined);
     throw new LocalizedError("fileTooLarge");
   }
-  const sink = await options.createSink(begin.name);
+  let sink: ReceiveFileSink | undefined;
   try {
+    assertTransferActive(options.signal);
+    sink = await options.createSink(begin.name);
+    assertTransferActive(options.signal);
     let offset = 0;
     while (offset < totalBytes) {
       const length = Math.min(FILE_CHUNK_SIZE, totalBytes - offset);
@@ -217,6 +239,7 @@ export async function receiveFile(
         offset,
         length,
       });
+      assertTransferActive(options.signal);
       const chunk = base64ToBytes(response.data);
       if (chunk.length !== length) {
         throw new LocalizedError("fileTransferFailed", {
@@ -224,15 +247,18 @@ export async function receiveFile(
         });
       }
       await sink.appendBase64(response.data);
+      assertTransferActive(options.signal);
       offset += chunk.length;
       options.onProgress?.(progressOf(offset, totalBytes));
     }
+    assertTransferActive(options.signal);
     await client.request("fetchFileEnd", { fileToken: begin.fileToken });
+    assertTransferActive(options.signal);
     // 호스트와 같은 .part 스테이징 규약 — 전송이 온전히 끝난 뒤 이름을
     // 바꿔 완성한다. 실패하면 아래 catch가 .part를 치운다.
     await sink.finalize();
   } catch (cause) {
-    await sink.discard().catch(() => undefined);
+    await sink?.discard().catch(() => undefined);
     await client
       .request("fetchFileCancel", { fileToken: begin.fileToken })
       .catch(() => undefined);

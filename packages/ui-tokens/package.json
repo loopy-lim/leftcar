@@ -7,7 +7,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./variants": "./src/variants.ts",
+    "./recipes": "./src/recipes.ts",
     "./i18n": "./src/i18n.ts"
   },
   "dependencies": {

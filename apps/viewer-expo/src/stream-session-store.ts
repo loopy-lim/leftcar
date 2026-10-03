@@ -25,6 +25,10 @@ export class StreamSessionStore {
     else this.recovery = new StreamRecoveryController(this, dependencies);
   }
 
+  recover(active: ActiveStream): void {
+    this.recovery?.recover(active);
+  }
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

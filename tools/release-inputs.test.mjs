@@ -14,6 +14,19 @@ async function fixture() {
  execFileSync('git',['init',root],{stdio:'ignore'});execFileSync('git',['-C',root,'add','.']);execFileSync('git',['-C',root,'-c','user.name=Fixture','-c','user.email=fixture@invalid','commit','-m','fixture'],{stdio:'ignore'});
  return root;
 }
+async function fixtureVersionInputs(root) {
+ const [cargo,gradle,expoConfig,expoPackage]=await Promise.all([
+  'apps/host-desktop/src-tauri/Cargo.toml',
+  'apps/viewer-expo/android/app/build.gradle',
+  'apps/viewer-expo/app.config.ts',
+  'apps/viewer-expo/package.json',
+ ].map(path=>readFile(join(root,path),'utf8')));
+ return {
+  versions:{host:cargo.match(/^version\s*=\s*"([^"]+)"/m)[1],android:{versionName:gradle.match(/\bversionName "([^"]+)"/)[1],versionCode:Number(gradle.match(/\bversionCode (\d+)/)[1])},expoConfig:expoConfig.match(/\bversion:\s*"([^"]+)"/)[1]},
+  expoPackageVersion:JSON.parse(expoPackage).version,
+ };
+}
+const mismatchedVersion=current=>current==='9.9.9'?'9.9.8':'9.9.9';
 const unavailable=()=>({status:null,error:{code:'ENOENT'},stdout:''});
 const collect=async(root,scope='android-internal')=>(await import('./release-inputs.mjs')).collectReleaseInputs(root,scope,{run:unavailable});
 test('source binding accepts snapshot and wrapper but rejects missing, mixed and altered evidence',async()=>{
@@ -24,10 +37,14 @@ test('source binding accepts snapshot and wrapper but rejects missing, mixed and
 },30_000);
 test('local preflight records distinct version roles, exact locks and unavailable checks without claiming distribution readiness',async()=>{
  const root=await fixture(),inputs=await collect(root);
+ const {versions,expoPackageVersion}=await fixtureVersionInputs(root);
  expect(inputs.components.host.cargoVersion).toBe(inputs.components.host.tauriVersion);
+ expect(inputs.components.host.cargoVersion).toBe(versions.host);
  expect(inputs.components.shim.requiredStartAbi).toBe(9);
- expect(inputs.components.expo.packageVersion).toBe('0.1.6');
- expect(inputs.components.viewerAndroid.versionName).toBe('0.1.10');
+ expect(inputs.components.expo.packageVersion).toBe(expoPackageVersion);
+ expect(inputs.components.expo.version).toBe(versions.expoConfig);
+ expect(inputs.components.viewerAndroid.versionName).toBe(versions.android.versionName);
+ expect(inputs.components.viewerAndroid.versionCode).toBe(versions.android.versionCode);
  expect(inputs.internalBuildable).toBe(true);expect(inputs.distributionReady).toBe(false);
  expect(inputs.dependencies.map(x=>x.lockfile)).toContain('bun.lock');
  expect(inputs.dependencies.find(x=>x.ecosystem==='bun').records.length).toBeGreaterThan(100);
@@ -35,13 +52,15 @@ test('local preflight records distinct version roles, exact locks and unavailabl
  expect(inputs.components.root.version).toBeNull();
 });
 test.each([
- ['apps/host-desktop/src-tauri/tauri.conf.json','"version": "0.1.10"','"version": "9.9.9"'],
+ ['apps/host-desktop/src-tauri/tauri.conf.json',null,null],
  ['apps/viewer-expo/android/gradle.properties','reactNativeArchitectures=arm64-v8a','reactNativeArchitectures=x86_64'],
  ['apps/viewer-expo/android/app/build.gradle','"--target", "aarch64-linux-android"','"--target", "x86_64-linux-android"'],
  ['apps/viewer-expo/android/gradle/wrapper/gradle-wrapper.properties','b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06','0'.repeat(64)],
  ['apps/host-desktop/src-tauri/src/ffi.rs','b"leftcar_capture_start_v9"','b"leftcar_capture_start_v99"'],
 ])('preflight rejects structural mismatch in %s',async(path,from,to)=>{
- const root=await fixture(),file=join(root,path),text=await readFile(file,'utf8');expect(text).toContain(from);await writeFile(file,text.replace(from,to));
+ const root=await fixture(),file=join(root,path),text=await readFile(file,'utf8');
+ if(from===null){const config=JSON.parse(text);await writeFile(file,JSON.stringify({...config,version:mismatchedVersion(config.version)}));}
+ else{expect(text).toContain(from);await writeFile(file,text.replace(from,to));}
  await expect(collect(root)).rejects.toThrow();
 });
 test('release inputs reject altered records, rehashed missing dependencies and source-lock disagreement',async()=>{
@@ -87,10 +106,11 @@ test('scan outcomes preserve findings/warnings and fail closed on errors and mal
 test('artifact release binding requires metadata, actual signing and matching scope/version/target',async()=>{
  const {bindArtifactReleaseInputs,classifyAndroidSigning,validateReleaseInputs}=await import('./release-inputs.mjs');
  const root=await fixture(),inputs=await collect(root),source=await manifest.sourceSnapshot(root);
+ const {versions}=await fixtureVersionInputs(root);
  const signing=classifyAndroidSigning('Signer #1 certificate DN: CN=Android Debug, O=Android, C=US\nSigner #1 certificate SHA-256 digest: '+'a'.repeat(64),'android-internal');
- const args={source,versions:{android:{versionName:'0.1.10',versionCode:16},host:'0.1.10',expoConfig:'0.1.6'},target:{platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:'aarch64-linux-android'},artifactMetadata:{identifier:'leftcar.ll3.kr',version:'0.1.10',versionCode:16},signing,artifacts:[{role:'viewer-apk'}]};
+ const args={source,versions,target:{platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:'aarch64-linux-android'},artifactMetadata:{identifier:'leftcar.ll3.kr',version:versions.android.versionName,versionCode:versions.android.versionCode},signing,artifacts:[{role:'viewer-apk'}]};
  const bound=bindArtifactReleaseInputs(inputs,args);expect(bound.distributionReady).toBe(false);expect(()=>validateReleaseInputs(bound,source)).not.toThrow();
- for(const change of [{artifactMetadata:null},{artifactMetadata:{...args.artifactMetadata,version:'0.1.4'}},{target:{...args.target,abi:'x86_64'}},{signing:{...signing,classification:'configured-release-key'}},{artifacts:[]}])expect(()=>bindArtifactReleaseInputs(inputs,{...args,...change})).toThrow();
+ for(const change of [{artifactMetadata:null},{artifactMetadata:{...args.artifactMetadata,version:mismatchedVersion(args.artifactMetadata.version)}},{target:{...args.target,abi:'x86_64'}},{signing:{...signing,classification:'configured-release-key'}},{artifacts:[]}])expect(()=>bindArtifactReleaseInputs(inputs,{...args,...change})).toThrow();
 });
 test('rehashed invalid component types and removed Swift source records still fail closed',async()=>{
  const {sealReleaseInputs,validateReleaseInputs}=await import('./release-inputs.mjs');
@@ -106,12 +126,13 @@ test('schema2 release manifests bind artifact versions, source inputs, signing a
  const elf=Buffer.alloc(64);elf.write('\x7fELF');elf[4]=2;elf[5]=1;elf.writeUInt16LE(183,18);await writeFile(join(output,'lib/arm64-v8a/libleftcar_viewer.so'),elf);
  execFileSync('zip',['-qr','app.apk','lib'],{cwd:output});
  const before=await manifest.sourceSnapshot(root),releaseInputs=await collect(root);
+ const {versions}=await fixtureVersionInputs(root);
  const signing=classifyAndroidSigning('Signer #1 certificate DN: CN=Android Debug, O=Android, C=US\nSigner #1 certificate SHA-256 digest: '+'a'.repeat(64),'android-internal');
- const args={root,before,releaseInputs,signing,versions:{android:{versionName:'0.1.10',versionCode:16},host:'0.1.10',expoConfig:'0.1.6'},artifactMetadata:{identifier:'leftcar.ll3.kr',version:'0.1.10',versionCode:16},target:{platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:'aarch64-linux-android'},artifacts:[{role:'viewer-apk',path:join(output,'app.apk')}]};
+ const args={root,before,releaseInputs,signing,versions,artifactMetadata:{identifier:'leftcar.ll3.kr',version:versions.android.versionName,versionCode:versions.android.versionCode},target:{platform:'android',architecture:'arm64',abi:'arm64-v8a',triple:'aarch64-linux-android'},artifacts:[{role:'viewer-apk',path:join(output,'app.apk')}]};
  const receipt=await manifest.createManifest(args);expect(await manifest.verifyManifest(receipt)).toBe(true);
  const missingInputs={...receipt};delete missingInputs.releaseInputs;await expect(manifest.verifyManifest(missingInputs)).rejects.toThrow();
  await expect(manifest.verifyManifest({...receipt,artifactMetadata:{...receipt.artifactMetadata,versionCode:3}})).rejects.toThrow();
- await expect(manifest.verifyManifest({...receipt,versions:{...receipt.versions,host:'9.9.9'}})).rejects.toThrow();
+ await expect(manifest.verifyManifest({...receipt,versions:{...receipt.versions,host:mismatchedVersion(receipt.versions.host)}})).rejects.toThrow();
  await expect(manifest.verifyManifest({...receipt,signing:{...signing,classification:'configured-release-key'}})).rejects.toThrow();
  const tampered=structuredClone(receipt);tampered.releaseInputs.dependencies[0].records=[];await expect(manifest.verifyManifest(tampered)).rejects.toThrow();
  await writeFile(join(output,'app.apk'),'changed');await expect(manifest.verifyManifest(receipt)).rejects.toThrow();

@@ -1,25 +1,11 @@
 import { useMemo, useState } from "react";
-import {
-  ActivityIndicator,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import {
-  displaySizePresets,
-  normalizeCustomSize,
-} from "./display-size";
+import { View } from "react-native";
+import { cn } from "@leftcar/ui-tokens";
+import { displaySizePresets, normalizeCustomSize } from "./display-size";
 import type { ActiveStream } from "./catalog-model-types";
 import type { ThemeTokens } from "./theme";
 import { useAppLanguage } from "./i18n";
-
-/**
- * "화면 해상도" card: shows the current session resolution, offers preset
- * candidates (1080p/1440p/4K), and a manual pixel input. Applies through the
- * model's session reconfigure path.
- */
+import { Action, Field, Label, Notice, Surface } from "./ui/primitives";
 
 export interface DisplaySizeCardProps {
   stream: ActiveStream | null;
@@ -32,246 +18,145 @@ export interface DisplaySizeCardProps {
     fps: number,
   ) => Promise<boolean>;
 }
-
-const MIN_WIDTH = 640;
-const MIN_HEIGHT = 480;
-const MAX_WIDTH = 4096;
-const MAX_HEIGHT = 4096;
-
-function parseDimension(raw: string, fallback: number): number {
-  const parsed = Number.parseInt(raw.trim(), 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function PresetButton({
-  label,
-  detail,
-  active,
-  disabled,
-  colors,
-  onPress,
-}: {
-  label: string;
-  detail: string;
-  active: boolean;
-  disabled: boolean;
-  colors: ThemeTokens;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`${label} ${detail}`}
-      accessibilityState={{ selected: active, disabled }}
-      style={{
-        flexBasis: "31%",
-        flexGrow: 1,
-        minHeight: 44,
-        justifyContent: "center",
-        gap: 2,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: active ? colors.btnPrimaryBg : colors.borderSubtle,
-        backgroundColor: active ? colors.btnPrimaryBg : colors.bgSubtle,
-        paddingHorizontal: 10,
-        paddingVertical: 8,
-      }}
-      disabled={disabled}
-      onPress={onPress}
-    >
-      <Text
-        style={{
-          fontSize: 13,
-          fontWeight: "700",
-          color: active ? colors.btnPrimaryText : colors.textPrimary,
-        }}
-      >
-        {label}
-      </Text>
-      <Text
-        style={{
-          fontSize: 12,
-          lineHeight: 16,
-          color: active ? colors.btnPrimaryText : colors.textSecondary,
-          opacity: active ? 0.85 : 1,
-        }}
-      >
-        {detail}
-      </Text>
-    </Pressable>
-  );
-}
-
 export function DisplaySizeCard({
   stream,
   resizing,
-  colors,
   onResizeSession,
 }: DisplaySizeCardProps) {
-  const [customWidth, setCustomWidth] = useState("");
-  const [customHeight, setCustomHeight] = useState("");
-  const [customError, setCustomError] = useState<string | null>(null);
   const { t, format } = useAppLanguage();
-
-  const currentWidth = stream?.activeTarget.width ?? null;
-  const currentHeight = stream?.activeTarget.height ?? null;
-  const presets = useMemo(
-    () =>
-      displaySizePresets(
-        currentWidth !== null && currentHeight !== null
-          ? { width: currentWidth, height: currentHeight }
-          : null,
-      ),
-    [currentWidth, currentHeight],
+  const [width, setWidth] = useState(String(stream?.activeTarget.width ?? ""));
+  const [height, setHeight] = useState(
+    String(stream?.activeTarget.height ?? ""),
   );
-
+  const [error, setError] = useState<string | null>(null);
+  const [applied, setApplied] = useState(false);
+  const presets = useMemo(
+    () => displaySizePresets(stream?.activeTarget ?? null),
+    [stream?.activeTarget],
+  );
   if (!stream) return null;
-
-  const applyPreset = (width: number, height: number) => {
-    if (resizing || !stream) return;
-    void onResizeSession(stream, width, height, stream.fps);
-  };
-
-  const applyCustom = () => {
-    if (resizing || !stream) return;
-    const width = parseDimension(customWidth, Number.NaN);
-    const height = parseDimension(customHeight, Number.NaN);
-    const normalized = normalizeCustomSize(width, height);
-    if (!normalized) {
-      setCustomError(
+  const apply = async () => {
+    if (resizing) return;
+    const size = normalizeCustomSize(
+      Number(width.trim()),
+      Number(height.trim()),
+    );
+    setApplied(false);
+    if (!size) {
+      setError(
         format(t.viewer.customSizeError, {
-          min: `${MIN_WIDTH}×${MIN_HEIGHT}px`,
-          max: `${MAX_WIDTH}×${MAX_HEIGHT}px`,
+          min: "640×480px",
+          max: "4096×4096px",
         }),
       );
       return;
     }
-    setCustomError(null);
-    void onResizeSession(stream, normalized.width, normalized.height, stream.fps);
+    setError(null);
+    try {
+      const accepted = await onResizeSession(
+        stream,
+        size.width,
+        size.height,
+        stream.fps,
+      );
+      if (accepted) setApplied(true);
+      else setError(t.viewer.resolutionFailed);
+    } catch (cause) {
+      setError(String(cause instanceof Error ? cause.message : cause));
+    }
   };
-
-  const styles = StyleSheet.create({
-    card: {
-      gap: 10,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      backgroundColor: colors.bgSurface,
-      padding: 12,
-    },
-    presetRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 6,
-    },
-    inputRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    input: {
-      flex: 1,
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: colors.borderSubtle,
-      backgroundColor: colors.bgSubtle,
-      paddingHorizontal: 10,
-      paddingVertical: 8,
-      fontSize: 13,
-      color: colors.textPrimary,
-    },
-    applyButton: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 8,
-      borderRadius: 8,
-      minHeight: 44,
-      backgroundColor: resizing ? colors.borderStrong : colors.btnPrimaryBg,
-      paddingVertical: 12,
-      paddingHorizontal: 12,
-    },
-  });
-
+  const changeDimension = (setter: (value: string) => void, value: string) => {
+    setter(value);
+    setError(null);
+    setApplied(false);
+  };
   return (
-    <View style={styles.card}>
-      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-        {t.viewer.displaySizeTitle}
-      </Text>
-
-      <Text
-        style={{ fontSize: 12, fontWeight: "600", color: colors.textSecondary }}
+    <Surface className="gap-4">
+      <Label
+        variant="code"
+        tone="muted"
         accessibilityLabel={format(t.viewer.displaySizeA11y, {
           width: stream.activeTarget.width,
           height: stream.activeTarget.height,
         })}
       >
-        {t.viewer.displaySizeCurrentPrefix} {stream.activeTarget.width} × {stream.activeTarget.height} · {stream.fps} FPS
-      </Text>
-
-      <View style={styles.presetRow}>
+        {t.viewer.displaySizeCurrentPrefix} {stream.activeTarget.width} ×{" "}
+        {stream.activeTarget.height} · {stream.activeTarget.fps} FPS
+      </Label>
+      <View className="flex-row flex-wrap gap-2">
         {presets.map((preset) => (
-          <PresetButton
-            key={`${preset.label}-${preset.width}x${preset.height}`}
-            label={preset.label}
-            detail={`${preset.width} × ${preset.height}`}
-            active={
-              currentWidth === preset.width &&
-              currentHeight === preset.height
-            }
-            disabled={resizing}
-            colors={colors}
-            onPress={() => applyPreset(preset.width, preset.height)}
-          />
+          <View
+            key={`${preset.width}x${preset.height}`}
+            className="min-w-32 grow gap-1"
+          >
+            <Action
+              variant="secondary"
+              label={preset.label}
+              disabled={resizing}
+              className={cn(
+                Number(width) === preset.width &&
+                  Number(height) === preset.height &&
+                  "border-strong bg-active",
+              )}
+              accessibilityState={{
+                selected:
+                  Number(width) === preset.width &&
+                  Number(height) === preset.height,
+              }}
+              accessibilityHint={`${preset.width} × ${preset.height}`}
+              onPress={() => {
+                setWidth(String(preset.width));
+                setHeight(String(preset.height));
+                setError(null);
+                setApplied(false);
+              }}
+            />
+            <Label variant="code" tone="muted" className="text-center">
+              {preset.width} × {preset.height}
+            </Label>
+          </View>
         ))}
       </View>
-
-
-      <View style={styles.inputRow}>
-        <TextInput
-          style={styles.input}
-          placeholder={format(t.viewer.customWidthPlaceholder, { min: MIN_WIDTH, max: MAX_WIDTH })}
-          placeholderTextColor={colors.textMuted}
-          keyboardType="number-pad"
-          value={customWidth}
-          editable={!resizing}
-          onChangeText={setCustomWidth}
-          accessibilityLabel={t.viewer.customWidthA11y}
-        />
-        <Text style={{ fontSize: 13, color: colors.textMuted }}>×</Text>
-        <TextInput
-          style={styles.input}
-          placeholder={format(t.viewer.customHeightPlaceholder, { min: MIN_HEIGHT, max: MAX_HEIGHT })}
-          placeholderTextColor={colors.textMuted}
-          keyboardType="number-pad"
-          value={customHeight}
-          editable={!resizing}
-          onChangeText={setCustomHeight}
-          accessibilityLabel={t.viewer.customHeightA11y}
-        />
+      <Label tone="muted">{t.viewer.resolutionApplyHint}</Label>
+      <View className="flex-row items-center gap-2">
+        <View className="min-w-0 flex-1 gap-1">
+          <Label variant="caption">{t.viewer.customWidthA11y}</Label>
+          <Field
+            value={width}
+            invalid={Boolean(error)}
+            editable={!resizing}
+            onChangeText={(value) => changeDimension(setWidth, value)}
+            keyboardType="number-pad"
+            accessibilityLabel={t.viewer.customWidthA11y}
+          />
+        </View>
+        <Label tone="muted">×</Label>
+        <View className="min-w-0 flex-1 gap-1">
+          <Label variant="caption">{t.viewer.customHeightA11y}</Label>
+          <Field
+            value={height}
+            invalid={Boolean(error)}
+            editable={!resizing}
+            onChangeText={(value) => changeDimension(setHeight, value)}
+            keyboardType="number-pad"
+            accessibilityLabel={t.viewer.customHeightA11y}
+          />
+        </View>
       </View>
-      {customError ? (
-        <Text
-          style={{ fontSize: 12, lineHeight: 16, color: colors.textPrimary }}
-          accessibilityLiveRegion="polite"
-        >
-          {customError}
-        </Text>
+      {error ? (
+        <Notice tone="error">
+          <Label>{error}</Label>
+        </Notice>
+      ) : applied ? (
+        <Notice>
+          <Label>{t.viewer.resolutionApplied}</Label>
+        </Notice>
       ) : null}
-
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={t.viewer.applySizeA11y}
-        accessibilityState={{ disabled: resizing }}
-        style={styles.applyButton}
-        disabled={resizing}
-        onPress={applyCustom}
-      >
-        {resizing ? <ActivityIndicator color={colors.btnPrimaryText} size="small" /> : null}
-        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.btnPrimaryText }}>
-          {resizing ? t.viewer.applyingSize : t.viewer.applySizeLabel}
-        </Text>
-      </Pressable>
-    </View>
+      <Action
+        busy={resizing}
+        onPress={() => void apply()}
+        label={resizing ? t.viewer.applyingSize : t.viewer.applySizeA11y}
+      />
+    </Surface>
   );
 }

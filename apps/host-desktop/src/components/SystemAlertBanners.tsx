@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Square, X } from "lucide-react";
 import {
@@ -7,8 +8,8 @@ import {
 } from "@leftcar/ui-tokens";
 import type { HostSnapshotView } from "../hostState";
 import type { TerminationNotice } from "../streamTermination";
-import { bannerAlertVariants, buttonVariants, terminationNoticeVariants } from "../lib/variants";
 import type { HostErrorView } from "../hooks/useHostStatus";
+import { Button, Notice, Text } from "../ui/primitives";
 
 export function TerminationBanner({
   notice,
@@ -22,38 +23,50 @@ export function TerminationBanner({
   onDismiss: () => void;
 }) {
   return (
-    <section
-      className={terminationNoticeVariants({ tone: notice.tone === "danger" ? "danger" : "default" })}
-      role={notice.tone === "danger" ? "alert" : "status"}
+    <Notice
+      tone={notice.tone === "danger" ? "error" : "info"}
       aria-label={notice.title}
+      className="flex items-start gap-3"
     >
-      <span className="termination-notice-icon" aria-hidden="true">
+      <span className="shrink-0 pt-1" aria-hidden="true">
         {notice.tone === "danger" ? (
-          <AlertTriangle size={14} />
+          <AlertTriangle size={16} />
         ) : (
-          <Square size={12} fill="currentColor" />
+          <Square size={14} fill="currentColor" />
         )}
       </span>
-      <div className="termination-notice-content">
-        <div className="termination-notice-heading">
-          <strong>{notice.title}</strong>
-          <time dateTime={notice.observedAt.toISOString()}>
-            {notice.observedAt.toLocaleTimeString(language === "ko" ? "ko-KR" : "en-US")}
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <Text className="font-semibold">{notice.title}</Text>
+          <time
+            className="text-caption text-muted tabular-nums"
+            dateTime={notice.observedAt.toISOString()}
+          >
+            {notice.observedAt.toLocaleTimeString(
+              language === "ko" ? "ko-KR" : "en-US",
+            )}
           </time>
         </div>
-        <span className="termination-notice-target">
-          {notice.sourceName} · {interpolate(t.host.connectedDevice, { addr: notice.viewerAddr })}
-        </span>
-        <p>{notice.detail}</p>
+        <Text variant="caption" tone="muted" className="block break-words">
+          {notice.sourceName} ·{" "}
+          {interpolate(t.host.connectedDevice, { addr: notice.viewerAddr })}
+        </Text>
+        <p className="text-caption text-muted">{notice.detail}</p>
       </div>
-      <button className={buttonVariants({ variant: "close" })} onClick={onDismiss} aria-label={t.common.close}>
-        <X size={15} />
-      </button>
-    </section>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onDismiss}
+        aria-label={t.common.close}
+      >
+        <X size={16} />
+      </Button>
+    </Notice>
   );
 }
 
 export interface SystemAlertBannersProps {
+  ready: boolean;
   error: HostErrorView | null;
   inputActionError: string | null;
   inputPermission: boolean;
@@ -63,105 +76,204 @@ export interface SystemAlertBannersProps {
   t: TranslationSchema;
   onRequestPermission: () => void;
   onOpenAccessibility: () => void;
+  onRefresh: () => void;
 }
 
-export function SystemAlertBanners({
+interface SettingsLauncher {
+  openingPane: string | null;
+  onOpenPane: (pane: string) => void;
+}
+function HostStatusError({
   error,
-  inputActionError,
-  inputPermission,
-  screenPermission,
+  ready,
   platform,
+  t,
+  onRefresh,
+  openingPane,
+  onOpenPane,
+}: Pick<
+  SystemAlertBannersProps,
+  "error" | "ready" | "platform" | "t" | "onRefresh"
+> &
+  SettingsLauncher) {
+  if (!error) return null;
+  const canOpenSettings = ready && platform === "macos";
+  return (
+    <Notice
+      tone="error"
+      className="flex flex-wrap items-center justify-between gap-3"
+    >
+      <Text className="flex min-w-0 items-start gap-2">
+        <AlertTriangle size={16} className="shrink-0" />
+        {error.message}
+      </Text>
+      <div className="flex flex-wrap gap-2">
+        {canOpenSettings && error.kind === "remote-desktop-permission" && (
+          <Button
+            variant="secondary"
+            busy={openingPane === "remote_desktop"}
+            onClick={() => onOpenPane("remote_desktop")}
+          >
+            {t.host.openRemoteDesktopSettings}
+          </Button>
+        )}
+        {canOpenSettings && error.kind === "screen-permission" && (
+          <Button
+            variant="secondary"
+            busy={openingPane === "screencapture"}
+            onClick={() => onOpenPane("screencapture")}
+          >
+            {t.host.openScreenCaptureSettings}
+          </Button>
+        )}
+        <Button variant="secondary" onClick={onRefresh}>
+          {t.common.retry}
+        </Button>
+      </div>
+    </Notice>
+  );
+}
+function ScreenPermissionNotice({
+  ready,
+  platform,
+  screenPermission,
+  error,
+  t,
+  openingPane,
+  onOpenPane,
+}: Pick<
+  SystemAlertBannersProps,
+  "ready" | "platform" | "screenPermission" | "error" | "t"
+> &
+  SettingsLauncher) {
+  if (
+    !ready ||
+    platform !== "macos" ||
+    screenPermission ||
+    error?.kind === "screen-permission"
+  )
+    return null;
+  return (
+    <Notice className="flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <Text className="block font-semibold">{t.host.setupScreenStep}</Text>
+        <p className="text-caption text-muted mt-1">
+          {t.host.screenPermBannerDesc}
+        </p>
+      </div>
+      <Button
+        busy={openingPane === "screencapture"}
+        onClick={() => onOpenPane("screencapture")}
+      >
+        {t.host.openScreenCaptureSettings}
+      </Button>
+    </Notice>
+  );
+}
+function InputPermissionNotice({
+  ready,
+  platform,
+  inputPermission,
   inputBusy,
   t,
   onRequestPermission,
   onOpenAccessibility,
-}: SystemAlertBannersProps) {
+}: Pick<
+  SystemAlertBannersProps,
+  | "ready"
+  | "platform"
+  | "inputPermission"
+  | "inputBusy"
+  | "t"
+  | "onRequestPermission"
+  | "onOpenAccessibility"
+>) {
+  if (!ready || platform !== "macos" || inputPermission) return null;
+  const busy = inputBusy === "permission";
+  return (
+    <Notice className="flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <Text className="block font-semibold">
+          {t.host.inputPermBannerTitle}
+        </Text>
+        <p className="text-caption text-muted mt-1">
+          {t.host.inputPermBannerDesc}
+        </p>
+        <p className="text-caption text-muted mt-1">
+          {t.host.inputOptionalHint}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" busy={busy} onClick={onRequestPermission}>
+          {busy ? t.host.checkingPerm : t.host.btnGrantPerm}
+        </Button>
+        <Button variant="ghost" onClick={onOpenAccessibility}>
+          {t.host.btnOpenSettings}
+        </Button>
+      </div>
+    </Notice>
+  );
+}
+export function SystemAlertBanners(props: SystemAlertBannersProps) {
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [openingPane, setOpeningPane] = useState<string | null>(null);
+  const lastPane = useRef("screencapture");
+  const openPane = async (pane: string) => {
+    lastPane.current = pane;
+    setOpeningPane(pane);
+    setSettingsError(null);
+    try {
+      await invoke("open_system_settings", { pane });
+    } catch (cause) {
+      setSettingsError(
+        `${props.t.host.connectionCheckError} ${String(cause instanceof Error ? cause.message : cause)}`,
+      );
+    } finally {
+      setOpeningPane(null);
+    }
+  };
+  if (!props.ready && !props.error)
+    return <Notice>{props.t.host.checkingHost}</Notice>;
   return (
     <>
-      {error && (
-        <div className={bannerAlertVariants({ tone: "danger" })}>
-          <div className="banner-text">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <AlertTriangle size={16} /> {error.message}
-            </span>
-          </div>
-          {platform === "macos" && error.kind === "remote-desktop-permission" && (
-            <button
-              className={buttonVariants({ variant: "ghost", size: "sm" })}
-              onClick={() => void invoke("open_system_settings", { pane: "remote_desktop" })}
-            >
-              {t.host.openRemoteDesktopSettings}
-            </button>
-          )}
-          {platform === "macos" && error.kind === "screen-permission" && (
-            <button
-              className={buttonVariants({ variant: "ghost", size: "sm" })}
-              onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
-            >
-              {t.host.openScreenCaptureSettings}
-            </button>
-          )}
-        </div>
+      <HostStatusError
+        {...props}
+        openingPane={openingPane}
+        onOpenPane={(pane) => void openPane(pane)}
+      />
+      <ScreenPermissionNotice
+        {...props}
+        openingPane={openingPane}
+        onOpenPane={(pane) => void openPane(pane)}
+      />
+      {props.inputActionError && (
+        <Notice
+          tone="error"
+          className="flex flex-wrap items-center justify-between gap-3"
+        >
+          <Text>{props.inputActionError}</Text>
+          <Button variant="secondary" onClick={props.onRefresh}>
+            {props.t.common.retry}
+          </Button>
+        </Notice>
       )}
-
-      {platform === "macos" && !screenPermission && error?.kind !== "screen-permission" && (
-        <div className={bannerAlertVariants({ tone: "warning" })}>
-          <div className="banner-text">
-            <strong>{t.host.screenPermBannerTitle}</strong>
-            <p>{t.host.screenPermBannerDesc}</p>
-          </div>
-          <div className="banner-actions">
-            <button
-              className={buttonVariants({ variant: "primary", size: "sm" })}
-              onClick={() => void invoke("open_system_settings", { pane: "screencapture" })}
-            >
-              {t.host.openScreenCaptureSettings}
-            </button>
-          </div>
-        </div>
+      {settingsError && (
+        <Notice
+          tone="error"
+          className="flex flex-wrap items-center justify-between gap-3"
+        >
+          <Text>{settingsError}</Text>
+          <Button
+            variant="secondary"
+            busy={openingPane !== null}
+            onClick={() => void openPane(lastPane.current)}
+          >
+            {props.t.common.retry}
+          </Button>
+        </Notice>
       )}
-
-      {inputActionError && (
-        <div className={bannerAlertVariants({ tone: "danger" })}>
-          <div className="banner-text">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <AlertTriangle size={16} /> {inputActionError}
-            </span>
-          </div>
-          {platform === "macos" && (
-            <button className={buttonVariants({ variant: "ghost", size: "sm" })} onClick={onOpenAccessibility}>
-              {t.host.btnOpenSettings}
-            </button>
-          )}
-        </div>
-      )}
-
-      {!inputPermission && platform === "macos" && (
-        <div className={bannerAlertVariants({ tone: "warning" })}>
-          <div className="banner-text">
-            <strong>{t.host.inputPermBannerTitle}</strong>
-            <p>{t.host.inputPermBannerDesc}</p>
-          </div>
-          <div className="banner-actions">
-            <button
-              className={buttonVariants({ variant: "primary", size: "sm" })}
-              disabled={inputBusy === "permission"}
-              onClick={onRequestPermission}
-            >
-              {inputBusy === "permission" ? t.host.checkingPerm : t.host.btnGrantPerm}
-            </button>
-            <button
-              className={buttonVariants({ variant: "ghost", size: "sm" })}
-              onClick={onOpenAccessibility}
-              title={t.host.btnOpenSettings}
-            >
-              {t.host.btnOpenSettings}
-            </button>
-          </div>
-        </div>
-      )}
+      <InputPermissionNotice {...props} />
     </>
   );
 }
-
 export default SystemAlertBanners;

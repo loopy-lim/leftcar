@@ -1,11 +1,16 @@
-import { useCallback, useState } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { View } from "react-native";
 import { interpolate } from "@leftcar/ui-tokens";
 import type { ThemeTokens } from "./theme";
 import { useAppLanguage } from "./i18n";
 import { currentTranslation } from "./language-store";
 import { formatErrorMessage } from "./control";
-import { requestWithReconnect } from "./catalog-helpers";
+import { requestForCurrentSelection } from "./catalog-helpers";
+import {
+  captureRequestContext,
+  isRequestContextCurrent,
+  type SessionRequestContext,
+} from "./session";
 import {
   listShareQueue,
   mapFileTransferError,
@@ -15,196 +20,280 @@ import {
   type ShareQueueEntry,
 } from "./file-transfer";
 import { getFileIo } from "./file-io";
+import { Action, Label, Notice, Surface } from "./ui/primitives";
 
-/**
- * 파일 전송 카드(카탈로그 화면): 호스트 공유 대기열 받기 + 문서 선택기로
- * 작은 파일 보내기. 게이트는 호스트 설정이므로 꺼져 있으면 명령이 오류로
- * 답하고, 그 문구를 여기서 번역한다.
- */
-
-/** requestWithReconnect를 file-transfer의 클라이언트 인터페이스로 맞춘다. */
-const reconnectClient: FileTransferClient = {
-  request: <T,>(command: string, args?: unknown) => requestWithReconnect<T>(command, args),
+type TransferAction = {
+  controller: AbortController;
+  origin: SessionRequestContext;
+  client: FileTransferClient;
 };
-
 function formatFileBytes(size: number): string {
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   if (size >= 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
   return `${size} B`;
 }
-
 function fileTransferErrorText(error: unknown): string {
   const key = mapFileTransferError(error);
-  if (key) {
-    const viewer = currentTranslation().viewer as Record<string, string>;
-    const template = viewer[key];
-    if (template) return template.replace("{detail}", String(error));
-  }
-  return formatErrorMessage(error);
+  const viewer = currentTranslation().viewer as Record<string, string>;
+  return key && viewer[key]
+    ? viewer[key].replace("{detail}", String(error))
+    : formatErrorMessage(error);
 }
-
-export function FileTransferCard({ colors }: { colors: ThemeTokens }) {
+export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
   const { t } = useAppLanguage();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [queue, setQueue] = useState<ReadonlyArray<ShareQueueEntry> | null>(null);
-
-  const beginAction = useCallback(() => {
+  const [destination, setDestination] = useState<string | null>(null);
+  const [percent, setPercent] = useState<number | null>(null);
+  const [queue, setQueue] = useState<ReadonlyArray<ShareQueueEntry> | null>(
+    null,
+  );
+  const queueOrigin = useRef<SessionRequestContext | null>(null);
+  const retryAction = useRef<(() => Promise<void>) | null>(null);
+  const actionRef = useRef<TransferAction | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      actionRef.current?.controller.abort();
+    };
+  }, []);
+  const beginAction = useCallback((): TransferAction | null => {
+    if (actionRef.current) return null;
+    const origin = captureRequestContext();
+    if (!origin) {
+      setError(t.viewer.notConnectedError);
+      return null;
+    }
+    const action = {
+      controller: new AbortController(),
+      origin,
+      client: {
+        request: requestForCurrentSelection(
+          `${origin.target.host}:${origin.target.port}`,
+        ),
+      },
+    };
+    actionRef.current = action;
     setBusy(true);
     setError(null);
     setStatus(null);
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    beginAction();
+    setPercent(null);
+    setDestination(null);
+    return action;
+  }, [t]);
+  const current = (action: TransferAction) => {
+    const context = captureRequestContext();
+    return (
+      mounted.current &&
+      actionRef.current === action &&
+      !action.controller.signal.aborted &&
+      context !== null &&
+      isRequestContextCurrent(context) &&
+      context.selectionGeneration === action.origin.selectionGeneration
+    );
+  };
+  const assertCurrent = (action: TransferAction) => {
+    if (
+      !current(action) ||
+      captureRequestContext()?.selectionGeneration !==
+        action.origin.selectionGeneration
+    ) {
+      const failure = new Error(t.viewer.fileHostChanged);
+      failure.name = "AbortError";
+      throw failure;
+    }
+  };
+  const finish = (action: TransferAction) => {
+    if (actionRef.current === action) {
+      actionRef.current = null;
+      if (mounted.current) setBusy(false);
+    }
+  };
+  const failed = (action: TransferAction, cause: unknown) => {
+    if (
+      mounted.current &&
+      actionRef.current === action &&
+      !action.controller.signal.aborted
+    ) {
+      setPercent(null);
+      setError(fileTransferErrorText(cause));
+    }
+  };
+  const handleSend = async () => {
+    const action = beginAction();
+    if (!action) return;
+    retryAction.current = handleSend;
     try {
-      const picked = await getFileIo().pickSendFile();
-      if (!picked) {
-        setBusy(false);
+      setStatus(t.viewer.fileChoosing);
+      const file = await getFileIo().pickSendFile();
+      assertCurrent(action);
+      if (!file) {
+        setStatus(null);
         return;
       }
-      setStatus(interpolate(t.viewer.fileProgress, { percent: 0 }));
-      const sent = await sendFile(
-        reconnectClient,
-        picked,
-        (progress) =>
-          setStatus(interpolate(t.viewer.fileProgress, { percent: progress.percent })),
+      setStatus(
+        `${t.viewer.fileSending}: ${file.name} · ${formatFileBytes(file.size)}`,
       );
+      const sent = await sendFile(
+        action.client,
+        file,
+        (progress) => {
+          if (current(action)) setPercent(progress.percent);
+        },
+        { signal: action.controller.signal },
+      );
+      assertCurrent(action);
       setStatus(interpolate(t.viewer.fileSendDone, { name: sent.name }));
+      setDestination(sent.path);
+      setPercent(null);
     } catch (cause) {
-      setError(fileTransferErrorText(cause));
+      failed(action, cause);
     } finally {
-      setBusy(false);
+      finish(action);
     }
-  }, [beginAction, t]);
-
-  const handleReceive = useCallback(async () => {
-    beginAction();
+  };
+  const handleReceive = async () => {
+    const action = beginAction();
+    if (!action) return;
+    retryAction.current = handleReceive;
     try {
-      const entries = await listShareQueue(reconnectClient);
-      if (entries.length === 0) {
-        setQueue(null);
-        setStatus(t.viewer.fileShareEmpty);
-        return;
-      }
+      setStatus(t.viewer.fileLoading);
+      const entries = await listShareQueue(action.client);
+      assertCurrent(action);
+      queueOrigin.current = action.origin;
       setQueue(entries);
+      setStatus(entries.length ? null : t.viewer.fileShareEmpty);
     } catch (cause) {
-      setError(fileTransferErrorText(cause));
+      failed(action, cause);
     } finally {
-      setBusy(false);
+      finish(action);
     }
-  }, [beginAction, t]);
-
-  const handleFetchEntry = useCallback(
-    async (entry: ShareQueueEntry) => {
-      beginAction();
-      try {
-        const received = await receiveFile(reconnectClient, entry, {
-          createSink: (name) => getFileIo().createReceivedSink(name),
-          onProgress: (progress) =>
-            setStatus(interpolate(t.viewer.fileProgress, { percent: progress.percent })),
-        });
-        setStatus(interpolate(t.viewer.fileReceiveDone, { name: received.name }));
-        setQueue(null);
-      } catch (cause) {
-        setError(fileTransferErrorText(cause));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [beginAction, t],
-  );
-
-  const cardStyle = {
-    gap: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.borderSubtle,
-    backgroundColor: colors.bgSurface,
-    padding: 12,
   };
-  const actionButtonStyle = {
-    minHeight: 44,
-    flex: 1,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.borderSubtle,
-    backgroundColor: colors.bgSubtle,
-    alignItems: "center" as const,
-    justifyContent: "center" as const,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    flexDirection: "row" as const,
-    gap: 6,
+  const handleFetchEntry = async (entry: ShareQueueEntry) => {
+    if (
+      !queueOrigin.current ||
+      captureRequestContext()?.selectionGeneration !==
+        queueOrigin.current.selectionGeneration
+    ) {
+      setQueue(null);
+      setError(t.viewer.fileHostChanged);
+      return;
+    }
+    const action = beginAction();
+    if (!action) return;
+    retryAction.current = () => handleFetchEntry(entry);
+    try {
+      setStatus(`${t.viewer.fileReceiving}: ${entry.name}`);
+      setPercent(0);
+      const received = await receiveFile(action.client, entry, {
+        signal: action.controller.signal,
+        createSink: async (name) => {
+          assertCurrent(action);
+          return getFileIo().createReceivedSink(name);
+        },
+        onProgress: (progress) => {
+          if (current(action)) setPercent(progress.percent);
+        },
+      });
+      assertCurrent(action);
+      setStatus(interpolate(t.viewer.fileReceiveDone, { name: received.name }));
+      setDestination(received.path);
+      setPercent(null);
+      setQueue(
+        (items) =>
+          items?.filter((item) => item.queueId !== entry.queueId) ?? null,
+      );
+    } catch (cause) {
+      failed(action, cause);
+    } finally {
+      finish(action);
+    }
   };
-
+  const cancel = () => {
+    actionRef.current?.controller.abort();
+    setStatus(t.viewer.fileCancelled);
+    setPercent(null);
+  };
+  const host = captureRequestContext()?.target;
   return (
-    <View style={cardStyle}>
-      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-        {t.viewer.fileTitle}
-      </Text>
-      <View style={{ flexDirection: "row", gap: 8 }}>
-        <Pressable
-          style={({ pressed }) => [actionButtonStyle, pressed && !busy && { opacity: 0.7 }]}
+    <Surface className="gap-4">
+      {host ? (
+        <Label variant="code" tone="muted">
+          {host.host}:{host.port}
+        </Label>
+      ) : null}
+      <Label tone="muted">{t.viewer.fileHostGateHint}</Label>
+      <View className="flex-row flex-wrap gap-2">
+        <Action
+          variant="secondary"
+          className="grow"
+          label={t.viewer.fileReceive}
+          disabled={busy}
           onPress={() => void handleReceive()}
+        />
+        <Action
+          variant="secondary"
+          className="grow"
+          label={t.viewer.fileSend}
           disabled={busy}
-          accessibilityRole="button"
-          accessibilityLabel={t.viewer.fileReceive}
-        >
-          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-            {t.viewer.fileReceive}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [actionButtonStyle, pressed && !busy && { opacity: 0.7 }]}
           onPress={() => void handleSend()}
-          disabled={busy}
-          accessibilityRole="button"
-          accessibilityLabel={t.viewer.fileSend}
-        >
-          <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textPrimary }}>
-            {t.viewer.fileSend}
-          </Text>
-        </Pressable>
+        />
       </View>
-
-      {busy ? <ActivityIndicator size="small" color={colors.textPrimary} /> : null}
-      {status ? (
-        <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textSecondary }} numberOfLines={2}>
-          {status}
-        </Text>
-      ) : null}
-      {error ? (
-        <Text style={{ fontSize: 12, lineHeight: 16, color: colors.textPrimary }} role="alert">
-          {error}
-        </Text>
-      ) : null}
-      {queue && queue.length > 0 ? (
-        <View style={{ gap: 6 }}>
-          {queue.map((entry) => (
-            <Pressable
-              key={entry.queueId}
-              style={({ pressed }) => [
-                actionButtonStyle,
-                { justifyContent: "space-between" },
-                pressed && !busy && { opacity: 0.7 },
-              ]}
-              onPress={() => void handleFetchEntry(entry)}
-              disabled={busy}
-              accessibilityRole="button"
-              accessibilityLabel={`${t.viewer.fileReceive}: ${entry.name}`}
-            >
-              <Text style={{ fontSize: 12, color: colors.textPrimary, flexShrink: 1 }} numberOfLines={1}>
-                {entry.name}
-              </Text>
-              <Text style={{ fontSize: 12, color: colors.textMuted }}>
-                {formatFileBytes(entry.size)}
-              </Text>
-            </Pressable>
-          ))}
+      {status ? <Label accessibilityLiveRegion="polite">{status}</Label> : null}
+      {percent !== null ? (
+        <View
+          className="gap-2"
+          accessibilityRole="progressbar"
+          accessibilityValue={{ min: 0, max: 100, now: percent }}
+          accessibilityLabel={t.viewer.fileTitle}
+        >
+          <View className="h-1 overflow-hidden rounded bg-subtle">
+            <View className="h-full bg-ink" style={{ width: `${percent}%` }} />
+          </View>
+          <Label variant="code">
+            {interpolate(t.viewer.fileProgress, { percent })}
+          </Label>
         </View>
       ) : null}
-    </View>
+      {busy ? (
+        <Action variant="ghost" onPress={cancel} label={t.common.cancel} />
+      ) : null}
+      {error ? (
+        <Notice tone="error">
+          <Label>{error}</Label>
+          <Action
+            variant="secondary"
+            disabled={busy}
+            onPress={() => {
+              if (retryAction.current) void retryAction.current();
+            }}
+            label={t.common.retry}
+          />
+        </Notice>
+      ) : null}
+      {destination ? (
+        <Label variant="caption" tone="muted" selectable>
+          {interpolate(t.viewer.fileSavedAt, { path: destination })}
+        </Label>
+      ) : null}
+      {queue?.map((entry) => (
+        <Surface variant="inset" key={entry.queueId}>
+          <Label>{entry.name}</Label>
+          <Label variant="code" tone="muted">
+            {formatFileBytes(entry.size)}
+          </Label>
+          <Action
+            variant="secondary"
+            label={t.viewer.fileReceive}
+            accessibilityLabel={`${t.viewer.fileReceive}: ${entry.name}`}
+            disabled={busy}
+            onPress={() => void handleFetchEntry(entry)}
+          />
+        </Surface>
+      ))}
+    </Surface>
   );
 }

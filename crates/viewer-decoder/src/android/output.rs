@@ -24,7 +24,8 @@ pub fn monotonic_now_ns() -> u64 {
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
-    (ts.tv_sec as u64).saturating_mul(1_000_000_000)
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64)
 }
 

@@ -125,6 +125,52 @@ class FakeHost {
   source = new Uint8Array(0);
 }
 
+describe("file transfer cancellation", () => {
+  it("does not send picked file bytes after cancellation during a local read", async () => {
+    const host = new FakeHost();
+    const action = new AbortController();
+    const source = {
+      name: "private.txt",
+      size: 1,
+      readBase64: async () => {
+        action.abort();
+        return "eA==";
+      },
+    };
+    await expect(sendFile(host.client, source, undefined, { signal: action.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(host.requests.map((request) => request.command)).toEqual([
+      "sendFileBegin", "sendFileCancel",
+    ]);
+  });
+
+  it("cancels the Host token if local receive staging cannot be created", async () => {
+    const host = new FakeHost();
+    const storageError = new Error("device storage unavailable");
+    await expect(receiveFile(host.client, { queueId: "queue-1" }, {
+      createSink: async () => { throw storageError; },
+    })).rejects.toBe(storageError);
+    expect(host.requests.map((request) => request.command)).toEqual([
+      "fetchFileBegin", "fetchFileCancel",
+    ]);
+  });
+
+  it("discards newly created receive staging when the action was cancelled", async () => {
+    const host = new FakeHost();
+    const action = new AbortController();
+    const sink = new MemorySink();
+    await expect(receiveFile(host.client, { queueId: "queue-1" }, {
+      signal: action.signal,
+      createSink: async () => { action.abort(); return sink; },
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(sink.discarded).toBe(true);
+    expect(sink.finalized).toBe(false);
+    expect(host.requests.map((request) => request.command)).toEqual([
+      "fetchFileBegin", "fetchFileCancel",
+    ]);
+  });
+});
+
 
 /** 테스트용 업로드 원본 — Uint8Array를 readBase64 범위 읽기로 노출한다. */
 function sourceFromBytes(name: string, bytes: Uint8Array) {

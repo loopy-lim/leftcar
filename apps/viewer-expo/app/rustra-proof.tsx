@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { View } from "react-native";
+import { Label } from "../src/ui/primitives";
 import { initializeRustra } from "../src/rustra";
 import { GENERATED_CONTRACT_HASH } from "../generated/contract";
 
@@ -16,7 +17,10 @@ export default function RustraProofScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const out = await initializeRustra().commands.addNumbers({ a: 20, b: 22 });
+        const out = await initializeRustra().commands.addNumbers({
+          a: 20,
+          b: 22,
+        });
         if (!cancelled) setResult(`value=${out.value}`);
       } catch (error) {
         if (!cancelled) setResult(`error=${String(error)}`);
@@ -28,9 +32,13 @@ export default function RustraProofScreen() {
   }, []);
 
   return (
-    <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text testID="rustra-proof-result">{result}</Text>
-      <Text testID="rustra-proof-hash">{GENERATED_CONTRACT_HASH.slice(0, 16)}</Text>
+    <View className="flex-1 items-center justify-center gap-3 bg-canvas px-4">
+      <Label variant="code" testID="rustra-proof-result">
+        {result}
+      </Label>
+      <Label variant="code" testID="rustra-proof-hash">
+        {GENERATED_CONTRACT_HASH.slice(0, 16)}
+      </Label>
     </View>
   );
 }

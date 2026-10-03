@@ -1,12 +1,5 @@
 import { useCallback, useState } from "react";
-import {
-  ActivityIndicator,
-  NativeModules,
-  Pressable,
-  Text,
-  View,
-} from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import { NativeModules, View } from "react-native";
 import { router } from "expo-router";
 import type { StreamLauncher } from "../launch-stream";
 import {
@@ -32,48 +25,54 @@ import {
   saveRecentHost,
   type RecentHostItem,
 } from "../recent-hosts";
-import { useAppTheme } from "../theme";
 import { useAppLanguage } from "../i18n";
-import type { HubStyles } from "./hub-styles";
+import { Action, Label, Notice } from "../ui/primitives";
 
-const streamLauncher = NativeModules.StreamLauncher as StreamLauncher | undefined;
+const streamLauncher = NativeModules.StreamLauncher as
+  StreamLauncher | undefined;
 
 async function localViewerAddresses(): Promise<string[]> {
   const discovered = streamLauncher?.getLocalIpv4Addresses
     ? await streamLauncher.getLocalIpv4Addresses().catch(() => [])
     : [];
-  return discovered.filter((address) => typeof address === "string" && address.length > 0);
+  return discovered.filter(
+    (address) => typeof address === "string" && address.length > 0,
+  );
 }
 
 export interface RecentHostQuickConnectProps {
+  signal: AbortSignal | undefined;
   item: RecentHostItem;
-  styles: HubStyles;
   onFinished: () => void;
 }
 
 export function RecentHostQuickConnect({
+  signal,
   item,
-  styles,
   onFinished,
 }: RecentHostQuickConnectProps) {
-  const { colors } = useAppTheme();
   const { t } = useAppLanguage();
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleConnect = useCallback(async () => {
-    if (connecting) return;
+    if (connecting || !signal || signal.aborted) return;
     setConnecting(true);
     setError(null);
     const selection = beginHostSelection();
     let context: SessionRequestContext | null = null;
+    let completed = false;
+    const cancel = () => {
+      if (context && !completed) disconnectHost(context);
+    };
+    signal.addEventListener("abort", cancel, { once: true });
     try {
       const connectedHost = await connectHostWithFallback(
         resolveConnectCandidates(item, await localViewerAddresses()),
         item.port,
-        { selection },
+        { selection, signal },
       );
-      if (!isHostSelectionCurrent(selection)) return;
+      if (signal.aborted || !isHostSelectionCurrent(selection)) return;
       context = captureRequestContext();
       if (!context || !isRequestContextCurrent(context)) return;
       let catalog: CatalogView;
@@ -83,55 +82,57 @@ export function RecentHostQuickConnect({
         if (isUnauthorizedError(e)) {
           await handleUnauthorized({
             context,
+            signal,
             markStale: true,
-            navigate: { endpoint: formatHostEndpoint(connectedHost, item.port) },
+            navigate: {
+              endpoint: formatHostEndpoint(connectedHost, item.port),
+            },
           });
           return;
         }
         throw e;
       }
-      if (!isRequestContextCurrent(context)) return;
+      if (signal.aborted || !isRequestContextCurrent(context)) return;
       void mergeAdvertisedRoutes(
         controlTarget() ?? { host: connectedHost, port: item.port },
         catalog,
       ).catch(() => undefined);
       void saveRecentHost(connectedHost, item.port, item.name);
+      completed = true;
       router.push("/catalog");
     } catch (e) {
-      if (!isHostSelectionCurrent(selection)) return;
+      if (signal.aborted || !isHostSelectionCurrent(selection)) return;
       if (context) disconnectHost(context);
       setError(formatErrorMessage(e));
     } finally {
-      setConnecting(false);
-      onFinished();
+      signal.removeEventListener("abort", cancel);
+      if (signal.aborted && context && !completed) disconnectHost(context);
+      if (!signal.aborted) {
+        setConnecting(false);
+        onFinished();
+      }
     }
-  }, [connecting, item, onFinished]);
+  }, [connecting, item, onFinished, signal]);
 
   return (
-    <View style={styles.recentQuickColumn}>
-      <Pressable
+    <View className="gap-3">
+      <Action
         onPress={() => void handleConnect()}
-        disabled={connecting}
-        style={({ pressed }) => [
-          styles.primaryActionBtn,
-          { flexDirection: "row", gap: 8, marginTop: 4 },
-          pressed && !connecting && styles.btnPressed,
-        ]}
-        accessibilityRole="button"
+        busy={connecting}
+        label={connecting ? t.viewer.connectingToHost : t.viewer.btnOpenScreen}
         accessibilityLabel={`${t.viewer.btnOpenScreen}: ${item.name || item.host}`}
-      >
-        {connecting ? (
-          <ActivityIndicator size="small" color={colors.btnPrimaryText} />
-        ) : (
-          <Ionicons name="play" size={16} color={colors.btnPrimaryText} />
-        )}
-        <Text style={styles.primaryActionText}>
-          {connecting ? t.viewer.connectingToHost : t.viewer.btnOpenScreen}
-        </Text>
-      </Pressable>
-      {error ? <Text style={styles.recentQuickError}>{error}</Text> : null}
+      />
+      {error ? (
+        <Notice tone="error">
+          <Label>{error}</Label>
+          <Action
+            variant="secondary"
+            onPress={() => void handleConnect()}
+            label={t.common.retry}
+          />
+        </Notice>
+      ) : null}
     </View>
   );
 }
-
 export default RecentHostQuickConnect;

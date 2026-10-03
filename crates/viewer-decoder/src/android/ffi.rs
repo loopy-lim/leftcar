@@ -173,5 +173,8 @@ extern "C" {
     /// bionic property read (libc). Used for the presentation-smoothing A/B
     /// switch; absent on host test builds, which only compile this module
     /// under the android target.
-    pub fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32;
+    pub fn __system_property_get(
+        name: *const std::ffi::c_char,
+        value: *mut std::ffi::c_char,
+    ) -> i32;
 }

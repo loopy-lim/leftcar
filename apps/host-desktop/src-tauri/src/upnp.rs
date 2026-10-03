@@ -387,10 +387,13 @@ fn mapping_plan(control_port: u16) -> Vec<(&'static str, u16, &'static str)> {
 
 /// WAN 포트 매핑의 런타임 상태. 설정 토글(외부 접속 허용)이 즉시 효력을 갖도록
 /// 활성화·해제·갱신을 이 객체 하나에서 조율한다.
+#[derive(Default)]
 pub struct UpnpMappingManager {
     active: tokio::sync::Mutex<Option<ActiveMapping>>,
-    endpoint_notify: std::sync::Mutex<Option<std::sync::Arc<dyn Fn(Option<String>) + Send + Sync>>>,
+    endpoint_notify: std::sync::Mutex<Option<EndpointNotify>>,
 }
+
+type EndpointNotify = std::sync::Arc<dyn Fn(Option<String>) + Send + Sync>;
 
 struct ActiveMapping {
     gateway: UpnpGateway,
@@ -400,18 +403,12 @@ struct ActiveMapping {
 
 impl UpnpMappingManager {
     pub fn new() -> Self {
-        Self {
-            active: tokio::sync::Mutex::new(None),
-            endpoint_notify: std::sync::Mutex::new(None),
-        }
+        Self::default()
     }
 
     /// 공개 미디어 엔드포인트가 바뀔 때 호스트에 알리는 콜백. 상태 스냅숏이 이
     /// 값을 뷰어에 광고하며, 매핑이 없으면 None으로 지운다.
-    pub fn set_endpoint_notify(
-        &self,
-        notify: std::sync::Arc<dyn Fn(Option<String>) + Send + Sync>,
-    ) {
+    pub fn set_endpoint_notify(&self, notify: EndpointNotify) {
         *self.endpoint_notify.lock().unwrap() = Some(notify);
     }
 

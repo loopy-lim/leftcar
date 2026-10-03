@@ -13,6 +13,7 @@ interface FakeSocket {
   destroy(): void;
   emit(event: string, ...args: unknown[]): void;
   written: PendingWrite[];
+  destroyed: boolean;
 }
 
 const sockets: FakeSocket[] = [];
@@ -30,12 +31,13 @@ function makeSocket(): FakeSocket {
       s.written.push({ payload, cb });
     },
     destroy() {
-      /* lifecycle is controlled by the test */
+      s.destroyed = true;
     },
     emit(event, ...args) {
       for (const h of handlers.get(event) ?? []) h(...args);
     },
     written: [],
+    destroyed: false,
   };
   return s;
 }
@@ -458,5 +460,37 @@ describe("FIFO request deadlines", () => {
       await vi.advanceTimersByTimeAsync(5_001);
       expect(await status).toMatchObject({ kind: "timeout" });
     } finally { client.close(); lastSocket().emit("close"); vi.useRealTimers(); }
+  });
+});
+
+
+describe("FIFO write failure isolation", () => {
+  it("rejects every pending request before a late failed-write reply can reach the next request", async () => {
+    const client = await connect("localhost");
+    const socket = lastSocket();
+    const first = client.request("startStream").catch(error => error);
+    const second = client.request("getStatus").catch(error => error);
+    socket.written[0].cb?.(new Error("Broken pipe"));
+    reply(socket, { ok: true, result: { session: 99 } });
+    reply(socket, { ok: true, result: { running: true } });
+
+    expect(await first).toMatchObject({ kind: "transport" });
+    expect(await second).toMatchObject({ kind: "transport" });
+    expect(socket.destroyed).toBe(true);
+    await expect(client.request("getStatus")).rejects.toMatchObject({ kind: "transport" });
+    expect(socket.written).toHaveLength(2);
+  });
+
+  it("terminates the FIFO channel when a later socket.write throws synchronously", async () => {
+    const client = await connect("localhost");
+    const socket = lastSocket();
+    const first = client.request("getStatus").catch(error => error);
+    socket.write = () => { throw new Error("Socket is closed."); };
+    const second = client.request("startStream").catch(error => error);
+    reply(socket, { ok: true, result: { running: true } });
+
+    expect(await second).toMatchObject({ kind: "transport" });
+    expect(await first).toMatchObject({ kind: "transport" });
+    expect(socket.destroyed).toBe(true);
   });
 });

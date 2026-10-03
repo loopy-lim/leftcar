@@ -150,7 +150,9 @@ pub fn render_swift() -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — 편집 금지. 단일 소스는 crates/keymap/src/lib.rs 다.\n");
     out.push_str("// 재생성: cargo run -p keymap --bin gen-swift\n");
-    out.push_str("// Windows 호스트는 같은 표를 Rust에서 직접 소비한다(golden 검사: keymap tests).\n");
+    out.push_str(
+        "// Windows 호스트는 같은 표를 Rust에서 직접 소비한다(golden 검사: keymap tests).\n",
+    );
     out.push_str("enum AndroidKeyMap {\n");
     out.push_str("    /// 안드로이드 키코드 → macOS 가상 키코드. 없는 코드는 미매핑.\n");
     out.push_str("    static let mac: [UInt16: UInt16] = [\n");

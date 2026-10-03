@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import {
-  beginHostSelection,
+  captureRequestContext,
   controlClient,
+  isRequestContextCurrent,
   subscribeConnectionChanged,
 } from "./session";
 import { getRecentHosts, type RecentHostItem } from "./recent-hosts";
@@ -20,7 +21,13 @@ export function useConnectionLost(
     const unsubscribe = subscribeConnectionChanged(() => {
       refreshConnected();
       if (controlClient()) return;
-      void getRecentHosts().then((hosts) => onLost(hosts[0] ?? null));
+      const origin = captureRequestContext();
+      if (!origin) return;
+      void getRecentHosts().then((hosts) => {
+        // A failed catalog probe or explicit disconnect may retire this loss
+        // before storage resolves. It must not start a replacement selection.
+        if (!controlClient() && isRequestContextCurrent(origin)) onLost(hosts[0] ?? null);
+      });
     });
     return unsubscribe;
   }, [onLost, refreshConnected]);

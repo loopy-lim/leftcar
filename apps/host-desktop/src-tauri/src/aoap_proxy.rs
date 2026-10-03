@@ -75,7 +75,7 @@ fn accept_media_connection(
     listener: TcpListener,
     sender: SyncSender<usb_mux::MuxFrame>,
     receiver: Receiver<Vec<u8>>,
-    stop: &std::sync::atomic::AtomicBool,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
 ) {
     let (stream, peer) = loop {
         match listener.accept() {
@@ -107,18 +107,35 @@ fn bridge_media_stream(
     stream: TcpStream,
     sender: SyncSender<usb_mux::MuxFrame>,
     receiver: Receiver<Vec<u8>>,
-    stop: &std::sync::atomic::AtomicBool,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
 ) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
     let writer = Arc::new(std::sync::Mutex::new(stream.try_clone()?));
     let reader_sender = sender;
     let reader_stream = stream;
+    let reader_stop = Arc::clone(stop);
     let reader = thread::spawn(move || -> io::Result<()> {
         let mut decoder = LengthPrefixDecoder::default();
         let mut buffer = [0u8; READ_BUFFER_BYTES];
         let mut stream = reader_stream;
         let mut forwarded = 0usize;
         loop {
-            let size = stream.read(&mut buffer)?;
+            if reader_stop.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(());
+            }
+            let size = match stream.read(&mut buffer) {
+                Ok(size) => size,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error),
+            };
             if size == 0 {
                 eprintln!("USB media proxy shim->viewer EOF after {forwarded} frames");
                 return Ok(());
@@ -132,12 +149,7 @@ fn bridge_media_stream(
                         &payload[..payload.len().min(8)]
                     );
                 }
-                reader_sender
-                    .send(usb_mux::MuxFrame {
-                        channel: usb_mux::CHANNEL_MEDIA,
-                        payload,
-                    })
-                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "USB link closed"))?;
+                send_usb_media_until_stopped(&reader_sender, payload, &reader_stop)?;
             }
         }
     });
@@ -170,7 +182,7 @@ fn bridge_media_stream(
         let result = writer
             .lock()
             .map_err(|_| io::Error::other("USB media writer lock poisoned"))
-            .and_then(|mut stream| stream.write_all(&frame));
+            .and_then(|mut stream| write_capture_frame(&mut stream, &frame, stop));
         if let Err(error) = result {
             write_result = Err(error);
             break;
@@ -181,6 +193,73 @@ fn bridge_media_stream(
     }
     let _ = reader.join();
     write_result
+}
+
+fn send_usb_media_until_stopped(
+    sender: &SyncSender<usb_mux::MuxFrame>,
+    payload: Vec<u8>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    let mut frame = usb_mux::MuxFrame {
+        channel: usb_mux::CHANNEL_MEDIA,
+        payload,
+    };
+    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+        match sender.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(pending)) => {
+                frame = pending;
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "USB link closed"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The whole frame has one deadline; write timeouts alone would reset on
+/// each partial write and let a slow capture peer retain the proxy forever.
+fn write_capture_frame(
+    stream: &mut TcpStream,
+    frame: &[u8],
+    stop: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut offset = 0;
+    while offset < frame.len() {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "USB media proxy stopped",
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "capture peer stopped reading",
+            ));
+        }
+        match stream.write(&frame[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "capture peer closed",
+                ))
+            }
+            Ok(written) => offset += written,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -215,6 +294,67 @@ impl LengthPrefixDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_releases_a_proxy_while_capture_is_not_reading_feedback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut capture = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        capture
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (usb_tx, _usb_rx) = std::sync::mpsc::sync_channel(1);
+        let (feedback_tx, feedback_rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = bridge_media_stream(stream, usb_tx, feedback_rx, &worker_stop);
+            let _ = done.send(result);
+        });
+        feedback_tx.send(vec![42; MAX_FRAME_BYTES]).unwrap();
+        let mut prefix = [0u8; 5];
+        capture.read_exact(&mut prefix).unwrap();
+        // Writing has begun, but the rest exceeds the socket's send buffer.
+        // The capture peer now deliberately stops reading.
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            completed.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "a blocked capture write must observe proxy cancellation"
+        );
+    }
+
+    #[test]
+    fn stop_releases_a_proxy_blocked_by_usb_backpressure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut capture = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (usb_tx, usb_rx) = std::sync::mpsc::sync_channel(1);
+        usb_tx
+            .send(usb_mux::MuxFrame {
+                channel: usb_mux::CHANNEL_MEDIA,
+                payload: b"occupied".to_vec(),
+            })
+            .unwrap();
+        let (feedback_tx, feedback_rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = bridge_media_stream(stream, usb_tx, feedback_rx, &worker_stop);
+            let _ = done.send(result);
+        });
+        capture.write_all(&[0, 0, 0, 1, 42]).unwrap();
+        // Reader progress is observable through the original socket: it has
+        // consumed our complete frame before the stop request.
+        thread::sleep(Duration::from_millis(50));
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            completed.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "USB queue backpressure must not pin a stopped media proxy"
+        );
+        drop((usb_rx, feedback_tx));
+    }
 
     #[test]
     fn length_prefix_decoder_roundtrip() {

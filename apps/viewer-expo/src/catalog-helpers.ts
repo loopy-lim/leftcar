@@ -1,4 +1,5 @@
 import { isControlTransportError } from "./control";
+import { AmbiguousControlError, ControlRequestError } from "./control-error";
 import { LocalizedError } from "./localized-error";
 import {
   bindRequestContext,
@@ -119,6 +120,12 @@ export function catalogErrorMessage(error: unknown): string {
   return message;
 }
 
+// Closed allowlist: unknown/new commands require an explicit safety decision.
+// File chunk reads address an immutable transfer range and can repeat exactly.
+const REPLAYABLE_CONTROL_READS = new Set([
+  "getCatalog", "getStatus", "getClipboard", "listShareQueue", "fetchFileChunk",
+]);
+
 export async function requestWithReconnect<T>(
   command: string,
   args?: unknown,
@@ -130,6 +137,13 @@ export async function requestWithReconnect<T>(
     return await origin.client.request<T>(command, args);
   } catch (error) {
     bindRequestContext(error, origin);
+    const uncertain = isControlTransportError(error) ||
+      (error instanceof ControlRequestError && error.kind === "timeout");
+    if (uncertain && !REPLAYABLE_CONTROL_READS.has(command)) {
+      const ambiguous = new AmbiguousControlError(command, error);
+      bindRequestContext(ambiguous, origin);
+      throw ambiguous;
+    }
     if (!isControlTransportError(error)) throw error;
     const client = await reconnectHost(origin);
     const retry = captureRequestContext();

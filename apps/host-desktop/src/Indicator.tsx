@@ -1,7 +1,12 @@
+import { Text } from "./ui/primitives";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { getTranslation, interpolate, type SupportedLanguage } from "@leftcar/ui-tokens";
+import {
+  getTranslation,
+  interpolate,
+  type SupportedLanguage,
+} from "@leftcar/ui-tokens";
 import { isTerminalSession } from "./streamTermination";
 import type { SessionRow } from "./sessionTypes";
 
@@ -66,41 +71,17 @@ export default function Indicator() {
   }
 
   return (
-    <div
-      style={{
-        boxSizing: "border-box",
-        width: "100%",
-        height: "100vh",
-        margin: 0,
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "0 10px",
-        borderRadius: 8,
-        background: "rgba(9, 9, 11, 0.92)",
-        color: "#fafafa",
-        fontFamily:
-          "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', sans-serif",
-        fontSize: 12,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        userSelect: "none",
-        WebkitUserSelect: "none",
-      }}
-    >
+    <div className="flex h-dvh w-full select-none items-center gap-2 overflow-hidden rounded-md bg-curtain px-3 text-curtain-ink">
       <span
         aria-hidden="true"
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: "50%",
-          background: "#f43f5e",
-          boxShadow: "0 0 6px rgba(244, 63, 94, 0.9)",
-          flexShrink: 0,
-        }}
+        className="h-2 w-2 shrink-0 rounded-full bg-curtain-ink"
       />
-      <span>{interpolate(t.host.indicatorStreaming, { count: connectedCount })}</span>
+      <Text
+        variant="caption"
+        className="whitespace-nowrap font-semibold text-curtain-ink"
+      >
+        {interpolate(t.host.indicatorStreaming, { count: connectedCount })}
+      </Text>
     </div>
   );
 }

@@ -9,16 +9,23 @@ pub mod audit;
 pub mod backend;
 pub mod clipboard;
 pub mod control;
+mod dashboard;
 pub mod fec;
 #[cfg(target_os = "macos")]
 pub mod ffi;
 pub mod file_transfer;
 pub mod identity;
+#[cfg(any(target_os = "windows", test))]
+mod input_gate;
 pub mod media_pacing;
+#[cfg(any(target_os = "windows", test))]
+mod media_sender;
 pub mod pairing;
 pub mod settings;
 pub mod source_grants;
 mod state_profile;
+#[cfg(any(target_os = "windows", test))]
+mod tcp_media;
 pub mod upnp;
 pub mod virtual_display;
 pub mod window_metrics;
@@ -64,6 +71,34 @@ fn set_dashboard_dock_visibility(app: &tauri::AppHandle, presentation: Dashboard
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, presentation);
+}
+
+impl dashboard::DashboardWindow for tauri::WebviewWindow {
+    type Error = tauri::Error;
+
+    fn show(&self) -> Result<(), Self::Error> {
+        tauri::WebviewWindow::show(self)
+    }
+
+    fn unminimize(&self) -> Result<(), Self::Error> {
+        tauri::WebviewWindow::unminimize(self)
+    }
+
+    fn restore_dock(&self) {
+        set_dashboard_dock_visibility(self.app_handle(), DashboardPresentation::Visible);
+    }
+
+    fn focus(&self) -> Result<(), Self::Error> {
+        self.set_focus()
+    }
+}
+
+fn show_dashboard(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = dashboard::restore(&window) {
+            eprintln!("Leftcar Host dashboard restore failed: {error}");
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -167,14 +202,17 @@ pub fn run() {
     let backend = platform_backend().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = backend.clone();
     // 호스트 정체 키: QR과 핸드셰이크 서명의 뿌리. 최초 기동에서 생성·영속된다.
-    let identity = Arc::new(identity::load_or_create(
-        (if profile.is_benchmark() {
-            profile.file("host_identity.json")
-        } else {
-            identity::default_identity_path()
-        })
-        .as_deref(),
-    ));
+    let identity = Arc::new(
+        identity::load_or_create(
+            (if profile.is_benchmark() {
+                profile.file("host_identity.json")
+            } else {
+                identity::default_identity_path()
+            })
+            .as_deref(),
+        )
+        .unwrap_or_else(|message| fatal_startup_error(message)),
+    );
     let pairing_store_path = if profile.is_benchmark() {
         profile.file("paired_devices.json")
     } else {
@@ -392,14 +430,7 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip(tray_tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.show().is_ok() {
-                                set_dashboard_dock_visibility(app, DashboardPresentation::Visible);
-                                let _ = window.set_focus();
-                            }
-                        }
-                    }
+                    "show" => show_dashboard(app),
                     "pairing" => show_pairing_window(app),
                     "quit" => app.exit(0),
                     _ => {}
@@ -409,12 +440,7 @@ pub fn run() {
             // The dashboard window can lose its first-show race on slow
             // AppKit startups. Show+focus defensively; users reported the
             // app appearing to "not launch" when only the tray existed.
-            if let Some(window) = app.get_webview_window("main") {
-                if window.show().is_ok() {
-                    set_dashboard_dock_visibility(app.handle(), DashboardPresentation::Visible);
-                    let _ = window.set_focus();
-                }
-            }
+            show_dashboard(app.handle());
 
             Ok(())
         })
@@ -433,20 +459,26 @@ pub fn run() {
                 }
             } else if window.label() == "pairing" {
                 if let WindowEvent::CloseRequested { .. } = event {
-                    // The pairing window is a plain closable window (close is
-                    // NOT prevented). The QR secret lives until canceled and
-                    // webview teardown cannot run React cleanup, so burn every
-                    // live offer here (pairing.rs cancel_active).
+                    // React teardown may not run when a native window closes.
+                    // Burn only this window's offer, preserving a newer QR
+                    // opened from the dashboard.
                     window
                         .app_handle()
                         .state::<Arc<pairing::PairingServer>>()
-                        .cancel_active();
+                        .cancel_view_offers(window.label());
                 }
             }
         })
         .build(tauri::generate_context!())
         .expect("tauri build")
         .run(|app, event| {
+            // Reopening an already-running macOS app does not run setup again.
+            // Other windows (pairing/indicator) may be visible while main is
+            // hidden, so restore main regardless of has_visible_windows.
+            #[cfg(target_os = "macos")]
+            if matches!(&event, tauri::RunEvent::Reopen { .. }) {
+                show_dashboard(app);
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 // WAN 포트 매핑을 종료 때 즉시 치운다. 응답 없는 게이트웨이 앞에서
                 // 종료가 붙잡히지 않게 3초로 잘라내고, 못 치운 매핑은 lease(1시간)가
@@ -859,16 +891,26 @@ fn force_stop_session(
 
 #[tauri::command]
 fn begin_pairing(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
     endpoint: tauri::State<'_, ControlEndpoint>,
 ) -> Result<pairing::PairingSessionView, String> {
     let ip = local_lan_ip().ok_or("no LAN interface found")?;
-    Ok(state.begin_pairing_with_tailnet(&ip, endpoint.port, tailscale_ip().as_deref()))
+    Ok(state.begin_pairing_for_view(
+        &ip,
+        endpoint.port,
+        tailscale_ip().as_deref(),
+        window.label(),
+    ))
 }
 
 #[tauri::command]
-fn cancel_pairing(state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>) {
-    state.cancel_active();
+fn cancel_pairing(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, std::sync::Arc<pairing::PairingServer>>,
+    offer_id: String,
+) -> bool {
+    state.cancel_for_view(&offer_id, window.label())
 }
 
 #[tauri::command]
@@ -1317,7 +1359,7 @@ fn set_file_share(
 async fn add_share_files(
     server: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
     settings: tauri::State<'_, std::sync::Arc<settings::SharedSettings>>,
-) -> Result<Vec<file_transfer::ShareQueueEntry>, String> {
+) -> Result<file_transfer::AddShareFilesResult, String> {
     let server = server.inner().clone();
     let dialog_title = match settings.language() {
         settings::HostLanguage::Ko => "Leftcar — 파일 공유",
@@ -1331,15 +1373,7 @@ async fn add_share_files(
     })
     .await
     .map_err(|error| format!("file dialog failed: {error:?}"))?;
-    let transfers = server.file_transfer_state();
-    let mut entries = Vec::new();
-    for path in picked {
-        match transfers.add_share_file(path) {
-            Ok(entry) => entries.push(entry),
-            Err(error) => eprintln!("leftcar: shared file rejected: {error}"),
-        }
-    }
-    Ok(entries)
+    Ok(server.file_transfer_state().add_share_files(picked))
 }
 
 #[tauri::command]

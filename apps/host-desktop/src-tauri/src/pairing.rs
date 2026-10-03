@@ -46,6 +46,7 @@ struct Inner {
     /// PairingService — its copy is the only one, zeroized on approve/cancel;
     /// the QR payload already carries the base64url form for the viewer).
     live_offers: std::collections::HashSet<String>,
+    offer_owner: Option<OfferOwner>,
     /// QR 시크릿을 제시했지만 Mac 사용자의 허용을 기다리는 요청.
     pending: HashMap<String, PendingPairing>,
     /// 승인이 끝나고 뷰어 폴링이 픽업할 토큰. 픽업 요청이 같은 시크릿의
@@ -54,6 +55,11 @@ struct Inner {
     /// Mac 사용자가 명시적으로 거절한 offer. 폴링에 "거절됨"을 알리기 위해
     /// 다음 offer 생성까지 보관한다.
     rejected: HashSet<String>,
+}
+
+struct OfferOwner {
+    offer_id: String,
+    view: String,
 }
 
 /// A pairing incarnation, invalidated by any credential or authorization change.
@@ -149,6 +155,7 @@ pub struct RevokeOutcome {
 
 #[derive(serde::Serialize)]
 pub struct PairingSessionView {
+    pub offer_id: String,
     pub qr_payload: String,
     pub code: String,
     pub expires_in_secs: u64,
@@ -268,6 +275,7 @@ impl PairingServer {
                 paired,
                 authorization_generation: 0,
                 live_offers: std::collections::HashSet::new(),
+                offer_owner: None,
                 pending: HashMap::new(),
                 completed: HashMap::new(),
                 rejected: HashSet::new(),
@@ -298,6 +306,26 @@ impl PairingServer {
         host_ip: &str,
         port: u16,
         tailscale_ip: Option<&str>,
+    ) -> PairingSessionView {
+        self.begin_pairing_owned(host_ip, port, tailscale_ip, None)
+    }
+
+    pub fn begin_pairing_for_view(
+        &self,
+        host_ip: &str,
+        port: u16,
+        tailscale_ip: Option<&str>,
+        view: &str,
+    ) -> PairingSessionView {
+        self.begin_pairing_owned(host_ip, port, tailscale_ip, Some(view))
+    }
+
+    fn begin_pairing_owned(
+        &self,
+        host_ip: &str,
+        port: u16,
+        tailscale_ip: Option<&str>,
+        owner_view: Option<&str>,
     ) -> PairingSessionView {
         let mut inner = self.inner.lock().unwrap();
         // Replacing the QR must invalidate every older image immediately. A
@@ -342,12 +370,56 @@ impl PairingServer {
         let payload = payload.to_string();
         drop(secret); // OfferSecret drops -> zeroized immediately
         let view = PairingSessionView {
+            offer_id: offer.ephemeral_offer_id.clone(),
             code: offer.human_verification_code.clone(),
             expires_in_secs: session::PAIRING_TTL.as_secs(),
             qr_payload: payload,
         };
+        inner.offer_owner = owner_view.map(|view| OfferOwner {
+            offer_id: offer.ephemeral_offer_id.clone(),
+            view: view.to_owned(),
+        });
         inner.live_offers.insert(offer.ephemeral_offer_id);
         view
+    }
+
+    /// Stale cleanup from one panel must not revoke a newer panel's QR.
+    pub fn cancel_for_view(&self, offer_id: &str, view: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .offer_owner
+            .as_ref()
+            .is_some_and(|owner| owner.offer_id == offer_id && owner.view == view)
+        {
+            return false;
+        }
+        Self::cancel_owned_offer(&mut inner, offer_id);
+        true
+    }
+
+    /// Native window teardown may run after React cleanup is unavailable.
+    pub fn cancel_view_offers(&self, view: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(offer_id) = inner
+            .offer_owner
+            .as_ref()
+            .filter(|owner| owner.view == view)
+            .map(|owner| owner.offer_id.clone())
+        else {
+            return false;
+        };
+        Self::cancel_owned_offer(&mut inner, &offer_id);
+        true
+    }
+
+    fn cancel_owned_offer(inner: &mut Inner, offer_id: &str) {
+        inner.service.cancel(offer_id);
+        inner.live_offers.remove(offer_id);
+        inner.fail_counts.remove(offer_id);
+        inner.pending.remove(offer_id);
+        inner.completed.remove(offer_id);
+        inner.rejected.remove(offer_id);
+        inner.offer_owner = None;
     }
 
     /// Complete pairing: verify secret possession + human code, issue a
@@ -667,6 +739,7 @@ impl PairingServer {
         inner.pending.clear();
         inner.completed.clear();
         inner.rejected.clear();
+        inner.offer_owner = None;
     }
 
     /// Denial is effective even if persistence fails; the caller must surface the outcome.
@@ -1298,6 +1371,64 @@ impl TokenStore for FileTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_view_cancellation_preserves_a_newer_pairing_offer() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
+        let old = server.begin_pairing_for_view("127.0.0.1", 7777, None, "pairing");
+        let current = server.begin_pairing_for_view("127.0.0.1", 7777, None, "main");
+        server.cancel_for_view(&old.offer_id, "pairing");
+        let payload: serde_json::Value = serde_json::from_str(&current.qr_payload).unwrap();
+        assert!(
+            server
+                .pair(
+                    &current.offer_id,
+                    payload["s"].as_str().unwrap(),
+                    &current.code,
+                    "viewer-1",
+                    "Viewer",
+                )
+                .is_ok(),
+            "closing an old view must not burn another view's current QR"
+        );
+    }
+
+    #[test]
+    fn closing_a_pairing_webview_preserves_the_dashboard_offer() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
+        let current = server.begin_pairing_for_view("127.0.0.1", 7777, None, "main");
+        server.cancel_view_offers("pairing");
+        let payload: serde_json::Value = serde_json::from_str(&current.qr_payload).unwrap();
+        assert!(
+            server
+                .pair(
+                    &current.offer_id,
+                    payload["s"].as_str().unwrap(),
+                    &current.code,
+                    "viewer-1",
+                    "Viewer",
+                )
+                .is_ok(),
+            "native close must only cancel the closing window's offer"
+        );
+    }
+
+    #[test]
+    fn the_owner_can_cancel_its_current_offer() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
+        let current = server.begin_pairing_for_view("127.0.0.1", 7777, None, "pairing");
+        assert!(server.cancel_for_view(&current.offer_id, "pairing"));
+        let payload: serde_json::Value = serde_json::from_str(&current.qr_payload).unwrap();
+        assert!(server
+            .pair(
+                &current.offer_id,
+                payload["s"].as_str().unwrap(),
+                &current.code,
+                "viewer-1",
+                "Viewer",
+            )
+            .is_err());
+    }
 
     fn temp_store_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

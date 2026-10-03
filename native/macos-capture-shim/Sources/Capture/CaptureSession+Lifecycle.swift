@@ -111,31 +111,76 @@ extension CaptureSession {
         }
     }
 
-    /// Best-effort authenticated termination notice so a live viewer can close
-    /// its window immediately instead of waiting for its own stale-frame
-    /// timeout. A dead viewer simply never receives it. The notice itself is
-    /// sealed at the socket boundary like every other host datagram.
+    /// Lifecycle output has only this fixed terminal packet. Revoking a source
+    /// still fences every ordinary media/input operation; it must not suppress
+    /// the notification that tells the already-authenticated viewer to retire.
     func notifyViewerTermination(code: UInt8, reason: String) {
+        if (1...3).contains(code) { sendTerminalNotice(code: code) }
+        markStopped(reason)
+    }
+
+    private func sendTerminalNotice(code: UInt8) {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 100_000_000
         stateLock.lock()
-        let fd = sock
+        // Own this descriptor while stop() closes the session's descriptor.
+        // A later session reusing its integer fd cannot receive this notice.
+        let fd = sock >= 0 ? dup(sock) : -1
         stateLock.unlock()
-        guard fd >= 0 else {
-            markStopped(reason)
-            return
-        }
+        guard fd >= 0 else { return }
+        defer { close(fd) }
         var notice = Data("LCT1".utf8)
         notice.append(code)
+        guard let sealed = mediaCrypto.seal(notice) else { return }
         if mediaTransport.usesTCP {
-            _ = sendTCPFrame(notice, fd: fd)
-            markStopped(reason)
+            var noSigPipe: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size))
+            // Existing admitted media can finish its frame, but teardown never
+            // waits indefinitely for a stalled writer. Do not alter O_NONBLOCK
+            // on a duplicated descriptor (it is shared with the original).
+            while !tcpWriteLock.try() {
+                guard DispatchTime.now().uptimeNanoseconds < deadline else { return }
+                usleep(1_000)
+            }
+            defer { tcpWriteLock.unlock() }
+            var length = UInt32(sealed.count).bigEndian
+            var framed = Data()
+            withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
+            framed.append(sealed)
+            framed.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count && terminalWritable(fd: fd, until: deadline) {
+                    let sent = Darwin.send(fd, raw.baseAddress!.advanced(by: offset),
+                        raw.count - offset, MSG_DONTWAIT)
+                    if sent > 0 { offset += sent }
+                    else if errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK { break }
+                }
+            }
             return
         }
-        // Send twice: one datagram may be lost exactly when the network that
-        // killed the feedback stream is degrading.
-        _ = sendToViewer(notice, fd: fd)
-        usleep(20_000)
-        _ = sendToViewer(notice, fd: fd)
-        markStopped(reason)
+        // Two independently sealed attempts keep the existing UDP loss budget.
+        for attempt in 0..<2 {
+            if attempt > 0 { usleep(20_000) }
+            guard terminalWritable(fd: fd, until: deadline),
+                  let packet = attempt == 0 ? sealed : mediaCrypto.seal(notice) else { return }
+            var address = targetAddr // Immutable, admitted session endpoint only.
+            packet.withUnsafeBytes { raw in
+                withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        _ = sendto(fd, raw.baseAddress, raw.count, MSG_DONTWAIT, $0,
+                            socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+        }
+    }
+
+    private func terminalWritable(fd: Int32, until deadline: UInt64) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline else { return false }
+        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let remainingMs = Int32(max(1, (deadline - now) / 1_000_000))
+        return poll(&descriptor, 1, remainingMs) > 0 && descriptor.revents & Int16(POLLOUT) != 0
     }
 
     func markStopped(_ reason: String) {

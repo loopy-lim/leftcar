@@ -103,6 +103,7 @@ const PNG_MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 /// PNG을 RGBA로 디코딩한다(플러그인 write_image가 RGBA만 받는다).
 fn png_to_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
     // 디코더의 중간 버퍼(행 단위)에도 같은 상한을 건다.
     let limits = png::Limits {
         bytes: PNG_MAX_DECODED_BYTES,
@@ -117,14 +118,48 @@ fn png_to_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     if width > PNG_MAX_DIMENSION || height > PNG_MAX_DIMENSION {
         return Err("clipboard image is too large".into());
     }
+    let rgba_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes <= PNG_MAX_DECODED_BYTES)
+        .ok_or("clipboard image is too large")?;
     let decoded = reader.output_buffer_size();
     if decoded > PNG_MAX_DECODED_BYTES {
         return Err("clipboard image is too large".into());
     }
-    let mut rgba = vec![0u8; decoded];
+    let mut pixels = vec![0u8; decoded];
     let info = reader
-        .next_frame(&mut rgba)
+        .next_frame(&mut pixels)
         .map_err(|e| format!("png frame: {e}"))?;
+    pixels.truncate(info.buffer_size());
+    let mut rgba = if info.color_type == png::ColorType::Rgba {
+        Vec::new()
+    } else {
+        Vec::with_capacity(rgba_bytes)
+    };
+    match info.color_type {
+        png::ColorType::Rgba => rgba = pixels,
+        png::ColorType::Rgb => {
+            for pixel in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(pixel);
+                rgba.push(255);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for gray in pixels {
+                rgba.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for pixel in pixels.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        png::ColorType::Indexed => return Err("clipboard PNG palette was not expanded".into()),
+    }
+    if rgba.len() != info.width as usize * info.height as usize * 4 {
+        return Err("clipboard PNG has invalid pixel data".into());
+    }
     Ok((rgba, info.width, info.height))
 }
 
@@ -241,6 +276,79 @@ impl ClipboardBackend for SystemClipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_color_formats_are_normalized_to_rgba8() {
+        for (color, depth, bytes, expected) in [
+            (
+                png::ColorType::Rgb,
+                png::BitDepth::Eight,
+                vec![10, 20, 30],
+                vec![10, 20, 30, 255],
+            ),
+            (
+                png::ColorType::Grayscale,
+                png::BitDepth::Eight,
+                vec![80],
+                vec![80, 80, 80, 255],
+            ),
+            (
+                png::ColorType::GrayscaleAlpha,
+                png::BitDepth::Eight,
+                vec![80, 40],
+                vec![80, 80, 80, 40],
+            ),
+            (
+                png::ColorType::Rgba,
+                png::BitDepth::Sixteen,
+                vec![10, 1, 20, 2, 30, 3, 40, 4],
+                vec![10, 20, 30, 40],
+            ),
+        ] {
+            let mut encoded = Vec::new();
+            let mut encoder = png::Encoder::new(&mut encoded, 1, 1);
+            encoder.set_color(color);
+            encoder.set_depth(depth);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&bytes)
+                .unwrap();
+            let (pixels, width, height) = png_to_rgba(&encoded).unwrap();
+            assert_eq!((width, height), (1, 1));
+            assert_eq!(pixels, expected, "{color:?} {depth:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_png_transparency_is_preserved_in_rgba8() {
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, 1, 1);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_palette(vec![10, 20, 30, 40, 50, 60]);
+        encoder.set_trns(vec![255, 128]);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[1])
+            .unwrap();
+        assert_eq!(png_to_rgba(&encoded).unwrap().0, vec![40, 50, 60, 128]);
+    }
+
+    #[test]
+    fn grayscale_rgba_expansion_is_bounded_before_pixel_decode() {
+        let mut encoded = header_only_png(8192, 8192);
+        // Change IHDR's color type to grayscale and update its CRC. The
+        // source is 64 MiB, but the required RGBA8 image would be 256 MiB.
+        encoded[25] = 0;
+        let crc = crc32(&encoded[12..29]);
+        encoded[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            png_to_rgba(&encoded).unwrap_err(),
+            "clipboard image is too large"
+        );
+    }
 
     fn crc32(data: &[u8]) -> u32 {
         let mut table = [0u32; 256];
