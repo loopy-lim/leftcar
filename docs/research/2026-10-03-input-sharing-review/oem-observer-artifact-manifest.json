@@ -1,0 +1,77 @@
+[
+  {
+    "file": "client-getconnection.smali",
+    "bytes": 896,
+    "sha256": "29c9184059643aae8c64daca0d11415ac6b294a1998ba34ca02daf64911d27de"
+  },
+  {
+    "file": "connection-dynamic.smali",
+    "bytes": 7931,
+    "sha256": "1cbcacf3f0ced85d693482d5b5d786de1d2e77f3f5348980aa991909bafd7ab0"
+  },
+  {
+    "file": "connection-get.smali",
+    "bytes": 1136,
+    "sha256": "cf749fc49bd33dbb64aa75b39c0e806eac302a5d8d366823940f860b3ed2329f"
+  },
+  {
+    "file": "connection-set.smali",
+    "bytes": 6436,
+    "sha256": "9ca076f92d6da60d0c43207facb67098f9ef604f0235b6f074067254647785cc"
+  },
+  {
+    "file": "framework.jar",
+    "bytes": 48528604,
+    "sha256": "1b384aa5dd38e70b35ff00504ee4dcf1a51593545a09629cbd33fd523b496065"
+  },
+  {
+    "file": "info-dynamic.smali",
+    "bytes": 3238,
+    "sha256": "20d1ba5bd2167f5aa60baeb5c9ac2fd09bed00be10cc75fab9626ed4059857f3"
+  },
+  {
+    "file": "service-dispatch-connected.smali",
+    "bytes": 2938,
+    "sha256": "5210ccb354dafe1a98e04b02af855a83088254a6ef76ec74d2c2e769df966edd"
+  },
+  {
+    "file": "service-get.smali",
+    "bytes": 1705,
+    "sha256": "6789ae4913e1849da6fabfd5265ccf4d3a9757c729670290b594f36633fede65"
+  },
+  {
+    "file": "service-getconnectionid.smali",
+    "bytes": 191,
+    "sha256": "2224a37f7457f23624fbf4ec0d681e663d2bc938b83ba2ed27e24d03d61b6408"
+  },
+  {
+    "file": "service-motion-callback.smali",
+    "bytes": 2372,
+    "sha256": "56d06a0891d327cdbd24dfe0000fe938dd2aea5044e981e1de1784da9830909b"
+  },
+  {
+    "file": "service-onbind.smali",
+    "bytes": 942,
+    "sha256": "42b400d64e2afb1eed836a30972983d228024441ad548504d031a4b67a0040c0"
+  },
+  {
+    "file": "service-send.smali",
+    "bytes": 2531,
+    "sha256": "b6a1104c42b860364b39135b94225ce23ff48de49c71f6be2c3db41beacf76dd"
+  },
+  {
+    "file": "service-set.smali",
+    "bytes": 925,
+    "sha256": "0f212919c4a4aa1f6d5b712783c03900d7ebe0e15f8348f50fd6ab6d28b9f482"
+  },
+  {
+    "file": "service-update-ime.smali",
+    "bytes": 1849,
+    "sha256": "34e374c2df479779b8fd1c3775c775895cd820a56f8de5a5d936c0086f6c76dc"
+  },
+  {
+    "file": "services.jar",
+    "bytes": 25540201,
+    "sha256": "d419950e2d77cb1dbfe56fdb053dabe832cc4291a767d850a00272378eb68bcc"
+  }
+]

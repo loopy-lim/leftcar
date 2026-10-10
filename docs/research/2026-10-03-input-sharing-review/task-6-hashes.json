@@ -1,0 +1,49 @@
+{
+  "task": "Task6 temporary native startup diagnostics",
+  "root": "/private/tmp/leftcar-km-20261003",
+  "source_frozen": true,
+  "files": [
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt",
+      "preimage_sha256": "d664a9d0968ac40f22eef1e72c0d85fe4ae30b15a16dac760bfe2fd51228c145",
+      "current_sha256": "86bd350248e84d8641440a7f8bdb8651a0d5e0c10a7e4095fd50a5f4ed7c1672",
+      "changed": true
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmDuplex.kt",
+      "preimage_sha256": "6a4298ff3104abebc61366650e3c3961035cd2fb0daade631110e35dd369158b",
+      "current_sha256": "9e775cf31c2099006fef739b4540d8509558b13b749b87e9342b75d989d7cde7",
+      "changed": true
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmHandshakeProbe.kt",
+      "preimage_sha256": null,
+      "current_sha256": "030d3078be0209ee221cbefb0901f41ffa3c5f635fad01f2f8656e87124bbafa",
+      "changed": true
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmLifecycle.kt",
+      "preimage_sha256": "0a4957b5bce8c5febf4e1a8d6af56baeaf0c278b54c091e66a59b3ee31b40794",
+      "current_sha256": "0a4957b5bce8c5febf4e1a8d6af56baeaf0c278b54c091e66a59b3ee31b40794",
+      "changed": false
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt",
+      "preimage_sha256": "21c153b1a28620babd02a0e91c4c0d95183a1c6677c259cc4e5764e071401e58",
+      "current_sha256": "21c153b1a28620babd02a0e91c4c0d95183a1c6677c259cc4e5764e071401e58",
+      "changed": false
+    },
+    {
+      "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmCipher.kt",
+      "preimage_sha256": "00d641e333a7b83d6f9b2696e6e9cc06222c0731a8a147b529732ffd1f55190b",
+      "current_sha256": "00d641e333a7b83d6f9b2696e6e9cc06222c0731a8a147b529732ffd1f55190b",
+      "changed": false
+    }
+  ],
+  "patch": {
+    "path": ".superpowers/sdd/2026-10-03-input-only-km/task-6-only.patch",
+    "sha256": "703606b09a1e274c8ca5f79ded00b48fb3ec1c817815b54fe8f5af2148b80301"
+  },
+  "compile": "pending root normal full Android internal compilation",
+  "device": "pending root scoped review/build/package verification/human Start"
+}

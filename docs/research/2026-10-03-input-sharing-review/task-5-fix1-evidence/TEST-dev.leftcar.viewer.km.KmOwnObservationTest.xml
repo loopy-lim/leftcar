@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="dev.leftcar.viewer.km.KmOwnObservationTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-10-03T16:16:48.738Z" hostname="loopyMainMBP.local" time="3.183">
+  <properties/>
+  <testcase name="actual service rejects unsupported member before helper set" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="2.856"/>
+  <testcase name="fresh generation connection and capture gates prevent ownership commit and restore OFF" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.025"/>
+  <testcase name="cancel after final freshness during local readback prevents either routing or owner commitment" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.012"/>
+  <testcase name="real helper seam rejects wrong UID mode resources descriptor metadata and IME before mutation" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.009"/>
+  <testcase name="helper expiry during borrowed RPC rejects success without holding its resource monitor" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.008"/>
+  <testcase name="real bounded main dispatcher timeout cannot run an invalidated queued active attempt" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.025"/>
+  <testcase name="capture hold invalidated before transaction rejects before helper write" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.007"/>
+  <testcase name="failed and uncertain readback perform confirmed local and system OFF rollback" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.009"/>
+  <testcase name="only app observed getter unsupported rejects before any active local helper or owner write" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.006"/>
+  <testcase name="real helper mode table keeps observe and consume identical and OFF works after expiration" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.006"/>
+  <testcase name="queued active write timeout and cancellation never rearm later" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.007"/>
+  <testcase name="hidden class initialization failure stays fixed capability failure" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.005"/>
+  <testcase name="helper verifies an immutable full flags tuple even when endpoint mutates its argument" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.009"/>
+  <testcase name="foreign Binder descriptor rejected by actual borrowed endpoint before any invocation" classname="dev.leftcar.viewer.km.KmOwnObservationTest" time="0.006"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

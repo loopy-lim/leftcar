@@ -1,0 +1,93 @@
+# Temporary exact-branch diagnostic delta from reviewed c380512 source; uncommitted1file
+
+--- a/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
++++ b/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
+@@ -36,40 +36,42 @@
+         require(sessionId.toByteArray().size in 1..128 && epoch > 0)
+         require(arrangementSide == "left" || arrangementSide == "right")
+         require(macToAndroid || androidToMac)
+     }
+ }
+ 
+ /** Single native actor owns input state. React receives low-rate status changes only. */
+ internal object KmRuntime {
+     private class Unavailable(message: String) : IllegalStateException(message)
+     // Temporary preparation-only diagnostic. Each attempt owns its budget and lifetime;
+     // retained main-thread callbacks cannot emit after that attempt settles or stops.
+     private class PrepareProbe {
+         private var open = true
+         private var records = 0
+         private var stage = "prepare"
+ 
+-        @Synchronized fun checkpoint(event: String, stage: String? = null, exceptionClass: String? = null, advanceStage: Boolean = true) {
++        @Synchronized fun checkpoint(event: String, stage: String? = null, exceptionClass: String? = null,
++            advanceStage: Boolean = true, branch: String? = null) {
+             if (!open || records >= 20) return
+             val currentStage = stage ?: this.stage
+             if (advanceStage) this.stage = currentStage
+             records++
+             runCatching {
+                 Log.i("LeftcarKmPrepareProbe", "event=$event stage=$currentStage" +
+-                    if (exceptionClass == null) "" else " exception_class=$exceptionClass")
++                    (if (exceptionClass == null) "" else " exception_class=$exceptionClass") +
++                    (if (branch == null) "" else " branch=$branch"))
+             }
+         }
+ 
+         @Synchronized fun ready() {
+             checkpoint("prepare_ready", "ready")
+             open = false
+         }
+ 
+         @Synchronized fun close() { open = false }
+     }
+     private val thread = HandlerThread("leftcar-km-session").apply { start() }
+     private val worker = Handler(thread.looper)
+     private val main = Handler(Looper.getMainLooper())
+     private var context: Context? = null
+     private var authority: IKmInputAuthority? = null
+     private var authorityBinder: IBinder? = null
+@@ -130,33 +132,42 @@
+         val okay = lease?.acknowledged == true || context?.let { !KmKeyBridgeLease.isEnabled(it) } == true
+         if (!okay && status.state != "off" && status.state != "cleanupFailed") stop("KeyBridge 입력 소유권 확인 전 물리 키 전달을 중지했습니다")
+         return okay
+     }
+     fun changed() { listeners.forEach { it(status) } }
+     private fun publish(value: KmNativeStatus) { status = value; main.post(::changed) }
+     private fun task(prepareProbe: (() -> PrepareProbe?)? = null, action: () -> Unit) {
+         if (pending.incrementAndGet() > 512) {
+             pending.decrementAndGet(); stop("입력 처리 대기열이 초과되었습니다"); return
+         }
+         worker.post {
+             pending.decrementAndGet()
+             try { action() } catch (error: Unavailable) {
+                 prepareProbe?.invoke()?.checkpoint("unavailable", exceptionClass = error.javaClass.name)
+                 stopNow(error.message)
+             } catch (error: Exception) {
+-                prepareProbe?.invoke()?.checkpoint("worker_exception", exceptionClass = error.javaClass.name)
++                prepareProbe?.invoke()?.checkpoint("worker_exception", exceptionClass = error.javaClass.name,
++                    branch = runCatching {
++                        when (error.message) {
++                            "접근성 서비스를 다시 활성화하세요" -> "service_info_missing"
++                            "접근성 설정을 확인할 수 없습니다" -> "service_info_readback_missing"
++                            "마우스 관찰 설정이 적용되지 않았습니다" -> "observation_readback_rejected"
++                            "로컬 입력이 눌려 있어 입력 소유권을 변경할 수 없습니다" -> "capture_holds"
++                            else -> "unclassified"
++                        }
++                    }.getOrDefault("unclassified"))
+                 stopNow("입력 권한 또는 입력 처리를 확인할 수 없습니다")
+             }
+         }
+     }
+ 
+     fun prepare(callback: (Result<KmNativeStatus>) -> Unit) {
+         var probe: PrepareProbe? = null
+         task({ probe }) {
+             if (status.state != "off") { main.post { callback(Result.failure(IllegalStateException("기존 입력 공유를 먼저 중지하세요"))) }; return@task }
+             val attempt = PrepareProbe()
+             probe = attempt
+             preparationProbe = attempt
+             attempt.checkpoint("prepare_enter", "preconditions")
+             preparation = callback
+             publish(KmNativeStatus("preparing"))
+             val ctx = context ?: error("KM not initialized")

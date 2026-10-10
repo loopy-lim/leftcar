@@ -1,0 +1,20 @@
+{
+  "method": "read-only selected after-state fields",
+  "managerProviderRegistered": true,
+  "providerDumpExit": 0,
+  "shizukuServerPidUnchanged": false,
+  "processes": [
+    {
+      "uid": 10326,
+      "pid": 14455,
+      "name": "moe.shizuku.privileged.api"
+    },
+    {
+      "uid": 2000,
+      "pid": 14660,
+      "name": "shizuku_server"
+    }
+  ],
+  "leftcarAccessibilityEnabled": true,
+  "keyBridgeAccessibilityEnabled": true
+}

@@ -1,0 +1,25 @@
+{
+  "method": "read-only retained buffer; exact two tags; max800 matching lines processed; max20 closed records; no raw strings saved",
+  "exitCode": 0,
+  "matchingTagLineCount": 9,
+  "leftcarWindowFound": true,
+  "unknownTargetStarterCount": 0,
+  "records": [
+    {
+      "event": "leftcar_record_created",
+      "relativeSeconds": 0
+    },
+    {
+      "event": "leftcar_process_dispatched",
+      "relativeSeconds": 0.0
+    },
+    {
+      "event": "leftcar_starter_entered",
+      "relativeSeconds": 0.12
+    },
+    {
+      "event": "leftcar_provider_null",
+      "relativeSeconds": 0.14
+    }
+  ]
+}

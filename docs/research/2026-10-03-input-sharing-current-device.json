@@ -1,0 +1,230 @@
+{
+  "checkedAt": "2026-10-03T16:52:53.941260+00:00",
+  "device": {
+    "adbSerial": "HA2H8QSD",
+    "model": "TB522FU",
+    "androidRelease": "16",
+    "sdk": 36,
+    "physicalDisplayPixels": [
+      2560,
+      3840
+    ]
+  },
+  "installedLeftcarBeforeUpdate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "93914a4f20db6a20241975ec01570bb0da4eb4e0f696cb2a9534b8bfe694f20c",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655"
+  },
+  "shizuku": {
+    "version": "13.6.0.r1086.2650830c",
+    "startup": "USB adb shell current installed lib/arm64/libshizuku.so",
+    "result": "starter exit0; shizuku_server running as shell UID2000",
+    "apiPermissionAfterDiagnosticUpdate": true
+  },
+  "accessibilityBeforeUpdate": [
+    "dev.loopy.keybridge/dev.loopy.keybridge.RemapService"
+  ],
+  "evidenceLevel": "Task6 scoped source review/normal compile/package/update-only proof complete; awaiting one bounded human Start to identify nativeHandshake failure.",
+  "physicalAcceptance": {
+    "tested": true,
+    "passed": false,
+    "observation": "Exact c16c5bc0 human Start after enabling both Host directions now fails at nativeHandshake/startFailed. Root verified Host OS permissions allowed and re-enabled only the two exact TB522FU directions via CUA following explicit user action-time approval. Native connection cause remains unknown; temporary bounded diagnostics under review.",
+    "limit": "No successful pointer/hover/wheel/key delivery or edge/recovery acceptance. Six other UX audit findings remain open."
+  },
+  "dataReset": false,
+  "permissionAutoGrants": false,
+  "androidObservedSourceProbe": {
+    "observedSetter": true,
+    "motionEventObservingFlag": true,
+    "method": "shell app_process reflection-only probe; no input injected or service config changed",
+    "limit": "presence/flag only; app hidden access and observed-source readback/real input still unverified"
+  },
+  "physicalInputInventory": {
+    "externalKeyboard": false,
+    "externalMouse": false,
+    "method": "filtered dumpsys input IsExternal/Sources/KeyboardType only; no key logs",
+    "keybridgeOwnershipServiceInInstalledManifest": false
+  },
+  "installedLeftcarAfterUpdate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "c4796c34136777fe52b32b43fdd89b68279ba11dfb0c4291c7cf90ea39873194",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": false,
+    "nativePreparationDiagnosticsOnly": false,
+    "temporaryPreparationLogs": false,
+    "javascriptDigestUnchanged": true,
+    "closedPreparationBranchDiagnostics": false,
+    "allTemporaryPreparationDiagnosticsRemoved": true,
+    "fixedObservationCapabilityReason": true,
+    "delegationImplemented": true,
+    "packageVerification": "2026-10-03-input-sharing-review/task-6-package-verification.json",
+    "installReceipt": "2026-10-03-input-sharing-review/task-6-install.json",
+    "currentCandidateHumanStartTested": true,
+    "temporaryHandshakeLogs": true,
+    "nativeHandshakeDiagnosticsOnly": true
+  },
+  "hostAfterUpdate": {
+    "path": "/Applications/Leftcar Host.app",
+    "bundleSha256": "94f7028e88248659ee58d9b0d5a759f765d5dab7bd4fed6e14b0a7521d24f257",
+    "personalTeamId": "88WFD6M5FC",
+    "signatureVerified": true,
+    "documentedSettingAndPairingHashesUnchanged": true,
+    "companyCertificateRemoved": true,
+    "personalCertificatePreserved": true,
+    "uiToolResult": "CUA AX works after user launch; both Mac permissions and two TB522FU direction approvals allowed, sharing OFF. Two white screenshots were not usable pixel evidence."
+  },
+  "accessibilityAfterHumanSetup": [
+    "dev.loopy.keybridge/dev.loopy.keybridge.RemapService",
+    "leftcar.ll3.kr/dev.leftcar.viewer.km.KmAccessibilityService"
+  ],
+  "previousInstalledCandidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "9262cf195347f1411f6a606b93665f03a0fc56872fdb4488d46434be62b07a58",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true
+  },
+  "androidPreparationFailure": {
+    "stage": "androidPreparation",
+    "issue": "helperUnavailable",
+    "userReproducedAgain": true,
+    "exactNativeReason": "observation_readback_rejected",
+    "probe": "2026-10-03-input-sharing-review/android-prepare-live-official-tags.json",
+    "provedBoundary": "UserService.create returned a Binder; Shizuku starter then obtained null manager provider and exited before binder attachment",
+    "classifiedProbe": "2026-10-03-input-sharing-review/android-prepare-retained-classification.json",
+    "latestIssue": "startFailed",
+    "latestStage": "androidPreparation",
+    "latestProvedBoundary": "actual serviceInfo is non-null after setServiceInfo, but authority.verifyObservation returns false",
+    "serverPidAfterHumanManagerInteraction": 14660,
+    "singleVariableRecoveryNotEstablished": true,
+    "nativeProbe": "2026-10-03-input-sharing-review/android-prepare-native-checkpoints.json",
+    "nativeBranchProbe": "2026-10-03-input-sharing-review/android-prepare-native-branch-checkpoints.json",
+    "sourceRuntimeCauseInference": "Exact OEM server checks original app caller observation permission before clearing identity, and zeros incoming observed mask when denied; Leftcar grantfalse vs shelltrue explains readback rejection. Actual per-call mask trace was not collected.",
+    "oemReport": "2026-10-03-input-sharing-review/oem-observer-readback-report.md",
+    "ordinaryAppSetterSupported": false,
+    "newOwnServiceDelegationImplemented": true,
+    "delegationApprovalReceived": true
+  },
+  "previousDiagnosticCandidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "3d60145f393eb386982741e03e8a597af308502b3bd414e78d714c14dcac9b91",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": true
+  },
+  "previousNativeCheckpointCandidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "a6ab83fc029e23448d915c92fe93e1b112a97b4351ca380cb2a17dbcffc13e2a",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": false,
+    "nativePreparationDiagnosticsOnly": true,
+    "temporaryPreparationLogs": true,
+    "javascriptDigestUnchanged": true
+  },
+  "previousClosedBranchCandidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "5fda0082ed1e37d7e3bfa4d903a6ff21ba2818b70c9e3e06801ab4647126aa35",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": false,
+    "nativePreparationDiagnosticsOnly": true,
+    "temporaryPreparationLogs": true,
+    "javascriptDigestUnchanged": true,
+    "closedPreparationBranchDiagnostics": true
+  },
+  "previousObserverCleanupCandidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "f90061e95d057e7343067fba0703875b10cafa4186f216ee9b398316e71907a4",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": false,
+    "nativePreparationDiagnosticsOnly": false,
+    "temporaryPreparationLogs": false,
+    "javascriptDigestUnchanged": true,
+    "closedPreparationBranchDiagnostics": false,
+    "allTemporaryPreparationDiagnosticsRemoved": true,
+    "fixedObservationCapabilityReason": true,
+    "delegationImplemented": false
+  },
+  "task5HumanStart": {
+    "checkedAt": "2026-10-03T16:28:32.089327+00:00",
+    "candidateApkSha256": "c16c5bc0ff608b92f6e176258615c1d34cf561004cd4f15a9d1c837ea65da3b1",
+    "humanReportedIssue": "hostConsentRequired",
+    "humanReportedText": "Mac에서 이 기기의 두 입력 공유를 모두 승인한 뒤 다시 시작하세요.",
+    "flowInference": "Exact closed reason comes from Host readiness after native.prepare and Android capability checks; prior Android preparation boundary passed on this attempt. Physical input remains unverified.",
+    "hostAX": {
+      "pairedDevice": "TB522FU",
+      "connected": true,
+      "macToAndroidConsent": false,
+      "androidToMacConsent": false,
+      "macInputMonitoring": true,
+      "macAccessibility": true
+    },
+    "permissionActionPerformed": false,
+    "automaticApprovalReview": "Initial directional toggle rejected for exact device/direction action-time confirmation. User subsequently explicitly approved both; CUA applied and verified both ON. No pending consent question.",
+    "pairingModal": "Initial open was rejected on suspected code generation; source confirmed modal-only, retry succeeded without creating offer."
+  },
+  "task5SecondHumanStart": {
+    "candidateApkSha256": "c16c5bc0ff608b92f6e176258615c1d34cf561004cd4f15a9d1c837ea65da3b1",
+    "humanReportedStage": "nativeHandshake",
+    "humanReportedIssue": "startFailed",
+    "flowInference": "Android preparation and Host authorization passed before this stage; actual native input remains unverified.",
+    "hostConsentAfterExplicitApproval": {
+      "device": "TB522FU",
+      "macToAndroid": true,
+      "androidToMac": true,
+      "method": "CUA exact existing device switches and AX confirmation"
+    },
+    "cryptoProbe": "2026-10-03-input-sharing-review/native-handshake-crypto-probe.md",
+    "cryptoProbeResult": "unchanged production KmCipher passed dummy local provider/HKDF/directional roundtrip/replay checks on actual Android; not a live app-to-Host handshake proof"
+  },
+  "previousTask5Candidate": {
+    "versionName": "0.1.10",
+    "versionCode": 16,
+    "apkSha256": "c16c5bc0ff608b92f6e176258615c1d34cf561004cd4f15a9d1c837ea65da3b1",
+    "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+    "byteEqualityWithFinalArchive": true,
+    "updateOnly": true,
+    "diagnosticStartupPatch": true,
+    "nativeImplementationUnchanged": false,
+    "nativePreparationDiagnosticsOnly": false,
+    "temporaryPreparationLogs": false,
+    "javascriptDigestUnchanged": true,
+    "closedPreparationBranchDiagnostics": false,
+    "allTemporaryPreparationDiagnosticsRemoved": true,
+    "fixedObservationCapabilityReason": true,
+    "delegationImplemented": true,
+    "packageVerification": "2026-10-03-input-sharing-review/task-5-package-verification.json",
+    "installReceipt": "2026-10-03-input-sharing-review/task-5-install.json",
+    "currentCandidateHumanStartTested": true
+  },
+  "task6NativeObservation": {
+    "apkSha256": "c4796c34136777fe52b32b43fdd89b68279ba11dfb0c4291c7cf90ea39873194",
+    "recordCount": 14,
+    "lastStage": "STATE_APPLY",
+    "terminalObserved": false,
+    "collectorStoppedOnSecondPrepare": true,
+    "proved": "prepare ready; TCP connect; first Hello encryption/write; first frame authentication and wire decode; State epoch gate and ownership-application entry",
+    "notProved": "ownership applied, native start success, exact failure/cancellation origin, cursor/input success",
+    "evidence": "2026-10-03-input-sharing-review/task-6-native-handshake-checkpoints.json"
+  }
+}

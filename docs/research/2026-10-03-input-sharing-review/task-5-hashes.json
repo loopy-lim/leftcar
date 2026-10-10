@@ -1,0 +1,57 @@
+[
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt",
+    "before": "b7dfcb068afca7218dd8cd7e9c910b5c0a156ec2f3203f9d2b5a088b5e365cb7",
+    "after": "21c153b1a28620babd02a0e91c4c0d95183a1c6677c259cc4e5764e071401e58"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmInputAuthority.kt",
+    "before": "a4fde7df18307785a074a91967448a08486acc151250d6af193fb8659711b4f5",
+    "after": "561054d663d265bb9467a01d488a0f35fd82a573968f426ee3df8c2a1fb09352"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt",
+    "before": "efd416b2c26f63e47b6364e0aac6cdabd43d2c8b60882807d9ec6e08ae3be22a",
+    "after": "d664a9d0968ac40f22eef1e72c0d85fe4ae30b15a16dac760bfe2fd51228c145"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/aidl/dev/leftcar/viewer/km/IKmInputAuthority.aidl",
+    "before": "b5add616aab78694f7b19cf75a4c3883e19f452b82b039f211f7a6a70e362703",
+    "after": "bc2d7c25a5d8cc29cdc29615853747ddac4dc84ca74b340be07add25f5e986e8"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/build.gradle",
+    "before": "778db74b20392ee8b7c322e99f637e27745e8c2420562ee734aaaa7410495421",
+    "after": "d061c3d7883202af84d2ce3060c973854a6d649db1870ecfb48688ef1292aa20"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/proguard-rules.pro",
+    "before": "16cb8b655c959bb20be5bc1d9f5130e5f5f050d81f8719793a0ee52c16865de7",
+    "after": "1b10f181a277c47b560c7e5a21a3b54420302219ab4aaa24038e6ba7aec7baa7"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeRecoveryTest.kt",
+    "before": "bd315d27fe48b419922ebc2deb91866d0adda39c50947cb5f0abb47755cf509e",
+    "after": "45e45f9ff7ca2b652d92d27fb293fce64699021fbff0647d812510ff27115f93"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeCompletionTest.kt",
+    "before": "6f557879c2fa669c2fc2b70aa5018093029fa49a7cc2b67a0e11cc1eec584149",
+    "after": "d71927b06f244a7b918e09072b9b63c91255e1f870ce01058ada05e3b4a2df7a"
+  },
+  {
+    "path": "docs/input-sharing-setup.md",
+    "before": "0217d91991411c138f4938dda8bc159205e221b37ef211b4a84ad0cfa50b8a9e",
+    "after": "fb59112cddab10a59a5b523630a6d0b3ba1331d5302dcd893c4e87b074f5bea0"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmOwnObservation.kt",
+    "before": "ABSENT",
+    "after": "4642310aee3c575fd195f2520125650d6185e0b5d4f85c1a60d464262b6b7dad"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmOwnObservationTest.kt",
+    "before": "ABSENT",
+    "after": "51444275be09a1381d72a3e5e6fdd3c8ac7ce9f7de1080100addc2e09b625401"
+  }
+]

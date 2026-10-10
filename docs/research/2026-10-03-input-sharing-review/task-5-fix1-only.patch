@@ -1,0 +1,374 @@
+--- a/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt
++++ b/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt
+@@ -39,13 +39,15 @@
+ 
+     /** Native worker transaction; main never waits for this worker. */
+     internal fun configure(authority: IKmInputAuthority, next: KmCaptureMode,
+-        captureTicket: Long? = null, freshGeneration: () -> Boolean = { true }, commitOwner: () -> Unit = {}) {
++        captureTicket: Long? = null, freshGeneration: () -> Boolean = { true },
++        commitSession: (() -> Unit) -> Boolean = { action -> action(); true }, commitOwner: () -> Unit = {}) {
+         val token = observationAttempt.begin()
+         try {
+             check(instance === this && freshGeneration())
+             val connection = observationPlatform.connection(this)
+             val info = serviceInfo ?: throw KmObservationUnavailable()
+             check(info.flags and AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR == 0)
++            observationPlatform.observed(info) // Required app-side cleanup reader, before any active write.
+             fun fresh(): Boolean = instance === this && freshGeneration() && observationAttempt.current(token) &&
+                 observationPlatform.connection(this) == connection && connection.binder.isBinderAlive &&
+                 (next != KmCaptureMode.CONSUME || captureTicket == runCatching { routing.beginCapture() }.getOrNull())
+@@ -58,9 +60,15 @@
+                     KmCaptureMode.OFF -> 0; KmCaptureMode.OBSERVE -> 1; KmCaptureMode.CONSUME -> 2
+                 })) throw KmObservationUnavailable()
+             check(fresh() && observationPlatform.localMask(this) == mask)
+-            if (next == KmCaptureMode.CONSUME) {
+-                check(routing.commitCapture(checkNotNull(captureTicket), commitOwner)) { "로컬 입력이 눌려 있어 입력 소유권을 변경할 수 없습니다" }
+-            } else { routing.setMode(next); commitOwner() }
++            // Remote/member reads and main completion are already finished. These nested
++            // short gates serialize cancellation with routing AND its owner callback.
++            check(commitSession {
++                check(observationAttempt.write(token, { instance === this && freshGeneration() }) {
++                    if (next == KmCaptureMode.CONSUME) {
++                        check(routing.commitCapture(checkNotNull(captureTicket), commitOwner)) { "로컬 입력이 눌려 있어 입력 소유권을 변경할 수 없습니다" }
++                    } else { routing.setMode(next); commitOwner() }
++                })
++            })
+         } catch (error: Throwable) {
+             observationAttempt.cancel()
+             // Always OFF, never restore a saved active mask. Runtime also neutralizes/releases.
+--- a/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
++++ b/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
+@@ -56,7 +56,9 @@
+     private var gate: KmEpochGate? = null
+     private var outgoingSeq = 0L
+     @Volatile private var generation = 0L
+-    private var observationService: KmAccessibilityService? = null
++    @Volatile private var observationService: KmAccessibilityService? = null
++    private val observationSession = KmObservationSession()
++    private var observationSessionTicket = observationSession.ticket()
+     private var lastReceived = 0L
+     private var preparedAt = 0L
+     private var owner = "local"
+@@ -119,32 +121,40 @@
+         }
+     }
+ 
+-    fun prepare(callback: (Result<KmNativeStatus>) -> Unit) = task {
+-        if (status.state != "off") { main.post { callback(Result.failure(IllegalStateException("기존 입력 공유를 먼저 중지하세요"))) }; return@task }
+-        preparation = callback
+-        publish(KmNativeStatus("preparing"))
+-        val ctx = context ?: error("KM not initialized")
+-        if (KmAccessibilityService.instance == null) throw Unavailable("Leftcar 접근성 권한이 필요합니다")
+-        if (!Shizuku.pingBinder() || Shizuku.getUid() != 2000 || Shizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
+-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
+-        val token = ++generation
+-        val keyLease = KmKeyBridgeLease(ctx, worker) { stop("KeyBridge 입력 소유권 연결이 종료되었습니다") }
+-        lease = keyLease
+-        keyLease.acquire { okay ->
+-            if (generation != token) return@acquire
+-            if (!okay) { stopNow("KeyBridge 입력 공유 연동 API가 필요합니다. KeyBridge를 활성화한 채 지원 업데이트를 적용하세요"); return@acquire }
+-            bindAuthority(ctx, token)
+-        }
+-        worker.postDelayed({ if (generation == token && authority == null) stopNow("Shizuku 입력 서비스 연결 시간이 초과되었습니다") }, 4000)
+-    }
+-
+-    private fun bindAuthority(ctx: Context, token: Long) {
++    fun prepare(callback: (Result<KmNativeStatus>) -> Unit) {
++        val admission = observationSession.ticket()
++        task {
++            if (!observationSession.current(admission)) {
++                main.post { callback(Result.failure(IllegalStateException("입력 공유 준비가 취소되었습니다"))) }
++                return@task
++            }
++            if (status.state != "off") { main.post { callback(Result.failure(IllegalStateException("기존 입력 공유를 먼저 중지하세요"))) }; return@task }
++            preparation = callback
++            publish(KmNativeStatus("preparing"))
++            val ctx = context ?: error("KM not initialized")
++            if (KmAccessibilityService.instance == null) throw Unavailable("Leftcar 접근성 권한이 필요합니다")
++            if (!Shizuku.pingBinder() || Shizuku.getUid() != 2000 || Shizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
++            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
++            val token = ++generation
++            observationSessionTicket = admission
++            val keyLease = KmKeyBridgeLease(ctx, worker) { stop("KeyBridge 입력 소유권 연결이 종료되었습니다") }
++            lease = keyLease
++            keyLease.acquire { okay ->
++                if (generation != token || !observationSession.current(admission)) return@acquire
++                if (!okay) { stopNow("KeyBridge 입력 공유 연동 API가 필요합니다. KeyBridge를 활성화한 채 지원 업데이트를 적용하세요"); return@acquire }
++                bindAuthority(ctx, token, admission)
++            }
++            worker.postDelayed({ if (generation == token && authority == null) stopNow("Shizuku 입력 서비스 연결 시간이 초과되었습니다") }, 4000)
++        }
++    }
++
++    private fun bindAuthority(ctx: Context, token: Long, admission: Long) {
+         val options = Shizuku.UserServiceArgs(ComponentName(ctx, KmInputAuthority::class.java))
+             .processNameSuffix("km-authority").tag("leftcar-km-v1").version(2).daemon(false).debuggable(false)
+         args = options
+         val connection = object : ServiceConnection {
+             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) = task {
+-                if (generation != token) return@task
++                if (generation != token || !observationSession.current(admission)) return@task
+                 val api = IKmInputAuthority.Stub.asInterface(binder) ?: error("Missing KM authority")
+                 authority = api
+                 authorityBinder = binder
+@@ -163,13 +173,23 @@
+                 val service = KmAccessibilityService.instance ?: error("Accessibility disconnected")
+                 checkNoConflictingObserver(ctx, api)
+                 observationService = service
+-                service.configure(api, KmCaptureMode.OBSERVE, freshGeneration = { generation == token })
+-                preparedAt = SystemClock.elapsedRealtime()
+-                publish(KmNativeStatus("preparing", null, true, true, api.mouseCaptureSupported(), true))
+-                main.post { runCatching { ctx.startForegroundService(Intent(ctx, KmConnectionService::class.java)) }
+-                    .onFailure { stop("백그라운드 입력 서비스를 시작하지 못했습니다") } }
+-                val readyStatus = status
+-                preparation?.let { ready -> main.post { ready(Result.success(readyStatus)) } }; preparation = null
++                service.configure(api, KmCaptureMode.OBSERVE,
++                    freshGeneration = { generation == token && observationSession.current(admission) },
++                    commitSession = { action -> observationSession.commit(admission, action) })
++                val mouseCaptureSupported = api.mouseCaptureSupported()
++                check(observationSession.commit(admission) {
++                    preparedAt = SystemClock.elapsedRealtime()
++                    publish(KmNativeStatus("preparing", null, true, true, mouseCaptureSupported, true))
++                    main.post { if (observationSession.current(admission)) {
++                        runCatching { ctx.startForegroundService(Intent(ctx, KmConnectionService::class.java)) }
++                            .onFailure { stop("백그라운드 입력 서비스를 시작하지 못했습니다") }
++                    } }
++                    val readyStatus = status
++                    preparation?.let { ready -> main.post {
++                        ready(if (observationSession.current(admission)) Result.success(readyStatus)
++                            else Result.failure(IllegalStateException("입력 공유 준비가 취소되었습니다")))
++                    } }; preparation = null
++                })
+                 heartbeat(token)
+                 flushLoop(token)
+             }
+@@ -252,7 +272,9 @@
+         when (message.kind) {
+             "state" -> {
+                 changeOwner(message.payload.getString("owner"))
+-                if (status.state in setOf("armed", "macToAndroid", "androidToMac")) starting.applied(startTicket, status)
++                check(observationSession.commit(observationSessionTicket) {
++                    if (status.state in setOf("armed", "macToAndroid", "androidToMac")) starting.applied(startTicket, status)
++                })
+             }
+             "heartbeat", "hello" -> Unit
+             "stop" -> stopNow("Mac에서 입력 공유를 중지했습니다")
+@@ -300,14 +322,15 @@
+                 val ticket = service.beginCapture()
+                 val mouse = service.physicalMouseName ?: error("No physical Android mouse")
+                 check(api.captureMouse(mouse, rawMouseCallback)) { "물리 마우스 전역 캡처를 사용할 수 없습니다" }
+-                service.configure(api, KmCaptureMode.CONSUME, ticket, freshGeneration = observationFence(service)) { owner = next }
+-            }
+-            "macToAndroid" -> { check(config!!.macToAndroid); service.configure(api, KmCaptureMode.OBSERVE, freshGeneration = observationFence(service)) }
+-            "local" -> service.configure(api, KmCaptureMode.OBSERVE, freshGeneration = observationFence(service))
++                service.configure(api, KmCaptureMode.CONSUME, ticket, freshGeneration = observationFence(service), commitSession = observationCommit()) { owner = next }
++            }
++            "macToAndroid" -> { check(config!!.macToAndroid); service.configure(api, KmCaptureMode.OBSERVE, freshGeneration = observationFence(service), commitSession = observationCommit()) { owner = next } }
++            "local" -> service.configure(api, KmCaptureMode.OBSERVE, freshGeneration = observationFence(service), commitSession = observationCommit()) { owner = next }
+             else -> error("Unknown owner")
+         }
+-        owner = next
+-        publish(status.copy(state = if (next == "local") "armed" else next, reason = null))
++        check(observationSession.commit(observationSessionTicket) {
++            publish(status.copy(state = if (next == "local") "armed" else next, reason = null))
++        })
+     }
+ 
+     private fun inject(p: JSONObject) {
+@@ -387,14 +410,21 @@
+ 
+     private fun observationFence(service: KmAccessibilityService): () -> Boolean {
+         val token = generation
+-        return { generation == token && KmAccessibilityService.instance === service }
++        val admission = observationSessionTicket
++        return { generation == token && observationSession.current(admission) && KmAccessibilityService.instance === service }
++    }
++    private fun observationCommit(): (() -> Unit) -> Boolean {
++        val admission = observationSessionTicket
++        return { action -> observationSession.commit(admission, action) }
+     }
+ 
+     fun stop(reason: String? = null, completion: ((Result<Unit>) -> Unit)? = null) {
++        observationSession.cancel() // Synchronous admission/commit fence, independent of worker progress.
+         (observationService ?: KmAccessibilityService.instance)?.invalidateObservation()
+         worker.post { val result = stopNow(reason); if (completion != null) main.post { completion(result) } }
+     }
+     private fun stopNow(reason: String?): Result<Unit> {
++        observationSession.cancel()
+         (observationService ?: KmAccessibilityService.instance)?.invalidateObservation()
+         generation++
+         runCatching { if (transport != null) send(KmWire.payload("stop")) }
+--- a/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmOwnObservation.kt
++++ b/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmOwnObservation.kt
+@@ -37,6 +37,20 @@
+     override fun localMask(service: KmAccessibilityService, mask: Int) { field().setInt(service, mask) }
+     override fun observed(info: AccessibilityServiceInfo): Int =
+         HiddenApiBypass.invoke(AccessibilityServiceInfo::class.java, info, "getObservedMotionEventSources") as Int
++}
++
++/** Stop advances a session revision synchronously; configure cannot reopen that session.
++ * Reads are nonblocking even inside the attempt gate. Commit actions contain local state only. */
++internal class KmObservationSession {
++    @Volatile private var revision = 0L
++    fun ticket(): Long = revision
++    fun current(ticket: Long): Boolean = revision == ticket
++    @Synchronized fun cancel() { revision++ }
++    @Synchronized fun commit(ticket: Long, action: () -> Unit): Boolean {
++        if (!current(ticket)) return false
++        action()
++        return true
++    }
+ }
+ 
+ /** Short gate covers attempt invalidation and own main-thread writes, never Binder calls. */
+--- a/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmOwnObservationTest.kt
++++ b/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmOwnObservationTest.kt
+@@ -19,15 +19,24 @@
+     var unsupported = false
+     var observedReadback: Int? = null
+     var failInitialization = false
++    var observedUnsupported = false
++    var onLocalRead: (() -> Unit)? = null
++    val activeWrites = mutableListOf<Int>()
+     private val binder = Binder()
+     override fun connection(service: KmAccessibilityService): KmOwnConnection {
+         if (failInitialization) throw ExceptionInInitializerError("unsupported ART")
+         check(!unsupported)
+         return KmOwnConnection(id, binder)
+     }
+-    override fun localMask(service: KmAccessibilityService) = local
+-    override fun localMask(service: KmAccessibilityService, mask: Int) { local = mask }
+-    override fun observed(info: AccessibilityServiceInfo) = observedReadback ?: info.motionEventSources
++    override fun localMask(service: KmAccessibilityService): Int {
++        onLocalRead?.let { onLocalRead = null; it() }
++        return local
++    }
++    override fun localMask(service: KmAccessibilityService, mask: Int) { local = mask; if (mask != 0) activeWrites += mask }
++    override fun observed(info: AccessibilityServiceInfo): Int {
++        check(!observedUnsupported) { "Only app observed getter unavailable" }
++        return observedReadback ?: info.motionEventSources
++    }
+     fun install(service: KmAccessibilityService) {
+         service.observationPlatform = this
+         service.observationMain = object : KmObservationMain { override fun run(action: () -> Unit) = runCatching(action).isSuccess }
+@@ -148,6 +157,24 @@
+         assertTrue(runCatching { service.configure(helper { true }, KmCaptureMode.OBSERVE) }.isFailure)
+         queued.forEach { runCatching(it) }
+         assertEquals(0, platform.local); assertEquals(KmCaptureMode.OFF, service.mode)
++    }
++    @Test fun `only app observed getter unsupported rejects before any active local helper or owner write`() {
++        val (service, platform) = service(); platform.observedUnsupported = true
++        var helperCalls = 0; var committed = false
++        val error = runCatching { service.configure(helper { helperCalls++; true }, KmCaptureMode.OBSERVE) { committed = true } }.exceptionOrNull()
++        assertTrue(error is KmObservationUnavailable)
++        assertEquals(KmObservationUnavailable.REASON, error?.message)
++        assertTrue(platform.activeWrites.isEmpty()); assertEquals(0, helperCalls)
++        assertFalse(committed); assertEquals(KmCaptureMode.OFF, service.mode)
++    }
++    @Test fun `cancel after final freshness during local readback prevents either routing or owner commitment`() {
++        for (mode in listOf(KmCaptureMode.OBSERVE, KmCaptureMode.CONSUME)) {
++            val (service, platform) = service(); var committed = false
++            val ticket = if (mode == KmCaptureMode.CONSUME) service.beginCapture() else null
++            platform.onLocalRead = { service.invalidateObservation() }
++            assertTrue(mode.toString(), runCatching { service.configure(helper { true }, mode, ticket) { committed = true } }.isFailure)
++            assertFalse(committed); assertEquals(KmCaptureMode.OFF, service.mode); assertEquals(0, platform.local)
++        }
+     }
+     @Test fun `capture hold invalidated before transaction rejects before helper write`() {
+         val (service, platform) = service(); val ticket = service.beginCapture()
+--- a/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeRecoveryTest.kt
++++ b/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeRecoveryTest.kt
+@@ -59,6 +59,8 @@
+     class Helper {
+         var alive = true
+         var failCleanup = false
++        var beforePrepare: (() -> Unit)? = null
++        val activeConfigurations = mutableListOf<Int>()
+         val deaths = mutableListOf<IBinder.DeathRecipient>()
+         val cleanup = mutableListOf<String>()
+         val binder: IBinder = Proxy.newProxyInstance(IBinder::class.java.classLoader, arrayOf(IBinder::class.java)) { _, method, args ->
+@@ -78,7 +80,8 @@
+                 if (failCleanup) error("live helper cleanup denied")
+             }
+             when (method.name) {
+-                "configureOwnObservation" -> true
++                "prepare" -> { beforePrepare?.invoke(); true }
++                "configureOwnObservation" -> { if (args!![1] as Int != 0) activeConfigurations += args[1] as Int; true }
+                 else -> when (method.returnType) { Boolean::class.javaPrimitiveType -> true; Int::class.javaPrimitiveType -> 0; else -> null }
+             }
+         } as IKmInputAuthority
+@@ -108,6 +111,26 @@
+         assertEquals("preparing", results.single().getOrThrow().state)
+         assertEquals(1, ShizukuShadow.connections.size)
+         return helper to service
++    }
++    @Test fun `Stop returned while worker prepare paused forbids later active admission and success publication`() {
++        ShizukuShadow.connections.clear(); ShizukuShadow.retired.clear()
++        val service = Robolectric.buildService(KmAccessibilityService::class.java).get()
++        KmAccessibilityService.instance = service
++        val platform = KmOwnObservationFixture(); platform.install(service)
++        KmRuntime.initialize(RuntimeEnvironment.getApplication())
++        val helper = Helper(); ShizukuShadow.next = helper
++        helper.beforePrepare = {
++            // This worker remains inside prepare until a separate Stop caller returns.
++            val stopCaller = Thread { KmRuntime.stop() }
++            stopCaller.start(); stopCaller.join(1000)
++            check(!stopCaller.isAlive) { "Stop must not wait for paused worker" }
++        }
++        val results = mutableListOf<Result<KmNativeStatus>>()
++        KmRuntime.prepare { results += it }; drain()
++        assertTrue(platform.activeWrites.isEmpty())
++        assertTrue(helper.activeConfigurations.isEmpty())
++        assertEquals(1, results.size); assertTrue(results.single().isFailure)
++        assertEquals(KmCaptureMode.OFF, service.mode); assertEquals("off", KmRuntime.status.state)
+     }
+     @Test fun `confirmed dead helper retires after local restore and explicit prepare binds a new unarmed generation`() {
+         val (dead, service) = setup()
+--- a/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeCompletionTest.kt
++++ b/apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeCompletionTest.kt
+@@ -101,12 +101,18 @@
+     @Test fun `failed State application rejects native start`() {
+         stateRoundTrip(verify = false)
+     }
+-    private fun stateRoundTrip(verify: Boolean) {
++    @Test fun `Runtime Stop at final local readback rejects State without owner success`() {
++        stateRoundTrip(verify = true, cancelAtReadback = true)
++    }
++    private fun stateRoundTrip(verify: Boolean, cancelAtReadback: Boolean = false) {
+         field("context", RuntimeEnvironment.getApplication())
+         val service = Robolectric.buildService(KmAccessibilityService::class.java).get()
+         service.serviceInfo = AccessibilityServiceInfo()
+         KmAccessibilityService.instance = service
+-        KmOwnObservationFixture().install(service)
++        val platform = KmOwnObservationFixture(); platform.install(service)
++        if (cancelAtReadback) platform.onLocalRead = { KmRuntime.stop() }
++        val session = KmRuntime::class.java.getDeclaredField("observationSession").apply { isAccessible = true }.get(KmRuntime) as KmObservationSession
++        field("observationSessionTicket", session.ticket()) // This fixture models an already prepared session.
+         field("authority", authority(verify = verify))
+         field("status", KmNativeStatus("preparing", mouseObservation = true, mouseCapture = true))
+         val results = mutableListOf<Result<KmNativeStatus>>()
+@@ -121,8 +127,12 @@
+                 val deadline = System.nanoTime() + 2_000_000_000L
+                 while (results.isEmpty() && System.nanoTime() < deadline) { Thread.sleep(5); drain() }
+                 assertEquals(1, results.size)
+-                if (verify) assertEquals("armed", results.single().getOrThrow().state)
++                if (verify && !cancelAtReadback) assertEquals("armed", results.single().getOrThrow().state)
+                 else assertTrue(results.single().isFailure)
++                if (cancelAtReadback) {
++                    assertEquals(KmCaptureMode.OFF, service.mode)
++                    assertEquals("off", KmRuntime.status.state)
++                }
+             }
+         }
+         KmRuntime.stop(); drain()
+--- a/docs/input-sharing-setup.md
++++ b/docs/input-sharing-setup.md
+@@ -24,6 +24,8 @@
+ 
+ Android 16의 마우스 관찰 설정은 이미 사용자가 켠 Leftcar 자체 접근성 서비스 연결에만 적용합니다. 네이티브 앱이 현재 자체 연결을 얻어 기존 승인된 Shizuku shell helper에 일시적으로 위임하며, helper는 닫힌 OFF/관찰/물리 입력 공유 모드에서 마우스 계열 관찰과 기존 키 필터만 설정합니다. 물리 마우스 독점은 기존 물리 장치 grab 경로에서 수행합니다. KeyBridge를 끄거나 다른 접근성 서비스를 변경할 필요가 없습니다.
+ 
++이 경로는 Android 공개 SDK만으로 보장되는 연동이 아니라 Shizuku shell 권한과 제한된 비공개 API에 의존하며, OS/OEM 업데이트 호환성과 현재 기기 동작은 별도 검증 대상입니다.
++
+ 이 경로는 고정 버전 HiddenApiBypass 6.1의 특정 메서드 호출과 자체 로컬 마우스 dispatch 필드 접근을 사용합니다. OS 전체 hidden API 정책이나 접근성 관찰 권한을 변경하지 않습니다. 실제 연결·필드·설정 readback을 확인하지 못하거나 예상치 못한 입력기 편집기 플래그가 있으면 시작하지 않습니다. 중지 시 자체 공개 설정 API로 마우스/관찰/키 필터와 로컬 dispatch를 OFF로 되돌려 확인하며, 확인 실패는 해제 실패 상태로 남아 재시작을 차단합니다. helper 종료만으로 관찰 해제가 확인된 것으로 처리하지 않습니다.
+ 
+ ## 검증 범위

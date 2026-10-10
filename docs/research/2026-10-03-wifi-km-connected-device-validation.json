@@ -1,0 +1,171 @@
+{
+  "task": "Test connected tablet and Mac direct Wi-Fi without wireless ADB",
+  "date": "2026-10-03",
+  "scope_note": "읽기 전용 진단만 수행. 무선 ADB 활성화·페어링·tcpip·root·UHID 데몬·보안 설정 변경·입력 주입 없음. 제품 소스 변경 없음.",
+  "wireless_adb_used": false,
+  "original_goal_satisfied": false,
+  "original_goal": "Universal Control 수준의 양방향 실제 마우스·키보드 경계 전환 (docs/superpowers/specs/2026-09-25-wifi-bidirectional-km-design.md)",
+  "device": {
+    "mac": {
+      "os": "macOS 26.6.2 (25G83), Darwin 25.6.0",
+      "host_app": "Leftcar Host 실행 중 (PID 67539, /Applications/Leftcar Host.app/Contents/MacOS/leftcar-host-desktop)",
+      "control_plane": "TCP *:7777 리슨 + mDNS _leftcar._tcp 'leftcar-host' 광고 확인",
+      "lan_addresses": ["192.168.0.133 (en0)", "192.168.0.154 (en9)", "100.80.133.120 (utun5, Tailscale 계열 — LAN 아님)"],
+      "permissions_tcc": {
+        "kTCCServiceAccessibility:leftcar.ll3.kr": 2,
+        "kTCCServiceScreenCapture:leftcar.ll3.kr": 2,
+        "kTCCServiceListenEvent:kr.ll3.keybridge": 2,
+        "kTCCServiceListenEvent:leftcar.ll3.kr": "부재 — KM Stage 2(억제·관찰 탭)에 필요, 미승인"
+      },
+      "usb": "system_profiler SPUSBDataType 출력 없음 — USB로 연결된 기기 없음"
+    },
+    "tablet": {
+      "identity": "TB710FU (이전 기기 가정 없이 mDNS TXT로 식별: name=TB710FU api=36.0 → Android API 36)",
+      "lan_address": "192.168.0.18 (mDNS Android.local. → A 레코드, en0/en9 동일 축)",
+      "paired": {
+        "device_id": "mt3rf5l0-3jrargbs",
+        "paired_at": "2026-09-14 12:18:14",
+        "source": "~/Library/Application Support/leftcar-host/paired_devices.json"
+      },
+      "wireless_debugging": "태블릿이 스스로 _adb-tls-connect._tcp 'adb-HA2D6EMP-Qnp1Nz' (포트 37727)를 광고 — 무선 디버깅 토글이 이미 켜져 있음을 뜻함. 단, 이번 작업에서 그 권한을 사용하지 않았고(제약 준수) 사용해도 Android OS 권한 결정은 별도다.",
+      "viewer_permissions": "접근성·IME 등 Viewer 측 권한 상태는 ADB 기기 부재로 확인 불가(미확인)"
+    },
+    "other_paired_devices": ["SM-I610 (2026-09-14)", "TB522FU (2026-09-18)"]
+  },
+  "wifi_test": {
+    "status": "blocked",
+    "summary": "직접 LAN 도달성(네트워크 계층)은 확인됐으나, 동의된 Leftcar 앱 간 Wi-Fi 세션의 '이번 실행'은 태블릿 UI를 구동할 수단(USB ADB 부재 + 무선 ADB 금지)이 없어 blocked. 과거 전송 증거(같은 LAN에서 오늘 새벽 UDP 세션 기록)는 존재한다.",
+    "evidence": [
+      {
+        "item": "직접 LAN 도달성",
+        "result": "passed",
+        "command": "ping -c 4 -t 5 192.168.0.18",
+        "outcome": "4 packets transmitted, 4 packets received, 0.0% loss; rtt min/avg/max = 104.9/154.2/182.1 ms (태블릿 Wi-Fi 절전 추정 — 재측정 필요)",
+        "meaning": "Mac ↔ 태블릿 간 Wi-Fi 직접 IP 도달성 확인 (릴레이·무선 ADB 불필요)"
+      },
+      {
+        "item": "mDNS 상호 발견",
+        "result": "passed",
+        "command": "dns-sd -B _leftcar._tcp local. / dns-sd -L leftcar-host _leftcar._tcp local. / dns-sd -B _adb-tls-connect._tcp local. / dns-sd -G v4 Android.local.",
+        "outcome": "leftcar-host → leftcar-host.local.:7777 (product=leftcar), 태블릿 → Android.local. → 192.168.0.18, TXT api=36.0 name=TB710FU",
+        "meaning": "Viewer의 NSD 탐색 경로(_leftcar._tcp, apps/viewer-expo/.../nsd/NsdModule.kt)와 동일한 발견 채널이 양쪽 모두에서 살아 있음"
+      },
+      {
+        "item": "과거 앱 간 UDP 전송 기록",
+        "result": "historical",
+        "command": "cat ~/Library/Application Support/leftcar-host/sessions.jsonl",
+        "outcome": "session 10: transport=udp, 2026-10-03 02:41:34 시작 → 02:46:08 종료(reason 3, 사용자 정지 추정), 총 343회 세션 기록. 단, 로그의 dev:* 식별자는 paired_devices.json의 이름과 직접 대응되지 않아 이 세션의 기기 귀속은 단정 불가.",
+        "meaning": "이 Mac·이 LAN에서 앱 간 UDP 스트리밍이 실제로 동작한 전송 증거"
+      },
+      {
+        "item": "라이브 앱 간 세션 테스트",
+        "result": "blocked",
+        "reason": "태블릿에서 Viewer를 열어 연결하는 동작을 에이전트가 수행할 수 없음(USB ADB 기기 없음, 무선 ADB 금지). 제어 평면은 QR 핀 Ed25519 핸드셰이크 계약이라 외부에서 대역 내 시험 불가. 미검증을 성공으로 기재하지 않음.",
+        "next_human_action": "태블릿에서 Leftcar Viewer를 열어 leftcar-host(192.168.0.154:7777 또는 192.168.0.133:7777)에 연결 — 새 권한 불필요(기기 페어링·화면·입력 승인이 이미 기록돼 있으나 source_grants.json dirty=true이므로 재검토 프롬프트가 뜨면 승인)"
+      }
+    ]
+  },
+  "direction_matrix": {
+    "mac_to_android": {
+      "mouse": {
+        "assessment": "blocked_untested — 보이는 커서·hover 경로는 무선 ADB+UHID(P2) 승인이 전제이며 이번엔 금지. 접근성-only 제스처 폴백도 미구현.",
+        "tested": false,
+        "evidence": "wifi-km-full-parity-gap §2/§3, 설계 §13-Q1; 이번 세션에서 무선 ADB 미사용"
+      },
+      "keyboard": {
+        "assessment": "blocked_untested — 자체 IME(Stage 5)·globalAction 어댑터 미구현. Android OS 측 IME 활성화도 별도 사용자 절차.",
+        "tested": false,
+        "evidence": "설계 §8, §11 Stage 5"
+      },
+      "real_cursor_hover": {
+        "assessment": "impossible_under_ordinary_permissions_untested — 일반 앱/접근성 권한으로는 Android 전역 가시 커서·hover 없음. P2 승인(UHID) 시에만 가능 후보.",
+        "tested": false,
+        "evidence": "wifi-km-full-parity-gap §2 (scrcpy UHID는 shell uid 전용 경로)"
+      },
+      "edge_crossing": {
+        "assessment": "untested_not_implemented — Mac 측 CGEventTap 경계 트리거는 설계(Stage 2)뿐이며, leftcar.ll3.kr에 Input Monitoring(kTCCServiceListenEvent) 미승인이라 탭 관찰·억제 자체가 아직 권한 미충족.",
+        "tested": false,
+        "evidence": "시스템 TCC DB 조회: leftcar.ll3.kr의 ListenEvent 행 부재"
+      },
+      "global_capture_suppression": {
+        "assessment": "blocked_untested — KM_MAC_TO_ANDROID 중 Mac 물리 입력 억제는 CGEventTap defaultTap이 전제. Input Monitoring 미승인 + Stage 2 미구현.",
+        "tested": false,
+        "evidence": "동일 TCC 근거 + 설계 §4.2 상태 기계"
+      }
+    },
+    "android_to_mac": {
+      "mouse": {
+        "assessment": "partial_candidate_untested — 태블릿 물리 마우스의 전역 관찰·억제는 API 34+ 접근성 모션 API(setMotionEventSources/onMotionEvent)가 새 후보가 됨(SOURCE_MOUSE 허용 값 명시, 구독 소스는 '시스템 나머지로 전송되지 않음' = 억제 의미론). TB710FU는 API 36이라 API 존재. 기기 실측 없음. 기존 Leftcar 스트리밍 내 포인터 전송·CGEvent 주입은 프로덕션 경로지만 앱 창 한정으로 전역 KM과 다름.",
+        "tested": false,
+        "evidence": "developer.android.com AccessibilityService#onMotionEvent (API 34): 'MotionEvents from sources in getMotionEventSources() are not sent to the rest of the system'; AccessibilityServiceInfo#getMotionEventSources 허용 값에 SOURCE_MOUSE·SOURCE_MOUSE_RELATIVE·SOURCE_TOUCHPAD 포함. 기존 '모션 필터 불가' 범주적 주장은 API 34+ 기준 정정 필요."
+      },
+      "keyboard": {
+        "assessment": "ready_untested — KeyBridge 접근성 키 필터 경로는 기존 설계상 사실상 완성. Mac 측 주입 권한(ACCESSIBILITY:leftcar.ll3.kr, LISTEN_EVENT:kr.ll3.keybridge)은 승인돼 있음. 그러나 이번 세션에서 태블릿 키보드 실측은 수행하지 않음.",
+        "tested": false,
+        "evidence": "wifi-km-android-feasibility §2.1 + 시스템 TCC 행(auth_value=2, 각각 2026-08-25·2026-09-23 승인)"
+      },
+      "real_cursor_hover": {
+        "assessment": "untested — Mac 측 커서는 CGEvent 주입의 진짜 macOS 커서(플랫폼 속성)라 방향상 문제 없음. 미실행.",
+        "tested": false,
+        "evidence": "macos-feasibility §3"
+      },
+      "edge_crossing": {
+        "assessment": "untested — Android→Mac 경계 트리거 후보: (a) 가상 커서(무선 ADB 승인 필요, 금지), (b) 스트립 hover, (c) evdev 읽기, (d) 신규: API 34 모션 관찰로 스트립 없는 경계 감지. 모두 미검증.",
+        "tested": false,
+        "evidence": "full-parity-gap §3 + 본 조사 API 34 발견"
+      },
+      "global_capture_suppression": {
+        "assessment": "keyboard_ready_untested__mouse_candidate_untested — 키보드 억제는 KeyBridge(기존). 마우스 억제는 API 34 setMotionEventSources(SOURCE_MOUSE)가 '공개 API 불가' 판정을 정정하는 후보이지만 TB710FU 실측 없음.",
+        "tested": false,
+        "evidence": "위 API 인용 + 2026-09-24-wifi-km-android-evidence.json(기존 판정) 비교"
+      }
+    }
+  },
+  "motion_event_api_finding": {
+    "summary": "기존 '프레임워크 수준 전역 모션 필터는 공개 API 부재'라는 범주적 주장은 API 34+에서 더 이상 성립하지 않는다.",
+    "details": [
+      "AccessibilityService.onMotionEvent(MotionEvent) — API 34 추가. 'an accessibility service to observe generic MotionEvents'.",
+      "AccessibilityServiceInfo.setMotionEventSources(int) — API 34. 구독 소스는 'not sent to the rest of the system' → 관찰과 억제가 동시에 성립.",
+      "getMotionEventSources 허용 값에 InputDevice.SOURCE_MOUSE, SOURCE_MOUSE_RELATIVE, SOURCE_TOUCHPAD, SOURCE_STYLUS, SOURCE_TRACKBALL 등 포함(터치스크린은 TouchInteractionController 별도 경로).",
+      "TB710FU(api=36.0)는 API 36 → API 존재는 확인. 실제 동작·지연·OEM 차이는 기기 실측 전이며 KeyBridge 확장(설계 §13-Q2)과 연결된다."
+    ],
+    "impact": "android_to_mac 마우스 전역 관찰·억제와 Android 측 경계 감지가 무선 ADB 없이도 접근성 권한만의 후보 경로로 갱신됨. full-parity-gap 문서의 해당 셀도 후속 정정 대상."
+  },
+  "commands": [
+    "adb devices -l  # 읽기 전용. 결과: 빈 목록 (USB 연결 없음)",
+    "system_profiler SPUSBDataType  # 출력 없음 — USB 기기 없음",
+    "sw_vers  # macOS 26.6.2 (25G83)",
+    "ifconfig / netstat -rn / arp -a  # Mac LAN 주소(192.168.0.133 en0, 192.168.0.154 en9)와 인접 항목 확인",
+    "ps aux | grep leftcar  # Leftcar Host 실행 중(PID 67539)",
+    "lsof -nP -iTCP -sTCP:LISTEN  # leftcar-host가 *:7777 리슨",
+    "dns-sd -B _leftcar._tcp local.  # leftcar-host 발견",
+    "dns-sd -B _adb-tls-connect._tcp local.  # 태블릿 무선 디버깅 광고 발견(연결하지 않음)",
+    "dns-sd -L adb-HA2D6EMP-Qnp1Nz _adb-tls-connect._tcp local.  # TXT: api=36.0 name=TB710FU, Android.local.:37727",
+    "dns-sd -L leftcar-host _leftcar._tcp local.  # leftcar-host.local.:7777",
+    "dns-sd -G v4 Android.local.  # 192.168.0.18 (en0/en9)",
+    "ping -c 4 -t 5 192.168.0.18  # 0% loss, avg 154.2 ms — 직접 LAN 도달성 입증",
+    "cat ~/Library/Application Support/leftcar-host/paired_devices.json  # TB710FU 페어링 기록(2026-09-14)",
+    "tail ~/Library/Application Support/leftcar-host/sessions.jsonl  # 2026-10-03 02:41 UDP 세션 기록(과거 전송 증거)",
+    "sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"select service,client,auth_value from access where client in ('leftcar.ll3.kr','kr.ll3.keybridge');\"  # macOS 권한 상태(읽기 전용)",
+    "curl developer.android.com AccessibilityService#onMotionEvent / AccessibilityServiceInfo#setMotionEventSources  # API 34 모션 관찰 문서 확인",
+    "python3 tools/wifi-km-device-probe.py --help / --mdns-timeout 4  # 읽기 전용 프로브 실행 확인",
+    "# 수행하지 않음: adb connect/tcpip/pair, /dev/uhid, 설정 변경, 입력 주입, 태블릿 포트 37727 접속(무선 ADB 계약이므로 의도적으로 회피)"
+  ],
+  "blockers": [
+    "USB로 연결된 Android 기기 없음(adb devices 빈 목록, SPUSBDataType 비어 있음) → 태블릿 UI를 에이전트가 구동 불가",
+    "무선 ADB는 이번 작업에서 금지 — 태블릿이 _adb-tls-connect를 광고 중이어도 접속하지 않음",
+    "KM(마우스·키보드 공유) 기능 자체가 아직 제품에 구현돼 있지 않음(설계 승인 대기) — 라이브 KM 테스트 대상 코드가 없음",
+    "Mac 측 leftcar.ll3.kr에 Input Monitoring(kTCCServiceListenEvent) 미승인 — Stage 2 경계 관찰·억제 탭의 권한 전제 미충족",
+    "태블릿의 Viewer 접근성/IME 권한 상태를 기기 접근 없이 확인할 방법 없음(미확인으로 기록)",
+    "sessions.jsonl의 dev:* 식별자가 paired_devices.json 이름과 직접 매핑되지 않아 과거 세션의 기기 귀속 단정 불가"
+  ],
+  "next_steps": [
+    "최소 사용자 조치(전송 계층): 태블릿에서 Leftcar Viewer를 열어 leftcar-host에 연결해 라이브 UDP 세션 재현. 새 권한 불필요, dirty=true인 source_grants 재검토 프롬프트만 확인.",
+    "Android OS 권한 결정(전송과 분리): 완전 패리티 후보인 P2(무선 디버깅+UHID) 승인 여부는 설계 §13-Q1의 별도 사용자 결정이다. 앱 간 Wi-Fi 전송(위 조치)과 무선 디버깅 권한은 다른 권한면이다.",
+    "무선 ADB 없는 대안 실측: TB710FU(API 36)에서 KeyBridge 확장으로 AccessibilityService.setMotionEventSources(SOURCE_MOUSE) 동작·지연·억제 범위를 기기 실측(설계 §13-Q2와 연결).",
+    "Stage 2 착수 전: leftcar.ll3.kr에 Input Monitoring 권한 부여(사용자 1회 설정).",
+    "권고 순서(설계 §11 준수): Stage 0 계약(KM 메시지+km_share capability) → Stage 1 Android→Mac 키보드(KeyBridge 경로, 이미 권한 충족) → Stage 2 Mac 경계·억제 → Stage 3 Mac→Android(P2 승인 시 UHID, 비승인 시 Q3 축소 결정) → Stage 4 동의·UI → Stage 5 IME → Stage 6 물리 검증.",
+    "세션 로그에 기기 이름 매핑 추가(dev:* ↔ device_id)하면 이후 검증의 귀속 단정이 가능해진다. (제품 변경이므로 별도 승인 과제)"
+  ],
+  "probe_script": "tools/wifi-km-device-probe.py (표준 라이브러리만 사용, 읽기 전용, --help 동작 확인)"
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt",
+    "before": "939f95abd11850e1a6830a7fce96e5c08a52108fa60287975d7fbf1c64dfbae6",
+    "after": "efd416b2c26f63e47b6364e0aac6cdabd43d2c8b60882807d9ec6e08ae3be22a"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt",
+    "before": "1f474744568d8c7af6e3e8894eba51c72dd0441a75626a8ee1b699306f1970fc",
+    "after": "b7dfcb068afca7218dd8cd7e9c910b5c0a156ec2f3203f9d2b5a088b5e365cb7"
+  }
+]

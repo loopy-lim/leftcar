@@ -1,0 +1,52 @@
+{
+  "environment": "actual Android16 device HA2H8QSD shell app_process",
+  "method": "dummy-only transforms + compiled exact production KmCipher; no socket/input/service/app operations",
+  "status": {
+    "pushExit": 0,
+    "probeExit": 0,
+    "deviceTempRemovalExit": 0,
+    "deviceTempAbsent": true
+  },
+  "records": [
+    {
+      "event": "transform_available",
+      "algorithm": "ChaCha20-Poly1305",
+      "provider": "AndroidOpenSSL"
+    },
+    {
+      "event": "transform_roundtrip",
+      "algorithm": "ChaCha20-Poly1305",
+      "dummyRoundtrip": true,
+      "tagLengthExpected": true
+    },
+    {
+      "event": "transform_available",
+      "algorithm": "ChaCha20/Poly1305/NoPadding",
+      "provider": "AndroidOpenSSL"
+    },
+    {
+      "event": "transform_roundtrip",
+      "algorithm": "ChaCha20/Poly1305/NoPadding",
+      "dummyRoundtrip": true,
+      "tagLengthExpected": true
+    },
+    {
+      "event": "actual_derivation",
+      "twoKeysMatchContract": true,
+      "directionKeysDistinct": true
+    },
+    {
+      "event": "actual_roundtrip",
+      "dummyRoundtrip": true,
+      "frameContractMatches": true
+    },
+    {
+      "event": "actual_replay",
+      "replayRejected": true
+    },
+    {
+      "event": "canonical_frame_actual_open",
+      "dummyRoundtrip": true
+    }
+  ]
+}

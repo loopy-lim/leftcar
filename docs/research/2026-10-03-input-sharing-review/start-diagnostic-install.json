@@ -1,0 +1,19 @@
+{
+  "checkedAt": "2026-10-03T14:52:44.226394+00:00",
+  "deviceSerial": "HA2H8QSD",
+  "package": "leftcar.ll3.kr",
+  "updateOnly": true,
+  "dataReset": false,
+  "appLaunchedByInstaller": false,
+  "permissionAutoGrants": false,
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-9afyDh/android-internal-manifest.json",
+  "installedApkSha256": "3d60145f393eb386982741e03e8a597af308502b3bd414e78d714c14dcac9b91",
+  "archiveByteEquality": true,
+  "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "enabledAccessibilityServices": [
+    "dev.loopy.keybridge/dev.loopy.keybridge.RemapService",
+    "leftcar.ll3.kr/dev.leftcar.viewer.km.KmAccessibilityService"
+  ],
+  "shizukuApiPermissionGranted": true,
+  "runtimeAcceptance": "pending safe displayed failure stage/reason after user Start; no current native-input acceptance"
+}

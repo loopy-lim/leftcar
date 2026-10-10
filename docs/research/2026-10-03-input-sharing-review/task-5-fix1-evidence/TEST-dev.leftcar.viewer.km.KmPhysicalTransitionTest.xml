@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="dev.leftcar.viewer.km.KmPhysicalTransitionTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-03T16:16:54.277Z" hostname="loopyMainMBP.local" time="0.002">
+  <properties/>
+  <testcase name="lost KeyBridge permission atomically returns keys to local and defers reacquisition" classname="dev.leftcar.viewer.km.KmPhysicalTransitionTest" time="0.0"/>
+  <testcase name="modifiers buttons and a completed local tap invalidate pending capture" classname="dev.leftcar.viewer.km.KmPhysicalTransitionTest" time="0.001"/>
+  <testcase name="local down during unlocked capture acquisition prevents consume commit and up remains local" classname="dev.leftcar.viewer.km.KmPhysicalTransitionTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

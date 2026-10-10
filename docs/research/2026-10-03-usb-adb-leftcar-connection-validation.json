@@ -1,0 +1,72 @@
+{
+  "task": "Verify physical USB ADB and restore live Leftcar Wi-Fi session on tablet",
+  "date": "2026-10-03",
+  "captured_at": "2026-10-03T21:04:51+09:00",
+  "scope_note": "이번 실행은 무선 ADB가 아니라 물리 USB ADB로 진단 채널을 전환. USB ADB는 진단·실행·UI 관찰 채널이며 제품 데이터 전송로가 아니다. 제품 연결은 앱 간 직접 Wi-Fi(TCP 제어 7777 / UDP 미디어) 그대로 사용. adb connect/pair/tcpip, 무선 폴백, keyguard 우회, 앱 재설치, 권한 자동 승인 없음.",
+  "usb_detected": true,
+  "usb_adb_authorized": true,
+  "selected_transport": "usb",
+  "device": {
+    "identity": "Lenovo TB522FU (LenovoTab LEGION Y900 13, product:TB522FU_PRC)",
+    "usb_serial_redacted": "HA2H***D",
+    "usb_enumeration": "ioreg IOUSB: idVendor=6353(0x18d1계열 LENOVO 보고), idProduct=19985, USB Serial='HA2H8QSD'(문서에서는 부분 마스킹), USB 2.0 High-Speed(480Mbps), locationID 0x01100000",
+    "note": "이전 run(2026-10-03-adb-leftcar-live-connection-validation.json)의 TB710FU(serial HA2D***)와는 다른 태블릿. 이번 USB 기기는 TB522FU이며 Viewer(leftcar.ll3.kr)가 설치되어 있음",
+    "screen_state_at_start": "unlocked (deviceLocked=0, SCREEN_STATE_ON, keyguard 미표시)"
+  },
+  "adb_transport": {
+    "mode": "USB ADB (유선)",
+    "serial_redacted": "HA2H***D",
+    "adb_devices_line": "HA2H8***SD device usb:1-1 product:TB522FU_PRC model:TB522FU transport_id:1",
+    "state": "device (authorized)",
+    "note": "네트워크/TLS serial(192.168.0.x:port 형태)은 이번 세션 전체에서 미사용. adb kill-server/start-server 후에도 USB transport만 존재해 USB 전송을 양성으로 구별함"
+  },
+  "product_transport": {
+    "control_plane": "TCP 192.168.0.154:7777 (leftcar-host-desktop PID 67539, mDNS _leftcar._tcp 'leftcar-host' 광고)",
+    "media_plane": "UDP (sessions.jsonl session 11 transport=udp, viewer 로그 stream=5001)",
+    "status": "connected"
+  },
+  "fresh_session_verified": true,
+  "fresh_media_progress_verified": true,
+  "full_km_satisfied": false,
+  "product_usb_transport_implemented": false,
+  "commands": [
+    {"ts": "2026-10-03T21:00:00+09:00", "cmd": "ioreg -p IOUSB -w 0 -l | grep -A25 LenovoTab", "outcome": "usb_detected=true — 'LenovoTab LEGION Y900 13' 물리 열거 확인(serial HA2H8QSD, 480Mbps)"},
+    {"ts": "2026-10-03T21:00:30+09:00", "cmd": "adb devices -l", "outcome": "usb_adb_authorized=true — HA2H8QSD device usb:1-1 model:TB522FU. 네트워크 serial 없음(이전 run의 192.168.0.18:37727 TB710FU와 다른 기기/전송)"},
+    {"ts": "2026-10-03T21:01:10+09:00", "cmd": "adb -s HA2H8QSD shell pm list packages | grep leftcar", "outcome": "package:leftcar.ll3.kr 존재 (설치된 Viewer 사용, 신규 설치 없음)"},
+    {"ts": "2026-10-03T21:01:30+09:00", "cmd": "adb -s HA2H8QSD shell \"dumpsys trust | grep trustState\"", "outcome": "deviceLocked=0, trustState=UNTRUSTED — 잠금 해제 상태, keyguard 장벽 없음"},
+    {"ts": "2026-10-03T21:02:39+09:00", "cmd": "python3 tools/leftcar-live-connection-check.py", "outcome": "before: verdict=disconnected (host_process=True, host_tcp=True, adb_device=True, fresh_active_session=False, session_age_sec=66066)"},
+    {"ts": "2026-10-03T21:02:50+09:00", "cmd": "adb -s HA2H8QSD shell am start -n leftcar.ll3.kr/dev.leftcar.viewer.MainActivity", "outcome": "topResumedActivity로 Viewer 포그라운드 성공 (잠금 장벽 없음)"},
+    {"ts": "2026-10-03T21:03:10+09:00", "cmd": "uiautomator dump → input tap (지금 화면 열기)", "outcome": "일반 앱 상호작용 — 저장된 호스트 192.168.0.50이 stale이라 '컴퓨터가 응답하지 않습니다' 오류 표시"},
+    {"ts": "2026-10-03T21:03:36+09:00", "cmd": "dns-sd -B _leftcar._tcp local.", "outcome": "leftcar-host mDNS 광고 정상 확인"},
+    {"ts": "2026-10-03T21:03:45+09:00", "cmd": "uiautomator dump → input tap (+ 다른 컴퓨터 연결 → leftcar-host 192.168.0.154 연결)", "outcome": "mDNS 발견 항목으로 일반 앱 흐름 재시도 — '연결된 컴퓨터: 192.168.0.154:7777' 화면 선택 도달"},
+    {"ts": "2026-10-03T21:04:00+09:00", "cmd": "uiautomator dump → input tap (Display 1 열기)", "outcome": "OS 권한 대화상자 없이 StreamActivity 포그라운드 (기존 승인 재사용, 자동 승인 불필요)"},
+    {"ts": "2026-10-03T21:04:11+09:00", "cmd": "python3 tools/leftcar-live-connection-check.py", "outcome": "verdict=connected, fresh_active_session=True (session_age_sec=11)"},
+    {"ts": "2026-10-03T21:04:20+09:00", "cmd": "adb -s HA2H8QSD logcat -d --pid=10070 | grep Rendered", "outcome": "fresh_media_progress_verified=true — Rendered 1410→2160 frames(약 55fps), outputDrops=0, inputRttMs=8, outputPts 지속 증가(stream=5001, UDP)"},
+    {"ts": "2026-10-03T21:04:51+09:00", "cmd": "adb devices -l && python3 tools/leftcar-live-connection-check.py", "outcome": "after: USB transport 단독 유지(HA2H8QSD usb:1-1) + verdict=connected, session_age_sec=39.2, sessions.jsonl session 11 session_started(udp)"}
+  ],
+  "before": {
+    "verdict": "disconnected",
+    "captured_at": "2026-10-03T21:02:39+09:00",
+    "evidence": [
+      "sessions.jsonl 최신 레코드: session 10 session_stopped(ts=unix:1790963168, 약 18.4시간 전) — 신규 session_started 없음",
+      "leftcar-host-desktop PID 67539 정상, TCP *:7777 listen, _leftcar._tcp mDNS 광고 중",
+      "Viewer 홈 화면 '접속 가능' 표시이나 저장된 호스트가 stale IP(192.168.0.50)라 실제 세션 없음",
+      "USB ADB는 이미 authorized(HA2H8QSD usb:1-1) — 이번 run에서 USB 진단 채널 자체는 즉시 성립"
+    ]
+  },
+  "after": {
+    "status": "restored",
+    "verdict": "connected",
+    "captured_at": "2026-10-03T21:04:51+09:00",
+    "fresh_session_verified": true,
+    "fresh_media_progress_verified": true,
+    "evidence": [
+      "sessions.jsonl 신규 레코드: {\"session\":11,\"device\":\"dev:34d4***4999\",\"transport\":\"udp\",\"event\":\"session_started\"} — checker verdict=connected (fresh_active_session=True)",
+      "Viewer logcat LeftcarNative: Rendered 1410→2160 frames(약 10초, ~55fps), outputDrops=0, staleInputDrops=0, inputRttMs≈8ms, outputPtsUs 지속 증가 — 실시간 미디어 진행 중",
+      "연결 세션 전체에서 selected_transport=usb 유지: adb devices는 HA2H8QSD usb:1-1 단독, adb connect/무선 폴백 미사용",
+      "제품 전송로는 직접 Wi-Fi(제어 TCP 7777 @192.168.0.154 / 미디어 UDP) — USB는 진단·실행 채널"
+    ]
+  },
+  "blockers": [],
+  "next_human_action": "없음 — 세션 복원 완료. 참고로 다음 확장은 사용자/별도 작업 몫: (1) 양방향 full KM 구현·실기기 검증, (2) 제품 USB 데이터 전송 구현(현재 미구현), (3) 저장된 호스트 stale IP(192.168.0.50) 정리 UX."
+}

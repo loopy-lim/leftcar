@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-10-03T16:02:56.981Z" hostname="loopyMainMBP.local" time="2.241">
+  <properties/>
+  <testcase name="dead helper never retires when actual observed cleanup readback remains nonzero" classname="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" time="2.159"/>
+  <testcase name="dead liveness allows explicit retry only after local restoration succeeds" classname="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" time="0.008"/>
+  <testcase name="confirmed dead helper retires after local restore and explicit prepare binds a new unarmed generation" classname="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" time="0.009"/>
+  <testcase name="live helper RPC failures stay unconfirmed until same proxy cleanup succeeds" classname="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" time="0.007"/>
+  <testcase name="retained helper death after failed Stop still recovers despite the advanced generation" classname="dev.leftcar.viewer.km.KmRuntimeRecoveryTest" time="0.007"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

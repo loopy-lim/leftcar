@@ -1,0 +1,12 @@
+{
+  "installed": "/Applications/Leftcar Host.app",
+  "backup": "/Applications/Leftcar Host.app.previous-a1e2c0cc-0061-4b94-93d9-7b7c1541a2df",
+  "stoppedPids": [],
+  "installedSha256": "94f7028e88248659ee58d9b0d5a759f765d5dab7bd4fed6e14b0a7521d24f257",
+  "backupSha256": "af62635fd0e7762ff87d06cf9019fb698e9446b64b32c887635268977ad4c464",
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-host-macos-internal-EiE23n/host-macos-internal-manifest.json",
+  "signingIdentityChangeApproved": true,
+  "tccAutoGrants": false,
+  "appLaunched": false,
+  "userSettingsChanged": false
+}

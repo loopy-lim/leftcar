@@ -1,0 +1,72 @@
+{
+  "method": "read-only exact native preparation tag; max120s/20 fixed records; terminal event plus2s; no raw messages or input stored",
+  "records": [
+    {
+      "event": "prepare_enter",
+      "stage": "preconditions",
+      "elapsedSeconds": 40.842
+    },
+    {
+      "event": "preconditions_passed",
+      "stage": "lease",
+      "elapsedSeconds": 40.842
+    },
+    {
+      "event": "lease_accepted",
+      "stage": "bind",
+      "elapsedSeconds": 40.853
+    },
+    {
+      "event": "bind_dispatch",
+      "stage": "bind",
+      "elapsedSeconds": 40.853
+    },
+    {
+      "event": "bind_call_returned",
+      "stage": "bind",
+      "elapsedSeconds": 40.856
+    },
+    {
+      "event": "service_connected",
+      "stage": "service",
+      "elapsedSeconds": 41.282
+    },
+    {
+      "event": "death_linked",
+      "stage": "helper_prepare",
+      "elapsedSeconds": 41.282
+    },
+    {
+      "event": "helper_prepare_enter",
+      "stage": "helper_prepare",
+      "elapsedSeconds": 41.282
+    },
+    {
+      "event": "helper_prepare_returned",
+      "stage": "helper_prepare",
+      "elapsedSeconds": 41.283
+    },
+    {
+      "event": "observer_check_enter",
+      "stage": "observer_check",
+      "elapsedSeconds": 41.283
+    },
+    {
+      "event": "observer_check_passed",
+      "stage": "observer_configure",
+      "elapsedSeconds": 41.283
+    },
+    {
+      "event": "observer_configure_enter",
+      "stage": "observer_configure",
+      "elapsedSeconds": 41.283
+    },
+    {
+      "event": "worker_exception",
+      "stage": "observer_configure",
+      "elapsedSeconds": 41.284,
+      "exceptionClass": "java.lang.IllegalStateException",
+      "branch": "observation_readback_rejected"
+    }
+  ]
+}

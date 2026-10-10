@@ -1,0 +1,40 @@
+{
+  "device": {
+    "model": "Lenovo TB522FU",
+    "usb_serial_redacted": "HA2H***D",
+    "android_release": "16",
+    "api_level": 36,
+    "build": "user/release-keys",
+    "installed_package": "leftcar.ll3.kr",
+    "installed_version": "0.1.10 (16), targetSdk 36",
+    "signing_digest_dumpsys_abbreviated": "eea7996d (not a certificate fingerprint)",
+    "accessibility_enabled": "dev.loopy.keybridge/dev.loopy.keybridge.RemapService only",
+    "keybridge_version": "0.3.4",
+    "uhid_node": "crw-rw---- uhid:uhid; normal app uid 10329 lacks access",
+    "evidence": ["adb devices -l: TB522FU usb:1-1 device", "adb -s HA2H8QSD shell getprop ro.build.version.sdk: 36", "adb -s HA2H8QSD shell dumpsys package leftcar.ll3.kr", "adb -s HA2H8QSD shell settings get secure enabled_accessibility_services", "adb -s HA2H8QSD shell ls -l /dev/uhid"]
+  },
+  "route": {
+    "status": "BLOCKED_PENDING_ANDROID_CURSOR_AUTHORITY_AND_USER_APPROVAL",
+    "product_transport": "direct authenticated Wi-Fi app-to-peer; no wireless ADB product dependency; USB development diagnostics only",
+    "architecture": "Host-owned KM state machine, separate from streaming; direction-specific consent and AEAD; native Mac capture/injection, Android accessibility capture and separately authorized real cursor injector",
+    "decision": "Proceed with independently testable unprivileged seams; do not claim full goal until a real TB522FU mouse cursor/hover injector is explicitly approved and verified",
+    "alternatives": ["A: approved OEM/platform-signed or managed input authority with device-proven input APIs", "B: separately consented USB-started shell UHID helper; debug-start dependency and helper security disclosed; not approved yet", "C: separately scoped USB AOA HID extension, not current Wi-Fi product route"],
+    "attention_required": "Choose/authorize A or explicitly authorize B with exact helper, startup/debug policy, privilege scope and restart/revoke behavior, or provide verified unprivileged API; otherwise original goal remains blocked. Do not auto-approve OS permission or substitute touch gestures."
+  },
+  "supported_capabilities": {
+    "confirmed_foundation": ["Rust default-OFF exclusive KM state and arrangement", "Android API34+ accessibility mouse-motion capture adapter JVM tested", "existing Mac stream-space input injection", "direct Wi-Fi stream restored previously (not KM)"],
+    "candidate_not_physical_verified": ["TB522FU accessibility mouse-family global observation and suppression", "Mac event tap capture/suppression with correct TCC grants"],
+    "not_established": ["Android app-level real OS cursor hover/button/wheel/key injection", "bidirectional physical edge crossing", "end-to-end KM packets/consent/service wiring"]
+  },
+  "permission_requirements": [
+    {"side": "Android capture", "authority": "human-enabled accessibility service with setMotionEventSources(SOURCE_MOUSE family), separate from KeyBridge ownership", "status": "Leftcar service not enabled/registered"},
+    {"side": "Android injection", "authority": "real HID/system input injection authority, not onMotionEvent or dispatchGesture", "status": "not granted; explicit user route choice required"},
+    {"side": "Mac", "authority": "human-granted Input Monitoring and Accessibility for event tap and CGEvent injection", "status": "TCC preflight pending; no automatic grant"},
+    {"side": "session", "authority": "independent directional peer consent, authenticated connection, KM capability and epoch", "status": "default OFF"}
+  ],
+  "unresolved_criteria": ["User-selected and approved Android actual cursor injection authority on TB522FU", "Physical visible Android OS cursor, hover, button, wheel and full keyboard verification in both directions", "TB522FU accessibility physical mouse observation/suppression and no touchscreen capture", "Mac TCC approval and event-tap/secure-input safety", "Physical two-way edge crossing, disconnect/revoke release-all, loop prevention", "Same-signature APK SHA-256 check before any later reinstall"],
+  "implementation_steps": ["1 protocol/versioned KM schemas and domain safety tests", "2 direct-Wi-Fi authenticated KM session and reliable transitions/latest-wins motion", "3 Mac event tap, tagged injection and edge coordinator", "4 Android accessibility mouse capture and physical suppression test", "5 HARD GATE: approval then actual Android cursor injector implementation and device verification", "6 independent consent/UI, React Doctor 100 if React changed, typecheck, tests, same-signed USB install and full physical acceptance"],
+  "read_only_diagnostics_only": true,
+  "full_goal_satisfied": false,
+  "references": ["docs/research/2026-10-03-usb-adb-leftcar-connection-validation.json", "docs/research/2026-10-04-wifi-km-foundation-validation.json", "docs/superpowers/specs/2026-09-25-wifi-bidirectional-km-design.md", "docs/superpowers/specs/2026-10-03-wifi-km-optional-usb-roadmap.json", "https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#onMotionEvent(android.view.MotionEvent)", "https://developer.android.com/reference/android/accessibilityservice/AccessibilityServiceInfo#setMotionEventSources(int)", "https://developer.android.com/reference/android/Manifest.permission#INJECT_EVENTS"]
+}

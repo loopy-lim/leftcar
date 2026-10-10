@@ -1,0 +1,45 @@
+{
+  "task": "mac-feasibility",
+  "title": "macOS 전역 입력 캡처/억제·주입과 기존 Wi-Fi 전송 재사용 타당성 근거",
+  "date": "2026-09-25",
+  "scope": "양방향 Mac ↔ Android KM(마우스·키보드 공유) 중 macOS 측 전역 입력 처리 가능성. Android 측은 별도 조사 과제.",
+  "capabilities": [
+    "macOS는 CGEventTap(hid/session tap, defaultTap 옵션)으로 전역 입력을 캡처하고 콜백이 NULL을 반환해 이벤트를 소비(억제)할 수 있다. 단, 손쉬운 사용(Accessibility) 및 10.15+에서는 입력 모니터링(Input Monitoring) 승인이 필요하다. 근거: Apple CGEventTap 문서 https://developer.apple.com/documentation/coregraphics/cgeventtap",
+    "CGEvent.post(tap:)으로 합성 마우스·키보드 이벤트를 전역으로 주입할 수 있다. Leftcar는 이미 이 경로를 프로덕션에서 사용 중이다. 근거: native/macos-capture-shim/Sources/Transport/CaptureSession+Input.swift의 injectPointerMove/injectKey/injectText",
+    "손쉬운 사용 승인 상태는 AXIsProcessTrusted / CGPreflightScreenCaptureAccess 등으로 프로그래밍 방식 확인 가능하며, Leftcar는 이미 입력 권한 미승인 시 오류로 fail-closed 처리한다. 근거: native/macos-capture-shim/Sources/CaptureShim+Exports.swift:262, docs/platform-permissions-audit.md",
+    "완전한 Wi-Fi 전송 계약이 이미 존재한다: 제어 평면은 QR로 핀된 호스트 Ed25519 정체 키 핸드셰이크 뒤 ChaCha20-Poly1305(RFC 8439) AEAD, 미디어/입력 평면은 HKDF 파생 방향별 키 + 세션 난수 검증된 UDP. 근거: crates/secure-channel/src/lib.rs, crates/control-contract/src/host.rs",
+    "입력 평면은 latest-wins 포인터(LCI1 kind 1), 시퀀스/ACK reliable 키·버튼·휠, release-all 실패 안전(kind 5), 입력 상태 브로드캐스트(LCS1)를 이미 구현한다. 근거: native/macos-capture-shim/Sources/Transport/CaptureSession+Input.swift handleInputMessage/releaseInjectedInput",
+    "전역 데스크톱 좌표계 매핑의 재료가 검증돼 있다: CGDisplayBounds의 글로벌 좌표(음수 원점 포함)와 0–65535 정규화 매핑, 디스플레이 이동·재시작 재조회(currentInputBounds). 근거: CaptureSession+Input.swift pointerPosition/currentInputBounds",
+    "피드백 루프 방지의 절반은 이미 갖춰져 있다: 커서 이벤트 탭은 listenOnly로 설치되어 물리·합성 이동을 관찰만 하고 소비하지 않는다. 근거: native/macos-capture-shim/Sources/Transport/CaptureSession+Cursor.swift:159-176",
+    "절전·수명 회복 재료가 있다: IOPMAssertion(시스템+디스플레이)으로 스트리밍 중 절전 방지, 세션 종료/입력 OFF 시 눌린 키·버튼 전량 해제. 근거: native/macos-capture-shim/Sources/Support/SleepAssertion.swift, CaptureSession+Input.swift releaseInjectedInput",
+    "입력 사용 동의 계약이 존재한다: 세션별 입력 기본 OFF, 기기별 상시 승인(재검토 규율), OS 입력 권한 실패 시 잠금 유지(fail-closed), 감사 로그. 근거: docs/07-security-privacy.md §21, README 보안 요약"
+  ],
+  "sources": [
+    "https://developer.apple.com/documentation/coregraphics/cgeventtap — CGEventTap 생성/활성화, hid vs session tap, 콜백 반환값으로 이벤트 통과/소비, 손쉬운 사용 권한 요구",
+    "https://developer.apple.com/documentation/coregraphics/quartz_event_services — Quartz Event Services 개요(이벤트 관찰·수정·합성 모델)",
+    "https://developer.apple.com/documentation/coregraphics/cgevent — CGEvent 생성과 post, 마우스/키보드 이벤트 필드",
+    "https://developer.apple.com/documentation/coregraphics/cgdisplaybounds — 글로벌 데스크톱 좌표계의 디스플레이 경계(음수 원점 허용)",
+    "https://developer.apple.com/documentation/applicationservices/axisprocesstrusted(_:) — 손쉬운 사용 신뢰 상태 프로그래밍 확인",
+    "https://github.com/input-leap/input-leap — 오픈소스 KM 구현체(Input Leap)가 동일한 OS 수준 캡처/억제/주입 접근을 사용하는 실증(2차 근거)",
+    "저장소: native/macos-capture-shim/Sources/Transport/CaptureSession+Input.swift (주입·릴리즈·좌표 매핑 전체)",
+    "저장소: native/macos-capture-shim/Sources/Transport/CaptureSession+Cursor.swift (listenOnly 커서 탭)",
+    "저장소: crates/secure-channel/src/lib.rs, crates/control-contract/src/host.rs (Ed25519/ChaCha20-Poly1305/HKDF 채널)",
+    "저장소: docs/03-system-architecture.md, docs/07-security-privacy.md, docs/platform-permissions-audit.md (권한·동의·위협 모델)"
+  ],
+  "limitations": [
+    "보안 입력(Secure Event Input)이 활성화된 상태(로그인 창, 비밀번호 필드 등)에서는 합성 키 이벤트가 대상 앱에 전달되지 않는 것이 알려진 플랫폼 동작이다. KM 전환 직후 Mac이 잠긴 상태면 입력 주입이 무시될 수 있다. 이번 조사에서 실기기 재현은 수행하지 않았다.",
+    "코드 주석에 macOS 26에서 HID 탭으로 합성 버튼·스크롤 주입이 드롭되고 세션 탭은 전달된다는 실측 기록이 있다(CaptureSession+Input.swift 상단). 탭·OS 버전별 주입 동작 차이는 KM 전환 경로 설계에서 세션 탭을 기본으로 삼아야 함을 시사한다.",
+    "KM의 '독점 소유'(전환된 쪽에서 물리 입력 억제)는 hid 탭 defaultTap으로 가능하지만, 억제 중 놓치는 이벤트·사용자 혼란·보안 입력 상태와의 상호작용은 KM 전용 설계·검증이 필요하다. 현재 저장소에는 억제(defaultTap) 경로가 없다.",
+    "피드백 루프 방지의 나머지 절반(자기 합성 이벤트를 커서 탭/억제 탭에서 구분)은 미구현이다. CGEvent 소스(process ID/state ID) 필드로 구분해야 하며, 이는 구현 단계에서 추가 검증이 필요하다.",
+    "화면 경계(edge) 기반 전환은 현재 normalized-viewport 매핑과 결합해야 한다. multi-display에서 CGDisplayBounds union의 외곽 경계 추적, 티어드/음수 원점 배치는 설계 필요, 실측 미수행.",
+    "Reliable 키 계약은 현재 뷰어→호스트 단방향이다. Mac→태블릿 방향 KM 전송은 같은 ACK/시퀀스 계약의 반대 방향 재사용을 뜻하며, Android 측 구현 가능성은 이 과제 범위 밖이다.",
+    "이번 조사는 소스·문서·Apple 공개 문서 기반이며, 손쉬운 사용/입력 모니터링 승인 상태의 KM 동작, 잠금→해제 복구, 디스플레이 구성 변경 중 전환 지속성은 실기기 검증으로 남는다."
+  ],
+  "unknowns": [
+    "본 머신에서 손쉬운 사용·입력 모니터링 승인이 KM 수준 억제+주입 동시 사용에 어떻게 프롬프트되는지(물리 확인 미수행). macOS 15+의 손쉬운 사용 주기적 재승인 프롬프트 동작도 실측되지 않았다.",
+    "hid 탭 defaultTap 억제가 Secure Event Input 활성 중에도 유지되는지, 잠금/로그인 창 전환 시 탭 콜백이 계속 호출되는지(물리 확인 미수행).",
+    "화면 잠금·절전→해제 후 UDP 입력 세션과 눌린 키 상태가 실제로 release-all/재핸드셰이크로 완전 복구되는지(코드상 계약은 존재, 실기기 KM 시나리오 미검증).",
+    "Wi-Fi Direct/AP 격리 환경에서 입력 평면 지연이 KM 사용감(마우스 전환 즉시성) 기준을 충족하는지 — 기존 스트리밍 실측은 있으나 KM 경계 전환 레이턴시 실측은 없다.",
+    "Android 태블릿 측 전역 입력 캡처(Accessibility/IME 등) 가능성은 이 과제 범위 밖이며, 그 결과에 따라 전체 양방향 KM의 실현 경로가 달라진다."
+  ]
+}

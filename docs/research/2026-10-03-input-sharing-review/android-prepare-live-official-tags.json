@@ -1,0 +1,25 @@
+{
+  "method": "read-only, 45s, two helper startup tags, closed events and exception classes only",
+  "events": [
+    {
+      "elapsedSeconds": 34.89,
+      "tag": "manager",
+      "event": "leftcar_service_requested"
+    },
+    {
+      "elapsedSeconds": 34.89,
+      "tag": "manager",
+      "event": "leftcar_process_dispatched"
+    },
+    {
+      "elapsedSeconds": 35.3,
+      "tag": "starter",
+      "event": "service_starter_record"
+    },
+    {
+      "elapsedSeconds": 35.39,
+      "tag": "starter",
+      "event": "service_starter_record"
+    }
+  ]
+}

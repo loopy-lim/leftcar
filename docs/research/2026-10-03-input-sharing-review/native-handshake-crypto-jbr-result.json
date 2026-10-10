@@ -1,0 +1,43 @@
+{
+  "environment": "host AndroidStudio JBR",
+  "method": "same dummy-only probe + same exact production Kotlin class",
+  "exit": 0,
+  "records": [
+    {
+      "event": "transform_available",
+      "algorithm": "ChaCha20-Poly1305",
+      "provider": "SunJCE"
+    },
+    {
+      "event": "transform_roundtrip",
+      "algorithm": "ChaCha20-Poly1305",
+      "dummyRoundtrip": true,
+      "tagLengthExpected": true
+    },
+    {
+      "event": "transform_exception",
+      "algorithm": "ChaCha20/Poly1305/NoPadding",
+      "checkpoint": "get_instance",
+      "exceptionClass": "java.security.NoSuchAlgorithmException"
+    },
+    {
+      "event": "actual_derivation",
+      "twoKeysMatchContract": true,
+      "directionKeysDistinct": true
+    },
+    {
+      "event": "actual_roundtrip",
+      "dummyRoundtrip": true,
+      "frameContractMatches": true
+    },
+    {
+      "event": "actual_replay",
+      "replayRejected": true
+    },
+    {
+      "event": "cross_transform_exception",
+      "checkpoint": "canonical_frame_actual_open",
+      "exceptionClass": "java.security.NoSuchAlgorithmException"
+    }
+  ]
+}

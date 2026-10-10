@@ -1,0 +1,18 @@
+{
+  "checkedAt": "2026-10-03T16:28:32.089327+00:00",
+  "candidateApkSha256": "c16c5bc0ff608b92f6e176258615c1d34cf561004cd4f15a9d1c837ea65da3b1",
+  "humanReportedIssue": "hostConsentRequired",
+  "humanReportedText": "Mac에서 이 기기의 두 입력 공유를 모두 승인한 뒤 다시 시작하세요.",
+  "flowInference": "Exact closed reason comes from Host readiness after native.prepare and Android capability checks; prior Android preparation boundary passed on this attempt. Physical input remains unverified.",
+  "hostAX": {
+    "pairedDevice": "TB522FU",
+    "connected": true,
+    "macToAndroidConsent": false,
+    "androidToMacConsent": false,
+    "macInputMonitoring": true,
+    "macAccessibility": true
+  },
+  "permissionActionPerformed": false,
+  "automaticApprovalReview": "Rejected enabling MacToAndroid: exact device/direction action-time confirmation required. Asked user for both directions; pending.",
+  "pairingModal": "Initial open was rejected on suspected code generation; source confirmed modal-only, retry succeeded without creating offer."
+}

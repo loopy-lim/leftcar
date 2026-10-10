@@ -1,0 +1,37 @@
+[
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityService.kt",
+    "before": "71dd96f5525284bf548ef5801b63bd8a579ed64f8b73ddcc70ba13dda910a68f",
+    "after": "21c153b1a28620babd02a0e91c4c0d95183a1c6677c259cc4e5764e071401e58"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt",
+    "before": "b1eccaff070423b4a84b382ad031d8ac1f4aa17e2f60d7ed8d84e74d70908492",
+    "after": "d664a9d0968ac40f22eef1e72c0d85fe4ae30b15a16dac760bfe2fd51228c145"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmOwnObservation.kt",
+    "before": "0f43da815f38bcb2b8e54bf7d8c2102e26c2c88874583bbf777a11c56b058e80",
+    "after": "4642310aee3c575fd195f2520125650d6185e0b5d4f85c1a60d464262b6b7dad"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmOwnObservationTest.kt",
+    "before": "080b21bfdd14a9c220a480d1c097bd202abfa7a96b5e5deb57babd55531a7233",
+    "after": "51444275be09a1381d72a3e5e6fdd3c8ac7ce9f7de1080100addc2e09b625401"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeRecoveryTest.kt",
+    "before": "66a8578a8aa442b09ab2822d0b320588c2d02d71092cbd4f228c7081c77cb95a",
+    "after": "45e45f9ff7ca2b652d92d27fb293fce64699021fbff0647d812510ff27115f93"
+  },
+  {
+    "path": "apps/viewer-expo/android/app/src/test/java/dev/leftcar/viewer/km/KmRuntimeCompletionTest.kt",
+    "before": "75de448ba9a49a86472088828fb1d97c6dae0dd6b261aa664ad0b67afa9d109c",
+    "after": "d71927b06f244a7b918e09072b9b63c91255e1f870ce01058ada05e3b4a2df7a"
+  },
+  {
+    "path": "docs/input-sharing-setup.md",
+    "before": "69e9397156967b610ea3cc30304ed25b8cb2f1b6a4870cfadfc78e51b33281bb",
+    "after": "fb59112cddab10a59a5b523630a6d0b3ba1331d5302dcd893c4e87b074f5bea0"
+  }
+]

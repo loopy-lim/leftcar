@@ -1,0 +1,12 @@
+{
+  "adbSerial": "HA2H8QSD",
+  "package": "leftcar.ll3.kr",
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-3whijn/android-internal-manifest.json",
+  "installedApkSha256": "9262cf195347f1411f6a606b93665f03a0fc56872fdb4488d46434be62b07a58",
+  "archiveApkSha256": "9262cf195347f1411f6a606b93665f03a0fc56872fdb4488d46434be62b07a58",
+  "byteEquality": true,
+  "updateOnly": true,
+  "dataReset": false,
+  "automaticPermissionGrants": false,
+  "appLaunchedByInstaller": false
+}

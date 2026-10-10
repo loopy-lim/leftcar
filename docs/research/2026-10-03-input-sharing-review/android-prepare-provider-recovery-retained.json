@@ -1,0 +1,28 @@
+{
+  "method": "latest retained target attempt; exact two tags; <=800 tag lines; <=20 closed records; private token correlation in memory only; failed-send before sent-binder classification",
+  "exitCode": 0,
+  "leftcarWindowFound": true,
+  "unknownTargetStarterCount": 0,
+  "records": [
+    {
+      "event": "leftcar_record_created",
+      "relativeSeconds": 0
+    },
+    {
+      "event": "leftcar_process_dispatched",
+      "relativeSeconds": 0.0
+    },
+    {
+      "event": "leftcar_starter_entered",
+      "relativeSeconds": 0.376
+    },
+    {
+      "event": "leftcar_manager_binder_received",
+      "relativeSeconds": 0.538
+    },
+    {
+      "event": "leftcar_binder_provider_reply_received",
+      "relativeSeconds": 0.539
+    }
+  ]
+}

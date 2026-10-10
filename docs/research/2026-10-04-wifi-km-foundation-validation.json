@@ -1,0 +1,74 @@
+{
+  "task": "foundation-integration: Verify aligned safety contracts (default-OFF/consent/capability/ownership/fail-closed/release-all/no-touchscreen) across Rust domain and Android API34+ KM foundation, and record remaining full-goal gaps",
+  "date": "2026-10-04",
+  "verdict": "PASS",
+  "verdict_scope": "두 기반(Rust 도메인 상태 기계/기하, Android API 34+ 마우스 접근성 관찰 seam)의 안전 계약이 상호 정렬됨을 독립 검증했다. 이는 '기반이 계약대로 동작한다'는 판정이지 전체 목표 달성 판정이 아니다.",
+  "full_goal_satisfied": false,
+  "wireless_adb_used": false,
+  "physical_km_test_passed": false,
+  "verified_foundation": {
+    "rust_domain": {
+      "source": ["crates/domain/src/km.rs", "crates/domain/src/lib.rs"],
+      "default_off": "KmStateMachine::new → Off, KmConsent::default() 전부 false, KmCapabilities 4개 필드 전부 false(파생 없음). 테스트 machine_starts_off_and_default_capabilities_are_fail_closed.",
+      "consent": "Arm은 양방향 동의 없으면 MissingBidirectionalConsent로 거리고 Off 유지; 각 방향 활성화 시 자기 방향 동의 재검사(MissingDirectionConsent). RevokeConsent는 Armed 상태에서 양방향 철회 시에만 해체, Active 방향 동의 철회는 exit_to_off(fail-closed).",
+      "capability": "preflight 전부 기본 false. android_virtual_cursor는 무선 ADB 승인 대상으로 문서상 미승인 유지(wifi-km-optional-usb-roadmap), VirtualCursorEdge 트리거는 capability 없으면 UnsupportedTriggerSource 거부. android_motion_observation은 candidate로 명시.",
+      "ownership_exclusive": "I1 — Active 방향 존재 시 타 방향 활성화는 ConflictingActiveDirection + BroadcastKmState. 테스트 second_direction_activation_is_rejected_while_one_is_active.",
+      "fail_closed_release_order": "I3 — 모든 Off 복귀 경로(Escape/Disconnected/HostLocked/HostSleep/StopAll/WatchdogTimeout/ArrangementInvalid/Disarm/active-consent-revoke)에서 ReleaseAllInjectedInput이 첫 효과, 이후 서브시스템 정지 → RestoreLocalInput → StopWatchdog → BroadcastKmState. 테스트 exit_paths_always_release_all_first_and_land_off가 7개 경로를 모두 단언.",
+      "no_auto_reactivate": "I4 — Reconnected는 효과 없음. 테스트 no_event_sequence_auto_activates_after_reconnect.",
+      "no_touchscreen": "도메인은 트리거 소스를 capability로 게이트하고 touch capture 효과 자체가 없다. SuppressMacPhysicalPointer는 Active(MacToAndroid)에서만(I2), EnableAndroidKeyFilter는 AndroidToMac에서만 발생.",
+      "tests": "cargo test -p domain → 46 passed, 0 failed (0.02s); proptest 포함"
+    },
+    "android_km": {
+      "source": [
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmMotionSources.kt",
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmMotionSample.kt",
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmCaptureController.kt",
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmAccessibilityMotionAdapter.kt"
+      ],
+      "default_off": "KmCaptureController의 5개 게이트(API 34+/ATTACHED_READY/세션 동의/인증 연결/소유권)가 전부 false 기본, desiredMask()는 5게이트 동시 충족 시에만 MOUSE_FAMILY. 테스트 default state is off and emits nothing, each missing gate keeps mask zero, below api 34 never activates even with every gate satisfied.",
+      "consent": "SessionConsent 게이트. 정상 철회는 ReleaseSources 후 새 동의로 재무장 가능(consent revoke releases sources and fresh consent re-arms). fail-closed(DISCONNECTED/WATCHDOG_TIMEOUT/PERMISSION_LOST/TEARDOWN/SINK_ERROR/WRITE_FAILED)는 세션 동의를 폐기해 재연결·게이트 리셋만으로 재활성 불가(disconnect fails closed and reconnect alone never re-activates) — 도메인 I4와 정렬.",
+      "capability": "KmMotionSources.MIN_API=34 게이트 + 서비스 ATTACHED_READY 게이트. attach는 API 34 미만 ApiUnsupported, 중복 결합 AlreadyAttached 거부.",
+      "ownership_exclusive": "OwnershipActive 게이트가 도메인 소유권 상태와 구독을 결합 — 소유권 없으면 구독 마스크 0.",
+      "fail_closed_release_order": "failClosed()는 ReleaseSources(commit 0)를 FailClosed 사유 보고보다 먼저 실행 — 도메인 I3 순서와 정렬. 이미 해제 상태면 중복 릴리스 없이 사유만 보고(teardown is idempotent and never double releases).",
+      "release_all": "ReleaseSources는 ServiceInfo read-modify-write로 motionEventSources=0 커밋, 다른 ServiceInfo 필드 보존(serviceInfo mask round trip uses real setMotionEventSources and preserves other fields). 커밋 실패 시 onWriteFailed로 즉시 fail-closed, 해제 재시도 1회, 재귀 없음, 사유는 동일 dispatch 반환값에 1회 보고.",
+      "no_touchscreen": "MOUSE_FAMILY = SOURCE_MOUSE|SOURCE_MOUSE_RELATIVE|SOURCE_TOUCHPAD 만. 테스트 mask contains no touchscreen device bits, isMouseFamily accepts mouse sources and rejects touchscreen garbage and empty, sanitize keeps only mouse family bits. 클래스 비트(SOURCE_CLASS_*) 단독 구독 금지, 키 이벤트 필터는 KeyBridge 소유 그대로(건드리지 않음).",
+      "sink_guard": "onMotionEvent는 captureActive 게이트 → KmMotionSample 정규화(runCatching, null 안전) → 마우스 계열 소스 필터 → sink 예외 시 즉시 fail-closed(sink exception clears subscriptions fail closed).",
+      "tests": "./gradlew :app:testDebugUnitTest --tests 'dev.leftcar.viewer.km.*' :app:compileDebugKotlin → BUILD SUCCESSFUL. --rerun-tasks 신규 실행 결과: Adapter 10 / Controller 10 / Sample 5 / Sources 5 = 30 tests, 0 failures, 0 errors."
+    },
+    "cross_foundation_alignment": [
+      "기본 OFF: 도메인 Off/consent-false/capability-false ↔ 컨트롤러 5게이트 false → 마스크 0. 정렬.",
+      "동의: 도메인 양방향 동의+방향별 재검사 ↔ 컨트롤러 세션 동의 게이트+fail-closed 동의 폐기(재동의 필요). 정렬(Android가 도메인 I4를 소비자 측에서 강화).",
+      "capability: 도메인 preflight(candidates 명시) ↔ Android API 34/attach 게이트. 정렬.",
+      "소유권: 도메인 I1 배타 활성 ↔ OwnershipActive 게이트. 정렬.",
+      "fail-closed 해제 선행: 도메인 I3(ReleaseAll 최우선) ↔ 컨트롤러 ReleaseSources 선행+사유 후행. 정렬.",
+      "touchscreen 비캡처: 도메인 virtual-cursor 미승인 유지 ↔ Android 마우스 계열 전용 마스크+sanitize. 정렬.",
+      "재연결 무자동재개: 도메인 I4 ↔ 컨트롤러 동의 폐기. 정렬."
+    ],
+    "no_forbidden_activation": "AndroidManifest.xml에 접근성 서비스 선언 없음(grep 'accessibility|km' 0건), km 패키지 밖에서 KmAccessibilityMotionAdapter/KmCaptureController 참조 없음 — 자동 설치·자동 권한 변경·서비스 자동 활성화 없음을 소스로 확인."
+  },
+  "unresolved_original_criteria": {
+    "live_wifi_session": "blocked — 연결 기기 실측(wifi-km-connected-device-validation)에서 직접 LAN 도달성·mDNS 상호 발견만 입증, 동의된 앱 간 라이브 Leftcar 세션은 미개설(태블릿 UI를 에이전트가 구동할 수단 없음, 무선 ADB 금지).",
+    "mac_event_tap_authority": "TCC 기준 Input Monitoring 미승인 — Mac 측 경계 감시·억제 탭(Stage 2) 전제 미충족. 도메인 mac_to_android capability는 preflight 통과를 요구하므로 실사용 게이트는 아직 닫혀 있음.",
+    "android_actual_cursor_injection": "미검증 — setMotionEventSources 실기기 적용·해제와 물리 마우스 이벤트 도달은 Robolectric/JVM 시뮬레이션만 확인. OEM이 accessibility motion 이벤트를 캡처·억제할 가능성 포함(candidate_untested).",
+    "bidirectional_physical_edge_crossing": "미수행 — mouse/keyboard/real_cursor_hover/edge_crossing/global_capture_suppression 양방향 물리 테스트 전부 untested.",
+    "service_wiring": "서비스 서브클래스 onMotionEvent 위임·라이프사이클→dispatch 배선과 manifest 등록은 미구현(별도 사용자 명시 단계 과제 — 자동 설치 금지 계약상 의도된 gap).",
+    "usb_transport": "선택적 미래 확장으로 설계에서 명시 제외 — 지금 구현하지 않음(roadmap 계약 준수)."
+  },
+  "next_integration_steps": [
+    "사용자 명시 단계: 태블릿에서 Leftcar Viewer로 leftcar-host에 접속해 라이브 세션 개설(전송 재현) — 무선 ADB·자동 권한 변경 없이.",
+    "사용자 명시 단계: Mac Input Monitoring(TCC) 승인 검토 — Stage 2 경계 감시·억제 탭 preflight의 실제 통과 조건.",
+    "서비스 서브클래스 배선 설계·구현(별도 결정): onMotionEvent 오버라이드 위임, onServiceConnected/라이프사이콜 콜백 → dispatch(ServiceCapability/ConnectionAuthenticated/OwnershipActive) 전달, manifest uses-permission·service 선언은 사용자 동의 절차와 함께.",
+    "실기기 API 34+ 검증: TB710FU(API 36)에서 setMotionEventSources 적용/해제와 물리 마우스 onMotionEvent 도달·OEM 차이 실측(tools/wifi-km-device-probe.py 계열 프로브 활용).",
+    "양방향 물리 edge-crossing·release-all 실측을 도메인 시나리오(Escape/Disconnect/StopAll)와 대응시켜 기록."
+  ],
+  "evidence_commands": [
+    "cargo test -p domain → 46 passed; 0 failed (0.02s)",
+    "cd apps/viewer-expo/android && ./gradlew :app:testDebugUnitTest --tests 'dev.leftcar.viewer.km.*' :app:compileDebugKotlin → BUILD SUCCESSFUL",
+    "./gradlew :app:testDebugUnitTest --tests 'dev.leftcar.viewer.km.*' --rerun-tasks → KmAccessibilityMotionAdapterTest 10, KmCaptureControllerTest 10, KmMotionSampleTest 5, KmMotionSourcesTest 5 — 0 failures/errors",
+    "grep -i 'accessibility|km' apps/viewer-expo/android/app/src/main/AndroidManifest.xml → 0건(서비스 미선언 확인)"
+  ],
+  "changed_files_in_this_task": [
+    "docs/research/2026-10-04-wifi-km-foundation-validation.json",
+    "docs/research/2026-10-04-wifi-km-foundation-validation.md"
+  ]
+}

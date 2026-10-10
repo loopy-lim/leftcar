@@ -1,0 +1,10 @@
+{
+  "user0States": [
+    "RUNNING_UNLOCKED"
+  ],
+  "userDumpExit": 0,
+  "providerExplicitlyDisabledUser0": false,
+  "providerExplicitlyEnabledUser0": false,
+  "shellCrossUsersFullPermission": "unsupported_or_unrecognized",
+  "permissionReadExit": 255
+}

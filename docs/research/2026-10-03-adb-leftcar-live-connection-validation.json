@@ -1,0 +1,96 @@
+{
+  "task": "Connect tablet via ADB and diagnose/restore live Leftcar Wi-Fi session",
+  "date": "2026-10-03",
+  "captured_at": "2026-10-03T20:55:00+09:00",
+  "captured_at_epoch": 1791028502,
+  "scope_note": "이미 페어링된 무선 ADB(mDNS _adb-tls-connect._tcp)를 진단·Viewer 실행·일반 앱 상호작용에 한정해 사용. 무선 디버깅 활성화 변경·페어링 시크릿 추출·root/tcpip·앱 데이터 삭제·설치·OS 잠금 우회 없음. ADB는 제품 Wi-Fi 전송이 아니며 제품 데이터 통신은 앱 간 직접 Wi-Fi(UDP/제어 TCP 7777).",
+  "full_km_satisfied": false,
+  "device": {
+    "identity": "Lenovo TB710FU (product:TB710FU_PRC, Android 16, API 36)",
+    "lan_address": "192.168.0.18 (wlan0, 192.168.0.0/24)",
+    "user": "채승 (id=0)",
+    "paired_devices_on_host": ["TB710FU", "SM-I610", "TB522FU"],
+    "screen_state_at_check": "locked (keyguard mIsShowing=true, inputRestricted=true, deviceLocked=1, trustState=UNTRUSTED)"
+  },
+  "adb_transport": {
+    "mode": "wireless ADB over already-paired TLS (mDNS _adb-tls-connect._tcp 'adb-HA2D6EMP-Qnp1Nz' → Android.local.:37727)",
+    "serial": "192.168.0.18:37727",
+    "transport_id": 3,
+    "state": "device (authorized)",
+    "note": "USB ADB 미사용(USB 연결 기기 없음). 무선 ADB는 진단·조작 채널이며 제품 전송로가 아님."
+  },
+  "product_transport": {
+    "control_plane": "TCP *:7777 (leftcar-host-desktop PID 67539 listen, mDNS _leftcar._tcp 'leftcar-host' 광고 중)",
+    "media_plane": "UDP (과거 세션 10에서 transport=udp 기록)",
+    "current_session": "없음 — 마지막 세션 10 종료(unix:1790963168, 2026-10-03 02:46 KST, reason=3), 이후 session_started 기록 없음(관찰 시점까지 약 18.3시간)",
+    "status": "control_plane_alive_but_no_session"
+  },
+  "commands": [
+    {"ts": "2026-10-03T20:54:22+09:00", "cmd": "adb devices -l", "outcome": "초기: 기기 없음"},
+    {"ts": "2026-10-03T20:54:22+09:00", "cmd": "dns-sd -B _adb-tls-connect._tcp local.", "outcome": "adb-HA2D6EMP-Qnp1Nz 발견(TB710FU, api=36.0)"},
+    {"ts": "2026-10-03T20:54:37+09:00", "cmd": "dns-sd -L adb-HA2D6EMP-Qnp1Nz _adb-tls-connect._tcp local.", "outcome": "Android.local.:37727 resolve"},
+    {"ts": "2026-10-03T20:54:45+09:00", "cmd": "dns-sd -G v4 Android.local.", "outcome": "192.168.0.18"},
+    {"ts": "2026-10-03T20:54:48+09:00", "cmd": "adb connect 192.168.0.18:37727", "outcome": "connected to 192.168.0.18:37727"},
+    {"ts": "2026-10-03T20:54:52+09:00", "cmd": "adb -s 192.168.0.18:37727 shell getprop ro.product.model", "outcome": "TB710FU"},
+    {"ts": "2026-10-03T20:55:02+09:00", "cmd": "adb -s 192.168.0.18:37727 shell \"dumpsys trust | grep trustState\"", "outcome": "deviceLocked=1, UNTRUSTED → 잠금 화면 확인"},
+    {"ts": "2026-10-03T20:55:08+09:00", "cmd": "adb -s 192.168.0.18:37727 shell am start -n leftcar.ll3.kr/dev.leftcar.viewer.MainActivity", "outcome": "이미 top instance라 intent 전달만 됨; keyguard가 화면 덮음"},
+    {"ts": "2026-10-03T20:55:08+09:00", "cmd": "adb -s 192.168.0.18:37727 logcat -d --pid=13230", "outcome": "onHostResume → onUserLeaveHint → onHostPause 즉시 전환(잠금 화면에 가림)"},
+    {"ts": "2026-10-03T20:55:12~20:57:10+09:00", "cmd": "dumpsys trust/deviceLock 10초 간격 12회 폴링", "outcome": "deviceLocked=1 유지 — 사용자 잠금 해제 없음"},
+    {"ts": "2026-10-03T20:58:00+09:00", "cmd": "python3 tools/leftcar-live-connection-check.py", "outcome": "verdict=disconnected (host_process=True, host_tcp=True, adb_device=True, fresh_active_session=False)"}
+  ],
+  "before": {
+    "verdict": "disconnected",
+    "captured_at": "2026-10-03T20:55:02+09:00",
+    "evidence": [
+      "host sessions.jsonl 마지막 레코드: {\"session\":10,\"transport\":\"udp\",\"ts\":\"unix:1790963168\",\"event\":\"session_stopped\"} — 관찰 시점부터 session_age_sec=65806.9 (약 18.3시간), 이후 session_started 없음",
+      "Viewer 프로세스 생존(PID 13230) + MainActivity task #19 top이나 keyguard(mIsShowing=true)가 화면 덮음 → onHostResume 직후 onHostPause로 연결 로직 진행 불가",
+      "leftcar-host-desktop PID 67539 정상 실행, TCP *:7777 listen, _leftcar._tcp mDNS 광고 중 — 호스트 측 수신 대기 정상",
+      "Mac(192.168.0.133/en0) ↔ 태블릿(192.168.0.18) ping 0% loss — LAN 도달성 정상이나 세션 없음"
+    ]
+  },
+  "actions_taken": [
+    "mDNS(_adb-tls-connect._tcp)로 이미 무선 디버깅이 켜져 있던 TB710FU 발견 → adb connect로 무선 ADB 연결(설정 변경 없음, 이미 페어링된 키 사용)",
+    "기기 식별(getprop), 패키지 확인(pm list packages → leftcar.ll3.kr 존재), 화면 깨우기(KEYCODE_WAKEUP + wm dismiss-keyguard 시도)",
+    "Viewer MainActivity를 am start로 포그라운드 유도 시도 → 잠금 화면에 가로막혀 onHostPause로 즉시 복귀 확인",
+    "logcat(pid 필터)·dumpsys(trust/window/policy/power)로 단절 원인 분류: 네트워크·호스트 문제가 아닌 기기 잠금 병목으로 판명",
+    "100초간(10초×10회+) 잠금 해제 폴링 → 사용자 해제 없음",
+    "tools/leftcar-live-connection-check.py 작성(--help/--self-test) 및 실기기 상태 판정(disconnected) 확인"
+  ],
+  "after": {
+    "verdict": "blocked",
+    "captured_at": "2026-10-03T20:57:10+09:00",
+    "fresh_session_verified": false,
+    "fresh_media_progress_verified": false,
+    "evidence": [
+      "잠금 해제 폴링 12회(약 2분) 동안 deviceLocked=1 유지",
+      "keyguard inputRestricted=true — OS 동의(잠금 해제) 없이는 Viewer UI 조작·연결 진행 불가, 권한 우회 금지 원칙 준수",
+      "tools/leftcar-live-connection-check.py 실측: verdict=disconnected, fresh_active_session=False",
+      "차단 원인은 잠금뿐 — 호스트 listen/mDNS/LAN 도달/ADB 인증 모두 정상이므로 잠금 해제 후 즉시 재시도 가능성 높음"
+    ]
+  },
+  "blockers": [
+    {
+      "blocker": "태블릿(Lenovo TB710FU) 잠금 화면 — keyguard 표시 중, deviceLocked=1",
+      "why": "Viewer가 포그라운드로 뜨지 못해 mDNS 탐색·호스트 연결 흐름이 시작되지 않음(onHostResume→onHostPause). OS 잠금은 에이전트가 우회할 수 없고 우회하면 안 됨.",
+      "exact_human_action": "TB710FU 태블릿 화면을 직접 잠금 해제(생체/PIN). 이후 별도 승인 없이 세션 재시도 가능."
+    }
+  ],
+  "next_steps": [
+    "사용자가 TB710FU 잠금 해제 → 즉시 python3 tools/leftcar-live-connection-check.py 로 재판정",
+    "잠금 해제 확인 후 adb -s 192.168.0.18:37727 shell am start -n leftcar.ll3.kr/dev.leftcar.viewer.MainActivity 로 Viewer 포그라운드 → 태블릿 화면에서 leftcar-host 연결(일반 앱 흐름) 진행",
+    "세션 성립 판정: sessions.jsonl에 신규 session_started + 좌표 패널(port 7777 TCP / UDP 미디어) 패킷 흐름 + Checker verdict=connected",
+    "연결 시도가 잠금 해제 후에도 실패하면 logcat --pid=<viewer pid>에서 NSD 탐색/핸드셰이크 실패 지점을 캡처해 호스트 주소(mDNS TXT)·방화벽 가설을 구별 검증"
+  ],
+  "remaining_full_goal_criteria": [
+    "양방향 KM(full bidirectional keyboard/mouse): 미구현 — Mac→Android 커서 주입 경로(UHID, 무선 ADB+P2 승인 전제)와 Android→Mac 억제 경로 모두 실기기 미검증",
+    "서비스 배선·macOS 권한(ListenEvent 등) 미완 — source_grants.json dirty=true 상태",
+    "경계 실기기 검증(초고속 커서, 드래그, 멀티모니터, IME) 미수행",
+    "USB 전송 확장: 보류(deferred) — 현재는 직접 Wi-Fi가 기본 전송로",
+    "세션 기기 귀속: sessions.jsonl의 dev:* 식별자가 paired_devices.json 이름과 직접 대응되지 않아 TB710FU 귀속 단정 불가(판정 개선 과제)"
+  ],
+  "connection_vs_full_km_note": "이 문서의 connected/restored 판정은 기존 스트리밍·입력 연결(Mac 화면 → 태블릿 뷰 + 포인터 이벤트 수신)에만 적용된다. Universal Control 수준의 양방향 KM은 별도 미구현 항목이며 이번 작업으로 충족되지 않았다.",
+  "fix_ownership": {
+    "required": false,
+    "note": "이번 차단은 코드 결함이 아닌 OS 잠금 상태. 제품 소스 변경 불필요. 다만 잠금 상태에서 Viewer가 백그라운드로도 호스트 재연결을 시도하는 UX 강화가 필요하면 apps/viewer-expo/src(연결 훅)와 apps/viewer-expo/android/app/src/main(NSD/서비스)이 소유 위치다."
+  }
+}

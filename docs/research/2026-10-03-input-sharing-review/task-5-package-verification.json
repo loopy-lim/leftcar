@@ -1,0 +1,14 @@
+{
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-gW3ljk/android-internal-manifest.json",
+  "apkPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-gW3ljk/artifacts/viewer-apk-app-release.apk",
+  "apkSha256": "c16c5bc0ff608b92f6e176258615c1d34cf561004cd4f15a9d1c837ea65da3b1",
+  "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "allCurrentFileSourceHashesMatched": 1123,
+  "reviewedNativeSourceHash": "d664a9d0968ac40f22eef1e72c0d85fe4ae30b15a16dac760bfe2fd51228c145",
+  "javascriptDigestUnchanged": true,
+  "rustNativeDigestUnchanged": true,
+  "allTemporaryPreparationTagAndClosedBranchesAbsentFromDex": true,
+  "reviewedServiceSourceHash": "21c153b1a28620babd02a0e91c4c0d95183a1c6677c259cc4e5764e071401e58",
+  "build": "normal full Android internal build; reviewed Task5 own-service delegation",
+  "runtimeAcceptance": "source/package verification only; actual ART access and physical input acceptance pending"
+}

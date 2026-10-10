@@ -1,0 +1,25 @@
+{
+  "method": "read-only exact package metadata + package-filtered provider metadata + selected process names only",
+  "packageDumpExit": 0,
+  "user0": {
+    "installed": "true",
+    "hidden": "false",
+    "suspended": "false",
+    "stopped": "false",
+    "notLaunched": "false",
+    "enabled": "0"
+  },
+  "declarationKinds": [
+    "authority_declared"
+  ],
+  "providerActivityDumpExit": 0,
+  "authoritySeenInCurrentActivityProviderDump": false,
+  "processes": [
+    {
+      "uid": 2000,
+      "pid": 25428,
+      "name": "shizuku_server"
+    }
+  ],
+  "limit": "post-attempt snapshot; no provider acquisition or launch performed"
+}

@@ -1,0 +1,185 @@
+{
+  "method": "fresh isolated headless developer render; not native device or user browser evidence",
+  "results": [
+    {
+      "name": "host-narrow-ko-light-off",
+      "errors": [],
+      "width": 360,
+      "height": 800,
+      "buttons": [
+        {
+          "label": "",
+          "width": 44,
+          "height": 44,
+          "disabled": false
+        },
+        {
+          "label": "",
+          "width": 44,
+          "height": 44,
+          "disabled": false
+        },
+        {
+          "label": "새로고침",
+          "width": 77.90625,
+          "height": 44,
+          "disabled": false
+        }
+      ],
+      "horizontalOverflow": []
+    },
+    {
+      "name": "viewer-compact-en-light-failure",
+      "errors": [],
+      "width": 360,
+      "height": 800,
+      "buttons": [
+        {
+          "label": "Allow Mac → Android · Approved",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Allow Android → Mac · Approved",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Left",
+          "width": 156,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "✓ Right",
+          "width": 156,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Start input sharing",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Open accessibility settings",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Refresh",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        }
+      ],
+      "horizontalOverflow": []
+    },
+    {
+      "name": "viewer-compact-ko-dark-recovery",
+      "errors": [],
+      "width": 360,
+      "height": 800,
+      "buttons": [
+        {
+          "label": "Mac → Android 허용 · 허용됨",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Android → Mac 허용 · 허용됨",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "왼쪽",
+          "width": 156,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "✓ 오른쪽",
+          "width": 156,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "입력 공유 중지",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "접근성 설정 열기",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "새로고침",
+          "width": 320,
+          "height": 48,
+          "disabled": false
+        }
+      ],
+      "horizontalOverflow": []
+    },
+    {
+      "name": "viewer-tablet-en-dark-owner",
+      "errors": [],
+      "width": 1024,
+      "height": 768,
+      "buttons": [
+        {
+          "label": "Allow Mac → Android · Approved",
+          "width": 632,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Allow Android → Mac · Approved",
+          "width": 632,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Left",
+          "width": 312,
+          "height": 48,
+          "disabled": true
+        },
+        {
+          "label": "✓ Right",
+          "width": 312,
+          "height": 48,
+          "disabled": true
+        },
+        {
+          "label": "Stop input sharing",
+          "width": 632,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Open accessibility settings",
+          "width": 632,
+          "height": 48,
+          "disabled": false
+        },
+        {
+          "label": "Refresh",
+          "width": 632,
+          "height": 48,
+          "disabled": false
+        }
+      ],
+      "horizontalOverflow": []
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+[
+  {
+    "package": "moe.shizuku.privileged.api",
+    "apkAvailableUser0": true,
+    "applicationFields": {
+      "enabled": null,
+      "directBootAware": "true",
+      "process": null
+    },
+    "shizukuProviders": [
+      {
+        "name": "moe.shizuku.manager.ShizukuManagerProvider",
+        "authorities": "moe.shizuku.privileged.api.shizuku",
+        "enabled": "true",
+        "exported": "true",
+        "permission": "android.permission.INTERACT_ACROSS_USERS_FULL",
+        "readPermission": null,
+        "writePermission": null,
+        "directBootAware": "true",
+        "process": null,
+        "multiprocess": "false"
+      },
+      {
+        "name": "androidx.startup.InitializationProvider",
+        "authorities": "moe.shizuku.privileged.api.androidx-startup",
+        "enabled": null,
+        "exported": "false",
+        "permission": null,
+        "readPermission": null,
+        "writePermission": null,
+        "directBootAware": null,
+        "process": null,
+        "multiprocess": null
+      }
+    ]
+  },
+  {
+    "package": "dev.loopy.keybridge",
+    "apkAvailableUser0": true,
+    "applicationFields": {
+      "enabled": null,
+      "directBootAware": null,
+      "process": null
+    },
+    "shizukuProviders": [
+      {
+        "name": "dev.loopy.keybridge.AdbOnlyProvider",
+        "authorities": "dev.loopy.keybridge.shizuku",
+        "enabled": null,
+        "exported": "true",
+        "permission": "android.permission.INTERACT_ACROSS_USERS_FULL",
+        "readPermission": null,
+        "writePermission": null,
+        "directBootAware": null,
+        "process": null,
+        "multiprocess": "false"
+      }
+    ]
+  },
+  {
+    "field": "currentUser",
+    "exit": 0,
+    "value": "0"
+  },
+  {
+    "field": "user0Unlocked",
+    "exit": 255,
+    "value": "unrecognized_or_unsupported"
+  }
+]

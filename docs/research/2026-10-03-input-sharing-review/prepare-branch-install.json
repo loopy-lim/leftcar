@@ -1,0 +1,21 @@
+{
+  "checkedAt": "2026-10-03T15:33:47.942412+00:00",
+  "deviceSerial": "HA2H8QSD",
+  "package": "leftcar.ll3.kr",
+  "updateOnly": true,
+  "dataReset": false,
+  "appLaunchedByInstaller": false,
+  "permissionAutoGrants": false,
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-SfpB7r/android-internal-manifest.json",
+  "installedApkSha256": "5fda0082ed1e37d7e3bfa4d903a6ff21ba2818b70c9e3e06801ab4647126aa35",
+  "archiveByteEquality": true,
+  "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "enabledAccessibilityServices": [
+    "dev.loopy.keybridge/dev.loopy.keybridge.RemapService",
+    "leftcar.ll3.kr/dev.leftcar.viewer.km.KmAccessibilityService"
+  ],
+  "shizukuApiPermissionGranted": true,
+  "nativePrepareProbeTemporary": true,
+  "closedPreparationBranchDiagnostics": true,
+  "runtimeAcceptance": "pending user-operated Start on exact artifact; input sharing not fixed or accepted"
+}

@@ -1,0 +1,22 @@
+{
+  "checkedAt": "2026-10-03T15:51:05.804035+00:00",
+  "deviceSerial": "HA2H8QSD",
+  "package": "leftcar.ll3.kr",
+  "updateOnly": true,
+  "dataReset": false,
+  "appLaunchedByInstaller": false,
+  "permissionAutoGrants": false,
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-L33YcI/android-internal-manifest.json",
+  "installedApkSha256": "f90061e95d057e7343067fba0703875b10cafa4186f216ee9b398316e71907a4",
+  "archiveByteEquality": true,
+  "signerCertificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "enabledAccessibilityServices": [
+    "dev.loopy.keybridge/dev.loopy.keybridge.RemapService",
+    "leftcar.ll3.kr/dev.leftcar.viewer.km.KmAccessibilityService"
+  ],
+  "shizukuApiPermissionGranted": true,
+  "nativePrepareProbeTemporary": false,
+  "allTemporaryPreparationDiagnosticsRemoved": true,
+  "delegationImplemented": false,
+  "runtimeAcceptance": "update-only package proof; ordinary app observer path remains unsupported, no new human retry required or native input acceptance claimed"
+}

@@ -1,0 +1,7 @@
+# Root normal-build verification state
+
+Reviewed native source c3805127940777224e6365459ab816b91ae0ffa93a6a2c97eadbb6dd265a6190 is integrated and frozen. Normal Android internal build includes release Kotlin compilation and real JS bundle; no scratch Gradle init script/exclusion is used. Kotlin compilation completed, package/signing/manifest gate remains pending. Log /private/tmp/leftcar-km-native-prepare-build.log.
+
+Two R8 warnings in unchanged external com.google.ar:core 1.53.0 invalid stack-map table are present. The previous installed diagnostic build log has no matching warning lines, so a prior observed-warning claim is unverified and withdrawn. These are external dependency warnings in this build; no pristine full-build claim is made. They are separate from the unchanged React gate and remain outside this temporary native diagnostic task.
+
+Normal full internal build succeeded3m2s; release Kotlin compile plus actual JS bundle/package completed. 1121current source file hashes matched manifest; diagnostic native source matches frozen reviewed c380512...; unchanged JavaScript and Rust-native APK digest verified. APK a6ab83fc029e23448d915c92fe93e1b112a97b4351ca380cb2a17dbcffc13e2a, same Android signer dd0f47...9655. Update-only install succeeded; pulled installed APK byte/hash equals archive; both accessibility services and Shizuku permission remain enabled. No launch/reset/grants/Host rebuild by installer. Source compilation gate now resolved; physical startup acceptance remains open.

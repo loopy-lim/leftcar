@@ -1,0 +1,53 @@
+{
+  "method": "read-only live two exact Shizuku startup tags; 120s max; target starter PID fenced; max20 closed records; no raw data stored",
+  "events": [
+    {
+      "event": "leftcar_record_created",
+      "elapsedSeconds": 55.47
+    },
+    {
+      "event": "leftcar_process_dispatched",
+      "elapsedSeconds": 55.47
+    },
+    {
+      "event": "leftcar_starter_entered",
+      "elapsedSeconds": 55.846
+    },
+    {
+      "event": "leftcar_binder_sent",
+      "elapsedSeconds": 56.009
+    },
+    {
+      "event": "leftcar_record_created",
+      "elapsedSeconds": 100.21
+    },
+    {
+      "event": "leftcar_process_dispatched",
+      "elapsedSeconds": 100.213
+    },
+    {
+      "event": "leftcar_starter_entered",
+      "elapsedSeconds": 100.68
+    },
+    {
+      "event": "leftcar_binder_sent",
+      "elapsedSeconds": 100.779
+    },
+    {
+      "event": "leftcar_record_created",
+      "elapsedSeconds": 103.293
+    },
+    {
+      "event": "leftcar_process_dispatched",
+      "elapsedSeconds": 103.294
+    },
+    {
+      "event": "leftcar_starter_entered",
+      "elapsedSeconds": 103.408
+    },
+    {
+      "event": "leftcar_binder_sent",
+      "elapsedSeconds": 103.428
+    }
+  ]
+}

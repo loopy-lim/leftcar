@@ -1,0 +1,155 @@
+{
+  "task": "android-feasibility: Verify Android global KM capabilities over Wi-Fi",
+  "date": "2026-09-24",
+  "verdict": "PARTIAL",
+  "summary": "접근성 필터만으로 Android 물리 키보드 → Mac 방향의 전역 키보드 공유는 이미 구현·검증 가능하다(기존 KeyBridge 경로). 그러나 Universal Control 수준의 양방향 KM은 접근성만으로 불가능하다. Mac → Android 방향에서 (1) Android에 보이는 전역 커서 생성, (2) 다른 앱 위 포인터 이벤트 관찰·억제, (3) hover·마우스 홀드 등 포인터 이벤트 시맨틱은 공개 API로 불가능하며 가상 입력 장치(uinput/root) 또는 시그니처 권한 INJECT_EVENTS가 필요하다. 무선 ADB(shell uid)는 주입은 가능하지만 커서 시맨틱은 여전히 없고 재부팅마다 사용자 재동작이 필요하다.",
+  "capabilities": [
+    {
+      "id": "global-key-capture-suppression",
+      "area": "Global physical keyboard capture/suppression",
+      "answer": "YES (keyboard only)",
+      "mechanism": "AccessibilityService + FLAG_REQUEST_FILTER_KEY_EVENTS: onKeyEvent에서 포커스 윈도우보다 먼저 하드웨어 키 이벤트를 관찰하고 true를 반환해 소비(억제) 가능. 마우스/포인터 이벤트에는 동일 필터가 없다. Power 키 등 일부 시스템 키는 접근성 서비스로 관찰·소비가 불가능하다.",
+      "status": "documented (Android 공식 문서) + repo 설계 확인",
+      "evidence": "기존 KeyBridge 접근성 서비스가 앱보다 먼저 외부 키 이벤트를 보고 소비한다는 사실이 docs/superpowers/specs/2026-09-14-android-input-ownership-and-disconnect-safety-design.md §2.2에 기록되어 있으며, Leftcar는 AIDL로 이 통과 게이트를 제어한다.",
+      "repoPaths": [
+        "apps/viewer-expo/android/app/src/main/aidl/dev/loopy/keybridge/remote/IRemoteInputOwnership.aidl",
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/KeyBridgeInputAdapter.kt"
+      ]
+    },
+    {
+      "id": "edge-detection-outside-app",
+      "area": "Edge detection outside Leftcar (other apps focused)",
+      "answer": "NO (public API에 전역 포인터 관찰 없음; 경계 스트립 오버레이 우회 가능성은 미검증)",
+      "mechanism": "포인터 캡처(View.requestPointerCapture, API 26+)는 포커스를 가진 자기 뷰 안에서만 동작한다(StreamActivity.kt가 hasWindowFocus 확인 후 requestPointerCapture 호출). AccessibilityService에는 키 필터에 해당하는 전역 motion-event 필터가 없어 다른 앱 위 커서 위치를 관찰할 수 없다. 가능한 우회는 화면 테두리에 TYPE_ACCESSIBILITY_OVERLAY 투명 스트립을 띄우고 hover 이벤트로 경계 통과를 감지하는 것이지만, 전체 화면 게임·터치 전용 상황·시스템 UI에서의 동작은 기기 검증이 없다.",
+      "status": "documented + verified-source (포인터 캡처 범위) / 스트립 우회는 unknown",
+      "repoPaths": [
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamActivity.kt",
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/InputOwnershipController.kt"
+      ]
+    },
+    {
+      "id": "cursor-injection-android",
+      "area": "Real visible cursor injection into Android (Mac → Android direction)",
+      "answer": "NO without root or system signature",
+      "mechanism": "화면에 보이는 커서를 옮기려면 가상 포인터 장치(uinput) 또는 InputManager.injectInputEvent(INJECT_EVENTS, signature|privileged)가 필요하다. 둘 다 root 또는 플랫폼 시그니처 권한을 요구하며 앱 서명으로는 불가능하다.",
+      "status": "documented (Android 공식 문서)",
+      "alternative": "AccessibilityService.dispatchGesture(API 24+)로 좌표 기반 클릭·드래그·스크롤은 주입 가능하나 제스처는 포인터 이벤트가 아니므로 보이는 커서 이동·hover가 없고 마우스 홀드는 연속 스트로크로 흉내만 낸다."
+    },
+    {
+      "id": "button-scroll-key-injection-android",
+      "area": "Mouse button / scroll / key injection (Mac → Android direction)",
+      "answer": "PARTIAL",
+      "mechanism": "dispatchGesture: 클릭·드래그·스크롤 주입 가능(전역, 좌표 기반). 키보드는 접근성 서비스가 임의 KeyEvents를 임의 앱에 주입하는 공개 경로가 없다 — 텍스트는 자체 IME, 시스템 키는 globalAction(Back/Home/Recents 등)으로만 부분 대체. adb shell input은 tap/swipe/keyevent/text를 제공하지만 명령당 프로세스 생성 지연과 상대 이동·hover 부재로 Universal Control 품질에 미달.",
+      "status": "documented (Android 공식 문서) — 기기 실측 미수행"
+    },
+    {
+      "id": "edge-detection-android-side-exit",
+      "area": "Android → Mac direction handoff (Android pointer leaves toward Mac)",
+      "answer": "YES within Leftcar, NO globally",
+      "mechanism": "기존 구현은 캡처 상태에서 정규화 좌표가 경계에 있고 이동이 바깥쪽이면 소유권을 해제한다(InputOwnershipController.moveCapturedPointer leavesAtEdge). 이는 Leftcar가 포인터를 캡처한 동안에만 유효하며, OS 전역 경계 감지와는 다르다.",
+      "status": "verified-source",
+      "repoPaths": [
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/InputOwnershipController.kt"
+      ]
+    },
+    {
+      "id": "ime-focus",
+      "area": "IME and focus",
+      "answer": "CONSTRAINED",
+      "mechanism": "하드웨어 키는 포커스 윈도우로만 전달되고, Mac → Android 키보드 주입 경로 중 IME는 편집 가능 필드에 포커스가 있을 때만 동작하며 시스템 단축키는 재현되지 않는다. Leftcar 스트림 창은 windowSoftInputMode=stateAlwaysHidden으로 소프트 입력을 정책상 금지하므로 IME 주입 경로는 제품 정책과 충돌한다.",
+      "status": "verified-source (manifest + StreamActivity) + documented",
+      "repoPaths": [
+        "apps/viewer-expo/android/app/src/main/AndroidManifest.xml"
+      ]
+    },
+    {
+      "id": "lifetime",
+      "area": "Reboot / permission lifetime",
+      "answer": "Accessibility persists, wireless ADB resets per reboot",
+      "mechanism": "접근성 서비스 권한은 사용자가 설정에서 활성화하면 재부팅 후에도 유지된다(배터리 최적화/OEM 킬러 예외 필요). Android 13+는 스토어 외 설치 앱의 접근성 활성화를 제한(restricted settings)한다. 무선 ADB는 재부팅마다 무선 디버깅 토글이 꺼져 사용자 재동작이 필요하고 페어링·포트가 변동된다. 포인터 캡처는 권한 없이 세션 단위다. KeyBridge 바인더 게이트는 프로세스 수명을 따르며, 연결 단절 시 로컬 모드 자동 복구는 이미 설계·구현되어 있다(KeyBridgeInputAdapter.onDisconnected/onBindingDied/onNullBinding).",
+      "status": "documented + verified-source (복구 경로)"
+    },
+    {
+      "id": "version-restrictions",
+      "area": "Android version restrictions",
+      "answer": "API 24/26/30로 갈라짐",
+      "mechanism": "dispatchGesture API 24+, 포인터 캡처 API 26+(StreamActivity가 SDK_INT < O 차단), 무선 디버깅 API 30+(Android 11), 스토어 외 앱 접근성 restricted settings Android 13+. Lenovo TB710FU의 실제 API 레벨은 본 조사에서 확인하지 않았다.",
+      "status": "documented + verified-source (SDK 가드)"
+    }
+  ],
+  "approaches": [
+    {
+      "name": "AccessibilityService (기존 KeyBridge 방식)",
+      "covers": "Android 물리 키보드 전역 관찰·억제·통과 → Mac 방향은 사실상 완성. Mac → Android는 dispatchGesture 클릭/스크롤과 globalAction 부분 지원.",
+      "missing": "전역 포인터 관찰, 보이는 커서, hover, 마우스 홀드 시맨틱, Power 키, 임의 KeyEvent 주입.",
+      "usbOrRoot": "불필요"
+    },
+    {
+      "name": "Wireless ADB (Android 11+ 무선 디버깅)",
+      "covers": "shell uid의 INJECT_EVENTS로 tap/swipe/keyevent/text 주입. app_process 상주 데몬으로 명령 지연 완화 가능(미검증).",
+      "missing": "보이는 커서·hover·상대 마우스 스트림 없음. 재부팅마다 무선 디버깅 재활성화 필요. 개발자 옵션·페어링 UX 부담.",
+      "usbOrRoot": "USB 불필요(무선 페어링), root 불필요"
+    },
+    {
+      "name": "Root / 가상 입력 장치 (uinput,.evemu 등)",
+      "covers": "진짜 가상 마우스·키보드 장치 생성. Universal Control 수준의 유일한 완전 경로.",
+      "missing": "대상 태블릿 루팅은 제품 전제에서 제외됨.",
+      "usbOrRoot": "root 필수 — 요구 범위 밖"
+    }
+  ],
+  "sources": [
+    {
+      "url": "https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#onKeyEvent(android.view.KeyEvent)",
+      "note": "FLAG_REQUEST_FILTER_KEY_EVENTS로 하드웨어 키 이벤트 필터링·소비. 이 세션에서 문서를 직접 fetch하지 않았으며 지식 기반 인용임을 명시."
+    },
+    {
+      "url": "https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#dispatchGesture(android.accessibilityservice.AccessibilityService.GestureDescription,%20android.accessibilityservice.AccessibilityService.GestureResultCallback,%20android.os.Handler)",
+      "note": "API 24+ 제스처 주입. 포인터 이벤트가 아닌 제스처 시맨틱."
+    },
+    {
+      "url": "https://developer.android.com/reference/android/view/View#requestPointerCapture()",
+      "note": "API 26+, 포커스 윈도우 내 상대 마우스 이동. Leftcar가 현재 사용하는 유일한 상대 포인터 경로."
+    },
+    {
+      "url": "https://developer.android.com/reference/android/Manifest.permission#INJECT_EVENTS",
+      "note": "signature|privileged 권한. InputManager.injectInputEvent 요구 권한으로 서드파티 서명으로는 불가."
+    },
+    {
+      "url": "https://developer.android.com/studio/command-line/adb",
+      "note": "adb shell input tap/swipe/keyevent/text 주입 경로와 무선 디버깅(Android 11+)."
+    },
+    {
+      "url": "https://developer.android.com/about/versions/13/behavior-changes-13",
+      "note": "Android 13 restricted settings: 스토어 외 설치 앱의 접근성 서비스 활성화 제한."
+    },
+    {
+      "url": "https://source.android.com/docs/core/interaction/input/input-devices",
+      "note": "Android 입력 장치 아키텍처. 보이는 커서가 생기려면 커널 레벨 가상 입력 장치(uinput)가 필요하다는 근거."
+    }
+  ],
+  "limitations": [
+    "Universal Control 수준의 OS 전역 양방향 KM은 접근성 + Wi-Fi만으로 달성 불가능. Mac → Android의 보이는 커서와 포인터 이벤트 시맨틱은 root 또는 시스템 시그니처 권한 없이는 공개 API로 불가능.",
+    "AccessibilityService에는 마우스/포인터 이벤트에 대한 전역 필터가 없어, Leftcar 외부에서 커서 위치를 관찰하거나 물리 마우스 입력을 억제할 수 없다.",
+    "Power 키와 일부 시스템 전용 키는 접근성 키 필터에서 관찰·소비·전달이 모두 불가능하다(기존 설계 문서 §4 불변식 4와 일치).",
+    "무선 ADB 주입은 상대 마우스 스트림·hover가 없고 명령당 지연이 있으며, 재부팅마다 사용자가 무선 디버깅을 다시 켜야 한다.",
+    "IME 기반 키보드 주입은 편집 필드 포커스를 요구하며, 스트림 창의 windowSoftInputMode=stateAlwaysHidden 제품 정책과 충돌한다.",
+    "KeyBridge 접근성 서비스의 실제 구현 소스는 이 저장소 밖에 있어 이번 조사에서 직접 검수하지 않았다. 검수한 것은 AIDL 계약, Leftcar 측 바인딩 어댑터, 설계 문서뿐이다.",
+    "이 보고서의 모든 안드로이드 프레임워크 동작은 공식 문서 인용이며 Lenovo TB710FU 기기 실측은 수행하지 않았다."
+  ],
+  "unknowns": [
+    "Lenovo TB710FU의 정확한 Android 버전(API 레벨)과 OEM 접근성·무선 디버깅 제한(배터리 최적화 킬러, restricted settings) 여부.",
+    "TYPE_ACCESSIBILITY_OVERLAY 경계 스트립이 다른 앱 위 hover 이벤트를 실제로 받는지, 특히 전체 화면 앱·게임·시스템 UI에서 동작하는지 — 기기 검증 필요.",
+    "무선 ADB app_process 상주 데몬의 실측 주입 지연이 커서 품질 요구(유비쿼터스 60fps 수준)를 만족하는지.",
+    "dispatchGesture 연속 스트로크(willContinue)로 마우스 홀드+드래그를 실제 앱에서 흉내 냈을 때 각 앱의 호환성.",
+    "OEM 예약 단축키(Lenovo)가 접근성 키 필터보다 먼저 가로채는지 여부.",
+    "Mac → Android 방향에서 물리 마우스와 주입 이벤트의 충돌 억제 전략(전역 억제 불가를 전제로 한 UX 설계)."
+  ],
+  "inspectedRepoPaths": [
+    "apps/viewer-expo/android/app/src/main/AndroidManifest.xml",
+    "apps/viewer-expo/android/app/src/main/aidl/dev/loopy/keybridge/remote/IRemoteInputOwnership.aidl",
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/InputOwnershipController.kt",
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/KeyBridgeInputAdapter.kt",
+    "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamActivity.kt",
+    "docs/superpowers/specs/2026-09-14-android-input-ownership-and-disconnect-safety-design.md"
+  ]
+}

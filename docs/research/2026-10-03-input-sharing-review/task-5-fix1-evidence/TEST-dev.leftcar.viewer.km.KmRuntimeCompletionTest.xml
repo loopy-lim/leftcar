@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="dev.leftcar.viewer.km.KmRuntimeCompletionTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-10-03T16:16:54.286Z" hostname="loopyMainMBP.local" time="0.144">
+  <properties/>
+  <testcase name="actual failed stop retains actionable status and authority for retry" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.013"/>
+  <testcase name="native disconnect before State rejects once" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.041"/>
+  <testcase name="real delayed authenticated State resolves Start only after observation readback" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.039"/>
+  <testcase name="Runtime Stop at final local readback rejects State without owner success" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.014"/>
+  <testcase name="failed State application rejects native start" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.017"/>
+  <testcase name="native start deadline rejects once without authenticated State" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.008"/>
+  <testcase name="real native start stays pending after Hello until State and stop settles cancellation once" classname="dev.leftcar.viewer.km.KmRuntimeCompletionTest" time="0.009"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

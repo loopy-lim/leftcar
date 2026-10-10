@@ -1,0 +1,14 @@
+{
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-4g5SSE/android-internal-manifest.json",
+  "apkPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-4g5SSE/artifacts/viewer-apk-app-release.apk",
+  "apkSha256": "a6ab83fc029e23448d915c92fe93e1b112a97b4351ca380cb2a17dbcffc13e2a",
+  "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "allCurrentFileSourceHashesMatched": 1121,
+  "reviewedNativeSourceHash": "c3805127940777224e6365459ab816b91ae0ffa93a6a2c97eadbb6dd265a6190",
+  "javascriptDigestUnchanged": true,
+  "rustNativeDigestUnchanged": true,
+  "diagnosticTagRetainedInDex": true,
+  "build": "normal full Android internal BUILD SUCCESSFUL 3m2s; release Kotlin compiled",
+  "warnings": "external ARCore1.53.0 R8 stack-map warnings and Gradle deprecations; no pristine-build claim",
+  "runtimeAcceptance": "pending user Start and fixed-stage observation; current sharing still fails"
+}

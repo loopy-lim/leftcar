@@ -1,0 +1,55 @@
+{
+  "scope": "dummy-only temporary provider probe; no production data",
+  "artifacts": [
+    {
+      "path": "KmCipher.kt",
+      "bytes": 2219,
+      "sha256": "00d641e333a7b83d6f9b2696e6e9cc06222c0731a8a147b529732ffd1f55190b"
+    },
+    {
+      "path": "KmCryptoProbe.class",
+      "bytes": 6113,
+      "sha256": "3b0110723989800e00ad5be5c81add96e17d0d900e78b867b52ace2ec2b7b510"
+    },
+    {
+      "path": "KmCryptoProbe.java",
+      "bytes": 4398,
+      "sha256": "16ae8d5192432a22c13e98b744f8a1c61c03f4547c2709af84b1b7f174340c13"
+    },
+    {
+      "path": "android-result.json",
+      "bytes": 1300,
+      "sha256": "c7f8690ebfa177340755429ae2a4f64b22057817acb43f1ee7d6c514eec0aa55"
+    },
+    {
+      "path": "compile.json",
+      "bytes": 315,
+      "sha256": "44a5d54f5b6b377f3a0877dde42c1eb83645d39736fe5423e51ed437391dcbc9"
+    },
+    {
+      "path": "dex/classes.dex",
+      "bytes": 2296460,
+      "sha256": "38ba53feddf81ae8366bd65e268d61dd91cf53b2d8c9cbfe24886f582431fd6d"
+    },
+    {
+      "path": "jbr-result.json",
+      "bytes": 1106,
+      "sha256": "3551da6885a394839b79f96508e9fdc30beaf80f1118fe6802c80a4228860c76"
+    },
+    {
+      "path": "kclasses/META-INF/main.kotlin_module",
+      "bytes": 24,
+      "sha256": "656b3d35db5641e3cf9477532a1c7e3e49f1ad706fac99640966922bc55061b6"
+    },
+    {
+      "path": "kclasses/dev/leftcar/viewer/km/KmCipher$Companion.class",
+      "bytes": 3328,
+      "sha256": "03975a0cc288d9793c9e31814ff9acabef2955193fc5da45a5b03cd089adef20"
+    },
+    {
+      "path": "kclasses/dev/leftcar/viewer/km/KmCipher.class",
+      "bytes": 3949,
+      "sha256": "7a692604d6fcb0736b901d107a1550779cc9427ec343901e5bb0eaec0d824cc6"
+    }
+  ]
+}

@@ -1,0 +1,335 @@
+# Task-only uncommitted delta from frozen pre-diagnostic source; production paths1
+
+--- a/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
++++ b/apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmRuntime.kt
+@@ -1,196 +1,262 @@
+ package dev.leftcar.viewer.km
+ 
+ import android.accessibilityservice.AccessibilityServiceInfo
+ import android.content.ComponentName
+ import android.content.Context
+ import android.content.Intent
+ import android.content.ServiceConnection
+ import android.content.pm.PackageManager
+ import android.os.Binder
+ import android.os.Handler
+ import android.os.HandlerThread
+ import android.os.IBinder
+ import android.os.Looper
+ import android.os.SystemClock
+ import android.util.Base64
++import android.util.Log
+ import android.view.accessibility.AccessibilityManager
+ import org.json.JSONObject
+ import rikka.shizuku.Shizuku
+ import java.util.concurrent.CopyOnWriteArraySet
+ import java.util.concurrent.atomic.AtomicInteger
+ import kotlin.math.abs
+ 
+ internal data class KmNativeStatus(
+     val state: String = "off", val reason: String? = null,
+     val cursorInjection: Boolean = false, val mouseObservation: Boolean = false,
+     val mouseCapture: Boolean = false, val keyboardCapture: Boolean = false,
+ )
+ 
+ internal data class KmStartConfig(
+     val host: String, val port: Int, val sessionId: String, val sessionKey: String,
+     val epoch: Long, val arrangementSide: String, val macToAndroid: Boolean, val androidToMac: Boolean,
+ ) {
+     fun validate() {
+         require(host.isNotBlank() && host.length <= 253 && port in 1..65535)
+         require(sessionId.toByteArray().size in 1..128 && epoch > 0)
+         require(arrangementSide == "left" || arrangementSide == "right")
+         require(macToAndroid || androidToMac)
+     }
+ }
+ 
+ /** Single native actor owns input state. React receives low-rate status changes only. */
+ internal object KmRuntime {
+     private class Unavailable(message: String) : IllegalStateException(message)
++    // Temporary preparation-only diagnostic. Each attempt owns its budget and lifetime;
++    // retained main-thread callbacks cannot emit after that attempt settles or stops.
++    private class PrepareProbe {
++        private var open = true
++        private var records = 0
++        private var stage = "prepare"
++
++        @Synchronized fun checkpoint(event: String, stage: String? = null, exceptionClass: String? = null, advanceStage: Boolean = true) {
++            if (!open || records >= 20) return
++            val currentStage = stage ?: this.stage
++            if (advanceStage) this.stage = currentStage
++            records++
++            runCatching {
++                Log.i("LeftcarKmPrepareProbe", "event=$event stage=$currentStage" +
++                    if (exceptionClass == null) "" else " exception_class=$exceptionClass")
++            }
++        }
++
++        @Synchronized fun ready() {
++            checkpoint("prepare_ready", "ready")
++            open = false
++        }
++
++        @Synchronized fun close() { open = false }
++    }
+     private val thread = HandlerThread("leftcar-km-session").apply { start() }
+     private val worker = Handler(thread.looper)
+     private val main = Handler(Looper.getMainLooper())
+     private var context: Context? = null
+     private var authority: IKmInputAuthority? = null
+     private var authorityBinder: IBinder? = null
+     private var deadAuthorityBinder: IBinder? = null
+     private var binding: ServiceConnection? = null
+     @Volatile private var lease: KmKeyBridgeLease? = null
+     private var args: Shizuku.UserServiceArgs? = null
+     private var transport: KmDuplex? = null
+     private var config: KmStartConfig? = null
+     private var gate: KmEpochGate? = null
+     private var outgoingSeq = 0L
+     private var generation = 0L
+     private var lastReceived = 0L
+     private var preparedAt = 0L
+     private var owner = "local"
+     private var motionX = 0.0
+     private var motionY = 0.0
+     private var sentButtons = 0
+     private var lastCursor: KmObservedPointer? = null
+     private var lastCursorSent = 0L
+     private var returnArmed = false
+     private var edgePending = false
+     private var placement: KmCursorPlacement? = null
+     private var remoteReleasePending = false
+     private var returnPlacementReceived = false
+     private var placementStarted = 0L
+     private val delayedInput = ArrayDeque<JSONObject>()
+     private val pending = AtomicInteger()
+     private val starting = KmStartCompletion<KmNativeStatus>()
+     private var startTicket = 0L
+     private var preparation: ((Result<KmNativeStatus>) -> Unit)? = null
++    private var preparationProbe: PrepareProbe? = null
+     private val lifetime = Binder()
+     private val transition = KmOwnerTransition(
+         { authority!!.releaseAll() }, { authority!!.releaseMouse() }, ::commitOwner,
+         { send(KmWire.payload("heartbeat")) },
+     )
+     val listeners = CopyOnWriteArraySet<(KmNativeStatus) -> Unit>()
+     @Volatile var status = KmNativeStatus(); private set
+ 
+     private val inventoryListener = object : android.hardware.input.InputManager.InputDeviceListener {
+         override fun onInputDeviceAdded(deviceId: Int) = inventoryChanged()
+         override fun onInputDeviceChanged(deviceId: Int) = inventoryChanged()
+         override fun onInputDeviceRemoved(deviceId: Int) = inventoryChanged()
+     }
+     fun initialize(appContext: Context) {
+         if (context != null) return
+         context = appContext.applicationContext
+         context!!.getSystemService(android.hardware.input.InputManager::class.java).registerInputDeviceListener(inventoryListener, worker)
+     }
+     private fun inventoryChanged() {
+         if (KmKeyboardInventory.mustStop(status.state != "off", KmKeyBridgeLease.isEnabled(context!!),
+                 lease?.acknowledged == true, KmKeyboardInventory.anyPhysical())) {
+             stopNow("물리 키 장치가 연결되어 KeyBridge 입력 소유권을 다시 확인해야 합니다")
+         }
+     }
+     fun physicalKeyAllowed(): Boolean {
+         val okay = lease?.acknowledged == true || context?.let { !KmKeyBridgeLease.isEnabled(it) } == true
+         if (!okay && status.state != "off" && status.state != "cleanupFailed") stop("KeyBridge 입력 소유권 확인 전 물리 키 전달을 중지했습니다")
+         return okay
+     }
+     fun changed() { listeners.forEach { it(status) } }
+     private fun publish(value: KmNativeStatus) { status = value; main.post(::changed) }
+-    private fun task(action: () -> Unit) {
++    private fun task(prepareProbe: (() -> PrepareProbe?)? = null, action: () -> Unit) {
+         if (pending.incrementAndGet() > 512) {
+             pending.decrementAndGet(); stop("입력 처리 대기열이 초과되었습니다"); return
+         }
+         worker.post {
+             pending.decrementAndGet()
+-            try { action() } catch (error: Unavailable) { stopNow(error.message) }
+-            catch (_: Exception) { stopNow("입력 권한 또는 입력 처리를 확인할 수 없습니다") }
+-        }
+-    }
+-
+-    fun prepare(callback: (Result<KmNativeStatus>) -> Unit) = task {
+-        if (status.state != "off") { main.post { callback(Result.failure(IllegalStateException("기존 입력 공유를 먼저 중지하세요"))) }; return@task }
+-        preparation = callback
+-        publish(KmNativeStatus("preparing"))
+-        val ctx = context ?: error("KM not initialized")
+-        if (KmAccessibilityService.instance == null) throw Unavailable("Leftcar 접근성 권한이 필요합니다")
+-        if (!Shizuku.pingBinder() || Shizuku.getUid() != 2000 || Shizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
+-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
+-        val token = ++generation
+-        val keyLease = KmKeyBridgeLease(ctx, worker) { stop("KeyBridge 입력 소유권 연결이 종료되었습니다") }
+-        lease = keyLease
+-        keyLease.acquire { okay ->
+-            if (generation != token) return@acquire
+-            if (!okay) { stopNow("KeyBridge 입력 공유 연동 API가 필요합니다. KeyBridge를 활성화한 채 지원 업데이트를 적용하세요"); return@acquire }
+-            bindAuthority(ctx, token)
+-        }
+-        worker.postDelayed({ if (generation == token && authority == null) stopNow("Shizuku 입력 서비스 연결 시간이 초과되었습니다") }, 4000)
+-    }
+-
+-    private fun bindAuthority(ctx: Context, token: Long) {
++            try { action() } catch (error: Unavailable) {
++                prepareProbe?.invoke()?.checkpoint("unavailable", exceptionClass = error.javaClass.name)
++                stopNow(error.message)
++            } catch (error: Exception) {
++                prepareProbe?.invoke()?.checkpoint("worker_exception", exceptionClass = error.javaClass.name)
++                stopNow("입력 권한 또는 입력 처리를 확인할 수 없습니다")
++            }
++        }
++    }
++
++    fun prepare(callback: (Result<KmNativeStatus>) -> Unit) {
++        var probe: PrepareProbe? = null
++        task({ probe }) {
++            if (status.state != "off") { main.post { callback(Result.failure(IllegalStateException("기존 입력 공유를 먼저 중지하세요"))) }; return@task }
++            val attempt = PrepareProbe()
++            probe = attempt
++            preparationProbe = attempt
++            attempt.checkpoint("prepare_enter", "preconditions")
++            preparation = callback
++            publish(KmNativeStatus("preparing"))
++            val ctx = context ?: error("KM not initialized")
++            if (KmAccessibilityService.instance == null) throw Unavailable("Leftcar 접근성 권한이 필요합니다")
++            if (!Shizuku.pingBinder() || Shizuku.getUid() != 2000 || Shizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
++            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
++            attempt.checkpoint("preconditions_passed", "lease")
++            val token = ++generation
++            val keyLease = KmKeyBridgeLease(ctx, worker) { stop("KeyBridge 입력 소유권 연결이 종료되었습니다") }
++            lease = keyLease
++            keyLease.acquire { okay ->
++                if (generation != token) return@acquire
++                if (!okay) { stopNow("KeyBridge 입력 공유 연동 API가 필요합니다. KeyBridge를 활성화한 채 지원 업데이트를 적용하세요"); return@acquire }
++                attempt.checkpoint("lease_accepted", "bind")
++                bindAuthority(ctx, token, attempt)
++            }
++            worker.postDelayed({ if (generation == token && authority == null) {
++                attempt.checkpoint("bind_timeout", "bind")
++                stopNow("Shizuku 입력 서비스 연결 시간이 초과되었습니다")
++            } }, 4000)
++        }
++    }
++
++    private fun bindAuthority(ctx: Context, token: Long, probe: PrepareProbe) {
+         val options = Shizuku.UserServiceArgs(ComponentName(ctx, KmInputAuthority::class.java))
+             .processNameSuffix("km-authority").tag("leftcar-km-v1").version(1).daemon(false).debuggable(false)
+         args = options
+         val connection = object : ServiceConnection {
+-            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) = task {
++            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) = task({ probe }) {
+                 if (generation != token) return@task
++                probe.checkpoint("service_connected", "service")
+                 val api = IKmInputAuthority.Stub.asInterface(binder) ?: error("Missing KM authority")
+                 authority = api
+                 authorityBinder = binder
+                 deadAuthorityBinder = null
+                 binder!!.linkToDeath({
+                     // A retained failed-cleanup authority can die after generation advances.
+                     // Match this exact Binder on the worker; stale deaths cannot stop a replacement.
+                     worker.post {
+                         if (authorityBinder === binder) {
+                             deadAuthorityBinder = binder
+                             stopNow("Shizuku 입력 서비스가 종료되었습니다")
+                         }
+                     }
+                 }, 0)
+-                if (!api.prepare(lifetime)) throw Unavailable("UHID 또는 Android 16 마우스 관찰 기능을 사용할 수 없습니다")
++                probe.checkpoint("death_linked", "helper_prepare")
++                probe.checkpoint("helper_prepare_enter", "helper_prepare")
++                val helperPrepared = api.prepare(lifetime)
++                probe.checkpoint("helper_prepare_returned", "helper_prepare")
++                if (!helperPrepared) throw Unavailable("UHID 또는 Android 16 마우스 관찰 기능을 사용할 수 없습니다")
+                 val service = KmAccessibilityService.instance ?: error("Accessibility disconnected")
++                probe.checkpoint("observer_check_enter", "observer_check")
+                 checkNoConflictingObserver(ctx, api)
++                probe.checkpoint("observer_check_passed", "observer_configure")
++                probe.checkpoint("observer_configure_enter", "observer_configure")
+                 service.configure(api, KmCaptureMode.OBSERVE)
++                probe.checkpoint("observer_configured", "foreground_service")
+                 preparedAt = SystemClock.elapsedRealtime()
+                 publish(KmNativeStatus("preparing", null, true, true, api.mouseCaptureSupported(), true))
++                probe.checkpoint("fgs_requested", "foreground_service")
+                 main.post { runCatching { ctx.startForegroundService(Intent(ctx, KmConnectionService::class.java)) }
+-                    .onFailure { stop("백그라운드 입력 서비스를 시작하지 못했습니다") } }
++                    .onFailure {
++                        probe.checkpoint("fgs_failed", "foreground_service", advanceStage = false)
++                        stop("백그라운드 입력 서비스를 시작하지 못했습니다")
++                    } }
+                 val readyStatus = status
+                 preparation?.let { ready -> main.post { ready(Result.success(readyStatus)) } }; preparation = null
++                probe.ready()
++                preparationProbe = null
+                 heartbeat(token)
+                 flushLoop(token)
+             }
+             override fun onServiceDisconnected(name: ComponentName?) { if (generation == token) stop("Shizuku 연결이 종료되었습니다") }
+             override fun onBindingDied(name: ComponentName?) { if (generation == token) stop("Shizuku 입력 서비스가 변경되었습니다") }
+             override fun onNullBinding(name: ComponentName?) { if (generation == token) stop("Shizuku 입력 서비스를 연결할 수 없습니다") }
+         }
+         binding = connection
+-        main.post { runCatching { Shizuku.bindUserService(options, connection) }.onFailure { stop("Shizuku 입력 서비스를 시작하지 못했습니다") } }
++        probe.checkpoint("bind_dispatch", "bind")
++        main.post { runCatching {
++            Shizuku.bindUserService(options, connection)
++            probe.checkpoint("bind_call_returned", "bind", advanceStage = false)
++        }.onFailure {
++            probe.checkpoint("bind_call_failed", "bind", advanceStage = false)
++            stop("Shizuku 입력 서비스를 시작하지 못했습니다")
++        } }
+     }
+ 
+     private fun checkNoConflictingObserver(ctx: Context, api: IKmInputAuthority) {
+         check(!KmKeyboardInventory.mustStop(true, KmKeyBridgeLease.isEnabled(ctx), lease?.acknowledged == true, KmKeyboardInventory.anyPhysical())) {
+             "KeyBridge physical key ownership unavailable"
+         }
+         ctx.getSystemService(AccessibilityManager::class.java)
+             .getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).forEach { info ->
+                 val packageName = info.resolveInfo.serviceInfo.packageName
+                 if (packageName != ctx.packageName) {
+                     check(api.observedSources(info) and (KmMotionSources.MOUSE_FAMILY and 255.inv()) == 0) { "다른 접근성 서비스가 마우스를 관찰 중입니다" }
+                     check(packageName == KmKeyBridgeLease.PACKAGE || info.flags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS == 0) { "다른 접근성 서비스가 키 입력을 필터링 중입니다" }
+                 }
+             }
+     }
+ 
+     fun start(value: KmStartConfig, callback: (Result<KmNativeStatus>) -> Unit) = worker.post {
+         if (starting.pending) {
+@@ -371,36 +437,37 @@
+         override fun onCaptureLost() { stop("물리 마우스 캡처가 종료되었습니다") }
+     }
+ 
+     private fun flushMotion() {
+         if (motionX == 0.0 && motionY == 0.0) return
+         send(KmWire.payload("move", "dx" to motionX, "dy" to motionY))
+         motionX = 0.0; motionY = 0.0
+     }
+     private fun send(payload: JSONObject) {
+         val current = config ?: return
+         check(outgoingSeq < Long.MAX_VALUE)
+         transport?.send(KmWire.encode(current.sessionId, gate!!.epoch, ++outgoingSeq, payload))
+     }
+ 
+     fun stop(reason: String? = null, completion: ((Result<Unit>) -> Unit)? = null) {
+         worker.post { val result = stopNow(reason); if (completion != null) main.post { completion(result) } }
+     }
+     private fun stopNow(reason: String?): Result<Unit> {
++        preparationProbe?.close(); preparationProbe = null
+         generation++
+         runCatching { if (transport != null) send(KmWire.payload("stop")) }
+         transport?.close(); transport = null
+         val api = authority
+         val capturedBinder = authorityBinder
+         var localRestored = false
+         val cleanup = KmOwnerTransition(
+             { api?.releaseAll() }, { api?.releaseMouse() },
+             { localRestored = KmAccessibilityService.instance?.restoreLocal() != false; check(localRestored) }, {},
+         )
+         val allCleaned = cleanup.disconnect { api?.close() }
+         // Only this helper's death recipient or Binder liveness proves its process is gone.
+         // RPC exceptions alone never prove FD closure. Local observation must still be restored.
+         val helperDead = capturedBinder != null && (deadAuthorityBinder === capturedBinder ||
+             runCatching { !capturedBinder.isBinderAlive }.getOrDefault(false))
+         val cleanupFailed = !allCleaned && !(helperDead && localRestored)
+         transition.cancel()
+         lease?.close(); lease = null

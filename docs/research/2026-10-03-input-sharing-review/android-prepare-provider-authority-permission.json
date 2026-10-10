@@ -1,0 +1,19 @@
+{
+  "retainedAuthorityCheck": [
+    {
+      "event": "leftcar_provider_null",
+      "exactAuthorityMatchesPinnedSource": true,
+      "user0": true
+    },
+    {
+      "event": "leftcar_provider_null",
+      "exactAuthorityMatchesPinnedSource": true,
+      "user0": true
+    }
+  ],
+  "shellPermissionGrantedReadFields": [
+    true,
+    true
+  ],
+  "limit": "package UID permission metadata only; no runtime provider acquisition"
+}

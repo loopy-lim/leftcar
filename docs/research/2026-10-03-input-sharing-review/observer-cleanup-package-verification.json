@@ -1,0 +1,15 @@
+{
+  "manifestPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-L33YcI/android-internal-manifest.json",
+  "apkPath": "/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/leftcar-android-internal-L33YcI/artifacts/viewer-apk-app-release.apk",
+  "apkSha256": "f90061e95d057e7343067fba0703875b10cafa4186f216ee9b398316e71907a4",
+  "certificateSha256": "dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655",
+  "allCurrentFileSourceHashesMatched": 1121,
+  "reviewedNativeSourceHash": "efd416b2c26f63e47b6364e0aac6cdabd43d2c8b60882807d9ec6e08ae3be22a",
+  "javascriptDigestUnchanged": true,
+  "rustNativeDigestUnchanged": true,
+  "allTemporaryPreparationTagAndClosedBranchesAbsentFromDex": true,
+  "reviewedServiceSourceHash": "b7dfcb068afca7218dd8cd7e9c910b5c0a156ec2f3203f9d2b5a088b5e365cb7",
+  "build": "normal full Android internal BUILD SUCCESSFUL2m29s; release Kotlin compiled",
+  "runtimeAcceptance": "ordinary app observation path remains unsupported; no native input acceptance or private delegation implemented",
+  "warnings": "two external ARCore1.53.0 R8 stack-map warnings and Gradle deprecations; not pristine"
+}

@@ -1,0 +1,76 @@
+{
+  "method": "read-only exact native startup tag; max120s/max20 whitelisted stage/code/class records; terminal+2s; no raw messages or input data",
+  "secondAttemptDetected": true,
+  "records": [
+    {
+      "stage": "PREPARE",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.093
+    },
+    {
+      "stage": "PREPARE_READY",
+      "code": "OK",
+      "elapsedSeconds": 40.589
+    },
+    {
+      "stage": "START_CONFIG",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.623
+    },
+    {
+      "stage": "SOCKET_CONNECT",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.623
+    },
+    {
+      "stage": "SOCKET_CONNECTED",
+      "code": "OK",
+      "elapsedSeconds": 40.627
+    },
+    {
+      "stage": "HELLO_QUEUE",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.628
+    },
+    {
+      "stage": "RECEIVE_FRAME",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.628
+    },
+    {
+      "stage": "HELLO_ENCRYPT",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.628
+    },
+    {
+      "stage": "HELLO_WRITE",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.628
+    },
+    {
+      "stage": "HELLO_WRITTEN",
+      "code": "OK",
+      "elapsedSeconds": 40.628
+    },
+    {
+      "stage": "RECEIVE_AUTH",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.648
+    },
+    {
+      "stage": "RECEIVE_DECODE",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.648
+    },
+    {
+      "stage": "RECEIVE_DECODED",
+      "code": "OK",
+      "elapsedSeconds": 40.651
+    },
+    {
+      "stage": "STATE_APPLY",
+      "code": "BEGIN",
+      "elapsedSeconds": 40.651
+    }
+  ]
+}
