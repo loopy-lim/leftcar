@@ -72,6 +72,10 @@ pub(crate) struct Authorization {
 }
 
 impl Authorization {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub(crate) fn device_id(&self) -> &str {
         &self.device
     }
@@ -151,6 +155,8 @@ pub struct RevokeOutcome {
     pub persistence_errors: Vec<String>,
     #[serde(skip)]
     pub(crate) retired_leases: Vec<std::sync::Arc<crate::source_grants::SourceLease>>,
+    #[serde(skip)]
+    pub(crate) retired_authorizations: Vec<Authorization>,
 }
 
 #[derive(serde::Serialize)]
@@ -774,6 +780,15 @@ impl PairingServer {
             .collect();
         for device in &removed {
             let owner = device.owner();
+            outcome.retired_authorizations.push(Authorization {
+                device: device.device_id.clone(),
+                generation: *inner
+                    .device_generations
+                    .get(&device.device_id)
+                    .expect("paired generation"),
+                owner: owner.clone(),
+                access: None,
+            });
             let (result, leases) = inner.grants.update(&owner, vec![]);
             outcome.retired_leases.extend(leases);
             if let Err(error) = result {
@@ -853,7 +868,6 @@ impl PairingServer {
             .any(|d| d.device_id == device_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn authorization(&self, device: &str) -> Option<Authorization> {
         let inner = self.inner.lock().unwrap();
         inner

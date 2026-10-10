@@ -1,3 +1,5 @@
+import { useId, useState } from "react";
+import KmConsentPanel from "./KmConsentPanel";
 import { Laptop, Smartphone } from "lucide-react";
 import {
   interpolate,
@@ -47,6 +49,8 @@ export default function PairedDeviceRow({
   onRevoke,
   onApproveScreens,
 }: PairedDeviceRowProps) {
+  const [showInputSharing, setShowInputSharing] = useState(false);
+  const inputPanelId = useId();
   const isComputer =
     device.name.toLowerCase().includes("pc") ||
     device.name.toLowerCase().includes("mac");
@@ -77,6 +81,7 @@ export default function PairedDeviceRow({
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" size="compact" aria-expanded={showInputSharing} aria-controls={inputPanelId} onClick={() => setShowInputSharing(previous => !previous)}>{t.km.title}</Button>
         {device.source_grants.reviewRequired && (
           <Button
             variant="secondary"
@@ -105,6 +110,7 @@ export default function PairedDeviceRow({
             : t.host.revoke}
         </Button>
       </div>
+      {showInputSharing && <div id={inputPanelId} className="w-full"><KmConsentPanel deviceId={device.device_id} t={t} /></div>}
     </li>
   );
 }

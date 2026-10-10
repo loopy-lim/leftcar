@@ -386,7 +386,13 @@ struct FailedDisplayRelease {
     failed_at: Instant,
 }
 
+struct AuthenticatedConn {
+    generation: u64,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
 pub struct ControlServer {
+    pub(crate) km: std::sync::Arc<crate::km::KmManager>,
     virtual_display_changes: tokio::sync::RwLock<()>,
     source_operations: crate::source_grants::SourceLease,
     input_changes: Mutex<()>,
@@ -423,7 +429,7 @@ pub struct ControlServer {
     file_transfers: crate::file_transfer::FileTransferState,
     /// 장치별 살아 있는 인증 연결. 연결 인증은 소켓 수명당 한 번이므로,
     /// 철회가 즉시 효력을 가지려면 열린 소켓도 함께 깨워야 한다.
-    authenticated_conns: Mutex<HashMap<String, Vec<std::sync::Arc<tokio::sync::Notify>>>>,
+    authenticated_conns: Mutex<HashMap<String, Vec<AuthenticatedConn>>>,
     /// 프라이버시 커튼 실행부(선택 — show/hide; lib.rs가 Tauri 창으로 구현해
     /// 주입한다). 상태 변화 시에만 호출되며, 적용 성공 여부를 돌려준다 —
     /// 커튼 상태 커밋은 성공 뒤에만 하기 위해서다(M3).
@@ -486,6 +492,7 @@ impl ControlServer {
     ) -> Self {
         let (connection_shutdown, _) = tokio::sync::watch::channel(false);
         Self {
+            km: crate::km::KmManager::platform(),
             backend,
             pairing,
             identity,
@@ -519,6 +526,95 @@ impl ControlServer {
             public_media_endpoint: Mutex::new(None),
             pending_input_requests: Mutex::new(Vec::new()),
             idle_release: std::sync::Arc::new(Mutex::new(IdleReleaseState::default())),
+        }
+    }
+
+    pub fn km_status(&self, device: &str) -> control_contract::km::KmStatus {
+        self.km.status(
+            &self
+                .pairing
+                .authorization(device)
+                .map(|auth| crate::km::KmPeer::from_authorization(&auth))
+                .unwrap_or_else(|| crate::km::KmPeer::unpaired(device)),
+        )
+    }
+
+    pub fn km_consent(&self, device: &str) -> control_contract::km::KmViewerConsent {
+        self.km.consent(
+            &self
+                .pairing
+                .authorization(device)
+                .map(|auth| crate::km::KmPeer::from_authorization(&auth))
+                .unwrap_or_else(|| crate::km::KmPeer::unpaired(device)),
+        )
+    }
+
+    pub fn set_km_consent(
+        &self,
+        device: &str,
+        consent: control_contract::km::KmViewerConsent,
+    ) -> Result<(), String> {
+        let auth = self
+            .pairing
+            .authorization(device)
+            .ok_or("Pair the device before approving input sharing")?;
+        self.pairing
+            .with_authorization(Some(&auth), || {
+                self.km
+                    .record_consent(&crate::km::KmPeer::from_authorization(&auth), consent)
+            })
+            .ok_or("The paired device was revoked before input-sharing approval")?;
+        if !consent.mac_to_android || !consent.android_to_mac {
+            self.km.stop_peer(
+                &crate::km::KmPeer::from_authorization(&auth),
+                "Host revoked input-sharing consent",
+                false,
+            );
+        }
+        Ok(())
+    }
+
+    async fn start_km_on_connection(
+        &self,
+        args: serde_json::Value,
+        peer: &str,
+        auth: Option<&crate::pairing::Authorization>,
+        secure: bool,
+        connection: usize,
+    ) -> serde_json::Value {
+        let Some(auth) = auth else {
+            return err("unauthorized");
+        };
+        let Ok(peer) = peer.parse::<std::net::IpAddr>() else {
+            return err("Invalid KM Wi-Fi peer");
+        };
+        if !secure || peer.is_loopback() {
+            return err("KM negotiation requires a sealed authenticated direct Wi-Fi connection");
+        }
+        let input = match serde_json::from_value::<control_contract::km::KmStartInput>(args) {
+            Ok(input) => input,
+            Err(_) => return err("Invalid input-sharing configuration"),
+        };
+        let pairing = self.pairing.clone();
+        let authorization = auth.clone();
+        let authorized = std::sync::Arc::new(move || {
+            pairing
+                .with_authorization(Some(&authorization), || ())
+                .is_some()
+        });
+        match self
+            .km
+            .start(
+                &crate::km::KmPeer::from_authorization(auth),
+                connection,
+                peer,
+                input,
+                authorized,
+            )
+            .await
+        {
+            Ok(result) => ok(result),
+            Err(reason) => err(&reason),
         }
     }
 
@@ -919,12 +1015,15 @@ impl ControlServer {
         targets: Vec<(u32, Session)>,
         reason: &str,
         device: Option<&str>,
+        disconnect: bool,
     ) -> usize {
         // Disconnect the affected connections before a blocking backend can
         // allow newly authenticated successors to join the registry.
-        match device {
-            Some(device) => self.disconnect_device_conns(device),
-            None => self.disconnect_all_conns(),
+        if disconnect {
+            match device {
+                Some(device) => self.disconnect_device_conns(device),
+                None => self.disconnect_all_conns(),
+            }
         }
         for (id, session) in &targets {
             Self::invalidate_session_source(session);
@@ -948,6 +1047,16 @@ impl ControlServer {
     }
 
     pub fn stop_sessions_for_device(&self, device_id: &str) -> usize {
+        if let Some(auth) = self.pairing.authorization(device_id) {
+            self.km.stop_peer(
+                &crate::km::KmPeer::from_authorization(&auth),
+                "Host disconnected peer",
+                true,
+            );
+        }
+        self.stop_media_sessions_for_device(device_id, true)
+    }
+    fn stop_media_sessions_for_device(&self, device_id: &str, disconnect: bool) -> usize {
         let targets = {
             let mut state = self.sessions.lock().unwrap();
             let ids: Vec<_> = state
@@ -960,7 +1069,7 @@ impl ControlServer {
                 .filter_map(|id| state.live.remove(&id).map(|session| (id, session)))
                 .collect()
         };
-        self.teardown_targets(targets, "device_revoked", Some(device_id))
+        self.teardown_targets(targets, "device_revoked", Some(device_id), disconnect)
     }
 
     fn invalidate_session_source(session: &Session) {
@@ -1066,6 +1175,7 @@ impl ControlServer {
         self.source_operations.enter()
     }
     pub fn shutdown_source_access(&self) -> Result<(), String> {
+        self.km.stop_all("Host is shutting down");
         self.source_operations.invalidate();
         self.connection_shutdown.send_replace(true);
         let leases = self.pairing.fence_source_access();
@@ -1125,8 +1235,16 @@ impl ControlServer {
             };
         };
         let mut outcome = self.pairing.revoke(device_id);
+        for auth in &outcome.retired_authorizations {
+            self.disconnect_authorization_conns(auth);
+            self.km.stop_peer(
+                &crate::km::KmPeer::from_authorization(auth),
+                "Paired credential revoked",
+                true,
+            );
+        }
         if !outcome.removed_devices.is_empty() {
-            let stopped = self.stop_sessions_for_device(device_id);
+            let stopped = self.stop_media_sessions_for_device(device_id, false);
             self.audit_log(
                 "device_revoked",
                 json!({"device":device_id,"stopped_sessions":stopped}),
@@ -1161,7 +1279,15 @@ impl ControlServer {
             };
         };
         let mut outcome = self.pairing.revoke_all();
-        self.stop_all_sessions();
+        for auth in &outcome.retired_authorizations {
+            self.disconnect_authorization_conns(auth);
+            self.km.stop_peer(
+                &crate::km::KmPeer::from_authorization(auth),
+                "Paired credential revoked",
+                true,
+            );
+        }
+        self.stop_media_all_sessions(false);
         self.audit_log(
             "devices_revoked_all",
             json!({"devices":outcome.removed_devices.len()}),
@@ -1189,8 +1315,12 @@ impl ControlServer {
     }
 
     pub fn stop_all_sessions(&self) {
+        self.km.stop_all("Host disconnected peers");
+        self.stop_media_all_sessions(true);
+    }
+    fn stop_media_all_sessions(&self, disconnect: bool) {
         let targets = self.sessions.lock().unwrap().live.drain().collect();
-        self.teardown_targets(targets, "devices_revoked_all", None);
+        self.teardown_targets(targets, "devices_revoked_all", None, disconnect);
     }
 
     /// 이 연결을 장치의 살아 있는 인증 연결로 등록한다. 반환된 가드가
@@ -1198,6 +1328,7 @@ impl ControlServer {
     fn register_authed_conn(
         &self,
         device: &str,
+        generation: u64,
     ) -> (std::sync::Arc<tokio::sync::Notify>, AuthedConnLease<'_>) {
         let notify = std::sync::Arc::new(tokio::sync::Notify::new());
         self.authenticated_conns
@@ -1205,7 +1336,10 @@ impl ControlServer {
             .unwrap()
             .entry(device.to_owned())
             .or_default()
-            .push(std::sync::Arc::clone(&notify));
+            .push(AuthenticatedConn {
+                generation,
+                notify: std::sync::Arc::clone(&notify),
+            });
         let lease = AuthedConnLease {
             server: self,
             device: device.to_owned(),
@@ -1217,7 +1351,7 @@ impl ControlServer {
     fn unregister_authed_conn(&self, device: &str, notify: &std::sync::Arc<tokio::sync::Notify>) {
         let mut map = self.authenticated_conns.lock().unwrap();
         if let Some(list) = map.get_mut(device) {
-            list.retain(|n| !std::sync::Arc::ptr_eq(n, notify));
+            list.retain(|conn| !std::sync::Arc::ptr_eq(&conn.notify, notify));
             if list.is_empty() {
                 map.remove(device);
             }
@@ -1242,8 +1376,25 @@ impl ControlServer {
     fn disconnect_device_conns(&self, device: &str) {
         let list = self.authenticated_conns.lock().unwrap().remove(device);
         if let Some(list) = list {
-            for notify in list {
-                notify.notify_one();
+            for conn in list {
+                conn.notify.notify_one();
+            }
+        }
+    }
+
+    fn disconnect_authorization_conns(&self, auth: &crate::pairing::Authorization) {
+        let mut registry = self.authenticated_conns.lock().unwrap();
+        if let Some(list) = registry.get_mut(auth.device_id()) {
+            list.retain(|conn| {
+                if conn.generation == auth.generation() {
+                    conn.notify.notify_one();
+                    false
+                } else {
+                    true
+                }
+            });
+            if list.is_empty() {
+                registry.remove(auth.device_id());
             }
         }
     }
@@ -1256,8 +1407,8 @@ impl ControlServer {
             .drain()
             .flat_map(|(_, list)| list)
             .collect();
-        for notify in all {
-            notify.notify_one();
+        for conn in all {
+            conn.notify.notify_one();
         }
     }
 
@@ -2650,6 +2801,28 @@ impl ControlServer {
             None
         };
         match command {
+            "getKmStatus" => match authenticated_device {
+                Some(device) => ok(request_authorization
+                    .map(|auth| self.km.status(&crate::km::KmPeer::from_authorization(auth)))
+                    .unwrap_or_else(|| self.km_status(device))),
+                None => err("unauthorized"),
+            },
+            "startKm" => {
+                err("KM start requires a sealed authenticated native connection negotiation")
+            }
+            "stopKm" => match authenticated_device {
+                Some(device) => {
+                    if let Some(auth) = request_authorization {
+                        let peer = crate::km::KmPeer::from_authorization(auth);
+                        self.km
+                            .stop_peer(&peer, "Input sharing stopped by peer", true);
+                        ok(self.km.status(&peer))
+                    } else {
+                        err(&format!("unauthorized KM peer {device}"))
+                    }
+                }
+                None => err("unauthorized"),
+            },
             "requestUsb" => match crate::aoap_control::ensure_usb_accessory().await {
                 Ok(()) => ok(json!({ "attached": true })),
                 Err(error) => err(&error),
@@ -3857,6 +4030,9 @@ impl Drop for AuthedConnLease<'_> {
     fn drop(&mut self) {
         self.server
             .unregister_authed_conn(&self.device, &self.notify);
+        self.server
+            .km
+            .control_closed(&self.device, std::sync::Arc::as_ptr(&self.notify) as usize);
     }
 }
 
@@ -4070,8 +4246,9 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                     match server.pairing.authenticate(token.as_deref().unwrap_or("")) {
                         Some(auth) => {
                             let device_id = auth.device_id().to_owned();
+                            let (notify, lease) =
+                                server.register_authed_conn(&device_id, auth.generation());
                             authorization = Some(auth);
-                            let (notify, lease) = server.register_authed_conn(&device_id);
                             killed = Some(notify);
                             _lease = Some(lease);
                             device = Some(device_id);
@@ -4111,15 +4288,30 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
                     .await;
                     break;
                 }
-                let out = server
-                    .dispatch_with_authorization(
-                        &cmd,
-                        args,
-                        peer,
-                        device.as_deref(),
-                        authorization.as_ref(),
-                    )
-                    .await;
+                let out = if cmd == "startKm" {
+                    server
+                        .start_km_on_connection(
+                            args,
+                            peer,
+                            authorization.as_ref(),
+                            matches!(&crypto, ConnCrypto::Secure { .. }),
+                            killed
+                                .as_ref()
+                                .map(|notify| std::sync::Arc::as_ptr(notify) as usize)
+                                .unwrap_or(0),
+                        )
+                        .await
+                } else {
+                    server
+                        .dispatch_with_authorization(
+                            &cmd,
+                            args,
+                            peer,
+                            device.as_deref(),
+                            authorization.as_ref(),
+                        )
+                        .await
+                };
                 serde_json::to_string(&out).unwrap_or_else(|_| "{\"ok\":false}".into())
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
@@ -5306,6 +5498,224 @@ mod tests {
             &backend().list_displays().unwrap(),
         );
         token
+    }
+
+    struct KmNeverCapture;
+    impl CaptureBackend for KmNeverCapture {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, String> {
+            Ok(Vec::new())
+        }
+        fn start(
+            &self,
+            _: u32,
+            _: &str,
+            _: u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: control_contract::host::EncoderExperiment,
+            _: &control_contract::udp_stability::AppliedUdpStability,
+            _: &[u8; 32],
+            _: Option<&crate::source_grants::CaptureAccess>,
+        ) -> Result<u32, String> {
+            panic!("KM must never start video capture")
+        }
+        fn stop(&self, _: u32) -> Result<(), String> {
+            panic!("KM must never own a capture handle")
+        }
+        fn stats(&self, _: u32) -> Result<StatsInfo, String> {
+            panic!("KM must never poll video stats")
+        }
+    }
+    struct KmReadyNative;
+    impl crate::km::KmBackend for KmReadyNative {
+        fn preflight(&self) -> crate::km::MacReadiness {
+            crate::km::MacReadiness {
+                capture: true,
+                injection: true,
+                safe: true,
+            }
+        }
+        fn bounds(&self) -> Result<domain::km::MacDisplayUnion, String> {
+            Ok(domain::km::MacDisplayUnion::new(-1920.0, 0.0, 3840.0, 1080.0).unwrap())
+        }
+        fn start(&self, _: Arc<crate::km::NativeQueue>) -> Result<(), String> {
+            Ok(())
+        }
+        fn owner(&self, _: control_contract::km::KmOwner) -> Result<(), String> {
+            Ok(())
+        }
+        fn inject(&self, _: &control_contract::km::KmPayload) -> Result<(), String> {
+            Ok(())
+        }
+        fn place(&self, _: f64, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn release_all(&self) {}
+        fn stop(&self) {}
+    }
+    #[tokio::test]
+    async fn km_repair_never_inherits_consent_and_delayed_old_revoke_preserves_replacement() {
+        let pairing = test_pairing();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        pairing
+            .pair_by_code(&offer.code, "km-peer", "peer")
+            .unwrap();
+        let old_auth = pairing.authorization("km-peer").unwrap();
+        let old_peer = crate::km::KmPeer::from_authorization(&old_auth);
+        let mut server =
+            ControlServer::new(Arc::new(KmNeverCapture), pairing.clone(), test_identity());
+        server.km = crate::km::KmManager::new(Arc::new(KmReadyNative));
+        let consent = control_contract::km::KmViewerConsent {
+            mac_to_android: true,
+            android_to_mac: true,
+        };
+        server.set_km_consent("km-peer", consent).unwrap();
+        let (old_notify, old_lease) = server.register_authed_conn("km-peer", old_auth.generation());
+        let retired = pairing.revoke("km-peer");
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        pairing
+            .pair_by_code(&offer.code, "km-peer", "replacement")
+            .unwrap();
+        let current = pairing.authorization("km-peer").unwrap();
+        assert_ne!(old_auth.generation(), current.generation());
+        assert_eq!(
+            server.km_consent("km-peer"),
+            control_contract::km::KmViewerConsent::default(),
+            "replacement cannot inherit old consent"
+        );
+        server.set_km_consent("km-peer", consent).unwrap();
+        let (current_notify, current_lease) =
+            server.register_authed_conn("km-peer", current.generation());
+        let args = json!({"arrangementSide":"right","tabletWidth":1600,"tabletHeight":2560,
+            "viewerConsent":{"macToAndroid":true,"androidToMac":true},
+            "androidCapabilities":{"cursorInjection":true,"mouseObservation":true,"mouseCapture":true,"keyboardCapture":true}});
+        assert_eq!(
+            server
+                .start_km_on_connection(
+                    args,
+                    "192.0.2.1",
+                    Some(&current),
+                    true,
+                    std::sync::Arc::as_ptr(&current_notify) as usize
+                )
+                .await["ok"],
+            true
+        );
+        assert_eq!(retired.retired_authorizations.len(), 1);
+        for auth in &retired.retired_authorizations {
+            server.disconnect_authorization_conns(auth);
+            server.km.stop_peer(
+                &crate::km::KmPeer::from_authorization(auth),
+                "delayed revoke",
+                true,
+            );
+        }
+        tokio::time::timeout(Duration::from_millis(20), old_notify.notified())
+            .await
+            .expect("retired control must close");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), current_notify.notified())
+                .await
+                .is_err(),
+            "old revoke cannot close replacement control"
+        );
+        drop(old_lease);
+        assert_eq!(server.km_consent("km-peer"), consent);
+        assert_eq!(
+            server.km_status("km-peer").epoch,
+            1,
+            "old teardown cannot stop replacement session"
+        );
+        assert_eq!(
+            server.km.consent(&old_peer),
+            control_contract::km::KmViewerConsent::default()
+        );
+        server.km.stop_all("test finished");
+        drop(current_lease);
+    }
+
+    #[tokio::test]
+    async fn km_secure_negotiation_creates_no_capture_and_revocation_closes_prepared_session() {
+        let pairing = test_pairing();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        pairing
+            .pair_by_code(&offer.code, "km-peer", "peer")
+            .unwrap();
+        let mut server =
+            ControlServer::new(Arc::new(KmNeverCapture), pairing.clone(), test_identity());
+        server.km = crate::km::KmManager::new(Arc::new(KmReadyNative));
+        server
+            .set_km_consent(
+                "km-peer",
+                control_contract::km::KmViewerConsent {
+                    mac_to_android: true,
+                    android_to_mac: true,
+                },
+            )
+            .unwrap();
+        let auth = pairing.authorization("km-peer").unwrap();
+        let args = json!({"arrangementSide":"right","tabletWidth":1600,"tabletHeight":2560,
+            "viewerConsent":{"macToAndroid":true,"androidToMac":true},
+            "androidCapabilities":{"cursorInjection":true,"mouseObservation":true,"mouseCapture":true,"keyboardCapture":true}});
+        assert_eq!(
+            server
+                .start_km_on_connection(args.clone(), "192.0.2.1", Some(&auth), false, 42)
+                .await["ok"],
+            false
+        );
+        assert_eq!(
+            server
+                .start_km_on_connection(args.clone(), "127.0.0.1", Some(&auth), true, 42)
+                .await["ok"],
+            false
+        );
+        assert_eq!(
+            server
+                .start_km_on_connection(args.clone(), "192.0.2.1", None, true, 42)
+                .await["ok"],
+            false
+        );
+        let response = server
+            .start_km_on_connection(args, "192.0.2.1", Some(&auth), true, 42)
+            .await;
+        assert_eq!(response["ok"], true);
+        assert!(response["result"]["port"].as_u64().unwrap() > 0);
+        assert_eq!(response["result"]["status"]["armed"], false);
+        assert!(server.snapshot().sessions.is_empty());
+        server.revoke_device("km-peer");
+        assert_eq!(server.km_status("km-peer").epoch, 0);
+        assert_eq!(
+            server.km_consent("km-peer"),
+            control_contract::km::KmViewerConsent::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn km_status_is_independent_of_capture_and_reports_blocked_authority() {
+        let pairing = test_pairing();
+        let offer = pairing.begin_pairing("127.0.0.1", 7777);
+        pairing
+            .pair_by_code(&offer.code, "km-viewer", "KM viewer")
+            .unwrap();
+        let server = ControlServer::new(backend(), pairing.clone(), test_identity());
+        let auth = pairing.authorization("km-viewer").unwrap();
+        let response = server
+            .dispatch_with_authorization(
+                "getKmStatus",
+                json!({}),
+                "192.0.2.9",
+                Some("km-viewer"),
+                Some(&auth),
+            )
+            .await;
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["result"]["armed"], false);
+        assert!(response["result"]["blockedReason"].is_string());
+        assert!(server.snapshot().sessions.is_empty());
     }
 
     #[tokio::test]
@@ -9121,7 +9531,7 @@ mod tests {
     async fn control_response_device_disconnect_interrupts_backpressure() {
         use tokio::io::AsyncReadExt;
         let server = ControlServer::new(backend(), test_pairing(), test_identity());
-        let (killed, _lease) = server.register_authed_conn("revoked-viewer");
+        let (killed, _lease) = server.register_authed_conn("revoked-viewer", 0);
         let mut shutdown = server.connection_shutdown.subscribe();
         let (mut writer, mut peer) = tokio::io::duplex(1);
         let send = async {

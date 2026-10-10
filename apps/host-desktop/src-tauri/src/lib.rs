@@ -17,6 +17,7 @@ pub mod file_transfer;
 pub mod identity;
 #[cfg(any(target_os = "windows", test))]
 mod input_gate;
+pub mod km;
 pub mod media_pacing;
 #[cfg(any(target_os = "windows", test))]
 mod media_sender;
@@ -313,6 +314,9 @@ pub fn run() {
             get_control_port,
             get_lan_ip,
             get_input_permission,
+            get_km_status,
+            get_km_consent,
+            set_km_consent,
             request_input_permission,
             get_screen_permission,
             open_system_settings,
@@ -809,6 +813,39 @@ fn get_lan_ip() -> Option<String> {
 }
 
 #[tauri::command]
+fn get_km_status(
+    device_id: String,
+    state: tauri::State<'_, Arc<control::ControlServer>>,
+) -> control_contract::km::KmStatus {
+    state.km_status(&device_id)
+}
+
+#[tauri::command]
+fn get_km_consent(
+    device_id: String,
+    state: tauri::State<'_, Arc<control::ControlServer>>,
+) -> control_contract::km::KmViewerConsent {
+    state.km_consent(&device_id)
+}
+
+#[tauri::command]
+fn set_km_consent(
+    device_id: String,
+    mac_to_android: bool,
+    android_to_mac: bool,
+    state: tauri::State<'_, Arc<control::ControlServer>>,
+) -> Result<control_contract::km::KmViewerConsent, String> {
+    state.set_km_consent(
+        &device_id,
+        control_contract::km::KmViewerConsent {
+            mac_to_android,
+            android_to_mac,
+        },
+    )?;
+    Ok(state.km_consent(&device_id))
+}
+
+#[tauri::command]
 fn get_input_permission(
     state: tauri::State<'_, std::sync::Arc<control::ControlServer>>,
 ) -> Result<bool, String> {
@@ -844,6 +881,9 @@ fn open_system_settings(pane: Option<String>) -> Result<(), String> {
         let url = match pane.as_deref() {
             Some("screen_capture") | Some("screencapture") => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            Some("inputMonitoring") => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
             }
             Some("remote_desktop") | Some("remotedesktop") => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_RemoteDesktop"
