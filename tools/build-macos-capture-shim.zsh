@@ -40,6 +40,10 @@ build_vdisp_object() {
 }
 
 case "$mode" in
+  km-test)
+    /usr/bin/xcrun swiftc -Onone -module-cache-path "${TMPDIR:-/tmp}/leftcar-km-module-cache" "${shim_sources[@]}" \
+      "$shim_root/Tests/KmEventPolicyTests.swift" -o "$output" "${framework_args[@]}"
+    ;;
   tcp-connection-test|terminal-notice-test|input-heartbeat-test)
     if [[ "$mode" == tcp-connection-test ]]; then
       test_source="$shim_root/Tests/TcpConnectionTests.swift"
@@ -109,7 +113,7 @@ case "$mode" in
     ;;
   library)
     build_vdisp_object
-    /usr/bin/xcrun swiftc -O -emit-library \
+    /usr/bin/xcrun swiftc -O -emit-library -module-cache-path "${TMPDIR:-/tmp}/leftcar-km-module-cache" \
       "${shim_sources[@]}" \
       "$vdisp_object" \
       -o "$output" \
