@@ -265,6 +265,21 @@ pub fn media_keys(media_key: &[u8; 32]) -> SessionKeys {
     SessionKeys { c2s, s2c }
 }
 
+/// Domain-separated KM direction keys. The authenticated host-created seed is
+/// never used as a raw AEAD key. A session-specific salt prevents key reuse across
+/// sessions; c2s is Android→Host and s2c is Host→Android.
+pub fn km_keys(seed: &[u8; 32], session_id: &str) -> SessionKeys {
+    let hk = Hkdf::<Sha256>::new(Some(session_id.as_bytes()), seed);
+    let mut okm = [0u8; 64];
+    hk.expand(b"leftcar/km/v1", &mut okm).expect("64B okm");
+    let mut c2s = [0u8; 32];
+    let mut s2c = [0u8; 32];
+    c2s.copy_from_slice(&okm[..32]);
+    s2c.copy_from_slice(&okm[32..]);
+    okm.zeroize();
+    SessionKeys { c2s, s2c }
+}
+
 // -- 봉인 ---------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -594,6 +609,35 @@ impl ReplayWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Independently derived with Swift CryptoKit HKDF/ChaChaPoly, and Python
+    /// RFC5869 HMAC-SHA256 for keys. Counter1, nonce00000000||counterBE, no AAD.
+    #[test]
+    fn km_cross_language_derivation_and_sealed_frame_fixture() {
+        let keys = km_keys(&fixed(0), "km-vector-v1");
+        assert_eq!(
+            hex::encode(keys.c2s),
+            "c1832723e3708ccaba0b6556606315f47bed62a617ea2f5245c70bf03d154e9d"
+        );
+        assert_eq!(
+            hex::encode(keys.s2c),
+            "43a451ccb7c5fa7ca56d14341c280227f52696f862d3d288a88ad2efcd719346"
+        );
+        let plaintext = br#"{"version":1,"sessionId":"km-vector-v1","epoch":1,"seq":1,"origin":"android","payload":{"kind":"hello"}}"#;
+        for (key, fixture) in [
+            (keys.c2s, "0000000000000001466bd7edde80cbaa55c15a07434f23b12d7c5221fb465c4eb0977abaf4c145e950919376679c11da9fc5ee46e873b766a8a6bbf6cb81cde9f6a580a134a8875a7e284131812f27006f516f5b3e95fabb9218916b58d8970ee6ec8779f83766fe0c42f4ac631a7aebe8c2c18ec109b297b98e51119ff21759"),
+            (keys.s2c, "000000000000000118a4701245f7c3794984e563b412bbbfd6207a91e46dfdc9161dfb1f6e9139b5ddcc3d9e83a1deabae2b4eabff01aa06a45768b5b5aca8de9a8bcbc0e10d91c1506386bc21c3ab9fe0b45d8b4744b298158aecf2fb0a4d48c71ee2ebc623a8b6062fbe629de18960bd990d1babb3cdef6df4e7c0a1e9ea5b"),
+        ] {
+            let frame = StreamSealer::new(key).seal(plaintext).unwrap();
+            assert_eq!(hex::encode(&frame), fixture);
+            assert_eq!((frame.len() as u32).to_be_bytes(), [0, 0, 0, 128]);
+            let mut receiver = StreamSealer::new(key);
+            assert_eq!(receiver.open(&hex::decode(fixture).unwrap()).unwrap(), plaintext);
+            assert_eq!(receiver.open(&frame), Err(OpenError::Replay));
+        }
+        assert_ne!(km_keys(&fixed(0), "other-session").c2s, keys.c2s);
+        assert_ne!(media_keys(&fixed(0)).c2s, keys.c2s);
+    }
 
     fn fixed(bytes: u8) -> [u8; 32] {
         (bytes..bytes + 32).collect::<Vec<u8>>().try_into().unwrap()

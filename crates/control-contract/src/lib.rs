@@ -5,6 +5,7 @@
 
 pub mod common;
 pub mod host;
+pub mod km;
 pub mod udp_stability;
 pub mod viewer;
 
