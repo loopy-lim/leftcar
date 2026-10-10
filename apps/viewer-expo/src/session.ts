@@ -10,6 +10,7 @@ import {
 } from "./pairing";
 import { getStoredPinnedHostKey, registerPinnedHostKey, rememberPinnedHostKey } from "./pinned-host-keys";
 import { getUsbState } from "./usb";
+import { KmError } from "./km-failure";
 
 /**
  * App-wide control session singleton: the hub screen connects once, catalog
@@ -164,9 +165,10 @@ async function openControl(
   target: string,
   port: number,
   signal?: AbortSignal,
+  transport: "auto" | "wifi" = "auto",
 ): Promise<{ client: ControlClient; credential: StoredCredential | null; identity: string | null }> {
   const endpoint = { host: target, port };
-  const usb = await getUsbState();
+  const usb = transport === "auto" ? await getUsbState() : { attached: false, controlPort: 0 };
   assertNotAborted(signal);
   if (usb.attached && usb.controlPort > 0) {
     try {
@@ -426,4 +428,35 @@ export function disconnectHost(context?: SessionRequestContext): boolean {
   reconnectInFlight = null;
   notifyConnectionChanged();
   return true;
+}
+
+/** Dedicated sealed, pinned, paired Wi-Fi control lease for native input only.
+ * Reuses the credential/identity transaction above without replacing video's
+ * USB/default client. Selection changes fence all pending startup stages. */
+export async function openKmControl(signal: AbortSignal): Promise<import("./km-session").KmPeer> {
+  const origin = captureRequestContext();
+  assertNotAborted(signal);
+  if (!origin) throw new KmError("connectionRequired");
+  if (!isRequestContextCurrent(origin)) throw abortError();
+  const { host, port } = origin.target;
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") throw new KmError("wifiRequired");
+  const cancellation = connectionCancellation(selectionCancellation.signal, signal);
+  try {
+    const pinned = await getStoredPinnedHostKey(host, port);
+    assertNotAborted(cancellation.signal);
+    if (!pinned) throw new KmError("pairingRequired");
+    const opened = await openControl(host, port, cancellation.signal, "wifi");
+    if (cancellation.signal.aborted || !isRequestContextCurrent(origin)) {
+      opened.client.close(); throw abortError();
+    }
+    if (opened.identity !== pinned || !opened.credential) {
+      opened.client.close(); throw new KmError("pairingRequired");
+    }
+    return {
+      host: opened.client.remoteAddress || host,
+      request: <T>(command: string, args?: unknown) => opened.client.request<T>(command, args),
+      isCurrent: () => isRequestContextCurrent(origin),
+      close: () => opened.client.close(),
+    };
+  } finally { cancellation.dispose(); }
 }

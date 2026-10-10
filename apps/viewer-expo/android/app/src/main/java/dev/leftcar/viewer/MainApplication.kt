@@ -28,6 +28,7 @@ class MainApplication : Application(), ReactApplication {
           // NSD host discovery (_leftcar._tcp)
           add(dev.leftcar.viewer.nsd.NsdPackage())
           add(dev.leftcar.viewer.crypto.CryptoPackage())
+          add(dev.leftcar.viewer.km.KmPackage())
         }
     )
   }

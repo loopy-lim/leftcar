@@ -59,6 +59,7 @@ function NavigationStack() {
             headerBackTitle: t.common.back,
           }}
         />
+        <Stack.Screen name="input-sharing" options={{ title: t.km.title, headerBackTitle: t.common.back }} />
         <Stack.Screen
           name="pairing"
           options={{

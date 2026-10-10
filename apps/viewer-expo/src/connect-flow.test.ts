@@ -43,6 +43,7 @@ import {
   controlHost,
   captureRequestContext,
   disconnectHost,
+  openKmControl,
 } from "./session";
 import { getPinnedHostKey, resetPinnedHostKeysForTests } from "./pinned-host-keys";
 import type { QrPayload } from "./pairing";
@@ -457,5 +458,57 @@ describe("production pairing workflow", () => {
     expect(store.get("leftcar.recent_hosts")).toBeUndefined();
     expect(sessionClient.close).toHaveBeenCalledTimes(1);
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("input-only authenticated Wi-Fi control", () => {
+  it("shows a missing selected connection as a precondition instead of silent cancellation", async () => {
+    await expect(openKmControl(new AbortController().signal)).rejects.toMatchObject({ name: "KmError", issue: "connectionRequired" });
+    expect(connectMock).not.toHaveBeenCalled();
+  });
+  it("keeps explicit cancellation silent even when no connection is selected", async () => {
+    const cancellation = new AbortController(); cancellation.abort();
+    await expect(openKmControl(cancellation.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(connectMock).not.toHaveBeenCalled();
+  });
+  it("uses the pinned network host despite an attached USB proxy and preserves streaming control", async () => {
+    store.set("leftcar.recent_hosts", JSON.stringify([{ host: "10.0.0.1", port: 7777, hostKey: HOST_KEY_A, lastConnected: 1 }]));
+    store.set("leftcar.token.v2.10.0.0.1.7777", TOKEN_A);
+    vi.mocked(getUsbState).mockResolvedValue({ attached: true, controlPort: 9000 });
+    const usb = makeClient(); const wifi = makeClient(HOST_KEY_A);
+    connectMock.mockResolvedValueOnce(usb);
+    await connectHost("10.0.0.1", 7777);
+    connectMock.mockImplementationOnce(async (host, port, _timeout, tokenProvider, options: ConnectOptions) => {
+      expect(host).toBe("10.0.0.1"); expect(port).toBe(7777);
+      expect(options.pinnedHostKey).toBe(HOST_KEY_A);
+      options.onHostKey?.(HOST_KEY_A);
+      expect(await tokenProvider()).toBe(TOKEN_A);
+      return wifi;
+    });
+    const peer = await openKmControl(new AbortController().signal);
+    expect(peer.host).toBe("10.0.0.1");
+    expect(controlClient()).toBe(usb);
+    expect(usb.close).not.toHaveBeenCalled();
+    peer.close();
+  });
+  it("rejects an input peer without pinned authenticated identity", async () => {
+    connectMock.mockResolvedValueOnce(makeClient());
+    await connectHost("10.0.0.1", 7777);
+    await expect(openKmControl(new AbortController().signal)).rejects.toThrow();
+    expect(connectMock).toHaveBeenCalledTimes(1);
+  });
+  it("closes a late input socket when its host selection changes", async () => {
+    store.set("leftcar.recent_hosts", JSON.stringify([{ host: "10.0.0.1", port: 7777, hostKey: HOST_KEY_A, lastConnected: 1 }]));
+    store.set("leftcar.token.v2.10.0.0.1.7777", TOKEN_A);
+    connectMock.mockResolvedValueOnce(makeClient(HOST_KEY_A));
+    await connectHost("10.0.0.1", 7777);
+    const delayed = deferred<ControlClient>(); const late = makeClient(HOST_KEY_A);
+    connectMock.mockReturnValueOnce(delayed.promise);
+    const opening = openKmControl(new AbortController().signal);
+    await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(2));
+    disconnectHost(); delayed.resolve(late);
+    await expect(opening).rejects.toMatchObject({ name: "AbortError" });
+    expect(late.close).toHaveBeenCalled();
   });
 });

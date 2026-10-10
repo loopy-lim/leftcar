@@ -11,6 +11,7 @@
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
   <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
+  <uses-permission android:name="moe.shizuku.manager.permission.API_V23"/>
   <queries>
     <package android:name="dev.loopy.keybridge"/>
     <intent>
@@ -57,5 +58,11 @@
            없으면 액티비티가 재생성돼 2026-09-19 XR "앱이 꺼짐"의 원인. -->
     </activity>
     <service android:name=".stream.StreamConnectionService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
+    <provider android:name="rikka.shizuku.ShizukuProvider" android:authorities="${applicationId}.shizuku" android:multiprocess="false" android:enabled="true" android:exported="true" android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+    <service android:name=".km.KmConnectionService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
+    <service android:name=".km.KmAccessibilityService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:label="@string/km_accessibility_name">
+      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+      <meta-data android:name="android.accessibilityservice" android:resource="@xml/km_accessibility_service"/>
+    </service>
   </application>
 </manifest>

@@ -21,3 +21,11 @@
 -keep class com.facebook.react.** { *; }
 -dontwarn com.facebook.react.**
 -keepclassmembers class * { native <methods>; }
+-keep class dev.leftcar.viewer.km.KmInputAuthority { *; }
+-keep class dev.leftcar.viewer.km.IKmInputAuthority$Stub { *; }
+
+# Exact targeted own-service member adapter; bundled consumer rules preserve ART helpers.
+-keep class org.lsposed.hiddenapibypass.HiddenApiBypass {
+    public static java.lang.Object invoke(java.lang.Class, java.lang.Object, java.lang.String, java.lang.Object[]);
+    public static java.util.List getInstanceFields(java.lang.Class);
+}

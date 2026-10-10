@@ -696,6 +696,7 @@ function CatalogHeader({
             onPress={openSettings}
             label={t.viewer.btnSettings}
           />
+          {model.host && <Action variant="secondary" className="grow" onPress={() => router.push("/input-sharing")} label={t.km.title} />}
           <Action
             variant="ghost"
             className="grow"

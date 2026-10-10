@@ -1,0 +1,7 @@
+<resources>
+    <string name="km_accessibility_name">Leftcar keyboard and mouse sharing</string>
+    <string name="km_accessibility_description">Shares physical mouse and keyboard input with your approved Mac. Touchscreen input stays on Android. Sharing starts only from Leftcar and stops on disconnect.</string>
+    <string name="km_notification_title">Leftcar input sharing</string>
+    <string name="km_notification_body">Keyboard and mouse sharing is active. Tap Stop to return control locally.</string>
+    <string name="km_notification_stop">Stop</string>
+</resources>

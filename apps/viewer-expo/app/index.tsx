@@ -1,3 +1,4 @@
+import { InputSharingEntry } from "../src/components/InputSharingEntry";
 import { useCallback, useRef, useState } from "react";
 import { ScrollView, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
@@ -275,6 +276,7 @@ export default function Hub() {
             {!lastHost && <SetupGuideCard t={t} />}
           </>
         )}
+        <InputSharingEntry connected={isConnected} t={t} />
         {connectionError ? (
           <Notice tone="error">
             <Label variant="body">{connectionError}</Label>
