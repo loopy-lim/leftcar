@@ -214,22 +214,18 @@ pub(super) fn park_drain_budget_ns(smoothing: bool) -> u64 {
 }
 
 /// 즉시 소화할 park 프레임 수(순수 함수 — boundary 테스트 대상). park 상한
-/// 초과분과, 나이 예산을 넘어 맨앞부터 막힌 초를 합친다. FIFO 도착 순서를
+/// 초과분과, 나이 예산을 넘은 맨앞 프레임 중 더 큰 수를 반환한다. FIFO 도착 순서를
 /// 전제하므로 예산 안쪽 프레임을 만나면 멈춘다.
 pub(super) fn immediate_release_count(
-    ages_ns: &[u64],
+    ages_ns: impl ExactSizeIterator<Item = u64>,
     park_cap: usize,
     drain_budget_ns: u64,
 ) -> usize {
-    let mut count = ages_ns.len().saturating_sub(park_cap);
-    for &age in ages_ns.iter().take(park_cap) {
-        if age > drain_budget_ns {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count.min(ages_ns.len())
+    let excess = ages_ns.len().saturating_sub(park_cap);
+    let expired = ages_ns.take_while(|age| *age > drain_budget_ns).count();
+    // The capacity trim already removes the oldest frames. Adding both
+    // counts drains fresh frames twice when capacity and age overlap.
+    excess.max(expired)
 }
 
 unsafe impl Send for AndroidDecoder {}
@@ -456,9 +452,11 @@ impl AndroidDecoder {
         let mut name_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
         let status = unsafe { AMediaCodec_getName_pub(self.codec, &mut name_ptr) };
         if status == AMEDIA_OK && !name_ptr.is_null() {
-            unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+            let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) }
                 .to_string_lossy()
-                .into_owned()
+                .into_owned();
+            unsafe { AMediaCodec_releaseName(self.codec, name_ptr) };
+            name
         } else {
             "<unknown>".to_owned()
         }
@@ -660,12 +658,11 @@ impl AndroidDecoder {
                 let now_ns = super::output::monotonic_now_ns();
                 let immediate = {
                     let excess = self.parked_outputs.len().saturating_sub(park_cap);
-                    let ages: Vec<u64> = self
+                    let ages = self
                         .parked_outputs
                         .iter()
-                        .map(|output| now_ns.saturating_sub(output.arrived_at_ns))
-                        .collect();
-                    let count = immediate_release_count(&ages, park_cap, drain_budget_ns);
+                        .map(|output| now_ns.saturating_sub(output.arrived_at_ns));
+                    let count = immediate_release_count(ages, park_cap, drain_budget_ns);
                     self.park_drained_frames += u64::try_from(count - excess).unwrap_or(0);
                     count
                 };
@@ -694,11 +691,11 @@ impl AndroidDecoder {
                 if self.last_paced_target_ns == Some(target) {
                     // This vsync slot already received its frame; hold the
                     // parked tail for the next slot.
-                    return Ok(false);
+                    return Ok(smoothing && immediate > 0);
                 }
                 let output = match self.parked_outputs.pop_front() {
                     Some(output) => output,
-                    None => return Ok(false),
+                    None => return Ok(smoothing && immediate > 0),
                 };
                 let r = unsafe {
                     AMediaCodec_releaseOutputBufferAtTime(self.codec, output.index, target)

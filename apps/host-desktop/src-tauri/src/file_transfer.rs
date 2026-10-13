@@ -74,7 +74,7 @@ struct IncomingTransfer {
 struct OutgoingTransfer {
     owner: String,
     name: String,
-    path: PathBuf,
+    file: std::fs::File,
     size: u64,
     last_activity: Instant,
 }
@@ -120,6 +120,37 @@ fn remove_staging(path: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
+}
+
+fn open_shared_file(path: &Path) -> Result<(std::fs::File, u64), String> {
+    if !std::fs::metadata(path)
+        .map_err(|_| "shared file is missing".to_string())?
+        .is_file()
+    {
+        return Err("only regular files can be shared".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // If a regular path is swapped for a FIFO between stat/open, avoid
+        // blocking before the descriptor's own metadata can reject it.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "shared file is missing".to_string())?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("stat shared file: {e}"))?;
+    if !metadata.is_file() {
+        return Err("only regular files can be shared".into());
+    }
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err("file is too large".into());
+    }
+    Ok((file, metadata.len()))
 }
 
 /// 제어 평면 파일 전송의 공유 상태. ControlServer가 소유하고, Tauri UI 명령
@@ -281,13 +312,15 @@ impl FileTransferState {
         Ok(dir)
     }
 
-    /// 호스트 UI가 고른 파일을 공유 대기열에 올린다. 존재하지 않는 파일과
-    /// 디렉터리, 상한 초과 파일은 거부 — 뷰어가 전 파일을 메모리에 받는 v1
-    /// 특성상 fetch 방향도 같은 20 MiB 상한을 적용한다.
+    /// Queue only regular files selected by the Host user. A FIFO/device must
+    /// never reach the blocking chunk reader under the shared state lock.
     pub fn add_share_file(&self, path: PathBuf) -> Result<ShareQueueEntry, String> {
         let metadata = std::fs::metadata(&path).map_err(|e| format!("stat: {e}"))?;
         if metadata.is_dir() {
             return Err("directories cannot be shared".into());
+        }
+        if !metadata.is_file() {
+            return Err("only regular files can be shared".into());
         }
         if metadata.len() > MAX_FILE_SIZE {
             return Err("file is too large".into());
@@ -546,21 +579,15 @@ impl FileTransferState {
             .iter()
             .find(|entry| entry.queue_id == queue_id)
             .ok_or("unknown queue entry")?;
-        let size = std::fs::metadata(&entry.path)
-            .map_err(|_| "shared file is missing".to_string())?
-            .len();
-        if size > MAX_FILE_SIZE {
-            return Err("file is too large".into());
-        }
+        let (file, size) = open_shared_file(&entry.path)?;
         let name = entry.name.clone();
-        let path = entry.path.clone();
         let token = new_token();
         inner.outgoing.insert(
             token.clone(),
             OutgoingTransfer {
                 owner: device.to_owned(),
                 name: name.clone(),
-                path,
+                file,
                 size,
                 last_activity: Instant::now(),
             },
@@ -591,12 +618,16 @@ impl FileTransferState {
             return Err("chunk offset is past the end of the file".into());
         }
         use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&transfer.path)
-            .map_err(|_| "shared file is missing".to_string())?;
-        file.seek(SeekFrom::Start(offset))
+        // The handle is bound to this transfer at Begin, so replacing the
+        // pathname cannot redirect a later chunk to an unselected file.
+        transfer
+            .file
+            .seek(SeekFrom::Start(offset))
             .map_err(|e| format!("seek: {e}"))?;
         let mut buffer = vec![0u8; length.min(transfer.size - offset) as usize];
-        file.read_exact(&mut buffer)
+        transfer
+            .file
+            .read_exact(&mut buffer)
             .map_err(|e| format!("read: {e}"))?;
         // 활동 갱신 — 512MiB fetch도 만료 스윕에 잘리지 않게 한다(M2).
         transfer.last_activity = Instant::now();
@@ -1068,6 +1099,46 @@ mod tests {
         let leftover: Vec<_> = std::fs::read_dir(root.join("viewer-1")).unwrap().collect();
         assert!(leftover.is_empty(), "staging .part must be cleaned up");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn outgoing_chunks_remain_bound_to_the_original_opened_file() {
+        let root = temp_dir("outgoing-replaced");
+        let source = root.join("shared.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let state = FileTransferState::default();
+        let entry = state.add_share_file(source.clone()).unwrap();
+        let (token, _, _) = state.begin_outgoing("viewer", &entry.queue_id).unwrap();
+        std::fs::rename(&source, root.join("moved.txt")).unwrap();
+        std::fs::write(&source, b"replaced").unwrap();
+        let (data, size) = state.read_outgoing("viewer", &token, 0, 8).unwrap();
+        assert_eq!(size, 8);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap(),
+            b"original"
+        );
+        state.finish_outgoing("viewer", &token).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_rejected_at_selection_and_after_a_queued_path_is_replaced() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = temp_dir("outgoing-fifo");
+        let source = root.join("shared.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let state = FileTransferState::default();
+        let entry = state.add_share_file(source.clone()).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(state.add_share_file(source).is_err());
+        assert!(state.begin_outgoing("viewer", &entry.queue_id).is_err());
+        assert!(state.inner.lock().unwrap().outgoing.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

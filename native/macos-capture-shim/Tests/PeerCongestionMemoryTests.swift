@@ -33,6 +33,39 @@ import Foundation
         }
         precondition(avgBitrate == 6_000_000.0)
 
-        print("PeerCongestionMemoryTests: TTL, per-peer keying, overwrite, floor clamp PASS")
+        // Capacity limits apply during the TTL, and updating an existing peer
+        // preserves unrelated entries while refreshing the eviction order.
+        var bounded = PeerCongestionMemory(capacity: 2)
+        bounded.remember(address: 1, ceiling: 1_000, nowNs: 100)
+        bounded.remember(address: 2, ceiling: 2_000, nowNs: 200)
+        bounded.remember(address: 1, ceiling: 3_000, nowNs: 300)
+        bounded.remember(address: 3, ceiling: 4_000, nowNs: 400)
+        precondition(bounded.count == 2)
+        precondition(bounded.startCeiling(address: 2, nowNs: 401) == nil)
+        precondition(bounded.startCeiling(address: 1, nowNs: 401) == 3_000)
+        precondition(bounded.startCeiling(address: 3, nowNs: 401) == 4_000)
+        // A lookup for a new peer also reclaims all expired entries.
+        precondition(bounded.startCeiling(address: 99, nowNs: ttl + 400) == nil)
+        precondition(bounded.count == 0)
+
+        // Insertion reclaims expired peers without requiring a prior lookup.
+        bounded.remember(address: 1, ceiling: 1_000, nowNs: ttl + 500)
+        bounded.remember(address: 2, ceiling: 2_000, nowNs: ttl * 2 + 500)
+        precondition(bounded.count == 1)
+        precondition(bounded.startCeiling(address: 1, nowNs: ttl * 2 + 501) == nil)
+        // A clock reset cannot keep a ceiling from a future time alive.
+        precondition(bounded.startCeiling(address: 2, nowNs: 1) == nil)
+        precondition(bounded.count == 0)
+
+        var churn = PeerCongestionMemory()
+        for address in 1...1_000 as ClosedRange<UInt32> {
+            churn.remember(address: address, ceiling: 1_000, nowNs: UInt64(address))
+            precondition(churn.count <= 128)
+        }
+        precondition(churn.count == 128)
+        precondition(churn.startCeiling(address: 1, nowNs: 1_001) == nil)
+        precondition(churn.startCeiling(address: 1_000, nowNs: 1_001) == 1_000)
+
+        print("PeerCongestionMemoryTests: TTL reclamation, capacity, churn, overwrite, clock reset, floor clamp PASS")
     }
 }

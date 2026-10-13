@@ -155,23 +155,32 @@ pub fn server_hello(
 }
 
 /// 호스트 측 세션키 도출.
-pub fn server_keys(xk_secret: &XStaticSecret, client: &ClientHello, ns: &[u8; 32]) -> SessionKeys {
-    let shared = x25519_shared(xk_secret, &client.xk);
-    derive_keys(&shared, &client.nc, ns)
+pub fn server_keys(
+    xk_secret: &XStaticSecret,
+    client: &ClientHello,
+    ns: &[u8; 32],
+) -> Result<SessionKeys, HandshakeError> {
+    let mut shared = x25519_shared(xk_secret, &client.xk)?;
+    let keys = derive_keys(&shared, &client.nc, ns);
+    shared.zeroize();
+    Ok(keys)
 }
 
 /// 호스트 측 응답 생성 + 키 도출을 한 번에. `ns`와 임시 X25519 비밀은 내부
 /// CSPRNG에서 뽑는다 — 호출자는 ClientHello만 파싱하면 된다.
-pub fn accept_client(identity: &HostIdentity, client: &ClientHello) -> (ServerHello, SessionKeys) {
+pub fn accept_client(
+    identity: &HostIdentity,
+    client: &ClientHello,
+) -> Result<(ServerHello, SessionKeys), HandshakeError> {
     let mut ns = [0u8; 32];
     random_bytes(&mut ns);
     let mut seed = [0u8; 32];
     random_bytes(&mut seed);
     let secret = XStaticSecret::from(seed);
     seed.zeroize();
+    let keys = server_keys(&secret, client, &ns)?;
     let hello = server_hello(identity, client, ns, &secret);
-    let keys = server_keys(&secret, client, &ns);
-    (hello, keys)
+    Ok((hello, keys))
 }
 
 /// 뷰어 측 ServerHello 검증 + 세션키 도출. `pinned_spk`가 Some이면 반드시
@@ -191,8 +200,9 @@ pub fn client_finish(
     if !verify_host_signature(&hello.spk, &msg, &hello.sig) {
         return Err(HandshakeError::BadSignature);
     }
-    let shared = x25519_shared(client_secret, &hello.xk);
+    let mut shared = x25519_shared(client_secret, &hello.xk)?;
     let keys = derive_keys(&shared, &client.nc, &hello.ns);
+    shared.zeroize();
     Ok((keys, hello.spk))
 }
 
@@ -202,6 +212,8 @@ pub enum HandshakeError {
     HostKeyMismatch,
     #[error("host signature invalid")]
     BadSignature,
+    #[error("peer key does not contribute to the shared secret")]
+    InvalidPeerKey,
 }
 
 /// 방향별 32B 키 쌍. c2s는 뷰어가 봉인/호스트가 열고, s2c는 그 반대다.
@@ -224,8 +236,14 @@ impl Drop for SessionKeys {
     }
 }
 
-fn x25519_shared(secret: &XStaticSecret, peer: &[u8; 32]) -> [u8; 32] {
-    secret.diffie_hellman(&XPublicKey::from(*peer)).to_bytes()
+fn x25519_shared(secret: &XStaticSecret, peer: &[u8; 32]) -> Result<[u8; 32], HandshakeError> {
+    let shared = secret.diffie_hellman(&XPublicKey::from(*peer));
+    // RFC 7748 section 6.1: small-order inputs erase the secret contribution.
+    // Reject before HKDF so public transcript values cannot determine our keys.
+    if !shared.was_contributory() {
+        return Err(HandshakeError::InvalidPeerKey);
+    }
+    Ok(shared.to_bytes())
 }
 
 /// HKDF-SHA256: ikm = X25519 공유비밀, salt = nc‖ns, info = HANDSHAKE_INFO.
@@ -594,15 +612,18 @@ impl ReplayWindow {
             self.bits.iter_mut().for_each(|w| *w = 0);
             return;
         }
-        let mut next = vec![0u64; words];
-        for (i, dst) in next.iter_mut().enumerate().skip(word_shift) {
+        // Copy high words first so lower source words remain intact. New
+        // highest counters are the normal packet path: reuse this bitmap
+        // instead of allocating another 1 KiB for every accepted datagram.
+        for i in (word_shift..words).rev() {
             let src = i - word_shift;
-            *dst = self.bits[src] << bit_shift;
+            let mut shifted = self.bits[src] << bit_shift;
             if bit_shift > 0 && src >= 1 {
-                *dst |= self.bits[src - 1] >> (64 - bit_shift);
+                shifted |= self.bits[src - 1] >> (64 - bit_shift);
             }
+            self.bits[i] = shifted;
         }
-        self.bits = next;
+        self.bits[..word_shift].fill(0);
     }
 }
 
@@ -808,7 +829,7 @@ mod tests {
             xk: XPublicKey::from(&c_secret).to_bytes(),
         };
         let hello = server_hello(&identity, &client, ns, &s_secret);
-        let skeys = server_keys(&s_secret, &client, &ns);
+        let skeys = server_keys(&s_secret, &client, &ns).unwrap();
         let (ckeys, spk) = client_finish(&c_secret, &client, &hello, None).unwrap();
         assert_eq!(spk, identity.public_key());
         assert_eq!(ckeys.c2s, skeys.c2s);
@@ -833,6 +854,41 @@ mod tests {
             client_finish(&c_secret, &client, &hijacked, None).unwrap_err(),
             HandshakeError::BadSignature
         );
+    }
+
+    #[test]
+    fn handshake_rejects_non_contributory_keys_on_both_sides() {
+        let identity = HostIdentity::from_seed(fixed(0));
+        let secret = XStaticSecret::from(fixed(32));
+        let valid_client = ClientHello {
+            nc: fixed(160),
+            xk: XPublicKey::from(&secret).to_bytes(),
+        };
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        for xk in [[0u8; 32], one] {
+            let client = ClientHello { xk, ..valid_client };
+            assert!(matches!(
+                accept_client(&identity, &client),
+                Err(HandshakeError::InvalidPeerKey)
+            ));
+
+            // A valid signature alone must not make a low-order ephemeral key
+            // usable, including during first-use identity pinning.
+            let ns = fixed(192);
+            let spk = identity.public_key();
+            let msg = signed_transcript(&valid_client.nc, &ns, &valid_client.xk, &xk, &spk);
+            let hello = ServerHello {
+                ns,
+                xk,
+                spk,
+                sig: identity.sign(&msg),
+            };
+            assert!(matches!(
+                client_finish(&secret, &valid_client, &hello, Some(&spk)),
+                Err(HandshakeError::InvalidPeerKey)
+            ));
+        }
     }
 
     #[test]
@@ -939,6 +995,42 @@ mod tests {
             }
             // 옛 접수 기록은 이동 후에도 유지된다.
             assert!(!w.check(1), "accepted bit must persist, shift={shift}");
+        }
+    }
+
+    #[test]
+    fn replay_window_matches_counter_history_across_word_and_window_boundaries() {
+        use std::collections::BTreeSet;
+        let mut window = ReplayWindow::new();
+        let mut seen = BTreeSet::new();
+        let mut highest = 0u64;
+        let advances = [1, 2, 63, 64, 65, 127, 128, 129, 4095, 8191, 8192, 8193];
+        for step in 0..1200u64 {
+            let counter = if step % 3 == 0 {
+                highest + advances[(step / 3) as usize % advances.len()]
+            } else {
+                highest.saturating_sub((step * 73) % (REPLAY_WINDOW + 3))
+            };
+            let expected = counter > 0
+                && (counter > highest
+                    || highest - counter < REPLAY_WINDOW && !seen.contains(&counter));
+            assert_eq!(
+                window.check(counter),
+                expected,
+                "counter={counter}, highest={highest}"
+            );
+            if expected {
+                window.accept(counter);
+                highest = highest.max(counter);
+                seen.retain(|&old| highest - old < REPLAY_WINDOW);
+                seen.insert(counter);
+                for &accepted in &seen {
+                    assert!(
+                        !window.check(accepted),
+                        "accepted packet became replayable: {accepted}"
+                    );
+                }
+            }
         }
     }
 

@@ -2,10 +2,12 @@
 use crate::wire;
 use secure_channel::DatagramSealer;
 use std::io::Write;
-use std::net::{TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+pub(crate) const MAX_VIEWER_CONTROL_DATAGRAM: usize = 640;
 
 #[derive(Clone, Copy)]
 pub(crate) enum TerminationReason {
@@ -55,6 +57,7 @@ mod tests {
         let key = [91; 32];
         let sender =
             MediaSender::new(MediaSocket::Udp(Arc::new(socket)), &key).with_access(&access);
+        assert_eq!(sender.plaintext_limit(), wire::MAX_DATAGRAM);
         access.lease.invalidate();
         assert_eq!(
             sender.send(b"private media").unwrap_err().kind(),
@@ -84,6 +87,7 @@ mod tests {
         let key = [92; 32];
         let sender = MediaSender::new(MediaSocket::Tcp(Arc::new(Mutex::new(stream))), &key)
             .with_access(&access);
+        assert_eq!(sender.plaintext_limit(), wire::MAX_DATAGRAM);
         access.lease.invalidate();
         assert_eq!(
             sender.send(b"private media").unwrap_err().kind(),
@@ -141,6 +145,142 @@ mod tests {
             std::io::ErrorKind::TimedOut
         );
         assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    #[test]
+    fn udp_control_uses_authenticated_ephemeral_port_without_redirecting_media() {
+        let media = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let control = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let host = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        for socket in [&media, &control, &*host] {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(30)))
+                .unwrap();
+        }
+        assert_ne!(media.local_addr().unwrap(), control.local_addr().unwrap());
+        let key = [97; 32];
+        let keys = secure_channel::media_keys(&key);
+        let opener = DatagramSealer::new(keys.c2s);
+        let viewer_tx = DatagramSealer::new(keys.c2s);
+        let viewer_rx = DatagramSealer::new(keys.s2c);
+        let access = access();
+        let sender = MediaSender::new(
+            MediaSocket::UdpTo(host.clone(), media.local_addr().unwrap()),
+            &key,
+        )
+        .with_access(&access);
+        assert_eq!(sender.plaintext_limit(), wire::MAX_DATAGRAM);
+        assert_eq!(sender.udp_peer(), Some(media.local_addr().unwrap()));
+
+        // The host socket receives the viewer's distinct control port. A
+        // connected media socket would filter this datagram at the OS layer.
+        let mut reliable = b"LCI1".to_vec();
+        reliable.extend_from_slice(&1u32.to_be_bytes());
+        reliable.extend_from_slice(&[5, 1]); // Reliable release-all.
+        let invalid = DatagramSealer::new([98; 32]).seal(&reliable).unwrap();
+        control
+            .send_to(&invalid, host.local_addr().unwrap())
+            .unwrap();
+        let mut bytes = [0; 640];
+        let (size, source) = host.recv_from(&mut bytes).unwrap();
+        assert!(sender
+            .authenticate_udp_control(&opener, &bytes[..size], source)
+            .is_none());
+        assert!(
+            control.recv(&mut bytes).is_err(),
+            "unauthenticated reflection"
+        );
+
+        let oversized = viewer_tx.seal(&[0; MAX_VIEWER_CONTROL_DATAGRAM]).unwrap();
+        control
+            .send_to(&oversized, host.local_addr().unwrap())
+            .unwrap();
+        let mut full_datagram = [0; 65_535];
+        let (size, source) = host.recv_from(&mut full_datagram).unwrap();
+        assert!(sender
+            .authenticate_udp_control(&opener, &full_datagram[..size], source)
+            .is_none());
+        assert_eq!(
+            opener.open(&full_datagram[..size]).unwrap().len(),
+            MAX_VIEWER_CONTROL_DATAGRAM
+        );
+
+        let envelope = viewer_tx.seal(&reliable).unwrap();
+        control
+            .send_to(&envelope, host.local_addr().unwrap())
+            .unwrap();
+        let (size, source) = host.recv_from(&mut bytes).unwrap();
+        let (message, reply) = sender
+            .authenticate_udp_control(&opener, &bytes[..size], source)
+            .unwrap();
+        assert_eq!(reply.udp_peer(), Some(control.local_addr().unwrap()));
+        assert_eq!(sender.udp_peer(), Some(media.local_addr().unwrap()));
+        let mut sequencer = wire::InputSequencer::default();
+        assert!(matches!(
+            sequencer.accept(&message),
+            wire::InputDecision::ApplyAndAck { sequence: 1, .. }
+        ));
+        reply.send(&wire::input_ack(1, true)).unwrap();
+        let size = control.recv(&mut bytes).unwrap();
+        assert_eq!(
+            viewer_rx.open(&bytes[..size]).unwrap(),
+            wire::input_ack(1, true)
+        );
+        assert!(
+            media.recv(&mut bytes).is_err(),
+            "control ACK went to media port"
+        );
+
+        sender.send(b"media stays here").unwrap();
+        let size = media.recv(&mut bytes).unwrap();
+        // Same opener proves reply and media share one nonce sequence.
+        assert_eq!(viewer_rx.open(&bytes[..size]).unwrap(), b"media stays here");
+        assert!(
+            control.recv(&mut bytes).is_err(),
+            "media followed the control port"
+        );
+        assert!(
+            sender
+                .authenticate_udp_control(&opener, &envelope, source)
+                .is_none(),
+            "replayed control was accepted"
+        );
+
+        access.lease.invalidate();
+        assert_eq!(
+            reply.send(b"ACK").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        sender.send_terminal(TerminationReason::Forced).unwrap();
+        let size = media.recv(&mut bytes).unwrap();
+        assert_eq!(viewer_rx.open(&bytes[..size]).unwrap(), b"LCT1\x02");
+    }
+
+    #[test]
+    fn udp_control_rejects_a_different_ip_before_consuming_a_valid_nonce() {
+        let control = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let host = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        host.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let key = [99; 32];
+        let keys = secure_channel::media_keys(&key);
+        let viewer = DatagramSealer::new(keys.c2s);
+        let opener = DatagramSealer::new(keys.c2s);
+        let sender = MediaSender::new(
+            MediaSocket::UdpTo(host.clone(), "192.0.2.1:5000".parse().unwrap()),
+            &key,
+        );
+        assert_eq!(sender.plaintext_limit(), wire::REMOTE_DATAGRAM);
+        let envelope = viewer.seal(b"IDR").unwrap();
+        control
+            .send_to(&envelope, host.local_addr().unwrap())
+            .unwrap();
+        let mut packet = [0; 128];
+        let (size, source) = host.recv_from(&mut packet).unwrap();
+        assert!(sender
+            .authenticate_udp_control(&opener, &packet[..size], source)
+            .is_none());
+        assert_eq!(opener.open(&packet[..size]).unwrap(), b"IDR");
     }
 
     #[cfg(unix)]
@@ -221,6 +361,9 @@ mod tests {
 #[derive(Clone)]
 pub(crate) enum MediaSocket {
     Udp(Arc<UdpSocket>),
+    /// Unconnected receive socket with an immutable media destination. The
+    /// viewer sends authenticated control from a different ephemeral port.
+    UdpTo(Arc<UdpSocket>, SocketAddr),
     Tcp(Arc<Mutex<TcpStream>>),
 }
 
@@ -260,6 +403,45 @@ impl MediaSender {
         matches!(self.socket, MediaSocket::Tcp(_))
     }
 
+    pub(crate) fn plaintext_limit(&self) -> usize {
+        match &self.socket {
+            MediaSocket::Tcp(_) => wire::MAX_DATAGRAM,
+            MediaSocket::Udp(socket) => {
+                wire::media_plaintext_limit(socket.peer_addr().ok().map(|peer| peer.ip()))
+            }
+            MediaSocket::UdpTo(_, peer) => wire::media_plaintext_limit(Some(peer.ip())),
+        }
+    }
+
+    pub(crate) fn udp_peer(&self) -> Option<SocketAddr> {
+        match &self.socket {
+            MediaSocket::Udp(socket) => socket.peer_addr().ok(),
+            MediaSocket::UdpTo(_, peer) => Some(*peer),
+            MediaSocket::Tcp(_) => None,
+        }
+    }
+
+    /// A reply endpoint exists only after the source IP and session AEAD both
+    /// pass. It shares the original sender's nonce sequence and source lease,
+    /// while the original media destination stays unchanged.
+    pub(crate) fn authenticate_udp_control(
+        &self,
+        opener: &DatagramSealer,
+        envelope: &[u8],
+        source: SocketAddr,
+    ) -> Option<(Vec<u8>, Self)> {
+        let MediaSocket::UdpTo(socket, peer) = &self.socket else {
+            return None;
+        };
+        if source.ip() != peer.ip() || envelope.len() > MAX_VIEWER_CONTROL_DATAGRAM {
+            return None;
+        }
+        let message = opener.open(envelope).ok()?;
+        let mut reply = self.clone();
+        reply.socket = MediaSocket::UdpTo(socket.clone(), source);
+        Some((message, reply))
+    }
+
     pub(crate) fn prepare(&self, packet: &[u8]) -> std::io::Result<Vec<u8>> {
         wire::seal_media_packet(&self.tx, packet, self.is_tcp())
     }
@@ -281,6 +463,7 @@ impl MediaSender {
             .transpose()?;
         match &self.socket {
             MediaSocket::Udp(socket) => socket.send(envelope),
+            MediaSocket::UdpTo(socket, peer) => socket.send_to(envelope, peer),
             MediaSocket::Tcp(_) => self
                 .write_tcp_envelope(envelope, Instant::now() + Duration::from_millis(200))
                 .map(|_| envelope.len()),
@@ -289,12 +472,12 @@ impl MediaSender {
 
     pub(crate) fn send_terminal(&self, reason: TerminationReason) -> std::io::Result<()> {
         // This is the sole lifecycle-only authority: fixed LCT1 bytes, existing
-        // session sealer and connected endpoint. No arbitrary payload or new
+        // session sealer and established endpoint. No arbitrary payload or new
         // source operation can pass through it after the source is fenced.
         let notice = wire::termination(reason as u8);
         let deadline = Instant::now() + Duration::from_millis(100);
         match &self.socket {
-            MediaSocket::Udp(socket) => {
+            MediaSocket::Udp(socket) | MediaSocket::UdpTo(socket, _) => {
                 let old_timeout = socket.write_timeout()?;
                 socket.set_write_timeout(Some(Duration::from_millis(20)))?;
                 let result = (|| {
@@ -306,7 +489,10 @@ impl MediaSender {
                             return Err(std::io::ErrorKind::TimedOut.into());
                         }
                         let envelope = self.prepare(&notice)?;
-                        let submitted = socket.send(&envelope)?;
+                        let submitted = match &self.socket {
+                            MediaSocket::UdpTo(_, peer) => socket.send_to(&envelope, peer)?,
+                            _ => socket.send(&envelope)?,
+                        };
                         wire::complete_plaintext_send(notice.len(), envelope.len(), submitted)?;
                     }
                     Ok(())

@@ -5,6 +5,20 @@
 //! prevents a Windows host from subtly diverging from the macOS shim.
 
 pub const MAX_DATAGRAM: usize = 1_400;
+pub const REMOTE_DATAGRAM: usize = 1_200;
+
+/// Plaintext budget; leaves room for AEAD and IPv6/UDP within a 1280 MTU.
+/// Match the macOS sender. Unknown routes use the conservative budget.
+pub fn media_plaintext_limit(peer: Option<std::net::IpAddr>) -> usize {
+    match peer {
+        Some(std::net::IpAddr::V4(ip))
+            if ip.is_private() || ip.is_loopback() || ip.is_link_local() =>
+        {
+            MAX_DATAGRAM
+        }
+        _ => REMOTE_DATAGRAM,
+    }
+}
 /// Legacy `LT` frame header length.
 pub const FRAME_HEADER_V1_LEN: usize = 17;
 /// Current `L2` frame header length.
@@ -252,14 +266,24 @@ pub fn termination(reason: u8) -> Vec<u8> {
 /// Fragment an Annex-B H.264 access unit using the exact Android viewer wire
 /// envelope: `G | fragment index/count | AU id LE | LT | wall ms | payload`.
 pub fn media_datagrams(au_id: u16, host_wall_ms: u64, annex_b: &[u8]) -> Vec<Vec<u8>> {
-    let count = annex_b.len().div_ceil(MAX_MEDIA_PAYLOAD).max(1);
+    media_datagrams_with_limit(au_id, host_wall_ms, annex_b, MAX_DATAGRAM)
+}
+
+pub fn media_datagrams_with_limit(
+    au_id: u16,
+    host_wall_ms: u64,
+    annex_b: &[u8],
+    plaintext_limit: usize,
+) -> Vec<Vec<u8>> {
+    let payload_limit = plaintext_limit.clamp(REMOTE_DATAGRAM, MAX_DATAGRAM) - FRAME_HEADER_V2_LEN;
+    let count = annex_b.len().div_ceil(payload_limit).max(1);
     if count > u16::MAX as usize {
         return Vec::new();
     }
     (0..count)
         .map(|index| {
-            let start = index * MAX_MEDIA_PAYLOAD;
-            let end = annex_b.len().min(start + MAX_MEDIA_PAYLOAD);
+            let start = index * payload_limit;
+            let end = annex_b.len().min(start + payload_limit);
             let mut datagram = Vec::with_capacity(MEDIA_HEADER + end - start);
             datagram.push(b'G');
             datagram.extend_from_slice(&(index as u16).to_be_bytes());
@@ -427,6 +451,59 @@ mod tests {
         }
         assert!(seal_media_packet(&tx, &[], false).is_err());
         assert!(seal_media_packet(&tx, &vec![0; 65_537], true).is_err());
+    }
+
+    #[test]
+    fn remote_media_and_parity_fit_encrypted_tunnel_mtu() {
+        for address in ["100.64.0.0", "100.127.255.255", "8.8.8.8", "2001:db8::1"] {
+            let limit = media_plaintext_limit(Some(address.parse().unwrap()));
+            assert_eq!(limit, REMOTE_DATAGRAM);
+            for size in [1, 1167, 1168, 16_000, 128 * 1024] {
+                let au = vec![0x55; size];
+                let packets = media_datagrams_with_limit(7, 99, &au, limit);
+                assert_eq!(
+                    packets
+                        .iter()
+                        .flat_map(|p| p[17..].iter().copied())
+                        .collect::<Vec<_>>(),
+                    au
+                );
+                let parity = crate::fec::parity_datagrams_for_media(7, 99, &packets);
+                if packets.len() > 1 {
+                    assert!(!parity.is_empty());
+                }
+                let sealer = secure_channel::DatagramSealer::new([7; 32]);
+                for packet in packets.iter().chain(&parity) {
+                    assert!(packet.len() <= limit);
+                    assert!(seal_media_packet(&sealer, packet, false).unwrap().len() + 48 <= 1280);
+                }
+            }
+        }
+        for address in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+        ] {
+            assert_eq!(
+                media_plaintext_limit(Some(address.parse().unwrap())),
+                MAX_DATAGRAM
+            );
+        }
+        for address in [
+            "172.15.255.255",
+            "172.32.0.0",
+            "100.63.255.255",
+            "100.128.0.0",
+        ] {
+            assert_eq!(
+                media_plaintext_limit(Some(address.parse().unwrap())),
+                REMOTE_DATAGRAM
+            );
+        }
+        assert_eq!(media_plaintext_limit(None), REMOTE_DATAGRAM);
     }
 
     #[test]

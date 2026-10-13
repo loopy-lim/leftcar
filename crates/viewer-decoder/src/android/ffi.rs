@@ -17,6 +17,7 @@ extern "C" {
         codec: *mut AMediaCodec,
         out_name: *mut *mut std::ffi::c_char,
     ) -> media_status_t;
+    pub(crate) fn AMediaCodec_releaseName(codec: *mut AMediaCodec, name: *mut std::ffi::c_char);
     #[link_name = "AMediaFormat_setString"]
     pub fn AMediaFormat_setString_pub(
         format: *mut AMediaFormat,
@@ -92,6 +93,7 @@ extern "C" {
         codec: *mut AMediaCodec,
         out_name: *mut *mut std::ffi::c_char,
     ) -> media_status_t;
+    pub(crate) fn AMediaCodec_releaseName(codec: *mut AMediaCodec, name: *mut std::ffi::c_char);
     // Host builds never call these; stubs keep the lib linking for tests.
     #[allow(clippy::missing_safety_doc)]
     pub fn AMediaCodec_createCodecByName(name: *const std::ffi::c_char) -> *mut AMediaCodec;

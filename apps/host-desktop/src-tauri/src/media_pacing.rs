@@ -78,6 +78,19 @@ pub struct MediaPacer {
 
 impl MediaPacer {
     pub fn new(bitrate: u32, fps: u32, tcp: bool, now: Duration) -> Self {
+        Self::with_plaintext_limit(bitrate, fps, tcp, now, crate::wire::MAX_DATAGRAM)
+    }
+
+    pub fn with_plaintext_limit(
+        bitrate: u32,
+        fps: u32,
+        tcp: bool,
+        now: Duration,
+        plaintext_limit: usize,
+    ) -> Self {
+        let plaintext_limit =
+            plaintext_limit.clamp(crate::wire::REMOTE_DATAGRAM, crate::wire::MAX_DATAGRAM);
+        let payload_limit = plaintext_limit - crate::wire::FRAME_HEADER_V2_LEN;
         // Encoded budget plus actual LT/AEAD/TCP framing, existing full8 FEC
         // parity (2/8), one rounded fragment and one tail parity per AU.
         // Reserve a full ordinary CFG per AU too. This bounds steady configured
@@ -86,14 +99,13 @@ impl MediaPacer {
             secure_channel::COUNTER_LEN + secure_channel::TAG_LEN + if tcp { 4 } else { 0 };
         let payload_rate = u64::from(bitrate.max(1)).div_ceil(8);
         let frames = u64::from(fps.max(1));
-        let fragments = payload_rate.div_ceil(crate::wire::MAX_MEDIA_PAYLOAD as u64) + frames;
+        let fragments = payload_rate.div_ceil(payload_limit as u64) + frames;
         let parity_count = fragments.div_ceil(8) * fec_core::parity_count(8) as u64 + frames;
-        let parity_wire =
-            crate::wire::MAX_MEDIA_PAYLOAD + 2 + crate::wire::PARITY_HEADER + overhead;
+        let parity_wire = payload_limit + 2 + crate::wire::PARITY_HEADER + overhead;
         let bytes_per_second = payload_rate
             + fragments * (crate::wire::FRAME_HEADER_V1_LEN + overhead) as u64
             + parity_count * parity_wire as u64
-            + frames * (crate::wire::MAX_DATAGRAM + overhead) as u64;
+            + frames * (plaintext_limit + overhead) as u64;
         Self {
             metrics: DrainMetrics::default(),
             bytes_per_second: bytes_per_second as f64,
@@ -575,6 +587,31 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn remote_fragment_budget_sustains_configured_rate() {
+        for bitrate in [4_000_000u32, 50_000_000] {
+            let mut io = FakeIo::new(false);
+            let mut pacer =
+                MediaPacer::with_plaintext_limit(bitrate, 60, false, io.now, wire::REMOTE_DATAGRAM);
+            for index in 0..600 {
+                let scheduled = Duration::from_secs_f64(index as f64 / 60.0);
+                io.now = io.now.max(scheduled);
+                let mut packets = wire::media_datagrams_with_limit(
+                    1,
+                    0,
+                    &vec![0; bitrate as usize / 8 / 60],
+                    wire::REMOTE_DATAGRAM,
+                );
+                packets.extend(fec::parity_datagrams_for_media(1, 0, &packets));
+                pacer.drain(&packets, true, &mut io).unwrap();
+                assert!(io.now.saturating_sub(scheduled) < Duration::from_millis(200));
+            }
+            assert!(io.now < Duration::from_secs(10));
+            assert!(io.sent.iter().all(|(_, bytes)| bytes + 48 <= 1280));
+            assert_eq!(pacer.metrics().completed_aus, 600);
+        }
+    }
+
     #[test]
     fn sustained_configured_rate_and_large_idrs_do_not_build_permanent_debt() {
         for tcp in [false, true] {

@@ -3,6 +3,7 @@ mod input;
 
 use crate::backend::CaptureBackend;
 use crate::input_gate::InputGate;
+use crate::media_feedback::{latency_probe_response, ReceiverFeedback};
 use crate::media_sender::{MediaSender, MediaSocket, TerminationReason};
 use crate::tcp_media::{self, FrameRead};
 use crate::wire::{self, InputDecision, InputSequencer};
@@ -11,7 +12,7 @@ use control_contract::udp_stability::AppliedUdpStability;
 use input::InputInjector;
 use secure_channel::DatagramSealer;
 use std::collections::HashMap;
-use std::net::{TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -74,9 +75,10 @@ pub(super) struct WindowsSession {
     stop: AtomicBool,
     input_gate: InputGate,
     force_keyframe: AtomicBool,
-    /// Milliseconds since process start of the last authenticated viewer
+    /// Milliseconds since input worker start of the last authenticated viewer
     /// datagram (feedback, probe, input, or BYE). Zero until first contact.
     last_viewer_contact_ms: AtomicU64,
+    last_receiver_feedback: Mutex<Option<std::time::Instant>>,
     pub stats: Mutex<StatsInfo>,
     injector: Mutex<InputInjector>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -89,7 +91,7 @@ pub(super) struct WindowsSession {
 
 /// The viewer emits authenticated traffic at 1 Hz (latency probes and
 /// receiver feedback). Silence beyond this budget while a session is running
-/// means the peer is gone: the connected UDP socket may never error, so the
+/// means the peer is gone: the UDP socket may never error, so the
 /// input receiver reaps the session itself.
 const VIEWER_CONTACT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -234,15 +236,17 @@ impl CaptureBackend for WindowsBackend {
         } else {
             let socket = UdpSocket::bind(("0.0.0.0", 0))
                 .map_err(|error| format!("bind media socket: {error}"))?;
-            socket
-                .connect((ip, port))
-                .map_err(|error| format!("connect viewer UDP {ip}:{port}: {error}"))?;
+            let peer = SocketAddr::new(
+                ip.parse()
+                    .map_err(|error| format!("invalid viewer IP {ip}: {error}"))?,
+                port,
+            );
             socket
                 .set_write_timeout(Some(Duration::from_millis(20)))
                 .map_err(|error| format!("configure media socket: {error}"))?;
             let socket = Arc::new(socket);
-            let sender =
-                MediaSender::new(MediaSocket::Udp(socket.clone()), media_key).with_access(access);
+            let sender = MediaSender::new(MediaSocket::UdpTo(socket.clone(), peer), media_key)
+                .with_access(access);
             prove_udp_reachability(&socket, &sender, &crypto_rx, &challenge, ip, port)?;
             let input_socket = socket
                 .try_clone()
@@ -259,6 +263,7 @@ impl CaptureBackend for WindowsBackend {
             input_gate: InputGate::new(media_sender.clone()),
             force_keyframe: AtomicBool::new(true),
             last_viewer_contact_ms: AtomicU64::new(0),
+            last_receiver_feedback: Mutex::new(None),
             stats: Mutex::new(initial_stats),
             injector: Mutex::new(InputInjector::new(monitor.rect)),
             threads: Mutex::new(Vec::new()),
@@ -313,7 +318,15 @@ impl CaptureBackend for WindowsBackend {
             .lock()
             .unwrap()
             .get(&handle)
-            .map(|session| session.stats.lock().unwrap().clone())
+            .map(|session| {
+                let mut stats = session.stats.lock().unwrap().clone();
+                stats.receiver_feedback_age_ms = session
+                    .last_receiver_feedback
+                    .lock()
+                    .unwrap()
+                    .map(|last| last.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+                stats
+            })
             .ok_or_else(|| format!("no such Windows capture handle {handle}"))
     }
 
@@ -365,14 +378,19 @@ fn prove_udp_reachability(
     socket
         .set_read_timeout(Some(Duration::from_millis(50)))
         .map_err(|error| format!("configure reachability timeout: {error}"))?;
-    // Sealed challenge + 24B AEAD overhead; genuine replies fit comfortably.
-    let mut response = [0u8; 256];
+    // Drain a whole UDP packet before validating its bounded challenge body.
+    // Windows reports WSAEMSGSIZE for a truncated datagram; that must not let
+    // an unauthenticated sender abort the reachability proof.
+    let mut response = [0u8; 65_535];
     for attempt in 0..60 {
         if attempt % 4 == 0 {
             let _ = sender.send(challenge);
         }
-        match socket.recv(&mut response) {
-            Ok(size) => {
+        match socket.recv_from(&mut response) {
+            Ok((size, source)) => {
+                if size > 256 || Some(source) != sender.udp_peer() {
+                    continue;
+                }
                 let opened = crypto_rx.open(&response[..size]).ok();
                 if opened.as_deref() == Some(challenge) {
                     socket
@@ -438,13 +456,19 @@ fn run_input(receiver: MediaReceiver, sender: MediaSender, session: Arc<WindowsS
 fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSession>) {
     let mut sequencer = InputSequencer::default();
     sequencer.reset();
-    // Sealed input datagrams carry +24B AEAD overhead over the largest
-    // plaintext input event.
-    let mut packet = [0u8; 640];
+    // Consume complete datagrams so oversized unauthenticated UDP cannot
+    // trigger Windows WSAEMSGSIZE. authenticate_udp_control rejects anything
+    // above the 640B control envelope limit before AEAD allocation/work.
+    let mut packet = [0u8; 65_535];
     let started = std::time::Instant::now();
     while !session.stop.load(Ordering::Acquire) {
-        let size = match socket.recv(&mut packet) {
-            Ok(size) => size,
+        // An invalid datagram flood must not postpone the liveness deadline.
+        check_viewer_health(&session, started);
+        if session.stop.load(Ordering::Acquire) {
+            break;
+        }
+        let (size, source) = match socket.recv_from(&mut packet) {
+            Ok(received) => received,
             Err(error)
                 if matches!(
                     error.kind(),
@@ -459,50 +483,20 @@ fn run_udp_input(socket: UdpSocket, sender: MediaSender, session: Arc<WindowsSes
                 break;
             }
         };
-        // AEAD possession replaces the old token-suffix authentication:
-        // anything that does not open under the session key is dropped here.
-        let Ok(message) = session.crypto_rx.open(&packet[..size]) else {
+        let received_ms = wall_clock_ms();
+        let Some((message, reply_sender)) =
+            sender.authenticate_udp_control(&session.crypto_rx, &packet[..size], source)
+        else {
             continue;
         };
-        session
-            .last_viewer_contact_ms
-            .store(started.elapsed().as_millis() as u64, Ordering::Release);
-        if message == b"BYE" {
-            session.stop.store(true, Ordering::Release);
-            break;
-        }
-        if message == b"IDR" {
-            session.force_keyframe.store(true, Ordering::Release);
-        }
-        if session.input_gate.refresh_on_control(&message) {
-            continue;
-        }
-        let Some(_permission) = session.access.lease.enter() else {
-            break;
-        };
-        match sequencer.accept(&message) {
-            InputDecision::Ignore => {}
-            InputDecision::AckDuplicate(sequence) => {
-                let enabled = session.input_gate.enabled();
-                let _ = sender.send(&wire::input_ack(sequence, enabled));
-            }
-            InputDecision::Apply(event) => {
-                if session.input_gate.enabled() {
-                    if let Err(error) = session.injector.lock().unwrap().apply(event) {
-                        set_session_error(&session, error);
-                    }
-                }
-            }
-            InputDecision::ApplyAndAck { sequence, event } => {
-                if session.input_gate.enabled() {
-                    if let Err(error) = session.injector.lock().unwrap().apply(event) {
-                        set_session_error(&session, error);
-                    }
-                }
-                let enabled = session.input_gate.enabled();
-                let _ = sender.send(&wire::input_ack(sequence, enabled));
-            }
-        }
+        process_authenticated_message(
+            &message,
+            &session,
+            &mut sequencer,
+            &reply_sender,
+            started,
+            received_ms,
+        );
     }
     session.stop.store(true, Ordering::Release);
     session.input_gate.retire();
@@ -536,10 +530,30 @@ fn process_input_packet(
     sender: &MediaSender,
     started: std::time::Instant,
 ) {
-    let Some(_permission) = session.access.lease.enter() else {
+    let received_ms = wall_clock_ms();
+    let Ok(message) = session.crypto_rx.open(packet) else {
         return;
     };
-    let Ok(message) = session.crypto_rx.open(packet) else {
+    process_authenticated_message(&message, session, sequencer, sender, started, received_ms);
+}
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn process_authenticated_message(
+    message: &[u8],
+    session: &Arc<WindowsSession>,
+    sequencer: &mut InputSequencer,
+    sender: &MediaSender,
+    started: std::time::Instant,
+    received_ms: u64,
+) {
+    let Some(_permission) = session.access.lease.enter() else {
+        session.stop.store(true, Ordering::Release);
         return;
     };
     session
@@ -552,10 +566,40 @@ fn process_input_packet(
     if message == b"IDR" {
         session.force_keyframe.store(true, Ordering::Release);
     }
-    if session.input_gate.refresh_on_control(&message) {
+    if session.input_gate.refresh_on_control(message) {
         return;
     }
-    match sequencer.accept(&message) {
+    if let Some(response) = latency_probe_response(message, received_ms, wall_clock_ms()) {
+        let _ = sender.send(&response);
+        return;
+    }
+    if let Some(feedback) = ReceiverFeedback::parse(message) {
+        let mut stats = session.stats.lock().unwrap();
+        stats.receiver_frame_gaps = stats
+            .receiver_frame_gaps
+            .max(i64::from(feedback.frame_gaps));
+        stats.receiver_input_drops = stats
+            .receiver_input_drops
+            .max(i64::from(feedback.input_drops));
+        stats.receiver_incomplete_aus = stats
+            .receiver_incomplete_aus
+            .max(i64::from(feedback.incomplete_aus));
+        stats.receiver_stale_frames = stats
+            .receiver_stale_frames
+            .max(i64::from(feedback.stale_frames));
+        stats.receiver_stale_input_drops = feedback.stale_input_drops.map(i64::from);
+        if let Some(discards) = feedback.output_burst_discards {
+            stats.receiver_output_burst_discards = stats
+                .receiver_output_burst_discards
+                .max(i64::from(discards));
+        }
+        stats.receiver_rtt_ms = feedback.rtt_ms;
+        stats.receiver_wire_ms = feedback.wire_ms;
+        stats.rendered_fps = feedback.rendered_fps;
+        *session.last_receiver_feedback.lock().unwrap() = Some(std::time::Instant::now());
+        return;
+    }
+    match sequencer.accept(message) {
         InputDecision::Ignore => {}
         InputDecision::AckDuplicate(sequence) => {
             let enabled = session.input_gate.enabled();

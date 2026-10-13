@@ -10,6 +10,7 @@ const MAX_DATA_SHARDS: usize = 8;
 pub const MAX_PARITY_SHARDS: usize = 4;
 const LEGACY_MAX_PARITY_SHARDS: usize = 2;
 const LENGTH_PREFIX: usize = 2;
+const MAX_SHARD_WIDTH: usize = LENGTH_PREFIX + u16::MAX as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FecError {
@@ -155,7 +156,7 @@ pub fn decode_group_with_max_parity(
     if max_parity > MAX_PARITY_SHARDS {
         return Err(FecError::InvalidParityCount(max_parity));
     }
-    if width < LENGTH_PREFIX {
+    if !(LENGTH_PREFIX..=MAX_SHARD_WIDTH).contains(&width) {
         return Err(FecError::InvalidShardWidth(width));
     }
     let expected = k + max_parity.min(k.saturating_sub(1));
@@ -168,6 +169,14 @@ pub fn decode_group_with_max_parity(
     let missing_data = received[..k].iter().filter(|shard| shard.is_none()).count();
     if received.iter().flatten().any(|shard| shard.len() != width) {
         return Err(FecError::InvalidShardWidth(width));
+    }
+    // No erasure means no matrix work or padded reconstruction allocation.
+    // Still validate every supplied shard above, including parity slots.
+    if missing_data == 0 {
+        return received[..k]
+            .iter()
+            .map(|shard| unpack_shard(shard.as_ref().expect("all data is present")))
+            .collect();
     }
 
     let selected = received
@@ -188,18 +197,35 @@ pub fn decode_group_with_max_parity(
         .iter()
         .map(|index| received[*index].as_ref().expect("selected is present"))
         .collect::<Vec<_>>();
-    let mut data_shards = vec![vec![0; width]; k];
-    for (row, output) in data_shards.iter_mut().enumerate() {
-        for byte_index in 0..width {
-            output[byte_index] = (0..k)
-                .map(|column| gf_mul(inverse[row][column], selected_shards[column][byte_index]))
-                .fold(0, |value, term| value ^ term);
+    // Most recovered groups have only one missing data shard. Preserve the
+    // received data and reconstruct only erased rows, with one reusable
+    // padded buffer instead of k full-width output allocations.
+    let mut restored = vec![0; width];
+    let mut payloads = Vec::with_capacity(k);
+    for row in 0..k {
+        if let Some(shard) = &received[row] {
+            payloads.push(unpack_shard(shard)?);
+            continue;
         }
+        restored.fill(0);
+        for (coefficient, shard) in inverse[row].iter().zip(&selected_shards) {
+            match *coefficient {
+                0 => {}
+                1 => {
+                    for (output, input) in restored.iter_mut().zip(shard.iter()) {
+                        *output ^= input;
+                    }
+                }
+                coefficient => {
+                    for (output, input) in restored.iter_mut().zip(shard.iter()) {
+                        *output ^= gf_mul(coefficient, *input);
+                    }
+                }
+            }
+        }
+        payloads.push(unpack_shard(&restored)?);
     }
-    data_shards
-        .iter()
-        .map(|shard| unpack_shard(shard))
-        .collect()
+    Ok(payloads)
 }
 
 pub fn parity_count(k: usize) -> usize {
@@ -211,7 +237,8 @@ pub fn parity_count(k: usize) -> usize {
 }
 
 pub fn pack_shard(payload: &[u8], width: usize) -> Result<Vec<u8>, FecError> {
-    if width < LENGTH_PREFIX || payload.len() > width - LENGTH_PREFIX {
+    if !(LENGTH_PREFIX..=MAX_SHARD_WIDTH).contains(&width) || payload.len() > width - LENGTH_PREFIX
+    {
         return Err(FecError::InvalidShardWidth(width));
     }
     if payload.len() > usize::from(u16::MAX) {
@@ -376,6 +403,75 @@ fn gf_inv(value: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_supported_erasure_patterns_preserve_variable_length_payloads() {
+        // Exercise every subset of up to the emitted parity count, including
+        // lost parity, simultaneous data losses, and the no-loss fast path.
+        for k in 1..=MAX_DATA_SHARDS {
+            let data: Vec<Vec<u8>> = (0..k)
+                .map(|index| {
+                    (0..index * 7)
+                        .map(|offset| (offset * 31 + index * 17) as u8)
+                        .collect()
+                })
+                .collect();
+            for requested_parity in 1..=MAX_PARITY_SHARDS {
+                let encoded = encode_group_with_parity(&data, requested_parity).unwrap();
+                let total = encoded.k + encoded.parity.len();
+                for erased in 0..(1usize << total) {
+                    if erased.count_ones() as usize > encoded.parity.len() {
+                        continue;
+                    }
+                    let mut received = encoded.all_shards();
+                    for (index, shard) in received.iter_mut().enumerate() {
+                        if erased & (1 << index) != 0 {
+                            *shard = None;
+                        }
+                    }
+                    assert_eq!(
+                        decode_group_with_max_parity(received, k, encoded.width, requested_parity)
+                            .unwrap(),
+                        data,
+                        "k={k}, parity={requested_parity}, erased={erased:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impossible_shard_widths_fail_before_allocation() {
+        for width in [0, 1, MAX_SHARD_WIDTH + 1, usize::MAX] {
+            assert_eq!(
+                pack_shard(&[], width),
+                Err(FecError::InvalidShardWidth(width))
+            );
+            assert_eq!(
+                decode_group_with_max_parity(vec![None], 1, width, 0),
+                Err(FecError::InvalidShardWidth(width))
+            );
+        }
+        let payload = vec![0xa5; u16::MAX as usize];
+        let packed = pack_shard(&payload, MAX_SHARD_WIDTH).unwrap();
+        assert_eq!(unpack_shard(&packed).unwrap(), payload);
+    }
+
+    #[test]
+    fn no_loss_fast_path_still_validates_lengths_and_parity_width() {
+        let mut encoded = encode_group(&[vec![1, 2], vec![3, 4]]).unwrap();
+        encoded.data[0][..2].copy_from_slice(&3u16.to_be_bytes());
+        assert_eq!(
+            decode_group(encoded.all_shards(), encoded.k, encoded.width),
+            Err(FecError::InvalidShardLength)
+        );
+        encoded.data[0][..2].copy_from_slice(&2u16.to_be_bytes());
+        encoded.parity[0].push(0);
+        assert_eq!(
+            decode_group(encoded.all_shards(), encoded.k, encoded.width),
+            Err(FecError::InvalidShardWidth(encoded.width))
+        );
+    }
 
     #[test]
     fn eight_shards_survive_two_losses() {

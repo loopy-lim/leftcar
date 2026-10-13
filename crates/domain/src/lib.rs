@@ -11,10 +11,10 @@ pub mod source;
 
 pub use error::{ErrorScope, LeftcarError, RecoveryAction, Retryability, ALL_ERRORS};
 pub use ids::{DeviceId, HostId, IdError, SessionId, SourceId, StreamInstanceId};
+pub use km::{
+    AndroidToMacTriggerSource, KmArrangement, KmCapabilities, KmConsent, KmDirection, KmEdgeEntry,
+    KmEffect, KmEvent, KmGeometryError, KmState, KmStateMachine, MacDisplayUnion,
+};
 pub use lease::{LeaseEvent, LeaseTable, PendingStop};
 pub use phase::{PairingState, StreamPhase};
 pub use source::{SourceCatalogSnapshot, SourceDescriptor, SourceKind, SourceRegistry};
-pub use km::{
-    AndroidToMacTriggerSource, KmArrangement, KmCapabilities, KmConsent, KmDirection, KmEdgeEntry,
-    KmEvent, KmEffect, KmGeometryError, KmState, KmStateMachine, MacDisplayUnion,
-};

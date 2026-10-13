@@ -71,7 +71,7 @@ pub(super) fn run(
     let bitrate = session.stats.lock().unwrap().current_bitrate;
     let mut encoder = HardwareH264Encoder::new(&device, width, height, fps, bitrate)?;
     let started = Instant::now();
-    let mut pacing = CapturePacing::new(bitrate, fps, sender.is_tcp(), started);
+    let mut pacing = CapturePacing::new(bitrate, fps, &sender, started);
     // Always close WGC resources on a terminal drain, including partial AUs.
     let result = (|| -> Result<(), String> {
         let mut au_id = 0u16;
@@ -244,7 +244,8 @@ fn send_encoded_outputs(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let datagrams = wire::media_datagrams(*au_id, wall_ms, &annex_b);
+        let datagrams =
+            wire::media_datagrams_with_limit(*au_id, wall_ms, &annex_b, sender.plaintext_limit());
         if datagrams.is_empty() {
             return Err("encoded H.264 access unit exceeds Leftcar fragment limit".into());
         }
@@ -733,9 +734,16 @@ struct CapturePacing {
 }
 
 impl CapturePacing {
-    fn new(bitrate: u32, fps: u32, tcp: bool, started: Instant) -> Self {
+    fn new(bitrate: u32, fps: u32, sender: &MediaSender, started: Instant) -> Self {
+        let tcp = sender.is_tcp();
         Self {
-            policy: MediaPacer::new(bitrate, fps, tcp, started.elapsed()),
+            policy: MediaPacer::with_plaintext_limit(
+                bitrate,
+                fps,
+                tcp,
+                started.elapsed(),
+                sender.plaintext_limit(),
+            ),
             started,
             last_snapshot: Instant::now(),
             capture_id: SystemTime::now()

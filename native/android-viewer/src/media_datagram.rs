@@ -384,6 +384,8 @@ impl FecGroup {
     pub fn push_data(&mut self, fragment: FrameFragment<'_>) {
         if fragment.id != self.id
             || fragment.count != self.total
+            || fragment.payload.is_empty()
+            || fragment.payload.len() > MAX_FRAGMENT_PAYLOAD
             || fragment.index < self.base
             || usize::from(fragment.index - self.base) >= self.k
         {
@@ -904,13 +906,18 @@ impl PartialPayload {
                     data.truncate(final_len);
                     return Some(data);
                 }
-                let mut compact = Vec::with_capacity(bytes);
+                // Tunnel packetization uses a smaller stride than the LAN
+                // slab. Compact toward the front in place; each destination
+                // ends before the next source, including out-of-order input.
+                let mut destination = 0;
                 for (index, length) in lengths.into_iter().enumerate() {
                     let length = usize::from(length);
                     let start = index * MAX_FRAGMENT_PAYLOAD;
-                    compact.extend_from_slice(&data[start..start + length]);
+                    data.copy_within(start..start + length, destination);
+                    destination += length;
                 }
-                Some(compact)
+                data.truncate(destination);
+                Some(data)
             }
             Self::Sparse(mut fragments) => {
                 let mut compact = Vec::with_capacity(bytes);
@@ -993,6 +1000,14 @@ impl FrameReassembler {
     }
 
     pub fn push(&mut self, fragment: FrameFragment<'_>) -> Option<ReassembledFrame> {
+        // FEC restoration also calls this API directly, bypassing the parser.
+        // Reject malformed shapes before allocation or resetting a valid AU.
+        if fragment.count == 0
+            || usize::from(fragment.count) > MAX_FRAGMENTS_PER_AU
+            || fragment.index >= fragment.count
+        {
+            return None;
+        }
         // Recovery keyframes may be transmitted twice. Once the first copy is
         // complete, fragments from the redundant copy must not create a new
         // partial frame or emit the same AU a second time. A small recent-ID
@@ -1373,6 +1388,53 @@ impl RecoveryRequestGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_reassembly_rejects_invalid_headers_without_allocating() {
+        for (index, count) in [(0, 0), (2, 2), (0, u16::MAX)] {
+            let mut reassembler = FrameReassembler::default();
+            let packet = datagram(0, 2, 42, 1, 2, 3, b"a");
+            let mut fragment = parse_fragment(&packet).unwrap();
+            fragment.index = index;
+            fragment.count = count;
+            assert!(reassembler.push(fragment).is_none());
+            assert!(reassembler.partial.is_empty());
+            assert!(reassembler.insertion_order.is_empty());
+        }
+    }
+
+    #[test]
+    fn tunnel_fragments_compact_in_existing_allocation() {
+        let mut payload = PartialPayload::new(3);
+        let original = match &payload {
+            PartialPayload::Contiguous { data, .. } => data.as_ptr(),
+            _ => unreachable!(),
+        };
+        let first = vec![1; 1167];
+        let second = vec![2; 1167];
+        let last = vec![3; 71];
+        assert!(payload.insert(2, &last));
+        assert!(payload.insert(0, &first));
+        assert!(payload.insert(1, &second));
+        let completed = payload.into_au(2405).unwrap();
+        assert_eq!(completed, [first, second, last].concat());
+        assert_eq!(
+            completed.as_ptr(),
+            original,
+            "tunnel completion must reuse its slab"
+        );
+    }
+
+    #[test]
+    fn fec_rejects_oversized_data_before_copying() {
+        let packet = datagram(0, 2, 42, 1, 2, 3, b"a");
+        let mut fragment = parse_fragment(&packet).unwrap();
+        let oversized = vec![0; MAX_FRAGMENT_PAYLOAD + 1];
+        fragment.payload = &oversized;
+        let mut group = FecGroup::new(42, 2, 0, 2).unwrap();
+        group.push_data(fragment);
+        assert!(group.data.iter().all(Option::is_none));
+    }
 
     #[test]
     fn lan_media_datagram_budget_stays_below_ethernet_mtu() {

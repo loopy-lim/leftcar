@@ -3,7 +3,7 @@ use crate::*;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ffi::{c_char, c_void, CStr},
+    ffi::{c_char, c_void, CStr, CString},
 };
 #[derive(Default)]
 struct Probe {
@@ -14,6 +14,9 @@ struct Probe {
     reject: usize,
     outputs: std::collections::VecDeque<(usize, i64)>,
     releases: Vec<(usize, Option<i64>, bool)>,
+    outstanding_names: usize,
+    name_status: i32,
+    name_null: bool,
 }
 thread_local! { static PROBE: RefCell<Probe> = RefCell::new(Probe::default()); }
 // PRESENTATION_SMOOTH is process-global; pacing tests must not interleave.
@@ -90,6 +93,43 @@ extern "C" fn AMediaCodec_stop(_: *mut c_void) -> i32 {
 #[no_mangle]
 extern "C" fn AMediaCodec_flush(_: *mut c_void) -> i32 {
     0
+}
+
+#[no_mangle]
+unsafe extern "C" fn AMediaCodec_getName(_: *mut c_void, name: *mut *mut c_char) -> i32 {
+    PROBE.with_borrow_mut(|p| {
+        if p.name_status != 0 || p.name_null {
+            return p.name_status;
+        }
+        p.outstanding_names += 1;
+        unsafe { *name = CString::new("c2.test.decoder").unwrap().into_raw() };
+        0
+    })
+}
+
+#[no_mangle]
+unsafe extern "C" fn AMediaCodec_releaseName(_: *mut c_void, name: *mut c_char) {
+    assert!(!name.is_null());
+    unsafe { drop(CString::from_raw(name)) };
+    PROBE.with_borrow_mut(|p| p.outstanding_names -= 1);
+}
+
+#[test]
+fn codec_name_returns_owned_string_and_releases_each_ndk_allocation() {
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let decoder = unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    for _ in 0..10 {
+        assert_eq!(decoder.codec_name(), "c2.test.decoder");
+        PROBE.with_borrow(|p| assert_eq!(p.outstanding_names, 0));
+    }
+    PROBE.with_borrow_mut(|p| p.name_status = -1);
+    assert_eq!(decoder.codec_name(), "<unknown>");
+    PROBE.with_borrow_mut(|p| {
+        p.name_status = 0;
+        p.name_null = true;
+    });
+    assert_eq!(decoder.codec_name(), "<unknown>");
+    PROBE.with_borrow(|p| assert_eq!(p.outstanding_names, 0));
 }
 #[test]
 fn real_constructor_retries_fresh_both_low_only_then_standard() {
@@ -304,10 +344,34 @@ fn real_output_drain_flush_forgets_parked_outputs() {
 }
 
 #[test]
-fn age_drain_counts_excess_plus_front_frames_beyond_budget() {
-    use crate::android::decoder::{immediate_release_count, park_drain_budget_ns};
+fn age_drain_takes_union_of_excess_and_expired_front_frames() {
+    use crate::android::decoder::park_drain_budget_ns;
+    let immediate_release_count = |ages: &[u64], cap, budget| {
+        crate::android::decoder::immediate_release_count(ages.iter().copied(), cap, budget)
+    };
     // 상한 초과분: cap 2에 5개면 3개 즉시 소화.
     assert_eq!(immediate_release_count(&[0, 0, 0, 0, 0], 2, 45_000_000), 3);
+    // Capacity already removes these old frames; do not drain fresh entries
+    // a second time when the age and capacity limits overlap.
+    assert_eq!(
+        immediate_release_count(
+            &[60_000_000, 50_000_000, 10_000, 5_000, 1_000],
+            3,
+            45_000_000
+        ),
+        2
+    );
+    assert_eq!(
+        immediate_release_count(
+            &[60_000_000, 50_000_000, 46_000_000, 5_000, 1_000],
+            3,
+            45_000_000
+        ),
+        3
+    );
+    assert_eq!(immediate_release_count(&[60_000_000; 5], 3, 45_000_000), 5);
+    assert_eq!(immediate_release_count(&[], 0, 45_000_000), 0);
+    assert_eq!(immediate_release_count(&[0; 5], 0, 45_000_000), 5);
     // 나이 예산 초과: 맨앞부터 예산을 넘는 만큼만 추가된다.
     assert_eq!(
         immediate_release_count(&[50_000_000, 46_000_000, 10_000], 4, 45_000_000),
@@ -329,6 +393,29 @@ fn age_drain_counts_excess_plus_front_frames_beyond_budget() {
         immediate_release_count(&[u64::MAX], 4, park_drain_budget_ns(false)),
         0
     );
+}
+
+#[test]
+fn immediate_smoothing_release_is_reported_even_when_vsync_slot_was_used() {
+    let _guard = SMOOTH_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    PRESENTATION_SMOOTH.store(true, std::sync::atomic::Ordering::Relaxed);
+    PROBE.with_borrow_mut(|p| *p = Probe::default());
+    let mut decoder =
+        unsafe { AndroidDecoder::new_h264(&[0x67], &[0x68], 1920, 1080, 0, 60) }.unwrap();
+    decoder.set_output_target(Some(9_876_543_210));
+    PROBE.with_borrow_mut(|p| p.outputs.push_back((40, 1000)));
+    assert!(decoder.pump_latest_output(0).unwrap());
+    PROBE.with_borrow_mut(|p| {
+        p.outputs
+            .extend((0..12).map(|index| (50 + index, 2000 + index as i64)));
+    });
+    assert!(decoder.pump_latest_output(0).unwrap());
+    assert_eq!(decoder.frames_rendered, 3);
+    PROBE.with_borrow(|p| {
+        assert_eq!(p.releases.len(), 3);
+        assert_eq!(p.releases[1..], [(50, None, true), (51, None, true)]);
+    });
+    PRESENTATION_SMOOTH.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[test]

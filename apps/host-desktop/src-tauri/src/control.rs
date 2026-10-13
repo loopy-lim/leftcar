@@ -337,6 +337,12 @@ const CLIPBOARD_MAX_IMAGE_BASE64: usize = 8 * 1024 * 1024;
 /// 동시 제어 연결 상한(F08). 인증 전 소켓도 작업을 무한 스폰하지 않게
 /// accept 루프에서 세마포 허가로 제한한다.
 const MAX_CONCURRENT_CONNS: usize = 64;
+/// A single remote address must not consume every global admission slot.
+const MAX_CONNS_PER_PEER: usize = 8;
+/// The idle timeout alone is reset by blank lines and pairing polls. Limit the
+/// total unauthenticated socket lifetime as well. Viewer approval polling opens
+/// a fresh socket for each request, so its 150s approval window is unaffected.
+const PREAUTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// 인증 전 줄 상한(F08). ClientHello/키 확인 JSON은 수백 바이트고 루프백
 /// 평문 진단 명령도 이보다 작으므로 16KiB면 충분하다. tokio Lines는 줄 길이
 /// 상한이 없어 '\n' 없는 입력을 무한 버퍼로 쌓으므로, 직접 상한을 둔다.
@@ -443,6 +449,7 @@ pub struct ControlServer {
     /// 동시 연결 상한 허가(F08). accept 루프가 연결 작업 하나당 하나씩
     /// 집고, 작업이 끝나면 반납된다.
     conn_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    peer_connections: PeerConnections,
     /// Persistent shutdown signal also reaches unauthenticated sockets and
     /// writers blocked by peers that stopped reading.
     connection_shutdown: tokio::sync::watch::Sender<bool>,
@@ -521,6 +528,7 @@ impl ControlServer {
             replacement_retired: Mutex::new(HashMap::new()),
             pending_retirements: Mutex::new(HashMap::new()),
             conn_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS)),
+            peer_connections: PeerConnections::default(),
             connection_shutdown,
             viewer_metrics: Mutex::new(HashMap::new()),
             public_media_endpoint: Mutex::new(None),
@@ -2073,14 +2081,18 @@ impl ControlServer {
                 accepted = listener.accept() => accepted,
             };
             match accepted {
-                Ok((sock, _)) => {
+                Ok((sock, addr)) => {
+                    let peer = addr.ip().to_canonical();
+                    if !self.auth_limiter.allow(&peer.to_string()) {
+                        continue;
+                    }
+                    let Some(peer_lease) = self.peer_connections.admit(peer) else {
+                        continue;
+                    };
                     let server = self.clone();
                     tokio::spawn(async move {
-                        let peer = sock
-                            .peer_addr()
-                            .map(|a| a.ip().to_string())
-                            .unwrap_or_default();
-                        handle_conn(sock, &server, &peer).await;
+                        handle_conn(sock, &server, &peer.to_string()).await;
+                        drop(peer_lease);
                         drop(permit);
                     });
                 }
@@ -4129,6 +4141,7 @@ async fn read_authed_line(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     killed: Option<&std::sync::Arc<tokio::sync::Notify>>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    preauth_deadline: tokio::time::Instant,
 ) -> Result<Option<String>, ControlLineReadError> {
     if *shutdown.borrow() {
         return Ok(None);
@@ -4138,11 +4151,17 @@ async fn read_authed_line(
     } else {
         HANDSHAKE_LINE_LIMIT
     };
+    let idle_deadline = tokio::time::Instant::now() + CONTROL_IDLE_TIMEOUT;
+    let deadline = if killed.is_some() {
+        idle_deadline
+    } else {
+        idle_deadline.min(preauth_deadline)
+    };
     tokio::select! {
         biased;
         _ = wait_for_disconnect(killed) => Ok(None),
         _ = shutdown.changed() => Ok(None),
-        outcome = tokio::time::timeout(CONTROL_IDLE_TIMEOUT, read_bounded_line(reader, cap)) => match outcome {
+        outcome = tokio::time::timeout_at(deadline, read_bounded_line(reader, cap)) => match outcome {
             Ok(inner) => inner,
             Err(_) => Ok(None),
         },
@@ -4150,38 +4169,58 @@ async fn read_authed_line(
 }
 
 async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
+    handle_conn_until(
+        sock,
+        server,
+        peer,
+        tokio::time::Instant::now() + PREAUTH_TIMEOUT,
+    )
+    .await;
+}
+
+async fn handle_conn_until(
+    sock: TcpStream,
+    server: &ControlServer,
+    peer: &str,
+    preauth_deadline: tokio::time::Instant,
+) {
     let mut shutdown = server.connection_shutdown.subscribe();
     let (rd, mut wr) = sock.into_split();
     let mut reader = BufReader::new(rd);
     // 첫 줄은 인증 전이다 — 핸드셰이크 상한을 넘기면 응답 없이 끊는다(F08).
-    let first_line = match read_authed_line(&mut reader, None, &mut shutdown).await {
-        Ok(Some(line)) => line,
-        Err(ControlLineReadError::TooLong) => {
-            eprintln!(
+    let first_line =
+        match read_authed_line(&mut reader, None, &mut shutdown, preauth_deadline).await {
+            Ok(Some(line)) => line,
+            Err(ControlLineReadError::TooLong) => {
+                eprintln!(
                 "control handshake line exceeded {HANDSHAKE_LINE_LIMIT} bytes from {peer}; closing"
             );
-            return;
-        }
-        Err(ControlLineReadError::Io(error)) => {
-            eprintln!(
-                "control handshake read failed ({:?}); closing",
-                error.kind()
-            );
-            return;
-        }
-        _ => return,
-    };
+                return;
+            }
+            Err(ControlLineReadError::Io(error)) => {
+                eprintln!(
+                    "control handshake read failed ({:?}); closing",
+                    error.kind()
+                );
+                return;
+            }
+            _ => return,
+        };
     if !server.auth_limiter.allow(peer) {
         // 무차별 시도가 누적된 주소 — 응답조차 주지 않는다(백오프).
         return;
     }
-    let Some((mut crypto, mut pending)) = negotiate(
-        &first_line,
-        &mut reader,
-        &mut wr,
-        server,
-        peer,
-        &mut shutdown,
+    let Ok(Some((mut crypto, mut pending))) = tokio::time::timeout_at(
+        preauth_deadline,
+        negotiate(
+            &first_line,
+            &mut reader,
+            &mut wr,
+            server,
+            peer,
+            &mut shutdown,
+            preauth_deadline,
+        ),
     )
     .await
     else {
@@ -4194,13 +4233,23 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
     let mut killed: Option<std::sync::Arc<tokio::sync::Notify>> = None;
     let mut _lease: Option<AuthedConnLease<'_>> = None;
     loop {
+        if device.is_none() && tokio::time::Instant::now() >= preauth_deadline {
+            break;
+        }
         let raw = match pending.take() {
             Some(line) => line,
             None => {
                 // Reap half-open connections: a peer that vanished without FIN never
                 // unblocks this read otherwise, and its task leaks for the process
                 // lifetime. The viewer's 2s status poll makes 15s a generous budget.
-                match read_authed_line(&mut reader, killed.as_ref(), &mut shutdown).await {
+                match read_authed_line(
+                    &mut reader,
+                    killed.as_ref(),
+                    &mut shutdown,
+                    preauth_deadline,
+                )
+                .await
+                {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(ControlLineReadError::TooLong) => {
@@ -4316,10 +4365,15 @@ async fn handle_conn(sock: TcpStream, server: &ControlServer, peer: &str) {
             }
             Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json!(e)),
         };
-        if write_response(&mut wr, &mut crypto, &resp, killed.as_ref(), &mut shutdown)
-            .await
-            .is_err()
-        {
+        let write = write_response(&mut wr, &mut crypto, &resp, killed.as_ref(), &mut shutdown);
+        let result = if device.is_some() {
+            write.await
+        } else {
+            tokio::time::timeout_at(preauth_deadline, write)
+                .await
+                .unwrap_or(Err(()))
+        };
+        if result.is_err() {
             break;
         }
     }
@@ -4407,6 +4461,7 @@ async fn negotiate(
     server: &ControlServer,
     peer: &str,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    preauth_deadline: tokio::time::Instant,
 ) -> Option<(ConnCrypto, Option<String>)> {
     let hello: ClientHelloLine = match serde_json::from_str::<ClientHelloLine>(first_line) {
         Ok(v) if v.hello == "c" => v,
@@ -4423,7 +4478,14 @@ async fn negotiate(
         return None;
     };
     let client = secure_channel::ClientHello { nc, xk };
-    let (hello_out, keys) = secure_channel::accept_client(&server.identity, &client);
+    let (hello_out, keys) = match secure_channel::accept_client(&server.identity, &client) {
+        Ok(accepted) => accepted,
+        Err(_) => {
+            server.auth_limiter.record_failure(peer);
+            refuse_handshake(wr, shutdown).await;
+            return None;
+        }
+    };
     let reply = json!({
         "v": 1,
         "hello": "s",
@@ -4439,7 +4501,7 @@ async fn negotiate(
     let tx = secure_channel::StreamSealer::new(keys.s2c);
     // 키 확인: 클라이언트의 첫 봉인 프레임은 {"hello":"ok","nc":<에코>}여야
     // 한다 — 핸드셰이크 유래 값의 되돌림으로 두 방향 키를 모두 증명한다.
-    let confirmation = match read_authed_line(reader, None, shutdown).await {
+    let confirmation = match read_authed_line(reader, None, shutdown, preauth_deadline).await {
         Ok(Some(line)) => line,
         _ => return None,
     };
@@ -4473,8 +4535,54 @@ fn b64_bytes32(encoded: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// :7777 토큰 무차별 대입에 대한 IP별 백오프. 60초 창에 5회 실패하면 60초
-/// 차단한다. 루프백은 대상에서 제외한다(진단 도구·테스트).
+/// Active peers only: leases remove idle entries, and the global semaphore
+/// bounds this map to the number of admitted sockets.
+#[derive(Default)]
+struct PeerConnections {
+    counts: std::sync::Arc<Mutex<HashMap<std::net::IpAddr, usize>>>,
+}
+
+struct PeerConnectionLease {
+    counts: std::sync::Arc<Mutex<HashMap<std::net::IpAddr, usize>>>,
+    peer: Option<std::net::IpAddr>,
+}
+
+impl PeerConnections {
+    fn admit(&self, peer: std::net::IpAddr) -> Option<PeerConnectionLease> {
+        let peer = peer.to_canonical();
+        // Local diagnostics and USB proxies share one address across devices;
+        // they still obey the global connection limit and preauth deadline.
+        let tracked = if peer.is_loopback() { None } else { Some(peer) };
+        if let Some(peer) = tracked {
+            let mut counts = self.counts.lock().unwrap();
+            let count = counts.entry(peer).or_default();
+            if *count >= MAX_CONNS_PER_PEER {
+                return None;
+            }
+            *count += 1;
+        }
+        Some(PeerConnectionLease {
+            counts: self.counts.clone(),
+            peer: tracked,
+        })
+    }
+}
+
+impl Drop for PeerConnectionLease {
+    fn drop(&mut self) {
+        if let Some(peer) = self.peer {
+            let mut counts = self.counts.lock().unwrap();
+            if let Some(count) = counts.get_mut(&peer) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&peer);
+                }
+            }
+        }
+    }
+}
+
+/// Per-IP token failure backoff, excluding loopback diagnostics.
 struct AuthRateLimiter {
     failures: Mutex<HashMap<String, FailState>>,
 }
@@ -4563,6 +4671,40 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod rate_limiter_tests {
     use super::*;
+
+    #[test]
+    fn peer_admission_preserves_other_addresses_and_releases_tracking() {
+        let connections = PeerConnections::default();
+        let peer = "192.0.2.1".parse().unwrap();
+        let mapped = "::ffff:192.0.2.1".parse().unwrap();
+        let mut leases: Vec<_> = (0..MAX_CONNS_PER_PEER)
+            .map(|_| connections.admit(peer).unwrap())
+            .collect();
+        assert!(connections.admit(peer).is_none());
+        assert!(
+            connections.admit(mapped).is_none(),
+            "IPv4 mapped addresses share a budget"
+        );
+        let other = connections.admit("192.0.2.2".parse().unwrap()).unwrap();
+        drop(leases.pop());
+        let replacement = connections.admit(peer).unwrap();
+        drop((leases, replacement, other));
+        assert!(connections.counts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn loopback_proxies_do_not_share_a_remote_peer_budget() {
+        let connections = PeerConnections::default();
+        let leases: Vec<_> = (0..MAX_CONCURRENT_CONNS)
+            .map(|_| {
+                connections
+                    .admit("::ffff:127.0.0.1".parse().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert!(connections.counts.lock().unwrap().is_empty());
+        drop(leases);
+    }
 
     #[test]
     fn expired_partial_failures_release_tracking_capacity() {
@@ -5331,6 +5473,83 @@ mod tests {
     }
 
     // -- 봉인 제어 평면 (secure-channel 핸드셰이크) ---------------------------
+
+    #[tokio::test]
+    async fn low_order_client_key_is_rejected_before_server_hello() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = spawn_server().await;
+        let mut socket = TcpStream::connect(addr).await.unwrap();
+        let zero = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+        socket
+            .write_all(format!("{}\n", json!({"hello":"c", "nc":zero, "xk":zero})).as_bytes())
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(2), socket.read_to_string(&mut reply))
+            .await
+            .expect("invalid key must be rejected before confirmation")
+            .unwrap();
+        assert!(reply.contains("handshake required"));
+        assert!(!reply.contains("\"spk\""));
+    }
+
+    #[tokio::test]
+    async fn blank_lines_cannot_extend_an_unauthenticated_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let server = ControlServer::new(backend(), test_pairing(), test_identity());
+        let task = tokio::spawn(async move {
+            handle_conn_until(
+                socket,
+                &server,
+                "127.0.0.1",
+                tokio::time::Instant::now() + Duration::from_millis(100),
+            )
+            .await;
+        });
+        let (mut rd, mut wr) = peer.split();
+        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        let mut byte = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    read = rd.read(&mut byte) => {
+                        assert!(matches!(read, Ok(0)) || read.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset));
+                        break;
+                    }
+                    _ = tick.tick() => { if wr.write_all(b"\n").await.is_err() { break; } }
+                }
+            }
+            task.await.unwrap();
+        }).await.expect("blank traffic must not reset the absolute preauth deadline");
+    }
+
+    #[tokio::test]
+    async fn authenticated_reads_outlive_the_preauth_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let (read, _) = socket.into_split();
+        let mut reader = BufReader::new(read);
+        let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+        let killed = Arc::new(tokio::sync::Notify::new());
+        peer.write_all(b"authenticated command\n").await.unwrap();
+        let line = read_authed_line(
+            &mut reader,
+            Some(&killed),
+            &mut shutdown,
+            tokio::time::Instant::now() - Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(line.as_deref(), Some("authenticated command"));
+    }
 
     #[tokio::test]
     async fn secure_handshake_seals_commands_and_pairing_token() {

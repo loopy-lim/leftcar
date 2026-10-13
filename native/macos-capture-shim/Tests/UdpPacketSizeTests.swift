@@ -6,11 +6,11 @@ struct UdpPacketSizeTests {
     static func main() {
         for (address, mtu, plaintextLimit) in [
             ("192.168.0.19", 1_500, 1_400),
-            ("100.63.255.255", 1_500, 1_400),
+            ("100.63.255.255", 1_280, 1_200),
             ("100.64.0.0", 1_280, 1_200),
             ("100.77.109.50", 1_280, 1_200),
             ("100.127.255.255", 1_280, 1_200),
-            ("100.128.0.0", 1_500, 1_400),
+            ("100.128.0.0", 1_280, 1_200),
         ] {
             var target = sockaddr_in()
             precondition(inet_pton(AF_INET, address, &target.sin_addr) == 1)

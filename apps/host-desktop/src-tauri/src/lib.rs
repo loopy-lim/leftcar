@@ -18,6 +18,8 @@ pub mod identity;
 #[cfg(any(target_os = "windows", test))]
 mod input_gate;
 pub mod km;
+#[cfg(any(target_os = "windows", test))]
+mod media_feedback;
 pub mod media_pacing;
 #[cfg(any(target_os = "windows", test))]
 mod media_sender;
@@ -488,8 +490,9 @@ pub fn run() {
                 // 종료가 붙잡히지 않게 3초로 잘라내고, 못 치운 매핑은 lease(1시간)가
                 // 만료시킨다.
                 let upnp = app.state::<Arc<upnp::UpnpMappingManager>>().inner().clone();
+                let disable = upnp.disable();
                 tauri::async_runtime::block_on(async {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), upnp.disable())
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), disable)
                         .await;
                 });
                 if let Err(error) = app
@@ -756,6 +759,13 @@ fn start_control_server(
     settings: std::sync::Arc<settings::SharedSettings>,
     upnp: std::sync::Arc<upnp::UpnpMappingManager>,
 ) {
+    // Capture startup intent before the thread can be delayed behind a later
+    // UI disable or application shutdown.
+    let startup_mapping = if settings.wan_access() {
+        local_lan_ip().map(|local_ip| upnp.enable(port, local_ip))
+    } else {
+        None
+    };
     std::thread::Builder::new()
         .name("leftcar-control".into())
         .spawn(move || {
@@ -767,8 +777,8 @@ fn start_control_server(
                 let listener = tokio::net::TcpListener::from_std(listener)
                     .expect("convert control listener to tokio");
                 println!("control server on 0.0.0.0:{port}");
-                if settings.wan_access() {
-                    start_upnp_port_mapping(upnp, port);
+                if let Some(mapping) = startup_mapping {
+                    tokio::spawn(mapping);
                 } else {
                     println!("UPnP: WAN access is off in settings (LAN direct only)");
                 }
@@ -776,18 +786,6 @@ fn start_control_server(
             });
         })
         .expect("control server thread");
-}
-
-/// 설정(wanAccess)이 켜져 있을 때만 호출된다. 게이트웨이 발견·매핑 등록·갱신은
-/// [upnp::UpnpMappingManager]가 담당하고, 토글 off·종료 때 disable()이 치운다.
-fn start_upnp_port_mapping(upnp: std::sync::Arc<upnp::UpnpMappingManager>, control_port: u16) {
-    tokio::spawn(async move {
-        let Some(local_ip) = local_lan_ip() else {
-            eprintln!("UPnP: local LAN IP not found");
-            return;
-        };
-        upnp.enable(control_port, local_ip).await;
-    });
 }
 
 #[tauri::command]
@@ -1299,18 +1297,15 @@ fn set_wan_access(
     if enabled {
         let upnp = upnp.inner().clone();
         let port = endpoint.port;
-        tauri::async_runtime::spawn(async move {
-            let Some(local_ip) = local_lan_ip() else {
-                eprintln!("UPnP: local LAN IP not found");
-                return;
-            };
-            upnp.enable(port, local_ip).await;
-        });
+        if let Some(local_ip) = local_lan_ip() {
+            tauri::async_runtime::spawn(upnp.enable(port, local_ip));
+        } else {
+            eprintln!("UPnP: local LAN IP not found");
+            tauri::async_runtime::spawn(upnp.disable());
+        }
     } else {
         let upnp = upnp.inner().clone();
-        tauri::async_runtime::spawn(async move {
-            upnp.disable().await;
-        });
+        tauri::async_runtime::spawn(upnp.disable());
     }
     Ok(enabled)
 }
