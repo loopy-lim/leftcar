@@ -1,6 +1,6 @@
 # 보안과 개인정보 보호
 
-문서 상태: 초기 요구와 구현 기록. 2026-09-13 현재 저장·권한 경계는 §6, §11, §16 및 [완료/지원 기준](completion-and-support.md)을 따른다.
+문서 상태: 초기 요구와 구현 기록. 저장·외부 접속·입력 정책은 2026-10-13 소스에 맞춰 보완했다. 아래 목표/시험 목록 자체가 실행 증거는 아니며, 최신 검사와 남은 격차는 [비교 기록](research/2026-10-13-project-comparison.md)을 따른다.
 
 보호 대상: 실시간 화면, source metadata, 장치 identity, pairing material, 진단 정보
 
@@ -9,7 +9,7 @@
 1. 페어링되지 않은 장치는 Host 존재를 최소 정보 이상 알 수 없고 화면을 받을 수 없다.
 2. 페어링된 Viewer도 Host 사용자가 승인한 source만 볼 수 있다.
 3. 페어링된 장치만 제어 연결을 획득하고, 제어 채널의 토큰/승인 정보가 유효해야 한다.
-4. 원격 입력은 Host가 세션별로 허용하고 macOS 손쉬운 사용 권한 또는 Windows의 UIPI 무결성 경계를 만족할 때만 동작하며, 세션 난수 검증 전에는 입력을 처리하지 않는다.
+4. 원격 입력은 Host의 기기·소스 승인과 세션 입력 게이트, macOS 손쉬운 사용 권한 또는 Windows의 UIPI 무결성 경계를 만족할 때만 동작하며, 세션 키 AEAD 검증 전에는 입력을 처리하지 않는다. 기기별 기본 허용·명시 거부 정책은 §21을 따른다.
 5. 창 제목, 화면 pixel, token, private key가 log/telemetry에 남지 않는다.
 6. 세션 종료 또는 권한 철회가 빠르고 완전하게 반영된다.
 7. malformed network/media input이 unbounded allocation, panic, double free를 유발하지 않는다.
@@ -47,7 +47,7 @@ v1은 다음 공격 환경을 완전히 해결한다고 주장하지 않는다.
 ```text
 Host user approval
   ├─ screen recording permission
-  ├─ accessibility input permission + per-stream opt-in
+  ├─ accessibility input permission + device/source approval + session gate
   ├─ source selection
   └─ Viewer pairing approval
 
@@ -74,7 +74,7 @@ Platform codec
 | T-03 | MITM이 Host를 바꿈 | QR에 Host public key fingerprint binding |
 | T-04 | 기존 paired Viewer 도난 | Host device list와 즉시 revoke |
 | T-05 | 승인되지 않은 source 요청 | source capability와 session authorization check |
-| T-06 | Viewer 또는 LAN 공격자가 입력을 무단 주입 | 페어링된 미디어 세션 난수 검증, Host 세션별 기본 거부/명시 승인, reliable sequence/ACK, 종료 시 전체 해제 |
+| T-06 | Viewer 또는 LAN 공격자가 입력을 무단 주입 | 세션 키 AEAD 검증, 기기별 검토·입력 허용/거부 및 세션 게이트, reliable sequence/ACK, 종료 시 전체 해제 |
 | T-07 | 무제한 fragment로 memory exhaustion | frame/fragment/stream/session byte cap와 timeout |
 | T-08 | malformed H.264로 decoder crash | codec config validation, fuzz, process watchdog, paired peer라도 제한 |
 | T-09 | log에 화면/창 제목 노출 | structured allowlist metric, redaction test |
@@ -85,15 +85,15 @@ Platform codec
 | T-14 | protected content 우회 | blank/protected error를 정상 처리, bypass 시도 금지 |
 
 v0.1.1 범위에서는 LAN 내 짧은 범위 사용을 가정하며 인증 제어는 TCP로 운용했다. 2026-09-09 강화(§20)로 제어 평면은 QR로 핀한 호스트 Ed25519 키에 묶인 암호 채널이 되었고, 미디어는 세션 키 AEAD로 암호화한다.
-공개 인터넷 노출이 필요한 경우 TLS + PAKE + certificate/pinning 기반의 추가 상호인증/암호화가 요구된다.
+현재 소스에는 Tailscale 경로와 별도 WAN opt-in/UPnP가 있다. 두 경로 모두 앱의 핀·서명·토큰·소스 승인·AEAD를 유지한다. `wan_access`는 UPnP 매핑의 허용 설정이며 모든 인터페이스의 OS 방화벽 정책을 대신하지 않는다. 독립 보안 검토와 외부망 실측은 아직 별도 요구다.
 
 ## 6. 장치 identity
 
-현재 Host는 `identity.rs`의 Ed25519 identity를 `data_dir/leftcar-host/host_identity.json`에 seed hex로 저장한다. Unix 새 파일 생성은 0600이며 Windows에서는 사용자 데이터 디렉터리의 ACL에 의존한다. 기존 파일의 과도한 권한을 고치는 별도 이관, 하드웨어 키 보관, private seed export 방지는 구현되어 있지 않다. 이 파일 저장을 Keychain 보관과 같은 보장으로 설명하지 않는다.
+현재 Host는 `identity.rs`의 Ed25519 identity를 `data_dir/leftcar-host/host_identity.json`에 seed hex로 저장한다. Unix 새 파일 생성은 0600이며 Windows에서는 사용자 데이터 디렉터리의 ACL에 의존한다. Unix 기존 파일은 읽을 때 0600으로 제한한다. 하드웨어 키 보관과 private seed export 방지는 구현되어 있지 않다. 이 파일 저장을 Keychain 보관과 같은 보장으로 설명하지 않는다.
 
 이 위협 모델은 OS와 로그인 계정을 신뢰한다. 같은 계정으로 실행되는 프로세스, 관리자, 백업 접근 권한자는 파일을 읽거나 복제할 수 있다. 파일을 다른 Host에 복사하면 같은 public identity도 복제되므로 일반 지원 첨부·클라우드 동기화·공유 백업에 넣지 않는다. 이번 마무리 작업은 기존 사용자 키를 이동하거나 삭제하지 않는다.
 
-`load_or_create`는 파일 부재·손상·읽기 실패 때 새 identity를 생성하고 저장을 시도한다. 저장까지 실패하면 해당 프로세스의 새 키만 남을 수 있다. 기존 Viewer의 핀 불일치는 우회하지 않고 실패한다. 복구 시 Host 저장 경로/권한과 실제 fingerprint를 먼저 확인하고, 기존 파일을 보존한 상태에서 의도한 Host인지 대조한 뒤 다시 페어링한다. 앱 재설치만으로 사용자 데이터가 삭제된다고 가정하지 않는다.
+`load_or_create`는 파일이 없을 때만 새 identity를 만들고 저장 성공을 요구한다. 손상·읽기 실패·지원하지 않는 형식은 기존 파일을 보존하고 오류로 끝난다. Unix에서는 심볼릭 링크를 따라 읽지 않는다. 기존 Viewer의 핀 불일치는 우회하지 않고 실패한다. 복구 시 Host 저장 경로/권한과 실제 fingerprint를 먼저 확인하고, 기존 파일을 보존한 상태에서 의도한 Host인지 대조한 뒤 다시 페어링한다. 앱 재설치만으로 사용자 데이터가 삭제된다고 가정하지 않는다.
 
 Host **pairing token**은 이 장기 seed와 별개다. `pairing.rs`의 플랫폼 token store는 macOS Keychain / Windows Credential Manager를 사용하고, 지원되지 않는 플랫폼의 파일 저장과 레거시 token 이관을 별도로 처리한다. 이관은 저장 후 다시 읽어 동일함을 확인한 경우에만 인라인 값을 제거한다. 저장 실패를 정상 페어링으로 알리지 않는다.
 
@@ -447,14 +447,14 @@ stream_task_restore_requires_reauthentication
 
 새로 페어링한 기기와 기존 승인 정보가 없는 기기는 Host에서 화면 접근을 검토해야 한다. Viewer의 카탈로그·시작·화면 변경은 인증된 기기의 승인만 사용한다. `sourceId`는 목록 순번과 구분하며 실제 캡처 생성 직전에 macOS 디스플레이 UUID 또는 Windows 모니터 경로로 다시 확인한다. 화면이 사라지거나 식별자가 모호하면 다른 화면으로 대체하지 않고 실패한다. 현재 Host는 승인 수명을 전달하는 v9 네이티브 시작 API가 필요하며, 예전 shim을 발견하면 시작을 거부한다.
 
-화면 보기와 원격 조작은 별도 승인이다. 새 세션의 입력은 기본 꺼짐이며 OS 입력 권한이 있어도 Host가 그 세션을 켜야 한다. 단, 운용자가 세션에서 입력을 한 번 허용하면 그 선택은 **기기별 상시 입력 승인**으로 기록돼 다음 세션부터 자동으로 적용된다(2026-09-14). 세션에서 입력을 끄면 상시 승인도 거두고, 기기 철회는 승인을 함께 지운다. 상시 승인은 화면 승인과 같은 재검토 규율을 따른다 — Host 재시작 직후에는 운용자가 화면 승인을 다시 저장하기 전까지 자동 활성화되지 않고, 자동 활성은 OS 입력 권한 확인에 실패하면 그 세션을 잠금에 남긴다(fail-closed). 같은 화면을 재구성할 때는 최신 Host 선택을 따르고, 다른 화면으로 변경하면 입력 승인을 다시 받는다. 재구성 중 입력을 끄면 교체 또는 복구된 세션도 그 차단을 따른다. 살아 있는 네이티브 세션의 입력 차단이 실패하면 승인 수명을 무효화하고 세션을 종료하며 오류를 표시한다. 자동 활성과 상시 승인 변경은 감사 로그(`input_auto_enabled`, `input_approval_changed`)에 남는다.
+화면 보기와 원격 조작은 별도 권한 상태다. 2026-09-21 이후 현재 소스의 `input_allowed`는 **검토된 기기에 명시 입력 거부가 없으면 기본 허용**한다. 이 선택은 기기별로 저장되고 다음 세션에 적용되며 OS 입력 권한 확인을 생략하지 않는다. 세션에서 입력을 끄면 상시 승인도 거두고, 기기 철회는 승인을 함께 지운다. 저장된 화면 검토와 입력 허용·거부 상태를 함께 검사하며, 자동 활성은 OS 입력 권한 확인에 실패하면 그 세션을 잠금에 남긴다(fail-closed). 같은 화면을 재구성할 때는 최신 Host 선택을 따르고, 다른 화면으로 변경하면 입력 승인을 다시 받는다. 재구성 중 입력을 끄면 교체 또는 복구된 세션도 그 차단을 따른다. 살아 있는 네이티브 세션의 입력 차단이 실패하면 승인 수명을 무효화하고 세션을 종료하며 오류를 표시한다. 자동 활성과 상시 승인 변경은 감사 로그(`input_auto_enabled`, `input_approval_changed`)에 남는다.
 
 화면 승인을 변경하면 해당 기기의 진행 중·대기 중 세션을 무효화하고 정리한다. 현재 정책은 승인 추가나 재검토 때도 해당 기기의 세션을 다시 열도록 하므로 잠시 연결이 끊길 수 있다. 오래된 시작·재구성 완료는 취소된 승인이나 재페어링 전 자격을 다시 사용할 수 없다. 오디오 소유권도 IP 주소 대신 Host가 인증한 자격 수명에 묶는다.
 
 | 저장·재시작 상황 | 동작 |
 | --- | --- |
-| 정상 종료 후 같은 자격으로 재시작 | 안전하게 기록된 승인 유지 |
-| 최초 실행, 손상·알 수 없는 저장 형식, 비정상 종료 | 저장된 선택이 있어도 자동 승인하지 않고 검토 요청 |
+| 정상/비정상 종료 후 같은 자격으로 재시작 | 안전하게 기록된 승인 유지; `dirty`만으로 승인을 초기화하지 않음 |
+| 최초 실행, 손상·알 수 없는 저장 형식 | 기존 승인으로 처리하지 않고 검토 요청 |
 | 실행 중 상태를 안전하게 기록하지 못함 | 승인이나 제어 서버를 활성화하기 전에 시작 실패를 알림 |
 | 승인 제거 저장 실패 | 접근 차단을 유지하고 저장 오류 표시; 이전 승인을 복구하지 않음 |
 | 같은 Host 상태 폴더로 중복 실행 | 두 번째 프로세스의 프로필 소유 거부 |

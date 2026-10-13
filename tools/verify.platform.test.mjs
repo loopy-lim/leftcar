@@ -49,7 +49,8 @@ test('macOS Rust verification still checks Swift and preserves pure RTX executio
   expect(libraryBuild).toBeLessThan(hostTests);
   expect(commands.some(([command, args]) => command === 'zsh' && args[1] === 'retransmit-policy-test')).toBe(true);
   expect(commands.some(([command]) => command.endsWith('/retransmit-policy-test'))).toBe(true);
-  for (const mode of ['tcp-connection-test', 'terminal-notice-test', 'input-heartbeat-test']) {
+  for (const mode of ['tcp-connection-test', 'terminal-notice-test', 'input-heartbeat-test',
+    'udp-packet-size-test', 'peer-congestion-test', 'congestion-cut-test', 'udp-frame-budget-test', 'pacing-clock-test']) {
     const build = commands.findIndex(([command, args]) => command === 'zsh' && args[1] === mode);
     const execution = commands.findIndex(([command]) => command.endsWith(`/${mode}`));
     expect(build).toBeGreaterThanOrEqual(0);

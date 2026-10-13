@@ -50,12 +50,13 @@ export function verify(scope='all', { platform = process.platform, diagnose: doc
       run('bun',['tools/test-media-interop.mjs']);
       run('zsh',['tools/build-macos-capture-shim.zsh','audio-ownership-test',join(dir,'audio-ownership-test')]);
       run(join(dir,'audio-ownership-test'));
-      for (const mode of ['tcp-connection-test','terminal-notice-test','input-heartbeat-test']) {
+      for (const mode of ['tcp-connection-test','terminal-notice-test','input-heartbeat-test',
+        'udp-packet-size-test','peer-congestion-test','congestion-cut-test','udp-frame-budget-test','pacing-clock-test']) {
         const binary=join(dir,mode);
         run('zsh',['tools/build-macos-capture-shim.zsh',mode,binary]);
         run(binary);
       }
-      console.log('Swift: full shim and existing adapter test binaries COMPILED ONLY; production split, RTX, media interoperability and audio opt-in policies EXECUTED. Hardware adapters/encoder/capture UNVERIFIED.');
+      console.log('Swift: full shim and existing adapter test binaries COMPILED ONLY; production split, RTX, encryption, audio opt-in, transport lifetime, MTU and congestion/pacing policies EXECUTED. Hardware adapters/encoder/capture UNVERIFIED.');
     }
   }
   if(scope==='all') run(platform==='win32'?'gradlew.bat':'./gradlew',[':app:testDebugUnitTest','--no-daemon'],join(root,'apps/viewer-expo/android'));

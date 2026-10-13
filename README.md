@@ -8,22 +8,23 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 한 문장 정의
 
-> 사용자가 승인한 컴퓨터 디스플레이를 신뢰하는 로컬 네트워크로 전송하고, Android 기기에서 각각 독립된 창으로 보여 주는 도구
+> 사용자가 승인한 컴퓨터 디스플레이를 암호화된 연결로 전송하고, Android 기기에서 각각 독립된 창으로 보여 주는 도구
 
 ## 고정된 기본 범위
 
-- 개발 브랜치의 새 세션은 원격 입력이 꺼진 상태로 시작한다. Host에서 해당 기기의 화면 접근을 승인한 뒤, 세션별 입력을 별도로 허용해야 한다. OS 입력 권한도 필요하다. 포인터 전송률은 영상 FPS의 2배(60fps→120Hz, 90fps→180Hz)로 제한한다.
+- 현재 개발 소스는 Host에서 화면 접근을 검토한 기기에 대해, 명시적으로 입력을 거부하지 않았다면 새 세션에 입력을 자동 허용한다. 세션에서 입력을 끄면 기기별 거부가 저장된다. OS 입력 권한은 별도로 필요하다. 포인터 전송률은 영상 FPS의 2배(60fps→120Hz, 90fps→180Hz)로 제한한다.
 - 특정 기기 전용 기능 없이 일반 Android 앱의 다중 창 기능을 사용한다.
 - 원격 source 하나를 Android Activity/task 인스턴스 하나에 연결해 여러 독립 창으로 보여 준다.
 - 선택적인 Hub 창은 연결과 source 선택을 담당하고, 선택적인 Overview 창만 여러 타일을 한 화면에 모은다.
-- 현재 캡처·화면 승인 대상은 디스플레이다. 앱 창 단독 캡처는 후속 목표이며, 가상 디스플레이 생성·관리는 제품에서 제거됐다.
+- 현재 캡처·화면 승인 대상은 디스플레이다. 앱 창 단독 캡처는 후속 목표이며, 가상 디스플레이 관리 코드는 별도 플랫폼 지원·수명 검사를 따른다.
 - Rustra는 Rust와 TypeScript 사이의 명령, 상태, 오류 계약에 사용한다.
 - 압축 영상과 고주파 입력 데이터는 Rustra나 JavaScript를 통과시키지 않고 별도 네이티브 데이터 경로로 전송한다.
-- 제품 로직은 TypeScript와 Rust로 작성한다. Kotlin은 Activity, Intent, Surface와 Android 플랫폼 입력 이벤트를 네이티브 코어에 연결하는 shim으로 제한한다.
-- 로컬 네트워크 직접 연결을 첫 배포 범위로 한다.
+- 아키텍처 목표는 TypeScript·Rust가 제품 로직을 맡고 Kotlin이 Android 플랫폼을 연결하는 것이다. 현재 KM의 Kotlin 네트워크·암호 정책은 이 경계를 벗어나며, 2026-10-13 검사에서 기존 위반 32건이 남아 있다.
+- LAN 직접 연결을 기준선으로 하며, Tailscale 주소·별칭과 공개 WAN opt-in/UPnP 경로가 구현되어 있다. 자체 릴레이는 없고 외부망·Windows 실측 수용은 별도다.
 
 ## 문서
 
+- [유사 프로젝트 비교와 개선·남은 격차](docs/research/2026-10-13-project-comparison.md)
 - [문서 인덱스](docs/README.md)
 - [지원 범위와 완료 기준](docs/completion-and-support.md)
 - [마무리 후속 작업 검증](docs/2026-09-13-completion-followup-validation.md)
@@ -47,11 +48,11 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 현재 상태
 
-- 상태 기준일: 2026-09-13
-- 개발 후보에는 기기별 화면 승인, 입력 기본 OFF, 연결·디코더 수명과 전송 복구 개선이 있다. 최신 후보의 실제 영상 연결과 10·30분 수용은 아직 완료되지 않았다. 공개 APK와 개발 소스의 검사 결과를 섞지 않는다. 현재 기준은 [지원 범위와 완료 기준](docs/completion-and-support.md), 과거 실측은 [구현 증거 문서](docs/EVIDENCE.md)에 구분한다.
+- 소스 설명 갱신: 2026-10-13. 공개 릴리스·과거 실측의 기준일은 각 기록을 따른다.
+- 개발 후보에는 기기별 화면 승인과 저장된 입력 허용·거부, 연결·디코더 수명과 전송 복구 개선이 있다. 최신 후보의 실제 영상 연결과 10·30분 수용은 아직 완료되지 않았다. 공개 APK와 개발 소스의 검사 결과를 섞지 않는다. 현재 기준은 [지원 범위와 완료 기준](docs/completion-and-support.md), 과거 실측은 [구현 증거 문서](docs/EVIDENCE.md)에 구분한다.
 - 구현: Rust workspace + Tauri 2 macOS/Windows Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
-- 두 번째 대상 호스트: Windows (코드 및 교차 컴파일 완료, 물리 E6/E7 대기)
+- 두 번째 대상 호스트: Windows (구현 있음; 이번 변경의 Windows 빌드·실기 수용 미검증)
 - 선택적 후속 대상: Linux
 - 우선 대상 뷰어: arm64 Android 휴대폰, 태블릿 및 대화면 기기
 
@@ -60,9 +61,9 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 개발 브랜치의 기기별 화면 승인과 정상/비정상 재시작 동작은 [화면·입력 승인 구현](docs/07-security-privacy.md#21-2026-09-13-개발-브랜치의-화면입력-승인)에 정리했다. 이 구현 설명을 기존 배포 파일이나 아직 수행하지 않은 실기기 검증에 소급 적용하지 않는다.
 
 - 페어링 토큰과 승인 흐름으로 제어 평면 접근을 제한한다.
-- 미디어 평면은 제어 peer와 같은 사설 LAN의 Viewer 후보만 허용하고, 예측 불가능한 난수의 UDP 왕복으로 실제 도달성을 증명한 주소에만 MTU 크기로 잘라 전송한다.
-- 입력 평면은 같은 UDP 세션 난수로 인증하고 Host 사용자가 세션별로 허용한 경우에만 macOS CGEvent 또는 Windows SendInput으로 주입한다. 포인터 이동은 최신값 우선, 키와 버튼은 ACK/재시도 방식이다. Windows UIPI 때문에 일반 권한 Host는 관리자 권한 앱을 제어할 수 없다.
-- 제어 채널은 QR로 핀된 호스트 Ed25519 정체 키 핸드셰이크 뒤 ChaCha20-Poly1305 AEAD로 봉인하고, 미디어 평면도 세션 키에서 HKDF로 도출한 방향별 키로 AEAD 봉인한다. 페어링 토큰은 macOS Keychain·Windows Credential Manager에 저장한다. 연결은 릴레이 없는 로컬 네트워크 직접 연결을 전제로 하며, 공개 인터넷 노출은 범위에 넣지 않는다.
+- 미디어 평면은 인증된 제어 peer와 연결된 경로 후보를 검증하고, 세션 키로 봉인한 왕복 확인을 거친 목적지로 전송한다. Tailscale·외부 주소를 사설 LAN 주소로 임의 대체하지 않는다.
+- 입력 평면은 세션 키 AEAD로 인증하고 현재 기기·소스의 입력 승인이 유효한 경우에만 macOS CGEvent 또는 Windows SendInput으로 주입한다. 포인터 이동은 최신값 우선, 키와 버튼은 ACK/재시도 방식이다. Windows UIPI 때문에 일반 권한 Host는 관리자 권한 앱을 제어할 수 없다.
+- 제어 채널은 QR로 핀된 호스트 Ed25519 정체 키 핸드셰이크 뒤 ChaCha20-Poly1305 AEAD로 봉인하고, 미디어 평면도 세션 키에서 HKDF로 도출한 방향별 키로 AEAD 봉인한다. 페어링 토큰은 macOS Keychain·Windows Credential Manager에 저장한다. Tailscale도 이 앱 인증을 생략하지 않는다. 공개 WAN 매핑은 기본 OFF이며 Host에서 켜야 한다. WAN 토글은 UPnP 매핑 설정이고 OS 방화벽 전체를 통제하는 기능은 아니다.
 
 ## 빌드/실행
 

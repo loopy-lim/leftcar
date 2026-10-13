@@ -65,6 +65,12 @@ jobs:
           /tmp/leftcar-policy-test
           zsh tools/build-macos-capture-shim.zsh retransmit-ring-test /tmp/leftcar-retransmit-ring-test
           /tmp/leftcar-retransmit-ring-test
+      - name: Remote network and congestion policy regressions (no capture)
+        run: |
+          for mode in udp-packet-size-test peer-congestion-test congestion-cut-test udp-frame-budget-test pacing-clock-test; do
+            zsh tools/build-macos-capture-shim.zsh "$mode" "/tmp/leftcar-$mode"
+            "/tmp/leftcar-$mode"
+          done
 
   ts:
     name: TypeScript (typecheck, tests, contract, architecture)
@@ -97,11 +103,12 @@ jobs:
         run: bun run test:architecture
       - name: Regeneration is clean (H26)
         run: |
-          cargo run -p control-contract --bin generate --locked
-          git diff --exit-code -- packages/control-generated
+          bun run rustra:generate
+          bun run rustra:check
+          git diff --exit-code -- packages/control-generated apps/viewer-expo/generated apps/viewer-expo/modules/rustra-bridge
 
   android-compile:
-    name: Android native (aarch64 check)
+    name: Android native (APK build and JVM tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -134,8 +141,8 @@ jobs:
           bun-version: 1.4.1
       - name: Frozen JS dependencies before Gradle settings resolution
         run: bun install --frozen-lockfile
-      - name: Gradle JVM unit tests
-        run: ./gradlew :app:testDebugUnitTest --no-daemon
+      - name: Gradle APK native link and JVM unit tests
+        run: ./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon
         working-directory: apps/viewer-expo/android
 
   windows-host:

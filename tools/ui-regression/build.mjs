@@ -1,11 +1,16 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { compileUiStyles } from "./styles.mjs";
 const outdir = process.env.UI_TEST_DIR ?? "/tmp/leftcar-task4-ui";
 await mkdir(outdir, { recursive: true });
 await compileUiStyles(outdir);
-const reactPath = resolve(import.meta.dir, "../../node_modules/.bun/react@19.2.3/node_modules/react");
-const reactDomPath = resolve(import.meta.dir, "../../node_modules/.bun/react-dom@19.2.3+83d5fd7b249dbeef/node_modules/react-dom");
+// Resolve the declared workspace dependencies, independent of Bun's linker
+// layout and peer-resolution hashes, while retaining one React instance.
+const hostRequire = createRequire(resolve(import.meta.dir, "../../apps/host-desktop/package.json"));
+const viewerRequire = createRequire(resolve(import.meta.dir, "../../apps/viewer-expo/package.json"));
+const reactPath = dirname(hostRequire.resolve("react/package.json"));
+const reactDomPath = dirname(hostRequire.resolve("react-dom/package.json"));
 const reactPlugin = {
   name: "react-singleton",
   setup(build) {
@@ -39,7 +44,7 @@ if (!extendedDisplay.success) throw new Error(extendedDisplay.logs.join("\n"));
 await writeFile(`${outdir}/extended-display.html`, '<!doctype html><meta charset="utf-8"><div id="root"></div><script src="extended-display.js"></script>');
 const extensionViewer = await Bun.build({ entrypoints: [`${import.meta.dir}/extension-viewer.jsx`], outdir, target: "browser", format: "iife", plugins: [reactPlugin, {
   name: "extension-network-and-os", setup(build) {
-    build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(import.meta.dir, "../../apps/viewer-expo/node_modules/@tanstack/react-query/build/modern/index.js") }));
+    build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(dirname(viewerRequire.resolve("@tanstack/react-query/package.json")), "build/modern/index.js") }));
     build.onResolve({ filter: /^(react-native|expo-secure-store|expo-router|expo-clipboard|expo-constants|expo-crypto)$/ }, () => ({ path: `${import.meta.dir}/viewer-io.js` }));
     build.onResolve({ filter: /^react-native-tcp-socket$/ }, () => ({ path: `${import.meta.dir}/tcp-io.js` }));
     build.onResolve({ filter: /^\.\/control$/ }, args => args.importer.endsWith('/src/session.ts') ? { path: `${import.meta.dir}/extension-control-io.js` } : undefined);
@@ -72,7 +77,7 @@ const viewer = await Bun.build({
       setup(build) {
         // fixture(저장소 루트 node_modules)와 앱(viewer-expo node_modules)이
         // 서로 다른 tanstack 사본을 가져오지 않게 단일 경로로 고정한다.
-        build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(import.meta.dir, "../../apps/viewer-expo/node_modules/@tanstack/react-query/build/modern/index.js") }));
+        build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(dirname(viewerRequire.resolve("@tanstack/react-query/package.json")), "build/modern/index.js") }));
         build.onResolve(
           {
             filter:
@@ -126,7 +131,7 @@ await writeFile(`${outdir}/hub-connect.html`, '<!doctype html><meta charset="utf
 
 const screens = await Bun.build({ entrypoints: [`${import.meta.dir}/viewer-screens.jsx`], outdir, target: "browser", format: "iife", plugins: [reactPlugin, {
   name: "whole-viewer-device-boundary", setup(build) {
-    build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(import.meta.dir, "../../apps/viewer-expo/node_modules/@tanstack/react-query/build/modern/index.js") }));
+    build.onResolve({ filter: /^@tanstack\/react-query$/ }, () => ({ path: resolve(dirname(viewerRequire.resolve("@tanstack/react-query/package.json")), "build/modern/index.js") }));
     build.onResolve({ filter: /^(react-native|react-native-safe-area-context|expo-router|@expo\/vector-icons)$/ }, () => ({ path: `${import.meta.dir}/camera-io.jsx` }));
     build.onResolve({ filter: /^(expo-secure-store|expo-clipboard|expo-constants|expo-crypto)$/ }, () => ({ path: `${import.meta.dir}/viewer-io.js` }));
     build.onResolve({ filter: /^react-native-tcp-socket$/ }, () => ({ path: `${import.meta.dir}/tcp-io.js` }));
