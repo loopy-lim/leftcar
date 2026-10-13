@@ -1,6 +1,6 @@
 import { LocalizedError } from "./localized-error";
 
-export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized";
+export type ControlErrorKind = "remote" | "timeout" | "transport" | "unauthorized" | "capacity";
 
 export class ControlRequestError extends Error {
   constructor(

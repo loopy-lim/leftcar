@@ -122,6 +122,29 @@ async function secureStore(): Promise<Map<string, string>> {
 }
 
 describe("control session connect lifecycle", () => {
+  it("an old alias fallback cannot overtake a newer Host selection", async () => {
+    const first = deferred<ControlClient>();
+    const { connect } = await import("./control");
+    vi.mocked(connect).mockImplementationOnce(() => first.promise).mockResolvedValue(makeClient());
+    const session = await import("./session");
+    const fallback = session.connectHostWithFallback(["10.0.0.1", "100.64.0.1"]).catch(error => error);
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
+    await session.connectHost("10.0.0.2");
+    first.resolve(makeClient());
+    expect(await fallback).toBeInstanceOf(Error);
+    expect(session.controlTarget()?.host).toBe("10.0.0.2");
+    expect(vi.mocked(connect).mock.calls.map(call => call[0])).toEqual(["10.0.0.1", "10.0.0.2"]);
+  });
+
+  it("an unavailable candidate still falls back within the same selection", async () => {
+    const { connect } = await import("./control");
+    vi.mocked(connect).mockRejectedValueOnce(new Error("connection timeout")).mockResolvedValue(makeClient());
+    const session = await import("./session");
+    await expect(session.connectHostWithFallback(["10.0.0.1", "100.64.0.1"]))
+      .resolves.toBe("100.64.0.1");
+    expect(session.controlTarget()?.host).toBe("100.64.0.1");
+  });
+
   it("reads the persisted pin before any handshake or credential delivery", async () => {
     const key = "B".repeat(43);
     const store = await secureStore();

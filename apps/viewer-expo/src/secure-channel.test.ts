@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { ed25519 } from "@noble/curves/ed25519";
 import {
   StreamSealer,
+  MAX_PLAINTEXT,
   bytesToBase64Url,
   clientFinish,
   createClientHello,
@@ -9,6 +11,7 @@ import {
   parseSealedLine,
   parseServerHello,
   sealedLine,
+  signedTranscript,
   setRandomSource,
   toHex,
 } from "./secure-channel";
@@ -53,6 +56,30 @@ function helloFromVector() {
 
 afterEach(() => {
   setRandomSource(null);
+});
+
+it("rejects malformed sealed envelopes without throwing", () => {
+  for (const line of ["null", "[]", "true", '{"e":"***"}', "broken"]) {
+    expect(parseSealedLine(line)).toBeNull();
+  }
+});
+
+it("rejects oversized frames before decryption", () => {
+  expect(() => new StreamSealer(new Uint8Array(32)).open(new Uint8Array(MAX_PLAINTEXT + 25)))
+    .toThrow("frame too large");
+});
+
+it.each([0, 1])("rejects a correctly signed low-order X25519 peer (%i)", lowOrder => {
+  const secret = fixed(32);
+  const nc = fixed(160);
+  const ns = fixed(192);
+  const xkC = hexToBytes(VEC.clientXk);
+  const xkS = new Uint8Array(32);
+  xkS[0] = lowOrder;
+  const seed = fixed(0);
+  const spk = ed25519.getPublicKey(seed);
+  const sig = ed25519.sign(signedTranscript(nc, ns, xkC, xkS, spk), seed);
+  expect(() => clientFinish(secret, { nc, xk: xkC }, { ns, xk: xkS, spk, sig }, spk)).toThrow();
 });
 
 describe("secure-channel cross-language vectors", () => {

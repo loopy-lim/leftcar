@@ -294,14 +294,17 @@ export async function connectHostWithFallback(
   options: ConnectHostOptions = {},
 ): Promise<string> {
   let lastError: unknown = new LocalizedError("trustedHostError");
+  // All aliases belong to one user selection. A failed older candidate must
+  // not create a fresh selection after the user has chosen another Host.
+  const selection = options.selection ?? beginHostSelection();
   for (const host of hosts) {
     try {
-      await connectHost(host, port, options);
+      await connectHost(host, port, { ...options, selection });
       return host;
     } catch (error) {
       // 사용자가 이미 다른 곳으로 떠났다면 남은 후보를 시도하지 않는다.
       if (options.signal?.aborted) throw error;
-      if (options.selection && !isHostSelectionCurrent(options.selection)) throw error;
+      if (!isHostSelectionCurrent(selection)) throw error;
       lastError = error;
     }
   }

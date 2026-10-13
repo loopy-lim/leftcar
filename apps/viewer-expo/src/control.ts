@@ -3,6 +3,8 @@ import { ControlRequestError } from "./control-error";
 import type { AdaptiveQualityState } from "./adaptive-resolution";
 import {
   StreamSealer,
+  COUNTER_LEN,
+  TAG_LEN,
   base64UrlToBytes,
   bytesToBase64Url,
   clientFinish,
@@ -18,6 +20,12 @@ import { currentTranslation } from "./language-store";
 import { LocalizedError } from "./localized-error";
 import { DEFAULT_CONTROL_PORT } from "./defaults";
 
+// Bound retained response text even when a peer never sends a newline. The
+// command budget accommodates the Host's sealed 8 MiB clipboard envelope.
+export const HANDSHAKE_LINE_LIMIT = 16 * 1024;
+export const CONTROL_LINE_LIMIT = 12 * 1024 * 1024;
+export const MAX_PENDING_REQUESTS = 32;
+export const MAX_PENDING_REQUEST_BYTES = 16 * 1024 * 1024;
 
 /** 명령별 요청 타임아웃: 스트림 시작은 첫 프레임 대기까지, 카탈로그는
  * 나열 조회까지의 실측 여유를 담는다. 나머지는 짧은 기본값을 쓴다.
@@ -382,8 +390,10 @@ export function connect(
         timer?: ReturnType<typeof setTimeout>;
         command: string;
         timeoutMs: number;
+        bytes: number;
       }
     >();
+    let pendingBytes = 0;
     let terminalError: ControlRequestError | null = null;
     let nextId = 1;
     // The issued token is immutable for the lifetime of this socket. After
@@ -416,6 +426,10 @@ export function connect(
         h.reject(e);
       }
       pending.clear();
+      pendingBytes = 0;
+      buffer = "";
+      helloSecret?.fill(0);
+      helloSecret = null;
       socket.destroy();
     };
 
@@ -464,6 +478,7 @@ export function connect(
           entry.reject(error);
         }
         pending.clear();
+        pendingBytes = 0;
         // With no response IDs, a late response cannot safely be reused.
         socket.destroy();
       }, handler.timeoutMs);
@@ -479,21 +494,42 @@ export function connect(
             rej(terminalError);
             return;
           }
+          if (pending.size >= MAX_PENDING_REQUESTS) {
+            rej(new ControlRequestError("control request queue full", "capacity"));
+            return;
+          }
           const id = nextId++;
           const envelope = { command, args: args ?? {}, ...(token ? { token } : {}) };
           const payload = JSON.stringify(envelope) + "\n";
+          const encodedPayload = textEncoder.encode(payload);
+          // Unpadded base64url plus {"e":""} and the delimiter must fit the
+          // Host's line reader. Reject before sealing or admitting into FIFO:
+          // an oversized write would otherwise retire unrelated requests.
+          const wireBytes = mode === "sealed"
+            ? Math.ceil((encodedPayload.length + COUNTER_LEN + TAG_LEN) * 4 / 3) + 9
+            : encodedPayload.length;
+          if (wireBytes > CONTROL_LINE_LIMIT) {
+            rej(new ControlRequestError("control request line limit exceeded", "capacity"));
+            return;
+          }
+          if (encodedPayload.length > MAX_PENDING_REQUEST_BYTES - pendingBytes) {
+            rej(new ControlRequestError("control request byte budget exceeded", "capacity"));
+            return;
+          }
           const requestTimeout = REQUEST_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
           pending.set(id, {
             resolve: res as (v: unknown) => void,
             reject: rej,
             command,
             timeoutMs: requestTimeout,
+            bytes: encodedPayload.length,
           });
+          pendingBytes += encodedPayload.length;
           armFrontDeadline();
           try {
             const wire =
               mode === "sealed" && tx
-                ? sealedLine(tx.seal(textEncoder.encode(payload))) + "\n"
+                ? sealedLine(tx.seal(encodedPayload)) + "\n"
                 : payload;
             socket.write(wire, "utf8", (writeError) => {
               if (!writeError) {
@@ -538,13 +574,19 @@ export function connect(
       try {
         parsed = JSON.parse(line);
       } catch {
+        fail("malformed control response");
+        return;
+      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.ok !== "boolean") {
+        fail("malformed control response");
         return;
       }
       // FIFO match: server replies in request order
-      const oldest = [...pending.entries()][0];
+      const oldest = pending.entries().next().value;
       if (!oldest) return;
       const [id, handlers] = oldest;
       pending.delete(id);
+      pendingBytes -= handlers.bytes;
       clearTimeout(handlers.timer);
       armFrontDeadline();
       if (parsed.ok) {
@@ -566,7 +608,7 @@ export function connect(
     };
 
     const drain = () => {
-      while (true) {
+      while (!terminalError) {
         const nl = buffer.indexOf("\n");
         if (nl < 0) return;
         const raw = buffer.slice(0, nl);
@@ -578,6 +620,8 @@ export function connect(
               ? base64UrlToBytes(options.pinnedHostKey)
               : null;
             const result = clientFinish(helloSecret as Uint8Array, hello as ClientHello, serverHello, pinned);
+            helloSecret?.fill(0);
+            helloSecret = null;
             tx = new StreamSealer(result.keys.c2s);
             rx = new StreamSealer(result.keys.s2c);
             clientHostKey = bytesToBase64Url(result.spk);
@@ -622,8 +666,24 @@ export function connect(
     };
 
     socket.on("data", (data) => {
-      buffer += typeof data === "string" ? data : data.toString("utf8");
-      drain();
+      if (terminalError) return;
+      const chunk = typeof data === "string" ? data : data.toString("utf8");
+      let start = 0;
+      while (start < chunk.length && !terminalError) {
+        // Scan only new text, not the growing partial line on every packet.
+        const newline = chunk.indexOf("\n", start);
+        const end = newline < 0 ? chunk.length : newline;
+        const limit = mode === "handshake" ? HANDSHAKE_LINE_LIMIT : CONTROL_LINE_LIMIT;
+        if (buffer.length + end - start > limit) {
+          fail("control response exceeds line limit");
+          return;
+        }
+        buffer += chunk.slice(start, end);
+        if (newline < 0) return;
+        buffer += "\n";
+        drain();
+        start = newline + 1;
+      }
     });
 
     socket.on("error", (err: unknown) => {
@@ -639,16 +699,25 @@ export function connect(
         h.reject(e);
       }
       pending.clear();
+      pendingBytes = 0;
     });
 
     socket.on("close", () => {
       const e = new ControlRequestError("control connection closed", "transport");
       terminalError = e;
+      buffer = "";
+      helloSecret?.fill(0);
+      helloSecret = null;
+      if (!settled) {
+        settled = true;
+        reject(e);
+      }
       for (const [, h] of pending) {
         clearTimeout(h.timer);
         h.reject(e);
       }
       pending.clear();
+      pendingBytes = 0;
       notifyClosed();
     });
 

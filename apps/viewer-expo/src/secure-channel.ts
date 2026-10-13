@@ -231,6 +231,7 @@ export class StreamSealer {
 
   open(frame: Uint8Array): Uint8Array {
     if (frame.length < COUNTER_LEN + TAG_LEN) throw new Error("frame too short");
+    if (frame.length > COUNTER_LEN + TAG_LEN + MAX_PLAINTEXT) throw new Error("frame too large");
     const counter = new DataView(
       frame.buffer,
       frame.byteOffset,
@@ -258,13 +259,13 @@ export function sealedLine(frame: Uint8Array): string {
 
 /** 전송 줄에서 봉인 프레임을 꺼낸다. 봉인 줄이 아니면 null. */
 export function parseSealedLine(line: string): Uint8Array | null {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(line);
+    const parsed: unknown = JSON.parse(line);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const encoded = (parsed as { e?: unknown }).e;
+    if (typeof encoded !== "string") return null;
+    return base64UrlToBytes(encoded);
   } catch {
     return null;
   }
-  const encoded = (parsed as { e?: unknown }).e;
-  if (typeof encoded !== "string") return null;
-  return base64UrlToBytes(encoded);
 }

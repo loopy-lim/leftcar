@@ -59,6 +59,10 @@ vi.mock("react-native-tcp-socket", () => ({
 
 import {
   connect,
+  CONTROL_LINE_LIMIT,
+  HANDSHAKE_LINE_LIMIT,
+  MAX_PENDING_REQUESTS,
+  MAX_PENDING_REQUEST_BYTES,
   formatErrorMessage,
   isUnauthorizedError,
   preferredCaptureBackend,
@@ -82,6 +86,85 @@ function lastSocket(): FakeSocket {
 function reply(socket: FakeSocket, line: unknown) {
   socket.emit("data", `${JSON.stringify(line)}\n`);
 }
+
+describe("bounded control response lifetime", () => {
+  it("rejects only unadmitted work when the FIFO is full and admits again after a reply", async () => {
+    const client = await connect("localhost");
+    const socket = lastSocket();
+    const pending = Array.from({ length: MAX_PENDING_REQUESTS }, () => client.request("getStatus").catch(error => error));
+    await expect(client.request("getStatus")).rejects.toMatchObject({ kind: "capacity" });
+    expect(socket.written).toHaveLength(MAX_PENDING_REQUESTS);
+    expect(socket.destroyed).toBe(false);
+    reply(socket, { ok: true, result: "first" });
+    expect(await pending[0]).toBe("first");
+    const admitted = client.request("getStatus").catch(error => error);
+    expect(socket.written).toHaveLength(MAX_PENDING_REQUESTS + 1);
+    socket.emit("close");
+    await Promise.all([...pending, admitted]);
+  });
+
+  it("bounds outstanding payload bytes without retiring requests already on the wire", async () => {
+    const client = await connect("localhost");
+    const first = client.request("setClipboard", { text: "a".repeat(MAX_PENDING_REQUEST_BYTES / 2) }).catch(error => error);
+    await expect(client.request("setClipboard", { text: "a".repeat(MAX_PENDING_REQUEST_BYTES / 2) }))
+      .rejects.toMatchObject({ kind: "capacity" });
+    expect(lastSocket().written).toHaveLength(1);
+    expect(lastSocket().destroyed).toBe(false);
+    reply(lastSocket(), { ok: true, result: "accepted" });
+    expect(await first).toBe("accepted");
+    const next = client.request("getStatus");
+    reply(lastSocket(), { ok: true, result: "next" });
+    expect(await next).toBe("next");
+    client.close();
+  });
+
+  it("rejects an unterminated oversized handshake immediately", async () => {
+    const result = connect("192.168.1.10").catch(error => error);
+    const socket = lastSocket();
+    socket.emit("data", "x".repeat(HANDSHAKE_LINE_LIMIT));
+    expect(socket.destroyed).toBe(false);
+    socket.emit("data", "x");
+    expect(await result).toMatchObject({ kind: "transport" });
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("bounds accumulated command text across chunks and retires pending replies", async () => {
+    const client = await connect("localhost");
+    const result = client.request("getClipboard").catch(error => error);
+    const socket = lastSocket();
+    for (let i = 0; i < 12; i++) socket.emit("data", "x".repeat(CONTROL_LINE_LIMIT / 12));
+    expect(socket.destroyed).toBe(false);
+    socket.emit("data", "x");
+    expect(await result).toMatchObject({ kind: "transport" });
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it.each(["null", "[]", "garbage", '{"ok":"yes"}'])("rejects malformed response %s without throwing in the socket callback", async line => {
+    const client = await connect("localhost");
+    const result = client.request("getStatus").catch(error => error);
+    expect(() => lastSocket().emit("data", line + "\n")).not.toThrow();
+    expect(await result).toMatchObject({ kind: "transport" });
+    expect(lastSocket().destroyed).toBe(true);
+  });
+
+  it("matches split and coalesced valid responses in FIFO order", async () => {
+    const client = await connect("localhost");
+    const first = client.request("getStatus");
+    const second = client.request("getStatus");
+    const socket = lastSocket();
+    socket.emit("data", '{"ok":tr');
+    socket.emit("data", 'ue,"result":1}\n{"ok":true,"result":2}\n');
+    expect(await Promise.all([first, second])).toEqual([1, 2]);
+    expect(socket.destroyed).toBe(false);
+    client.close();
+  });
+
+  it("settles a connection closed before its handshake without waiting for timeout", async () => {
+    const result = connect("192.168.1.10").catch(error => error);
+    lastSocket().emit("close");
+    expect(await result).toMatchObject({ kind: "transport" });
+  });
+});
 
 beforeEach(() => {
   sockets.length = 0;
@@ -353,6 +436,27 @@ async function handshakeAsServer(socket: FakeSocket): Promise<ScriptedServer> {
 }
 
 describe("secure control channel", () => {
+  it("rejects an oversized sealed request before writing and preserves earlier FIFO work", async () => {
+    const connection = connect("192.168.1.10");
+    await vi.waitFor(() => expect(lastSocket().written.length).toBeGreaterThanOrEqual(1));
+    const socket = lastSocket();
+    const server = await handshakeAsServer(socket);
+    const client = await connection;
+    const first = client.request("getStatus");
+    const writesBefore = socket.written.length;
+    await expect(client.request("setClipboard", { text: "a".repeat(10 * 1024 * 1024) }))
+      .rejects.toMatchObject({ kind: "capacity" });
+    expect(socket.written).toHaveLength(writesBefore);
+    expect(socket.destroyed).toBe(false);
+    const tx = new StreamSealer(server.serverKeys.s2c);
+    socket.emit("data", `${sealedLine(tx.seal(enc.encode(JSON.stringify({ ok: true, result: "still valid" }))))}\n`);
+    await expect(first).resolves.toBe("still valid");
+    const next = client.request("getStatus");
+    socket.emit("data", `${sealedLine(tx.seal(enc.encode(JSON.stringify({ ok: true, result: "next" }))))}\n`);
+    await expect(next).resolves.toBe("next");
+    client.close();
+  });
+
   it("handshakes with a pinned key and seals every frame", async () => {
     const pending = connect("192.168.1.10", 7777, 5000, async () => "tok");
     await vi.waitFor(() => expect(lastSocket().written.length).toBeGreaterThanOrEqual(1));
