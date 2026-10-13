@@ -17,7 +17,8 @@
     "test:contract": "vitest run -c vitest.contract.config.mts",
     "test:architecture": "bun tools/architecture-check/ts.ts",
     "benchmark:capture": "bun tools/capture-ab-report.ts",
-    "rustra:generate": "cargo run -p control-contract --bin generate --locked",
+    "rustra:generate": "cargo run -p control-contract --bin generate --locked && rustra codegen --config apps/viewer-expo/rustra.json",
+    "rustra:check": "rustra codegen --config apps/viewer-expo/rustra.json --check",
     "doctor": "bun tools/doctor.mjs",
     "build": "bun tools/build.mjs",
     "verify": "bun tools/verify.mjs",
@@ -29,6 +30,8 @@
     "test:gradle-policy": "bun tools/build.gradle-policy.mjs"
   },
   "devDependencies": {
+    "@rustra/cli": "0.12.0",
+    "@rustra/types": "0.12.1",
     "@tailwindcss/node": "4.3.3",
     "@tailwindcss/oxide": "4.3.3",
     "@types/node": "^26.2.0",
@@ -39,6 +42,12 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.12",
+    "compression": "1.8.2",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2"
   },
   "patchedDependencies": {
     "react-native-tcp-socket@6.4.2": "patches/react-native-tcp-socket@6.4.2.patch"

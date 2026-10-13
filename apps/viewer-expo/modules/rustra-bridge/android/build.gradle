@@ -21,7 +21,7 @@ apply plugin: "com.android.library"
 apply plugin: "kotlin-android"
 
 def extOr = { name, fallback -> rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback }
-def adapterRoot = file("../../../../../node_modules/@rustra/react-native/native").canonicalFile
+def adapterRoot = file("../../../node_modules/@rustra/react-native/native").canonicalFile
 def generatedRoot = file("../generated").canonicalFile
 def rustManifest = file("../../../../../native/leftcar-rustra/Cargo.toml").canonicalFile
 def rustLibsDir = file("src/main/cpp/libs")

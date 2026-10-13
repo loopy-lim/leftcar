@@ -12,8 +12,7 @@ bytes = { workspace = true }
 domain = { workspace = true }
 base64 = "0.22"
 schemars = "0.8"
-# Rustra pin (H02): vetted public main commit. Do not track branches.
-rustra = { git = "https://github.com/loopy-lim/rustra", rev = "9ebf25f7b185141d6b792cdbb97743e9c679b303" }
+rustra = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

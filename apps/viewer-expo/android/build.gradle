@@ -22,3 +22,35 @@ allprojects {
 
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
+
+// Rustra's generated task watches its leaf crate, while Leftcar's contract
+// and Cargo.lock live in the parent workspace. Let Cargo check that complete
+// graph on every build so a dependency upgrade cannot reuse an old staticlib.
+// Keep this consumer policy outside generated files so codegen preserves it.
+def rustraModuleDir = file("../modules/rustra-bridge/android").canonicalFile
+def rustraAppRoot = file("..").canonicalFile
+subprojects { child ->
+  if (child.projectDir.canonicalFile == rustraModuleDir) {
+    child.tasks.matching { it.name == "buildRustAndroid" }.configureEach {
+      outputs.upToDateWhen { false }
+      outputs.cacheIf { false }
+    }
+    child.afterEvaluate {
+      // Bun may hoist the published adapter to the workspace root. The
+      // generated template assumes app-local node_modules; resolve the same
+      // installed package JS uses instead of copying or editing its sources.
+      def entry = providers.exec {
+        workingDir rustraAppRoot
+        commandLine "node", "--input-type=module", "--eval",
+          "import {fileURLToPath} from 'node:url'; console.log(fileURLToPath(import.meta.resolve('@rustra/react-native')))"
+      }.standardOutput.asText.get().trim()
+      def adapter = new File(new File(entry).parentFile.parentFile, "native")
+      if (!new File(adapter, "cpp/RustraJSIBridge.cpp").isFile()) {
+        throw new GradleException("Rustra native adapter is missing: ${adapter}")
+      }
+      def cmake = child.android.defaultConfig.externalNativeBuild.cmake
+      cmake.arguments.removeAll { it.startsWith("-DRUSTRA_ADAPTER_ROOT=") }
+      cmake.arguments "-DRUSTRA_ADAPTER_ROOT=${adapter.canonicalPath}"
+    }
+  }
+}

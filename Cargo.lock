@@ -730,8 +730,9 @@ dependencies = [
 
 [[package]]
 name = "rustra"
-version = "0.10.2"
-source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54672721a04ce63cc7d2ff1667af5b055e4957c0bb83af7aabba5694fb90d347"
 dependencies = [
  "hex",
  "postcard",
@@ -745,8 +746,9 @@ dependencies = [
 
 [[package]]
 name = "rustra-macros"
-version = "0.10.2"
-source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b3874b8b71e15d36114e9c9bce704107bb62e8c8f05e01524b30e6b2e823f8f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -756,8 +758,9 @@ dependencies = [
 
 [[package]]
 name = "rustra-naming"
-version = "0.10.2"
-source = "git+https://github.com/loopy-lim/rustra?rev=9ebf25f7b185141d6b792cdbb97743e9c679b303#9ebf25f7b185141d6b792cdbb97743e9c679b303"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe530f86e7b39b994a0c5a3612e51fc7d5ddaacb49a46635471d164df903f033"
 
 [[package]]
 name = "rustversion"

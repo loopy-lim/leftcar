@@ -24,6 +24,8 @@ license = "MIT"
 repository = "leftcar"
 
 [workspace.dependencies]
+# Keep the contract generator and native entry on the same published release.
+rustra = "=0.12.0"
 domain = { path = "crates/domain" }
 media-model = { path = "crates/media-model" }
 thiserror = "2"

@@ -2,11 +2,10 @@
   "name": "@rustra/generated-react-native",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "main": "src/index.ts",
   "react-native": "src/index.ts",
   "peerDependencies": {
-    "@rustra/react-native": "^0.9.0",
+    "@rustra/react-native": "^0.10.0",
     "react-native": ">=0.76"
   }
 }

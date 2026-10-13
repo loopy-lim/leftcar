@@ -94,7 +94,8 @@ android {
 
     sourceSets {
         main {
-            // Rust rustra library (cargo build -p leftcar-rustra --target aarch64-linux-android)
+            // Video JNI library copied by copyViewerSo below. Rustra is linked
+            // by the generated module, not loaded from this legacy directory.
             jniLibs.srcDirs = ["libs"]
         }
     }
@@ -151,6 +152,9 @@ android {
     }
     packagingOptions {
         jniLibs {
+            // Older manual builds can leave this unused JNI shim in libs/.
+            // Only the generated librustra_bridge.so owns Rustra in this app.
+            excludes += ["**/libleftcar_rustra.so"]
             def enableLegacyPackaging = findProperty('expo.useLegacyPackaging') ?: 'false'
             useLegacyPackaging enableLegacyPackaging.toBoolean()
         }

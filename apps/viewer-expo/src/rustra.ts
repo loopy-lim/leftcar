@@ -1,5 +1,5 @@
 /**
- * Rustra 0.8 generated entry point.
+ * Rustra generated entry point (CLI 0.12 / React Native adapter 0.10).
  *
  * Importing this module installs the lazy zero-config bootstrap. The native
  * JSI module is still installed only when a generated command is invoked, so

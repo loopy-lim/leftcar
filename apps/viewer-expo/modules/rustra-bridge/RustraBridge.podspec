@@ -17,7 +17,7 @@ Pod::Spec.new do |s|
   s.source = { :path => '.' }
   s.static_framework = true
 
-  adapter_root = File.expand_path('../../../../node_modules/@rustra/react-native/native', __dir__)
+  adapter_root = File.expand_path('../../node_modules/@rustra/react-native/native', __dir__)
   generated_root = File.expand_path('generated', __dir__)
   rust_archive = 'ios/rust/lib/libleftcar_rustra.a'
 

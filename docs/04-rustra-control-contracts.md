@@ -3,6 +3,32 @@
 문서 상태: 설계용 의사 코드  
 목적: Rustra가 담당하는 범위를 고정하고 구현자가 contract-first TDD를 시작할 수 있게 한다.
 
+## 2026-10-13 적용 버전과 재생성
+
+공식 registry에서 다음 배포판을 확인해 함께 적용했다. npm 패키지는 서로 독립 버전이다.
+
+| 대상 | 이전 | 적용 |
+|---|---|---|
+| Rust `rustra`, `rustra-macros`, `rustra-naming` | Git `9ebf25f`의 0.10.2 | crates.io 0.12.0 |
+| `@rustra/react-native` | 0.9.0 | 0.10.0 |
+| `@rustra/types` | 0.10.0 | 0.12.1 |
+| `@rustra/cli` | 생성 manifest 0.10.0, 도구 미고정 | devDependency 0.12.0 |
+
+Rust 의존성은 루트 workspace의 `=0.12.0` 하나를 계약 crate와 네이티브 entry가 공유한다. 두 Cargo 잠금 파일 및 Bun 잠금 파일을 갱신했다. 다운로드한 crate SHA256은 lock checksum과 일치한다. npm `gitHead`는 `162c0002d55001ad1dd4fa48dcbb8866e994fe4f`, crate VCS SHA는 `4663a3e073cce5f660d17b0d6e6c09584d4fb280`이며 서로 다른 발행 기록을 같은 SHA라고 표시하지 않는다.
+
+- `bun run rustra:generate`: Rust Host/Viewer 참조 계약과 RN TS/C++·네이티브 모듈·소유권 manifest를 함께 생성한다.
+- `bun run rustra:check`: 실제 Rust schema probe와 생성 파일의 일치를 검사한다. CI에도 두 단계를 연결했다.
+- 계약 schema/hash는 유지됐다. RN 엔트리는 명시적 strict 검증과 새 runtime 수명 처리를 사용한다.
+- RN 0.10 정적 셸은 Rust 0.12의 owned-response FFI를 요구하므로 네이티브 브리지까지 재빌드해야 한다. JS만 교체하는 OTA 업그레이드로 취급하지 않는다.
+- Android 앱 소유 Gradle 설정에서 실제 설치된 어댑터 경로를 찾도록 했다. Bun workspace hoisting 때문에 생성 템플릿의 app-local 경로가 존재하지 않을 수 있다. 생성 파일이나 설치 패키지를 수작업으로 고치지 않는다.
+- 생성된 Gradle task의 leaf-crate 입력만으로는 상위 Cargo.lock·공유 계약 변경을 알 수 없으므로, 앱 설정에서 매번 Cargo의 전체 의존성 검사를 실행하게 한다. Cargo 자체의 증분 빌드는 유지한다.
+- 현재 앱은 `librustra_bridge.so`를 로드한다. 과거 수동 빌드에서 `app/libs`에 남을 수 있는, 더 이상 호출하지 않는 `libleftcar_rustra.so`는 APK 패키징에서 제외해 서로 다른 Rustra 배포판이 섞이지 않게 한다. 기존 로컬 파일은 삭제하지 않는다.
+- CI는 JVM 검사와 함께 APK를 빌드해 새 정적 FFI와 C++ 어댑터 사이의 링크도 검사한다.
+
+Leftcar의 영상·고주파 입력은 Rustra를 통과하지 않으므로 이 업데이트 자체를 영상 FPS 향상으로 설명하지 않는다. 기존 `vendor/rustra-*`는 참조 사본이며 현재 Bun 의존성이나 생성 브리지의 빌드 입력으로 선택하지 않는다. 사용하는 어댑터만 갱신했고, 사용하지 않는 `@rustra/tauri` 등을 새로 도입하지 않았다.
+
+근거: [공식 마이그레이션](https://github.com/loopy-lim/rustra/blob/162c0002d55001ad1dd4fa48dcbb8866e994fe4f/docs/migrations/0.11-to-0.12.ko.md), [Rust 배포판](https://crates.io/crates/rustra/0.12.0), [RN 배포판](https://www.npmjs.com/package/@rustra/react-native/v/0.10.0). 실제 검사 결과는 [작업 기록](plans/2026-10-13-performance-security.md)의 Rustra 추가 업데이트 항목을 따른다.
+
 ## 1. 경계
 
 Rustra는 다음 로컬 호출을 연결한다.

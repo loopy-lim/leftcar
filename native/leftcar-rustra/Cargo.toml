@@ -10,5 +10,5 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 control-contract = { path = "../../crates/control-contract" }
-rustra = { git = "https://github.com/loopy-lim/rustra", rev = "9ebf25f7b185141d6b792cdbb97743e9c679b303" }
+rustra = { workspace = true }
 serde_json = { workspace = true }

@@ -7,60 +7,55 @@
 // ────────────────────────────────────────────────────────────
 // C++ postcard codec for the RN JSI fast path (B1).
 #include "rustra-generated-codecs.hpp"
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <jsi/jsi.h>
+#include <initializer_list>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
+#include <vector>
 
 using namespace facebook::jsi;
 namespace jsi = facebook::jsi;
 namespace rc = rustra::codec;
+namespace rustra::generated {
+const char* compiled_contract_hash() { return "be754a50f3177d068356707641c86b80ebcaf7d08930823fe7afc46cc354cf37"; }
+}
 
-namespace rustra { namespace generated {
-#ifdef RUSTRA_TEST_JSI_SHIM
-  using RuntimePropNameCache = std::unordered_map<std::string, jsi::PropNameID>;
-  std::shared_ptr<RuntimePropNameCache> runtimePropNameCache(jsi::Runtime&) {
-    static auto cache = std::make_shared<RuntimePropNameCache>();
-    return cache;
+// Each invocation owns its captured map values until canonical encoding finishes.
+// Small maps avoid a vector allocation; larger maps retain bounded reservation.
+class RustraMapEntries {
+public:
+  using Entry = std::pair<std::string, jsi::Value>;
+  RustraMapEntries(jsi::Runtime& rt, size_t count) : use_inline_(count <= inline_entries_.size()) {
+    if (count > heap_entries_.max_size()) throw jsi::JSError(rt, "rustra: map size exceeds native capacity");
+    if (!use_inline_) heap_entries_.reserve(std::min<size_t>(count, 64));
   }
-#else
-  class RuntimePropNameCache final : public jsi::NativeState {
-  public:
-    std::unordered_map<std::string, jsi::PropNameID> values;
-  };
-  std::shared_ptr<RuntimePropNameCache> runtimePropNameCache(jsi::Runtime& rt) {
-    static std::unordered_map<jsi::Runtime*, std::weak_ptr<RuntimePropNameCache>> caches;
-    auto found = caches.find(&rt);
-    if (found != caches.end()) {
-      if (auto cache = found->second.lock()) return cache;
-    }
-    auto cache = std::make_shared<RuntimePropNameCache>();
-    jsi::Object holder(rt);
-    holder.setNativeState(rt, cache);
-    rt.global().setProperty(rt, "__rustraPropNameCache", std::move(holder));
-    caches[&rt] = cache;
-    return cache;
+  void emplace_back(std::string&& key, jsi::Value&& value) {
+    if (use_inline_) inline_entries_[size_] = Entry(std::move(key), std::move(value));
+    else heap_entries_.emplace_back(std::move(key), std::move(value));
+    ++size_;
   }
-#endif
-  const jsi::PropNameID& cachedProp(jsi::Runtime& rt, const char* name) {
-    auto cache = runtimePropNameCache(rt);
-#ifdef RUSTRA_TEST_JSI_SHIM
-    auto& values = *cache;
-#else
-    auto& values = cache->values;
-#endif
-    auto it = values.find(name);
-    if (it == values.end()) {
-      it = values.emplace(name, jsi::PropNameID::forAscii(rt, name)).first;
-    }
-    return it->second;
-  }
-}}
+  Entry* begin() { return use_inline_ ? inline_entries_.data() : heap_entries_.data(); }
+  Entry* end() { return begin() + size_; }
+  size_t size() const { return size_; }
+private:
+  std::array<Entry, 4> inline_entries_;
+  std::vector<Entry> heap_entries_;
+  size_t size_ = 0;
+  bool use_inline_;
+};
+
+// UTF8 may replace lone UTF16 surrogates. Preserve the prior normalized lookup
+// for replacement-containing keys; ordinary keys retain their original JSI string.
+[[maybe_unused]] static jsi::Value rustra_map_value(jsi::Runtime& rt, const jsi::Object& object, const jsi::String& key, const std::string& utf8) {
+  if (utf8.find("\xEF\xBF\xBD") == std::string::npos) return object.getProperty(rt, key);
+  return object.getProperty(rt, jsi::String::createFromUtf8(rt, reinterpret_cast<const uint8_t*>(utf8.data()), utf8.size()));
+}
 
 [[maybe_unused]] static double rustra_f64(jsi::Runtime& rt, const jsi::Value& value, const char* field) {
   if (!value.isNumber()) throw jsi::JSError(rt, std::string("rustra: '") + field + "' must be a number");
@@ -133,12 +128,41 @@ struct RustraByteSpan { const uint8_t* data; size_t size; };
   return static_cast<float>(number);
 }
 
+namespace rustra::generated {
+struct BoundCodecContext {
+  const uint16_t commandId;
+  const std::vector<jsi::PropNameID> input;
+  const std::vector<jsi::PropNameID> output;
+private:
+  static std::vector<jsi::PropNameID> ownNames(Runtime& rt, std::initializer_list<const char*> names) {
+    std::vector<jsi::PropNameID> result; result.reserve(names.size());
+    for (auto name : names) result.push_back(jsi::PropNameID::forAscii(rt, name));
+    return result;
+  }
+  BoundCodecContext(Runtime& rt, uint16_t id, std::initializer_list<const char*> in, std::initializer_list<const char*> out)
+    : commandId(id), input(ownNames(rt, in)), output(ownNames(rt, out)) {}
+  friend std::shared_ptr<const BoundCodecContext> make_bound_codec_context(Runtime&, uint16_t);
+};
+std::shared_ptr<const BoundCodecContext> make_bound_codec_context(Runtime& rt, uint16_t commandId) {
+  switch (commandId) {
+    case 1: return std::shared_ptr<const BoundCodecContext>(new BoundCodecContext(rt, commandId, {"a", "b"}, {"value"}));
+    default: throw JSError(rt, "rustra: no bound codec for cmd_id " + std::to_string(commandId));
+  }
+}
+} // namespace rustra::generated
 
+
+static void encode_body_addNumbers(jsi::Runtime& rt, const jsi::Object& argsObj, rc::Writer& w, const jsi::PropNameID* _properties) {
+  const auto& _prop_0 = _properties[0];
+  const auto& _prop_1 = _properties[1];
+  w.push_i64(rustra_i64(rt, argsObj.getProperty(rt, _prop_0), "a"));
+  w.push_i64(rustra_i64(rt, argsObj.getProperty(rt, _prop_1), "b"));
+}
 static void encode_addNumbers(jsi::Runtime& rt, const jsi::Value& args, rc::Writer& w) {
   w.push_u8(1); w.push_u8(0); // cmd_id = 1 LE
   auto argsObj = args.asObject(rt);
-  w.push_i64(rustra_i64(rt, argsObj.getProperty(rt, "a"), "a"));
-  w.push_i64(rustra_i64(rt, argsObj.getProperty(rt, "b"), "b"));
+  const std::array<jsi::PropNameID, 2> _properties{jsi::PropNameID::forAscii(rt, "a"), jsi::PropNameID::forAscii(rt, "b")};
+  encode_body_addNumbers(rt, argsObj, w, _properties.data());
 }
 
 // (Tier 1 positional) 개별 인자 → 직접 인코딩. argsObj 경유 대비 JSI 프로퍼티 조회 2회 제거.
@@ -149,13 +173,39 @@ static void encode_pos_addNumbers(jsi::Runtime& rt, const jsi::Value* argv, size
   w.push_i64(rustra_i64(rt, argv[1], "b"));
 }
 
+static jsi::Value decode_body_addNumbers(jsi::Runtime& rt, jsi::Object& resultObj, rc::Reader& r, const jsi::PropNameID* _properties) {
+  const auto& _prop_0 = _properties[0];
+  resultObj.setProperty(rt, _prop_0, [&]() -> jsi::Value { auto _v = r.read_i64(); if (_v >= -9007199254740991ll && _v <= 9007199254740991ll) return jsi::Value(static_cast<double>(_v)); return jsi::Value(rt, jsi::BigInt::fromInt64(rt, _v)); }());
+  return std::move(resultObj);
+}
 static jsi::Value decode_addNumbers(jsi::Runtime& rt, rc::Reader& r) {
   auto resultObj = jsi::Object(rt);
-  resultObj.setProperty(rt, rustra::generated::cachedProp(rt, "value"), [&]() -> jsi::Value { auto _v = r.read_i64(); if (_v >= -9007199254740991ll && _v <= 9007199254740991ll) return jsi::Value(static_cast<double>(_v)); return jsi::Value(rt, jsi::BigInt::fromInt64(rt, _v)); }());
-  return std::move(resultObj);
+  const std::array<jsi::PropNameID, 1> _properties{jsi::PropNameID::forAscii(rt, "value")};
+  return decode_body_addNumbers(rt, resultObj, r, _properties.data());
 }
 
 namespace rustra::generated {
+
+bool encode_bound(Runtime& rt, const BoundCodecContext& context, const Value& args, rc::Writer& w) {
+  switch (context.commandId) {
+    case 1: {
+      w.push_u8(1); w.push_u8(0);
+      auto argsObj = args.asObject(rt);
+      encode_body_addNumbers(rt, argsObj, w, context.input.data()); return true;
+    }
+    default: return false;
+  }
+}
+
+Value decode_bound(Runtime& rt, const BoundCodecContext& context, rc::Reader& r) {
+  switch (context.commandId) {
+    case 1: {
+      auto resultObj = jsi::Object(rt);
+      return decode_body_addNumbers(rt, resultObj, r, context.output.data());
+    }
+    default: throw JSError(rt, "rustra: no bound codec");
+  }
+}
 
 bool encode_by_name(Runtime& rt, const std::string& name, const Value& args, rc::Writer& w) {
   if (name == "addNumbers") { encode_addNumbers(rt, args, w); return true; }
@@ -227,6 +277,12 @@ Value decode_buffer_result_by_id(Runtime& rt, uint16_t cmd_id, Value buffer) {
   }
 }
 
+Value decode_buffer_bound(Runtime& rt, const BoundCodecContext& context, Value buffer) {
+  switch (context.commandId) {
+    default: throw JSError(rt, "rustra: no bound buffer result codec");
+  }
+}
+
 bool has_raw_codec(uint16_t cmd_id) {
   switch (cmd_id) {
     case 1: return true;
@@ -251,10 +307,22 @@ Value decode_raw_result(Runtime& rt, uint16_t cmd_id, uint64_t slot) {
     case 1: {
       Object result(rt);
       int64_t value; std::memcpy(&value, &slot, sizeof(value));
-      result.setProperty(rt, cachedProp(rt, "value"), value >= -9007199254740991ll && value <= 9007199254740991ll ? jsi::Value(static_cast<double>(value)) : jsi::Value(rt, jsi::BigInt::fromInt64(rt, value)));
+      result.setProperty(rt, jsi::PropNameID::forAscii(rt, "value"), value >= -9007199254740991ll && value <= 9007199254740991ll ? jsi::Value(static_cast<double>(value)) : jsi::Value(rt, jsi::BigInt::fromInt64(rt, value)));
       return std::move(result);
     }
     default: throw JSError(rt, "rustra: no raw result codec for cmd_id " + std::to_string(cmd_id));
+  }
+}
+
+Value decode_raw_bound(Runtime& rt, const BoundCodecContext& context, uint64_t slot) {
+  switch (context.commandId) {
+    case 1: {
+      Object result(rt);
+      int64_t value; std::memcpy(&value, &slot, sizeof(value));
+      result.setProperty(rt, context.output[0], value >= -9007199254740991ll && value <= 9007199254740991ll ? jsi::Value(static_cast<double>(value)) : jsi::Value(rt, jsi::BigInt::fromInt64(rt, value)));
+      return std::move(result);
+    }
+    default: throw JSError(rt, "rustra: no bound raw result codec");
   }
 }
 

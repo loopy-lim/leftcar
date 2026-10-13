@@ -1,4 +1,4 @@
-//! Rustra 0.8 control-package boundary for Leftcar.
+//! Rustra control-package boundary for Leftcar (published core 0.12).
 //!
 //! The generated React Native entry point is `native_entry!`; the JNI exports
 //! below are retained only as the legacy H09 device-proof shim until the app
@@ -20,7 +20,7 @@ static PACKAGE: OnceLock<Package> = OnceLock::new();
 
 fn package() -> &'static Package {
     let package = PACKAGE.get_or_init(host_package);
-    // Rustra 0.8 generated JSI calls the generic rkyv-v2 FFI surface. The
+    // Generated JSI calls Rustra's generic Frame FFI surface. The
     // legacy JNI shim invokes Package directly, so without this registration
     // the old proof passes while the generated bridge returns
     // `ffi.not_registered`.
@@ -28,7 +28,7 @@ fn package() -> &'static Package {
     package
 }
 
-// Rustra 0.8's generated React Native package loads the stable native entry
+// Rustra's generated React Native package loads the stable native entry
 // point. Keep the legacy JNI shim below during the app cutover; both paths
 // resolve to the same OnceLock-backed package and therefore cannot diverge in
 // command registration or contract hash.
@@ -106,6 +106,37 @@ mod tests {
             rustra::ffi::get_package().map(Package::id),
             Some("leftcar.host.control")
         );
+    }
+
+    #[test]
+    fn generated_frame_call_supports_owned_and_caller_buffer_responses() {
+        let _ = package();
+        // Generated addNumbers codec: u16 command 1, then postcard i64
+        // zigzag values 20 and 22. Both RN 0.10 response paths must return 42.
+        let request = [1u8, 0, 40, 44];
+        for capacity in [2, 64] {
+            let mut buffer = vec![0u8; capacity];
+            let mut length = 0;
+            let owned = unsafe {
+                rustra::ffi::rustra_ffi_invoke_frame_owned(
+                    request.as_ptr(),
+                    request.len(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut length,
+                )
+            };
+            let response = if owned.is_null() {
+                buffer[..length].to_vec()
+            } else {
+                let frame = unsafe { std::slice::from_raw_parts(owned, length) }.to_vec();
+                // Copy before freeing and always pair the exact pointer/length.
+                unsafe { rustra::ffi::rustra_ffi_free_owned_bytes(owned, length) };
+                frame
+            };
+            assert_eq!(owned.is_null(), capacity == 64);
+            assert_eq!(rustra::decode_frame_response(&response).unwrap(), &[84]);
+        }
     }
 }
 

@@ -18,9 +18,24 @@ import com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder
 class RustraBridgeModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   companion object { init { System.loadLibrary("rustra_bridge") } }
   override fun getName(): String = "RustraBridge"
-  override fun invalidate() { nativeInvalidate(); super.invalidate() }
+  private fun onJavaScriptThread(action: () -> Unit): Boolean {
+    val queue = reactApplicationContext.jsMessageQueueThread ?: return false
+    if (queue.isOnThread()) { action(); return true }
+    return queue.runOnQueue { action() }
+  }
+  override fun invalidate() {
+    // Legacy registry teardown runs on the native queue before enqueueing the
+    // JS runtime destruction barrier. TurboModule teardown already runs on JS.
+    onJavaScriptThread { nativeInvalidate() }
+    super.invalidate()
+  }
   @ReactMethod
   fun install(promise: Promise) {
+    if (!onJavaScriptThread { installOnJavaScriptThread(promise) }) {
+      promise.reject("ERR_NO_RUNTIME", "JavaScript queue is unavailable")
+    }
+  }
+  private fun installOnJavaScriptThread(promise: Promise) {
     val pointer = reactApplicationContext.javaScriptContextHolder?.get()
     if (pointer == null || pointer == 0L) { promise.reject("ERR_NO_RUNTIME", "JavaScript context pointer is null"); return }
     if (!nativeInstall(pointer, reactApplicationContext.jsCallInvokerHolder)) {
