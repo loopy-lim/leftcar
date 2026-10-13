@@ -1,10 +1,12 @@
 # 구현 증거 문서 (EVIDENCE)
 
-## 현재 판정의 진입점 — 2026-09-13
+## 현재 판정의 진입점 — 2026-10-13
 
 [지원 범위와 완료 기준](completion-and-support.md)은 최신 후보의 수용 경계를, [감사 개선 검증](2026-09-13-audit-remediation-validation.md)은 앞선 코드·패키지·실기기 시도를 기록한다. 이 문서 아래의 날짜별 기록은 **그때의 소스와 패키지에 대한 역사 기록**이다. 일부 crate·테스트·capture API·Activity 설정·버전은 이후 제거 또는 변경됐으며 현재 테스트 inventory로 사용하지 않는다.
 
-[2026-09-13 후속 검증과 내부 후보](2026-09-13-completion-followup-validation.md)에 최종 소스·검토·전체 검사·Host/APK 해시를 기록했다. 새 후보의 실기기 영상과 10/30분은 아직 실행하지 않았다.
+[2026-10-13 성능·안전성·Rustra 업데이트](plans/2026-10-13-performance-security.md)에 현재 검사와 Android debug APK 해시를 기록했다. React Doctor 100/100, TS 1,072개, Android JVM 252개, Rust/Host 검사와 APK 링크는 통과했다. 구조 검사 32개 실패, JS advisory 6개, Host Rust unmaintained 6·unsound 1 경고는 남아 있다. 새 APK 설치·외부망·실기 영상·10/30분 성능은 검증하지 않았다. FEC CPU 벤치를 실제 FPS 개선으로 해석하지 않는다.
+
+개선 커밋은 `f43c988`(네이티브), `997fd06`(Viewer), `49de7ea`(Rustra/의존성), `0e981a3`(검증·문서)다. [9월 내부 후보](2026-09-13-completion-followup-validation.md)는 별도 소스·Host/APK의 과거 기록이다. 이번 로컬 결과와 GitHub Actions 결과는 각각의 실행 SHA로 구분한다.
 
 현재 검사 범위의 소스 진입점:
 

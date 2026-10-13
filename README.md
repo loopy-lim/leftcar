@@ -4,7 +4,7 @@
 
 Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에서 빠르게 보고, 필요할 때 키보드와 포인터로 조작하는 다중 화면 뷰어다. 컴퓨터마다 Leftcar를 실행하고, Viewer 앱에서 원하는 화면을 별도 창으로 열 수 있다.
 
-2026-09-13에 확인한 최신 공개 릴리스는 [v0.1.4](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.4)이며 `Leftcar-Viewer-0.1.4.apk`만 제공한다. 이 태그에 macOS·Windows 설치판이 함께 있다고 가정하지 않는다. 개발 후보와 공개 APK의 변경·호환성·서명 상태는 [지원 범위와 완료 기준](docs/completion-and-support.md), [버전·업데이트 안내](docs/versioning.md)를 확인한다.
+2026-10-13 GitHub Releases 조회 기준 최신 공개 릴리스는 [v0.1.10](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.10)이다. Android APK와 macOS arm64 ZIP을 제공하며 Windows 파일은 없다. 이번 성능·안전성 개선과 Rustra 업데이트는 개발 소스의 변경으로, 해당 공개 파일에 포함됐다는 뜻이 아니다. 지원·호환성·서명 상태는 [지원 범위와 완료 기준](docs/completion-and-support.md), [버전·업데이트 안내](docs/versioning.md)를 확인한다.
 
 ## 한 문장 정의
 
@@ -25,6 +25,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 ## 문서
 
 - [유사 프로젝트 비교와 개선·남은 격차](docs/research/2026-10-13-project-comparison.md)
+- [현재 개선과 Rustra 업데이트 검증](docs/plans/2026-10-13-performance-security.md)
 - [문서 인덱스](docs/README.md)
 - [지원 범위와 완료 기준](docs/completion-and-support.md)
 - [마무리 후속 작업 검증](docs/2026-09-13-completion-followup-validation.md)
@@ -49,6 +50,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 ## 현재 상태
 
 - 소스 설명 갱신: 2026-10-13. 공개 릴리스·과거 실측의 기준일은 각 기록을 따른다.
+- 이번 후보는 React Doctor 100/100, TS 1,072개·Android JVM 252개, Rust 검사와 Android debug APK 빌드를 통과했다. 기존 구조 검사 32건과 의존성 경고는 남아 있으며 [상세 결과](docs/plans/2026-10-13-performance-security.md#최종-로컬-검증)에 구분했다. 새 APK 설치·영상 실측은 수행하지 않았다.
 - 개발 후보에는 기기별 화면 승인과 저장된 입력 허용·거부, 연결·디코더 수명과 전송 복구 개선이 있다. 최신 후보의 실제 영상 연결과 10·30분 수용은 아직 완료되지 않았다. 공개 APK와 개발 소스의 검사 결과를 섞지 않는다. 현재 기준은 [지원 범위와 완료 기준](docs/completion-and-support.md), 과거 실측은 [구현 증거 문서](docs/EVIDENCE.md)에 구분한다.
 - 구현: Rust workspace + Tauri 2 macOS/Windows Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
@@ -85,7 +87,8 @@ bun run typecheck
 bun run test
 bun run test:contract
 bun run test:architecture
-cargo run -p control-contract --bin generate   # 생성물 갱신/검증
+bun run rustra:generate          # Rust 계약 + RN TS/C++/네이티브 모듈 재생성
+bun run rustra:check             # 실제 Rust schema와 생성물 일치 검사
 cargo test --workspace
 cargo clippy --workspace --tests -- -D warnings
 ```
@@ -121,6 +124,7 @@ cargo clippy --workspace --tests -- -D warnings
 bun run test && bun run test:contract # TS 단위 + 계약 테스트
 bun run test:architecture       # ADR-0002 의존성/TS/Kotlin 규칙
 bun run rustra:generate         # 생성 코드 재생성 (diff 없어야 함)
+bun run rustra:check            # schema probe + TS/C++ 일치
 ```
 
 추가 문서:

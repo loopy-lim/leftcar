@@ -189,7 +189,7 @@ source capability는 다음에 bind한다.
 - short expiry/renewal
 - codec/profile upper bound
 
-Viewer가 임의 source ID나 입력 세션 난수를 추측해도 authorization에 실패해야 한다. 입력 capability는 source 보기 승인만으로 자동 획득되지 않으며 Host 토글을 끄면 즉시 주입을 중단하고 눌린 키와 버튼을 해제한다.
+Viewer가 임의 source ID나 입력 세션 난수를 추측해도 authorization에 실패해야 한다. 입력은 저장된 기기별 정책과 OS 권한을 추가로 검사하며 현재 자동 허용·명시 거부 조건은 §21을 따른다. Host 토글을 끄면 주입을 중단하고 눌린 키와 버튼을 해제한다.
 
 Windows `SendInput`은 UIPI에 따라 Leftcar Host와 같거나 낮은 무결성 수준의 프로세스에만 입력을 주입할 수 있다. current-user 설치와 일반 권한 실행을 기본으로 하며, 관리자 앱을 제어하기 위해 Host를 자동 상승시키지 않는다. `SendInput`이 일부 이벤트만 처리하면 세션 진단에 오류를 기록하고 reliable packet은 재주입하지 않도록 ACK한다.
 
@@ -242,22 +242,23 @@ source catalog에는 UI에 필요한 정보만 담는다.
 
 ## 13. parser와 resource limit
 
-초기 상한은 benchmark 뒤 조정하되 코드에 명시한다.
+2026-10-13 현재 코드에서 확인한 상한이다. 총 프로세스 메모리 상한이나 공개 인터넷 DDoS 수용 결과를 뜻하지 않는다.
 
-| 항목 | 초기 상한 가설 |
+| 항목 | 구현된 상한 |
 | --- | --- |
-| control message | 256 KiB |
-| source catalog entries | 256 |
-| active source per session | 8 |
-| frame encoded bytes | 16 MiB |
-| fragments per frame | 16,384보다 훨씬 낮은 measured bound |
-| incomplete frame per source | 2 |
-| pairing attempts | exponential rate limit |
-| protocol nesting/string | schema-specific cap |
+| Host 동시 제어 연결 | 전역 64개, 원격 IP별 8개. 루프백 프록시는 전역 제한 적용 |
+| Host 인증 전 수명 / 제어 읽기·쓰기 대기 | 총 30초 / 15초 |
+| Host·Viewer 제어 줄 | handshake 16KiB, 인증 후 봉인 JSON 줄 12MiB |
+| Viewer 대기 요청 | 32개, 직렬화된 요청 총 16MiB. 새 요청만 거부하며 기존 FIFO 유지 |
+| Android 재조립 AU | AU당 16MiB, 최대 16,384개 조각, 수신 중 AU 4개 |
+| Android 활성 FEC 그룹 | 48개 |
+| UPnP SOAP 응답 | 64KiB |
 
-상한 초과는 allocation 전에 거부한다.
+제어 줄은 상한을 넘겨 계속 버퍼링하지 않고 종료하며, 조각 수·길이는 재조립 버퍼 할당 전에 확인한다. 초기 설계의 catalog 256개·세션당 source 8개 등의 목표를 검증된 구현 상한으로 표시하지 않는다. 실제 상수는 [Host 제어](../apps/host-desktop/src-tauri/src/control.rs), [Viewer 제어](../apps/viewer-expo/src/control.ts), [Android 재조립](../native/android-viewer/src/media_datagram.rs)를 따른다.
 
 ## 14. Android native 경계
+
+아래는 목표 경계다. 현재 TS 제어 클라이언트는 SecureStore 자격을 사용해 키 합의·암호 처리를 수행하고, KM의 Kotlin 네트워크·암호 정책도 남아 있다. 2026-10-13 구조 검사 실패 32건을 이 목표를 달성한 것으로 읽지 않는다. 영상 hot path의 네이티브 분리와 모든 인증 로직의 Rust 이전은 다른 조건이다.
 
 ### TypeScript
 
@@ -335,7 +336,7 @@ denylist:
 - signing key 분리
 - debug endpoint와 frame dump flag release 제거
 
-Rustra는 pin된 commit/tag와 contract hash를 기록한다. 로컬 개발 branch를 암묵적으로 release dependency로 사용하지 않는다.
+Rustra는 정확한 registry 배포 버전·잠금 checksum과 contract hash를 기록한다. 로컬 개발 branch를 암묵적으로 release dependency로 사용하지 않는다. 현재 core/CLI 0.12.0·RN 0.10.0·types 0.12.1의 네이티브 재빌드 근거는 [계약 문서](04-rustra-control-contracts.md)를 따른다.
 
 ## 18. 보안 테스트
 
@@ -437,7 +438,7 @@ stream_task_restore_requires_reauthentication
 - **세션 절전 방지(2026-09-10)**: 캡처 세션이 살아 있는 동안 macOS는
   IOPMAssertion(시스템+디스플레이), Windows는 스레드별
   SetThreadExecutionState로 절전을 막는다.
-- 유휴 타임아웃, 토큰 만료/로테이션, dylib/APK 서명(§17·§19) 미구현.
+- 당시 남은 제품 수명 정책: 무활동 스트림 자동 종료와 장기 토큰 만료/로테이션, 배포 서명·공증 수용. 현재 제어 소켓의 15초 대기와 30초 인증 전 수명 제한은 §13을 따른다. 로컬 debug/ad-hoc 서명과 공개 배포용 서명 수용은 구분한다.
 - USB AOAP 제어 채널은 물리 접근 전제로 평문 유지(v1).
 
 
@@ -466,3 +467,13 @@ stream_task_restore_requires_reauthentication
 Host 내부 UI 계약의 `credentialId`·`stateRevision`은 비밀이 아닌 자격 수명과 상태 순서를 나타낸다. 기기 삭제 결과는 삭제된 기기와 저장 오류를 함께 반환한다. 이 상태를 원격 토큰이나 네이티브 승인 대신 사용하지 않는다. 실제 권한은 Rust의 인증·승인 수명과 네이티브 생성·송신·입력 경계에서 검사한다.
 
 실제 GUI 종료와 지연된 OS 콜백, 디스플레이 연결 변경, Windows 파일시스템·입력, USB 및 장시간 스트리밍은 각각 별도 실행 증거가 필요하다. 단위·브라우저 회귀 검사와 교차 컴파일은 이 실행 검증을 대신하지 않는다.
+
+
+## 22. 2026-10-13 외부 연결·자원 제한 보강
+
+- 키 합의는 비기여 X25519 입력을 거부한다. 정상 Rust↔TS 벡터와 잘못된 키 입력 회귀를 함께 검사했다.
+- UPnP는 기존 매핑의 소유권을 먼저 확인한다. 활성화·해제의 순서, 부분 실패·응답 유실·취소를 처리하고, 확인된 소유 매핑만 정리한다. 공개 IP 확인 실패·비공개 주소에서는 광고를 철회한다. 실제 공유기의 삭제 응답이나 CGNAT 도달성은 아직 검증하지 않았으며 남은 매핑은 1시간 lease에 의존할 수 있다.
+- 파일 공유는 일반 파일만 허용하고 시작 시 연 파일 핸들을 유지해 경로 교체를 막는다. 같은 파일의 내용 변경을 막는 스냅샷이나 무결성 해시를 제공한다는 뜻은 아니다.
+- Viewer는 §13의 요청·응답 예산을 적용하고 잘못된 응답을 연결 오류로 처리한다. 이전 연결의 실패가 새 Host 선택을 덮어쓰지 않도록 했다.
+
+[구현·회귀 결과](plans/2026-10-13-performance-security.md)와 [타 프로젝트 비교](research/2026-10-13-project-comparison.md)는 코드 검증이다. 공개망 부하·실제 NAT/공유기·Windows 실행·장시간 기기 시험, 독립 암호 감사와 지속 fuzz는 별도다. JS advisory 6건, Host Rust unmaintained 6건·unsound 1건, 기존 KM 구조 실패 32건은 남아 있다.

@@ -1,22 +1,24 @@
 # 버전·호환성·업데이트 안내
 
-기준일: 2026-09-13. 버전 문자열은 역할이 다르다. Android·Expo·Host·개발 package의 숫자가 같다는 사실만으로 호환성을 증명하지 않으며, 같은 소스에서 생성한 패키지와 계약·native ABI를 함께 확인한다.
+기준일: 2026-10-13. 소스 설정과 GitHub Releases metadata를 다시 조회했다. 버전 문자열은 역할이 다르다. Android·Expo·Host·개발 package의 숫자가 같다는 사실만으로 호환성을 증명하지 않으며, 같은 소스에서 생성한 패키지와 계약·native ABI를 함께 확인한다.
 
 | 위치 | 현재 값 | 역할 |
 | --- | --- | --- |
-| `apps/viewer-expo/android/app/build.gradle` `versionName` | `0.1.5` | Viewer Android 릴리스 기준 |
-| `apps/viewer-expo/android/app/build.gradle` `versionCode` | `4` | Viewer Android 설치 판별 값 |
-| `apps/viewer-expo/app.config.ts` `version` | `0.1.2` | Expo 앱 표시 버전 |
-| `apps/viewer-expo/package.json` `version` | `0.1.0` | 개발 트래킹용 |
-| `apps/host-desktop/src-tauri/Cargo.toml` `version` | `0.1.2` | macOS/Windows Host 빌드 버전 |
-| `apps/host-desktop/src-tauri/tauri.conf.json` `version` | `0.1.2` | 실제 Host 번들 버전, Cargo 버전과 일치 확인 |
+| `apps/viewer-expo/android/app/build.gradle` `versionName` | `0.1.10` | Viewer Android 릴리스 기준 |
+| `apps/viewer-expo/android/app/build.gradle` `versionCode` | `16` | Viewer Android 설치 판별 값 |
+| `apps/viewer-expo/app.config.ts` `version` | `0.1.6` | Expo 앱 표시 버전 |
+| `apps/viewer-expo/package.json` `version` | `0.1.6` | 개발 트래킹용 |
+| `apps/host-desktop/src-tauri/Cargo.toml` `version` | `0.1.11` | macOS/Windows Host 빌드 버전 |
+| `apps/host-desktop/src-tauri/tauri.conf.json` `version` | `0.1.11` | 실제 Host 번들 버전, Cargo 버전과 일치 확인 |
 | Host capture shim 시작 ABI | `leftcar_capture_start_v9` | 현재 Host가 요구하는 capture entry point |
 
 ## 공개 파일과 개발 후보
 
-현재 공개 [v0.1.4](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.4)는 Viewer APK 하나만 포함한다. 이 릴리스에 현재 Host가 포함됐거나 현재 개발 Host와의 조합이 수용됐다는 뜻은 아니다. 현재 Android 소스의 `0.1.5`는 아직 이 작업에서 공개하지 않은 후보 값이다.
+GitHub API `/repos/loopy-lim/leftcar/releases/latest` 조회 기준 최신 공개판은 [v0.1.10](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.10)(2026-09-21 공개)이며, `Leftcar-Viewer-0.1.10.apk`(25,744,586 bytes)와 `Leftcar-Host-0.1.10-macOS-arm64.zip`(3,158,146 bytes)을 제공한다. Windows 파일은 없다. 이번에는 릴리스 metadata만 조회했으며 해당 파일의 다운로드·서명·설치·업데이트를 재검증하지 않았다.
 
-공개 APK를 내려받아 `aapt2 dump badging`과 `apksigner verify --print-certs`로 확인한 값은 package `leftcar.ll3.kr`, versionCode `3`, versionName `0.1.4`, 인증서 DN `CN=Android Debug, O=Android, C=US`다. APK SHA-256은 `3dade6eb378b54a60ca674335dd8d260fe5ecc8b0195ce9ba238dd99939e96fe`, 공개 인증서 SHA-256은 `dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655`다. 파일 검사만 수행했으며 설치·업데이트는 실행하지 않았다.
+현재 Host 소스는 0.1.11이고 Viewer Android 설정은 여전히 0.1.10/16이다. 같은 버전 표시가 이번 변경의 공개를 뜻하지 않는다. 이번 커밋 푸시는 새 태그나 릴리스 파일 게시가 아니며, 실제 다음 배포에서는 버전 정책·서명·기존 설치 업데이트를 별도로 확인한다.
+
+과거 2026-09-13 **v0.1.4 파일 검사 기록**: 당시 APK를 내려받아 `aapt2 dump badging`과 `apksigner verify --print-certs`로 확인한 값은 package `leftcar.ll3.kr`, versionCode `3`, versionName `0.1.4`, 인증서 DN `CN=Android Debug, O=Android, C=US`다. APK SHA-256은 `3dade6eb378b54a60ca674335dd8d260fe5ecc8b0195ce9ba238dd99939e96fe`, 공개 인증서 SHA-256은 `dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655`다. 파일 검사만 수행했으며 설치·업데이트는 실행하지 않았다.
 
 개발 후보를 시험할 때는 같은 source snapshot에서 만든 Host와 Viewer를 한 쌍으로 사용한다. build manifest의 `source.sha256`·commit, `versions`, `artifactMetadata`, `target`, `signing`과 실제 artifact 해시를 확인한다. 현재 v9 Host에 이전 shim을 섞거나, 내장 JS가 없는 debug APK를 독립 배포판으로 안내하지 않는다. Host와 Viewer의 생성 계약 해시는 서로 다른 계약이므로 서로 같게 만들지 않고 각 생성물/잠금 의존성과 대조한다.
 
@@ -29,6 +31,10 @@
 | Windows | Windows CI/Windows의 Tauri build | 실제 산출물/서명·GPU·설치·업데이트 근거를 별도 보관 |
 
 빌드 결과의 표시 버전뿐 아니라 실제 APK/Info.plist의 식별자·버전, 서명 인증서·seal, ABI, 내장 JS/native를 검증한다. 내부 서명 키는 새로 만들지 않고 기존 시험 키를 명시해 사용하며 비밀 값은 로그·receipt에 기록하지 않는다.
+
+## Rustra 동반 업데이트
+
+현재 Rust core·CLI는 0.12.0, RN 어댑터는 0.10.0, types는 0.12.1로 고정했다. 기존 계약 hash는 유지됐지만 새 RN 어댑터가 owned-response FFI를 요구하므로 생성 코드와 네이티브 라이브러리를 함께 빌드해야 한다. JS만 교체하는 OTA 업데이트로 취급하지 않는다. 정확한 출처·재생성은 [Rustra 계약 문서](04-rustra-control-contracts.md#2026-10-13-적용-버전과-재생성), APK 해시·검증은 [현재 작업 기록](plans/2026-10-13-performance-security.md#rustra-추가-업데이트)을 따른다.
 
 ## 빌드 전 검사와 소스 일치
 

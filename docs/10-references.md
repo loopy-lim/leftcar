@@ -1,6 +1,6 @@
 # 공식 근거 자료
 
-확인일: 2026-08-24
+최초 확인일: 2026-08-24. Rustra 배포·고정 상태는 2026-10-13 재확인; 나머지 링크의 플랫폼 사실을 같은 날짜에 모두 재검증했다는 뜻은 아니다.
 정책: 기술 및 플랫폼 사실은 가능한 한 원 제작사/표준 문서를 사용한다. 이 목록의 존재는 Leftcar 실기기 성능을 증명하지 않는다.
 
 ## 1. Rustra
@@ -9,9 +9,9 @@
   - Rust command에서 TypeScript client 생성
   - Node, Bun, Tauri, React Native, Lynx adapter
   - local control contract의 근거
-- 현재 검증·고정한 `0.10.2` public commit: [`9ebf25f7b185141d6b792cdbb97743e9c679b303`](https://github.com/loopy-lim/rustra/commit/9ebf25f7b185141d6b792cdbb97743e9c679b303)
-  - Rust crate(crates.io 0.10.2), 생성 TypeScript 계약, npm 의존성(`@rustra/react-native` 0.9.x / `@rustra/types` 0.10.x)을 같은 상태로 맞춘다. `vendor/`의 두 패키지는 참조용 사본으로 함께 갱신한다.
-  - 이후 업그레이드도 branch가 아니라 검증한 commit/tag를 pin하고 코드젠 diff와 런타임을 함께 확인한다.
+- 현재 고정 조합: [Rust core 0.12.0](https://crates.io/crates/rustra/0.12.0), [CLI 0.12.0](https://www.npmjs.com/package/@rustra/cli/v/0.12.0), [RN 0.10.0](https://www.npmjs.com/package/@rustra/react-native/v/0.10.0), [types 0.12.1](https://www.npmjs.com/package/@rustra/types/v/0.12.1).
+  - Rust workspace는 정확한 registry 버전과 두 Cargo.lock checksum, Bun은 고정 배포판을 사용한다. Git 브랜치를 추적하지 않는다. `vendor/rustra-*`는 빌드에서 선택하지 않는 과거 참조 사본이며 이번 업데이트에서 변경하지 않았다.
+  - [공식 0.12 마이그레이션](https://github.com/loopy-lim/rustra/blob/162c0002d55001ad1dd4fa48dcbb8866e994fe4f/docs/migrations/0.11-to-0.12.ko.md)과 [적용·출처·네이티브 재빌드 기록](04-rustra-control-contracts.md#2026-10-13-적용-버전과-재생성)을 따른다. 코드 생성·APK 링크와 실기기 실행은 별도 검증이다.
 
 ## 2. Android XR와 Home Space
 

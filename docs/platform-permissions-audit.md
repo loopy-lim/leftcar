@@ -1,14 +1,14 @@
 # 플랫폼 권한과 남은 검증
 
-기준: 2026-09-13 completion-followup 소스. 최초 2026-09-07 조사의 가상 디스플레이 복구 제안과 오래된 권한 목록을 현재 구현에 맞게 교체했다. 현재 후보의 최종 빌드/실기기 상태는 [완료와 지원 기준](completion-and-support.md)을 따른다.
+기준: 2026-10-13 현재 소스. 최초 2026-09-07 조사의 가상 디스플레이 복구 제안과 오래된 권한 목록을 현재 구현에 맞게 교체했다. 현재 후보의 최종 빌드/실기기 상태는 [완료와 지원 기준](completion-and-support.md)을 따른다.
 
 ## macOS Host
 
 - 캡처는 display-only다. 화면 녹화 TCC 상태를 shim의 `CGPreflightScreenCaptureAccess`로 확인하고 Host 대시보드에서 설정 열기/재시작을 안내한다. 권한 없이 캡처에 성공한 것으로 처리하지 않는다.
-- 원격 입력은 Host 세션별 기본 OFF이며, 손쉬운 사용 권한과 명시적 세션 허용이 모두 필요하다. OS 권한을 얻어도 source grant나 입력 토글을 대체하지 않는다.
+- 원격 입력은 검토된 기기에 저장된 명시 거부가 없고 손쉬운 사용 권한이 유효하면 새 세션에서 자동 허용된다. 세션 OFF는 기기별 거부로 저장한다. OS 권한만으로 source grant나 입력 게이트를 대체하지 않는다.
 - `persistent-content-capture`는 예제 entitlement와 런타임 게이트만 존재한다. Apple 승인·활성 entitlement·장시간 안정성은 각각 확인해야 한다. entitlement가 없어도 내부 후보를 빌드할 수 있지만 해당 권한을 가진 배포본으로 설명하지 않는다.
 - `tauri.macos.conf.json`의 개발용 signingIdentity와 내부 build의 ad-hoc 서명, Developer ID/notarization은 다른 상태다. 현재 내부 빌드 도구의 실제 `codesign` 검사와 manifest를 따른다. 설정 파일의 identity만으로 서명을 확인했다고 하지 않는다.
-- 사용자 TCC 허용, 권한 철회, Host/Viewer 종료 후 캡처 해제, 디스플레이 sleep/wake는 실기기 체크에 남는다. 가상 디스플레이 관리 복원은 현재 완료 범위가 아니다.
+- 사용자 TCC 허용, 권한 철회, Host/Viewer 종료 후 캡처 해제, 디스플레이 sleep/wake는 실기기 체크에 남는다. 2026-10-13 소스에는 가상 디스플레이 관리가 다시 존재하지만, 이번 후보의 생성·제거·권한·주 화면 보존은 미검증이다.
 
 ## Android Viewer
 

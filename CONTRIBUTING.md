@@ -5,7 +5,7 @@
 - Rust **1.95.0**: 저장소의 `rust-toolchain.toml` 사용, rustfmt·clippy 포함
 - Bun **1.4.1**: 설치와 JS/TS 스크립트의 기본 진입점
 - Node **22.21.1**: CI 기준. Expo/React Native와 Gradle 플러그인의 요구 버전은 `bun run doctor`로 확인
-- Android Studio의 JDK(`JAVA_HOME`), Android SDK(`ANDROID_HOME` 또는 `ANDROID_SDK_ROOT`), NDK **27.1.12297006**, Rust 대상 `aarch64-linux-android`
+- JDK **17**(`JAVA_HOME`), Android SDK(`ANDROID_HOME` 또는 `ANDROID_SDK_ROOT`), NDK **27.1.12297006**, `cargo-ndk` **4.1.2**, Rust 대상 `aarch64-linux-android`·`x86_64-linux-android`(생성 Rustra 모듈의 두 ABI). 앱 APK의 기본 ABI는 arm64다.
 - macOS Host: Xcode 명령줄 도구의 Swift와 저장소에 선언된 Tauri CLI
 
 ## 로컬 셋업
@@ -40,8 +40,10 @@ bun run test:architecture
 cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked  # Host crate(루트 워크스페이스 밖)
 ```
 
-- 빌드 산출이 필요할 때: `cargo check --workspace`, `cargo run -p control-contract --bin generate`
+- 빌드 산출이 필요할 때: `cargo check --workspace`. 계약 생성은 아래 `rustra:generate`·`rustra:check`를 사용한다.
 - `docs/` 변경 시: `docs/README.md`의 상태 표/근거 수준과 동기화
+
+2026-10-13 기준 `test:architecture`는 기존 KM Kotlin 네트워크·암호 정책 위반 **32건**으로 실패한다. `verify js`·전체 verify·CI도 이 검사를 포함하므로 전체 통과로 표시하지 않는다. React Doctor·타입·단위 테스트의 통과와 구분하며, ignore로 숨기지 않는다. 나머지 검사와 의존성 경고는 [현재 작업 기록](docs/plans/2026-10-13-performance-security.md)을 따른다.
 
 ## 내부 빌드와 산출물 확인
 
@@ -61,16 +63,17 @@ bun run release:manifest -- verify /absolute/path/build-manifest.json
 
 ## Rustra 코드젠
 
-계약(Rust `control-contract`)을 고치면 두 단계로 재생성한다:
+루트에 고정 설치된 CLI 0.12.0을 사용한다. 계약(Rust `control-contract`)을 고치면 다음 두 명령으로 Rust 계약과 RN 모듈을 함께 갱신·검사한다:
 
 ```bash
-bun run rustra:generate                                   # packages/control-generated (+ 스키마)
-cd apps/viewer-expo && bunx --package @rustra/cli@0.10.0 rustra codegen --config rustra.json
+bun run rustra:generate
+bun run rustra:check
 ```
 
-- CLI 버전은 Rust crate 핀(docs/10-references.md)과 같은 라인으로 맞춘다.
-- CLI 실행 직후 `apps/viewer-expo/package.json`에 `workspaces: ["modules/rustra-bridge"]`가 다시 생기면 제거한다 — 루트 workspace가 `apps/*/modules/*`를 이미 커버하며, 이 키가 남으면 react-doctor가 viewer-expo를 모노레포 루트로 오판한다.
-- 브리지 실기기 증명(E9): metro 띄우고(`bunx expo start --dev-client --port 8082` + `adb reverse tcp:8081 tcp:8082`) 앱 설치·실행 뒤 딥링크 `leftcar://rustra-proof`로 진입하면 `addNumbers(20,22)=42`와 계약 해시가 화면에 렌더링된다.
+- 현재 조합은 Rust core/CLI 0.12.0, RN 0.10.0, types 0.12.1이다. 패키지별 버전은 독립적이며 [고정 버전·출처](docs/04-rustra-control-contracts.md#2026-10-13-적용-버전과-재생성)를 따른다.
+- 생성 TS/C++/Kotlin과 manifest는 직접 고치지 않는다. Bun hoisting 경로와 공유 Cargo 입력 검사는 앱 소유 Android Gradle에 있으며 재생성 후에도 유지된다.
+- 새 RN 정적 어댑터는 Rust 0.12의 owned-response FFI를 요구한다. JS만 교체하지 말고 APK를 다시 빌드한다. Android 디렉터리에서 `./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon`으로 C++ 링크와 JVM 검사를 함께 확인할 수 있다.
+- 기기 검증 절차(E9 역사 기록): Metro를 띄우고(`bunx expo start --dev-client --port 8082` + `adb reverse tcp:8081 tcp:8082`) 대상 앱 설치·실행 뒤 `leftcar://rustra-proof`에서 `addNumbers(20,22)=42`와 계약 해시를 확인한다. Rustra 0.12 후보에서는 아직 이 실기기 절차를 실행하지 않았다.
 
 ## PR 규칙
 

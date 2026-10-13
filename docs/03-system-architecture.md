@@ -2,7 +2,7 @@
 
 문서 상태: 제안안 0.1  
 선행 결정: ADR-0001부터 ADR-0004  
-중요: Viewer UI shell과 transport 구현은 Phase 1/2 실험 전까지 provisional이다.
+중요: 아래 도식·인터페이스는 초기 설계이며 현재 구현 목록이 아니다. 2026-10-13 소스는 Tauri Host, Expo/RN Viewer와 UDP/AOAP/adbTcp 경로를 사용한다. Host UI는 Tauri invoke를, RN의 생성 참조 브리지는 Rustra를 사용한다. KM Kotlin 네트워크·암호 정책은 목표 경계 위반 32건으로 남아 있다. 현재 판정은 [지원 표](completion-and-support.md)와 [작업 검증](plans/2026-10-13-performance-security.md)을 따른다.
 
 ## 1. 아키텍처 목표
 

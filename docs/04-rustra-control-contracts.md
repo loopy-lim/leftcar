@@ -1,7 +1,7 @@
 # Rustra 제어 계약
 
-문서 상태: 설계용 의사 코드  
-목적: Rustra가 담당하는 범위를 고정하고 구현자가 contract-first TDD를 시작할 수 있게 한다.
+문서 상태: 현재 고정 버전·생성/빌드 절차와 초기 계약 설계를 함께 보관. 아래 §1–12의 의사 코드·제안 타입은 현재 생성 API 목록이 아니다. 실제 계약은 `crates/control-contract`와 `packages/control-generated`를 따른다.
+목적: Rustra의 현재 사용 경계와 후속 계약 설계를 구분한다. Host UI는 Tauri invoke를 사용하며 `@rustra/tauri`로 전환한 상태가 아니다. RN 브리지는 현재 설정대로 Host 참조 schema를 사용한다.
 
 ## 2026-10-13 적용 버전과 재생성
 

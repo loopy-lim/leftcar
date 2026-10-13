@@ -1,6 +1,6 @@
 # Windows 원격 Host 구현과 검증
 
-검토일: 2026-08-22
+최초 검토일: 2026-08-22. 2026-10-13 현재 소스의 목적지·패킷 예산·승인 정책을 다시 대조했다. 이번 후보의 Windows 대상 빌드·실행 증거는 아직 없으며 아래 과거 교차 컴파일 기록과 구분한다.
 
 이 문서는 Windows x64 PC를 Leftcar Host로 사용해 Galaxy XR/Android Viewer에서 화면을 보고 키보드와 마우스로 제어하는 경로의 구현 범위와 검증 경계를 기록한다.
 
@@ -9,14 +9,18 @@
 | 영역 | 구현 | 실패 정책 |
 | --- | --- | --- |
 | Host shell | 동일한 Tauri 2 앱, mDNS/QR pairing/control server | Windows backend 초기화 실패 시 테스트 backend로 전환하지 않고 앱 시작 실패 |
-| source catalog | `EnumDisplayMonitors`의 활성 물리 디스플레이 | 시작 시 index를 다시 확인해 hot-plug stale index 거부 |
+| source catalog | `EnumDisplayMonitors`의 활성 물리 디스플레이 | 캡처 생성 직전 승인된 안정 source ID를 다시 찾아 hot-plug·모호한 식별자 거부 |
 | capture | `IGraphicsCaptureItemInterop::CreateForMonitor` + WGC `CreateFreeThreaded` frame pool | 5초 안에 첫 frame이 없거나 resize/recreate 실패 시 session error |
 | encode | WGC D3D11 texture → `MFCreateDXGISurfaceBuffer` → `IMFDXGIDeviceManager`가 연결된 Media Foundation hardware H.264 MFT | `MFT_ENUM_FLAG_HARDWARE` 또는 ARGB32 texture 입력 경로가 없으면 명시 실패, CPU readback/software fallback 없음 |
-| media | SPS/PPS `CFG`, Annex-B H.264, 1,200-byte 이하 UDP fragment 또는 USB AOAP mux의 framed media | malformed output/fragment 초과 시 명시 실패, send queue drop 시 IDR 요청 |
-| input | 인증 UDP → 별도 worker → `SendInput` | Observe가 기본, session별 Control OFF/종료에서 key/button 전체 해제 |
+| media | SPS/PPS `CFG`, Annex-B H.264, 사설·루프백·link-local IPv4 평문 예산 1,400B, 나머지·미확인 경로 1,200B 및 AEAD/FEC 부가 바이트를 반영한 UDP 또는 USB AOAP framed media | malformed output/fragment 초과 시 명시 실패, send queue drop 시 IDR 요청 |
+| input | 인증 UDP → 별도 worker → `SendInput` | 기기별 저장된 허용·명시 거부와 OS 권한 적용, session별 OFF/종료에서 key/button 전체 해제 |
 | package | Windows x64 current-user NSIS installer | CI 산출물은 서명 전 internal artifact이며 public release로 간주하지 않음 |
 
 Windows Graphics Capture desktop interop의 monitor 생성 API는 Windows 10 version 1903부터 제공되므로 Leftcar Windows Host의 최소 기준도 Windows 10 1903으로 둔다.
+
+## 외부망 피드백과 남은 격차
+
+현재 구현은 LCF1 통계와 LCP1→LCP2 탐침 응답을 처리한다. 인증된 같은 IP의 Viewer 제어 송신 포트에 응답하면서 영상 목적지는 유지하며, AEAD 송신 카운터를 공유한다. 이것만으로 NACK 재전송 ring이나 Media Foundation 동적 비트레이트 조정이 제공되는 것은 아니다. 오디오·커서 동등성, 실제 NAT·GPU·장시간 성능도 후속 검증이다. [비교와 수정 근거](research/2026-10-13-project-comparison.md)를 따른다.
 
 ## 입력 지연 정책
 
@@ -83,7 +87,7 @@ RC=/path/to/x86_64-w64-mingw32-windres \
 7. 다중 monitor의 네 모서리, 음수 origin, 서로 다른 DPI scaling, 화면 회전에서 pointer 오차를 측정한다.
 8. 5% input datagram loss와 500ms 단절 뒤 stuck key/button이 없어야 하며, 30분 soak에서 handle/memory 증가가 없어야 한다(2026-09-13 사용자 시간 변경 반영).
 
-현재 저장소에서 달성한 것은 protocol/unit test, USB AOAP framed media/input 소스 경로, GPU texture 입력 소스 경로와 macOS→Windows MSVC 교차 compile까지다. 실제 Windows installer, AOAP 핸드셰이크, WGC frame/GPU MFT identity와 E6/E7 결과는 Windows/폰 물리 장치 실행 뒤에만 달성으로 변경한다.
+과거 후보에는 protocol/unit test, USB AOAP framed media/input·GPU texture 입력 소스와 macOS→Windows MSVC 교차 compile 기록이 있다. 이번 후보는 이식 가능한 정책 테스트까지만 통과했으며 Windows cfg 코드의 컴파일·실행은 별도 결과가 필요하다. 실제 Windows installer, AOAP 핸드셰이크, WGC frame/GPU MFT identity와 E6/E7 결과는 Windows/폰 물리 장치 실행 뒤에만 달성으로 변경한다.
 
 ## 공식 근거
 
