@@ -32,7 +32,7 @@ Files:
 - Create: `docs/plans/2026-10-19-viewer-diagnostics.md` (본 문서)
 
 - [x] 계획 문서 작성.
-- [ ] 커밋: `docs(plan): 뷰어 진단 캡처와 사용자 내보내기 구현 계약`
+- [x] 커밋: `docs(plan): 뷰어 진단 캡처와 사용자 내보내기 구현 계약`
 
 ### Task 2: 진단 레코드 스키마와 §16 redaction 포맷터 (TS)
 
@@ -62,9 +62,9 @@ export function formatSession(record: DiagnosticsSessionRecord): string;
 export function summarizeCounts(counts: Readonly<Record<string, number>>): string;
 ```
 
-- [ ] §18 필수 테스트 `diagnostics_redact_title_path_token_and_ip` 포함 red 테스트 작성(`bun run test -- src/diagnostics.test.ts` 실패 확인): 제목·IP·토큰·파일 경로 주입 시 부재, `profile`은 `[a-z0-9_-]{1,40}` 이외 `"unknown"` 치환, 알 수 없는 이벤트 종류 거절, 레코드 ≤1024바이트, 요약 형식.
-- [ ] 포맷터 구현(snake_case 키, docs/06 필드명 정렬). green 확인.
-- [ ] 커밋: `feat(viewer): 진단 세션 레코드 스키마와 §16 redaction 포맷터`
+- [x] §18 필수 테스트 `diagnostics_redact_title_path_token_and_ip` 포함 red 테스트 작성(`bun run test -- src/diagnostics.test.ts` 실패 확인): 제목·IP·토큰·파일 경로 주입 시 부재, `profile`은 `[a-z0-9_-]{1,40}` 이외 `"unknown"` 치환, 알 수 없는 이벤트 종류 거절, 레코드 ≤1024바이트, 요약 형식.
+- [x] 포맷터 구현(snake_case 키, docs/06 필드명 정렬). green 확인.
+- [x] 커밋: `feat(viewer): 진단 세션 레코드 스키마와 §16 redaction 포맷터`
 
 ### Task 3: 진단 스토어 append·회전·내보내기 (Kotlin)
 
@@ -88,9 +88,9 @@ class DiagnosticsStore(
 }
 ```
 - crash 레코드 JSON은 JVM 테스트로 형식 고정(클래스명만, 메시지 부재).
-- [ ] red 테스트 작성(`cd apps/viewer-expo/android && ./gradlew :app:testDebugUnitTest --no-daemon` 실패 확인): append 내용, 5MiB 회전, 1024B 초과 거절(false), FS 오류 래치 후 무음 거절, crash 형식(denylist 문자열 부재), export 시간순 병합.
-- [ ] 스토어 구현. green 확인.
-- [ ] 커밋: `feat(android): 진단 스토어 append·5MiB 회전·단일 백업 세대`
+- [x] red 테스트 작성(`cd apps/viewer-expo/android && ./gradlew :app:testDebugUnitTest --no-daemon` 실패 확인): append 내용, 5MiB 회전, 1024B 초과 거절(false), FS 오류 래치 후 무음 거절, crash 형식(denylist 문자열 부재), export 시간순 병합.
+- [x] 스토어 구현. green 확인.
+- [x] 커밋: `feat(android): 진단 스토어 append·5MiB 회전·단일 백업 세대`
 
 ### Task 4: Diagnostics 네이티브 모듈·샘플러·크래시 마커 (Kotlin)
 
@@ -118,18 +118,18 @@ object CrashMarker { fun install(store: DiagnosticsStore): Unit }
 ```
 - sample 레코드 JSON은 Kotlin이 직렬화하고 JVM/Robolectric 테스트로 형식 고정(`{"ts":..,"up_ms":..,"kind":"sample","battery_percent":..,"charging":..,"plugged":..,"voltage_mv":..,"temp_deci_c":..,"thermal_status":..,"thermal_headroom":..}`).
 - MediaStore.Downloads insert: `IS_PENDING` 플립, 단일 `java.util.concurrent.Executor`(메인 스레드 금지). 실제 MediaStore 경로는 Robolectric 한계로 fake sink 테스트 + 실기 수동 검증으로 나눈다.
-- [ ] Robolectric red 테스트: wiring, appendRecord resolve, fresh 환경 boot_detected, 주입 스냅샷으로 샘플러 1틱→1줄, fake sink export, 크래시 마커가 클래스명만 기록.
-- [ ] 구현. `./gradlew :app:testDebugUnitTest` green.
-- [ ] 커밋: `feat(android): Diagnostics 네이티브 모듈과 15초 샘플러·크래시 마커`
+- [x] Robolectric red 테스트: wiring, appendRecord resolve, fresh 환경 boot_detected, 주입 스냅샷으로 샘플러 1틱→1줄, fake sink export, 크래시 마커가 클래스명만 기록.
+- [x] 구현. `./gradlew :app:testDebugUnitTest` green.
+- [x] 커밋: `feat(android): Diagnostics 네이티브 모듈과 15초 샘플러·크래시 마커`
 
 ### Task 5: 패키지 등록과 크래시 핸들러 설치
 
 Files:
 - Modify: `apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/MainApplication.kt`
 
-- [ ] packageList에 `dev.leftcar.viewer.diagnostics.DiagnosticsPackage()` 추가, `onCreate`에서 `super.onCreate()` 후 `loadReactNative` 전 `CrashMarker.install(...)` 호출.
-- [ ] `bun run test:architecture` — 기존 32건 외 신규 위반 0건 확인(green 주장 금지). `./gradlew :app:compileDebugKotlin` 성공.
-- [ ] 커밋: `feat(android): Diagnostics 패키지 등록과 크래시 핸들러 설치`
+- [x] packageList에 `dev.leftcar.viewer.diagnostics.DiagnosticsPackage()` 추가, `onCreate`에서 `super.onCreate()` 후 `loadReactNative` 전 `CrashMarker.install(...)` 호출.
+- [x] `bun run test:architecture` — 기존 32건 외 신규 위반 0건 확인(green 주장 금지). `./gradlew :app:compileDebugKotlin` 성공.
+- [x] 커밋: `feat(android): Diagnostics 패키지 등록과 크래시 핸들러 설치`
 
 ### Task 6: TS 브리지·설정 UI·세션 이벤트 (TS/React)
 
@@ -140,14 +140,34 @@ Files:
 
 i18n 키: `diagnosticsTitle`, `diagnosticsNote`, `diagnosticsExport`, `diagnosticsExporting`, `diagnosticsExportDone({name})`, `diagnosticsExportFailed`, `diagnosticsSummaryLabel`, `diagnosticsUnavailable`.
 
-- [ ] 세션 이벤트 기록 경로 vitest 확장. UI 구현. 루트에서 `npx -y react-doctor@latest . --verbose` 100/100, `bun run typecheck && bun run test`.
-- [ ] 커밋: `feat(viewer): 진단 내보내기 설정 UI와 세션 이벤트 기록`
+- [x] 세션 이벤트 기록 경로 vitest 확장. UI 구현. 루트에서 `npx -y react-doctor@latest . --verbose` 100/100, `bun run typecheck && bun run test`.
+- [x] 커밋: `feat(viewer): 진단 내보내기 설정 UI와 세션 이벤트 기록`
 
 ### Task 7: 문서 갱신과 최종 검증
 
 Files:
 - Modify: `docs/07-security-privacy.md` §16(사용자 주도 내보내기·요약 제공으로 경계 문장 갱신, "공유 전 확인" 유지, 네이티브 크래시 미기록 한계 명시), `docs/README.md` (상태 표 동기), `docs/completion-and-support.md` (내부 전용 표기)
 
-- [ ] 전체 검증: `bun run typecheck && bun run test && bun run test:architecture`(32 기준) && `./gradlew :app:testDebugUnitTest` && `npx -y react-doctor@latest . --verbose`. Cargo 미변경.
-- [ ] 수동 검증 절차 문서화(내부 APK 설치 → 세션 → 기기 꺼짐 → 재부팅 → 설정에서 내보내기 → MTP 복사 → 패턴 판독: 방전/전압 강하/패닉 재부팅/JS 크래시/프로세스 종료). 실기 미수행 항목은 미검증으로 명시.
-- [ ] 커밋: `docs: 진단 내보내기 경계 문장과 상태 표 갱신`
+- [x] 전체 검증: `bun run typecheck && bun run test && bun run test:architecture`(32 기준) && `./gradlew :app:testDebugUnitTest` && `npx -y react-doctor@latest . --verbose`. Cargo 미변경.
+- [x] 수동 검증 절차 문서화(내부 APK 설치 → 세션 → 기기 꺼짐 → 재부팅 → 설정에서 내보내기 → MTP 복사 → 패턴 판독: 방전/전압 강하/패닉 재부팅/JS 크래시/프로세스 종료). 실기 미수행 항목은 미검증으로 명시.
+- [x] 커밋: `docs: 진단 내보내기 경계 문장과 상태 표 갱신`
+
+## 수동 검증 절차(adb 없음)
+
+1. `bun run build android-internal` → MTP로 Galaxy XR에 사이드로드.
+2. 평소처럼 세션을 사용해 기기가 꺼질 때까지 실행한다. 꺼진 뒤 기기를 다시 켜고 앱을 연다.
+3. 설정 화면 맨 아래 **진단 기록** → 요약 확인(이번 실행 기록) → **진단 내보내기** → 저장된 파일명 확인.
+4. MTP로 Downloads의 `leftcar-diagnostics-*.ndjson`을 Mac에 복사해 판독한다.
+
+판독 가이드(레코드는 `ts`(epoch)·`up_ms`(부팅 후 경과)를 함께 가진다):
+
+| 파일 패턴 | 판정 |
+| --- | --- |
+| `battery_percent` 단조 감소 → ≤5%에서 종료, `charging:false` | 배터리 방전 |
+| percent 15-20% 이상 유지, 마지막 샘플들에서 `voltage_mv` 붕괴 | 부하 전압 강하(전력 W 추정 금지) |
+| 정상 값에서 급단종 + 다음 `session_start`가 `boot_detected:true`·`up_ms` 극소, crash 레코드 없음 | 기기 패닉 재부팅(시스템/드라이버) |
+| 마지막 session 기록 후에도 sample 계속 + (Java 기원이면) `kind:"crash"` | RN JS 크래시 — 프로세스 생존 |
+| 시계열 끊김 + 다음 `boot_detected:false`·큰 `up_ms` | 재부팅 없는 프로세스 사망(네이티브 크래시 한계 지점) |
+| 15초 초과 공백 | 샘플러 정지 — 판단 유보 |
+
+실기기 수집은 아직 수행되지 않았으며, 수행 전까지 이 기능의 기기 수용은 미검증이다.

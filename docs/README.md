@@ -4,7 +4,7 @@
 상태 기준일: 2026-10-13
 현재 진입점: [지원 범위와 완료 기준](completion-and-support.md), [버전·업데이트 안내](versioning.md)
 
-현재 변경·검증 경계는 [성능·안전성·Rustra 업데이트 기록](plans/2026-10-13-performance-security.md), [유사 프로젝트 비교](research/2026-10-13-project-comparison.md)를 따른다. [2026-09 감사 개선 검증](2026-09-13-audit-remediation-validation.md)과 날짜별 문서는 당시 후보의 역사 기록이다. 과거 목표·실측을 현재 소스의 완료 증거로 옮기지 않는다.
+현재 변경·검증 경계는 [성능·안전성·Rustra 업데이트 기록](plans/2026-10-13-performance-security.md), [유사 프로젝트 비교](research/2026-10-13-project-comparison.md)를 따른다. 2026-10-19에는 Galaxy XR 기기 꺼짐 원인 규명을 위한 [뷰어 진단 캡처·내보내기](plans/2026-10-19-viewer-diagnostics.md)가 내부 빌드 대상으로 추가됐다([보안 경계](07-security-privacy.md) §16 갱신 동반). [2026-09 감사 개선 검증](2026-09-13-audit-remediation-validation.md)과 날짜별 문서는 당시 후보의 역사 기록이다. 과거 목표·실측을 현재 소스의 완료 증거로 옮기지 않는다.
 
 ## 먼저 읽을 결론
 
