@@ -98,6 +98,13 @@ class DiagnosticsModuleTest {
     }
 
     @Test
+    fun `uptimeMs resolves a non-negative elapsed value`() {
+        val promise = RecordingPromise()
+        module(storeWith()).uptimeMs(promise)
+        assertTrue((promise.resolved as Number).toLong() >= 0)
+    }
+
+    @Test
     fun `exportToDownloads resolves the display name through the injected sink`() {
         val store = storeWith()
         store.append("{\"ts\":1,\"kind\":\"sample\"}")

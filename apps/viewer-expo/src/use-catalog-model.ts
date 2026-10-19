@@ -72,6 +72,7 @@ import {
   retryAbandonedDecoderCleanup,
 } from "./reserved-stream";
 import { streamSessionStore } from "./stream-session-store";
+import { diagnosticsRecorder } from "./diagnostics-recorder";
 import type { ActiveStream, RestoredStream } from "./catalog-model-types";
 import {
   deriveQualityState,
@@ -860,6 +861,12 @@ export function useCatalogModel() {
             mediaKey: started.mediaKey,
             startedAt: Date.now(),
           });
+          // 진단 — 시작에 성공한 스트림의 프로필과 디코더 점유를 남긴다(기기
+          // 꺼짐 원인 규명용, docs/plans/2026-10-19-viewer-diagnostics.md).
+          void diagnosticsRecorder.recordStreamStart(
+            displayProfile.id,
+            started.encoderExperiment === "splitVertical" ? 2 : 1,
+          );
         } catch (cause) {
           try {
             await reservation.close();
@@ -935,6 +942,7 @@ export function useCatalogModel() {
             );
             if (active.reservation)
               ownedReservations.delete(active.reservation);
+            void diagnosticsRecorder.recordStreamStop();
           },
         });
       } catch (cause) {

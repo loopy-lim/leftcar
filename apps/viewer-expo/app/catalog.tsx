@@ -43,6 +43,8 @@ import { DisplaySizeCard } from "../src/DisplaySizeCard";
 import { ExtensionDisplayCard } from "../src/ExtensionDisplayCard";
 import { FileTransferCard } from "../src/FileTransferCard";
 import { formatErrorMessage } from "../src/control";
+import { summarizeCounts } from "../src/diagnostics";
+import { diagnosticsRecorder } from "../src/diagnostics-recorder";
 import { useAppTheme } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 import { SafeArea, Action, Label, Notice, Surface } from "../src/ui/primitives";
@@ -400,7 +402,86 @@ function SettingsContent({ model }: { model: CatalogModel }) {
       </Surface>
       <QualityChoices model={model} />
       <AdvancedOptions model={model} />
+      <DiagnosticsControls />
     </>
+  );
+}
+
+/**
+ * 진단 기록 안내와 내보내기(§16 "공유 전 사용자 확인") — 기기 꺼짐 원인
+ * 규명용 기록은 항상 켜져 있고 이 섹션에서만 내보낸다.
+ * 수명/대기 참조 규약은 UsbTransportStatus와 같은 패턴이다.
+ */
+function DiagnosticsControls() {
+  const { t } = useAppLanguage();
+  const [exporting, setExporting] = useState(false);
+  const [savedName, setSavedName] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [summary, setSummary] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void diagnosticsRecorder
+      .summary()
+      .then((counts) => {
+        if (active && counts) setSummary(summarizeCounts(counts));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    setFailed(false);
+    try {
+      const name = await diagnosticsRecorder.exportToDownloads();
+      if (name) {
+        setSavedName(name);
+      } else {
+        setFailed(true);
+      }
+    } catch {
+      setFailed(true);
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+  return (
+    <Surface className="gap-2">
+      <Label variant="title">{t.viewer.diagnosticsTitle}</Label>
+      <Notice>{t.viewer.diagnosticsNote}</Notice>
+      {summary ? (
+        <Label variant="caption" tone="muted">
+          {t.viewer.diagnosticsSummaryLabel}: {summary}
+        </Label>
+      ) : null}
+      {diagnosticsRecorder.available ? (
+        <>
+          <Action
+            label={
+              exporting ? t.viewer.diagnosticsExporting : t.viewer.diagnosticsExport
+            }
+            busy={exporting}
+            disabled={exporting}
+            onPress={() => void handleExport()}
+          />
+          {savedName ? (
+            <Label variant="caption" tone="muted">
+              {t.viewer.diagnosticsExportDone.replace("{name}", savedName)}
+            </Label>
+          ) : null}
+          {failed ? (
+            <Notice tone="error">
+              <Label>{t.viewer.diagnosticsExportFailed}</Label>
+            </Notice>
+          ) : null}
+        </>
+      ) : (
+        <Label variant="caption" tone="muted">
+          {t.viewer.diagnosticsUnavailable}
+        </Label>
+      )}
+    </Surface>
   );
 }
 

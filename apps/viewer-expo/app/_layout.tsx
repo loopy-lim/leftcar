@@ -1,10 +1,12 @@
 import "../global.css";
+import { useEffect } from "react";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useAppTheme } from "../src/theme";
 import { LanguageProvider, useAppLanguage } from "../src/i18n";
 import { initializeRustra } from "../src/rustra";
+import { diagnosticsRecorder } from "../src/diagnostics-recorder";
 
 initializeRustra();
 
@@ -19,6 +21,9 @@ const queryClient = new QueryClient({
 function NavigationStack() {
   const { colors, isDark } = useAppTheme();
   const { t } = useAppLanguage();
+
+  // 포그라운드/백그라운드 전환을 진단 세션 레코드로 남긴다.
+  useEffect(() => diagnosticsRecorder.startLifecycle(), []);
 
   return (
     <>

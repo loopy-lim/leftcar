@@ -46,6 +46,12 @@ class DiagnosticsModule(
     promise.resolve(map)
   }
 
+  /** up_ms 원본 — SystemClock.elapsedRealtime(재부팅 시 0으로 돌아온다). */
+  @ReactMethod
+  fun uptimeMs(promise: Promise) {
+    promise.resolve(android.os.SystemClock.elapsedRealtime())
+  }
+
   @ReactMethod
   fun exportToDownloads(promise: Promise) {
     exportExecutor.execute {
