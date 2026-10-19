@@ -11,6 +11,9 @@ import com.facebook.react.ReactHost
 import com.facebook.react.common.ReleaseLevel
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint
 
+import dev.leftcar.viewer.diagnostics.CrashMarker
+import dev.leftcar.viewer.diagnostics.DiagnosticsRuntime
+
 import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ExpoReactHostFactory
 
@@ -29,12 +32,16 @@ class MainApplication : Application(), ReactApplication {
           add(dev.leftcar.viewer.nsd.NsdPackage())
           add(dev.leftcar.viewer.crypto.CryptoPackage())
           add(dev.leftcar.viewer.km.KmPackage())
+          // Device shutdown diagnostics (docs/plans/2026-10-19-viewer-diagnostics.md)
+          add(dev.leftcar.viewer.diagnostics.DiagnosticsPackage())
         }
     )
   }
 
   override fun onCreate() {
     super.onCreate()
+    // JS 초기화와 무관하게 크래시 마커와 15초 샘플러가 프로세스 시작부터 동작한다.
+    CrashMarker.install(DiagnosticsRuntime.store(this))
     DefaultNewArchitectureEntryPoint.releaseLevel = try {
       ReleaseLevel.valueOf(BuildConfig.REACT_NATIVE_RELEASE_LEVEL.uppercase())
     } catch (e: IllegalArgumentException) {
