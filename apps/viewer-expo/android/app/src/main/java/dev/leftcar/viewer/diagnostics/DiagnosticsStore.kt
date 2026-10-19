@@ -98,7 +98,7 @@ class DiagnosticsStore(
   }
 
   private fun countLocked(line: String) {
-    val match = KIND_REGEX.find(line) ?: return
+    val match = KIND_OF.find(line) ?: return
     val kind = match.groupValues[1]
     kindCounts[kind] = (kindCounts[kind] ?: 0) + 1
   }
@@ -124,7 +124,8 @@ class DiagnosticsStore(
   }
 
   companion object {
-    private val KIND_REGEX = Regex("\"kind\":\"([a-z_]{1,16})\"")
+    /** 레코드 본문에서 kind 식별자를 읽는 정규식 — 소문자·밑줄 16자 이하만 인정한다. */
+    val KIND_OF = Regex("\"kind\":\"([a-z_]{1,16})\"")
 
     /** 최선 노력 0600. 내부 저장소 디렉터리(0700)에 더해 파일 자체도 소유자 전용으로 강제한다. */
     fun enforceOwnerOnly(file: java.io.File) {
