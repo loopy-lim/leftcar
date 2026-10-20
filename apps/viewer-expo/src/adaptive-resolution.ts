@@ -1,3 +1,5 @@
+import { capTargetToPanelShortSide } from "./streaming-policy";
+
 export type AdaptiveQualityState =
   | "native"
   | "downshifting"
@@ -45,6 +47,11 @@ export interface AdaptiveObservation {
   recoveryObserved?: boolean;
   rebindInFlight: boolean;
   floorCollapseDelta?: number;
+  /**
+   * Thermal이 정한 시작 단변 상한(ADR-0006). upshift 목표만 이 값으로
+   * 클램프한다 — downshift는 기존 혼잡 증거만 남기고, 캡이 없으면 무영향이다.
+   */
+  thermalCapShortSide?: number;
 }
 
 export interface AdaptiveResolutionState {
@@ -239,7 +246,15 @@ export function observeAdaptiveResolution(
   ) {
     return {
       state: { ...nextState, qualityState: "upshifting" },
-      action: { kind: "upshift", target: { ...previous.sourceTarget } },
+      // Thermal 상한이 있으면 상향도 그 단변을 넘지 않는다 — 완화 중에
+      // 적응 정책이 캡을 되돌려 풀지 않게 하는 최소 개입이다(ADR-0006).
+      action: {
+        kind: "upshift",
+        target: capTargetToPanelShortSide(
+          { ...previous.sourceTarget },
+          observation.thermalCapShortSide,
+        ),
+      },
     };
   }
   return { state: nextState, action: { kind: "keep" } };

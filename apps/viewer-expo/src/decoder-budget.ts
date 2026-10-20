@@ -202,19 +202,36 @@ interface Reservation {
  */
 export class DecoderReservations {
   private readonly entries = new Map<DecoderLease, Reservation>();
+  /** Thermal 인지 용량 오버레이(ADR-0006). 새 진입만 좁힌다. */
+  private capacityOverlay: number | undefined = undefined;
   constructor(private hint: DecoderCapabilityHint = {}) {}
 
   setCapability(hint: DecoderCapabilityHint): void { this.hint = hint; }
+
+  /**
+   * Thermal 배터리 축이 정한 용량 상한. 네이티브 힌트를 올리지 못하고
+   * 기존 점유·재구성(replacing이 있는 연산)에는 적용되지 않는다 — 라이브
+   * 스트림 강등·퇴거는 이 계층의 몫이 아니다(ADR-0006).
+   */
+  setCapacityOverlay(capacityCap?: number): void {
+    this.capacityOverlay = capacityCap !== undefined && Number.isFinite(capacityCap) && capacityCap >= 1
+      ? Math.floor(capacityCap)
+      : undefined;
+  }
 
   async refreshCapability(launcher: {getDecoderCapabilityHint?(): Promise<DecoderCapabilityHint>}): Promise<void> {
     try { this.setCapability(await launcher.getDecoderCapabilityHint?.() ?? {}); }
     catch { this.setCapability({}); }
   }
 
-  private capacity(): number {
+  private capacity(existingOperation: boolean): number {
     const value = this.hint.maxInstances;
-    return value !== undefined && Number.isFinite(value) && value >= 1
+    let capacity = value !== undefined && Number.isFinite(value) && value >= 1
       ? Math.min(DEFAULT_DECODER_CAPACITY, Math.floor(value)) : 1;
+    if (!existingOperation && this.capacityOverlay !== undefined) {
+      capacity = Math.min(capacity, this.capacityOverlay);
+    }
+    return capacity;
   }
 
   private fits(demand: DecoderDemand, replacing?: DecoderLease): boolean {
@@ -234,7 +251,7 @@ export class DecoderReservations {
       pixels += entry.demand.target.width * entry.demand.target.height * entry.demand.target.fps;
     }
     const pixelLimit = this.hint.maxPixelRate;
-    return slots <= this.capacity() &&
+    return slots <= this.capacity(replacing !== undefined) &&
       !(pixelLimit !== undefined && Number.isFinite(pixelLimit) && pixelLimit > 0 && pixels > pixelLimit);
   }
 

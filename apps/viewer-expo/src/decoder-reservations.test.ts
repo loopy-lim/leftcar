@@ -134,3 +134,45 @@ it("120Hz display testing never expands the stream FPS admission ceiling", () =>
   const pool = new DecoderReservations({maxInstances:4});
   expect(() => pool.reserve({split:false,target:{...target,fps:120}})).toThrow();
 });
+describe("thermal capacity overlay", () => {
+  it("blocks new admissions beyond the overlay and restores when lifted", () => {
+    const pool = new DecoderReservations({maxInstances: 4});
+    pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.setCapacityOverlay(2);
+    expect(() => pool.reserve({ split: false, target })).toThrow();
+    pool.setCapacityOverlay(undefined);
+    expect(pool.reserve({ split: false, target })).toBeDefined();
+  });
+  it("seals split admission while the overlay leaves fewer than two slots", () => {
+    const pool = new DecoderReservations({ maxInstances: 4 });
+    pool.setCapacityOverlay(1);
+    expect(() => pool.reserve({ split: true, target })).toThrow();
+    // 기존 사다리 정책과 일관되게 — split은 강등되거나 막히지만 절대
+    // split 형태로 예약되지 않는다(호스트 정확 4K60 요구에 도달하지 않음).
+    const planned = pool.plan({ split: true, target });
+    if (planned) expect(planned.split).toBe(false);
+  });
+  it("keeps existing entries open when the overlay tightens", () => {
+    const pool = new DecoderReservations({ maxInstances: 4 });
+    const first = pool.reserve({ split: false, target });
+    const second = pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.setCapacityOverlay(2);
+    expect(pool.isOpen(first)).toBe(true);
+    expect(pool.isOpen(second)).toBe(true);
+  });
+  it("keeps existing-stream rebinds working under a tightened overlay", async () => {
+    const pool = new DecoderReservations({ maxInstances: 4 });
+    const lease = pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.reserve({ split: false, target });
+    pool.setCapacityOverlay(2);
+    const smaller = { split: false, target: { width: 1280, height: 720, fps: 60 } };
+    await expect(
+      pool.run(lease, smaller, async () => smaller),
+    ).resolves.toEqual(smaller);
+  });
+});

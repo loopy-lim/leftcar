@@ -96,20 +96,32 @@ export function resolveStreamingTarget(
  * 네이티브로, 그렇지 않으면 소스 그대로) instead of being upscaled after a
  * blind 1440 downscale. Missing or implausible metrics simply omit the cap
  * and the fixed anchors apply.
+ *
+ * `options.thermalShortSideCap` lowers the start anchor the same way
+ * externalRoute does (ADR-0006): thermal이 정한 상한은 min 체인으로 모든
+ * 다른 캡과 결합하며, 시작만 낮춘다 — 적응 정책의 상향 목표(maximum)는
+ * 별도로 유지된다.
  */
 export function resolveInitialStreamTarget(
   source: StreamingTargetSource,
   priority: StreamingPriority,
   maximum?: StreamingTargetSource,
-  options?: { externalRoute?: boolean; panelShortSide?: number },
+  options?: {
+    externalRoute?: boolean;
+    panelShortSide?: number;
+    thermalShortSideCap?: number;
+  },
 ): StreamingTarget {
   const priorityAnchor = priority === "clarity"
     ? CLARITY_STREAM_SHORT_SIDE
     : RESPONSIVE_STREAM_SHORT_SIDE;
-  const baseAnchor = options?.panelShortSide ?? priorityAnchor;
-  const anchor = options?.externalRoute
-    ? Math.min(baseAnchor, EXTERNAL_ROUTE_START_SHORT_SIDE)
-    : baseAnchor;
+  let anchor = options?.panelShortSide ?? priorityAnchor;
+  if (options?.externalRoute) {
+    anchor = Math.min(anchor, EXTERNAL_ROUTE_START_SHORT_SIDE);
+  }
+  if (options?.thermalShortSideCap !== undefined) {
+    anchor = Math.min(anchor, options.thermalShortSideCap);
+  }
   if (!maximum) return resolveStreamingTarget(source, priority, anchor);
   const maxLongSide = Math.max(maximum.width, maximum.height);
   const maxShortSide = Math.min(maximum.width, maximum.height);

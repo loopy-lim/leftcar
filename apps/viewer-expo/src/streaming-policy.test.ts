@@ -368,3 +368,38 @@ describe("capTargetToPanelShortSide", () => {
     ).toEqual({ width: 3840, height: 2160, fps: 60 });
   });
 });
+
+describe("thermal start cap", () => {
+  it("caps the start short side at the thermal value", () => {
+    expect(
+      resolveInitialStreamTarget(
+        { width: 3840, height: 2160 },
+        "clarity",
+        undefined,
+        { thermalShortSideCap: 1080 },
+      ),
+    ).toEqual({ width: 1920, height: 1080, fps: 60 });
+  });
+
+  it("combines externalRoute and panelShortSide as a min chain", () => {
+    expect(
+      resolveInitialStreamTarget(
+        { width: 3840, height: 2160 },
+        "clarity",
+        undefined,
+        { externalRoute: true, panelShortSide: 1440, thermalShortSideCap: 720 },
+      ),
+    ).toEqual({ width: 1280, height: 720, fps: 60 });
+  });
+
+  it("never widens a smaller explicit maximum", () => {
+    expect(
+      resolveInitialStreamTarget(
+        { width: 3840, height: 2160 },
+        "clarity",
+        { width: 1280, height: 720 },
+        { thermalShortSideCap: 2160 },
+      ),
+    ).toEqual({ width: 1280, height: 720, fps: 60 });
+  });
+});

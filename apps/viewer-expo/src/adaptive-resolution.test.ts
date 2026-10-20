@@ -547,3 +547,51 @@ describe("deriveQualityState", () => {
     expect(deriveQualityState(fallback, native)).toBe("fallback");
   });
 });
+
+describe("thermal upshift clamp", () => {
+  it("clamps an upshift to the thermal short-side cap", () => {
+    let state = seedAdaptiveResolutionState(sourceTarget, {
+      width: 2560,
+      height: 1440,
+      fps: 60,
+    });
+    let action = observeAdaptiveResolution(
+      state,
+      observation(1_000, { thermalCapShortSide: 1_080 }),
+    );
+    state = action.state;
+    for (let window = 1; window < 4; window += 1) {
+      action = observeAdaptiveResolution(
+        state,
+        observation(1_000 + window * 1_000, { thermalCapShortSide: 1_080 }),
+      );
+      state = action.state;
+    }
+    expect(action.action).toEqual({
+      kind: "upshift",
+      target: { width: 1920, height: 1080, fps: 60 },
+    });
+  });
+
+  it("does not touch the downshift path", () => {
+    let state = seedAdaptiveResolutionState(sourceTarget, sourceTarget);
+    const first = observeAdaptiveResolution(
+      state,
+      observation(1_000, {
+        receiverLossDelta: 3,
+        encodedFps: 48,
+        thermalCapShortSide: 720,
+      }),
+    );
+    state = first.state;
+    const second = observeAdaptiveResolution(
+      state,
+      observation(2_000, {
+        receiverLossDelta: 2,
+        encodedFps: 50,
+        thermalCapShortSide: 720,
+      }),
+    );
+    expect(second.action.kind).toBe("downshift");
+  });
+});
