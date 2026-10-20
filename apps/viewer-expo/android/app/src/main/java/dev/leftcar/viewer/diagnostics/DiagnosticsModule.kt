@@ -22,6 +22,7 @@ class DiagnosticsModule(
   private val storeOf: (Context) -> DiagnosticsStore,
   private val sinkOf: (Context) -> ExportSink,
   private val exportExecutor: Executor,
+  private val latestSampleOf: () -> DiagnosticsSample? = { DiagnosticsRuntime.latestSample() },
 ) : ReactContextBaseJavaModule(reactContext) {
   constructor(reactContext: ReactApplicationContext) : this(
     reactContext,
@@ -35,6 +36,31 @@ class DiagnosticsModule(
   @ReactMethod
   fun appendRecord(line: String, promise: Promise) {
     promise.resolve(storeOf(reactApplicationContext).append(line))
+  }
+
+  /**
+   * 최신 샘플 스냅숏 — thermal 인지 자원 상한(ADR-0006)의 입력. 값 없음은
+   * 0이 아니라 null로 남긴다(기록과 같은 원천, NDJSON 키와 같은 snake_case).
+   */
+  @ReactMethod
+  fun getLatestSample(promise: Promise) {
+    val sample = latestSampleOf() ?: run {
+      promise.resolve(null)
+      return
+    }
+    val map = JavaOnlyMap()
+    sample.batteryPercent?.let { map.putInt("battery_percent", it) } ?: map.putNull("battery_percent")
+    map.putBoolean("charging", sample.charging)
+    map.putInt("plugged", sample.plugged)
+    sample.voltageMv?.let { map.putInt("voltage_mv", it) } ?: map.putNull("voltage_mv")
+    sample.tempDeciC?.let { map.putInt("temp_deci_c", it) } ?: map.putNull("temp_deci_c")
+    sample.thermalStatus?.let { map.putInt("thermal_status", it) } ?: map.putNull("thermal_status")
+    sample.thermalHeadroom?.let { map.putDouble("thermal_headroom", it) } ?: map.putNull("thermal_headroom")
+    sample.releaseGapP50Ms?.let { map.putInt("release_gap_p50_ms", it) } ?: map.putNull("release_gap_p50_ms")
+    sample.releaseGapP95Ms?.let { map.putInt("release_gap_p95_ms", it) } ?: map.putNull("release_gap_p95_ms")
+    sample.releaseGapMaxMs?.let { map.putInt("release_gap_max_ms", it) } ?: map.putNull("release_gap_max_ms")
+    sample.releaseGapCount?.let { map.putInt("release_gap_count", it) } ?: map.putNull("release_gap_count")
+    promise.resolve(map)
   }
 
   /** 종류별 기록 개수 — 내보내기 전 사용자 확인용 요약(§16 "공유 전 확인"). */

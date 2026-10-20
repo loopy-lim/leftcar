@@ -22,12 +22,20 @@ import java.util.concurrent.Executors
  */
 object DiagnosticsRuntime {
   @Volatile private var storeRef: DiagnosticsStore? = null
+  @Volatile private var latestSampleRef: DiagnosticsSample? = null
   private var executorRef: ExecutorService? = null
 
   fun store(context: Context): DiagnosticsStore =
     storeRef ?: synchronized(this) {
       storeRef ?: create(context.applicationContext).also { storeRef = it }
     }
+
+  /** 최신 샘플 스냅숏 — thermal 인지 자원 상한(ADR-0006)의 유일한 입력이다. */
+  fun latestSample(): DiagnosticsSample? = latestSampleRef
+
+  private fun noteLatestSample(sample: DiagnosticsSample) {
+    latestSampleRef = sample
+  }
 
   fun exportExecutor(): ExecutorService =
     executorRef ?: synchronized(this) {
@@ -106,6 +114,7 @@ object DiagnosticsRuntime {
       upMs = { SystemClock.elapsedRealtime() },
       append = { line -> store.append(line) },
       schedule = { task, delayMs -> handler.postDelayed(task, delayMs) },
+      onSample = { noteLatestSample(it) },
     )
     sampler.start()
   }

@@ -34,7 +34,7 @@
 | Opus·balanced 표시 | 실험 선택 기능, 기본 OFF | 기준선에서 이득·회귀를 확인한 뒤 승격 |
 | HEVC·4K split | 코드와 과거 일부 실측 존재 | 새 후보 4K60·장시간 보장 아님; split 전송은 UDP |
 | 외부망 | Tailscale 주소·별칭, 명시적 WAN UPnP, 경로별 패킷 예산과 제한된 진단 도구 | 실제 NAT·CGNAT·릴레이 오버레이·망 전환·장시간 수용 미실행 |
-| 뷰어 진단 기록·내보내기(2026-10-19) | 배터리·thermal 15초 샘플과 세션·크래시 이벤트를 앱 내부에 기록([보안 문서 §16](07-security-privacy.md)), 설정 화면에서 요약 확인 후 Downloads로 사용자 내보내기. Galaxy XR 기기 꺼짐 원인 규명용([구현 계획](plans/2026-10-19-viewer-diagnostics.md)) | 내부 빌드 전용. 실기기 수집·내보내기·파일 회수는 미실행 |
+| 뷰어 진단 기록·내보내기(2026-10-19) | 배터리·thermal 15초 샘플과 세션·크래시 이벤트를 앱 내부에 기록([보안 문서 §16](07-security-privacy.md)), 설정 화면에서 요약 확인 후 Downloads로 사용자 내보내기. Galaxy XR 기기 꺼짐 원인 규명용([구현 계획](plans/2026-10-19-viewer-diagnostics.md)). 2026-10-20 확장: 표면 릴리스 간격(`release_gap_*`)·thermal 인지 자원 상한 이벤트([계획](plans/2026-10-20-thermal-cadence-rendezvous-plan.md)) | 내부 빌드 전용. 실기기 수집·내보내기·파일 회수는 미실행 |
 | Linux·iOS·자체 인터넷 relay·Full Space | 현재 안정화 범위 밖 | 이번 작업에서 추가하지 않음 |
 
 | Host / Viewer | 전송·프로필 | 소스·빌드 수준 | 현재 후보의 실제 수용 |

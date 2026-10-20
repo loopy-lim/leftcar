@@ -41,6 +41,7 @@ class DiagnosticsSampler(
   private val upMs: () -> Long,
   private val append: (String) -> Boolean,
   private val schedule: (Runnable, Long) -> Unit,
+  private val onSample: (DiagnosticsSample) -> Unit = {},
 ) {
   private var running = false
 
@@ -58,18 +59,15 @@ class DiagnosticsSampler(
     if (!running) return
     val cadence = streamCadence()?.let { unpackCadence(it) }
     val sample = sampleFromExtras(readSnapshot(), thermalStatus(), thermalHeadroom())
-    append(
-      formatSampleValues(
-        sample.copy(
-          releaseGapP50Ms = cadence?.p50Ms,
-          releaseGapP95Ms = cadence?.p95Ms,
-          releaseGapMaxMs = cadence?.maxMs,
-          releaseGapCount = cadence?.count,
-        ),
-        nowMs = nowMs(),
-        upMs = upMs(),
-      ),
-    )
+      .copy(
+        releaseGapP50Ms = cadence?.p50Ms,
+        releaseGapP95Ms = cadence?.p95Ms,
+        releaseGapMaxMs = cadence?.maxMs,
+        releaseGapCount = cadence?.count,
+      )
+    append(formatSampleValues(sample, nowMs = nowMs(), upMs = upMs()))
+    // 판단 없는 전달 — 최신 스냅숏 보관(DiagnosticsRuntime)은 이 훅뿐이다.
+    onSample(sample)
     schedule({ tick() }, intervalMs)
   }
 

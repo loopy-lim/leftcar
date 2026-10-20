@@ -40,13 +40,18 @@ class DiagnosticsModuleTest {
 
     private fun activeFile() = java.io.File(tmp.root, "leftcar-diagnostics.ndjson")
 
-    private fun module(store: DiagnosticsStore, sink: ExportSink? = null): DiagnosticsModule {
+    private fun module(
+        store: DiagnosticsStore,
+        sink: ExportSink? = null,
+        latestSampleOf: () -> DiagnosticsSample? = { null },
+    ): DiagnosticsModule {
         val context = TestReactContext(RuntimeEnvironment.getApplication())
         return DiagnosticsModule(
             context,
             storeOf = { store },
             sinkOf = { sink ?: error("sink 미주입") },
             exportExecutor = Executor { it.run() },
+            latestSampleOf = latestSampleOf,
         )
     }
 
@@ -102,6 +107,72 @@ class DiagnosticsModuleTest {
         val promise = RecordingPromise()
         module(storeWith()).uptimeMs(promise)
         assertTrue((promise.resolved as Number).toLong() >= 0)
+    }
+
+    @Test
+    fun `getLatestSample resolves the pinned snapshot fields`() {
+        val m = module(storeWith(), latestSampleOf = {
+            DiagnosticsSample(87, false, 0, 4123, 284, 3, 1.5, 16, 33, 120, 240)
+        })
+        val promise = RecordingPromise()
+        m.getLatestSample(promise)
+        val map = promise.resolved as WritableMap
+        assertEquals(87, map.getInt("battery_percent"))
+        assertEquals(false, map.getBoolean("charging"))
+        assertEquals(0, map.getInt("plugged"))
+        assertEquals(4123, map.getInt("voltage_mv"))
+        assertEquals(284, map.getInt("temp_deci_c"))
+        assertEquals(3, map.getInt("thermal_status"))
+        assertEquals(1.5, map.getDouble("thermal_headroom"), 0.0)
+        assertEquals(16, map.getInt("release_gap_p50_ms"))
+        assertEquals(33, map.getInt("release_gap_p95_ms"))
+        assertEquals(120, map.getInt("release_gap_max_ms"))
+        assertEquals(240, map.getInt("release_gap_count"))
+    }
+
+    @Test
+    fun `getLatestSample leaves absent numbers null not zero`() {
+        val m = module(storeWith(), latestSampleOf = {
+            DiagnosticsSample(null, false, 0, null, null, null, null)
+        })
+        val promise = RecordingPromise()
+        m.getLatestSample(promise)
+        val map = promise.resolved as WritableMap
+        assertTrue(map.isNull("battery_percent"))
+        assertTrue(map.isNull("thermal_status"))
+        assertTrue(map.isNull("release_gap_count"))
+        assertFalse(map.isNull("charging"))
+        assertFalse(map.isNull("plugged"))
+    }
+
+    @Test
+    fun `getLatestSample resolves null before the first tick`() {
+        val promise = RecordingPromise()
+        module(storeWith(), latestSampleOf = { null }).getLatestSample(promise)
+        assertFalse(promise.rejected)
+        assertEquals(1, promise.resolveCount)
+    }
+
+    @Test
+    fun `sampler reports each tick sample through the passthrough hook`() {
+        val captured = mutableListOf<DiagnosticsSample>()
+        val sampler = DiagnosticsSampler(
+            intervalMs = 1L,
+            readSnapshot = { batteryExtras() },
+            thermalStatus = { 3 },
+            thermalHeadroom = { null },
+            streamCadence = { (240L shl 48) or (16L shl 32) or (33L shl 16) or 120L },
+            nowMs = { 1 },
+            upMs = { 2 },
+            append = { _ -> true },
+            schedule = { _, _ -> },
+            onSample = { captured.add(it) },
+        )
+        sampler.start()
+        assertEquals(1, captured.size)
+        assertEquals(3, captured[0].thermalStatus)
+        assertEquals(16, captured[0].releaseGapP50Ms)
+        assertEquals(240, captured[0].releaseGapCount)
     }
 
     @Test
@@ -257,10 +328,13 @@ private class TestReactContext(context: android.content.Context) : ReactApplicat
 
 private class RecordingPromise : Promise {
     var resolved: Any? = null
+    var resolveCount = 0
+        private set
     var rejected = false
         private set
 
     override fun resolve(value: Any?) {
+        resolveCount += 1
         if (resolved == null) resolved = value
     }
 
