@@ -45,6 +45,7 @@ import { FileTransferCard } from "../src/FileTransferCard";
 import { formatErrorMessage } from "../src/control";
 import { summarizeCounts } from "../src/diagnostics";
 import { diagnosticsRecorder } from "../src/diagnostics-recorder";
+import { thermalState } from "../src/thermal-state";
 import { useAppTheme } from "../src/theme";
 import { useAppLanguage } from "../src/i18n";
 import { SafeArea, Action, Label, Notice, Surface } from "../src/ui/primitives";
@@ -934,6 +935,10 @@ export default function Catalog() {
   const [resolutionSession, setResolutionSession] = useState<number | null>(
     null,
   );
+  // Thermal 최신 스냅숏 예열(ADR-0006) — openDisplay 판정의 첫 값 확보.
+  useEffect(() => {
+    void thermalState.refresh();
+  }, []);
   const stream =
     model.streams.find((item) => item.session === resolutionSession) ?? null;
   const openSettings = useCallback(() => setSettingsOpen(true), []);

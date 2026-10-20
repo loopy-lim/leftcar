@@ -1,4 +1,5 @@
 import { useExtensionDisplay } from "./use-extension-display";
+import { thermalState } from "./thermal-state";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { NativeModules } from "react-native";
@@ -744,6 +745,12 @@ export function useCatalogModel() {
               }
             : undefined,
         );
+        // Thermal 인지 자원 상한(ADR-0006) — 최신 틱 값으로 판정하고 용량
+        // 오버레이·시작 단변 캡에 반영한다. 네이티브 부재·실패는 완화
+        // 미적용(현행 동작)으로 떨어진다.
+        await thermalState.refresh();
+        const thermalCaps = thermalState.currentCaps();
+        deviceDecoderReservations.setCapacityOverlay(thermalCaps.capacityCap);
         const maximumTarget = capTargetToPanelShortSide(
           resolveStreamMaximum(display, preferences.profileId),
           panelCap,
@@ -752,7 +759,11 @@ export function useCatalogModel() {
           display,
           streamingPriority,
           maximumTarget,
-          { externalRoute: externalMediaRoute, panelShortSide: panelCap },
+          {
+            externalRoute: externalMediaRoute,
+            panelShortSide: panelCap,
+            thermalShortSideCap: thermalCaps.startShortSideCap,
+          },
         );
         const requestedTarget = {
           width: initialTarget.width,

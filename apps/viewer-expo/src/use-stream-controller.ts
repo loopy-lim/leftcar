@@ -25,6 +25,7 @@ import {
 import { requestWithReconnect, requestForCurrentSelection } from "./catalog-helpers";
 import { controlHost } from "./session";
 import { streamSessionStore } from "./stream-session-store";
+import { thermalState } from "./thermal-state";
 import { shouldSwitchTransport } from "./transport-switch";
 import {
   claimStreamRestore,
@@ -363,6 +364,11 @@ export function useStreamController(
 
   useEffect(() => {
     if (!statusView || !reconfigureStreamRef.current) return;
+    // Thermal 캡은 상태 폴링 리듬에서만 갱신한다 — 별도 폴링 루프는
+    // R-011을 악화하므로 만들지 않는다(ADR-0006). stale이면 비동기 갱신을
+    // 걸고, 이번 틱은 직전 캡으로 관측한다(2초 지연은 thermal 스케일에서 무의미).
+    if (thermalState.isStale()) void thermalState.refresh();
+    const thermalShortSideCap = thermalState.currentCaps().startShortSideCap;
     const sessionsById = new Map(
       statusView.sessions.map((session) => [session.session, session]),
     );
@@ -409,6 +415,7 @@ export function useStreamController(
         recoveryObserved: recovery > previousRecovery,
         floorCollapseDelta: Math.max(0, floorCollapse - previousFloorCollapse),
         rebindInFlight: adaptiveRebinds.current.has(active.session),
+        thermalCapShortSide: thermalShortSideCap,
       });
       adaptiveStates.current.set(active.session, observed.state);
       if (observed.action.kind !== "keep") {

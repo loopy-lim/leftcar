@@ -36,6 +36,7 @@ import {
 } from "../src/recent-hosts";
 import { useAppLanguage } from "../src/i18n";
 import { useConnectionLost } from "../src/use-connection-lost";
+import { thermalState } from "../src/thermal-state";
 import { ConnectedHeroCard } from "../src/components/ConnectedHeroCard";
 import { StandbyHeroCard } from "../src/components/StandbyHeroCard";
 import { SetupGuideCard } from "../src/components/SetupGuideCard";
@@ -170,6 +171,8 @@ export default function Hub() {
       setAutoConnecting(false);
       setConnectionError(null);
       checkConnection();
+      // Thermal 최신 스냅숏 예열(ADR-0006) — 실패는 조용히 완화 미적용.
+      void thermalState.refresh();
       void getRecentHosts().then((hosts) => {
         if (controller.signal.aborted) return;
         const target = hosts[0] ?? null;
