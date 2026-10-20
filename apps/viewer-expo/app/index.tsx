@@ -276,7 +276,13 @@ export default function Hub() {
               onOpenPairing={openPairing}
               onCancelReconnect={cancelReconnect}
             />
-            {!lastHost && <SetupGuideCard t={t} />}
+            {!lastHost && (
+              <SetupGuideCard
+                t={t}
+                onOpenHostPicker={openHostPicker}
+                onOpenPairing={openPairing}
+              />
+            )}
           </>
         )}
         <InputSharingEntry connected={isConnected} t={t} />
