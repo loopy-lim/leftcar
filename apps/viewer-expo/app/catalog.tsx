@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { cn } from "@leftcar/ui-tokens";
+import { cn, interpolate } from "@leftcar/ui-tokens";
 import type { DisplayInfo } from "../src/control";
 import { captureRequestContext, isRequestContextCurrent } from "../src/session";
 import { requestForCurrentSelection } from "../src/catalog-helpers";
@@ -368,6 +368,7 @@ function SettingsContent({ model }: { model: CatalogModel }) {
   const { t } = useAppLanguage();
   return (
     <>
+      <LanguageSection />
       <NativeSettingsNotice model={model} />
       <PersistenceNotice model={model} />
       <Surface className="gap-2">
@@ -405,6 +406,31 @@ function SettingsContent({ model }: { model: CatalogModel }) {
       <AdvancedOptions model={model} />
       <DiagnosticsControls />
     </>
+  );
+}
+
+/** 설정 Sheet의 언어 전환 — 허브 우상단 토글과 같은 상태를 바꾼다. XR에서는
+ * 설정에 들어와야 언어를 찾는 경우가 많아 진입점을 여기도 둔다. */
+function LanguageSection() {
+  const { t, language, setLanguage } = useAppLanguage();
+  return (
+    <Surface className="gap-2">
+      <Label variant="title">{t.common.languageTitle}</Label>
+      <View className="flex-row gap-2">
+        <Action
+          variant={language === "ko" ? "primary" : "secondary"}
+          label="한국어"
+          onPress={() => setLanguage("ko")}
+          accessibilityLabel={t.common.toggleLanguage}
+        />
+        <Action
+          variant={language === "en" ? "primary" : "secondary"}
+          label="English"
+          onPress={() => setLanguage("en")}
+          accessibilityLabel={t.common.toggleLanguage}
+        />
+      </View>
+    </Surface>
   );
 }
 
@@ -468,7 +494,7 @@ function DiagnosticsControls() {
           />
           {savedName ? (
             <Label variant="caption" tone="muted">
-              {t.viewer.diagnosticsExportDone.replace("{name}", savedName)}
+              {interpolate(t.viewer.diagnosticsExportDone, { name: savedName })}
             </Label>
           ) : null}
           {failed ? (
