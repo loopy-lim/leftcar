@@ -21,7 +21,9 @@ export type DiagnosticsSessionEvent =
   | "foreground"
   | "background"
   | "stream_start"
-  | "stream_stop";
+  | "stream_stop"
+  | "thermal_cap"
+  | "thermal_cap_cleared";
 
 export interface DiagnosticsSessionRecord {
   /** epoch ms — 사용자 기록과의 대조용. */
@@ -36,6 +38,10 @@ export interface DiagnosticsSessionRecord {
   /** 화질 프로필·인코더 실험 ID 같은 안정적 식별자. */
   profile?: string;
   decoderSlots?: number;
+  /** thermal_cap 진입 시 상태(PowerManager 0..6)·용량 상한·시작 단변 상한. */
+  thermalStatus?: number;
+  capacityCap?: number;
+  startShortSideCap?: number;
 }
 
 const SESSION_EVENTS = new Set<string>([
@@ -44,6 +50,8 @@ const SESSION_EVENTS = new Set<string>([
   "background",
   "stream_start",
   "stream_stop",
+  "thermal_cap",
+  "thermal_cap_cleared",
 ]);
 
 /** 식별자 허용 문자셋: 단어 문자·점·대시·덧셈 기호. 공백·콜론·슬래시는 없다. */
@@ -94,6 +102,30 @@ export function formatSession(record: DiagnosticsSessionRecord): string {
     record.decoderSlots <= 8
   ) {
     payload.decoder_slots = record.decoderSlots;
+  }
+  if (
+    record.thermalStatus !== undefined &&
+    Number.isInteger(record.thermalStatus) &&
+    record.thermalStatus >= 0 &&
+    record.thermalStatus <= 6
+  ) {
+    payload.thermal_status = record.thermalStatus;
+  }
+  if (
+    record.capacityCap !== undefined &&
+    Number.isInteger(record.capacityCap) &&
+    record.capacityCap >= 1 &&
+    record.capacityCap <= 8
+  ) {
+    payload.capacity_cap = record.capacityCap;
+  }
+  if (
+    record.startShortSideCap !== undefined &&
+    Number.isInteger(record.startShortSideCap) &&
+    record.startShortSideCap >= 1 &&
+    record.startShortSideCap <= 8_191
+  ) {
+    payload.start_short_side_cap = record.startShortSideCap;
   }
   return JSON.stringify(payload);
 }

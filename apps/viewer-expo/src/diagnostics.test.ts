@@ -147,3 +147,43 @@ describe("summarizeCounts", () => {
     expect(summarizeCounts({ crash: -1 })).toBe("");
   });
 });
+
+describe("thermal_cap 세션 이벤트", () => {
+  const base = { ts: 1_760_000_000_000, upMs: 1_234_567 };
+
+  it("formats the cap event with its numeric fields in schema order", () => {
+    expect(
+      formatSession({
+        ...base,
+        event: "thermal_cap",
+        thermalStatus: 3,
+        capacityCap: 2,
+        startShortSideCap: 1_080,
+      }),
+    ).toBe(
+      '{"ts":1760000000000,"up_ms":1234567,"kind":"session","event":"thermal_cap","thermal_status":3,"capacity_cap":2,"start_short_side_cap":1080}',
+    );
+  });
+
+  it("formats the cleared event without cap fields", () => {
+    expect(
+      formatSession({ ...base, event: "thermal_cap_cleared", thermalStatus: 1 }),
+    ).toBe(
+      '{"ts":1760000000000,"up_ms":1234567,"kind":"session","event":"thermal_cap_cleared","thermal_status":1}',
+    );
+  });
+
+  it("omits implausible numeric fields instead of leaking them", () => {
+    const line = formatSession({
+      ...base,
+      event: "thermal_cap",
+      thermalStatus: 99,
+      capacityCap: 0,
+      startShortSideCap: 2.5,
+    });
+    expect(line).not.toContain("thermal_status");
+    expect(line).not.toContain("capacity_cap");
+    expect(line).not.toContain("start_short_side_cap");
+    expect(line).toContain('"event":"thermal_cap"');
+  });
+});

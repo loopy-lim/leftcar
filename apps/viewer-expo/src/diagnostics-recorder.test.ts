@@ -129,3 +129,29 @@ describe("DiagnosticsRecorder", () => {
     expect(await recorder.exportToDownloads()).toBe("leftcar-diagnostics-x.ndjson");
   });
 });
+
+describe("DiagnosticsRecorder thermal events", () => {
+  it("records the thermal cap entry with its caps", async () => {
+    const native = fakeNative();
+    const recorder = new DiagnosticsRecorder(ports({ native }));
+    await recorder.recordThermalCap(3, 2, 1_080);
+    expect(native.lines).toEqual([
+      '{"ts":1760000000000,"up_ms":45000,"kind":"session","event":"thermal_cap","thermal_status":3,"capacity_cap":2,"start_short_side_cap":1080}',
+    ]);
+  });
+
+  it("records the thermal cap clear", async () => {
+    const native = fakeNative();
+    const recorder = new DiagnosticsRecorder(ports({ native }));
+    await recorder.recordThermalCapCleared(1);
+    expect(native.lines).toEqual([
+      '{"ts":1760000000000,"up_ms":45000,"kind":"session","event":"thermal_cap_cleared","thermal_status":1}',
+    ]);
+  });
+
+  it("is a no-op for thermal events without native", async () => {
+    const recorder = new DiagnosticsRecorder(ports({}));
+    await expect(recorder.recordThermalCap(3, 2)).resolves.toBeUndefined();
+    await expect(recorder.recordThermalCapCleared(1)).resolves.toBeUndefined();
+  });
+});

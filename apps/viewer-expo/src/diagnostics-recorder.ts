@@ -49,6 +49,30 @@ export class DiagnosticsRecorder {
     return this.append({ ts: this.ports.epochMs(), event: "stream_stop" });
   }
 
+  /** thermal 상한 진입·격상(상태 변화 edge에서만 1회). */
+  recordThermalCap(
+    thermalStatus: number,
+    capacityCap: number,
+    startShortSideCap?: number,
+  ): Promise<void> {
+    return this.append({
+      ts: this.ports.epochMs(),
+      event: "thermal_cap",
+      thermalStatus,
+      capacityCap,
+      startShortSideCap,
+    });
+  }
+
+  /** thermal 상한 해제(edge에서만 1회). */
+  recordThermalCapCleared(thermalStatus: number): Promise<void> {
+    return this.append({
+      ts: this.ports.epochMs(),
+      event: "thermal_cap_cleared",
+      thermalStatus,
+    });
+  }
+
   /** AppState 구독을 시작하고 구독 해제 함수를 돌려준다. */
   startLifecycle(): () => void {
     let previous = this.ports.currentState();

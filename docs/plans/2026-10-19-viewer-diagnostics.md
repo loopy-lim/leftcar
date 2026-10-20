@@ -50,13 +50,19 @@ export const BOOT_DETECTION_UPTIME_MS = 120_000;
 
 // 세션 레코드는 TS가 살아 있을 때만 발생한다. sample·crash 레코드는
 // JS 사망 후에도 기록되어야 하므로 Kotlin 측이 같은 스키마로 직접 기록한다.
+// 확장(2026-10-20): thermal_cap·thermal_cap_cleared — thermal 인지 자원
+// 상한(ADR-0006)의 상태 변화 edge에서만 기록된다. 숫자 필드 thermal_status
+// (0..6)·capacity_cap(1..8)·start_short_side_cap(1..8191)는 허용 범위 밖에서
+// 생략된다.
 export type DiagnosticsSessionEvent =
   | "session_start" | "foreground" | "background"
-  | "stream_start" | "stream_stop";
+  | "stream_start" | "stream_stop"
+  | "thermal_cap" | "thermal_cap_cleared";
 export interface DiagnosticsSessionRecord {
   ts: number; upMs: number; event: DiagnosticsSessionEvent;
   appVersion?: string; osApi?: number; bootDetected?: boolean;
   profile?: string; decoderSlots?: number;
+  thermalStatus?: number; capacityCap?: number; startShortSideCap?: number;
 }
 export function formatSession(record: DiagnosticsSessionRecord): string;
 export function summarizeCounts(counts: Readonly<Record<string, number>>): string;
