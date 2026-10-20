@@ -199,6 +199,7 @@ extern "C" {
     fn leftcar_jni_set_audio_stream(instance: *const c_char, enabled: bool) -> i32;
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
+    fn leftcar_jni_stream_cadence() -> i64;
     fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
     fn leftcar_jni_surface_release_latency(instance: *const c_char) -> i32;
 }
@@ -434,4 +435,18 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_setPresentati
         unsafe { leftcar_jni_set_presentation_smooth(smooth != 0) }
     })
     .unwrap_or(3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamCadence(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+) -> i64 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 0;
+        }
+        unsafe { leftcar_jni_stream_cadence() }
+    })
+    .unwrap_or(0)
 }

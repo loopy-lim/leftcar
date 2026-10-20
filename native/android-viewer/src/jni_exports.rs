@@ -1112,6 +1112,31 @@ pub extern "C" fn leftcar_jni_set_presentation_smooth(smooth: bool) -> i32 {
     .unwrap_or(LEFTCAR_ERR_PANIC)
 }
 
+/// Cadence window pack for the diagnostics sampler: count | p50 | p95 | max,
+/// 각 u16 레인(4×16비트). count는 65535로 캡하고, 전부 0이면 데이터 없음이다
+/// (input_rtt_ms 센티널 선례). read_and_reset 게터라 한 번 호출이 윈도우
+/// 하나를 소비한다.
+pub fn pack_cadence_window(window: viewer_decoder::CadenceWindow) -> i64 {
+    let count = window.count.min(u64::from(u16::MAX));
+    let p50 = u64::from(window.p50_ms.min(u32::from(u16::MAX)));
+    let p95 = u64::from(window.p95_ms.min(u32::from(u16::MAX)));
+    let max = u64::from(window.max_ms.min(u32::from(u16::MAX)));
+    ((count << 48) | (p50 << 32) | (p95 << 16) | max) as i64
+}
+
+/// Stateless cadence getter. Per-stream 구분 없이 전 창 집계 한 윈도우를
+/// 돌려준다(락 경합·비었을 때 0).
+#[no_mangle]
+pub extern "C" fn leftcar_jni_stream_cadence() -> i64 {
+    std::panic::catch_unwind(|| {
+        match viewer_decoder::read_and_reset_surface_cadence() {
+            Some(window) => pack_cadence_window(window),
+            None => 0,
+        }
+    })
+    .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod display_boundary_tests {
     use super::*;
@@ -1159,5 +1184,44 @@ mod display_boundary_tests {
             LEFTCAR_ERR_STATE
         );
         forget_owned_renderer(702, "display-boundary-7", &current);
+    }
+
+    #[test]
+    fn cadence_pack_orders_count_and_percentiles_into_u16_lanes() {
+        let packed = pack_cadence_window(viewer_decoder::CadenceWindow {
+            count: 240,
+            p50_ms: 16,
+            p95_ms: 33,
+            p99_ms: 45,
+            max_ms: 120,
+        });
+        assert_eq!((packed >> 48) & 0xFFFF, 240);
+        assert_eq!((packed >> 32) & 0xFFFF, 16);
+        assert_eq!((packed >> 16) & 0xFFFF, 33);
+        // p99는 pack에 없다 — 샘플 레코드는 count·p50·p95·max만 소비한다.
+        assert_eq!(packed & 0xFFFF, 120);
+    }
+
+    #[test]
+    fn cadence_pack_caps_lanes_and_sentinels_empty_windows() {
+        let saturated = pack_cadence_window(viewer_decoder::CadenceWindow {
+            count: 70_000,
+            p50_ms: 70_000,
+            p95_ms: 0,
+            p99_ms: 0,
+            max_ms: 0,
+        });
+        assert_eq!((saturated >> 48) & 0xFFFF, 65_535);
+        assert_eq!((saturated >> 32) & 0xFFFF, 65_535);
+        assert_eq!(
+            pack_cadence_window(viewer_decoder::CadenceWindow {
+                count: 0,
+                p50_ms: 0,
+                p95_ms: 0,
+                p99_ms: 0,
+                max_ms: 0,
+            }),
+            0
+        );
     }
 }

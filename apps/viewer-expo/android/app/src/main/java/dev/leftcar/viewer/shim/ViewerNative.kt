@@ -117,6 +117,9 @@ object ViewerNative {
     ): Int
     external fun displayFrame(state: Long, instanceId: String, balanced: Boolean, displayId: Int, frameNs: Long, periodNs: Long): Int
     external fun setPresentationSmooth(smooth: Boolean): Int
+
+    /** 전 창 집계 표면 릴리스 간격 윈도우 — count|p50|p95|max 각 u16 pack, 0은 데이터 없음. 1회 소비. */
+    external fun streamCadence(): Long
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
     external fun sendPointer(
