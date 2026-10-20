@@ -64,7 +64,10 @@ struct SplitPolicyTests {
         expect(!dependent.requestKeyframe)
         expect(barrier.insert(.init(side: .left, sequence: lost.sequence, value: Data([30]), valid: true), nowNs: 0) == .wait)
         expect(barrier.insert(.init(side: .right, sequence: dependent.sequence, value: Data([31]), valid: true), nowNs: 5) == .wait)
-        expect(barrier.takeExpiredSequences(nowNs: 8) == [lost.sequence])
+        let expiredEntries = barrier.takeExpiredPairEntries(nowNs: 8)
+        expect(expiredEntries.count == 1 && expiredEntries[0].sequence == lost.sequence)
+        expect(expiredEntries[0].missingSide == .right, "soft expiry must identify the missing side")
+        expect(expiredEntries[0].readyValue == Data([30]), "soft expiry must return the ready half")
         let recovery = pairs.expirePairs(sequences: [lost.sequence], generation: lost.generation, barrier: &barrier)!
         expect(barrier.retainedValueCount == 0, "expiry must release dependent retained buffers")
         expect(recovery.releasedPairCount == 2, "expiry must retire all admitted dependent encode slots")
@@ -122,6 +125,37 @@ struct SplitPolicyTests {
         print("PASS: failed IDR retries once and missing carrier does not invent a capture")
 
         print("PASS: production expiry policy releases synthetic retained half-pairs")
+
+        // 실험 1 소프트 만료 — 순수 계층 계약.
+        var softBarrier = EncodedPairAssembler<Data>(frameBudgetNs: 8, maximumRetainedSequences: 5)
+        expect(softBarrier.insert(.init(side: .left, sequence: 10, value: Data([1]), valid: true), nowNs: 0) == .wait)
+        expect(softBarrier.insert(.init(side: .right, sequence: 11, value: Data([2]), valid: true), nowNs: 0) == .wait)
+        expect(softBarrier.insert(.init(side: .left, sequence: 12, value: Data([3]), valid: true), nowNs: 4) == .wait)
+        let softExpired = softBarrier.takeExpiredPairEntries(nowNs: 8)
+        expect(softExpired.map(\.sequence) == [10, 11], "a half pair still inside its own budget must survive soft expiry")
+        expect(softExpired[0].missingSide == .right && softExpired[0].readyValue == Data([1]))
+        expect(softExpired[1].missingSide == .left && softExpired[1].readyValue == Data([2]))
+        expect(softBarrier.retainedSequenceCount == 1 && softBarrier.retainedValueCount == 1, "healthy pairs must not be cascade-wiped")
+        expect(softBarrier.takeExpiredPairEntries(nowNs: 8).isEmpty, "expired sequences are removed exactly once")
+
+        var softFlow = SplitFlowControlState(capacity: 5)
+        var softPairs = SplitPairLifecycleState()
+        let softBootLease = softFlow.admit()!
+        let softBoot = softPairs.admit(lease: softBootLease, maximumInFlightPairs: 5)!
+        expect(softBoot.requestKeyframe, "first admission is the paired IDR boundary")
+        expect(softPairs.completePair(sequence: softBoot.sequence) == softBootLease)
+        expect(softFlow.complete(softBootLease))
+        let softLeaseA = softFlow.admit()!
+        let softA = softPairs.admit(lease: softLeaseA, maximumInFlightPairs: 5)!
+        let softLeaseB = softFlow.admit()!
+        let softB = softPairs.admit(lease: softLeaseB, maximumInFlightPairs: 5)!
+        let generationBefore = softPairs.recoveryGeneration
+        expect(softPairs.expireSinglePair(sequence: softA.sequence) == softLeaseA, "soft expiry returns the cancelled lease")
+        expect(softPairs.recoveryGeneration == generationBefore, "soft expiry must not bump the recovery generation")
+        expect(softPairs.inFlightPairs == 1, "sibling in-flight pairs survive a soft expiry")
+        expect(softPairs.completePair(sequence: softB.sequence) == softLeaseB)
+        expect(softPairs.expireSinglePair(sequence: softA.sequence) == nil, "a cancelled sequence releases once")
+        print("PASS: soft expiry cancels one pair without touching the generation")
     }
     static func testRecoveryTransitionSeedsBeforeScheduledDrain() {
         var flow = SplitFlowControlState(capacity: 3)

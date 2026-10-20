@@ -25,6 +25,15 @@ private struct PendingEncodedPair<Value> {
     }
 }
 
+/// 실험 1 소프트 만료 엔트리 — 시퀀스별로 미도착 면과 이미 준비된 반쪽을
+/// 함께 돌려준다. 파이프라인은 준비 반쪽을 단독 전송하고(왼쪽 준비일 때,
+/// 기존 left-solo 와이어 형태), 미도착 면에만 타일 키프레임을 요청한다.
+struct ExpiredPairEntry<Value> {
+    let sequence: UInt64
+    let missingSide: TileSide
+    let readyValue: Value?
+}
+
 struct EncodedPairAssembler<Value> {
     private let frameBudgetNs: UInt64
     private let maximumRetainedSequences: Int
@@ -98,17 +107,28 @@ struct EncodedPairAssembler<Value> {
     /// late frame and must not cascade-wipe healthy pairs that are still
     /// waiting for their peer.
     mutating func takeExpiredSequences(nowNs: UInt64) -> [UInt64] {
-        var expired = [UInt64]()
+        takeExpiredPairEntries(nowNs: nowNs).map(\.sequence)
+    }
+
+    mutating func takeExpiredPairEntries(nowNs: UInt64) -> [ExpiredPairEntry<Value>] {
+        var expired = [ExpiredPairEntry<Value>]()
         for (sequence, pair) in pending
         where nowNs >= pair.firstReadyNs
             && nowNs - pair.firstReadyNs >= frameBudgetNs {
-            expired.append(sequence)
+            switch (pair.left, pair.right) {
+            case (let left?, nil):
+                expired.append(.init(sequence: sequence, missingSide: .right, readyValue: left))
+            case (nil, let right?):
+                expired.append(.init(sequence: sequence, missingSide: .left, readyValue: right))
+            default:
+                expired.append(.init(sequence: sequence, missingSide: .left, readyValue: nil))
+            }
         }
         guard !expired.isEmpty else { return [] }
-        for sequence in expired {
-            pending.removeValue(forKey: sequence)
+        for entry in expired {
+            pending.removeValue(forKey: entry.sequence)
         }
-        return expired.sorted()
+        return expired.sorted { $0.sequence < $1.sequence }
     }
 
     mutating func reset() {

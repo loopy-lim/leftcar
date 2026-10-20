@@ -109,6 +109,14 @@ struct SplitPairLifecycleState {
         return leasesBySequence.removeValue(forKey: sequence)
     }
 
+    /// 소프트 만료(실험 1): 이 시퀀스의 in-flight 슬롯과 lease만 회수한다.
+    /// recovery generation은 불변 — 다른 in-flight 페어와 타일 델타 사슬은
+    /// 살아 있어야 한다. 늦게 도착한 반쪽 콜백은 파이프라인의 취소 목록으로
+    /// 폐기된다. 미제 시퀀스(이미 회수됨)는 nil이다.
+    mutating func expireSinglePair(sequence: UInt64) -> SplitFlowLease? {
+        completePair(sequence: sequence)
+    }
+
     mutating func beginPairedRecovery() -> SplitPairRecovery {
         let recovery = SplitPairRecovery(
             releasedPairCount: inFlightSequences.count,
