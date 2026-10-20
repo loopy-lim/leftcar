@@ -1,7 +1,9 @@
+mod cadence;
 mod decoder;
 pub(crate) mod ffi;
 mod output;
 
+pub use cadence::*;
 pub use decoder::*;
 pub use output::*;
 

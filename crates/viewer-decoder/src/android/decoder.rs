@@ -637,6 +637,7 @@ impl AndroidDecoder {
                 }
                 self.frames_rendered += 1;
                 self.last_released_pts_us = Some(output.pts_us);
+                super::cadence::record_surface_release();
                 Ok(true)
             }
             Some(target) => {
@@ -684,6 +685,7 @@ impl AndroidDecoder {
                         }
                         self.frames_rendered += 1;
                         self.last_released_pts_us = Some(output.pts_us);
+                        super::cadence::record_surface_release();
                     } else {
                         self.discard_output(output)?;
                     }
@@ -706,6 +708,7 @@ impl AndroidDecoder {
                 self.frames_rendered += 1;
                 self.last_released_pts_us = Some(output.pts_us);
                 self.last_paced_target_ns = Some(target);
+                super::cadence::record_surface_release();
                 Ok(true)
             }
         }
@@ -730,6 +733,7 @@ impl AndroidDecoder {
                     return Err(DecoderError::OpFailed { status: r });
                 }
                 self.frames_rendered += 1;
+                super::cadence::record_surface_release();
                 Ok(true)
             }
             err => Err(DecoderError::OpFailed { status: err as i32 }),
