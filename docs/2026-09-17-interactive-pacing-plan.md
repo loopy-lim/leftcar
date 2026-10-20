@@ -49,6 +49,7 @@
 기존 인프라 재활용: `LEFTCAR_FRAME_TRACE=1`(프레임별 전송 JSON, `artifacts/.../debug/summarize_trace.py`), `tools/stream-stats.py --log` JSONL, `tools/stream-gate.py`(counter-continuity 게이트 포함).
 
 연기(명시): viewer 표시 간격 p50/p95/p99·최장 gap 계측 — `native/android-viewer`와 Kotlin stream 파일에 다른 세션의 미커밋 경화가 있어 충돌을 피하기 위해 별도 배치로 진행한다. LTR/frames-ACK는 복구가 여전히 1위 이후에만 검토.
+연기 해소(2026-10-20): 표시 간격 계측이 구현됐다 — viewer-decoder `PRESENTATION_CADENCE`(release_output_at + 단일 render 경로 4곳) → JNI `streamCadence()` → 진단 샘플러 15초 틱이 NDJSON sample 레코드에 `release_gap_p50/p95/max_ms/count`로 기록(docs/plans/2026-10-20-thermal-cadence-rendezvous-plan.md T1.1~T1.3). 전 창 전역 집계, 게이트 경계값 없음(수집 선행). 실기 수집 후 P3·balanced A/B 판정 재개.
 
 ## 5. 실험 계획 (브리프 Phase 2–7 매핑)
 

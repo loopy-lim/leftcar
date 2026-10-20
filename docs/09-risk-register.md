@@ -39,7 +39,7 @@
 | R-008 | macOS 최소화/가림/Space 상태에서 창 캡처가 기대와 다름 | High | High | H16-H20 | 사용 조건 문서, display capture, virtual display 재검토 | Open |
 | R-009 | 다중 ScreenCaptureKit/VideoToolbox session이 Host 자원 초과 | Medium | High | H17-H18 | adaptive profile, shared budget, source 상한 | Open |
 | R-010 | H.264 4:2:0 text 품질이 모니터 용도에 부족 | Medium | High | H20/H21 | bitrate/scale, HEVC, 중요 창 고품질 | Open |
-| R-011 | 4창에서 Galaxy XR thermal/battery가 급격히 악화 | High | High | H08/H36 | dynamic FPS/resolution, charger mode, 상한 | Open |
+| R-011 | 4창에서 Galaxy XR thermal/battery가 급격히 악화 | High | High | H08/H36 | 완화 구현(ADR-0006, 2026-10-20): thermal 인지 디코더 용량 상한(SEVERE→2·CRITICAL→1)·시작 단변 캡(1080/720)·적응 upshift 클램프·저배터리(≤15% 방전) 추가 감축. charger mode는 배터리 축으로 해석(충전 중 thermal 완화 없음). **실기 검증 전 — docs/plans/2026-10-20 T5.2 대기** | Open |
 | R-012 | source 창 재생성 시 ID가 바뀌어 잘못 복구 | Medium | High | H16/H29 | 명시적 reselect, revision, title heuristic 금지 | Open |
 | R-013 | pairing 또는 source metadata가 log에 노출 | Medium | Critical | H22-H27/H37 | allowlist log, redaction property tests | Open |
 | R-014 | Android XR/SDK/System UI 동작이 업데이트로 변경 | High | High | 각 release | 일반 Android API 우선, device matrix, pin/compat test | Accepted |
@@ -150,6 +150,7 @@ source identity를 제목/위치 heuristic으로 자동 재연결하면 잘못�
 | Q-012 | Play Store vs sideload/internal | P8 | distribution requirements |
 | Q-013 | Overview mode 포함 | beta | user feedback |
 | Q-014 | Linux 우선순위 | post-v1 | demand |
+| Q-015 | 커서 60Hz JNI 폴링(`CursorOverlayView`, 033f1da 끊김 회귀로 의도적 재도입)의 4창 thermal 비용 | thermal 진단·cadence 데이터 확보 후(docs/plans/2026-10-20 T5.2) | 폴링 간격 재조정 A/B |
 
 ## 9. 위험 갱신 템플릿
 
