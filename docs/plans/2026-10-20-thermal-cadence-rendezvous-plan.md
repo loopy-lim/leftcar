@@ -123,9 +123,9 @@ Files:
 - Modify: `native/macos-capture-shim/Sources/Split/EncodedPairAssembler.swift`(`takeExpiredSequences` → `[(sequence, missingSide, readyValue?)]`), `SplitPairLifecycleState.swift`(`expireSinglePair(sequence:)` — generation 불변, 해당 시퀀스 in-flight·lease만 제거)
 - Test: `Tests/SplitPolicyTests.swift`
 
-- [ ] 테스트: 만료 시퀀스의 미도착 면 식별, 예산 내 반쪽 보존, expireSinglePair 후 generation·타 in-flight 불변·lease 반환.
-- [ ] `tools/build-macos-capture-shim.zsh split-policy-test <out> && <out>` exit 0.
-- [ ] 커밋: `feat(capture): 페어 만료의 타일별 폐기 준비`
+- [x] 테스트: 만료 시퀀스의 미도착 면 식별, 예산 내 반쪽 보존, expireSinglePair 후 generation·타 in-flight 불변·lease 반환.
+- [x] `tools/build-macos-capture-shim.zsh split-policy-test <out> && <out>` exit 0.
+- [x] 커밋: `feat(capture): 페어 만료의 타일별 폐기 준비`
 
 ### T3.2: 랑데부 소프트 만료 경로 (Swift)
 
@@ -133,18 +133,18 @@ Files:
 - Modify: `native/macos-capture-shim/Sources/Split/DualEncoderPipeline.swift`(handlePairCallbackExpiry 정상 분기 교체, cancelledSequences 등록, publish 가드 — 늦은 AU lease 회수·폐기, `tileEmittedSolo` 이벤트), `CaptureSession+Split.swift`(이벤트 소비), `SplitRecoveryPolicy.swift`(필요 시 헬퍼)
 - Test: `Tests/SplitPipelineTests.swift`
 
-- [ ] 테스트: 오른쪽 타일 지연 합성 → pairExpired + dropped(리셋) 부재 + 왼쪽 단독 emit + 오른쪽 requestTileKeyframe + 늦은 오른쪽 AU 폐기 + 정상 페어 지속 + 연속 2회 만료 하드 밸브 + generation 불변 + fault injection 상호(fault 주입 시 기존 경로 유지).
-- [ ] `split-test` + `split-policy-test` 재실행 exit 0.
-- [ ] 커밋: `feat(capture): 랑데부 만료를 늦은 타일 폐기+단독 IDR로 완화(실험 1)`
+- [x] 테스트: 오른쪽 타일 지연 합성 → pairExpired + dropped(리셋) 부재 + 왼쪽 단독 emit + 오른쪽 requestTileKeyframe + 늦은 오른쪽 AU 폐기 + 정상 페어 지속 + 연속 2회 만료 하드 밸브 + generation 불변 + fault injection 상호(fault 주입 시 기존 경로 유지).
+- [x] `split-test` + `split-policy-test` 재실행 exit 0.
+- [x] 커밋: `feat(capture): 랑데부 만료를 늦은 타일 폐기+단독 IDR로 완화(실험 1)`
 
 ### T4.1: 첫 실행 가이드 강화 (React)
 
 Files:
 - Modify: `apps/viewer-expo/src/components/SetupGuideCard.tsx`(행동 체크리스트: Mac 호스트 앱 실행 → 페어링 Action → 창 열기, 완료 상태·완료 시 축소), `app/index.tsx`(props: lastHost·isConnected 전달), `packages/ui-tokens/src/i18n.ts`(viewer 네임스페이스 ko/en)
 
-- [ ] i18n parity 테스트 통과, 완료 판정 순수 로직 테스트.
-- [ ] `bun run test` + `bun run typecheck` + react-doctor 100/100.
-- [ ] 커밋: `feat(viewer): 첫 실행 가이드를 행동 가능한 체크리스트로 강화`
+- [x] i18n parity 테스트 통과, 완료 판정 순수 로직 테스트.
+- [x] `bun run test` + `bun run typecheck` + react-doctor 100/100.
+- [x] 커밋: `feat(viewer): 첫 실행 가이드를 행동 가능한 체크리스트로 강화`
 
 ### T4.2: 설정 언어 전환 + 치환 정리 (React)
 
@@ -152,32 +152,32 @@ Files:
 - Modify: `app/catalog.tsx`(SettingsContent 언어 섹션 — index.tsx 토글 로직 이식, :470 `.replace` → `interpolate`), `packages/ui-tokens/src/i18n.ts`
 - 검토: `apps/host-desktop/src/streamTermination.ts` 한국어 — host i18n 인프라 부재 시 이번 배치 제외·문서화
 
-- [ ] `bun run test` + typecheck + react-doctor.
-- [ ] 커밋: `refactor(viewer): 설정에 언어 전환 추가와 치환 헬퍼 정리`
+- [x] `bun run test` + typecheck + react-doctor.
+- [x] 커밋: `refactor(viewer): 설정에 언어 전환 추가와 치환 헬퍼 정리`
 
 ### T4.3: 패널 밀도 재적용 (React)
 
 Files:
 - Modify: `app/index.tsx`, `app/catalog.tsx`, `app/host.tsx`, `app/pairing.tsx`(useWindowDimensions + `panelDensityScale` + `applyPanelDensity` — 27e33e4 패턴 복원)
 
-- [ ] `panel-density.test.ts` 유지 green, react-doctor 100/100.
-- [ ] 커밋: `feat(viewer): 4 화면에 패널 밀도 곡선 재적용`
+- [x] `panel-density.test.ts` 유지 green, react-doctor 100/100.
+- [x] 커밋: `feat(viewer): 4 화면에 패널 밀도 곡선 재적용`
 
 ### T4.4: 수정 화면 토큰 일관성 (React)
 
 Files:
 - Modify: T4.1–T4.3이 건드린 화면·컴포넌트 한정(타이포·간격·색 토큰 감사)
 
-- [ ] react-doctor 100/100, 신규 범위 확장 없음.
-- [ ] 커밋: `style(viewer): 수정 화면 토큰 일관성 정리`
+- [x] 감사 결과: T4.1–T4.3이 추가한 UI는 전부 프리미티브·변형 경유(토큰 일관성 위반 없음) — 변경 없음.
+- [x] 커밋: `style(viewer): 수정 화면 토큰 일관성 정리`
 
 ### T5.1: 실기 수집 절차 문서화
 
 Files:
 - Modify: 본 문서(수동 검증 절차 섹션), 필요 시 `tools/perf-matrix/collect.mjs`·`tools/stream-stats.py` 신규 필드 점검
 
-- [ ] 시나리오별 체크리스트 + 합격 기준 기록.
-- [ ] 커밋: `docs: 실기 수집 절차와 합격 기준`
+- [x] 시나리오별 체크리스트 + 합격 기준 기록.
+- [x] 커밋: `docs: 실기 수집 절차와 합격 기준`
 
 ### T5.2: 실기 수집 (사용자 실행, adb 금지)
 
@@ -204,7 +204,7 @@ Files:
 
 **시나리오 2 — 4K split 랑데부 (실험 1)**
 1. 4K 확장 디스플레이 split 스트림을 고움직임 콘텐츠(예: 영상 재생)로 3회, 회당 5분 이상 실행.
-2. 호스트 측 `tools/stream-stats.py`로 `idrRes`·`dropped`(리셋) 이벤트 관찰 — 실험 1 합격 기준: 페어 리셋 ≥90% 감소, gap→첫 출력 p95 ≤100ms, 2.9초급 정지 0회.
+2. 호스트 측 `python3 tools/stream-stats.py --log <실행>.jsonl`을 켜고 관찰한다 — 실시간 열은 `idrRes`, JSONL에는 `splitPairDrops`(하드 페어 리셋)·`splitPairSoftExpiries`(소프트 만료)·`splitSoloTileEmits`(단독 전송)·`splitPairConsecutiveTimeouts`가 샘플마다 누적된다. 실험 1 합격 기준: 페어 리셋(`splitPairDrops`) ≥90% 감소, gap→첫 출력 p95 ≤100ms, 2.9초급 정지 0회.
 3. 뷰어 체감 정지 발생 시 시각·상황을 기록해 이벤트 시계열과 대조.
 
 **시나리오 3 — 단일 baseline**
