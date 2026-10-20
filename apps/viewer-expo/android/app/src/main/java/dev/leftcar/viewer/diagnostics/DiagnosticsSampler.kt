@@ -12,6 +12,18 @@ data class DiagnosticsSample(
   val tempDeciC: Int?,
   val thermalStatus: Int?,
   val thermalHeadroom: Double?,
+  val releaseGapP50Ms: Int? = null,
+  val releaseGapP95Ms: Int? = null,
+  val releaseGapMaxMs: Int? = null,
+  val releaseGapCount: Int? = null,
+)
+
+/** ViewerNative.streamCadence pack 해체 결과. 값 단위는 ms다. */
+data class CadenceWindowValues(
+  val count: Int,
+  val p50Ms: Int,
+  val p95Ms: Int,
+  val maxMs: Int,
 )
 
 /**
@@ -24,6 +36,7 @@ class DiagnosticsSampler(
   private val readSnapshot: () -> Bundle?,
   private val thermalStatus: () -> Int?,
   private val thermalHeadroom: () -> Double?,
+  private val streamCadence: () -> Long? = { null },
   private val nowMs: () -> Long,
   private val upMs: () -> Long,
   private val append: (String) -> Boolean,
@@ -43,9 +56,16 @@ class DiagnosticsSampler(
 
   private fun tick() {
     if (!running) return
+    val cadence = streamCadence()?.let { unpackCadence(it) }
+    val sample = sampleFromExtras(readSnapshot(), thermalStatus(), thermalHeadroom())
     append(
       formatSampleValues(
-        sampleFromExtras(readSnapshot(), thermalStatus(), thermalHeadroom()),
+        sample.copy(
+          releaseGapP50Ms = cadence?.p50Ms,
+          releaseGapP95Ms = cadence?.p95Ms,
+          releaseGapMaxMs = cadence?.maxMs,
+          releaseGapCount = cadence?.count,
+        ),
         nowMs = nowMs(),
         upMs = upMs(),
       ),
@@ -94,7 +114,27 @@ class DiagnosticsSampler(
         "\"plugged\":${sample.plugged},\"voltage_mv\":${num(sample.voltageMv)}," +
         "\"temp_deci_c\":${num(sample.tempDeciC)}," +
         "\"thermal_status\":${num(sample.thermalStatus)}," +
-        "\"thermal_headroom\":${num(finite(sample.thermalHeadroom))}}"
+        "\"thermal_headroom\":${num(finite(sample.thermalHeadroom))}," +
+        "\"release_gap_p50_ms\":${num(sample.releaseGapP50Ms)}," +
+        "\"release_gap_p95_ms\":${num(sample.releaseGapP95Ms)}," +
+        "\"release_gap_max_ms\":${num(sample.releaseGapMaxMs)}," +
+        "\"release_gap_count\":${num(sample.releaseGapCount)}}"
+
+    /**
+     * ViewerNative.streamCadence pack 해체. 전부 0은 데이터 없음이다
+     * (input_rtt_ms 센티널 선례) — 0으로 오염시키지 않고 null로 남긴다.
+     */
+    fun unpackCadence(packed: Long): CadenceWindowValues? {
+      if (packed <= 0L) return null
+      val count = ((packed ushr 48) and 0xFFFF).toInt()
+      if (count == 0) return null
+      return CadenceWindowValues(
+        count = count,
+        p50Ms = ((packed ushr 32) and 0xFFFF).toInt(),
+        p95Ms = ((packed ushr 16) and 0xFFFF).toInt(),
+        maxMs = (packed and 0xFFFF).toInt(),
+      )
+    }
 
     private fun num(value: Int?): String = value?.toString() ?: "null"
 

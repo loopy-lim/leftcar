@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 
 import dev.leftcar.viewer.BuildConfig
+import dev.leftcar.viewer.shim.ViewerNative
 
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -95,6 +96,11 @@ object DiagnosticsRuntime {
         } else {
           null
         }
+      },
+      streamCadence = {
+        // 전 창 집계 표면 릴리스 간격(pack, 전부 0=데이터 없음). 네이티브
+        // 미적재 환경은 데이터 없음으로 취급한다 — 판단 없이 전달만 한다.
+        runCatching { ViewerNative.streamCadence() }.getOrNull()
       },
       nowMs = { System.currentTimeMillis() },
       upMs = { SystemClock.elapsedRealtime() },

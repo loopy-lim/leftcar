@@ -116,7 +116,8 @@ class DiagnosticsSampler(
 )
 object CrashMarker { fun install(store: DiagnosticsStore): Unit }
 ```
-- sample 레코드 JSON은 Kotlin이 직렬화하고 JVM/Robolectric 테스트로 형식 고정(`{"ts":..,"up_ms":..,"kind":"sample","battery_percent":..,"charging":..,"plugged":..,"voltage_mv":..,"temp_deci_c":..,"thermal_status":..,"thermal_headroom":..}`).
+- sample 레코드 JSON은 Kotlin이 직렬화하고 JVM/Robolectric 테스트로 형식 고정(`{"ts":..,"up_ms":..,"kind":"sample","battery_percent":..,"charging":..,"plugged":..,"voltage_mv":..,"temp_deci_c":..,"thermal_status":..,"thermal_headroom":..,"release_gap_p50_ms":..,"release_gap_p95_ms":..,"release_gap_max_ms":..,"release_gap_count":..}`).
+- **확장(2026-10-20, docs/plans/2026-10-20-thermal-cadence-rendezvous-plan.md T1.3):** sample 레코드에 `release_gap_*` 4필드(nullable) 추가 — viewer-decoder 전 창 집계 표면 릴리스 간격 윈도우(`ViewerNative.streamCadence()` pack, 전부 0=데이터 없음, 1회 소비). 값 단위 ms, Surface release는 물리 표시가 아님(docs/06 위생). 샘플러 15초 틱이 유일한 소비자다.
 - MediaStore.Downloads insert: `IS_PENDING` 플립, 단일 `java.util.concurrent.Executor`(메인 스레드 금지). 실제 MediaStore 경로는 Robolectric 한계로 fake sink 테스트 + 실기 수동 검증으로 나눈다.
 - [x] Robolectric red 테스트: wiring, appendRecord resolve, fresh 환경 boot_detected, 주입 스냅샷으로 샘플러 1틱→1줄, fake sink export, 크래시 마커가 클래스명만 기록.
 - [x] 구현. `./gradlew :app:testDebugUnitTest` green.

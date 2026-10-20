@@ -26,9 +26,48 @@ class DiagnosticsFormatsTest {
       "{\"ts\":1760000000000,\"up_ms\":123456,\"kind\":\"sample\"," +
         "\"battery_percent\":87,\"charging\":false,\"plugged\":0," +
         "\"voltage_mv\":4123,\"temp_deci_c\":284," +
-        "\"thermal_status\":0,\"thermal_headroom\":1.5}",
+        "\"thermal_status\":0,\"thermal_headroom\":1.5," +
+        "\"release_gap_p50_ms\":null,\"release_gap_p95_ms\":null," +
+        "\"release_gap_max_ms\":null,\"release_gap_count\":null}",
       line,
     )
+  }
+
+  @Test
+  fun formats_cadence_lanes_when_a_window_is_present() {
+    val line = DiagnosticsSampler.formatSampleValues(
+      DiagnosticsSample(
+        batteryPercent = 87,
+        charging = false,
+        plugged = 0,
+        voltageMv = null,
+        tempDeciC = null,
+        thermalStatus = null,
+        thermalHeadroom = null,
+        releaseGapP50Ms = 16,
+        releaseGapP95Ms = 33,
+        releaseGapMaxMs = 120,
+        releaseGapCount = 240,
+      ),
+      nowMs = 1,
+      upMs = 2,
+    )
+    assertTrue(line.contains("\"release_gap_p50_ms\":16"))
+    assertTrue(line.contains("\"release_gap_p95_ms\":33"))
+    assertTrue(line.contains("\"release_gap_max_ms\":120"))
+    assertTrue(line.contains("\"release_gap_count\":240"))
+  }
+
+  @Test
+  fun unpacks_cadence_pack_lanes_and_treats_zero_as_absent() {
+    val packed = (240L shl 48) or (16L shl 32) or (33L shl 16) or 120L
+    val window = DiagnosticsSampler.unpackCadence(packed)
+    assertEquals(240, window?.count)
+    assertEquals(16, window?.p50Ms)
+    assertEquals(33, window?.p95Ms)
+    assertEquals(120, window?.maxMs)
+    // 전부 0은 데이터 없음(input_rtt_ms 센티널 선례) — 0으로 오염시키지 않는다.
+    assertNull(DiagnosticsSampler.unpackCadence(0L))
   }
 
   @Test
@@ -42,7 +81,9 @@ class DiagnosticsFormatsTest {
     assertEquals(
       "{\"ts\":1,\"up_ms\":2,\"kind\":\"sample\",\"battery_percent\":null," +
         "\"charging\":false,\"plugged\":0,\"voltage_mv\":null,\"temp_deci_c\":null," +
-        "\"thermal_status\":null,\"thermal_headroom\":null}",
+        "\"thermal_status\":null,\"thermal_headroom\":null," +
+        "\"release_gap_p50_ms\":null,\"release_gap_p95_ms\":null," +
+        "\"release_gap_max_ms\":null,\"release_gap_count\":null}",
       line,
     )
   }

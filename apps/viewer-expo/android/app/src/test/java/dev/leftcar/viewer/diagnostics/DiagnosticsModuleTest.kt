@@ -142,7 +142,9 @@ class DiagnosticsModuleTest {
             "{\"ts\":1760000000000,\"up_ms\":123456,\"kind\":\"sample\"," +
                 "\"battery_percent\":87,\"charging\":true,\"plugged\":4," +
                 "\"voltage_mv\":4123,\"temp_deci_c\":284," +
-                "\"thermal_status\":0,\"thermal_headroom\":1.5}",
+                "\"thermal_status\":0,\"thermal_headroom\":1.5," +
+                "\"release_gap_p50_ms\":null,\"release_gap_p95_ms\":null," +
+                "\"release_gap_max_ms\":null,\"release_gap_count\":null}",
             activeFile().readText().trim(),
         )
         sampler.stop()
