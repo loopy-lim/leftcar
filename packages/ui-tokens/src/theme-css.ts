@@ -14,9 +14,23 @@ function declarations(palette: ThemeTokens, prefix: string): string {
   return Object.entries(roleKeys).map(([role, key]) => `    --${prefix}${role}: ${palette[key]};`).join("\n");
 }
 
+/**
+ * 텍스트 변형이 쓰는 타이포 역할. CSS 변수 생성(scale)과 런타임 밀도 배율
+ * (viewer primitives의 패널 밀도)이 같은 표를 쓴다 — 두 소비자가 어긋나면
+ * 생성 CSS와 실제 렌더 크기가 벌어진다.
+ */
+export const TEXT_VARIANT_TYPE_ROLES = {
+  caption: "xs",
+  label: "sm",
+  body: "base",
+  title: "lg",
+  subtitle: "xl",
+  heading: "xxl",
+  code: "xs",
+} as const;
+
 function scale(): string {
-  const typeRoles = { caption: "xs", label: "sm", body: "base", title: "lg", subtitle: "xl", heading: "xxl", code: "xs" } as const;
-  const type = Object.entries(typeRoles).flatMap(([role, key]) => [
+  const type = Object.entries(TEXT_VARIANT_TYPE_ROLES).flatMap(([role, key]) => [
     `  --text-${role}: ${typography.fontSize[key]}px;`,
     `  --text-${role}--line-height: ${typography.lineHeight[key]}px;`,
   ]);

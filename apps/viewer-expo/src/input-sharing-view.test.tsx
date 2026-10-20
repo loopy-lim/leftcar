@@ -39,6 +39,8 @@ vi.mock("react-native", async () => {
     ScrollView: box, View: box,
     Text: ({ children, className }: { children: ReactNode; className?: string }) => createElement("span", { className }, children),
     TextInput: () => createElement("input"), ActivityIndicator: () => createElement("span"),
+    // SafeArea의 패널 밀도 제공자가 화면 폭을 읽는다(폰 폭 = 배율 1).
+    useWindowDimensions: () => ({ width: 390, height: 844, scale: 2, fontScale: 1 }),
     Pressable: ({ children, className, disabled, accessibilityRole, accessibilityState }: {
       children: ReactNode | ((state: { pressed: boolean }) => ReactNode); className?: string; disabled?: boolean;
       accessibilityRole?: string; accessibilityState?: { checked?: boolean };
