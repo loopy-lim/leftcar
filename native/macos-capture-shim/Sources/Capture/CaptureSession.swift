@@ -475,6 +475,8 @@ final class CaptureSession {
      var splitPairAdmissionDrops: Int64 = 0
      var splitPairDrops: Int64 = 0
      var splitPairTimeouts: Int64 = 0
+     var splitPairSoftExpiries: Int64 = 0
+     var splitSoloTileEmits: Int64 = 0
      var splitPairConsecutiveTimeouts: Int64 = 0
      var splitLastPairDropReason = "none"
      var splitInjectedRightDrops: Int64 = 0

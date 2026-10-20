@@ -270,6 +270,8 @@ extension CaptureSession {
         let reportedSplitPairAdmissionDrops = splitPairAdmissionDrops
         let reportedSplitPairDrops = splitPairDrops
         let reportedSplitPairTimeouts = splitPairTimeouts
+        let reportedSplitPairSoftExpiries = splitPairSoftExpiries
+        let reportedSplitSoloTileEmits = splitSoloTileEmits
         let reportedSplitPairConsecutiveTimeouts = splitPairConsecutiveTimeouts
         let reportedSplitLastPairDropReason = splitLastPairDropReason
         let reportedSplitInjectedRightDrops = splitInjectedRightDrops
@@ -517,6 +519,8 @@ extension CaptureSession {
             "splitPairAdmissionDrops": reportedSplitPairAdmissionDrops,
             "splitPairDrops": reportedSplitPairDrops,
             "splitPairTimeouts": reportedSplitPairTimeouts,
+            "splitPairSoftExpiries": reportedSplitPairSoftExpiries,
+            "splitSoloTileEmits": reportedSplitSoloTileEmits,
             "splitPairConsecutiveTimeouts": reportedSplitPairConsecutiveTimeouts,
             "splitLastPairDropReason": reportedSplitLastPairDropReason,
             "splitInjectedRightDrops": reportedSplitInjectedRightDrops,

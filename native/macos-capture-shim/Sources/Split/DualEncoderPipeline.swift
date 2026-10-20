@@ -35,11 +35,17 @@ enum DualEncoderPipelineEvent {
         right: TileEncodedSample
     )
     case injectedRightDrop(lease: SplitFlowLease?, left: TileEncodedSample)
-    case pairExpired(
+    /// 실험 1 소프트 만료: 랑데부 예산이 지난 페어를 전체 리셋 없이 정리한다.
+    /// 왼쪽 반쪽이 준비됐으면 `tileEmittedSolo`로 단독 전송되고(lease는 그
+    /// 이벤트로 소비된다), 그 외 취소 페어의 lease는 이 이벤트로 어댑터가
+    /// 흐름 용량에 돌려놓는다. 전송 복구를 걸지 않는다 — 그것이 이 경로의
+    /// 존재 이유다.
+    case pairExpiredSoft(
         consecutiveExpiries: Int,
-        releasedPairs: Int,
+        cancelledPairs: Int,
         releasedLeases: [SplitFlowLease]
     )
+    case tileEmittedSolo(lease: SplitFlowLease?, sample: TileEncodedSample)
     case dropped(
         reason: String,
         releasedPairs: Int,
@@ -60,6 +66,9 @@ final class DualEncoderPipeline {
     private var barrier: EncodedPairAssembler<TileEncodedSample>
     private var pairLifecycle = SplitPairLifecycleState()
     private var faultInjection = SplitFaultInjection()
+    /// 소프트 만료로 취소된 시퀀스 — 늦게 도착한 반쪽 콜백을 배리어 오염
+    /// 없이 폐기하기 위한 목록이다. 하드 복구·무효화에서 비운다.
+    private var cancelledSequences = Set<UInt64>()
     // Expiry fences the whole admitted generation. Three consecutive failures
     // retain the existing hard-recovery safety valve and reset its streak.
     private var consecutivePairExpiries = 0
@@ -219,6 +228,7 @@ final class DualEncoderPipeline {
         guard !stopped else { return }
         stopped = true
         barrier.reset()
+        cancelledSequences.removeAll()
         _ = pairLifecycle.cancelAll()
         leftEncoder.invalidate()
         rightEncoder?.invalidate()
@@ -337,6 +347,12 @@ final class DualEncoderPipeline {
                     reason: "\(side) encoder callback failed: \(error)"
                 )
             case let .success(sample):
+                if self.cancelledSequences.remove(sequence) != nil {
+                    // 소프트 만료로 취소된 페어의 늦은 반쪽 — lease는 이미
+                    // 회수됐고 이 반쪽을 배리어에 재적체하면 오버플로→하드
+                    // 밸브로 역진한다. 조용히 폐기한다.
+                    return
+                }
                 let decision = self.barrier.insert(
                     EncodedTile(
                         side: side,
@@ -389,12 +405,12 @@ final class DualEncoderPipeline {
             guard let self,
                   !self.stopped,
                   generation == self.pairLifecycle.recoveryGeneration else { return }
-            let expiredSequences = self.barrier.takeExpiredSequences(
+            let expiredEntries = self.barrier.takeExpiredPairEntries(
                 nowNs: DispatchTime.now().uptimeNanoseconds
             )
-            guard !expiredSequences.isEmpty else { return }
+            guard !expiredEntries.isEmpty else { return }
             self.handlePairCallbackExpiry(
-                expiredSequences: expiredSequences,
+                expiredSequences: expiredEntries,
                 generation: generation
             )
         }
@@ -404,7 +420,7 @@ final class DualEncoderPipeline {
     /// recreating encoders. A paired IDR in the new lifecycle/flow generation
     /// reestablishes the reference chain; stale callbacks release nothing twice.
     private func handlePairCallbackExpiry(
-        expiredSequences: [UInt64],
+        expiredSequences: [ExpiredPairEntry<TileEncodedSample>],
         generation: UInt64
     ) {
         guard generation == pairLifecycle.recoveryGeneration else { return }
@@ -412,20 +428,42 @@ final class DualEncoderPipeline {
             beginPairedRecovery(reason: "encoded pair callback timeout")
             return
         }
-        guard let recovery = pairLifecycle.expirePairs(
-            sequences: expiredSequences, generation: generation, barrier: &barrier
-        ) else { return }
+        // 실험 1 소프트 경로: 전체 리셋·페어 IDR 폭풍 없이 만료 페어 하나만
+        // 정리한다. generation 불변이라 다른 in-flight 페어와 타일 델타
+        // 사슬은 계속된다. 연속 만료는 여전히 하드 밸브로 에스컬레이션한다.
+        var cancelledPairs = 0
+        var retiredLeases = [SplitFlowLease]()
+        for entry in expiredSequences {
+            guard let lease = pairLifecycle.expireSinglePair(sequence: entry.sequence) else {
+                continue
+            }
+            cancelledPairs += 1
+            cancelledSequences.insert(entry.sequence)
+            if entry.missingSide == .right, let ready = entry.readyValue {
+                // 왼쪽 준비: 기존 left-solo 와이어 형태로 단독 전송 — 이
+                // 프레임의 절반은 시청자에게 도달한다(lease는 이 이벤트로
+                // 소비된다). 오른쪽은 per-tile 키프레임으로 복구된다.
+                event(.tileEmittedSolo(lease: lease, sample: ready))
+            } else {
+                // 오른쪽 준비(v1 한계): 오른쪽 단독 와이어 경로가 없어
+                // 폐기한다 — lease는 어댑터가 흐름 용량에 돌려놓는다.
+                retiredLeases.append(lease)
+            }
+            pairLifecycle.requestTileKeyframe(entry.missingSide)
+        }
+        guard cancelledPairs > 0 else { return }
         consecutivePairExpiries += 1
-        event(.pairExpired(
+        event(.pairExpiredSoft(
             consecutiveExpiries: consecutivePairExpiries,
-            releasedPairs: recovery.releasedPairCount,
-            releasedLeases: recovery.releasedLeases
+            cancelledPairs: cancelledPairs,
+            releasedLeases: retiredLeases
         ))
     }
 
     private func beginPairedRecovery(reason: String) {
         let recovery = pairLifecycle.beginPairedRecovery()
         barrier.reset()
+        cancelledSequences.removeAll()
         consecutivePairExpiries = 0
         event(
             .dropped(

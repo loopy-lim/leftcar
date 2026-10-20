@@ -234,30 +234,52 @@ extension CaptureSession {
             packetizationQueue.async { [weak self] in
                 self?.packetizeSplitPair(lease: lease, left: left, right: right)
             }
-        case let .pairExpired(consecutiveExpiries, releasedPairs, _):
-            // Fence packetization and queued sends before freeing encode slots.
-            // The pipeline already advanced its lifecycle generation, so only
-            // this one event can invalidate a pending boundary for this loss.
-            beginSplitTransportRecovery(
-                reason: "encoded pair expiry",
-                invalidatePendingBoundary: true
-            )
+        case let .pairExpiredSoft(consecutiveExpiries, cancelledPairs, releasedLeases):
+            // 실험 1 소프트 만료 — 전송 복구를 걸지 않는다. 늦은 반쪽만
+            // 폐기되고 흐름은 계속된다. 하드 밸브(.dropped timeout)만 복구를 건다.
             stateLock.lock()
             splitPairTimeouts &+= 1
+            splitPairSoftExpiries &+= 1
             splitPairConsecutiveTimeouts = Int64(consecutiveExpiries)
-            splitPairDrops &+= Int64(max(1, releasedPairs))
-            framesDropped &+= Int64(max(1, releasedPairs))
             splitLastPairDropReason = "encoded pair callback timeout (soft discard)"
             stateLock.unlock()
-            if releasedPairs > 0 {
-                completeEncodeSlots(releasedPairs)
+            if cancelledPairs > 0 {
+                completeEncodeSlots(cancelledPairs)
+            }
+            for lease in releasedLeases {
+                // 단독 전송 없이 취소된 페어의 lease — 흐름 용량에 돌려놓는다.
+                _ = finishSplitFlowLease(lease)
             }
             NSLog(
-                "Leftcar split pair expired %@: consecutive=%d released=%d",
+                "Leftcar split pair soft expired %@: consecutive=%d cancelled=%d retired=%d",
                 targetLabel,
                 consecutiveExpiries,
-                releasedPairs
+                cancelledPairs,
+                releasedLeases.count
             )
+        case let .tileEmittedSolo(lease, sample):
+            stateLock.lock()
+            splitSoloTileEmits &+= 1
+            stateLock.unlock()
+            guard let lease else {
+                beginSplitTransportRecovery(
+                    reason: "solo split tile missing flow lease",
+                    invalidatePendingBoundary: true
+                )
+                return
+            }
+            packetizationQueue.async { [weak self] in
+                guard let self else { return }
+                if let payload = self.packetizeSplitTile(sample) {
+                    self.enqueueSplitSoloTile(lease: lease, sample: sample, payload: payload)
+                } else {
+                    self.beginSplitTransportRecovery(
+                        reason: "solo split packetization failed",
+                        invalidatePendingBoundary: true,
+                        failedLease: lease
+                    )
+                }
+            }
         case let .injectedRightDrop(lease, left):
             stateLock.lock()
             splitInjectedRightDrops &+= 1
@@ -502,6 +524,35 @@ extension CaptureSession {
                 right: payload,
                 isKeyframe: left.isKeyframe,
                 isRecoveryKeyframe: lease.isRecoveryBoundary && left.isKeyframe,
+                queuedNs: DispatchTime.now().uptimeNanoseconds,
+                dropRightForTest: true
+            )
+        )
+    }
+
+    /// 실험 1 소프트 만료의 단독 타일 전송 — 왼쪽 반쪽이 준비된 만료 페어를
+    /// 기존 left-solo 와이어 형태로 보낸다(오른쪽은 취소, per-tile 키프레임
+    /// 으로 복구). fault 주입 카운터와 무관하게 셈한다.
+    private func enqueueSplitSoloTile(
+        lease: SplitFlowLease,
+        sample: TileEncodedSample,
+        payload: SplitEncodedPayload
+    ) {
+        guard splitFlowAccepts(lease) else {
+            stateLock.lock()
+            splitRecoveryBoundaryDiscards &+= 1
+            stateLock.unlock()
+            return
+        }
+        enqueueSplitAccessUnit(
+            PendingSplitAccessUnit(
+                sequence: sample.frameSequence,
+                generation: lease.generation,
+                lease: lease,
+                left: payload,
+                right: payload,
+                isKeyframe: sample.isKeyframe,
+                isRecoveryKeyframe: false,
                 queuedNs: DispatchTime.now().uptimeNanoseconds,
                 dropRightForTest: true
             )
