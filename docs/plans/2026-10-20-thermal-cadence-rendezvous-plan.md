@@ -32,8 +32,8 @@ Files:
 - Create: `docs/plans/2026-10-20-thermal-cadence-rendezvous-plan.md` (본 문서)
 - Create: `docs/decisions/0006-thermal-aware-viewer-resource-policy.md`
 
-- [ ] 자원 판단 계층(뷰어 TS)·Kotlin 패스스루·보수 임계+히스테리시스·호스트 수용 원칙을 ADR로 기록.
-- [ ] 커밋: `docs(viewer): R-011 완화와 랑데부 실험 1 구현 계획, thermal 자원 정책 ADR`
+- [x] 자원 판단 계층(뷰어 TS)·Kotlin 패스스루·보수 임계+히스테리시스·호스트 수용 원칙을 ADR로 기록.
+- [x] 커밋: `docs(viewer): R-011 완화와 랑데부 실험 1 구현 계획, thermal 자원 정책 ADR`
 
 ### T1.1: viewer-decoder cadence 히스토그램 + release 계측 (Rust)
 
@@ -42,18 +42,18 @@ Files:
 - Modify: `crates/viewer-decoder/src/android/mod.rs`, `output.rs`(`release_output_at` 성공 후 기록), `decoder.rs`(render=true release 3곳 성공 후 기록)
 
 - 히스토그램(1ms 버킷 + overflow) + count/max/last_release_ns, 전역 `PRESENTATION_CADENCE`(Mutex), `record_gap_ns` / `read_and_reset -> Option<CadenceWindow{count,p50,p95,p99,max}>`.
-- [ ] 단위 테스트: 알려진 gap 시퀀스의 분위수, read_and_reset 후 비움, overflow 버킷, 최초 release(간격 없음) 스킵, 버킷 경계.
-- [ ] `cargo test -p viewer-decoder` green.
-- [ ] 커밋: `feat(viewer-decoder): 표면 릴리스 간격 히스토그램 계측`
+- [x] 단위 테스트: 알려진 gap 시퀀스의 분위수, read_and_reset 후 비움, overflow 버킷, 최초 release(간격 없음) 스킵, 버킷 경계.
+- [x] `cargo test -p viewer-decoder` green.
+- [x] 커밋: `feat(viewer-decoder): 표면 릴리스 간격 히스토그램 계측`
 
 ### T1.2: cadence JNI 게터 (Rust)
 
 Files:
 - Modify: `native/android-viewer/src/jni_exports.rs`(`leftcar_jni_stream_cadence` + u16 pack: count|p50|p95|max, count 65535 캡, 전부 0=데이터 없음), `jni_wrappers.rs`
 
-- [ ] 테스트: pack/센티널, read_and_reset 1회성.
-- [ ] `cargo test -p android-viewer` green.
-- [ ] 커밋: `feat(android-viewer): cadence 윈도우 JNI 게터`
+- [x] 테스트: pack/센티널, read_and_reset 1회성.
+- [x] `cargo test -p android-viewer` green.
+- [x] 커밋: `feat(android-viewer): cadence 윈도우 JNI 게터`
 
 ### T1.3: 진단 sample에 cadence 기록 (Kotlin) + 계약 확장
 
@@ -61,18 +61,18 @@ Files:
 - Modify: `apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/diagnostics/DiagnosticsSampler.kt`(cadence 클로저 DI), `DiagnosticsRuntime.kt`(ViewerNative.streamCadence 배선, 부재·실패 시 null), `apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/ViewerNative.kt`(external fun)
 - Modify: `docs/plans/2026-10-19-viewer-diagnostics.md`(sample 레코드 `release_gap_p50_ms/p95_ms/max_ms/count` nullable 필드 계약)
 
-- [ ] JVM 테스트(DiagnosticsFormatsTest): cadence 필드 포함 포맷·null 필드·≤1024B.
-- [ ] `./gradlew :app:testDebugUnitTest --no-daemon` green.
-- [ ] 커밋: `feat(viewer): 진단 샘플에 표면 릴리스 간격 기록`
+- [x] JVM 테스트(DiagnosticsFormatsTest): cadence 필드 포함 포맷·null 필드·≤1024B.
+- [x] `./gradlew :app:testDebugUnitTest --no-daemon` green.
+- [x] 커밋: `feat(viewer): 진단 샘플에 표면 릴리스 간격 기록`
 
 ### T2.1: 최신 샘플 조회 네이티브 메서드 (Kotlin)
 
 Files:
 - Modify: `DiagnosticsRuntime.kt`(`@Volatile latestSample` 갱신), `DiagnosticsModule.kt`(`getLatestSample(promise)` — JavaOnlyMap, 없으면 resolve(null))
 
-- [ ] Robolectric 테스트(DiagnosticsModuleTest): 샘플 후 최신값, 값 없음 null, thermalStatus null 전달.
-- [ ] gradlew green. Kotlin은 판단 없이 보관·전달만.
-- [ ] 커밋: `feat(viewer): 진단 최신 샘플 조회 네이티브 메서드`
+- [x] Robolectric 테스트(DiagnosticsModuleTest): 샘플 후 최신값, 값 없음 null, thermalStatus null 전달.
+- [x] gradlew green. Kotlin은 판단 없이 보관·전달만.
+- [x] 커밋: `feat(viewer): 진단 최신 샘플 조회 네이티브 메서드`
 
 ### T2.2: thermal 순수 정책 (TS)
 
@@ -81,9 +81,9 @@ Files:
 - Test: `apps/viewer-expo/src/thermal-policy.test.ts`
 
 - 상수 표: 진입 SEVERE(3)→capacityCap 2 + 시작 단변 1080 / CRITICAL(4)→cap 1 + 720 / 해제 LIGHT(1) 이하(MODERATE 유지 구간 히스테리시스). charging은 thermal 완화 없음, `batteryPercent≤15 && !charging` → cap −1(하한 1). 첫 값 없음 = 미적용.
-- [ ] 테스트: SEVERE 진입 cap 2, CRITICAL cap 1, LIGHT 해제, MODERATE 유지, charging 배터리 축 스킵, 저배터리 −1, 첫 값 없음 미적용, 상수 표 고정.
-- [ ] 루트 `bun run test -- src/thermal-policy.test.ts` green.
-- [ ] 커밋: `feat(viewer): thermal 자원 상한 순수 정책`
+- [x] 테스트: SEVERE 진입 cap 2, CRITICAL cap 1, LIGHT 해제, MODERATE 유지, charging 배터리 축 스킵, 저배터리 −1, 첫 값 없음 미적용, 상수 표 고정.
+- [x] 루트 `bun run test -- src/thermal-policy.test.ts` green.
+- [x] 커밋: `feat(viewer): thermal 자원 상한 순수 정책`
 
 ### T2.3: thermal 진단 이벤트 + 캐시 브리지 (TS)
 
@@ -92,10 +92,10 @@ Files:
 - Create: `src/thermal-state.ts`(TTL=SAMPLE_INTERVAL_MS 캐시, refresh, transition 구독·edge 기록)
 - Test: `diagnostics.test.ts`, `diagnostics-recorder.test.ts` 확장, `thermal-state.test.ts` 신설
 
-- [ ] 테스트: 알 수 없는 이벤트 거절 유지, thermal_cap 레코드 필드·크기, edge 1회, TTL 캐시, 네이티브 부재 no-op.
-- [ ] 루트 `bun run test` green.
-- [ ] docs/plans/2026-10-19-viewer-diagnostics.md에 세션 이벤트 2종 계약 추가.
-- [ ] 커밋: `feat(viewer): thermal 상한 전환 진단 기록과 캐시 브리지`
+- [x] 테스트: 알 수 없는 이벤트 거절 유지, thermal_cap 레코드 필드·크기, edge 1회, TTL 캐시, 네이티브 부재 no-op.
+- [x] 루트 `bun run test` green.
+- [x] docs/plans/2026-10-19-viewer-diagnostics.md에 세션 이벤트 2종 계약 추가.
+- [x] 커밋: `feat(viewer): thermal 상한 전환 진단 기록과 캐시 브리지`
 
 ### T2.4: 상한 적용 지점 순수 확장 (TS)
 
@@ -103,9 +103,9 @@ Files:
 - Modify: `src/decoder-budget.ts`(DecoderReservations capacity overlay — `capacity()=min(hint, overlay)`), `src/streaming-policy.ts`(`resolveInitialStreamTarget`에 `thermalShortSideCap` 옵션 — externalRoute·panelShortSide와 min 체인), `src/adaptive-resolution.ts`(`AdaptiveObservation.thermalCapShortSide` — upshift 대상 클램프)
 - Test: `decoder-reservations.test.ts`, `streaming-policy.test.ts`, `adaptive-resolution.test.ts` 확장
 
-- [ ] 테스트: overlay 차단·해제 복원, split 승격 차단(3840×2160@60 요구가 overlay로 먼저 막힘), 기존 엔트리 유지, 캡 min 체인, upshift 클램프·downshift 무영향·cap 없을 때 무영향.
-- [ ] 대상 3종 vitest green.
-- [ ] 커밋: `feat(viewer): 디코더 용량 오버레이와 thermal 시작·업시프트 캡`
+- [x] 테스트: overlay 차단·해제 복원, split 승격 차단(3840×2160@60 요구가 overlay로 먼저 막힘), 기존 엔트리 유지, 캡 min 체인, upshift 클램프·downshift 무영향·cap 없을 때 무영향.
+- [x] 대상 3종 vitest green.
+- [x] 커밋: `feat(viewer): 디코더 용량 오버레이와 thermal 시작·업시프트 캡`
 
 ### T2.5: openDisplay·적응 정책 배선 (TS/React)
 
@@ -113,9 +113,9 @@ Files:
 - Modify: `src/use-catalog-model.ts`(openDisplay에서 thermal-state 캡 읽기 → plan·resolveInitialStreamTarget 전달), `src/use-stream-controller.ts`(관측 주입부에 cap 전달), `app/index.tsx`, `app/catalog.tsx`(마운트 예열 refresh)
 - Test: `launch-stream.test.ts`, adaptive-launch 테스트 확장
 
-- [ ] 테스트: thermal 케이스 추가, 네이티브 부재 시 기존 동작 회귀 없음.
-- [ ] `bun run typecheck && bun run test` + react-doctor 100/100 + `bun run test:architecture`(기존 32 red 유지·신규 0).
-- [ ] 커밋: `feat(viewer): 창 열기·적응 정책에 thermal 상한 반영`
+- [x] 테스트: thermal 케이스 추가, 네이티브 부재 시 기존 동작 회귀 없음.
+- [x] `bun run typecheck && bun run test` + react-doctor 100/100 + `bun run test:architecture`(기존 32 red 유지·신규 0).
+- [x] 커밋: `feat(viewer): 창 열기·적응 정책에 thermal 상한 반영`
 
 ### T3.1: 랑데부 순수 계층 (Swift)
 
