@@ -52,8 +52,8 @@ impl CadenceHistogram {
     /// 사슬 시작만 하고 집계하지 않는다.
     pub fn record_release(&mut self, now_ns: u64) {
         if let Some(last_ns) = self.last_release_ns {
-            let gap_ms = u32::try_from(now_ns.saturating_sub(last_ns) / 1_000_000)
-                .unwrap_or(u32::MAX);
+            let gap_ms =
+                u32::try_from(now_ns.saturating_sub(last_ns) / 1_000_000).unwrap_or(u32::MAX);
             let bucket = usize::try_from(gap_ms).unwrap_or(usize::MAX);
             if bucket >= CADENCE_BUCKET_COUNT {
                 self.overflow_count += 1;
@@ -121,7 +121,10 @@ pub fn record_surface_release() {
 
 /// 진단 샘플러 틱이 유일한 소비자다. 윈도우가 비면 None.
 pub fn read_and_reset_surface_cadence() -> Option<CadenceWindow> {
-    global_cadence().lock().ok().and_then(|mut histogram| histogram.read_and_reset())
+    global_cadence()
+        .lock()
+        .ok()
+        .and_then(|mut histogram| histogram.read_and_reset())
 }
 
 #[cfg(test)]

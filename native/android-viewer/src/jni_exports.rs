@@ -1128,11 +1128,9 @@ pub fn pack_cadence_window(window: viewer_decoder::CadenceWindow) -> i64 {
 /// 돌려준다(락 경합·비었을 때 0).
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_cadence() -> i64 {
-    std::panic::catch_unwind(|| {
-        match viewer_decoder::read_and_reset_surface_cadence() {
-            Some(window) => pack_cadence_window(window),
-            None => 0,
-        }
+    std::panic::catch_unwind(|| match viewer_decoder::read_and_reset_surface_cadence() {
+        Some(window) => pack_cadence_window(window),
+        None => 0,
     })
     .unwrap_or(0)
 }
