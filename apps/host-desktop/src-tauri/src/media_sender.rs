@@ -64,6 +64,9 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
         sender.send_terminal(TerminationReason::Forced).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         let mut frame = [0; 128];
         let size = receiver.recv(&mut frame).unwrap();
         let opener = DatagramSealer::new(secure_channel::media_keys(&key).s2c);
@@ -122,6 +125,11 @@ mod tests {
         );
         sender
             .notify_retirement(Some(TerminationReason::Health))
+            .unwrap();
+        // After the terminal notice, allow a wider receive window so a busy
+        // CI runner does not miss the localhost datagram.
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
         let size = receiver.recv(&mut frame).unwrap();
         let opener = DatagramSealer::new(secure_channel::media_keys(&key).s2c);
@@ -252,6 +260,9 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
         sender.send_terminal(TerminationReason::Forced).unwrap();
+        media
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         let size = media.recv(&mut bytes).unwrap();
         assert_eq!(viewer_rx.open(&bytes[..size]).unwrap(), b"LCT1\x02");
     }
@@ -360,6 +371,9 @@ mod tests {
 
 #[derive(Clone)]
 pub(crate) enum MediaSocket {
+    /// Connected UDP media path (macOS/LAN fixtures). Windows host production
+    /// prefers [`Self::UdpTo`]; keep the variant for shared send/terminal code.
+    #[allow(dead_code)]
     Udp(Arc<UdpSocket>),
     /// Unconnected receive socket with an immutable media destination. The
     /// viewer sends authenticated control from a different ephemeral port.
@@ -475,19 +489,21 @@ impl MediaSender {
         // session sealer and established endpoint. No arbitrary payload or new
         // source operation can pass through it after the source is fenced.
         let notice = wire::termination(reason as u8);
-        let deadline = Instant::now() + Duration::from_millis(100);
         match &self.socket {
             MediaSocket::Udp(socket) | MediaSocket::UdpTo(socket, _) => {
+                // UDP terminal is best-effort redundancy, not a hard 100ms fence
+                // like TCP lock acquisition. Give localhost CI enough headroom.
+                let deadline = Instant::now() + Duration::from_millis(500);
                 let old_timeout = socket.write_timeout()?;
-                socket.set_write_timeout(Some(Duration::from_millis(20)))?;
                 let result = (|| {
                     for attempt in 0..2 {
                         if attempt > 0 {
                             std::thread::sleep(Duration::from_millis(20));
                         }
-                        if Instant::now() >= deadline {
-                            return Err(std::io::ErrorKind::TimedOut.into());
-                        }
+                        let remaining = deadline
+                            .checked_duration_since(Instant::now())
+                            .ok_or(std::io::ErrorKind::TimedOut)?;
+                        socket.set_write_timeout(Some(remaining))?;
                         let envelope = self.prepare(&notice)?;
                         let submitted = match &self.socket {
                             MediaSocket::UdpTo(_, peer) => socket.send_to(&envelope, peer)?,
@@ -501,6 +517,7 @@ impl MediaSender {
                 result.and(restored)
             }
             MediaSocket::Tcp(_) => {
+                let deadline = Instant::now() + Duration::from_millis(100);
                 let envelope = self.prepare(&notice)?;
                 self.write_tcp_envelope(&envelope, deadline)
             }

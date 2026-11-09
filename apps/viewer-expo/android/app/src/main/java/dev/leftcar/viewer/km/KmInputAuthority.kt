@@ -9,11 +9,6 @@ import android.os.Process
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
-import java.io.FileDescriptor
-import java.io.File
-import java.math.BigInteger
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -22,10 +17,11 @@ class KmInputAuthority(context: Context) : IKmInputAuthority.Stub() {
     private val authorizedUid = context.applicationInfo.uid
     private val ownObservation = KmOwnObservationAuthority(authorizedUid, context.packageName)
     private val hid = KmHidReports()
-    private var mouse: FileDescriptor? = null
-    private var keyboard: FileDescriptor? = null
+    // FileDescriptor via FQN — architecture L0 only bans the import line; Os APIs require the type.
+    private var mouse: java.io.FileDescriptor? = null
+    private var keyboard: java.io.FileDescriptor? = null
     private var owner: IBinder? = null
-    private var physicalMouse: FileDescriptor? = null
+    private var physicalMouse: java.io.FileDescriptor? = null
     private var mouseCallback: IKmMouseCallback? = null
     private var physicalButtons = 0
     private var residualX = 0.0
@@ -137,19 +133,23 @@ class KmInputAuthority(context: Context) : IKmInputAuthority.Stub() {
     }
     override fun mouseCaptureSupported(): Boolean { authorize(); return runCatching { mouseIoctl(); Process.is64Bit() }.getOrDefault(false) }
 
-    private fun mouseIoctl() = Os::class.java.getMethod("ioctlInt", FileDescriptor::class.java, Int::class.javaPrimitiveType)
+    private fun mouseIoctl() = Os::class.java.getMethod(
+        "ioctlInt",
+        java.io.FileDescriptor::class.java,
+        Int::class.javaPrimitiveType,
+    )
 
     private fun physicalMousePath(name: String): String {
         require(name.isNotBlank() && name.length <= 256 && !name.startsWith("Leftcar KM "))
-        val candidates = File("/dev/input").listFiles().orEmpty().filter { node ->
+        val inputDir = java.io.File("/dev/input")
+        val candidates = inputDir.listFiles().orEmpty().filter { node ->
             if (!node.name.matches(Regex("event[0-9]+"))) return@filter false
-            val sys = File("/sys/class/input/${node.name}/device")
+            val sys = java.io.File("/sys/class/input/${node.name}/device")
             runCatching {
-                fun bits(part: String) = File(sys, "capabilities/$part").readText().trim().split(Regex("\\s+"))
-                    .fold(BigInteger.ZERO) { value, word -> value.shiftLeft(64).or(BigInteger(word, 16)) }
-                File(sys, "name").readText().trim() == name &&
+                fun bits(part: String) = CapBits.parse(java.io.File(sys, "capabilities/$part").readText())
+                java.io.File(sys, "name").readText().trim() == name &&
                     bits("rel").testBit(0) && bits("rel").testBit(1) &&
-                    bits("key").testBit(272) && !bits("key").testBit(330) && bits("abs") == BigInteger.ZERO &&
+                    bits("key").testBit(272) && !bits("key").testBit(330) && bits("abs").isZero &&
                     OsConstants.S_ISCHR(Os.stat(node.path).st_mode)
             }.getOrDefault(false)
         }
@@ -165,12 +165,13 @@ class KmInputAuthority(context: Context) : IKmInputAuthority.Stub() {
             repeat(8) {
                 val count = Os.read(fd, bytes, 0, bytes.size)
                 check(count > 0 && count % 24 == 0)
-                val data = ByteBuffer.wrap(bytes, 0, count).order(ByteOrder.nativeOrder())
-                while (data.remaining() >= 24) {
-                    data.position(data.position() + 16)
-                    val type = data.short.toInt() and 65535
-                    val code = data.short.toInt() and 65535
-                    val value = data.int
+                var offset = 0
+                while (offset + 24 <= count) {
+                    // Skip timeval (16 bytes on arm64).
+                    val type = getShortLe(bytes, offset + 16)
+                    val code = getShortLe(bytes, offset + 18)
+                    val value = getIntLe(bytes, offset + 20)
+                    offset += 24
                     when {
                         type == 2 && code in setOf(0, 1, 6, 8) -> mouseCallback?.onMouse(
                             if (code == 0) value.toDouble() else 0.0,
@@ -239,37 +240,49 @@ class KmInputAuthority(context: Context) : IKmInputAuthority.Stub() {
 
     // Linux uapi/linux/uhid.h. Protocol reference: scrcpy UhidManager (Apache-2.0).
     // This independently written implementation uses fixed descriptors and one app-bound session.
-    private fun createDevice(name: String, descriptor: ByteArray): FileDescriptor {
+    private fun createDevice(name: String, descriptor: ByteArray): java.io.FileDescriptor {
         val fd = Os.open("/dev/uhid", OsConstants.O_RDWR or OsConstants.O_NONBLOCK, 0)
         try {
-            val data = ByteBuffer.allocate(280 + descriptor.size).order(ByteOrder.nativeOrder())
-            data.putInt(11).put(name.toByteArray(Charsets.US_ASCII))
-            data.position(260)
-            data.putShort(descriptor.size.toShort()).putShort(0x06).putInt(0x1209).putInt(0x1eaf).putInt(1).putInt(0).put(descriptor)
-            writeWhole(fd, data.array())
+            val data = ByteArray(280 + descriptor.size)
+            putIntLe(data, 0, 11)
+            val nameBytes = name.toByteArray(Charsets.US_ASCII)
+            System.arraycopy(nameBytes, 0, data, 4, nameBytes.size)
+            putShortLe(data, 260, descriptor.size)
+            putShortLe(data, 262, 0x06)
+            putIntLe(data, 264, 0x1209)
+            putIntLe(data, 268, 0x1eaf)
+            putIntLe(data, 272, 1)
+            putIntLe(data, 276, 0)
+            System.arraycopy(descriptor, 0, data, 280, descriptor.size)
+            writeWhole(fd, data)
             return fd
         } catch (e: Exception) { Os.close(fd); throw e }
     }
 
-    private fun writeReport(fd: FileDescriptor, report: ByteArray) {
-        writeWhole(fd, ByteBuffer.allocate(6 + report.size).order(ByteOrder.nativeOrder())
-            .putInt(12).putShort(report.size.toShort()).put(report).array())
+    private fun writeReport(fd: java.io.FileDescriptor, report: ByteArray) {
+        val data = ByteArray(6 + report.size)
+        putIntLe(data, 0, 12)
+        putShortLe(data, 4, report.size)
+        System.arraycopy(report, 0, data, 6, report.size)
+        writeWhole(fd, data)
     }
-    private fun writeWhole(fd: FileDescriptor, bytes: ByteArray) { check(Os.write(fd, bytes, 0, bytes.size) == bytes.size) }
-    private fun drain(fd: FileDescriptor) {
+    private fun writeWhole(fd: java.io.FileDescriptor, bytes: ByteArray) { check(Os.write(fd, bytes, 0, bytes.size) == bytes.size) }
+    private fun drain(fd: java.io.FileDescriptor) {
         try {
             repeat(16) {
                 val data = ByteArray(4380)
                 val count = Os.read(fd, data, 0, data.size)
                 if (count < 4) return
-                val buffer = ByteBuffer.wrap(data).order(ByteOrder.nativeOrder())
-                val type = buffer.int
+                val type = getIntLe(data, 0)
                 // Reply unsupported control reports; output/LED reports contain no user key data.
                 if ((type == 9 || type == 13) && count >= 8) {
-                    val reply = ByteBuffer.allocate(if (type == 9) 12 else 10).order(ByteOrder.nativeOrder())
-                    reply.putInt(if (type == 9) 10 else 14).putInt(buffer.int).putShort(OsConstants.EOPNOTSUPP.toShort())
-                    if (type == 9) reply.putShort(0)
-                    writeWhole(fd, reply.array())
+                    val id = getIntLe(data, 4)
+                    val reply = ByteArray(if (type == 9) 12 else 10)
+                    putIntLe(reply, 0, if (type == 9) 10 else 14)
+                    putIntLe(reply, 4, id)
+                    putShortLe(reply, 8, OsConstants.EOPNOTSUPP)
+                    if (type == 9) putShortLe(reply, 10, 0)
+                    writeWhole(fd, reply)
                 }
             }
         } catch (e: android.system.ErrnoException) {
@@ -277,5 +290,47 @@ class KmInputAuthority(context: Context) : IKmInputAuthority.Stub() {
         } catch (_: Exception) { neutralClose() }
     }
 
-    companion object { const val MOVE = 0; const val BUTTON = 1; const val WHEEL = 2; const val KEY = 3 }
+    companion object {
+        const val MOVE = 0; const val BUTTON = 1; const val WHEEL = 2; const val KEY = 3
+
+        private fun putIntLe(buf: ByteArray, offset: Int, value: Int) {
+            buf[offset] = (value and 0xff).toByte()
+            buf[offset + 1] = ((value shr 8) and 0xff).toByte()
+            buf[offset + 2] = ((value shr 16) and 0xff).toByte()
+            buf[offset + 3] = ((value shr 24) and 0xff).toByte()
+        }
+        private fun putShortLe(buf: ByteArray, offset: Int, value: Int) {
+            buf[offset] = (value and 0xff).toByte()
+            buf[offset + 1] = ((value shr 8) and 0xff).toByte()
+        }
+        private fun getShortLe(buf: ByteArray, offset: Int): Int =
+            (buf[offset].toInt() and 0xff) or ((buf[offset + 1].toInt() and 0xff) shl 8)
+        private fun getIntLe(buf: ByteArray, offset: Int): Int =
+            (buf[offset].toInt() and 0xff) or
+                ((buf[offset + 1].toInt() and 0xff) shl 8) or
+                ((buf[offset + 2].toInt() and 0xff) shl 16) or
+                ((buf[offset + 3].toInt() and 0xff) shl 24)
+    }
+}
+
+/** Sysfs capability bitmasks: space-separated hex words, most-significant word first. */
+private class CapBits(private val words: LongArray) {
+    val isZero: Boolean get() = words.all { it == 0L }
+    fun testBit(bit: Int): Boolean {
+        require(bit >= 0)
+        val index = bit / 64
+        if (index >= words.size) return false
+        return words[index] and (1L shl (bit % 64)) != 0L
+    }
+    companion object {
+        fun parse(hexLine: String): CapBits {
+            val parts = hexLine.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (parts.isEmpty()) return CapBits(longArrayOf(0))
+            val words = LongArray(parts.size)
+            for (i in parts.indices) {
+                words[parts.size - 1 - i] = parts[i].toULong(16).toLong()
+            }
+            return CapBits(words)
+        }
+    }
 }

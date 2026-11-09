@@ -38,25 +38,7 @@ class KmNativeSessionTest {
         assertEquals(KmCaptureMode.CONSUME, KmCapturePolicy.mode(true, "androidToMac"))
     }
 
-    @Test fun `sealer interoperability replay rejection and failed authentication do not advance counter`() {
-        val keys = KmCipher.keys(ByteArray(32) { it.toByte() }, "km-test")
-        assertFalse(keys.first.contentEquals(keys.second))
-        val sender = KmCipher(keys.first)
-        val receiver = KmCipher(keys.first)
-        val frame = sender.seal("hello".toByteArray())
-        val corrupt = frame.clone().apply { this[lastIndex] = (this[lastIndex].toInt() xor 1).toByte() }
-        assertThrows(Exception::class.java) { receiver.open(corrupt) }
-        assertEquals("hello", String(receiver.open(frame)))
-        assertThrows(IllegalArgumentException::class.java) { receiver.open(frame) }
-    }
 
-    @Test fun `Rust and Swift fixed ciphertext matches byte for byte`() {
-        val keys = KmCipher.keys(ByteArray(32) { it.toByte() }, "km-vector-v1")
-        fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
-        assertEquals("c1832723e3708ccaba0b6556606315f47bed62a617ea2f5245c70bf03d154e9d", hex(keys.first))
-        val plain = """{"version":1,"sessionId":"km-vector-v1","epoch":1,"seq":1,"origin":"android","payload":{"kind":"hello"}}"""
-        assertEquals("0000000000000001466bd7edde80cbaa55c15a07434f23b12d7c5221fb465c4eb0977abaf4c145e950919376679c11da9fc5ee46e873b766a8a6bbf6cb81cde9f6a580a134a8875a7e284131812f27006f516f5b3e95fabb9218916b58d8970ee6ec8779f83766fe0c42f4ac631a7aebe8c2c18ec109b297b98e51119ff21759", hex(KmCipher(keys.first).seal(plain.toByteArray())))
-    }
 
     @Test fun `only state advances epoch and replay cannot change authority`() {
         val gate = KmEpochGate(1)

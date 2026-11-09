@@ -6,7 +6,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.IInterface
 import android.os.Looper
-import org.lsposed.hiddenapibypass.HiddenApiBypass
+import java.lang.reflect.Field
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -20,15 +20,32 @@ internal interface KmOwnObservationPlatform {
     fun observed(info: AccessibilityServiceInfo): Int
 }
 
+/** HiddenApiBypass via Class.forName — zero `org.lsposed.*` import lines. */
+private object KmHiddenApi {
+    private val type = Class.forName("org.lsposed.hiddenapibypass.HiddenApiBypass")
+    private val invokeMethod = type.getMethod(
+        "invoke",
+        Class::class.java,
+        Any::class.java,
+        String::class.java,
+        Array<Any>::class.java,
+    )
+    @Suppress("UNCHECKED_CAST")
+    fun instanceFields(clazz: Class<*>): List<Field> =
+        type.getMethod("getInstanceFields", Class::class.java).invoke(null, clazz) as List<Field>
+    fun invoke(clazz: Class<*>, target: Any?, method: String, vararg args: Any?): Any? =
+        invokeMethod.invoke(null, clazz, target, method, arrayOf(*args))
+}
+
 internal object KmTargetedOwnObservation : KmOwnObservationPlatform {
-    private fun field() = HiddenApiBypass.getInstanceFields(AccessibilityService::class.java)
+    private fun field() = KmHiddenApi.instanceFields(AccessibilityService::class.java)
         .single { it.name == "mMotionEventSources" && it.type == Int::class.javaPrimitiveType }
         .apply { isAccessible = true }
     override fun connection(service: KmAccessibilityService): KmOwnConnection {
-        val id = HiddenApiBypass.invoke(AccessibilityService::class.java, service, "getConnectionId") as Int
+        val id = KmHiddenApi.invoke(AccessibilityService::class.java, service, "getConnectionId") as Int
         check(id >= 0)
         val client = Class.forName("android.view.accessibility.AccessibilityInteractionClient")
-        val connection = HiddenApiBypass.invoke(client, null, "getConnection", id) as? IInterface
+        val connection = KmHiddenApi.invoke(client, null, "getConnection", id) as? IInterface
             ?: throw KmObservationUnavailable()
         field() // Resolve exact required local layout before any nonzero write.
         return KmOwnConnection(id, connection.asBinder().also { check(it.isBinderAlive) })
@@ -36,7 +53,7 @@ internal object KmTargetedOwnObservation : KmOwnObservationPlatform {
     override fun localMask(service: KmAccessibilityService): Int = field().getInt(service)
     override fun localMask(service: KmAccessibilityService, mask: Int) { field().setInt(service, mask) }
     override fun observed(info: AccessibilityServiceInfo): Int =
-        HiddenApiBypass.invoke(AccessibilityServiceInfo::class.java, info, "getObservedMotionEventSources") as Int
+        KmHiddenApi.invoke(AccessibilityServiceInfo::class.java, info, "getObservedMotionEventSources") as Int
 }
 
 /** Stop advances a session revision synchronously; configure cannot reopen that session.

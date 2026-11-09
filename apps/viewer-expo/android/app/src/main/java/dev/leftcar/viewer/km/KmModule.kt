@@ -14,31 +14,30 @@ import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.uimanager.ViewManager
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import rikka.shizuku.Shizuku
 
 class KmModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
     private val statusListener: (KmNativeStatus) -> Unit = { status ->
         if (reactContext.hasActiveReactInstance()) reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit("leftcarKmStatus", statusMap(status))
     }
-    private val binderListener = Shizuku.OnBinderReceivedListener { KmRuntime.changed() }
-    private val deadListener = Shizuku.OnBinderDeadListener { KmRuntime.stop("Shizuku가 종료되었습니다") }
-    private val permissionListener = Shizuku.OnRequestPermissionResultListener { _, _ -> KmRuntime.changed() }
+    private val binderListener = KmShizuku.onBinderReceived { KmRuntime.changed() }
+    private val deadListener = KmShizuku.onBinderDead { KmRuntime.stop("Shizuku가 종료되었습니다") }
+    private val permissionListener = KmShizuku.onRequestPermissionResult { _, _ -> KmRuntime.changed() }
 
     init {
         KmRuntime.initialize(reactContext)
         KmRuntime.listeners.add(statusListener)
-        Shizuku.addBinderReceivedListenerSticky(binderListener)
-        Shizuku.addBinderDeadListener(deadListener)
-        Shizuku.addRequestPermissionResultListener(permissionListener)
+        KmShizuku.addBinderReceivedListenerSticky(binderListener)
+        KmShizuku.addBinderDeadListener(deadListener)
+        KmShizuku.addRequestPermissionResultListener(permissionListener)
     }
     override fun getName() = "LeftcarKm"
     @ReactMethod fun getStatus(promise: Promise) { promise.resolve(statusMap(KmRuntime.status)) }
     @ReactMethod fun prepare(promise: Promise) { KmRuntime.prepare { it.fold({ ready -> promise.resolve(statusMap(ready)) }, { error -> promise.reject("km_prepare_failed", error.message) }) } }
     @ReactMethod fun requestShizukuPermission(promise: Promise) {
         try {
-            check(Shizuku.pingBinder() && Shizuku.getUid() == 2000) { "USB로 Shizuku를 ADB 모드에서 시작하세요" }
-            Shizuku.requestPermission(1441)
+            check(KmShizuku.pingBinder() && KmShizuku.getUid() == 2000) { "USB로 Shizuku를 ADB 모드에서 시작하세요" }
+            KmShizuku.requestPermission(1441)
             promise.resolve(null)
         } catch (_: Exception) { promise.reject("km_shizuku_unavailable", "USB로 Shizuku를 ADB 모드에서 시작하세요") }
     }
@@ -65,17 +64,17 @@ class KmModule(private val reactContext: ReactApplicationContext) : ReactContext
     @ReactMethod fun removeListeners(count: Int) = Unit
     override fun invalidate() {
         KmRuntime.listeners.remove(statusListener)
-        Shizuku.removeBinderReceivedListener(binderListener)
-        Shizuku.removeBinderDeadListener(deadListener)
-        Shizuku.removeRequestPermissionResultListener(permissionListener)
+        KmShizuku.removeBinderReceivedListener(binderListener)
+        KmShizuku.removeBinderDeadListener(deadListener)
+        KmShizuku.removeRequestPermissionResultListener(permissionListener)
         KmRuntime.stop("앱 연결이 종료되어 입력 공유를 중지했습니다")
         super.invalidate()
     }
 
     private fun statusMap(status: KmNativeStatus): WritableMap = Arguments.createMap().apply {
         putString("state", status.state); putString("reason", status.reason)
-        putBoolean("shizukuRunning", runCatching { Shizuku.pingBinder() && Shizuku.getUid() == 2000 }.getOrDefault(false))
-        putBoolean("shizukuGranted", runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false))
+        putBoolean("shizukuRunning", runCatching { KmShizuku.pingBinder() && KmShizuku.getUid() == 2000 }.getOrDefault(false))
+        putBoolean("shizukuGranted", runCatching { KmShizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false))
         putBoolean("accessibilityEnabled", KmAccessibilityService.instance != null)
         val bounds = reactContext.getSystemService(android.view.WindowManager::class.java).maximumWindowMetrics.bounds
         putInt("displayWidth", bounds.width()); putInt("displayHeight", bounds.height())

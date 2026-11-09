@@ -120,6 +120,14 @@ object ViewerNative {
 
     /** 전 창 집계 표면 릴리스 간격 윈도우 — count|p50|p95|max 각 u16 pack, 0은 데이터 없음. 1회 소비. */
     external fun streamCadence(): Long
+
+    /** Opaque KM TCP duplex handle; sockets+AEAD live in Rust. 0 = failure. */
+    external fun kmDuplexOpen(host: String, port: Int, seed: ByteArray, sessionId: String): Long
+    external fun kmDuplexSend(handle: Long, plain: ByteArray): Int
+    /** Copies plaintext into [out]; returns length, -3 timeout, other negatives on error. */
+    external fun kmDuplexRecv(handle: Long, out: ByteArray, timeoutMs: Int): Int
+    external fun kmDuplexDiscard(handle: Long)
+    external fun kmDuplexClose(handle: Long)
     external fun surfaceChanged(state: Long, instanceId: String, width: Int, height: Int): Int
     external fun detachSurface(state: Long, instanceId: String): Int
     external fun sendPointer(

@@ -1128,13 +1128,120 @@ pub fn pack_cadence_window(window: viewer_decoder::CadenceWindow) -> i64 {
 /// 돌려준다(락 경합·비었을 때 0).
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_cadence() -> i64 {
+    std::panic::catch_unwind(|| match viewer_decoder::read_and_reset_surface_cadence() {
+        Some(window) => pack_cadence_window(window),
+        None => 0,
+    })
+    .unwrap_or(0)
+}
+
+/// Open a KM TCP duplex. Returns an opaque handle (>0) or 0 on failure.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_km_duplex_open(
+    host: *const c_char,
+    port: u16,
+    seed: *const u8,
+    seed_len: usize,
+    session_id: *const c_char,
+) -> i64 {
     std::panic::catch_unwind(|| {
-        match viewer_decoder::read_and_reset_surface_cadence() {
-            Some(window) => pack_cadence_window(window),
-            None => 0,
+        if host.is_null() || session_id.is_null() || seed.is_null() || seed_len != 32 {
+            return 0;
+        }
+        let host = unsafe { CStr::from_ptr(host) }.to_string_lossy();
+        let session = unsafe { CStr::from_ptr(session_id) }.to_string_lossy();
+        let seed_bytes: [u8; 32] =
+            match unsafe { std::slice::from_raw_parts(seed, seed_len) }.try_into() {
+                Ok(s) => s,
+                Err(_) => return 0,
+            };
+        match crate::km_duplex::KmDuplex::connect(&host, port, &seed_bytes, &session) {
+            Ok(duplex) => crate::km_duplex::km_duplex_into_handle(duplex),
+            Err(error) => {
+                log_info!("km duplex open failed: {error}");
+                0
+            }
         }
     })
     .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_km_duplex_send(
+    handle: i64,
+    plain: *const u8,
+    plain_len: usize,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if plain.is_null() {
+            return crate::km_duplex::KM_ERR;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(plain, plain_len) };
+        crate::km_duplex::km_duplex_with(
+            handle,
+            |duplex| match duplex.send(bytes) {
+                Ok(()) => crate::km_duplex::KM_OK,
+                Err(code) => code,
+            },
+            crate::km_duplex::KM_ERR_CLOSED,
+        )
+    })
+    .unwrap_or(crate::km_duplex::KM_ERR_INTERNAL)
+}
+
+/// Blocking recv with timeout_ms. Copies plaintext into `out` (capacity out_cap).
+/// Returns length (>=0) or negative error codes matching `-KM_ERR_*`.
+#[no_mangle]
+pub extern "C" fn leftcar_jni_km_duplex_recv(
+    handle: i64,
+    out: *mut u8,
+    out_cap: usize,
+    timeout_ms: u32,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if out.is_null() {
+            return -crate::km_duplex::KM_ERR;
+        }
+        crate::km_duplex::km_duplex_with(
+            handle,
+            |duplex| match duplex
+                .recv_timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
+            {
+                Ok(plain) => {
+                    if plain.len() > out_cap {
+                        return -crate::km_duplex::KM_ERR_TOO_LARGE;
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(plain.as_ptr(), out, plain.len());
+                    }
+                    plain.len() as i32
+                }
+                Err(code) => -code,
+            },
+            -crate::km_duplex::KM_ERR_CLOSED,
+        )
+    })
+    .unwrap_or(-crate::km_duplex::KM_ERR_INTERNAL)
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_km_duplex_discard(handle: i64) {
+    let _ = std::panic::catch_unwind(|| {
+        crate::km_duplex::km_duplex_with(
+            handle,
+            |duplex| {
+                duplex.discard_queued();
+            },
+            (),
+        );
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn leftcar_jni_km_duplex_close(handle: i64) {
+    let _ = std::panic::catch_unwind(|| {
+        crate::km_duplex::km_duplex_drop_handle(handle);
+    });
 }
 
 #[cfg(test)]

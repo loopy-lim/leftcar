@@ -141,6 +141,21 @@ jobs:
           bun-version: 1.4.1
       - name: Frozen JS dependencies before Gradle settings resolution
         run: bun install --frozen-lockfile
+      # debug.keystore is gitignored (*.keystore). Local checkouts keep a private
+      # copy; CI creates the well-known Android debug identity that build.gradle
+      # already expects (android / androiddebugkey) so assembleDebug can sign.
+      - name: Create CI debug keystore
+        run: |
+          keytool -genkeypair \
+            -keystore app/debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+        working-directory: apps/viewer-expo/android
       - name: Gradle APK native link and JVM unit tests
         run: ./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon
         working-directory: apps/viewer-expo/android

@@ -35,6 +35,17 @@ internal fun resolveKeyBridgeAvailability(
 internal interface KeyBridgeOwnershipRemote {
     fun acquire(): Boolean
     fun release()
+    fun asBinder(): IBinder
+}
+
+/** AIDL Stub lives only in this allowlisted file; KM reuses the returned remote. */
+internal fun keyBridgeOwnershipRemote(binder: IBinder): KeyBridgeOwnershipRemote? {
+    val service = IRemoteInputOwnership.Stub.asInterface(binder) ?: return null
+    return object : KeyBridgeOwnershipRemote {
+        override fun acquire(): Boolean = service.acquire()
+        override fun release() = service.release()
+        override fun asBinder(): IBinder = service.asBinder()
+    }
 }
 
 internal interface KeyBridgeBindingBackend {
@@ -200,14 +211,11 @@ private class AndroidKeyBridgeBindingBackend(
         if (connection != null) return true
         val next = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-                val service = IRemoteInputOwnership.Stub.asInterface(binder) ?: run {
+                val remote = binder?.let(::keyBridgeOwnershipRemote) ?: run {
                     onDisconnected()
                     return
                 }
-                onConnected(object : KeyBridgeOwnershipRemote {
-                    override fun acquire(): Boolean = service.acquire()
-                    override fun release() = service.release()
-                })
+                onConnected(remote)
             }
 
             override fun onServiceDisconnected(name: ComponentName?) = onDisconnected()

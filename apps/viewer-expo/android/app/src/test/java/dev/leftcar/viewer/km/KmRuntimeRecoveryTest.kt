@@ -21,10 +21,9 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadows.ShadowAccessibilityService
-import rikka.shizuku.Shizuku
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], manifest = Config.NONE, shadows = [KmRuntimeRecoveryTest.ServiceInfoShadow::class, KmRuntimeRecoveryTest.ShizukuShadow::class])
+@Config(sdk = [35], manifest = Config.NONE, shadows = [KmRuntimeRecoveryTest.ServiceInfoShadow::class])
 class KmRuntimeRecoveryTest {
     @Implements(AccessibilityService::class)
     class ServiceInfoShadow : ShadowAccessibilityService() {
@@ -36,23 +35,34 @@ class KmRuntimeRecoveryTest {
             info = value
         }
     }
-    @Implements(Shizuku::class)
-    class ShizukuShadow {
-        companion object {
-            lateinit var next: Helper
-            val connections = mutableListOf<ServiceConnection>()
-            val retired = mutableListOf<ServiceConnection>()
-            @JvmStatic @Implementation fun pingBinder() = true
-            @JvmStatic @Implementation fun getUid() = 2000
-            @JvmStatic @Implementation fun getVersion() = 13
-            @JvmStatic @Implementation fun checkSelfPermission() = PackageManager.PERMISSION_GRANTED
-            @JvmStatic @Implementation fun bindUserService(options: Shizuku.UserServiceArgs, connection: ServiceConnection) {
+
+    /**
+     * Fake bound through [KmShizuku] hooks — reflective Shizuku calls bypass Robolectric shadows.
+     */
+    object ShizukuShadow {
+        lateinit var next: Helper
+        val connections = mutableListOf<ServiceConnection>()
+        val retired = mutableListOf<ServiceConnection>()
+
+        fun install() {
+            KmShizuku.pingBinder = { true }
+            KmShizuku.getUid = { 2000 }
+            KmShizuku.getVersion = { 13 }
+            KmShizuku.checkSelfPermission = { PackageManager.PERMISSION_GRANTED }
+            KmShizuku.userServiceArgs = { Any() }
+            KmShizuku.bindUserService = { _, connection ->
                 connections += connection
                 connection.onServiceConnected(null, next.binder)
             }
-            @JvmStatic @Implementation fun unbindUserService(options: Shizuku.UserServiceArgs, connection: ServiceConnection, remove: Boolean) {
+            KmShizuku.unbindUserService = { _, connection, _ ->
                 retired += connection
             }
+        }
+
+        fun reset() {
+            connections.clear()
+            retired.clear()
+            KmShizuku.reset()
         }
     }
     /** The same permanent proxy survives death. Only the next explicit bind creates another helper. */
@@ -94,13 +104,14 @@ class KmRuntimeRecoveryTest {
         KmRuntime::class.java.getDeclaredField("authority").apply { isAccessible = true }.set(KmRuntime, null)
         KmRuntime::class.java.getDeclaredField("observationService").apply { isAccessible = true }.set(KmRuntime, null)
         KmRuntime.stop(); drain()
+        ShizukuShadow.reset()
     }
     private fun drain() {
         val worker = KmRuntime::class.java.getDeclaredField("worker").apply { isAccessible = true }.get(KmRuntime) as Handler
         repeat(4) { shadowOf(worker.looper).idle(); shadowOf(Looper.getMainLooper()).idle() }
     }
     private fun setup(): Pair<Helper, KmAccessibilityService> {
-        ShizukuShadow.connections.clear(); ShizukuShadow.retired.clear()
+        ShizukuShadow.reset(); ShizukuShadow.install()
         val service = Robolectric.buildService(KmAccessibilityService::class.java).get()
         KmAccessibilityService.instance = service
         KmOwnObservationFixture().install(service)
@@ -113,7 +124,7 @@ class KmRuntimeRecoveryTest {
         return helper to service
     }
     @Test fun `Stop returned while worker prepare paused forbids later active admission and success publication`() {
-        ShizukuShadow.connections.clear(); ShizukuShadow.retired.clear()
+        ShizukuShadow.reset(); ShizukuShadow.install()
         val service = Robolectric.buildService(KmAccessibilityService::class.java).get()
         KmAccessibilityService.instance = service
         val platform = KmOwnObservationFixture(); platform.install(service)

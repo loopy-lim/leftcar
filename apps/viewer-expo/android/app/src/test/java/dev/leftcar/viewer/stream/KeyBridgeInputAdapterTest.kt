@@ -45,6 +45,7 @@ class KeyBridgeInputAdapterTest {
         private val remote = object : KeyBridgeOwnershipRemote {
             override fun acquire() = true
             override fun release() = Unit
+            override fun asBinder() = android.os.Binder()
         }
 
         override fun packageInstalled() = true
