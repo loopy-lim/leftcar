@@ -2,7 +2,7 @@
 //!
 //! All IDs are opaque; titles/bundle IDs/native handles are never encoded.
 
-use rustra::prelude::*;
+use unikit_bridge::prelude::*;
 
 #[bridge_type]
 #[derive(Clone)]

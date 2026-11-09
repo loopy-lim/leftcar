@@ -10,5 +10,5 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 control-contract = { path = "../../crates/control-contract" }
-rustra = { workspace = true }
+unikit-bridge = { workspace = true }
 serde_json = { workspace = true }

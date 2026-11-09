@@ -166,7 +166,7 @@ fn viewer_add_numbers_20_22_is_42() {
 #[test]
 fn unknown_command_is_rejected() {
     let package = host_package();
-    let result: rustra::Result<AddNumbersOutput> =
+    let result: unikit_bridge::Result<AddNumbersOutput> =
         package.invoke("sendKeyboard", AddNumbersInput { a: 1, b: 2 });
     assert!(
         result.is_err(),

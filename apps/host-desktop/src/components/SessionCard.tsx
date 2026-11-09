@@ -3,7 +3,7 @@ import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import type { SessionRow } from "../sessionTypes";
 import QualityOverride from "../QualityOverride";
 import SessionInspector from "../SessionInspector";
-import { Button, Notice, Text } from "../ui/primitives";
+import { Badge, Button, Notice, Text } from "../ui/primitives";
 export interface SessionCardProps {
   session: SessionRow;
   inputPermission: boolean;
@@ -34,9 +34,17 @@ function SessionIdentity({
 }: Pick<SessionCardProps, "session" | "t">) {
   return (
     <div className="min-w-0 flex-1 space-y-1">
-      <h3 className="text-title text-ink break-words font-semibold">
-        {session.sourceName}
-      </h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-title text-ink break-words font-semibold">
+          {session.sourceName}
+        </h3>
+        <Badge
+          variant={session.mediaTransport === "usb" ? "secondary" : "outline"}
+          className="text-xs"
+        >
+          {sessionTransportLabel(session, t)}
+        </Badge>
+      </div>
       {session.deviceName && (
         <Text tone="muted" className="block break-words">
           {session.deviceName}

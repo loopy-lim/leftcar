@@ -3,6 +3,31 @@ import {
   actionVariants, cn, inputVariants, noticeVariants, surfaceVariants, textVariants,
   type ActionVariantProps, type SurfaceVariantProps, type TextVariantProps,
 } from "@leftcar/ui-tokens";
+import {
+  Button as UniKitButton,
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+  Input as UniKitInput,
+  Label as UniKitLabel,
+  Badge,
+} from "@unikit-bridge/ui";
+
+export {
+  UniKitButton,
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+  UniKitInput,
+  UniKitLabel,
+  Badge,
+};
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & ActionVariantProps & { busy?: boolean };
 export function Button({ variant, size, busy = false, disabled = false, className, type = "button", ...props }: ButtonProps) {

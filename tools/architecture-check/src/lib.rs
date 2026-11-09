@@ -137,7 +137,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         // 안드로이드 키코드 기본표(단일 소스) — 데이터 전용 무의존 하위 계층.
         ("keymap", &[]),
         ("media-model", &["domain"]),
-        ("control-contract", &["domain", "media-model"]),
+        ("control-contract", &["domain", "media-model", "unikit-bridge"]),
         ("session", &["domain"]),
         ("host-core", &["domain", "media-model"]),
         ("viewer-core", &["domain", "media-model"]),
@@ -156,7 +156,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "secure-channel",
             ],
         ),
-        ("leftcar-rustra", &["control-contract"]),
+        ("leftcar-rustra", &["control-contract", "unikit-bridge"]),
         ("viewer-decoder", &[]),
         (
             "leftcar-host-desktop",
@@ -170,6 +170,12 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "usb-mux",
             ],
         ),
+        (
+            "unikit-bridge",
+            &["unikit-bridge-macros", "unikit-bridge-naming"],
+        ),
+        ("unikit-bridge-macros", &["unikit-bridge-naming"]),
+        ("unikit-bridge-naming", &[]),
 
         ("architecture-check", &[]),
     ];
@@ -215,6 +221,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
             "android-viewer",
             "viewer-decoder",
             "leftcar-host-desktop",
+            "unikit-bridge",
         ]
         .contains(&crate_name.as_str())
         {

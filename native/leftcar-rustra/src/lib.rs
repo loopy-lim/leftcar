@@ -14,13 +14,13 @@ use std::ffi::{c_char, CStr, CString};
 use std::sync::OnceLock;
 
 use control_contract::host_package;
-use rustra::prelude::Package;
+use unikit_bridge::prelude::Package;
 
 static PACKAGE: OnceLock<Package> = OnceLock::new();
 
 fn package() -> &'static Package {
     let package = PACKAGE.get_or_init(host_package);
-    // Generated JSI calls Rustra's generic Frame FFI surface. The
+    // Generated JSI calls Unikit's generic Frame FFI surface. The
     // legacy JNI shim invokes Package directly, so without this registration
     // the old proof passes while the generated bridge returns
     // `ffi.not_registered`.
@@ -28,11 +28,11 @@ fn package() -> &'static Package {
     package
 }
 
-// Rustra's generated React Native package loads the stable native entry
+// Unikit's generated React Native package loads the stable native entry
 // point. Keep the legacy JNI shim below during the app cutover; both paths
 // resolve to the same OnceLock-backed package and therefore cannot diverge in
 // command registration or contract hash.
-rustra::native_entry!(package);
+unikit_bridge::native_entry!(package);
 
 /// Result strings carry an "OK"/"ER" prefix so errors never look like data.
 #[no_mangle]
@@ -103,7 +103,7 @@ mod tests {
     fn native_entry_target_is_registered_for_generated_ffi() {
         let _ = package();
         assert_eq!(
-            rustra::ffi::get_package().map(Package::id),
+            unikit_bridge::ffi::get_package().map(Package::id),
             Some("leftcar.host.control")
         );
     }
@@ -112,13 +112,13 @@ mod tests {
     fn generated_frame_call_supports_owned_and_caller_buffer_responses() {
         let _ = package();
         // Generated addNumbers codec: u16 command 1, then postcard i64
-        // zigzag values 20 and 22. Both RN 0.10 response paths must return 42.
+        // zigzag values 20 and 22. Both RN response paths must return 42.
         let request = [1u8, 0, 40, 44];
         for capacity in [2, 64] {
             let mut buffer = vec![0u8; capacity];
             let mut length = 0;
             let owned = unsafe {
-                rustra::ffi::rustra_ffi_invoke_frame_owned(
+                unikit_bridge::ffi::unikit_ffi_invoke_frame_owned(
                     request.as_ptr(),
                     request.len(),
                     buffer.as_mut_ptr(),
@@ -131,11 +131,11 @@ mod tests {
             } else {
                 let frame = unsafe { std::slice::from_raw_parts(owned, length) }.to_vec();
                 // Copy before freeing and always pair the exact pointer/length.
-                unsafe { rustra::ffi::rustra_ffi_free_owned_bytes(owned, length) };
+                unsafe { unikit_bridge::ffi::unikit_ffi_free_owned_bytes(owned, length) };
                 frame
             };
             assert_eq!(owned.is_null(), capacity == 64);
-            assert_eq!(rustra::decode_frame_response(&response).unwrap(), &[84]);
+            assert_eq!(unikit_bridge::decode_frame_response(&response).unwrap(), &[84]);
         }
     }
 }

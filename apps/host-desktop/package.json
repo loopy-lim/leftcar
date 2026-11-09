@@ -12,10 +12,14 @@
   "dependencies": {
     "@leftcar/ui-tokens": "workspace:*",
     "@tauri-apps/api": "^2",
+    "@unikit-bridge/ui": "0.1.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",
     "qrcode": "^1.5.4",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "tailwind-merge": "^3.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

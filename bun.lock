@@ -4,13 +4,19 @@
   "workspaces": {
     "": {
       "name": "leftcar",
+      "dependencies": {
+        "@unikit-bridge/ui": "0.1.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.1",
+        "tailwind-merge": "^3.0.0",
+      },
       "devDependencies": {
-        "@rustra/cli": "0.12.0",
-        "@rustra/types": "0.12.1",
         "@tailwindcss/node": "4.3.3",
         "@tailwindcss/oxide": "4.3.3",
         "@types/node": "^26.6.6",
         "@types/react": "^19.3.0",
+        "@unikit-bridge/cli": "^0.13.0",
+        "@unikit-bridge/types": "^0.13.0",
         "@xmldom/xmldom": "0.9.12",
         "playwright-core": "1.63.0",
         "semver": "7.8.5",
@@ -25,10 +31,14 @@
       "dependencies": {
         "@leftcar/ui-tokens": "workspace:*",
         "@tauri-apps/api": "^2",
+        "@unikit-bridge/ui": "0.1.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.1",
         "lucide-react": "^1.33.0",
         "qrcode": "^1.5.4",
         "react": "19.2.3",
         "react-dom": "19.2.3",
+        "tailwind-merge": "^3.0.0",
       },
       "devDependencies": {
         "@tailwindcss/vite": "^4.3.3",
@@ -64,9 +74,13 @@
         "@noble/ciphers": "1",
         "@noble/curves": "1",
         "@noble/hashes": "1",
-        "@rustra/generated-react-native": "workspace:*",
-        "@rustra/react-native": "0.10.0",
         "@tanstack/react-query": "^5.101.4",
+        "@unikit-bridge/generated-react-native": "workspace:*",
+        "@unikit-bridge/react-native": "^0.11.0",
+        "@unikit-bridge/types": "^0.13.0",
+        "@unikit-bridge/ui": "0.1.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.1",
         "expo": "~57.0.15",
         "expo-camera": "~57.0.4",
         "expo-clipboard": "^57.0.1",
@@ -84,6 +98,7 @@
         "react-native-safe-area-context": "~5.7.0",
         "react-native-screens": "~4.26.0",
         "react-native-tcp-socket": "^6.4.2",
+        "tailwind-merge": "^3.0.0",
         "tailwindcss": "^4.3.3",
         "uniwind": "^1.11.0",
       },
@@ -95,10 +110,10 @@
       },
     },
     "apps/viewer-expo/modules/rustra-bridge": {
-      "name": "@rustra/generated-react-native",
+      "name": "@unikit-bridge/generated-react-native",
       "version": "0.0.0",
       "peerDependencies": {
-        "@rustra/react-native": "^0.10.0",
+        "@unikit-bridge/react-native": "^0.11.0",
         "react-native": ">=0.76",
       },
     },
@@ -578,14 +593,6 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.4", "", { "os": "win32", "cpu": "x64" }, "sha512-zD6NdeWEByGE9QF9vCrlJ5YQB4oq9q91kPZS37Jwj5hOkvR1lTBSpsKhKDw4IJtbQ35LsTS1HD9DZYGKIshU1Q=="],
 
-    "@rustra/cli": ["@rustra/cli@0.12.0", "", { "dependencies": { "@rustra/types": "^0.12.1", "picomatch": "^4.0.7", "smol-toml": "^1.9.0" }, "bin": { "rustra": "dist/index.js" } }, "sha512-MRdPmX339XbVlIHIi9GLtm5wNydvAUZffq1A3amTXzF0LFz+oZuTl6k4nVLR9f+7HDd1bGIfvh0Ns1oR/Y/Vpw=="],
-
-    "@rustra/generated-react-native": ["@rustra/generated-react-native@workspace:apps/viewer-expo/modules/rustra-bridge"],
-
-    "@rustra/react-native": ["@rustra/react-native@0.10.0", "", { "dependencies": { "@rustra/types": "^0.12.1" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-uczy1AsSMPNo+lKmHAYXIOQ/S8fROgsaAC+JasTPIrlivooAYWxRClQ8HkC63IxGQs51tBGwDtC7SitHaC80iw=="],
-
-    "@rustra/types": ["@rustra/types@0.12.1", "", {}, "sha512-yalv+drjn5gXfmq/fVVMCszl/rhR6iOIMUvT8vHfze62+TyZSoKyhF+EbqZimWlyD/FL+4LkRBh17L2WDm/XEA=="],
-
     "@sinclair/typebox": ["@sinclair/typebox@0.27.12", "", {}, "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
@@ -689,6 +696,16 @@
     "@types/yargs-parser": ["@types/yargs-parser@21.0.3", "", {}, "sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ=="],
 
     "@ungap/structured-clone": ["@ungap/structured-clone@1.3.3", "", {}, "sha512-60YRaenCQcVjYEKOcG824+DRGGIQ3VKErcBoAEDJZz5bKIs2ZG+X/H9Nk+Q6EVkwJk5QNApxbrc5QtBSwtrXAg=="],
+
+    "@unikit-bridge/cli": ["@unikit-bridge/cli@0.13.0", "", { "dependencies": { "@unikit-bridge/types": "^0.13.0", "picomatch": "^4.0.7", "smol-toml": "^1.9.0" }, "bin": { "unikit": "dist/index.js" } }, "sha512-AJVB57BzJ0EvyEC3OrJ6IDkFBCn2zmHYVq4EIAU6AQLi/P/drbWXxg6ELmBSIJtUWnGgSuK0klXu1PHkEBzh8w=="],
+
+    "@unikit-bridge/generated-react-native": ["@unikit-bridge/generated-react-native@workspace:apps/viewer-expo/modules/rustra-bridge"],
+
+    "@unikit-bridge/react-native": ["@unikit-bridge/react-native@0.11.0", "", { "dependencies": { "@unikit-bridge/types": "^0.13.0" }, "peerDependencies": { "react-native": ">=0.76" }, "optionalPeers": ["react-native"] }, "sha512-4itq1xHVnIDWpqi6KjbH2CKdQJMrRFGV6R74DwV6aNzA2e3ZHcFzVN7cuMXugLNGJjhuI9rGOSFfhd3Ex7xLIQ=="],
+
+    "@unikit-bridge/types": ["@unikit-bridge/types@0.13.0", "", {}, "sha512-PRuCC81uIqUduhBDEap7R7xnoxcd7z+1AgPyc3N1/caka+wxh6Re2ltUorDvI7YGIYyF7Bh20NiiaEYP9raSUA=="],
+
+    "@unikit-bridge/ui": ["@unikit-bridge/ui@0.1.0", "", { "peerDependencies": { "class-variance-authority": "^0.7.0", "clsx": "^2.1.0", "react": "^18.0.0 || ^19.0.0", "react-native": ">=0.81.0", "tailwind-merge": "^3.0.0", "uniwind": ">=1.13.0" }, "optionalPeers": ["react-native", "uniwind"] }, "sha512-K3FOYykXHvxsghprFkKicPrnj6Kwrd2exulLgrsUa00j1FlutqCg97i0EDgLJ47qeHp2NubAJAsGBu+PBTCFqQ=="],
 
     "@vitejs/plugin-react": ["@vitejs/plugin-react@4.7.0", "", { "dependencies": { "@babel/core": "7.29.7", "@babel/plugin-transform-react-jsx-self": "7.29.7", "@babel/plugin-transform-react-jsx-source": "7.29.7", "@rolldown/pluginutils": "1.0.0-beta.27", "@types/babel__core": "7.20.5", "react-refresh": "0.17.0" }, "peerDependencies": { "vite": "6.4.3" } }, "sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA=="],
 

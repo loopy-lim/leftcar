@@ -12,7 +12,7 @@ bytes = { workspace = true }
 domain = { workspace = true }
 base64 = "0.22"
 schemars = "0.8"
-rustra = { workspace = true }
+unikit-bridge = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

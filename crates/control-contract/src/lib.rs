@@ -16,7 +16,7 @@ pub use viewer::viewer_package;
 ///
 /// Layout: `<out_dir>/host/` and `<out_dir>/viewer/` (rustra writes
 /// schema.json, types.ts, commands.ts, contract.ts into each).
-pub fn generate_all(out_dir: std::path::PathBuf) -> rustra::Result<()> {
+pub fn generate_all(out_dir: std::path::PathBuf) -> unikit_bridge::Result<()> {
     let host = host_package().generate_typescript()?;
     host.write_to_dir(out_dir.join("host"))?;
     let viewer = viewer_package().generate_typescript()?;

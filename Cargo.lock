@@ -203,11 +203,11 @@ dependencies = [
  "bytes",
  "domain",
  "proptest",
- "rustra",
  "schemars",
  "serde",
  "serde_json",
  "thiserror",
+ "unikit-bridge",
 ]
 
 [[package]]
@@ -551,8 +551,8 @@ name = "leftcar-rustra"
 version = "0.1.0"
 dependencies = [
  "control-contract",
- "rustra",
  "serde_json",
+ "unikit-bridge",
 ]
 
 [[package]]
@@ -764,40 +764,6 @@ dependencies = [
  "linux-raw-sys",
  "windows-sys",
 ]
-
-[[package]]
-name = "rustra"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54672721a04ce63cc7d2ff1667af5b055e4957c0bb83af7aabba5694fb90d347"
-dependencies = [
- "hex",
- "postcard",
- "rustra-macros",
- "rustra-naming",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "rustra-macros"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b3874b8b71e15d36114e9c9bce704107bb62e8c8f05e01524b30e6b2e823f8f"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustra-naming",
- "syn 3.0.9",
-]
-
-[[package]]
-name = "rustra-naming"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe530f86e7b39b994a0c5a3612e51fc7d5ddaacb49a46635471d164df903f033"
 
 [[package]]
 name = "rustversion"
@@ -1123,6 +1089,34 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unikit-bridge"
+version = "0.13.0"
+dependencies = [
+ "hex",
+ "postcard",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unikit-bridge-macros",
+ "unikit-bridge-naming",
+]
+
+[[package]]
+name = "unikit-bridge-macros"
+version = "0.13.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+ "unikit-bridge-naming",
+]
+
+[[package]]
+name = "unikit-bridge-naming"
+version = "0.13.0"
 
 [[package]]
 name = "universal-hash"

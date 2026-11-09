@@ -1,8 +1,8 @@
 #!/bin/sh
-# ── rustra generated ────────────────────────────────────────
+# ── unikit generated ────────────────────────────────────────
 # File:   android/build-rust-android.sh
 # Source: schema.json (single source of truth for this file)
-# Regen:  rustra codegen --config rustra.json
+# Regen:  unikit codegen --config unikit.json
 # Stage:  rust-probe schema → ts renderer
 # DO NOT EDIT — changes will be overwritten and fail codegen --check.
 # ────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ PACKAGE='leftcar-rustra'
 LIBRARY='leftcar_rustra'
 TARGET_DIR="$MODULE_DIR/build/target"
 CARGO_BIN=${CARGO_BIN:-cargo}
-PROFILE=${RUSTRA_PROFILE:-release}
+PROFILE=${UNIKIT_PROFILE:-release}
 REL_FLAG=""
 if [ "$PROFILE" = "release" ]; then REL_FLAG="--release"; fi
 ABIS=${ANDROID_ABIS:-"x86_64-linux-android aarch64-linux-android"}

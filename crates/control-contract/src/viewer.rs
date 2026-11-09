@@ -1,7 +1,7 @@
 //! Viewer control package (docs/04 §6).
 
 use crate::common::*;
-use rustra::prelude::*;
+use unikit_bridge::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -169,7 +169,7 @@ pub struct ViewerAddNumbersOutput {
 }
 
 #[command]
-fn viewer_add_numbers(input: ViewerAddNumbersInput) -> rustra::Result<ViewerAddNumbersOutput> {
+fn viewer_add_numbers(input: ViewerAddNumbersInput) -> unikit_bridge::Result<ViewerAddNumbersOutput> {
     Ok(ViewerAddNumbersOutput {
         value: input.a + input.b,
     })

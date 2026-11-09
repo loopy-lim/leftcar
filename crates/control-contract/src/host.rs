@@ -2,7 +2,7 @@
 
 use crate::common::*;
 use crate::udp_stability::{AppliedUdpStability, UdpStabilityCapabilities, UdpStabilityRequest};
-use rustra::prelude::*;
+use unikit_bridge::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // -- permission and sources (5.1) ------------------------------------------
@@ -200,7 +200,7 @@ pub struct AddNumbersOutput {
 }
 
 #[command]
-fn add_numbers(input: AddNumbersInput) -> rustra::Result<AddNumbersOutput> {
+fn add_numbers(input: AddNumbersInput) -> unikit_bridge::Result<AddNumbersOutput> {
     Ok(AddNumbersOutput {
         value: input.a + input.b,
     })

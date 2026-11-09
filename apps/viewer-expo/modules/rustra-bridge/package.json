@@ -1,11 +1,11 @@
 {
-  "name": "@rustra/generated-react-native",
+  "name": "@unikit-bridge/generated-react-native",
   "version": "0.0.0",
   "private": true,
   "main": "src/index.ts",
   "react-native": "src/index.ts",
   "peerDependencies": {
-    "@rustra/react-native": "^0.10.0",
+    "@unikit-bridge/react-native": "^0.11.0",
     "react-native": ">=0.76"
   }
 }

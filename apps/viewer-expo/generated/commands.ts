@@ -1,14 +1,14 @@
-// ── rustra generated ────────────────────────────────────────
+// ── unikit generated ────────────────────────────────────────
 // File:   commands.ts
 // Source: schema.json (single source of truth for this file)
-// Regen:  rustra codegen --config rustra.json
+// Regen:  unikit codegen --config unikit.json
 // Stage:  rust-probe schema → ts renderer
 // DO NOT EDIT — changes will be overwritten and fail codegen --check.
 // ────────────────────────────────────────────────────────────
 
 import type { AddNumbersInput, AddNumbersOutput } from './types.js';
-import { createGeneratedFields2, invokeGenerated } from '@rustra/types';
-import type { InvokeOptions as CoreInvokeOptions } from '@rustra/types';
+import { createGeneratedFields2, invokeGenerated } from '@unikit-bridge/types';
+import type { InvokeOptions as CoreInvokeOptions } from '@unikit-bridge/types';
 
 /**
  * 이 패키지 생성 명령의 호출 옵션 — 모든 생성 함수의 마지막 파라미터.
@@ -23,7 +23,7 @@ import type { InvokeOptions as CoreInvokeOptions } from '@rustra/types';
  * 시도가 반영되지 않았음을 확인한 뒤에만 하세요.
  *
  * 전체 의미론은 docs/compatibility-matrix.md "Signal semantics in detail" 및
- * 원본 타입(`InvokeOptions`(@rustra/types)) 문서를 참고하세요.
+ * 원본 타입(`InvokeOptions`(@unikit-bridge/types)) 문서를 참고하세요.
  */
 export type InvokeOptions = CoreInvokeOptions;
 
