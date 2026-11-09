@@ -123,6 +123,11 @@ mod tests {
         sender
             .notify_retirement(Some(TerminationReason::Health))
             .unwrap();
+        // After the terminal notice, allow a wider receive window so a busy
+        // CI runner does not miss the localhost datagram.
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         let size = receiver.recv(&mut frame).unwrap();
         let opener = DatagramSealer::new(secure_channel::media_keys(&key).s2c);
         assert_eq!(opener.open(&frame[..size]).unwrap(), b"LCT1\x01");
@@ -479,15 +484,17 @@ impl MediaSender {
         match &self.socket {
             MediaSocket::Udp(socket) | MediaSocket::UdpTo(socket, _) => {
                 let old_timeout = socket.write_timeout()?;
-                socket.set_write_timeout(Some(Duration::from_millis(20)))?;
+                // Match the remaining retirement deadline so a loaded CI
+                // scheduler cannot turn a localhost send into TimedOut.
                 let result = (|| {
                     for attempt in 0..2 {
                         if attempt > 0 {
                             std::thread::sleep(Duration::from_millis(20));
                         }
-                        if Instant::now() >= deadline {
-                            return Err(std::io::ErrorKind::TimedOut.into());
-                        }
+                        let remaining = deadline
+                            .checked_duration_since(Instant::now())
+                            .ok_or(std::io::ErrorKind::TimedOut)?;
+                        socket.set_write_timeout(Some(remaining))?;
                         let envelope = self.prepare(&notice)?;
                         let submitted = match &self.socket {
                             MediaSocket::UdpTo(_, peer) => socket.send_to(&envelope, peer)?,

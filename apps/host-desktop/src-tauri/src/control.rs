@@ -9650,22 +9650,44 @@ mod tests {
 
     #[tokio::test]
     async fn control_response_backpressure_releases_connection_permit() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let peer = TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (socket, _) = listener.accept().await.unwrap();
+        // Real TCP send buffers (especially on Windows) can absorb a large
+        // response without blocking. Drive write_response through a writer that
+        // stays pending so the idle deadline — not kernel buffering — decides.
+        struct NeverReadyWrite;
+        impl AsyncWrite for NeverReadyWrite {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> std::task::Poll<Result<usize, std::io::Error>> {
+                std::task::Poll::Pending
+            }
+
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), std::io::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), std::io::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = permits.clone().acquire_owned().await.unwrap();
         let (_shutdown_signal, mut shutdown) = tokio::sync::watch::channel(false);
         let send = tokio::spawn(async move {
             let _permit = permit;
-            let (_, mut writer) = socket.into_split();
-            let response = "x".repeat(32 * 1024 * 1024);
+            let mut writer = NeverReadyWrite;
             write_response(
                 &mut writer,
                 &mut ConnCrypto::Plain,
-                &response,
+                "x",
                 None,
                 &mut shutdown,
             )
@@ -9681,7 +9703,6 @@ mod tests {
             "backpressured responses must fail at their deadline"
         );
         assert_eq!(permits.available_permits(), 1);
-        drop(peer);
     }
 
     #[tokio::test]
