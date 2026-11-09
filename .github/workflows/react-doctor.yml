@@ -1,0 +1,40 @@
+# React Doctor — advisory PR signal (sticky comment + inline notes + commit status).
+# Hard 100/100 gate remains in .github/workflows/ci.yml (TypeScript job).
+#
+# Docs: https://www.react.doctor/ci
+# Source: https://github.com/millionco/react-doctor
+
+name: React Doctor
+
+on:
+  # Scans the PR's changed files and posts a sticky summary of new issues vs the merge base.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Tracks health-score trend on the default branch.
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: react-doctor-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  react-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is required so React Doctor can find the merge base.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # Advisory only: does not fail the check. Blocking score gate is ci.yml.
+      - uses: millionco/react-doctor@695e46eee203a5d1855020191aa7e9c010a1250e # v2.4.0
+        with:
+          blocking: none
+          directory: .
