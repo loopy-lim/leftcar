@@ -710,7 +710,6 @@ impl VirtualDisplayManager {
         }
     }
 
-
     #[cfg(not(target_os = "macos"))]
     fn call_create(
         &self,
@@ -814,7 +813,6 @@ impl VirtualDisplayManager {
             }
         }
     }
-
 
     #[cfg(not(target_os = "macos"))]
     fn call_destroy(&self, state: &ManagerState, display_id: u32) -> Result<bool, String> {
