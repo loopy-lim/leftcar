@@ -545,7 +545,12 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexRecv(
         }
         let mut buf = vec![0u8; cap as usize];
         let got = unsafe {
-            leftcar_jni_km_duplex_recv(handle, buf.as_mut_ptr(), buf.len(), timeout_ms.max(0) as u32)
+            leftcar_jni_km_duplex_recv(
+                handle,
+                buf.as_mut_ptr(),
+                buf.len(),
+                timeout_ms.max(0) as u32,
+            )
         };
         if got > 0 {
             let set: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, i32, i32, *const c_void) =

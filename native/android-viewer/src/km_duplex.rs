@@ -90,7 +90,12 @@ pub struct KmDuplex {
 }
 
 impl KmDuplex {
-    pub fn connect(host: &str, port: u16, seed: &[u8; 32], session_id: &str) -> Result<Self, String> {
+    pub fn connect(
+        host: &str,
+        port: u16,
+        seed: &[u8; 32],
+        session_id: &str,
+    ) -> Result<Self, String> {
         if !(1..=65535).contains(&port) {
             return Err("invalid KM port".into());
         }
@@ -118,7 +123,9 @@ impl KmDuplex {
         // Separate halves so the reader can block without stalling the writer.
         let writer_stream = stream.try_clone().map_err(|e| e.to_string())?;
         let reader_stream = stream;
-        let shutdown = Arc::new(Mutex::new(writer_stream.try_clone().map_err(|e| e.to_string())?));
+        let shutdown = Arc::new(Mutex::new(
+            writer_stream.try_clone().map_err(|e| e.to_string())?,
+        ));
         let outbound = Arc::new(OutboundQueue::new());
         let (inbound_tx, inbound_rx) = mpsc::sync_channel::<Result<Vec<u8>, String>>(QUEUE_CAP);
         let writer_errors = inbound_tx.clone();
@@ -131,7 +138,8 @@ impl KmDuplex {
             .spawn(move || {
                 let mut writer_stream = writer_stream;
                 while !writer_stop.load(Ordering::SeqCst) {
-                    let Some(plain) = writer_outbound.pop_timeout(Duration::from_millis(100)) else {
+                    let Some(plain) = writer_outbound.pop_timeout(Duration::from_millis(100))
+                    else {
                         continue;
                     };
                     if plain.is_empty() || plain.len() > MAX_PLAINTEXT {
@@ -252,7 +260,11 @@ impl KmDuplex {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = self.stream.lock().ok().and_then(|s| s.shutdown(Shutdown::Both).ok());
+        let _ = self
+            .stream
+            .lock()
+            .ok()
+            .and_then(|s| s.shutdown(Shutdown::Both).ok());
         if let Some(h) = self.writer.take() {
             let _ = h.join();
         }
@@ -323,7 +335,11 @@ pub fn km_duplex_into_handle(duplex: KmDuplex) -> i64 {
     let cell = Arc::new(KmDuplexHandle {
         duplex: Mutex::new(Some(duplex)),
     });
-    if handle_table().lock().map(|mut t| t.insert(id, cell)).is_err() {
+    if handle_table()
+        .lock()
+        .map(|mut t| t.insert(id, cell))
+        .is_err()
+    {
         return 0;
     }
     id
@@ -411,7 +427,9 @@ mod tests {
             // Blocking reads with a generous deadline — avoid WouldBlock from
             // nonblocking accept inheritance on some platforms.
             socket.set_nonblocking(false).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             let mut len = [0u8; 4];
             read_exact_retry(&mut socket, &mut len).expect("peer length");
             let n = u32::from_be_bytes(len) as usize;
@@ -423,7 +441,9 @@ mod tests {
             assert!(hello.contains("\"kind\":\"hello\""));
             let state = br#"{"version":1,"sessionId":"km-socket-test","epoch":1,"seq":1,"origin":"mac","payload":{"kind":"state","owner":"local"}}"#;
             let response = StreamSealer::new(keys.s2c).seal(state).unwrap();
-            socket.write_all(&(response.len() as u32).to_be_bytes()).unwrap();
+            socket
+                .write_all(&(response.len() as u32).to_be_bytes())
+                .unwrap();
             socket.write_all(&response).unwrap();
             socket.flush().unwrap();
             thread::sleep(Duration::from_millis(200));

@@ -1128,11 +1128,9 @@ pub fn pack_cadence_window(window: viewer_decoder::CadenceWindow) -> i64 {
 /// 돌려준다(락 경합·비었을 때 0).
 #[no_mangle]
 pub extern "C" fn leftcar_jni_stream_cadence() -> i64 {
-    std::panic::catch_unwind(|| {
-        match viewer_decoder::read_and_reset_surface_cadence() {
-            Some(window) => pack_cadence_window(window),
-            None => 0,
-        }
+    std::panic::catch_unwind(|| match viewer_decoder::read_and_reset_surface_cadence() {
+        Some(window) => pack_cadence_window(window),
+        None => 0,
     })
     .unwrap_or(0)
 }
@@ -1152,11 +1150,11 @@ pub extern "C" fn leftcar_jni_km_duplex_open(
         }
         let host = unsafe { CStr::from_ptr(host) }.to_string_lossy();
         let session = unsafe { CStr::from_ptr(session_id) }.to_string_lossy();
-        let seed_bytes: [u8; 32] = match unsafe { std::slice::from_raw_parts(seed, seed_len) }.try_into()
-        {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
+        let seed_bytes: [u8; 32] =
+            match unsafe { std::slice::from_raw_parts(seed, seed_len) }.try_into() {
+                Ok(s) => s,
+                Err(_) => return 0,
+            };
         match crate::km_duplex::KmDuplex::connect(&host, port, &seed_bytes, &session) {
             Ok(duplex) => crate::km_duplex::km_duplex_into_handle(duplex),
             Err(error) => {
@@ -1206,7 +1204,8 @@ pub extern "C" fn leftcar_jni_km_duplex_recv(
         }
         crate::km_duplex::km_duplex_with(
             handle,
-            |duplex| match duplex.recv_timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
+            |duplex| match duplex
+                .recv_timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
             {
                 Ok(plain) => {
                     if plain.len() > out_cap {
