@@ -1,0 +1,18 @@
+[package]
+name = "viewer-app-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+secure-channel = { path = "../secure-channel" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+# crates/secure-channel이 이미 끌어 오는 암호 프리미티브 — 클라이언트 절차가
+# 임시 X25519 비밀을 만들 때 재사용한다.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+hex = { version = "0.4", default-features = false, features = ["std"] }

@@ -1,0 +1,22 @@
+[package]
+name = "host-gpui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# GPUI 호스트 앱(2026-11-06 GPUI 전환 계획 T-1). Tauri 앱과 같은 단일
+# 프로세스 구조를 재현한다: 이 크레이트가 코어 부트스트랩을 직접 기동하고
+# UI 폴러가 panel::dispatch 1:1 위임 표를 백그라운드 스레드에서 호출한다.
+# 토큰·포트 파일·TCP 클라이언트는 GPUI 경로에 필요 없다(설계 §2.1 개정).
+[dependencies]
+gpui-kit = "0.9"
+leftcar-host-desktop = { path = ".." }
+# KmStatus·KmViewerConsent·DisplayInfo 같은 계약 뷰 타입을 래퍼 시그니처에
+# 그대로 쓰기 위한 path 의존. leftcar-host-desktop의 의존 폐쇄 안에 이미
+# 있어 빌드 비용은 없다.
+control-contract = { path = "../../../../crates/control-contract" }
+# 테스트 하니스가 ControlServer 신원을 만들 때 쓴다(panel.rs 선례와 같다).
+secure-channel = { path = "../../../../crates/secure-channel" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
