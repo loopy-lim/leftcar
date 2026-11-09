@@ -54,3 +54,41 @@ adb devices            # 기기 인식 확인
 adb shell getprop ro.build.version.release
 adb logcat -d -s Leftcar   # 스트리밍 세션 로그 덤프
 ```
+
+## 리눅스 Host 개발 머신 (2026-11-01)
+
+- Arch Linux, Hyprland 0.56.2 (Wayland), Ryzen 9 9950X, 출력 HDMI-A-3 1920x1080@60 단일.
+- 자동화 셸은 Hyprland GUI 세션 밖이다(`XDG_SESSION_TYPE=tty`). GUI가 필요한 실행은
+  `WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000`(및 필요 시
+  `HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1)`)을 env로 주입해
+  세션 소켓에 붙는다. grim 캡처·wlr-screencopy·가상 입력 프로토콜은 이 경로로 동작한다.
+- 빌드 요구 패키지: webkit2gtk-4.1, gtk3, libsoup3, pkg-config(빌드),
+  libayatana-appindicator(트레이, 런타임 dlopen — 없으면 트레이만 실패),
+  openh264(런타임 dlopen, Linux Host 소프트웨어 폴백 인코더),
+  nvidia-utils(런타임 dlopen `libnvidia-encode.so.1`+`libcuda.so.1`, Linux Host
+  NVENC 하드웨어 인코더 — NVIDIA 독점 드라이버 머신에서 자동 선택, 없으면
+  openh264로 폴백), zenity·xdg-desktop-portal(파일 대화상자).
+  adb는 미설치 — Android 실기기 검증은 미실행.
+- Linux Host 인코더 선택은 세션 시작 시 자동이다: NVENC(H.264 baseline, CBR,
+  P4+ULTRA_LOW_LATENCY 튜닝, 무한 GOP·뷰어-IDR 구동, 클래식 시스템 메모리 입력
+  버퍼 경로) → 실패 시 OpenH264 소프트웨어. `LEFTCAR_LINUX_ENCODER` 환경변수로
+  강제할 수 있다(`auto`(기본) | `hardware` | `software`; 알 수 없는 값은
+  세션 시작 오류). 선택 결과는 stats(`encoder_id`/`encoder_hardware_accelerated`)
+  와 `linux_encoder_selected` 로그로 관찰된다.
+- NVENC 입력 경로는 클래식 `nvEncCreateInputBuffer`+`nvEncLockInputBuffer`를
+  쓴다. 드라이버 615.78.08에서 CUDADEVICEPTR register/map 경로는 sync 모드
+  encode가 NV_ENC_ERR_EVENT_NOT_REGISTERD로 실패하는 것을 실측했고(FFmpeg
+  h264_nvenc가 쓰는 클래식 경로는 동일 드라이버에서 정상), sync 모드의
+  `NV_ENC_LOCK_BITSTREAM.hwEncodeStatus`는 성공 인코딩에서도 비-NVENCSTATUS
+  내부값(2)을 담으므로 신뢰하지 않는다. NVENC H.264 최소 해상도는 이 드라이버
+  기준 145x49(caps WIDTH_MIN/HEIGHT_MIN 실측)다.
+- 루트 워크스페이스 `cargo build`/`cargo test --workspace`는 리눅스 호스트에서
+  viewer-decoder의 `stream_receiver`/`decode_harness` 바이너리 링크가 Android NDK 심볼
+  (AMediaCodec_*)을 요구해 실패한다 — 기존 구조로, Host crate는 별도 매니페스트로
+  빌드한다(`cargo test --manifest-path apps/host-desktop/src-tauri/Cargo.toml --locked`).
+- Wayland(tao 0.35) 제약: 숨은 창에 `set_ignore_cursor_events(true)`를 보내면
+  tao event_loop의 `window().unwrap()`이 패닉한다. 인디케이터 배지는 리눅스에서 이
+  요청을 건너뛴다(lib.rs create_indicator_window 주석). 배지는 클릭을 받는 대신
+  항상 위 특성은 컴포지터가 무시할 수 있다.
+- Hyprland 0.56의 `hyprctl dispatch`는 Lua 파서를 거치므로 구형 공백 인자 문법이
+  실패한다. 스크립트는 IPC 소켓에 Lua 인자 형식(`dispatch name("arg")`)으로 보낸다.

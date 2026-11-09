@@ -55,7 +55,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - 구현: Rust workspace + Tauri 2 macOS/Windows Host + Expo/React Native Android Viewer + 네이티브 캡처/디코더 + CI
 - 우선 대상 호스트: macOS
 - 두 번째 대상 호스트: Windows (구현 있음; 이번 변경의 Windows 빌드·실기 수용 미검증)
-- 선택적 후속 대상: Linux
+- Linux Host: 개발 후보 (2026-11-01). Wayland(wlroots 계열, Hyprland 실측) wlr-screencopy 캡처 + NVENC 하드웨어 H.264(2026-11-02, 소프트웨어 OpenH264 자동 폴백) + wlr 가상 포인터/키보드 입력. 1080p60 인코더 스루풋 실측 avg 5.4ms(예산 16.6ms 이내). 실기기 Viewer 수용은 미실행 — [구현 계획](docs/plans/2026-11-01-linux-host.md), [NVENC 계획](docs/plans/2026-11-02-linux-nvenc-60fps.md)
 - 우선 대상 뷰어: arm64 Android 휴대폰, 태블릿 및 대화면 기기
 
 ## 보안(요약)
@@ -69,7 +69,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 
 ## 빌드/실행
 
-개발 도구의 기본은 **Bun 1.4.1**이다. Rust는 `rust-toolchain.toml`의 **1.95.0**을 사용한다. Expo/React Native와 Gradle 플러그인의 Node 호환 경로는 유지하며 CI 기준은 **Node 22.21.1**이다. 영상 처리의 Cargo·Swift·Gradle 경로는 그대로 사용한다.
+개발 도구의 기본은 **Bun 1.4.1**이다. Rust는 `rust-toolchain.toml`의 **1.99.1**을 사용한다. Expo/React Native와 Gradle 플러그인의 Node 호환 경로는 유지하며 CI 기준은 **Node 22.21.1**이다. 영상 처리의 Cargo·Swift·Gradle 경로는 그대로 사용한다.
 
 ```text
 bun install --frozen-lockfile

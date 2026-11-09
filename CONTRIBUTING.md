@@ -2,7 +2,7 @@
 
 ## 개발 환경
 
-- Rust **1.95.0**: 저장소의 `rust-toolchain.toml` 사용, rustfmt·clippy 포함
+- Rust **1.99.1**: 저장소의 `rust-toolchain.toml` 사용, rustfmt·clippy 포함
 - Bun **1.4.1**: 설치와 JS/TS 스크립트의 기본 진입점
 - Node **22.21.1**: CI 기준. Expo/React Native와 Gradle 플러그인의 요구 버전은 `bun run doctor`로 확인
 - JDK **17**(`JAVA_HOME`), Android SDK(`ANDROID_HOME` 또는 `ANDROID_SDK_ROOT`), NDK **27.1.12297006**, `cargo-ndk` **4.1.2**, Rust 대상 `aarch64-linux-android`·`x86_64-linux-android`(생성 Rustra 모듈의 두 ABI). 앱 APK의 기본 ABI는 arm64다.

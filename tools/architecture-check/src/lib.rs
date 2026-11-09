@@ -141,6 +141,9 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
         ("session", &["domain"]),
         ("host-core", &["domain", "media-model"]),
         ("viewer-core", &["domain", "media-model"]),
+        // 뷰어 순수 코어(계획 T-6) — 세션 암호 프리미티브 위의 제어 평면·페어링·
+        // 세션 상태머신. UI·네이티브 IO는 주입 포트로 만난다.
+        ("viewer-app-core", &["secure-channel"]),
         (
             "android-viewer",
             &[
@@ -167,6 +170,7 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Violation> {
                 "usb-mux",
             ],
         ),
+
         ("architecture-check", &[]),
     ];
 

@@ -75,6 +75,8 @@ function encoderModeLabel(mode: SessionRow["encoderMode"], t: InspectorStrings):
       return "AVE";
     case "rtvc":
       return "RTVC";
+    case "nvenc":
+      return "NVENC";
     default:
       return t.encoderModeUnknown;
   }

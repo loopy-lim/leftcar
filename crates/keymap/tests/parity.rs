@@ -176,10 +176,94 @@ fn windows_table_matches_previous_hardcoded_table() {
     }
 }
 
+// ---- 새 Linux evdev 표(input-event-codes.h 기준, 첫 도입값을 고정한다) ----
+
+fn first_linux(android: u16) -> Option<u16> {
+    let letters: [u16; 26] = [
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17,
+        45, 21, 44,
+    ];
+    if (29..=54).contains(&android) {
+        return Some(letters[(android - 29) as usize]);
+    }
+    if (7..=16).contains(&android) {
+        return Some(2 + (android - 7)); // KEY_1..KEY_0
+    }
+    let function_keys: [u16; 12] = [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88];
+    if (131..=142).contains(&android) {
+        return Some(function_keys[(android - 131) as usize]);
+    }
+    let keypad: [u16; 10] = [82, 79, 80, 81, 75, 76, 77, 71, 72, 73];
+    if (144..=153).contains(&android) {
+        return Some(keypad[(android - 144) as usize]);
+    }
+    if (183..=190).contains(&android) {
+        return Some(183 + (android - 183)); // KEY_F13..KEY_F20
+    }
+    match android {
+        19 => Some(103),
+        20 => Some(108),
+        21 => Some(105),
+        22 => Some(106),
+        23 | 66 => Some(28),
+        55 => Some(51),
+        56 => Some(52),
+        57 => Some(56),
+        58 => Some(100),
+        59 => Some(42),
+        60 => Some(54),
+        61 => Some(15),
+        62 => Some(57),
+        67 => Some(14),
+        68 => Some(41),
+        69 => Some(12),
+        70 => Some(13),
+        71 => Some(26),
+        72 => Some(27),
+        73 => Some(43),
+        74 => Some(39),
+        75 => Some(40),
+        76 => Some(53),
+        92 => Some(104),
+        93 => Some(109),
+        111 => Some(1),
+        112 => Some(111),
+        113 => Some(29),
+        114 => Some(97),
+        115 => Some(58),
+        117 => Some(125),
+        118 => Some(126),
+        122 => Some(102),
+        123 => Some(107),
+        124 => Some(110),
+        143 => Some(69),
+        154 => Some(98),
+        155 => Some(55),
+        156 => Some(74),
+        157 => Some(78),
+        158 => Some(83),
+        159 => Some(121),
+        160 => Some(96),
+        161 => Some(117),
+        _ => None,
+    }
+}
+
+#[test]
+fn linux_table_matches_first_commit() {
+    for code in 0..=u16::MAX {
+        assert_eq!(
+            keymap::linux(code),
+            first_linux(code),
+            "android keycode {code} linux mapping drifted"
+        );
+    }
+}
+
 #[test]
 fn lookup_never_returns_all_none() {
     for code in 0..=u16::MAX {
-        if let Some(KeyMapping { mac, windows }) = keymap::lookup(code) {
+        if let Some(KeyMapping { mac, windows, .. }) = keymap::lookup(code) {
             assert!(
                 mac.is_some() || windows.is_some(),
                 "code {code} maps nothing"

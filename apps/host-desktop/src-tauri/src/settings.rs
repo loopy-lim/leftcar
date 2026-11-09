@@ -30,7 +30,7 @@ pub struct ExperimentSettings {
     #[serde(rename = "pacingBudgetPct", skip_serializing_if = "Option::is_none")]
     pub pacing_budget_pct: Option<u32>,
     /// 프레임별 전송 trace(FRAME_TRACE). 진단용 로그라 기본 끔.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(rename = "frameTrace", skip_serializing_if = "std::ops::Not::not")]
     pub frame_trace: bool,
 }
 

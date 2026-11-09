@@ -373,11 +373,14 @@ mod tests {
 pub(crate) enum MediaSocket {
     /// Connected UDP media path (macOS/LAN fixtures). Windows host production
     /// prefers [`Self::UdpTo`]; keep the variant for shared send/terminal code.
+    // Linux v1 streams over UdpTo only; Udp/Tcp carry the Windows loopback
+    // and USB transports plus their tests.
     #[allow(dead_code)]
     Udp(Arc<UdpSocket>),
     /// Unconnected receive socket with an immutable media destination. The
     /// viewer sends authenticated control from a different ephemeral port.
     UdpTo(Arc<UdpSocket>, SocketAddr),
+    #[allow(dead_code)]
     Tcp(Arc<Mutex<TcpStream>>),
 }
 

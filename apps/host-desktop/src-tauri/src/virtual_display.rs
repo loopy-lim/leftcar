@@ -1154,6 +1154,7 @@ mod tests {
     //    (artifacts/stale-connected-state-2026-09-27/report.md §2) -------
 
     /// 스텁별 독립 카운터 — 테스트 병렬 실행에서도 정확한 호출 수를 단언한다.
+    // 이 보조들도 좀비 복구 훅에 묶여 macOS에서만 쓰인다.
     #[cfg(target_os = "macos")]
     static VANISH_CALLS: AtomicUsize = AtomicUsize::new(0);
     #[cfg(target_os = "macos")]
@@ -1171,6 +1172,9 @@ mod tests {
         Ok(false)
     }
 
+    // 좀비 복구 경로는 macOS 브리지(set_test_find_stale/set_test_destroy 훅)에
+    // 묶여 있다 — 다른 플랫폼에서는 이 기능 자체가 "unsupported"로 조기
+    // 반환하므로 이 검사도 macOS에서만 의미가 있다.
     #[cfg(target_os = "macos")]
     #[test]
     fn startup_and_status_paths_detect_and_recover_zombies() {

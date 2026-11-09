@@ -68,7 +68,9 @@ export function HostSettingsModal(props: HostSettingsModalProps) {
       title: t.host.privacyCurtainLabel,
       desc: t.host.privacyCurtainDesc,
       active: props.privacyCurtain,
-      supported: props.platform !== "windows",
+      // macOS 전용: 캡처에서 창을 제외하는 오버레이 방식이라 Windows와
+      // Linux(커튼 컨트롤러 no-op)에서는 지원됨으로 표시하지 않는다.
+      supported: props.platform === "macos",
       ready: props.curtainReady,
       pending: props.curtainPending,
       error: props.curtainError,

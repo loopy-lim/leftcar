@@ -4,9 +4,8 @@ version = "0.1.11"
 edition = "2021"
 license = "MIT"
 
-# Deliberately NOT a member of the repo root workspace: tauri pulls a large
-# dependency graph that conflicts with the lean workspace lockfile.
 [workspace]
+
 
 [profile.release]
 opt-level = "z"
@@ -77,6 +76,17 @@ windows = { version = "0.61.3", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wayland 클라이언트: 출력 나열(wl_output), 캡처(wlr-screencopy), 원격 입력
+# 주입(wlr-virtual-pointer / zwlr-virtual-keyboard)에 쓴다. compositor 연결이
+# 없으면 LinuxBackend::new가 명시적으로 실패한다. virtual keyboard는
+# wayland-protocols에 아직 없어 protocols/ XML을 wayland-scanner로 코드젠한다.
+wayland-client = "0.31"
+# wayland-scanner 코드젠물이 참조하는 저수준 크레이트(직접 사용은 없음).
+wayland-backend = "0.3"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = "0.31"
 
 [dev-dependencies]
 tokio-test = "0.4"

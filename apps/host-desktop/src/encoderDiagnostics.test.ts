@@ -71,6 +71,25 @@ describe("encoder diagnostics", () => {
     });
   });
 
+  it("labels the Linux NVENC hardware encoder", () => {
+    expect(
+      encoderDiagnosticsView({
+        ...session,
+        encoderMode: "nvenc",
+        encoderID: "nvenc",
+        encoderPreset: "p4-ultraLowLatency",
+        encoderProfile: "baseline",
+        encoderAppliedProperties: [],
+        encoderUnsupportedProperties: [],
+        encoderRejectedProperties: [],
+      }),
+    ).toMatchObject({
+      path: "NVENC · 하드웨어",
+      identity: "nvenc",
+      configuration: "p4-ultraLowLatency · baseline",
+    });
+  });
+
   it("shows the applied adaptive QP profile and true encoder pressure", () => {
     expect(encoderDiagnosticsView(adaptiveSession)).toMatchObject({
       experiment: "적응형 QP",

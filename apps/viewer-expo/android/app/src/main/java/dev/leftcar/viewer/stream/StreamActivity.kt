@@ -17,6 +17,7 @@ import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.View
+import dev.leftcar.viewer.input.TypingClickGuard
 import dev.leftcar.viewer.shim.ViewerNative
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -84,6 +85,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var cursorOverlay: CursorOverlayView? = null
     private var audioPlayer: StreamAudioPlayer? = null
     private val inputOwnership = InputOwnershipController()
+    private val typingClickGuard = TypingClickGuard()
     private var keyBridgeInput: KeyBridgeInputAdapter? = null
     private var pendingCaptureView: View? = null
     private var consumeEscapeUp = false
@@ -680,6 +682,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun sendTextUnlocked(text: String) {
+        typingClickGuard.onTyping()
         if (remoteInputLocked()) return
         ViewerNative.sendText(instanceId, text.toByteArray(Charsets.UTF_8))
         cursorOverlay?.nudge()
@@ -687,6 +690,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     /** IME 텍스트 계열의 편집 키는 다운/업 페어로 왕복시킨다. */
     private fun sendKeyPairUnlocked(keyCode: Int) {
+        typingClickGuard.onTyping()
         sendKeyUnlocked(keyCode, 0, 0, true, 0)
         sendKeyUnlocked(keyCode, 0, 0, false, 0)
     }
@@ -894,6 +898,8 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (event.actionMasked != MotionEvent.ACTION_BUTTON_PRESS &&
             event.actionMasked != MotionEvent.ACTION_DOWN
         ) return false
+        // 타이핑 직후의 클릭(핀치 오탐)은 원격 소유권 획득을 시작하지 않는다.
+        if (typingClickGuard.typingRecently()) return true
         if (remoteInputLocked()) {
             forceReleaseInput(InputOwnershipEvent.HostInputDisabled)
             return true
@@ -1000,6 +1006,12 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             touchLike && event.actionMasked != MotionEvent.ACTION_UP -> MotionEvent.BUTTON_PRIMARY
             else -> event.buttonState
         }
+        // 타이핑 직후의 press/release(핀치 오탐)는 전송하지 않고, 억제 중인
+        // 버튼은 buttonState 에서 뺀다. 이동·휠·스크롤은 그대로 전송된다.
+        val guardBit = if (actionButton != 0) actionButton else MotionEvent.BUTTON_PRIMARY
+        if (action == 2 && !typingClickGuard.shouldForwardPress(guardBit)) return true
+        if (action == 3 && !typingClickGuard.shouldForwardRelease(guardBit)) return true
+        val sanitizedButtons = typingClickGuard.sanitizeButtons(buttons)
         // 스타일러스만 압력을 싣는다 — 손가락·마우스의 pressure는
         // 기기 의존적이라 의미가 없다(음수 = 압력 없음).
         val stylusPressure =
@@ -1013,7 +1025,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             action,
             nx,
             ny,
-            buttons,
+            sanitizedButtons,
             actionButton,
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
@@ -1116,11 +1128,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             action == 2 || action == 3 -> MotionEvent.BUTTON_PRIMARY
             else -> 0
         }
+        // 타이핑 직후의 press/release(핀치 오탐)는 전송하지 않는다. 캡처 중에도
+        // 이동은 유지돼 원격 커서가 계속 따라간다.
+        if (action == 2 && !typingClickGuard.shouldForwardPress(actionButton)) return true
+        if (action == 3 && !typingClickGuard.shouldForwardRelease(actionButton)) return true
         return sendPointerUnlocked(
             action,
             position.x,
             position.y,
-            event.buttonState,
+            typingClickGuard.sanitizeButtons(event.buttonState),
             actionButton,
             event.getAxisValue(MotionEvent.AXIS_HSCROLL),
             event.getAxisValue(MotionEvent.AXIS_VSCROLL),
@@ -1395,6 +1411,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
             return true
         }
+        // 핀치 오탐 억제 신호: 마우스 출처가 아닌 나머지 물리 키 DOWN은 라우팅
+        // 결과와 무관하게 키 활동으로 기록한다. KeyBridge 로컬 소비 키도
+        // 타이핑이므로 isRemoteKey 필터보다 앞선다.
+        if (event.action == KeyEvent.ACTION_DOWN) typingClickGuard.onTyping()
         if (!isRemoteKey(event.keyCode)) return super.dispatchKeyEvent(event)
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP) {
             return super.dispatchKeyEvent(event)

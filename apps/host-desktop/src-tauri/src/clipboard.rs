@@ -140,7 +140,7 @@ fn png_to_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     match info.color_type {
         png::ColorType::Rgba => rgba = pixels,
         png::ColorType::Rgb => {
-            for pixel in pixels.chunks_exact(3) {
+            for pixel in pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(pixel);
                 rgba.push(255);
             }
@@ -151,7 +151,7 @@ fn png_to_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for pixel in pixels.chunks_exact(2) {
+            for pixel in pixels.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
             }
         }

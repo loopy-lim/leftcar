@@ -125,12 +125,36 @@ const STREAM_ACTIVITY_XR_COROUTINE_IMPORTS = new Set([
 
 function isKeyBridgeOwnershipContractImport(file: string, line: string): boolean {
   const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
-  // KeyBridge is an optional installed app. Its AIDL contract may cross the
-  // process boundary only through Leftcar's dedicated ownership adapter.
-  return projectRelativePath ===
-      "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/KeyBridgeInputAdapter.kt" &&
-    line === "import dev.loopy.keybridge.remote.IRemoteInputOwnership";
+  // KeyBridge is an optional installed app. Its AIDL contract crosses the
+  // process boundary only through Leftcar's two dedicated binding sites: the
+  // stream ownership adapter and the km lease (binding lifecycle + death
+  // recipient). Any third site needs its own documented exception here.
+  return line === "import dev.loopy.keybridge.remote.IRemoteInputOwnership" &&
+    (projectRelativePath ===
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/KeyBridgeInputAdapter.kt" ||
+      projectRelativePath ===
+        "apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/km/KmKeyBridgeLease.kt");
 }
+
+// km 입력 공유 평면(호스트 Rust km 세션 ↔ Android Kotlin 고주파 채널)은
+// 자체 TCP 듀플렉스 소켓과 봉인 채널 암호가 설계 경계다. 스트리밍 평면의
+// "네트워크·코덱은 Rust" 규칙과 달리 이 디렉터리에서만 프리미티브를 허용한다
+// (docs/plans km 계획, 체커 헤더의 네이티브 입력 평면 정책). 디렉터리 밖으로
+// 새는 즉시 위반 — 새 프리미티브는 이 목록에 문서와 함께 추가한다.
+const KM_MODULE_DIR = "apps/viewer-expo/android/app/src/";
+const KM_MODULE_SOURCE = /^(?:main|test)\/java\/dev\/leftcar\/viewer\/km\/.+\.kt$/;
+const KM_IMPORT_ALLOW =
+  /^import (javax\.crypto\.|java\.nio\.|java\.io\.|java\.net\.|java\.math\.|java\.time\.|org\.json\.|rikka\.shizuku\.|org\.lsposed\.hiddenapibypass\.|dev\.loopy\.keybridge\.remote\.)/;
+
+function isKmModuleSource(file: string): boolean {
+  const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
+  if (!projectRelativePath.startsWith(KM_MODULE_DIR)) return false;
+  const underApp = projectRelativePath.slice(KM_MODULE_DIR.length);
+  return KM_MODULE_SOURCE.test(underApp);
+}
+
+const isKmModuleImport = (file: string, line: string): boolean =>
+  isKmModuleSource(file) && KM_IMPORT_ALLOW.test(line);
 
 function isStreamActivityXrCoroutineImport(file: string, line: string): boolean {
   const projectRelativePath = relative(ROOT, file).replaceAll("\\", "/");
@@ -156,10 +180,11 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
       const allowsJvmUnitTestDependency = isAndroidJvmUnitTestSource(file, folder) && JVM_TEST_IMPORT.test(line);
       const allowsStreamActivityXrCoroutine = isStreamActivityXrCoroutineImport(file, line);
       const allowsKeyBridgeOwnershipContract = isKeyBridgeOwnershipContractImport(file, line);
+      const allowsKmModuleImport = isKmModuleImport(file, line);
       const audioPath = relative(ROOT, file).replaceAll("\\", "/");
       const allowsAudioBuffer = /^apps\/viewer-expo\/android\/app\/src\/(?:main\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoder|test\/java\/dev\/leftcar\/viewer\/stream\/OpusAudioDecoderTest)\.kt$/.test(audioPath)
         && /^import java\.nio\.(?:ByteBuffer|ByteOrder)$/.test(line);
-      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsKeyBridgeOwnershipContract && !allowsAudioBuffer) {
+      if (m && !KOTLIN_ALLOW.test(line) && !allowsJvmUnitTestDependency && !allowsStreamActivityXrCoroutine && !allowsKeyBridgeOwnershipContract && !allowsAudioBuffer && !allowsKmModuleImport) {
         fail(
           "kotlin-import-allowlist",
           `${file}: ${line}`,
@@ -173,7 +198,8 @@ for (const folder of [join(ROOT, "apps/viewer-android/android"), join(ROOT, "app
     const audio = path === `${base}main/${stream}OpusAudioDecoder.kt`;
     const audioTest = path === `${base}test/${stream}OpusAudioDecoderTest.kt`;
     const queryTest = path === `${base}test/${stream}SplitDecoderCapabilityTest.kt`;
-    if (/DatagramSocket|(?:Server)?Socket\s*\(|java\.net\./.test(text)) {
+    const kmModule = isKmModuleSource(file);
+    if (/DatagramSocket|(?:Server)?Socket\s*\(|java\.net\./.test(text) && !kmModule) {
       fail("kotlin-no-policy", `${file}: network creation belongs to Rust`);
     }
     if (/MediaCodec|AMediaCodec/.test(text) && !(query || audio || audioTest || queryTest)) {

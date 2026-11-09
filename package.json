@@ -34,14 +34,14 @@
     "@rustra/types": "0.12.1",
     "@tailwindcss/node": "4.3.3",
     "@tailwindcss/oxide": "4.3.3",
-    "@types/node": "^26.2.0",
-    "@types/react": "^19.2.18",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
     "@xmldom/xmldom": "0.9.12",
     "playwright-core": "1.63.0",
     "semver": "7.8.5",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.11"
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "brace-expansion": "5.0.12",

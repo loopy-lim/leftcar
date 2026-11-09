@@ -14,6 +14,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
 import android.view.accessibility.AccessibilityManager
+import dev.leftcar.viewer.input.TypingClickGuard
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
@@ -72,6 +73,10 @@ internal object KmRuntime {
     private var returnPlacementReceived = false
     private var placementStarted = 0L
     private val delayedInput = ArrayDeque<Map<String, Any>>()
+    // GXR 손 추적 핀치 오탐 억제 — 키 활동 직후의 버튼 전이는 호스트로
+    // 보내지 않는다. main(onKeyEvent 기록)과 worker(rawMouseCallback 억제)가
+    // 공유하므로 정책이 동기화된다.
+    private val typingClickGuard = TypingClickGuard()
     private val pending = AtomicInteger()
     private val starting = KmStartCompletion<KmNativeStatus>()
     private var startTicket = 0L
@@ -441,6 +446,9 @@ internal object KmRuntime {
         }
     }
 
+    /** GXR 물리 키 활동 기록 — 핀치 오탐 억제 창을 연다(스레드 무관). */
+    fun noteTyping() = typingClickGuard.onTyping()
+
     fun key(usage: Int, down: Boolean) = task {
         if (owner == "androidToMac" && transport != null && !remoteReleasePending) {
             flushMotion(); send(KmWire.payload("key", "code" to usage, "down" to down))
@@ -455,7 +463,12 @@ internal object KmRuntime {
             if (wheelX != 0.0 || wheelY != 0.0 || buttons != sentButtons) flushMotion()
             if (wheelX != 0.0 || wheelY != 0.0) send(KmWire.payload("wheel", "dx" to wheelX, "dy" to wheelY))
             for (button in 0..4) if ((buttons xor sentButtons) and (1 shl button) != 0) {
-                send(KmWire.payload("button", "button" to button, "down" to (buttons and (1 shl button) != 0)))
+                val bit = 1 shl button
+                // 타이핑 직후의 press(핀치 오탐)는 보내지 않고 그 쌍 release 도
+                // 함께 억제한다. 실제로 보낸 press 의 release 는 항상 보낸다.
+                val forward = if (buttons and bit != 0) typingClickGuard.shouldForwardPress(bit)
+                else typingClickGuard.shouldForwardRelease(bit)
+                if (forward) send(KmWire.payload("button", "button" to button, "down" to (buttons and bit != 0)))
             }
             sentButtons = buttons
         }

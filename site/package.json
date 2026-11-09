@@ -13,11 +13,11 @@
     "react-dom": "19.2.3"
   },
   "devDependencies": {
-    "@types/react": "^19.0.8",
-    "@types/react-dom": "^19.0.3",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.7.2",
-    "vite": "^6.1.0",
-    "wrangler": "^3.109.0"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.5",
+    "wrangler": "^3.114.17"
   }
 }

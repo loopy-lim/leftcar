@@ -1689,6 +1689,7 @@ mod tests {
             result
         });
         let mut socket = TcpStream::connect(addr).await.unwrap();
+        socket.set_nodelay(true).unwrap();
         let mut tx = secure_channel::StreamSealer::new(client_keys.c2s);
         let mut rx = secure_channel::StreamSealer::new(client_keys.s2c);
         write_frame(&mut socket, &mut tx, &incoming(1, 1, KmPayload::Hello))
@@ -1738,8 +1739,21 @@ mod tests {
         write_frame(&mut socket, &mut tx, &incoming(3, 4, KmPayload::Heartbeat))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(manager.status(&test_peer(1)).owner, KmOwner::Local);
+        // The new-epoch heartbeat must hand ownership back to Local; wait on
+        // the transition itself so the assert measures the state machine, not
+        // socket scheduling jitter (the peer socket is nodelay, like the real
+        // viewer, but a fixed sleep still flakes under load).
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            if manager.status(&test_peer(1)).owner == KmOwner::Local {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "heartbeat did not confirm the return to Local in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         manager.stop_session("session", "test finished", false);
         assert!(task.await.unwrap().is_err());
         assert!(backend
@@ -1788,6 +1802,7 @@ mod tests {
             result
         });
         let mut socket = TcpStream::connect(addr).await.unwrap();
+        socket.set_nodelay(true).unwrap();
         let mut tx = secure_channel::StreamSealer::new(client_keys.c2s);
         let mut rx = secure_channel::StreamSealer::new(client_keys.s2c);
         write_frame(&mut socket, &mut tx, &incoming(1, 1, KmPayload::Hello))

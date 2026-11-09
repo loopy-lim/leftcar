@@ -129,6 +129,10 @@ class KmAccessibilityService : AccessibilityService() {
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        // 핀치 오탐 억제 신호: 자격·권한·소유권과 무관하게 물리 키 DOWN은
+        // 키 활동으로 기록한다. 실제 타이핑인데 전달이 막힌 조합에서도
+        // 포인터 버튼 억제는 유지돼야 하기 때문이다.
+        if (event.action == KeyEvent.ACTION_DOWN) KmRuntime.noteTyping()
         val device = InputDevice.getDevice(event.deviceId) ?: return false
         if (!KmKeyboardInventory.eligible(device)) return false
         // Permission queries can cross Binder; keep them outside the routing gate.
