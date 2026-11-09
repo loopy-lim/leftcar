@@ -200,6 +200,22 @@ extern "C" {
     fn leftcar_jni_stream_stats(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_latency(instance: *const c_char) -> i64;
     fn leftcar_jni_stream_cadence() -> i64;
+    fn leftcar_jni_km_duplex_open(
+        host: *const c_char,
+        port: u16,
+        seed: *const u8,
+        seed_len: usize,
+        session_id: *const c_char,
+    ) -> i64;
+    fn leftcar_jni_km_duplex_send(handle: i64, plain: *const u8, plain_len: usize) -> i32;
+    fn leftcar_jni_km_duplex_recv(
+        handle: i64,
+        out: *mut u8,
+        out_cap: usize,
+        timeout_ms: u32,
+    ) -> i32;
+    fn leftcar_jni_km_duplex_discard(handle: i64);
+    fn leftcar_jni_km_duplex_close(handle: i64);
     fn leftcar_jni_termination_reason(instance: *const c_char) -> i32;
     fn leftcar_jni_surface_release_latency(instance: *const c_char) -> i32;
 }
@@ -449,4 +465,124 @@ pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_streamCadence
         unsafe { leftcar_jni_stream_cadence() }
     })
     .unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexOpen(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    host: *mut jobject,
+    port: i32,
+    seed: *mut jobject,
+    session_id: *mut jobject,
+) -> i64 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 0;
+        }
+        let Some(host) = (unsafe { get_utf(env, host) }) else {
+            return 0;
+        };
+        let Some(session) = (unsafe { get_utf(env, session_id) }) else {
+            return 0;
+        };
+        let Some(seed_bytes) = (unsafe { get_bytes(env, seed) }) else {
+            return 0;
+        };
+        if !(1..=65535).contains(&port) {
+            return 0;
+        }
+        unsafe {
+            leftcar_jni_km_duplex_open(
+                host.as_ptr(),
+                port as u16,
+                seed_bytes.as_ptr(),
+                seed_bytes.len(),
+                session.as_ptr(),
+            )
+        }
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexSend(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    handle: i64,
+    plain: *mut jobject,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return 3;
+        }
+        let Some(bytes) = (unsafe { get_bytes(env, plain) }) else {
+            return 1;
+        };
+        unsafe { leftcar_jni_km_duplex_send(handle, bytes.as_ptr(), bytes.len()) }
+    })
+    .unwrap_or(crate::km_duplex::KM_ERR_INTERNAL)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexRecv(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    handle: i64,
+    out: *mut jobject,
+    timeout_ms: i32,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } || out.is_null() {
+            return -crate::km_duplex::KM_ERR_INTERNAL;
+        }
+        let fns = unsafe { env_functions(env) };
+        let length: unsafe extern "C" fn(*mut JNIEnv, *mut jobject) -> i32 =
+            unsafe { std::mem::transmute(*fns.add(JNI_GET_ARRAY_LENGTH)) };
+        let cap = unsafe { length(env, out) };
+        if cap <= 0 {
+            return -1;
+        }
+        let mut buf = vec![0u8; cap as usize];
+        let got = unsafe {
+            leftcar_jni_km_duplex_recv(handle, buf.as_mut_ptr(), buf.len(), timeout_ms.max(0) as u32)
+        };
+        if got > 0 {
+            let set: unsafe extern "C" fn(*mut JNIEnv, *mut jobject, i32, i32, *const c_void) =
+                unsafe { std::mem::transmute(*fns.add(JNI_SET_BYTE_ARRAY_REGION)) };
+            unsafe {
+                set(env, out, 0, got, buf.as_ptr().cast());
+            }
+        }
+        got
+    })
+    .unwrap_or(-crate::km_duplex::KM_ERR_INTERNAL)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexDiscard(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    handle: i64,
+) {
+    let _ = std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return;
+        }
+        unsafe { leftcar_jni_km_duplex_discard(handle) }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_leftcar_viewer_shim_ViewerNative_kmDuplexClose(
+    env: *mut JNIEnv,
+    _class: *mut jobject,
+    handle: i64,
+) {
+    let _ = std::panic::catch_unwind(|| {
+        if unsafe { exception_pending(env) } {
+            return;
+        }
+        unsafe { leftcar_jni_km_duplex_close(handle) }
+    });
 }

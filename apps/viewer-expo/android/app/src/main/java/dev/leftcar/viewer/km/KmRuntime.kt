@@ -14,8 +14,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
 import android.view.accessibility.AccessibilityManager
-import org.json.JSONObject
-import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
@@ -50,7 +48,7 @@ internal object KmRuntime {
     private var deadAuthorityBinder: IBinder? = null
     private var binding: ServiceConnection? = null
     @Volatile private var lease: KmKeyBridgeLease? = null
-    private var args: Shizuku.UserServiceArgs? = null
+    private var args: Any? = null
     private var transport: KmDuplex? = null
     private var config: KmStartConfig? = null
     private var gate: KmEpochGate? = null
@@ -73,7 +71,7 @@ internal object KmRuntime {
     private var remoteReleasePending = false
     private var returnPlacementReceived = false
     private var placementStarted = 0L
-    private val delayedInput = ArrayDeque<JSONObject>()
+    private val delayedInput = ArrayDeque<Map<String, Any>>()
     private val pending = AtomicInteger()
     private val starting = KmStartCompletion<KmNativeStatus>()
     private var startTicket = 0L
@@ -156,8 +154,8 @@ internal object KmRuntime {
             publish(KmNativeStatus("preparing"))
             val ctx = context ?: error("KM not initialized")
             if (KmAccessibilityService.instance == null) throw Unavailable("Leftcar 접근성 권한이 필요합니다")
-            if (!Shizuku.pingBinder() || Shizuku.getUid() != 2000 || Shizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
-            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
+            if (!KmShizuku.pingBinder() || KmShizuku.getUid() != 2000 || KmShizuku.getVersion() < 13) throw Unavailable("USB로 Shizuku를 ADB 모드에서 시작하세요")
+            if (KmShizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) throw Unavailable("Shizuku 사용 권한이 필요합니다")
             val token = ++generation
             observationSessionTicket = admission
             val keyLease = KmKeyBridgeLease(ctx, worker) { stop("KeyBridge 입력 소유권 연결이 종료되었습니다") }
@@ -173,8 +171,7 @@ internal object KmRuntime {
 
     private fun bindAuthority(ctx: Context, token: Long, admission: Long) {
         val probe = handshakeProbe
-        val options = Shizuku.UserServiceArgs(ComponentName(ctx, KmInputAuthority::class.java))
-            .processNameSuffix("km-authority").tag("leftcar-km-v1").version(2).daemon(false).debuggable(false)
+        val options = KmShizuku.userServiceArgs(ComponentName(ctx, KmInputAuthority::class.java))
         args = options
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) = task {
@@ -227,7 +224,7 @@ internal object KmRuntime {
             override fun onNullBinding(name: ComponentName?) { if (generation == token) stop("Shizuku 입력 서비스를 연결할 수 없습니다") }
         }
         binding = connection
-        main.post { runCatching { Shizuku.bindUserService(options, connection) }.onFailure {
+        main.post { runCatching { KmShizuku.bindUserService(options, connection) }.onFailure {
             probe?.record(KmHandshakeProbe.Stage.PREPARE, KmHandshakeProbe.Code.FAILED, it)
             probe?.finish(KmHandshakeProbe.Code.STOPPED)
             stop("Shizuku 입력 서비스를 시작하지 못했습니다")
@@ -326,7 +323,7 @@ internal object KmRuntime {
             "state" -> {
                 handshakeProbe?.record(KmHandshakeProbe.Stage.STATE_APPLY, KmHandshakeProbe.Code.BEGIN)
                 startupStage(KmHandshakeProbe.Stage.STATE_OWNER_GUARD)
-                changeOwner(message.payload.getString("owner"))
+                changeOwner(message.payload.str("owner"))
                 startupStage(KmHandshakeProbe.Stage.STATE_COMMIT)
                 check(observationSession.commit(observationSessionTicket) {
                     if (status.state in setOf("armed", "macToAndroid", "androidToMac")) starting.applied(startTicket, status)
@@ -345,8 +342,8 @@ internal object KmRuntime {
                 if (owner == "androidToMac") returnPlacementReceived = true
                 val bounds = context!!.getSystemService(android.view.WindowManager::class.java).maximumWindowMetrics.bounds
                 val width = bounds.width(); val height = bounds.height()
-                val tx = message.payload.getDouble("x") / message.payload.getInt("width") * width
-                val ty = message.payload.getDouble("y") / message.payload.getInt("height") * height
+                val tx = message.payload.dbl("x") / message.payload.int("width") * width
+                val ty = message.payload.dbl("y") / message.payload.int("height") * height
                 placementStarted = SystemClock.elapsedRealtime()
                 placement = KmCursorPlacement(tx.coerceIn(0.0, width - 1.0), ty.coerceIn(0.0, height - 1.0), placementStarted)
                 // Get a current OS position even if the virtual mouse has not moved yet.
@@ -401,13 +398,13 @@ internal object KmRuntime {
         })
     }
 
-    private fun inject(p: JSONObject) {
+    private fun inject(p: Map<String, Any>) {
         val api = authority ?: error("No input authority")
-        when (p.getString("kind")) {
-            "move" -> api.inject(KmInputAuthority.MOVE, 0, false, p.getDouble("dx"), p.getDouble("dy"))
-            "wheel" -> api.inject(KmInputAuthority.WHEEL, 0, false, p.getDouble("dx"), p.getDouble("dy"))
-            "button" -> api.inject(KmInputAuthority.BUTTON, p.getInt("button"), p.getBoolean("down"), 0.0, 0.0)
-            "key" -> api.inject(KmInputAuthority.KEY, p.getInt("code"), p.getBoolean("down"), 0.0, 0.0)
+        when (p.str("kind")) {
+            "move" -> api.inject(KmInputAuthority.MOVE, 0, false, p.dbl("dx"), p.dbl("dy"))
+            "wheel" -> api.inject(KmInputAuthority.WHEEL, 0, false, p.dbl("dx"), p.dbl("dy"))
+            "button" -> api.inject(KmInputAuthority.BUTTON, p.int("button"), p.bool("down"), 0.0, 0.0)
+            "key" -> api.inject(KmInputAuthority.KEY, p.int("code"), p.bool("down"), 0.0, 0.0)
         }
     }
 
@@ -470,7 +467,7 @@ internal object KmRuntime {
         send(KmWire.payload("move", "dx" to motionX, "dy" to motionY))
         motionX = 0.0; motionY = 0.0
     }
-    private fun send(payload: JSONObject) {
+    private fun send(payload: Map<String, Any>) {
         val current = config ?: return
         check(outgoingSeq < Long.MAX_VALUE)
         transport?.send(KmWire.encode(current.sessionId, gate!!.epoch, ++outgoingSeq, payload))
@@ -519,7 +516,7 @@ internal object KmRuntime {
             observationService = null
             authority = null; authorityBinder = null; deadAuthorityBinder = null
             val oldBinding = binding; val oldArgs = args; binding = null; args = null
-            if (oldBinding != null && oldArgs != null) main.post { runCatching { Shizuku.unbindUserService(oldArgs, oldBinding, true) } }
+            if (oldBinding != null && oldArgs != null) main.post { runCatching { KmShizuku.unbindUserService(oldArgs, oldBinding, true) } }
         } // Retain failed cleanup authority for explicit retry; watchdog remains a fallback.
 
         config = null; gate = null; owner = "local"; placement = null; delayedInput.clear(); remoteReleasePending = false; returnPlacementReceived = false

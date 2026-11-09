@@ -11,6 +11,9 @@ use std::ffi::{c_char, CStr};
 pub mod audio_protocol;
 pub mod cursor_protocol;
 pub mod input_protocol;
+/// Host-testable KM TCP duplex (secure_channel + length-prefix). Kotlin shim
+/// must not open sockets or implement AEAD — see architecture-check L0.
+pub mod km_duplex;
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(test, allow(dead_code))]
 pub mod jni;

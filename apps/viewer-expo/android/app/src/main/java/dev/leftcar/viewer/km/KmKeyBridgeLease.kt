@@ -9,13 +9,14 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.accessibility.AccessibilityManager
-import dev.loopy.keybridge.remote.IRemoteInputOwnership
+import dev.leftcar.viewer.stream.KeyBridgeOwnershipRemote
+import dev.leftcar.viewer.stream.keyBridgeOwnershipRemote
 
 /** Separate KM lease; failed binding never silently disables the user's remapper. */
 internal class KmKeyBridgeLease(private val context: Context, private val worker: Handler, private val lost: () -> Unit) {
     private val main = Handler(Looper.getMainLooper())
     private var connection: ServiceConnection? = null
-    private var remote: IRemoteInputOwnership? = null
+    private var remote: KeyBridgeOwnershipRemote? = null
     private var closed = false
     @Volatile var acknowledged = false; private set
     private val death = IBinder.DeathRecipient { if (!closed) lost() }
@@ -28,8 +29,8 @@ internal class KmKeyBridgeLease(private val context: Context, private val worker
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 worker.post {
                     if (closed) return@post
-                    val api = IRemoteInputOwnership.Stub.asInterface(binder)
-                    val okay = runCatching { binder!!.linkToDeath(death, 0); api.acquire() }.getOrDefault(false)
+                    val api = binder?.let(::keyBridgeOwnershipRemote)
+                    val okay = api != null && runCatching { binder!!.linkToDeath(death, 0); api.acquire() }.getOrDefault(false)
                     if (okay) { remote = api; acknowledged = true }
                     finish(okay)
                 }

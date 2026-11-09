@@ -710,6 +710,18 @@ impl VirtualDisplayManager {
         }
     }
 
+
+    #[cfg(not(target_os = "macos"))]
+    fn call_create(
+        &self,
+        _state: &ManagerState,
+        _logical_width: u32,
+        _logical_height: u32,
+        _scale: u32,
+    ) -> Result<String, String> {
+        Err("unsupported platform".into())
+    }
+
     fn recover_stale(&self, state: &mut ManagerState) {
         #[cfg(all(test, target_os = "macos"))]
         {
@@ -801,6 +813,17 @@ impl VirtualDisplayManager {
                 code => Err(format!("virtual display removal failed: {code}")),
             }
         }
+    }
+
+
+    #[cfg(not(target_os = "macos"))]
+    fn call_destroy(&self, state: &ManagerState, display_id: u32) -> Result<bool, String> {
+        #[cfg(test)]
+        if let Some(destroy) = *state.test_destroy.lock().unwrap() {
+            return destroy(display_id);
+        }
+        let _ = (state, display_id);
+        Err("unsupported platform".into())
     }
 
     /// 캡처 shim dylib을 후보 경로에서 연다(FfiBackend와 같은 경로 규칙).
@@ -1131,19 +1154,24 @@ mod tests {
     //    (artifacts/stale-connected-state-2026-09-27/report.md §2) -------
 
     /// 스텁별 독립 카운터 — 테스트 병렬 실행에서도 정확한 호출 수를 단언한다.
+    #[cfg(target_os = "macos")]
     static VANISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(target_os = "macos")]
     static LINGER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
+    #[cfg(target_os = "macos")]
     fn destroy_vanishes(_display_id: u32) -> Result<bool, String> {
         VANISH_CALLS.fetch_add(1, Ordering::SeqCst);
         Ok(true)
     }
 
+    #[cfg(target_os = "macos")]
     fn destroy_lingers(_display_id: u32) -> Result<bool, String> {
         LINGER_CALLS.fetch_add(1, Ordering::SeqCst);
         Ok(false)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_and_status_paths_detect_and_recover_zombies() {
         let manager = VirtualDisplayManager::new();
@@ -1163,6 +1191,7 @@ mod tests {
         assert_eq!(VANISH_CALLS.load(Ordering::SeqCst), 2);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn zombie_that_has_not_vanished_surfaces_as_removal_pending() {
         let manager = VirtualDisplayManager::new();
