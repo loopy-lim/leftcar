@@ -364,6 +364,8 @@ impl VirtualDisplayManager {
                 }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = state;
     }
 
     pub fn create(
