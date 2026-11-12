@@ -132,3 +132,31 @@ rust·windows 실패는 모두 내 커밋이 아닌 원인:
 `native/android-viewer/src/{usb_bridge.rs,jni_exports.rs}`,
 `apps/host-desktop/src-tauri/src/bin/leftcar-hostd.rs`(테스트만), 이 문서.
 사용자 진행 WIP(`panel.rs`·`panel_client.rs`)은 미포함.
+
+---
+
+# 4차 라운드: ef9bfad CI — 4잡 중 rust만 남은 타이밍 예산 부족
+
+ts·android·windows·device-evidence 초록(USB 소켓 정체 게이트 효과 확인).
+rust는 새 지점에서 마지막 1건:
+
+- **`tcp_media::tests::fragmented_header_survives_an_idle_timeout_inside_a_frame`**
+  (43196980786): writer 스레드의 fragment 간 sleep(50ms)이 CI 병렬 부하에서
+  수백 ms로 늘어나며 whole-frame 마감(200ms)을 넘겨 `Err(TimedOut)` 패닉.
+  마감은 리더 측 `Instant`라 부하에 비례해 늘어나지 않고 절대 지연만 끼는데,
+  반대로 writer의 wall-clock sleep은 부하에 그대로 늘어나는 비대칭이 원인.
+  → **테스트 예산만 확대**: idle 20→100ms, 갭 50→250ms, whole 200→2_000ms
+  (불변식 idle < 갭 < whole 유지 — 갭이 idle을 넘겨야 조각 경계에서 Idle이
+  아니라 계속 읽히고, whole가 갭을 넘겨야 프레임 완결이 가능하다).
+  trickling 테스트의 elapsed 상한도 250→500ms로 동일 사유 확대.
+  프로덕션 경로(`run_frames`의 idle 200ms·frame 2s)는 불변.
+
+검증: CI 동일 명령 그대로 — `cargo test --manifest-path
+apps/host-desktop/src-tauri/Cargo.toml --locked` 422 passed / 0 failed / 2
+ignored(해당 테스트 포함), `cargo clippy --manifest-path … --tests --locked
+-- -D warnings` 0, 대상 테스트 단독 8회 연속 그린, `rustfmt --edition 2021
+--check src/tcp_media.rs` clean. /simplify: 자명한 수치 확대라 무변경 종료.
+
+## 4차 커밋 경계
+
+`apps/host-desktop/src-tauri/src/tcp_media.rs`(테스트만)와 이 문서.

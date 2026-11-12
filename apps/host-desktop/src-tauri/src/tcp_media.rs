@@ -126,13 +126,16 @@ mod tests {
         let (mut sender, mut receiver) = pair();
         let writer = std::thread::spawn(move || {
             sender.write_all(&[0, 0]).unwrap();
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(250));
             sender.write_all(&[0, 3, 1, 2, 3]).unwrap();
         });
+        // 불변식(idle < 갭 < 전체 마감)을 유지한 채 예산을 넉넉히 — CI 병렬
+        // 부하에서 writer sleep이 수백 ms 늘어나도 프레임은 마감 안에 완료돼야
+        // 한다(마감은 리더 측 Instant라 부하에 비례하지 않고 절대 지연만 낀다).
         let result = read_frame(
             &mut receiver,
-            Duration::from_millis(20),
-            Duration::from_millis(200),
+            Duration::from_millis(100),
+            Duration::from_millis(2_000),
         );
         writer.join().unwrap();
         assert_eq!(result.unwrap(), FrameRead::Frame(vec![1, 2, 3]));
@@ -164,7 +167,7 @@ mod tests {
             "partial-frame progress extended the total deadline: {result:?}"
         );
         assert!(
-            elapsed < Duration::from_millis(250),
+            elapsed < Duration::from_millis(500),
             "slow peer exceeded whole-frame budget: {elapsed:?}"
         );
     }
