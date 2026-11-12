@@ -42,15 +42,15 @@ subprojects { child ->
       def entry = providers.exec {
         workingDir rustraAppRoot
         commandLine "node", "--input-type=module", "--eval",
-          "import {fileURLToPath} from 'node:url'; console.log(fileURLToPath(import.meta.resolve('@rustra/react-native')))"
+          "import {fileURLToPath} from 'node:url'; console.log(fileURLToPath(import.meta.resolve('@unikit-bridge/react-native')))"
       }.standardOutput.asText.get().trim()
       def adapter = new File(new File(entry).parentFile.parentFile, "native")
-      if (!new File(adapter, "cpp/RustraJSIBridge.cpp").isFile()) {
-        throw new GradleException("Rustra native adapter is missing: ${adapter}")
+      if (!new File(adapter, "cpp/UnikitJSIBridge.cpp").isFile()) {
+        throw new GradleException("Unikit native adapter is missing: ${adapter}")
       }
       def cmake = child.android.defaultConfig.externalNativeBuild.cmake
-      cmake.arguments.removeAll { it.startsWith("-DRUSTRA_ADAPTER_ROOT=") }
-      cmake.arguments "-DRUSTRA_ADAPTER_ROOT=${adapter.canonicalPath}"
+      cmake.arguments.removeAll { it.startsWith("-DUNIKIT_ADAPTER_ROOT=") }
+      cmake.arguments "-DUNIKIT_ADAPTER_ROOT=${adapter.canonicalPath}"
     }
   }
 }

@@ -14,9 +14,7 @@ use common::{SecureServerContext, ServerEnd};
 use secure_channel::HostIdentity;
 use viewer_app_core::b64;
 use viewer_app_core::control::ControlClient;
-use viewer_app_core::pairing::{
-    identity_token_key, token_key, HostEndpoint, RecentHostsPort, RECENT_HOSTS_KEY,
-};
+use viewer_app_core::pairing::{identity_token_key, token_key, HostEndpoint, RECENT_HOSTS_KEY};
 use viewer_app_core::session::{ControlSession, SessionError};
 
 /// 서버(시드 12)의 공개키 — 스크립트 서버가 항상 제시하는 정체다.
@@ -58,7 +56,6 @@ fn connect_secure_with(
     ServerEnd,
 ) {
     let session_for_thread = Arc::clone(session);
-    let transport_for_thread = transport.clone();
     let host_owned = host.to_string();
     let baseline = transport.connections_created();
     let handle =
@@ -92,7 +89,6 @@ fn an_old_alias_fallback_cannot_overtake_a_newer_host_selection() {
     let gate = GateHandle::new();
     transport.push_outcome(common::ConnectOutcome::Hold(Arc::clone(&gate)));
     let session_for_thread = Arc::clone(&session);
-    let transport_for_thread = transport.clone();
     let fallback = std::thread::spawn(move || {
         session_for_thread.connect_host_with_fallback(&["10.0.0.1", "100.64.0.1"], 7777, None, None)
     });
@@ -133,7 +129,6 @@ fn an_old_alias_fallback_cannot_overtake_a_newer_host_selection() {
         session.control_target().map(|t| t.host),
         Some("10.0.0.2".to_string())
     );
-    let _ = transport_for_thread;
 }
 
 #[test]
@@ -144,7 +139,6 @@ fn an_unavailable_candidate_still_falls_back_within_the_same_selection() {
     let session = ControlSession::new(ports);
 
     let session_for_thread = Arc::clone(&session);
-    let transport_for_thread = transport.clone();
     let handle = std::thread::spawn(move || {
         session_for_thread.connect_host_with_fallback(&["10.0.0.1", "100.64.0.1"], 7777, None, None)
     });
@@ -160,7 +154,6 @@ fn an_unavailable_candidate_still_falls_back_within_the_same_selection() {
         session.control_target().map(|t| t.host),
         Some("100.64.0.1".to_string())
     );
-    let _ = transport_for_thread;
 }
 
 #[test]

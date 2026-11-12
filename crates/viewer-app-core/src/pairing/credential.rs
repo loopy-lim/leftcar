@@ -62,7 +62,7 @@ fn rollback_values(ports: &CorePorts, entries: &[Snapshot]) -> Result<(), Pairin
 pub struct PairingAttempt {
     cancelled: Arc<CancelToken>,
     committed: AtomicBool,
-    rollbacks: Mutex<Vec<Arc<dyn Fn() -> Result<(), StoreError> + Send + Sync>>>,
+    rollbacks: Mutex<Vec<TokenRollback>>,
 }
 
 impl PairingAttempt {
@@ -88,7 +88,7 @@ impl PairingAttempt {
 
     /// Predecessor rollback must finish before this run can mutate
     /// Host/storage — 커밋 이후에는 받지 않는다.
-    pub fn retain_rollback(&self, rollback: Arc<dyn Fn() -> Result<(), StoreError> + Send + Sync>) {
+    pub fn retain_rollback(&self, rollback: TokenRollback) {
         if self.committed.load(Ordering::SeqCst) {
             return;
         }

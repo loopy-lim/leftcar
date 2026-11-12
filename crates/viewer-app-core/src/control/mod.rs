@@ -169,6 +169,12 @@ pub struct ConnectOptions {
     pub random: Arc<dyn RandomSource>,
 }
 
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectOptions {
     pub fn new() -> Self {
         Self {
@@ -973,7 +979,7 @@ pub fn connect(
     *shared.connect_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(connect_tx);
 
     if secure {
-        let handshake_result = (|| -> Result<(), ControlError> {
+        let handshake_result = {
             let ephemeral = create_client_hello(shared.options.random.as_ref());
             let line = encode_client_hello(&ephemeral.hello);
             {
@@ -991,7 +997,7 @@ pub fn connect(
                     ),
                 )
             })
-        })();
+        };
         if let Err(e) = handshake_result {
             teardown(&shared, e);
             return Err(lock(&shared).terminal.clone().unwrap_or_else(|| {
@@ -1022,11 +1028,8 @@ pub fn connect(
 
     let deadline = Instant::now() + io_timeout;
     let client_id = shared.id;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
+    let now = Instant::now();
+    if now < deadline {
         match connect_rx.recv_timeout(deadline - now) {
             Ok(Ok(())) => {
                 return Ok(ControlClient {
@@ -1038,8 +1041,7 @@ pub fn connect(
                 // 확정 실패 — teardown이 이미 소켓을 정리했다.
                 return Err(e);
             }
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
         }
     }
     let error = ControlError::new(

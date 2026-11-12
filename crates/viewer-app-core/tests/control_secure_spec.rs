@@ -16,14 +16,15 @@ use viewer_app_core::control::{connect, ConnectOptions, ControlErrorKind, ErrorM
 fn rejects_an_oversized_sealed_request_before_writing_and_preserves_earlier_fifo_work() {
     let transport = ScriptedTransport::new();
     let connect_transport = transport.clone();
+    // 10MiB 거부 경로 직후의 getStatus는 부하 찬 CI 러너에서 기본 데드라인
+    // 5초를 먼저 소진해 오탐한다(실패 시 공용 소켓이 파괴됨). 이 스펙은
+    // FIFO 순서·용량 거부가 목적이므로 이 테스트의 getStatus만 여유를 둔다.
+    let options = ConnectOptions::new().timeout_overrides(std::collections::BTreeMap::from([(
+        "getStatus".to_string(),
+        60_000,
+    )]));
     let pending = std::thread::spawn(move || {
-        connect(
-            &connect_transport,
-            "192.168.1.10",
-            7777,
-            5000,
-            ConnectOptions::new(),
-        )
+        connect(&connect_transport, "192.168.1.10", 7777, 5000, options)
     });
     assert!(wait_until(
         || transport.connections_created() >= 1,

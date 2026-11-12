@@ -836,11 +836,11 @@ impl ControlSession {
         // A late 401 still retires only its own credential incarnation, but
         // it must not tear down or navigate away from a newer user selection.
         if cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false)
-            || !self.is_request_context_current(&origin)
+            || !self.is_request_context_current(origin)
         {
             return Ok(false);
         }
-        self.disconnect_host(Some(&origin));
+        self.disconnect_host(Some(origin));
         if mark_stale {
             self.mark_pairing_stale();
         }

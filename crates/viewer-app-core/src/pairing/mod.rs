@@ -171,7 +171,7 @@ pub fn parse_host_endpoint(endpoint: &str) -> Option<HostEndpoint> {
         return None;
     }
     let port: u32 = raw_port.parse().ok()?;
-    if !is_trusted_host(host) || port < 1 || port > 65535 {
+    if !is_trusted_host(host) || !(1..=65535).contains(&port) {
         return None;
     }
     Some(HostEndpoint {

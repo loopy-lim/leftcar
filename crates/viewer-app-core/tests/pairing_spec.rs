@@ -44,19 +44,6 @@ fn flow_options() -> PairingFlowOptions {
     }
 }
 
-/// 새 서버 끝단이 나타나기를 기다린다(페어링 흐름이 연결을 열 때까지).
-fn wait_new_server(transport: &ScriptedTransport, seen: &AtomicUsize) -> ServerEnd {
-    assert!(
-        wait_until(
-            || transport.connections_created() > seen.load(Ordering::SeqCst),
-            Duration::from_secs(5)
-        ),
-        "a new connection appeared"
-    );
-    let index = seen.fetch_add(1, Ordering::SeqCst);
-    transport.servers()[index].clone()
-}
-
 /// 페어링 서버 루프: pair 요청마다 스크립트 응답을 하나씩 보낸다.
 fn script_pair_replies(
     transport: ScriptedTransport,

@@ -154,12 +154,14 @@ pub fn to_hex(bytes: &[u8]) -> String {
 /// 16진수 파싱. 홀수 길이·비16진수 문자면 None(TS hexToBytes — 그쪽은 예외를
 /// 던지지만 Rust 코어는 값으로 실패를 돌려준다).
 pub fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let bytes = hex
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let hi = (pair[0] as char).to_digit(16)?;
             let lo = (pair[1] as char).to_digit(16)?;

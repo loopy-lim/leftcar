@@ -10,6 +10,9 @@ export default defineConfig({
       "**/.{idea,git,cache,output,temp}/**",
       "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*",
       "**/.worktrees/**",
+      // CI checks the unikit-bridge sibling repo out into the workspace so
+      // Cargo path deps resolve; its own test suite is not ours to run.
+      "**/unikit-bridge-sibling/**",
     ],
   },
 });

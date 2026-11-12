@@ -263,10 +263,7 @@ fn formats_error_messages_like_the_ts_classifier() {
         "컴퓨터에서 연결 요청을 거절했습니다. 다시 시도하려면 QR을 다시 스캔해 주세요."
     );
     // non-Error 소켓 오류도 'undefined'를 만들지 않는다.
-    assert_eq!(
-        format_error_message("ECONNREFUSED", &t).contains("undefined"),
-        false
-    );
+    assert!(!format_error_message("ECONNREFUSED", &t).contains("undefined"));
 }
 
 #[test]

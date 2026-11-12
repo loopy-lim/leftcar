@@ -177,7 +177,7 @@ fn bounds_accumulated_command_text_across_chunks_and_retires_pending_replies() {
         .expect("settles")
         .expect_err("line limit");
     assert_eq!(kind_of(&error), ControlErrorKind::Transport);
-    assert!(server.destroyed());
+    assert!(wait_until(|| server.destroyed(), Duration::from_secs(5)));
 }
 
 #[test]
@@ -197,7 +197,10 @@ fn rejects_malformed_responses_without_throwing_in_the_reader_thread() {
             .expect("settles")
             .expect_err(line);
         assert_eq!(error.kind, ControlErrorKind::Transport, "{line}");
-        assert!(server.destroyed(), "{line}");
+        assert!(
+            wait_until(|| server.destroyed(), Duration::from_secs(5)),
+            "{line}"
+        );
     }
 }
 
@@ -362,7 +365,7 @@ fn still_times_out_an_unanswered_status_once_it_reaches_the_front() {
     assert!(error
         .message
         .starts_with("control request timeout: getStatus"));
-    assert!(server.destroyed());
+    assert!(wait_until(|| server.destroyed(), Duration::from_secs(5)));
 }
 
 #[test]
@@ -421,6 +424,12 @@ fn terminates_the_fifo_channel_when_a_later_socket_write_throws_synchronously() 
     server.arm_sync_write_failure();
     let second = issue(&client, "startStream");
 
+    // 동기 쓰기 실패가 채널을 종료하는 것을 먼저 관찰한다 — 종료 전에 유효
+    // 응답을 먼저 보내면 리더가 그 응답을 선두 요청(first)에 정상 매칭해
+    // 버리는 경합이 있다. teardown은 보류 싱크 정리 뒤에 writer를 파괴하므로
+    // destroyed 플래그가 참이면 두 요청 모두 이미 전송 오류로 확정됐다.
+    assert!(wait_until(|| server.destroyed(), Duration::from_secs(5)));
+    // 늦게 도착한 유효 응답은 종료된 채널에 아무 효과를 주지 못한다.
     server.send(&serde_json::json!({"ok": true, "result": {"running": true}}).to_string());
 
     let second_error = second
