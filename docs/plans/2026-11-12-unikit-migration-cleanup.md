@@ -209,3 +209,19 @@ typecheck 체인(ui-theme·react-runtime·루트 tsc -b·viewer-expo·host-deskt
 **최종 확정:** 9f4d87a·940d2f8 연속 두 커밋 모두 CI 5잡 전원 초록
 (43199389965·43202008524). unikit-bridge 마이그레이션 부채·의존 최신화
 전부 종결.
+
+---
+
+# 6차 라운드: c964228(docs-only)에서 control_secure_spec 부하 플레이크
+
+문서만 바뀐 커밋의 CI(43204212572)에서 rust 잡만 실패 —
+`rejects_an_oversized_sealed_request_before_writing_and_preserves_earlier_fifo_work`
+가 `first.recv_timeout(5s).expect("settles")`에서 Timeout. 직전 두 런에서
+같은 바이너리가 통과했으므로 순수 러너 부하 오탐: 1차 라운드에서 클라이언트
+측 `getStatus` 데드라인만 60s 오버라이드했고, 응답 라우팅을 기다리는 테스트
+측 정착 대기는 5s wall-clock 그대로였다. → 같은 테스트의 정착 대기 2곳
+(`first`·`next`)을 60s로 확대. FIFO·용량 거부 의미는 타임아웃과 무관하다.
+
+검증: `cargo test -p viewer-app-core --test control_secure_spec` 9회 연속
+4/4 그린, rustfmt clean, clippy `-D warnings` 0. /simplify: 수치 확대라
+무변경 종료.

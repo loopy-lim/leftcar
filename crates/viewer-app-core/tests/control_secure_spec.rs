@@ -57,8 +57,11 @@ fn rejects_an_oversized_sealed_request_before_writing_and_preserves_earlier_fifo
         &context,
         &serde_json::json!({"ok": true, "result": "still valid"}).to_string(),
     );
+    // 정착 대기도 위 getStatus 오버라이드와 같은 근거로 여유를 둔다 — 응답은
+    // 이미 소켓에 쓰였고 라우팅만 남은 시점이지만, 부하 찬 러너에서 리더
+    // 스레드가 5초 넘게 스케줄링을 못 받은 오탐(43204212572)이 실측됐다.
     let value = first
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(60))
         .expect("settles")
         .expect("ok");
     assert_eq!(value, serde_json::Value::String("still valid".into()));
@@ -70,7 +73,7 @@ fn rejects_an_oversized_sealed_request_before_writing_and_preserves_earlier_fifo
         &serde_json::json!({"ok": true, "result": "next"}).to_string(),
     );
     let value = next
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(60))
         .expect("settles")
         .expect("ok");
     assert_eq!(value, serde_json::Value::String("next".into()));
