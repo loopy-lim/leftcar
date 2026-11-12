@@ -2,8 +2,8 @@
 
 use crate::common::*;
 use crate::udp_stability::{AppliedUdpStability, UdpStabilityCapabilities, UdpStabilityRequest};
-use unikit_bridge::prelude::*;
 use serde::{Deserialize, Serialize};
+use unikit_bridge::prelude::*;
 
 // -- permission and sources (5.1) ------------------------------------------
 

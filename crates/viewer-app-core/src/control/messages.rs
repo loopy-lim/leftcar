@@ -47,7 +47,9 @@ impl ErrorMessages {
 
 /// TS `[가-힣]` 판정과 동일한 한글 음절 범위(U+AC00–U+D7A3).
 fn has_hangul(message: &str) -> bool {
-    message.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+    message
+        .chars()
+        .any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
 }
 
 /// 임의 오류 원문을 사용자 안내 문구로 매핑한다. TS formatErrorMessage의

@@ -69,9 +69,8 @@ fn client_finish_with_vector_secret(
     };
     // 벡터 경로는 secure-channel의 raw client_finish를 쓴다 — 비밀을 벡터 값으로
     // 고정해야 하므로 랜덤 생성 절차를 거치지 않는다.
-    let (keys, spk) =
-        secure_channel::client_finish(&secret, &client_hello, &vector.server, pinned)
-            .expect("finish");
+    let (keys, spk) = secure_channel::client_finish(&secret, &client_hello, &vector.server, pinned)
+        .expect("finish");
     viewer_app_core::secure::HandshakeOutcome { keys, spk }
 }
 
@@ -154,8 +153,9 @@ fn accepts_a_pinned_matching_key_and_rejects_a_mismatching_pin() {
         nc: vector.nc,
         xk: arr32(CLIENT_XK),
     };
-    let mismatch = secure_channel::client_finish(&secret, &client, &vector.server, Some(&[9u8; 32]))
-        .expect_err("mismatching pin");
+    let mismatch =
+        secure_channel::client_finish(&secret, &client, &vector.server, Some(&[9u8; 32]))
+            .expect_err("mismatching pin");
     assert_eq!(mismatch, secure_channel::HandshakeError::HostKeyMismatch);
     assert!(mismatch.to_string().contains("pinned key"));
 }
@@ -170,8 +170,8 @@ fn rejects_a_tampered_signature() {
         nc: vector.nc,
         xk: arr32(CLIENT_XK),
     };
-    let error = secure_channel::client_finish(&secret, &client, &tampered, None)
-        .expect_err("tampered");
+    let error =
+        secure_channel::client_finish(&secret, &client, &tampered, None).expect_err("tampered");
     assert_eq!(error, secure_channel::HandshakeError::BadSignature);
 }
 

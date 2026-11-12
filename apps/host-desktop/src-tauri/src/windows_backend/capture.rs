@@ -2,16 +2,22 @@ use super::{MediaSender, Monitor, WindowsSession};
 use crate::media_pacing::{DrainIo, MediaPacer};
 use crate::wire;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::core::{factory, Interface};
+use windows::core::{factory, s, IInspectable, Interface};
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem};
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{HMODULE, VARIANT_TRUE};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
+use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use windows::Win32::Graphics::Direct3D::{
+    ID3DBlob, ID3DInclude, D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL,
+    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+};
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -42,7 +48,7 @@ pub(super) fn run(
         .ok_or("source authorization revoked")?;
     let _winrt = WinRtGuard::new()?;
     let _media_foundation = MfGuard::new()?;
-    let (device, runtime_device) = create_d3d_device()?;
+    let (device, context, runtime_device) = create_d3d_device()?;
     // Resolve the same identity again at the actual WGC constructor. A stale
     // HMONITOR captured before worker/transport setup cannot select a new target.
     let current = super::select_monitor(super::monitors()?, &session.access.source_id)?;
@@ -53,6 +59,18 @@ pub(super) fn run(
         monitor.handle as *mut _,
     ))?;
     let mut content_size = item.Size().map_err(win("read WGC item size"))?;
+    // WGC raises Closed when the captured monitor goes away (unplug, mode
+    // collapse). Without this subscription the worker would spin on empty
+    // TryGetNextFrame forever while the session claims to be running.
+    let display_closed = Arc::new(AtomicBool::new(false));
+    let closed_flag = display_closed.clone();
+    let closed_handler =
+        TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_sender, _args| {
+            closed_flag.store(true, Ordering::Release);
+            Ok(())
+        });
+    item.Closed(&closed_handler)
+        .map_err(win("subscribe WGC item Closed event"))?;
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &runtime_device,
         DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -63,6 +81,9 @@ pub(super) fn run(
     let capture = pool
         .CreateCaptureSession(&item)
         .map_err(win("create WGC capture session"))?;
+    // Win11+ draws a yellow border around captured screens. Hide it where the
+    // OS allows it; older builds reject the call and keep the border.
+    let _ = capture.SetIsBorderRequired(false);
     capture
         .StartCapture()
         .map_err(win("start Windows Graphics Capture"))?;
@@ -70,6 +91,12 @@ pub(super) fn run(
     drop(admission);
     let bitrate = session.stats.lock().unwrap().current_bitrate;
     let mut encoder = HardwareH264Encoder::new(&device, width, height, fps, bitrate)?;
+    // The viewer negotiates stream geometry that can differ from the monitor
+    // surface (responsive anchor, adaptive downscale reconfigure). WGC always
+    // delivers item.Size() pixels, so a mismatch is blit-scaled on the GPU
+    // into an encoder-sized texture — same contract as the Linux backend's
+    // convert stage, with no CPU readback.
+    let scaler = GpuScaler::new(&device, &context, width, height)?;
     let started = Instant::now();
     let mut pacing = CapturePacing::new(bitrate, fps, &sender, started);
     // Always close WGC resources on a terminal drain, including partial AUs.
@@ -85,6 +112,11 @@ pub(super) fn run(
         let mut last_capture_to_encode_us = 0u64;
 
         while !session.stop.load(Ordering::Acquire) {
+            if display_closed.load(Ordering::Acquire) {
+                return Err(
+                    "captured display was closed (monitor removed or capture revoked)".into(),
+                );
+            }
             let frame = match pool.TryGetNextFrame() {
                 Ok(frame) => frame,
                 Err(_) => {
@@ -148,7 +180,14 @@ pub(super) fn run(
                 encoder.force_keyframe();
             }
             let encode_started = Instant::now();
-            let outputs = encoder.encode(&texture)?;
+            let encode_target: &ID3D11Texture2D =
+                if content_size.Width == width as i32 && content_size.Height == height as i32 {
+                    &texture
+                } else {
+                    scaler.scale(&texture)?;
+                    scaler.texture()
+                };
+            let outputs = encoder.encode(encode_target)?;
             frame.Close().ok();
             let encode_us = encode_started.elapsed().as_micros() as u64;
             send_encoded_outputs(
@@ -289,7 +328,7 @@ fn send_encoded_outputs(
     Ok(())
 }
 
-fn create_d3d_device() -> Result<(ID3D11Device, IDirect3DDevice), String> {
+fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice), String> {
     let mut device = None;
     let mut context = None;
     let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
@@ -308,13 +347,205 @@ fn create_d3d_device() -> Result<(ID3D11Device, IDirect3DDevice), String> {
     }
     .map_err(win("create D3D11 hardware device"))?;
     let device = device.ok_or("D3D11 returned no device")?;
-    let _context = context.ok_or("D3D11 returned no immediate context")?;
+    let context = context.ok_or("D3D11 returned no immediate context")?;
     let dxgi: IDXGIDevice = device.cast().map_err(win("cast D3D11 device to DXGI"))?;
     let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
         .map_err(win("create WinRT D3D11 device"))?;
     let runtime_device: IDirect3DDevice =
         inspectable.cast().map_err(win("cast WinRT D3D11 device"))?;
-    Ok((device, runtime_device))
+    Ok((device, context, runtime_device))
+}
+
+/// One-shot GPU blit that rescales each WGC frame texture to the encoder
+/// negotiated size. Pure draw path (no CPU readback); the destination mirrors
+/// WGC's own bind flags so Media Foundation consumes it like a native frame.
+struct GpuScaler {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    vertex_shader: ID3D11VertexShader,
+    pixel_shader: ID3D11PixelShader,
+    sampler: ID3D11SamplerState,
+    texture: ID3D11Texture2D,
+    render_target: ID3D11RenderTargetView,
+    width: u32,
+    height: u32,
+}
+
+const SCALE_HLSL: &str = r#"
+Texture2D srcTex : register(t0);
+SamplerState srcSampler : register(s0);
+
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VSOut VSMain(uint id : SV_VertexID) {
+    VSOut output;
+    float2 coords = float2((id << 1) & 2, id & 2);
+    output.pos = float4(coords.x * 2.0 - 1.0, 1.0 - coords.y * 2.0, 0.0, 1.0);
+    output.uv = coords;
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_Target {
+    return srcTex.Sample(srcSampler, input.uv);
+}
+"#;
+
+impl GpuScaler {
+    fn new(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
+            .map_err(win("create scaled encoder texture"))?;
+        let texture = texture.ok_or("D3D11 returned no scaled texture")?;
+        let mut render_target = None;
+        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut render_target)) }
+            .map_err(win("create scaled render target view"))?;
+        let render_target = render_target.ok_or("D3D11 returned no render target view")?;
+
+        let sampler_desc = D3D11_SAMPLER_DESC {
+            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+            MipLODBias: 0.0,
+            MaxAnisotropy: 1,
+            ComparisonFunc: D3D11_COMPARISON_NEVER,
+            BorderColor: [0.0; 4],
+            MinLOD: 0.0,
+            MaxLOD: D3D11_FLOAT32_MAX,
+        };
+        let mut sampler = None;
+        unsafe { device.CreateSamplerState(&sampler_desc, Some(&mut sampler)) }
+            .map_err(win("create scale sampler state"))?;
+        let sampler = sampler.ok_or("D3D11 returned no sampler state")?;
+
+        let vertex_blob = compile_scale_shader(s!("VSMain"), s!("vs_5_0"))?;
+        let pixel_blob = compile_scale_shader(s!("PSMain"), s!("ps_5_0"))?;
+        let mut vertex_shader = None;
+        unsafe {
+            device.CreateVertexShader(blob_bytes(&vertex_blob), None, Some(&mut vertex_shader))
+        }
+        .map_err(win("create scale vertex shader"))?;
+        let mut pixel_shader = None;
+        unsafe { device.CreatePixelShader(blob_bytes(&pixel_blob), None, Some(&mut pixel_shader)) }
+            .map_err(win("create scale pixel shader"))?;
+
+        Ok(Self {
+            device: device.clone(),
+            context: context.clone(),
+            vertex_shader: vertex_shader.ok_or("D3D11 returned no vertex shader")?,
+            pixel_shader: pixel_shader.ok_or("D3D11 returned no pixel shader")?,
+            sampler,
+            texture,
+            render_target,
+            width,
+            height,
+        })
+    }
+
+    /// Draw `source` into the encoder-sized target with a fullscreen
+    /// triangle. The caller keeps ownership of the frame texture and closes
+    /// it as usual; the scaled target is reused across frames.
+    fn scale(&self, source: &ID3D11Texture2D) -> Result<(), String> {
+        let mut source_view = None;
+        unsafe {
+            self.device
+                .CreateShaderResourceView(source, None, Some(&mut source_view))
+        }
+        .map_err(win("create WGC frame shader resource view"))?;
+        let source_view = source_view.ok_or("D3D11 returned no shader resource view")?;
+        unsafe {
+            self.context.IASetInputLayout(None);
+            self.context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            self.context.VSSetShader(&self.vertex_shader, None);
+            self.context.PSSetShader(&self.pixel_shader, None);
+            self.context
+                .PSSetShaderResources(0, Some(&[Some(source_view)]));
+            self.context
+                .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.context.OMSetRenderTargets(
+                Some(&[Some(self.render_target.clone())]),
+                None::<&ID3D11DepthStencilView>,
+            );
+            self.context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: self.width as f32,
+                Height: self.height as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            self.context.Draw(3, 0);
+            // Unbind so the encoder can read the target while the WGC pool
+            // reuses the source surface for the next frame.
+            self.context.PSSetShaderResources(0, Some(&[None]));
+            self.context
+                .OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
+        }
+        Ok(())
+    }
+
+    fn texture(&self) -> &ID3D11Texture2D {
+        &self.texture
+    }
+}
+
+fn compile_scale_shader(
+    entry: windows::core::PCSTR,
+    profile: windows::core::PCSTR,
+) -> Result<ID3DBlob, String> {
+    let mut code = None;
+    let mut error = None;
+    let result = unsafe {
+        D3DCompile(
+            SCALE_HLSL.as_ptr().cast(),
+            SCALE_HLSL.len(),
+            s!("leftcar_scale.hlsl"),
+            None,
+            None::<&ID3DInclude>,
+            entry,
+            profile,
+            0,
+            0,
+            &mut code,
+            Some(&mut error),
+        )
+    };
+    if let Err(status) = result {
+        let detail = error
+            .as_ref()
+            .map(|blob| String::from_utf8_lossy(blob_bytes(blob)).into_owned())
+            .unwrap_or_default();
+        return Err(format!("compile GPU scale shader ({status}): {detail}"));
+    }
+    code.ok_or_else(|| "D3DCompile returned no shader code".to_string())
+}
+
+fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(blob.GetBufferPointer().cast(), blob.GetBufferSize()) }
 }
 
 fn capture_item(

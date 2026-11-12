@@ -196,7 +196,8 @@ pub fn run() {
     ensure_debug_dev_server_available();
     // Tauri와 무관한 기동 순서는 bootstrap 한 벌을 사이드카(leftcar-hostd)와
     // 공유한다 — 실패 대화상자만 Tauri 앱의 몫이다.
-    let services = bootstrap::start_host_services().unwrap_or_else(|message| fatal_startup_error(message));
+    let services =
+        bootstrap::start_host_services().unwrap_or_else(|message| fatal_startup_error(message));
     let warmup_backend = services.warmup_backend.clone();
 
     tauri::Builder::default()
@@ -253,13 +254,13 @@ pub fn run() {
         .setup(move |app| {
             // 클립보드 접근은 플러그인의 Rust API로 한다(U5). pbcopy/pbpaste는
             // 이 주입이 없는 환경의 폴백일 뿐이다.
-            services.server.set_clipboard(Arc::new(
-                clipboard::TauriClipboard::new(app.handle().clone()),
-            ));
-            let curtain_controller = make_curtain_controller(app.handle().clone());
             services
                 .server
-                .set_curtain_controller(curtain_controller);
+                .set_clipboard(Arc::new(clipboard::TauriClipboard::new(
+                    app.handle().clone(),
+                )));
+            let curtain_controller = make_curtain_controller(app.handle().clone());
+            services.server.set_curtain_controller(curtain_controller);
             app.manage(services.server);
             app.manage(services.pairing);
             app.manage(services.audit);
@@ -387,8 +388,7 @@ pub fn run() {
                 bootstrap::run_exit_shutdown(
                     app.state::<Arc<upnp::UpnpMappingManager>>().inner().clone(),
                     app.state::<Arc<control::ControlServer>>().inner(),
-                    app
-                        .state::<Arc<virtual_display::VirtualDisplayManager>>()
+                    app.state::<Arc<virtual_display::VirtualDisplayManager>>()
                         .inner(),
                     app.state::<Arc<audit::SessionAudit>>().inner(),
                     |future| {

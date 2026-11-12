@@ -69,7 +69,8 @@ fn is_offer_id(id: &str) -> bool {
         Some(rest) if rest.len() == 36 => rest,
         _ => return false,
     };
-    let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c);
+    let hex =
+        |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c);
     let bytes = rest.as_bytes();
     let dashes = [8, 13, 18, 23];
     for &d in &dashes {
@@ -86,8 +87,7 @@ fn is_offer_id(id: &str) -> bool {
         }
     }
     // v4: 버전 니블 4, 변형 니블 8/9/a/b
-    bytes[14] == b'4'
-        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+    bytes[14] == b'4' && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
 /// `^[A-Za-z0-9_-]{43}$` — 오퍼 시크릿과 호스트 공개키(b64url 32B = 43문자)
@@ -106,7 +106,10 @@ pub fn is_host_key_shape(value: &str) -> bool {
 
 /// 발급 토큰은 64자리 16진수다.
 pub fn is_valid_issued_token(token: &str) -> bool {
-    token.len() == 64 && token.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Remote control uses authenticated encryption and paired Host identity.
@@ -195,15 +198,15 @@ pub fn resolve_pairing_host(route_endpoint: Option<&str>, current_host: &str) ->
 /// from the direct Host endpoint + six-digit pairing contract.
 pub fn can_submit_pairing_code(code: &str, has_host_target: bool, busy: bool) -> bool {
     let normalized = normalize_pairing_code(code);
-    has_host_target && !busy && normalized.len() == 6 && normalized.bytes().all(|c| c.is_ascii_digit())
+    has_host_target
+        && !busy
+        && normalized.len() == 6
+        && normalized.bytes().all(|c| c.is_ascii_digit())
 }
 
 /// 붙여넣은 코드의 공백을 제거한다(TS code.trim().replace(/\s+/g, "")).
 pub(crate) fn normalize_pairing_code(code: &str) -> String {
-    code.trim()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect()
+    code.trim().chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// `{"v":2,"id":..,"s":..,"k":..,"h":..,"p":..[,"ts":..]}` → QrPayload; 어떤
@@ -357,7 +360,10 @@ pub fn parse_recent_hosts_strict(raw: Option<&str>) -> Result<Vec<RecentHostEntr
         out.push(RecentHostEntry {
             host: host.to_string(),
             port: port as u16,
-            name: item.get("name").and_then(|v| v.as_str()).map(str::to_string),
+            name: item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             host_key,
             aliases,
         });
@@ -451,18 +457,33 @@ mod tests {
         );
         assert_eq!(
             parse_host_endpoint(&format_host_endpoint("192.168.0.134", 7777)),
-            Some(HostEndpoint { host: "192.168.0.134".into(), port: 7777 })
+            Some(HostEndpoint {
+                host: "192.168.0.134".into(),
+                port: 7777
+            })
         );
         assert_eq!(
             parse_host_endpoint("192.168.0.134"),
-            Some(HostEndpoint { host: "192.168.0.134".into(), port: 7777 })
+            Some(HostEndpoint {
+                host: "192.168.0.134".into(),
+                port: 7777
+            })
         );
         assert_eq!(
             parse_host_endpoint("localhost:7777"),
-            Some(HostEndpoint { host: "localhost".into(), port: 7777 })
+            Some(HostEndpoint {
+                host: "localhost".into(),
+                port: 7777
+            })
         );
         // never invents localhost
-        for bad in ["", "   ", ":7777", "192.168.0.134:not-a-port", "192.168.0.134:0"] {
+        for bad in [
+            "",
+            "   ",
+            ":7777",
+            "192.168.0.134:not-a-port",
+            "192.168.0.134:0",
+        ] {
             assert_eq!(parse_host_endpoint(bad), None, "{bad}");
         }
     }
@@ -486,10 +507,16 @@ mod tests {
 
     #[test]
     fn token_keys_match_the_ts_schemas() {
-        assert_eq!(token_key("192.168.1.5", 7777), "leftcar.token.v2.192.168.1.5.7777");
+        assert_eq!(
+            token_key("192.168.1.5", 7777),
+            "leftcar.token.v2.192.168.1.5.7777"
+        );
         // SecureStore 허용 문자 밖은 치환한다(IPv6 등).
         assert_eq!(token_key("::1", 6200), "leftcar.token.v2.__1.6200");
-        assert_eq!(identity_token_key(HOST_KEY), format!("leftcar.token.v3.{HOST_KEY}"));
+        assert_eq!(
+            identity_token_key(HOST_KEY),
+            format!("leftcar.token.v3.{HOST_KEY}")
+        );
         assert!(is_valid_issued_token(&"a".repeat(64)));
         assert!(!is_valid_issued_token("not-a-valid-token"));
         assert!(!is_valid_issued_token(&"A".repeat(64)));
@@ -517,7 +544,11 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].host_key.as_deref(), Some(HOST_KEY));
 
-        for raw in ["broken", "{}", r#"[{"host":"10.0.0.5","port":7777,"hostKey":3,"lastConnected":1}]"#] {
+        for raw in [
+            "broken",
+            "{}",
+            r#"[{"host":"10.0.0.5","port":7777,"hostKey":3,"lastConnected":1}]"#,
+        ] {
             assert!(parse_recent_hosts_strict(Some(raw)).is_err(), "{raw}");
         }
         assert_eq!(parse_recent_hosts_strict(None).expect("empty"), Vec::new());

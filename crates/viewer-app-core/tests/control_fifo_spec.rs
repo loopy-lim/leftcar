@@ -57,7 +57,10 @@ fn rejects_only_unadmitted_work_when_the_fifo_is_full_and_admits_again_after_a_r
 
     let admitted = issue(&client, "getStatus");
     assert!(
-        wait_until(|| server.written_len() == MAX_PENDING_REQUESTS + 1, Duration::from_secs(5)),
+        wait_until(
+            || server.written_len() == MAX_PENDING_REQUESTS + 1,
+            Duration::from_secs(5)
+        ),
         "re-admitted after a reply"
     );
 
@@ -81,7 +84,10 @@ fn bounds_outstanding_payload_bytes_without_retiring_requests_already_on_the_wir
         "setClipboard",
         serde_json::json!({ "text": "a".repeat(half) }),
     );
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(10)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(10)
+    ));
 
     // 두 번째 8MiB는 바이트 예산 초과로 거부되며, 전송 중인 첫 요청은 그대로 둔다.
     let rejected = client
@@ -104,7 +110,10 @@ fn bounds_outstanding_payload_bytes_without_retiring_requests_already_on_the_wir
 
     // 예산이 비워졌으므로 다음 요청은 들어간다.
     let next = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 2, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 2,
+        Duration::from_secs(5)
+    ));
     server.send(&serde_json::json!({"ok": true, "result": "next"}).to_string());
     let next_value = next
         .recv_timeout(Duration::from_secs(5))
@@ -127,16 +136,25 @@ fn rejects_an_unterminated_oversized_handshake_immediately() {
             ConnectOptions::new(),
         )
     });
-    assert!(wait_until(|| transport.connections_created() >= 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || transport.connections_created() >= 1,
+        Duration::from_secs(5)
+    ));
     let server = transport.last_server();
     // ClientHello 쓰기를 기다린다.
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     // 핸드셰이크 한도(16KiB) 딱까지는 버퍼에 쌓인다.
     server.send_raw(&vec![b'x'; HANDSHAKE_LINE_LIMIT]);
     assert!(wait_until(|| !server.destroyed(), Duration::from_secs(5)));
     // 한 바이트 더 오면 즉시 거부된다.
     server.send_raw(b"x");
-    let error = handle.join().expect("connect thread").expect_err("rejected");
+    let error = handle
+        .join()
+        .expect("connect thread")
+        .expect_err("rejected");
     assert_eq!(error.kind, ControlErrorKind::Transport);
     assert!(server.destroyed());
 }
@@ -169,7 +187,10 @@ fn rejects_malformed_responses_without_throwing_in_the_reader_thread() {
         let client = connect_plain(&transport, "localhost", ConnectOptions::new());
         let server = transport.last_server();
         let result = issue(&client, "getStatus");
-        assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+        assert!(wait_until(
+            || server.written_len() == 1,
+            Duration::from_secs(5)
+        ));
         server.send(line);
         let error = result
             .recv_timeout(Duration::from_secs(5))
@@ -186,14 +207,26 @@ fn matches_split_and_coalesced_valid_responses_in_fifo_order() {
     let client = connect_plain(&transport, "localhost", ConnectOptions::new());
     let server = transport.last_server();
     let first = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let second = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 2, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 2,
+        Duration::from_secs(5)
+    ));
     server.send_raw(b"{\"ok\":tr");
     server.send_raw(b"ue,\"result\":1}\n{\"ok\":true,\"result\":2}\n");
     let values = [
-        first.recv_timeout(Duration::from_secs(5)).expect("first").expect("ok"),
-        second.recv_timeout(Duration::from_secs(5)).expect("second").expect("ok"),
+        first
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first")
+            .expect("ok"),
+        second
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second")
+            .expect("ok"),
     ];
     assert_eq!(
         values,
@@ -219,9 +252,15 @@ fn settles_a_connection_closed_before_its_handshake_without_waiting_for_timeout(
             ConnectOptions::new(),
         )
     });
-    assert!(wait_until(|| transport.connections_created() >= 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || transport.connections_created() >= 1,
+        Duration::from_secs(5)
+    ));
     let server = transport.last_server();
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     server.close();
     let error = handle.join().expect("connect thread").expect_err("closed");
     assert_eq!(error.kind, ControlErrorKind::Transport);
@@ -254,22 +293,35 @@ fn allows_status_polls_to_wait_behind_a_slow_display_resize() {
         "resizeVirtualDisplay",
         serde_json::json!({"width": 1440, "height": 900, "scale": 2}),
     );
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let status = issue(&client, "getVirtualDisplay");
-    assert!(wait_until(|| server.written_len() == 2, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 2,
+        Duration::from_secs(5)
+    ));
     let stream_status = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 3, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 3,
+        Duration::from_secs(5)
+    ));
 
     // resize 데드라인(1.2s)의 절반이 지나도 아무도 죽지 않는다 — 뒤의 status는
     // 아직 시계가 시작하지 않았다.
     std::thread::sleep(Duration::from_millis(600));
     assert!(!server.destroyed());
 
-    server.send(&serde_json::json!({"ok": true, "result": {"sourceId": "display:resized"}}).to_string());
+    server.send(
+        &serde_json::json!({"ok": true, "result": {"sourceId": "display:resized"}}).to_string(),
+    );
     server.send(&serde_json::json!({"ok": true, "result": {"removalPending": false}}).to_string());
     server.send(&serde_json::json!({"ok": true, "result": {"sessions": []}}).to_string());
     for receiver in [resize, status, stream_status] {
-        let outcome = receiver.recv_timeout(Duration::from_secs(5)).expect("settles");
+        let outcome = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("settles");
         assert!(outcome.is_ok(), "all three fulfil: {outcome:?}");
     }
     assert!(!server.destroyed());
@@ -287,9 +339,15 @@ fn still_times_out_an_unanswered_status_once_it_reaches_the_front() {
     let server = transport.last_server();
 
     let resize = issue(&client, "resizeVirtualDisplay");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let status = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 2, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 2,
+        Duration::from_secs(5)
+    ));
     // resize가 끝나면 status가 맨 앞이 되고 그때부터 200ms 시계가 돈다.
     server.send(&serde_json::json!({"ok": true, "result": {}}).to_string());
     resize
@@ -301,19 +359,23 @@ fn still_times_out_an_unanswered_status_once_it_reaches_the_front() {
         .expect("status settles")
         .expect_err("timeout");
     assert_eq!(kind_of(&error), ControlErrorKind::Timeout);
-    assert!(error.message.starts_with("control request timeout: getStatus"));
+    assert!(error
+        .message
+        .starts_with("control request timeout: getStatus"));
     assert!(server.destroyed());
 }
 
 #[test]
-fn rejects_every_pending_request_before_a_late_failed_write_reply_can_reach_the_next_request()
-{
+fn rejects_every_pending_request_before_a_late_failed_write_reply_can_reach_the_next_request() {
     let transport = ScriptedTransport::new();
     let client = connect_plain(&transport, "localhost", ConnectOptions::new());
     let server = transport.last_server();
 
     let first = issue(&client, "startStream");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     // 다음 쓰기는 큐에 넣은 뒤 실패한다(TS 지연 실패 콜백 흉내) — 이미 전송 중인
     // 첫 요청도 함께 은퇴해야 한다(FIFO 채널에는 응답 ID가 없다).
     server.arm_write_failure();
@@ -352,7 +414,10 @@ fn terminates_the_fifo_channel_when_a_later_socket_write_throws_synchronously() 
     let server = transport.last_server();
 
     let first = issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     server.arm_sync_write_failure();
     let second = issue(&client, "startStream");
 
@@ -377,14 +442,8 @@ fn rejects_the_connect_promise_when_the_transport_never_opens() {
     let gate = GateHandle::new();
     transport.push_outcome(ConnectOutcome::Hold(gate.clone()));
     let started = Instant::now();
-    let error = connect(
-        &transport,
-        "192.168.1.10",
-        7777,
-        150,
-        ConnectOptions::new(),
-    )
-    .expect_err("timeout");
+    let error =
+        connect(&transport, "192.168.1.10", 7777, 150, ConnectOptions::new()).expect_err("timeout");
     assert_eq!(error.kind, ControlErrorKind::Timeout);
     assert_eq!(error.message, "connect timeout to 192.168.1.10:7777");
     assert!(started.elapsed() >= Duration::from_millis(140));
@@ -404,9 +463,16 @@ fn acknowledges_the_write_before_the_server_response() {
         let mut on_written = || {
             flag_for_callback.store(true, std::sync::atomic::Ordering::SeqCst);
         };
-        let _ = tx.send(client_for_thread.request("startStream", Some(&serde_json::json!({"viewerPort": 5001})), Some(&mut on_written)));
+        let _ = tx.send(client_for_thread.request(
+            "startStream",
+            Some(&serde_json::json!({"viewerPort": 5001})),
+            Some(&mut on_written),
+        ));
     });
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     // 쓰기 성공 시점에 콜백이 이미 발화했다(서버 응답 전).
     assert!(written_flag.load(std::sync::atomic::Ordering::SeqCst));
     server.send(&serde_json::json!({"ok": true, "result": {"session": 1}}).to_string());

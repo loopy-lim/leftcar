@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    read_plain_request, test_ports, wait_until, GateHandle, ScriptedTransport,
-    ServerEnd,
+    read_plain_request, test_ports, wait_until, GateHandle, ScriptedTransport, ServerEnd,
 };
+use viewer_app_core::pairing::flows::DEFAULT_POLL_MS;
 use viewer_app_core::pairing::{
     can_submit_pairing_code, clear_stored_credential, clear_token, format_host_endpoint,
     get_device_id, get_stored_credential, get_stored_pinned_host_key, get_stored_token,
@@ -20,7 +20,6 @@ use viewer_app_core::pairing::{
     parse_qr_payload, resolve_pairing_host, token_key, PairingApprovalResult, PairingAttempt,
     PairingError, PairingFlowOptions, QrPayload, RecentHostsPort, DEFAULT_CONTROL_PORT,
 };
-use viewer_app_core::pairing::flows::DEFAULT_POLL_MS;
 
 const OFFER_ID: &str = "offer-123e4567-e89b-42d3-a456-426614174000";
 const OFFER_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 43
@@ -98,7 +97,10 @@ fn qr_parsing_and_endpoint_helpers_match_the_ts_contract() {
         "{{\"v\":2,\"id\":\"{OFFER_ID}\",\"s\":\"{OFFER_SECRET}\",\"k\":\"{HOST_KEY}\",\"h\":\"192.168.1.5\",\"p\":7777,\"c\":\"123456\"}}"
     );
     assert!(parse_qr_payload(&with_code).is_some());
-    assert!(parse_qr_payload("{\"v\":1,\"id\":\"o\",\"s\":\"s\",\"h\":\"1.2.3.4\",\"p\":7777}").is_none());
+    assert!(
+        parse_qr_payload("{\"v\":1,\"id\":\"o\",\"s\":\"s\",\"h\":\"1.2.3.4\",\"p\":7777}")
+            .is_none()
+    );
     assert!(parse_qr_payload("not json").is_none());
 
     assert_eq!(
@@ -128,7 +130,10 @@ fn qr_parsing_and_endpoint_helpers_match_the_ts_contract() {
 
 #[test]
 fn token_key_schemas_are_v2_endpoint_and_v3_identity() {
-    assert_eq!(token_key("192.168.1.5", 7777), "leftcar.token.v2.192.168.1.5.7777");
+    assert_eq!(
+        token_key("192.168.1.5", 7777),
+        "leftcar.token.v2.192.168.1.5.7777"
+    );
     assert_eq!(
         identity_token_key(HOST_KEY),
         format!("leftcar.token.v3.{HOST_KEY}")
@@ -144,8 +149,8 @@ fn pair_with_host_success_stores_the_token_and_releases_the_socket() {
         vec![serde_json::json!({"ok": true, "result": {"token": TOKEN_64HEX}})],
     );
 
-    let token = pair_with_host(&ports, &payload(), "123456", &flow_options())
-        .expect("pair succeeds");
+    let token =
+        pair_with_host(&ports, &payload(), "123456", &flow_options()).expect("pair succeeds");
     assert_eq!(token, TOKEN_64HEX);
     assert_eq!(replies.load(Ordering::SeqCst), 1);
 
@@ -158,10 +163,13 @@ fn pair_with_host_success_stores_the_token_and_releases_the_socket() {
     assert!(!store.snapshot().contains_key("leftcar.token"));
     // 루프백은 평문이라 hostKey 자격증명은 없다.
     assert_eq!(
-        get_stored_token(&ports, &viewer_app_core::pairing::HostEndpoint {
-            host: "127.0.0.1".into(),
-            port: 7777,
-        })
+        get_stored_token(
+            &ports,
+            &viewer_app_core::pairing::HostEndpoint {
+                host: "127.0.0.1".into(),
+                port: 7777,
+            }
+        )
         .expect("read")
         .as_deref(),
         Some(TOKEN_64HEX)
@@ -174,8 +182,7 @@ fn pair_with_host_success_stores_the_token_and_releases_the_socket() {
 fn pair_with_host_requires_the_separately_displayed_code() {
     let transport = ScriptedTransport::new();
     let (ports, _store, _recent) = test_ports(Arc::new(transport.clone()));
-    let error = pair_with_host(&ports, &payload(), "", &flow_options())
-        .expect_err("empty code");
+    let error = pair_with_host(&ports, &payload(), "", &flow_options()).expect_err("empty code");
     assert_eq!(error, PairingError::CodeInvalid);
     assert!(error.to_string().contains("leftcar:errPairingCodeInvalid"));
     assert_eq!(transport.connections_created(), 0);
@@ -189,8 +196,8 @@ fn pair_with_host_rejects_a_malformed_issued_token_instead_of_storing_it() {
         transport.clone(),
         vec![serde_json::json!({"ok": true, "result": {"token": "not-a-valid-token"}})],
     );
-    let error = pair_with_host(&ports, &payload(), "123456", &flow_options())
-        .expect_err("malformed token");
+    let error =
+        pair_with_host(&ports, &payload(), "123456", &flow_options()).expect_err("malformed token");
     assert_eq!(error, PairingError::ResponseInvalid);
     assert!(!store.snapshot().contains_key(&token_key("127.0.0.1", 7777)));
     assert!(transport.last_server().destroyed());
@@ -206,8 +213,8 @@ fn a_failed_pairing_keeps_a_previously_stored_token() {
         transport.clone(),
         vec![serde_json::json!({"ok": false, "error": "pairing failed"})],
     );
-    let error = pair_with_host(&ports, &payload(), "000000", &flow_options())
-        .expect_err("pairing failed");
+    let error =
+        pair_with_host(&ports, &payload(), "000000", &flow_options()).expect_err("pairing failed");
     assert!(is_pairing_unsupported_error(&error.to_string()));
     // 토큰은 발급한 호스트의 것이다 — 다른 시도가 그것을 지우지 않는다.
     assert_eq!(
@@ -233,7 +240,10 @@ fn pairs_directly_with_a_host_endpoint_and_normalizes_the_code() {
         };
         let (command, envelope) = read_plain_request(&server);
         assert_eq!(command, "pair");
-        let args = envelope.get("args").cloned().unwrap_or(serde_json::Value::Null);
+        let args = envelope
+            .get("args")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         assert_eq!(args.get("code").and_then(|v| v.as_str()), Some("123456"));
         assert!(envelope.get("token").is_none());
         server.send(&serde_json::json!({"ok": true, "result": {"token": TOKEN_64HEX}}).to_string());
@@ -244,7 +254,10 @@ fn pairs_directly_with_a_host_endpoint_and_normalizes_the_code() {
         .expect("pair succeeds");
     assert_eq!(token, TOKEN_64HEX);
     assert_eq!(
-        store.snapshot().get(&token_key("localhost", 8888)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("localhost", 8888))
+            .map(String::as_str),
         Some(TOKEN_64HEX)
     );
     assert!(transport.last_server().destroyed());
@@ -263,22 +276,30 @@ fn stores_one_token_per_host_endpoint() {
         ],
     );
     pair_with_host(&ports, &payload(), "123456", &flow_options()).expect("pair A");
-    pair_with_host_by_code(&ports, "localhost", 8888, "123456", &flow_options())
-        .expect("pair B");
+    pair_with_host_by_code(&ports, "localhost", 8888, "123456", &flow_options()).expect("pair B");
 
     assert_eq!(
-        store.snapshot().get(&token_key("127.0.0.1", 7777)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("127.0.0.1", 7777))
+            .map(String::as_str),
         Some("a".repeat(64).as_str())
     );
     assert_eq!(
-        store.snapshot().get(&token_key("localhost", 8888)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("localhost", 8888))
+            .map(String::as_str),
         Some("b".repeat(64).as_str())
     );
     // 스코프 검사: 다른 호스트는 null이다.
     assert_eq!(
         get_stored_token(
             &ports,
-            &viewer_app_core::pairing::HostEndpoint { host: "localhost".into(), port: 7777 }
+            &viewer_app_core::pairing::HostEndpoint {
+                host: "localhost".into(),
+                port: 7777
+            }
         )
         .expect("read"),
         None
@@ -307,12 +328,18 @@ fn clear_token_removes_only_the_given_hosts_key() {
     store.put(&token_key("localhost", 8888), &"b".repeat(64));
     clear_token(
         &ports,
-        &viewer_app_core::pairing::HostEndpoint { host: "127.0.0.1".into(), port: 7777 },
+        &viewer_app_core::pairing::HostEndpoint {
+            host: "127.0.0.1".into(),
+            port: 7777,
+        },
     )
     .expect("clear");
     assert!(!store.snapshot().contains_key(&token_key("127.0.0.1", 7777)));
     assert_eq!(
-        store.snapshot().get(&token_key("localhost", 8888)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("localhost", 8888))
+            .map(String::as_str),
         Some("b".repeat(64).as_str())
     );
 }
@@ -321,7 +348,10 @@ fn clear_token_removes_only_the_given_hosts_key() {
 fn credential_lookup_prefers_the_verified_identity_and_refreshes_the_endpoint_alias() {
     let transport = ScriptedTransport::new();
     let (ports, store, recent) = test_ports(Arc::new(transport.clone()));
-    let endpoint = viewer_app_core::pairing::HostEndpoint { host: "192.168.1.99".into(), port: 7777 };
+    let endpoint = viewer_app_core::pairing::HostEndpoint {
+        host: "192.168.1.99".into(),
+        port: 7777,
+    };
     store.put(&token_key(&endpoint.host, endpoint.port), TOKEN_64HEX);
     store.put(&identity_token_key(HOST_KEY), &"b".repeat(64));
 
@@ -332,15 +362,22 @@ fn credential_lookup_prefers_the_verified_identity_and_refreshes_the_endpoint_al
     assert_eq!(credential.host_key.as_deref(), Some(HOST_KEY));
     // 엔드포인트 별칭도 정체 토큰을 따라간다.
     assert_eq!(
-        store.snapshot().get(&token_key(&endpoint.host, endpoint.port)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key(&endpoint.host, endpoint.port))
+            .map(String::as_str),
         Some("b".repeat(64).as_str())
     );
     // TOFU 핀도 같은 거래에서 반영된다.
     let entries = recent.entries().expect("recent entries");
-    assert!(entries.iter().any(|entry| entry.host_key.as_deref() == Some(HOST_KEY)));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.host_key.as_deref() == Some(HOST_KEY)));
     // 이 엔드포인트는 이후 저장된 핀으로 해석된다.
     assert_eq!(
-        get_stored_pinned_host_key(&ports, "192.168.1.99", 7777).expect("pin").as_deref(),
+        get_stored_pinned_host_key(&ports, "192.168.1.99", 7777)
+            .expect("pin")
+            .as_deref(),
         Some(HOST_KEY)
     );
 }
@@ -349,7 +386,10 @@ fn credential_lookup_prefers_the_verified_identity_and_refreshes_the_endpoint_al
 fn a_stale_credential_incarnation_cannot_clear_a_newly_paired_token() {
     let transport = ScriptedTransport::new();
     let (ports, store, _recent) = test_ports(Arc::new(transport.clone()));
-    let endpoint = viewer_app_core::pairing::HostEndpoint { host: "127.0.0.1".into(), port: 7777 };
+    let endpoint = viewer_app_core::pairing::HostEndpoint {
+        host: "127.0.0.1".into(),
+        port: 7777,
+    };
     store.put(&identity_token_key(HOST_KEY), TOKEN_64HEX);
     store.put(&token_key(&endpoint.host, endpoint.port), TOKEN_64HEX);
     let stale = get_stored_credential(&ports, &endpoint, Some(HOST_KEY), None, true)
@@ -361,9 +401,18 @@ fn a_stale_credential_incarnation_cannot_clear_a_newly_paired_token() {
     store.put(&token_key(&endpoint.host, endpoint.port), &fresh);
     clear_stored_credential(&ports, &stale).expect("clear stale");
 
-    assert_eq!(store.snapshot().get(&identity_token_key(HOST_KEY)).map(String::as_str), Some(fresh.as_str()));
     assert_eq!(
-        store.snapshot().get(&token_key(&endpoint.host, endpoint.port)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&identity_token_key(HOST_KEY))
+            .map(String::as_str),
+        Some(fresh.as_str())
+    );
+    assert_eq!(
+        store
+            .snapshot()
+            .get(&token_key(&endpoint.host, endpoint.port))
+            .map(String::as_str),
         Some(fresh.as_str())
     );
 }
@@ -416,12 +465,17 @@ fn approval_polls_pending_until_the_host_completes_approval() {
     let result = pair_with_host_approval(&ports, &payload(), &options).expect("approved");
     assert_eq!(
         result,
-        PairingApprovalResult::Approved { token: TOKEN_64HEX.to_string() }
+        PairingApprovalResult::Approved {
+            token: TOKEN_64HEX.to_string()
+        }
     );
     assert_eq!(replies.load(Ordering::SeqCst), 3);
     assert_eq!(pending_count.load(Ordering::SeqCst), 2);
     assert_eq!(
-        store.snapshot().get(&token_key("127.0.0.1", 7777)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("127.0.0.1", 7777))
+            .map(String::as_str),
         Some(TOKEN_64HEX)
     );
 }
@@ -485,7 +539,9 @@ fn approval_keeps_polling_through_an_individual_request_timeout() {
     let result = pair_with_host_approval(&ports, &payload(), &options).expect("approved");
     assert_eq!(
         result,
-        PairingApprovalResult::Approved { token: TOKEN_64HEX.to_string() }
+        PairingApprovalResult::Approved {
+            token: TOKEN_64HEX.to_string()
+        }
     );
 }
 
@@ -504,7 +560,9 @@ fn approval_times_out_when_approval_never_arrives() {
     };
     let error = pair_with_host_approval(&ports, &payload(), &options).expect_err("timeout");
     assert_eq!(error, PairingError::ApprovalTimeout);
-    assert!(error.to_string().contains("leftcar:errPairingApprovalTimeout"));
+    assert!(error
+        .to_string()
+        .contains("leftcar:errPairingApprovalTimeout"));
 }
 
 #[test]
@@ -549,10 +607,21 @@ fn cancellation_during_the_approval_handshake_closes_the_late_client_without_pai
     let error = pending.join().expect("flow thread").expect_err("cancelled");
     assert_eq!(error, PairingError::Cancelled);
     // pair 요청은 발화하지 않았고 늦게 도착한 클라이언트는 닫혔다.
-    assert!(wait_until(|| {
-        transport.servers().first().map(|s| s.destroyed()).unwrap_or(false)
-    }, Duration::from_secs(5)));
-    let written = transport.servers().first().map(|s| s.written()).unwrap_or_default();
+    assert!(wait_until(
+        || {
+            transport
+                .servers()
+                .first()
+                .map(|s| s.destroyed())
+                .unwrap_or(false)
+        },
+        Duration::from_secs(5)
+    ));
+    let written = transport
+        .servers()
+        .first()
+        .map(|s| s.written())
+        .unwrap_or_default();
     assert!(
         written.iter().all(|line| !line.contains("\"pair\"")),
         "no pair request: {written:?}"

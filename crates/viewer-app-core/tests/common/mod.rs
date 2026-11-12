@@ -11,10 +11,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use secure_channel::{HostIdentity, StreamSealer, SessionKeys};
+use secure_channel::{HostIdentity, SessionKeys, StreamSealer};
 use viewer_app_core::b64;
 use viewer_app_core::control::{
-    ControlStream, ControlTransport, ControlWriter, ConnectOptions, ControlClient, ControlError,
+    ConnectOptions, ControlClient, ControlError, ControlStream, ControlTransport, ControlWriter,
     TokenProvider,
 };
 use viewer_app_core::pairing::{
@@ -422,7 +422,12 @@ impl ScriptedTransport {
 }
 
 impl ControlTransport for ScriptedTransport {
-    fn connect(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Box<dyn ControlStream>> {
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> io::Result<Box<dyn ControlStream>> {
         let outcome = self
             .script
             .lock()
@@ -476,7 +481,11 @@ pub fn read_hello_and_reply(server: &ServerEnd) -> SecureServerContext {
     let hello: serde_json::Value =
         serde_json::from_str(hello_line.trim()).expect("client hello json");
     assert_eq!(hello.get("hello").and_then(|v| v.as_str()), Some("c"));
-    let nc_b64 = hello.get("nc").and_then(|v| v.as_str()).expect("nc").to_string();
+    let nc_b64 = hello
+        .get("nc")
+        .and_then(|v| v.as_str())
+        .expect("nc")
+        .to_string();
     let nc: [u8; 32] = b64::decode(&nc_b64)
         .expect("nc decodes")
         .try_into()
@@ -491,27 +500,24 @@ pub fn read_hello_and_reply(server: &ServerEnd) -> SecureServerContext {
     let identity = HostIdentity::from_seed(server_seed);
     let hello_struct = secure_channel::server_hello(
         &identity,
-        &secure_channel::ClientHello {
-            nc,
-            xk: client_xk,
-        },
+        &secure_channel::ClientHello { nc, xk: client_xk },
         ns,
         &x25519_dalek::StaticSecret::from(server_secret),
     );
-    server.send(&serde_json::json!({
-        "v": 1,
-        "hello": "s",
-        "ns": b64::encode(&hello_struct.ns),
-        "xk": b64::encode(&hello_struct.xk),
-        "spk": b64::encode(&hello_struct.spk),
-        "sig": b64::encode(&hello_struct.sig),
-    }).to_string());
+    server.send(
+        &serde_json::json!({
+            "v": 1,
+            "hello": "s",
+            "ns": b64::encode(&hello_struct.ns),
+            "xk": b64::encode(&hello_struct.xk),
+            "spk": b64::encode(&hello_struct.spk),
+            "sig": b64::encode(&hello_struct.sig),
+        })
+        .to_string(),
+    );
     let keys = secure_channel::server_keys(
         &x25519_dalek::StaticSecret::from(server_secret),
-        &secure_channel::ClientHello {
-            nc,
-            xk: client_xk,
-        },
+        &secure_channel::ClientHello { nc, xk: client_xk },
         &ns,
     )
     .expect("server keys");
@@ -534,8 +540,7 @@ pub fn handshake_as_server(server: &ServerEnd) -> SecureServerContext {
         .unwrap_or_else(|| panic!("confirm frame is a sealed line: {confirm_line:?}"));
     let mut opener = StreamSealer::new(context.keys.c2s);
     let plaintext = opener.open(&confirm).expect("confirm opens with c2s");
-    let confirm_json: serde_json::Value =
-        serde_json::from_slice(&plaintext).expect("confirm json");
+    let confirm_json: serde_json::Value = serde_json::from_slice(&plaintext).expect("confirm json");
     assert_eq!(
         confirm_json.get("hello").and_then(|v| v.as_str()),
         Some("ok")
@@ -544,7 +549,10 @@ pub fn handshake_as_server(server: &ServerEnd) -> SecureServerContext {
         .client_nc_b64
         .clone()
         .expect("handshake recorded nc");
-    assert_eq!(confirm_json.get("nc").and_then(|v| v.as_str()), Some(expected_nc.as_str()));
+    assert_eq!(
+        confirm_json.get("nc").and_then(|v| v.as_str()),
+        Some(expected_nc.as_str())
+    );
     context
 }
 
@@ -561,8 +569,8 @@ pub fn read_sealed_request(
     context: &SecureServerContext,
 ) -> (String, serde_json::Value) {
     let line = server.read_line(Duration::from_secs(5));
-    let frame = viewer_app_core::secure::parse_sealed_line(line.trim())
-        .expect("request is a sealed line");
+    let frame =
+        viewer_app_core::secure::parse_sealed_line(line.trim()).expect("request is a sealed line");
     let mut opener = StreamSealer::new(context.keys.c2s);
     let plaintext = opener.open(&frame).expect("request opens with c2s");
     let request: serde_json::Value = serde_json::from_slice(&plaintext).expect("request json");
@@ -572,7 +580,10 @@ pub fn read_sealed_request(
             .and_then(|v| v.as_str())
             .expect("command")
             .to_string(),
-        request.get("args").cloned().unwrap_or(serde_json::Value::Null),
+        request
+            .get("args")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
     )
 }
 
@@ -649,7 +660,10 @@ impl MemoryRecentHosts {
 
     pub fn set_raw(&self, raw: Option<String>) {
         match raw {
-            Some(raw) => self.store.set(&crate_key(), raw).expect("recent blob write"),
+            Some(raw) => self
+                .store
+                .set(&crate_key(), raw)
+                .expect("recent blob write"),
             None => self.store.delete(&crate_key()).expect("recent blob delete"),
         }
     }
@@ -748,7 +762,13 @@ impl viewer_app_core::pairing::UsbPort for FixedUsb {
 }
 
 /// 스펙용 포트 묶음 — 결정적 난수·수동 시계·메모리 저장.
-pub fn test_ports(transport: Arc<ScriptedTransport>) -> (CorePorts, Arc<MemoryCredentialStore>, Arc<MemoryRecentHosts>) {
+pub fn test_ports(
+    transport: Arc<ScriptedTransport>,
+) -> (
+    CorePorts,
+    Arc<MemoryCredentialStore>,
+    Arc<MemoryRecentHosts>,
+) {
     let store = Arc::new(MemoryCredentialStore::new());
     let recent = MemoryRecentHosts::new(Arc::clone(&store) as Arc<dyn CredentialStore>);
     let ports = CorePorts {

@@ -140,22 +140,18 @@ struct EncodeApiFunctionList {
         Option<unsafe extern "C" fn(*mut c_void, *mut InitializeParams) -> NvencStatus>,
     nv_enc_create_input_buffer:
         Option<unsafe extern "C" fn(*mut c_void, *mut CreateInputBuffer) -> NvencStatus>,
-    nv_enc_destroy_input_buffer:
-        Option<unsafe extern "C" fn(*mut c_void, usize) -> NvencStatus>,
+    nv_enc_destroy_input_buffer: Option<unsafe extern "C" fn(*mut c_void, usize) -> NvencStatus>,
     nv_enc_create_bitstream_buffer:
         Option<unsafe extern "C" fn(*mut c_void, *mut CreateBitstreamBuffer) -> NvencStatus>,
     nv_enc_destroy_bitstream_buffer:
         Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> NvencStatus>,
-    nv_enc_encode_picture:
-        Option<unsafe extern "C" fn(*mut c_void, *mut PicParams) -> NvencStatus>,
+    nv_enc_encode_picture: Option<unsafe extern "C" fn(*mut c_void, *mut PicParams) -> NvencStatus>,
     nv_enc_lock_bitstream:
         Option<unsafe extern "C" fn(*mut c_void, *mut LockBitstream) -> NvencStatus>,
-    nv_enc_unlock_bitstream:
-        Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> NvencStatus>,
+    nv_enc_unlock_bitstream: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> NvencStatus>,
     nv_enc_lock_input_buffer:
         Option<unsafe extern "C" fn(*mut c_void, *mut LockInputBuffer) -> NvencStatus>,
-    nv_enc_unlock_input_buffer:
-        Option<unsafe extern "C" fn(*mut c_void, usize) -> NvencStatus>,
+    nv_enc_unlock_input_buffer: Option<unsafe extern "C" fn(*mut c_void, usize) -> NvencStatus>,
     nv_enc_get_encode_stats: usize,
     nv_enc_get_sequence_params: usize,
     nv_enc_register_async_event:
@@ -166,8 +162,9 @@ struct EncodeApiFunctionList {
     nv_enc_unmap_input_resource: usize,
     nv_enc_destroy_encoder: Option<unsafe extern "C" fn(*mut c_void) -> NvencStatus>,
     nv_enc_invalidate_ref_frames: usize,
-    nv_enc_open_encode_session_ex:
-        Option<unsafe extern "C" fn(*mut OpenEncodeSessionExParams, *mut *mut c_void) -> NvencStatus>,
+    nv_enc_open_encode_session_ex: Option<
+        unsafe extern "C" fn(*mut OpenEncodeSessionExParams, *mut *mut c_void) -> NvencStatus,
+    >,
     nv_enc_register_resource: usize,
     nv_enc_unregister_resource: usize,
     nv_enc_reconfigure_encoder: usize,
@@ -178,8 +175,9 @@ struct EncodeApiFunctionList {
     nv_enc_get_last_error_string:
         Option<unsafe extern "C" fn(*mut c_void) -> *const std::ffi::c_char>,
     nv_enc_set_io_cuda_streams: usize,
-    nv_enc_get_encode_preset_config_ex:
-        Option<unsafe extern "C" fn(*mut c_void, Guid, Guid, i32, *mut PresetConfig) -> NvencStatus>,
+    nv_enc_get_encode_preset_config_ex: Option<
+        unsafe extern "C" fn(*mut c_void, Guid, Guid, i32, *mut PresetConfig) -> NvencStatus,
+    >,
     nv_enc_get_sequence_param_ex: usize,
     nv_enc_restore_encoder_state: usize,
     nv_enc_lookahead_picture: usize,
@@ -205,7 +203,8 @@ struct NvencFns {
     get_encode_preset_config_ex:
         unsafe extern "C" fn(*mut c_void, Guid, Guid, i32, *mut PresetConfig) -> NvencStatus,
     initialize_encoder: unsafe extern "C" fn(*mut c_void, *mut InitializeParams) -> NvencStatus,
-    create_bitstream_buffer: unsafe extern "C" fn(*mut c_void, *mut CreateBitstreamBuffer) -> NvencStatus,
+    create_bitstream_buffer:
+        unsafe extern "C" fn(*mut c_void, *mut CreateBitstreamBuffer) -> NvencStatus,
     destroy_bitstream_buffer: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NvencStatus,
     create_input_buffer: unsafe extern "C" fn(*mut c_void, *mut CreateInputBuffer) -> NvencStatus,
     destroy_input_buffer: unsafe extern "C" fn(*mut c_void, usize) -> NvencStatus,
@@ -611,9 +610,12 @@ impl CudaApi {
 }
 
 unsafe fn symbol<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
-    lib.get::<T>(name)
-        .map(|symbol| *symbol)
-        .map_err(|error| format!("symbol {:?} unavailable: {error}", String::from_utf8_lossy(name)))
+    lib.get::<T>(name).map(|symbol| *symbol).map_err(|error| {
+        format!(
+            "symbol {:?} unavailable: {error}",
+            String::from_utf8_lossy(name)
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +654,10 @@ impl Pending {
         // cannot skip the rest.
         unsafe {
             if self.bitstream_buffer != 0 {
-                let _ = (fns.destroy_bitstream_buffer)(self.encoder, self.bitstream_buffer as *mut c_void);
+                let _ = (fns.destroy_bitstream_buffer)(
+                    self.encoder,
+                    self.bitstream_buffer as *mut c_void,
+                );
                 self.bitstream_buffer = 0;
             }
             if self.input_buffer != 0 {
@@ -671,7 +676,10 @@ impl Pending {
 /// pointers this encoder calls. The table itself is dropped here; the driver
 /// does not retain pointers into it.
 fn create_api_function_list() -> Result<(NvencFns, Library), String> {
-    let lib = load_first_library(ENCODE_LIBRARY_CANDIDATES, "libnvidia-encode (NVENC runtime)")?;
+    let lib = load_first_library(
+        ENCODE_LIBRARY_CANDIDATES,
+        "libnvidia-encode (NVENC runtime)",
+    )?;
     // SAFETY: NvEncodeAPICreateInstance is the documented entry point; it
     // fills the zeroed table with the driver's function pointers.
     unsafe {
@@ -992,7 +1000,10 @@ impl NvencEncoder {
         // the rest.
         unsafe {
             if self.bitstream_buffer != 0 {
-                let _ = (self.fns.destroy_bitstream_buffer)(self.encoder, self.bitstream_buffer as *mut c_void);
+                let _ = (self.fns.destroy_bitstream_buffer)(
+                    self.encoder,
+                    self.bitstream_buffer as *mut c_void,
+                );
                 self.bitstream_buffer = 0;
             }
             if self.input_buffer != 0 {
@@ -1032,7 +1043,8 @@ impl VideoEncoder for NvencEncoder {
         let nv12_len = (self.pitch * self.height * 3 / 2) as usize;
         // SAFETY: the driver reports `pitch * height * 3 / 2` writable bytes
         // through bufferDataPtr until the matching unlock below.
-        let host = unsafe { slice::from_raw_parts_mut(input_lock.buffer_data_ptr as *mut u8, nv12_len) };
+        let host =
+            unsafe { slice::from_raw_parts_mut(input_lock.buffer_data_ptr as *mut u8, nv12_len) };
         convert::bgra_to_nv12(host, self.pitch, self.width, self.height, source);
         self.check(
             unsafe { (self.fns.unlock_input_buffer)(self.encoder, self.input_buffer) },
@@ -1140,7 +1152,9 @@ impl VideoEncoder for NvencEncoder {
         let keyframe =
             lock.picture_type == NV_ENC_PIC_TYPE_IDR || lock.picture_type == NV_ENC_PIC_TYPE_I;
         self.check(
-            unsafe { (self.fns.unlock_bitstream)(self.encoder, self.bitstream_buffer as *mut c_void) },
+            unsafe {
+                (self.fns.unlock_bitstream)(self.encoder, self.bitstream_buffer as *mut c_void)
+            },
             "nvEncUnlockBitstream",
         )?;
         self.frame_index += 1;
@@ -1190,8 +1204,7 @@ mod tests {
         // machines without the runtime instead of failing them. Tests stay at
         // or above the NVENC H.264 minimum dimensions (145x49 measured on
         // driver 615).
-        CudaApi::load().is_ok()
-            && load_first_library(ENCODE_LIBRARY_CANDIDATES, "nvenc").is_ok()
+        CudaApi::load().is_ok() && load_first_library(ENCODE_LIBRARY_CANDIDATES, "nvenc").is_ok()
     }
 
     fn solid_frame(b: u8, g: u8, r: u8, width: usize, height: usize) -> Vec<u8> {
@@ -1275,8 +1288,7 @@ mod tests {
         let mut enc = NvencEncoder::new(width, height, fps, 12_400_000).expect("nvenc init");
         let mut frame = solid_frame(80, 90, 100, width as usize, height as usize);
         // Warm up (first frame allocates internal surfaces).
-        enc
-            .encode(&BgraFrame::new(&frame, width, height, width * 4).expect("source"))
+        enc.encode(&BgraFrame::new(&frame, width, height, width * 4).expect("source"))
             .expect("warmup");
         let frame_period_us = 1_000_000 / fps;
         let mut samples = Vec::with_capacity(120);
@@ -1316,4 +1328,3 @@ mod tests {
         );
     }
 }
-

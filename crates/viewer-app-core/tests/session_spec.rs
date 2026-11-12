@@ -7,9 +7,11 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{read_sealed_envelope, test_ports, wait_until, FixedUsb, GateHandle, ScriptedTransport};
-use secure_channel::HostIdentity;
+use common::{
+    read_sealed_envelope, test_ports, wait_until, FixedUsb, GateHandle, ScriptedTransport,
+};
 use common::{SecureServerContext, ServerEnd};
+use secure_channel::HostIdentity;
 use viewer_app_core::b64;
 use viewer_app_core::control::ControlClient;
 use viewer_app_core::pairing::{
@@ -36,7 +38,11 @@ fn connect_secure(
     transport: &ScriptedTransport,
     host: &str,
     port: u16,
-) -> (Result<Arc<ControlClient>, SessionError>, SecureServerContext, ServerEnd) {
+) -> (
+    Result<Arc<ControlClient>, SessionError>,
+    SecureServerContext,
+    ServerEnd,
+) {
     connect_secure_with(session, transport, host, port, HandshakeReply::Full)
 }
 
@@ -46,20 +52,29 @@ fn connect_secure_with(
     host: &str,
     port: u16,
     mode: HandshakeReply,
-) -> (Result<Arc<ControlClient>, SessionError>, SecureServerContext, ServerEnd) {
+) -> (
+    Result<Arc<ControlClient>, SessionError>,
+    SecureServerContext,
+    ServerEnd,
+) {
     let session_for_thread = Arc::clone(session);
     let transport_for_thread = transport.clone();
     let host_owned = host.to_string();
     let baseline = transport.connections_created();
-    let handle = std::thread::spawn(move || {
-        session_for_thread.connect_host(&host_owned, port, None, None)
-    });
+    let handle =
+        std::thread::spawn(move || session_for_thread.connect_host(&host_owned, port, None, None));
     assert!(
-        wait_until(|| transport.connections_created() > baseline, Duration::from_secs(5)),
+        wait_until(
+            || transport.connections_created() > baseline,
+            Duration::from_secs(5)
+        ),
         "connection opened"
     );
     let server = transport.last_server();
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let context = match mode {
         HandshakeReply::Full => server.auto_handshake().wait(),
         HandshakeReply::ReplyOnly => common::read_hello_and_reply(&server),
@@ -85,24 +100,39 @@ fn an_old_alias_fallback_cannot_overtake_a_newer_host_selection() {
     assert!(wait_until(|| gate.waiters() >= 1, Duration::from_secs(5)));
 
     // 사용자가 다른 호스트를 선택한다 — 새 세대가 열린다.
-    let won = connect_secure(&session, &transport, "10.0.0.2", 7777).0.expect("B wins");
+    let won = connect_secure(&session, &transport, "10.0.0.2", 7777)
+        .0
+        .expect("B wins");
     assert_eq!(session.control_host(), "10.0.0.2:7777");
     assert_eq!(session.control_client().map(|c| c.id()), Some(won.id()));
 
     gate.release();
     assert!(
-        wait_until(|| transport.connections_created() >= 2, Duration::from_secs(5)),
+        wait_until(
+            || transport.connections_created() >= 2,
+            Duration::from_secs(5)
+        ),
         "late candidate opens"
     );
     transport.last_server().auto_handshake().wait();
     // 늦게 도착한 시도는 세대가 옛것이라 거부되고, 남은 후보도 시도하지 않는다.
-    let error = fallback.join().expect("fallback thread").expect_err("superseded");
+    let error = fallback
+        .join()
+        .expect("fallback thread")
+        .expect_err("superseded");
     assert!(matches!(error, SessionError::Cancelled), "{error}");
     assert_eq!(
-        transport.servers().iter().map(|s| s.host.as_str()).collect::<Vec<_>>(),
+        transport
+            .servers()
+            .iter()
+            .map(|s| s.host.as_str())
+            .collect::<Vec<_>>(),
         ["10.0.0.2", "10.0.0.1"]
     );
-    assert_eq!(session.control_target().map(|t| t.host), Some("10.0.0.2".to_string()));
+    assert_eq!(
+        session.control_target().map(|t| t.host),
+        Some("10.0.0.2".to_string())
+    );
     let _ = transport_for_thread;
 }
 
@@ -119,11 +149,17 @@ fn an_unavailable_candidate_still_falls_back_within_the_same_selection() {
         session_for_thread.connect_host_with_fallback(&["10.0.0.1", "100.64.0.1"], 7777, None, None)
     });
     // 두 번째 후보는 secure 연결이므로 핸드셰이크를 답한다.
-    assert!(wait_until(|| transport.connections_created() >= 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || transport.connections_created() >= 1,
+        Duration::from_secs(5)
+    ));
     transport.last_server().auto_handshake().wait();
     let host = handle.join().expect("fallback thread").expect("fallback");
     assert_eq!(host, "100.64.0.1");
-    assert_eq!(session.control_target().map(|t| t.host), Some("100.64.0.1".to_string()));
+    assert_eq!(
+        session.control_target().map(|t| t.host),
+        Some("100.64.0.1".to_string())
+    );
     let _ = transport_for_thread;
 }
 
@@ -145,8 +181,13 @@ fn reads_the_persisted_pin_before_any_handshake_or_credential_delivery() {
     store.put(&token_key("10.0.0.5", 7777), &endpoint_token);
     let session = ControlSession::new(ports);
 
-    let (result, _context, _server) =
-        connect_secure_with(&session, &transport, "10.0.0.5", 7777, HandshakeReply::ReplyOnly);
+    let (result, _context, _server) = connect_secure_with(
+        &session,
+        &transport,
+        "10.0.0.5",
+        7777,
+        HandshakeReply::ReplyOnly,
+    );
     let error = result.expect_err("pin mismatch");
     let message = error.to_string();
     assert!(message.contains("보안 키"), "{message}");
@@ -154,11 +195,18 @@ fn reads_the_persisted_pin_before_any_handshake_or_credential_delivery() {
     assert_eq!(transport.last_server().written_len(), 1);
     // 핸드셰이크가 실패했으므로 자격증명은 아무것도 전달되지 않았다.
     assert_eq!(
-        store.snapshot().get(&token_key("10.0.0.5", 7777)).map(String::as_str),
+        store
+            .snapshot()
+            .get(&token_key("10.0.0.5", 7777))
+            .map(String::as_str),
         Some(endpoint_token.as_str())
     );
     // 정체 저장은 그대로다.
-    assert!(recent.raw().as_deref().map(|raw| raw.contains(&saved_pin)).unwrap_or(false));
+    assert!(recent
+        .raw()
+        .as_deref()
+        .map(|raw| raw.contains(&saved_pin))
+        .unwrap_or(false));
 }
 
 #[test]
@@ -278,7 +326,10 @@ fn a_closed_socket_invalidates_the_session_so_the_home_badge_stops_claiming_conn
     // 호스트 재시작·네트워크 전환 등으로 소켓이 닫히면 연결 객체가 남아
     // "컴퓨터 연결됨" 배지가 거짓말을 하던 회귀를 잠근다.
     server.close();
-    assert!(wait_until(|| session.control_client().is_none(), Duration::from_secs(5)));
+    assert!(wait_until(
+        || session.control_client().is_none(),
+        Duration::from_secs(5)
+    ));
     assert_eq!(session.control_host(), "");
     assert!(client.is_closed());
     // target·선택 세대는 남는다 — 네이티브 창이 같은 대상으로 재접속할 수 있게.
@@ -298,17 +349,30 @@ fn reconnects_the_retained_context_after_transport_loss() {
     let first = first.expect("connects");
     let origin = session.capture_request_context().expect("origin");
     server.close();
-    assert!(wait_until(|| session.control_client().is_none(), Duration::from_secs(5)));
+    assert!(wait_until(
+        || session.control_client().is_none(),
+        Duration::from_secs(5)
+    ));
 
     // 같은 대상으로 직접 되살린다(선택 세대를 올리지 않는다).
     let session_for_thread = Arc::clone(&session);
     let transport_for_thread = transport.clone();
-    let reconnect = std::thread::spawn(move || session_for_thread.reconnect_host(Some(origin), None));
-    assert!(wait_until(|| transport_for_thread.connections_created() >= 2, Duration::from_secs(5)));
+    let reconnect =
+        std::thread::spawn(move || session_for_thread.reconnect_host(Some(origin), None));
+    assert!(wait_until(
+        || transport_for_thread.connections_created() >= 2,
+        Duration::from_secs(5)
+    ));
     transport_for_thread.last_server().auto_handshake().wait();
-    let replacement = reconnect.join().expect("reconnect thread").expect("reconnected");
+    let replacement = reconnect
+        .join()
+        .expect("reconnect thread")
+        .expect("reconnected");
     assert_eq!(session.control_host(), "10.0.0.1:7777");
-    assert_eq!(session.control_client().map(|c| c.id()), Some(replacement.id()));
+    assert_eq!(
+        session.control_client().map(|c| c.id()),
+        Some(replacement.id())
+    );
     let _ = first;
 }
 
@@ -322,7 +386,10 @@ fn transport_loss_recovery_cannot_undo_an_explicit_disconnect() {
     let _first = first.expect("connects");
     let origin = session.capture_request_context().expect("origin");
     server.close();
-    assert!(wait_until(|| session.control_client().is_none(), Duration::from_secs(5)));
+    assert!(wait_until(
+        || session.control_client().is_none(),
+        Duration::from_secs(5)
+    ));
 
     session.disconnect_host(None);
     // 해제가 이미 요청 컨텍스트를 비웠다 — 재접속은 소켓을 열기 전에 거부된다.
@@ -344,21 +411,35 @@ fn a_connect_that_settles_after_disconnect_host_does_not_resurrect_the_session()
 
     let session_for_thread = Arc::clone(&session);
     let transport_for_thread = transport.clone();
-    let pending = std::thread::spawn(move || session_for_thread.connect_host("10.0.0.1", 7777, None, None));
+    let pending =
+        std::thread::spawn(move || session_for_thread.connect_host("10.0.0.1", 7777, None, None));
     assert!(wait_until(|| gate.waiters() >= 1, Duration::from_secs(5)));
     session.disconnect_host(None);
     gate.release();
-    assert!(wait_until(|| transport_for_thread.connections_created() >= 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || transport_for_thread.connections_created() >= 1,
+        Duration::from_secs(5)
+    ));
     transport_for_thread.last_server().auto_handshake().wait();
-    let error = pending.join().expect("connect thread").expect_err("superseded");
+    let error = pending
+        .join()
+        .expect("connect thread")
+        .expect_err("superseded");
     assert!(matches!(error, SessionError::Cancelled), "{error}");
     assert!(session.control_client().is_none());
     assert_eq!(session.control_host(), "");
     assert!(session.control_target().is_none());
     // 늦게 도착한 소켓은 닫혔다.
-    assert!(wait_until(|| {
-        transport.servers().first().map(|s| s.destroyed()).unwrap_or(false)
-    }, Duration::from_secs(5)));
+    assert!(wait_until(
+        || {
+            transport
+                .servers()
+                .first()
+                .map(|s| s.destroyed())
+                .unwrap_or(false)
+        },
+        Duration::from_secs(5)
+    ));
 }
 
 #[test]
@@ -372,8 +453,12 @@ fn the_usb_loopback_path_still_reads_the_selected_network_targets_token() {
 
     let session_for_thread = Arc::clone(&session);
     let transport_for_thread = transport.clone();
-    let pending = std::thread::spawn(move || session_for_thread.connect_host("10.0.0.5", 7777, None, None));
-    assert!(wait_until(|| transport_for_thread.connections_created() >= 1, Duration::from_secs(5)));
+    let pending =
+        std::thread::spawn(move || session_for_thread.connect_host("10.0.0.5", 7777, None, None));
+    assert!(wait_until(
+        || transport_for_thread.connections_created() >= 1,
+        Duration::from_secs(5)
+    ));
     let server = transport.last_server();
     // 루프백 프록시로 연결됐다(평문 모드 — 핸드셰이크 없음).
     assert_eq!(server.host, "127.0.0.1");
@@ -381,7 +466,10 @@ fn the_usb_loopback_path_still_reads_the_selected_network_targets_token() {
     let client = pending.join().expect("connect thread").expect("connects");
     // 선택된 네트워크 대상의 토큰이 프록시 요청에 실린다.
     let request = common::issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() >= 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() >= 1,
+        Duration::from_secs(5)
+    ));
     let (_command, envelope) = common::read_plain_request(&server);
     assert_eq!(
         envelope.get("token").and_then(|v| v.as_str()),
@@ -396,7 +484,10 @@ fn handle_unauthorized_retires_only_its_own_credential_incarnation() {
     let transport = ScriptedTransport::new();
     let (ports, store, recent) = test_ports(Arc::new(transport.clone()));
     // 정체 자격증명을 프리셋한다 — 연결이 이 교체값을 컨텍스트로 캡처한다.
-    let endpoint = HostEndpoint { host: "10.0.0.1".into(), port: 7777 };
+    let endpoint = HostEndpoint {
+        host: "10.0.0.1".into(),
+        port: 7777,
+    };
     let token = "a".repeat(64);
     store.put(&token_key(&endpoint.host, endpoint.port), &token);
     store.put(&identity_token_key(&server_spk_b64()), &token);
@@ -415,12 +506,19 @@ fn handle_unauthorized_retires_only_its_own_credential_incarnation() {
         })
         .expect("unauthorized handled");
     // 같은 교체값의 키만 지워진다.
-    assert!(!store.snapshot().contains_key(&token_key(&endpoint.host, endpoint.port)));
-    assert!(!store.snapshot().contains_key(&identity_token_key(&server_spk_b64())));
+    assert!(!store
+        .snapshot()
+        .contains_key(&token_key(&endpoint.host, endpoint.port)));
+    assert!(!store
+        .snapshot()
+        .contains_key(&identity_token_key(&server_spk_b64())));
     let raw = recent.raw().unwrap_or_default();
     assert!(!raw.contains(&server_spk_b64()), "{raw}");
     // 세션이 해제되고 게이트가 페어링 만료로 막혔다.
-    assert!(wait_until(|| session.control_client().is_none(), Duration::from_secs(5)));
+    assert!(wait_until(
+        || session.control_client().is_none(),
+        Duration::from_secs(5)
+    ));
     assert!(session.gate_snapshot().pairing_stale);
     let _ = server;
     let _ = client;

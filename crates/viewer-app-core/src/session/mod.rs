@@ -109,7 +109,11 @@ impl Cancellation {
 
     pub fn is_cancelled(&self) -> bool {
         self.selection.is_cancelled()
-            || self.action.as_ref().map(|a| a.is_cancelled()).unwrap_or(false)
+            || self
+                .action
+                .as_ref()
+                .map(|a| a.is_cancelled())
+                .unwrap_or(false)
     }
 
     pub fn selection(&self) -> &Arc<CancelToken> {
@@ -345,7 +349,13 @@ impl ControlSession {
             return Err(SessionError::Cancelled);
         }
         if let Some(control_port) = usb_control_port.filter(|&p| p > 0) {
-            let credential = get_stored_credential(&self.ports, &endpoint, None, Some(cancellation.selection().as_ref()), true)?;
+            let credential = get_stored_credential(
+                &self.ports,
+                &endpoint,
+                None,
+                Some(cancellation.selection().as_ref()),
+                true,
+            )?;
             let token = credential.as_ref().map(|c| c.token.clone());
             let result = connect(
                 self.ports.transport.as_ref(),
@@ -354,9 +364,7 @@ impl ControlSession {
                 DEFAULT_CONNECT_TIMEOUT_MS,
                 crate::control::ConnectOptions::new()
                     .messages(self.ports.messages.clone())
-                    .token_provider(Arc::new(
-                        crate::control::StaticTokenProvider(token),
-                    )),
+                    .token_provider(Arc::new(crate::control::StaticTokenProvider(token))),
             );
             match result {
                 Ok(client) => {
@@ -379,23 +387,21 @@ impl ControlSession {
         }
         // Read persistent trust before opening a network socket — 핀 저장이
         // 읽히지 않으면 소켓도 열지 않는다(실패 닫힘).
-        let pinned_host_key = crate::pairing::credential::get_stored_pinned_host_key(
-            &self.ports,
-            target,
-            port,
-        )?;
+        let pinned_host_key =
+            crate::pairing::credential::get_stored_pinned_host_key(&self.ports, target, port)?;
         if cancellation.is_cancelled() {
             return Err(SessionError::Cancelled);
         }
-        let allow_endpoint_credential = pinned_host_key.is_some()
-            || target == "127.0.0.1"
-            || target == "localhost";
+        let allow_endpoint_credential =
+            pinned_host_key.is_some() || target == "127.0.0.1" || target == "localhost";
         let verified: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let verified_for_callback = Arc::clone(&verified);
         let pins = self.ports.pins.clone();
         let target_owned = target.to_string();
         let on_host_key: crate::control::HostKeyCallback = Arc::new(move |key: &str| {
-            *verified_for_callback.lock().unwrap_or_else(|p| p.into_inner()) = Some(key.to_string());
+            *verified_for_callback
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(key.to_string());
             // registerPinnedHostKey — 메모리 핀만 등록한다(지속은 자격증명
             // 마이그레이션이 소유한다).
             pins.register(&target_owned, port, key);
@@ -442,7 +448,13 @@ impl ControlSession {
             // alias committed if token migration later rolled back.
             if let Some(key) = &verified_host_key {
                 if credential.is_none() {
-                    remember_pinned_host_key(&self.ports, target, port, key, Some(cancellation.selection().as_ref()))?;
+                    remember_pinned_host_key(
+                        &self.ports,
+                        target,
+                        port,
+                        key,
+                        Some(cancellation.selection().as_ref()),
+                    )?;
                 }
             }
             Ok(OpenedControl {
@@ -486,7 +498,14 @@ impl ControlSession {
             client.close();
             return Err(SessionError::Cancelled);
         }
-        self.commit_connection(&client, host, port, &selection, opened.identity, opened.credential);
+        self.commit_connection(
+            &client,
+            host,
+            port,
+            &selection,
+            opened.identity,
+            opened.credential,
+        );
         Ok(client)
     }
 
@@ -512,7 +531,11 @@ impl ControlSession {
                 Ok(_) => return Ok((*host).to_string()),
                 Err(error) => {
                     // 사용자가 이미 다른 곳으로 떠났다면 남은 후보를 시도하지 않는다.
-                    if action_cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false) {
+                    if action_cancel
+                        .as_ref()
+                        .map(|c| c.is_cancelled())
+                        .unwrap_or(false)
+                    {
                         return Err(error);
                     }
                     if !self.is_host_selection_current(&selection) {
@@ -571,7 +594,9 @@ impl ControlSession {
         let weak = Arc::downgrade(self);
         let watched_id = client.id();
         client.when_closed(Arc::new(move || {
-            let Some(session) = weak.upgrade() else { return };
+            let Some(session) = weak.upgrade() else {
+                return;
+            };
             {
                 let mut st = lock(&session);
                 if st.client.as_ref().map(|c| c.id()) != Some(watched_id) {
@@ -682,7 +707,12 @@ impl ControlSession {
         selection_cancel: &Arc<CancelToken>,
     ) -> Result<Arc<ControlClient>, SessionError> {
         let cancellation = Cancellation::new(selection_cancel, None);
-        let opened = self.open_control(&origin.target.host, origin.target.port, &cancellation, TransportChoice::Auto)?;
+        let opened = self.open_control(
+            &origin.target.host,
+            origin.target.port,
+            &cancellation,
+            TransportChoice::Auto,
+        )?;
         let client = opened.client;
         if cancellation.is_cancelled() || !self.is_request_context_current(origin) {
             client.close();
@@ -763,7 +793,8 @@ impl ControlSession {
         if host == "127.0.0.1" || host == "localhost" || host == "::1" {
             return Err(SessionError::WifiRequired);
         }
-        let pinned = crate::pairing::credential::get_stored_pinned_host_key(&self.ports, &host, port)?;
+        let pinned =
+            crate::pairing::credential::get_stored_pinned_host_key(&self.ports, &host, port)?;
         let Some(pinned) = pinned else {
             return Err(SessionError::PairingRequired);
         };

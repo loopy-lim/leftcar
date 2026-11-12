@@ -13,6 +13,18 @@
 use leftcar_host_desktop::{bootstrap, panel};
 
 fn main() {
+    // hostd has no event loop to set DPI awareness on our behalf (the
+    // Tauri/tao shell does it for the GUI exe). Without per-monitor-v2
+    // awareness GetMonitorInfoW reports virtualized coordinates on scaled
+    // displays, so every negotiated stream size mismatches the capture
+    // surface. Best effort: older Windows keeps the default context.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        )
+        .ok();
+    }
     let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|message| {
         eprintln!("leftcar-hostd: {message}\n{}", USAGE);
         std::process::exit(2);
@@ -34,7 +46,8 @@ fn main() {
     let token = panel::generate_token();
     panel::write_token_file(&args.panel_token_file, &token)
         .unwrap_or_else(|message| fatal(message));
-    let (listener, panel_port) = panel::bind_panel_listener().unwrap_or_else(|message| fatal(message));
+    let (listener, panel_port) =
+        panel::bind_panel_listener().unwrap_or_else(|message| fatal(message));
     if let Some(port_file) = &args.panel_port_file {
         if let Err(error) = std::fs::write(port_file, panel_port.to_string()) {
             fatal(format!("panel port file {}: {error}", port_file.display()));
@@ -159,13 +172,9 @@ fn spawn_sigterm_handler(services: &bootstrap::HostServices) {
                 return;
             }
             println!("leftcar-hostd: shutting down on termination signal");
-            bootstrap::run_exit_shutdown(
-                upnp,
-                &server,
-                &virtual_display,
-                &audit,
-                |future| runtime.block_on(future),
-            );
+            bootstrap::run_exit_shutdown(upnp, &server, &virtual_display, &audit, |future| {
+                runtime.block_on(future)
+            });
             std::process::exit(0);
         })
         .expect("signal handler thread");

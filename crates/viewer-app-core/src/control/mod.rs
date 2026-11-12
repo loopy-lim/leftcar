@@ -294,7 +294,10 @@ struct EngineShared {
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn lock<'a>(shared: &'a EngineShared) -> MutexGuard<'a, EngineState> {
-    shared.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// TS formatErrorMessage 경계 — 엔진 안의 실패 문구는 문구 표를 통과한다.
@@ -347,7 +350,10 @@ fn teardown(shared: &Arc<EngineShared>, error: ControlError) {
 }
 
 fn fail(shared: &Arc<EngineShared>, message: &str) {
-    teardown(shared, ControlError::new(ControlErrorKind::Transport, message.to_string()));
+    teardown(
+        shared,
+        ControlError::new(ControlErrorKind::Transport, message.to_string()),
+    );
 }
 
 /// connect() 결과를 확정한다. 이미 터미널이 있으면 Err로 확정한다.
@@ -384,10 +390,7 @@ fn watchdog_loop(shared: Arc<EngineShared>) {
             None => {
                 if let Some(front) = s.pending.front() {
                     let at = Instant::now() + Duration::from_millis(front.timeout_ms);
-                    s.front_deadline = Some(FrontDeadline {
-                        id: front.id,
-                        at,
-                    });
+                    s.front_deadline = Some(FrontDeadline { id: front.id, at });
                     continue;
                 }
                 s = shared
@@ -445,8 +448,14 @@ fn reader_loop(shared: Arc<EngineShared>, mut stream: Box<dyn ControlStream>) {
             Ok(0) => break,
             Ok(n) => process_chunk(&shared, &mut buffer, &chunk[..n]),
             Err(e) => {
-                let message = format!("control connection error: {}", fmt_message(&shared, &e.to_string()));
-                teardown(&shared, ControlError::new(ControlErrorKind::Transport, message));
+                let message = format!(
+                    "control connection error: {}",
+                    fmt_message(&shared, &e.to_string())
+                );
+                teardown(
+                    &shared,
+                    ControlError::new(ControlErrorKind::Transport, message),
+                );
                 break;
             }
         }
@@ -578,9 +587,10 @@ fn handle_handshake_line(shared: &Arc<EngineShared>, raw: &[u8]) {
         }
     };
     match outcome {
-        Outcome::Failure(message) => {
-            fail(shared, &format!("secure handshake failed: {}", fmt_message(shared, &message)))
-        }
+        Outcome::Failure(message) => fail(
+            shared,
+            &format!("secure handshake failed: {}", fmt_message(shared, &message)),
+        ),
         Outcome::Sealed { confirm, host_key } => {
             // TS와 같이 봉인 프레임을 전송 줄({"e":"<b64url>"})로 감싼다.
             let mut wire = secure::sealed_line(&confirm).into_bytes();
@@ -588,7 +598,10 @@ fn handle_handshake_line(shared: &Arc<EngineShared>, raw: &[u8]) {
             if let Err(message) = write_wire(shared, &wire) {
                 fail(
                     shared,
-                    &format!("secure handshake write error: {}", fmt_message(shared, &message)),
+                    &format!(
+                        "secure handshake write error: {}",
+                        fmt_message(shared, &message)
+                    ),
                 );
                 return;
             }
@@ -648,10 +661,9 @@ fn handle_plain_text_line(shared: &Arc<EngineShared>, raw: &[u8]) {
         )));
         return;
     }
-    let _ = entry.sink.send(Err(ControlError::new(
-        ControlErrorKind::Remote,
-        error_text,
-    )));
+    let _ = entry
+        .sink
+        .send(Err(ControlError::new(ControlErrorKind::Remote, error_text)));
 }
 
 /// 전송 줄을 쓴다. 상태 잠금 밖에서 쓰기 핸들만 잠근다 — 읽기 루프와 간섭하지
@@ -795,9 +807,7 @@ impl ControlClient {
             // Host's line reader. Reject before sealing or admitting into FIFO:
             // an oversized write would otherwise retire unrelated requests.
             let wire_bytes = match s.mode {
-                Mode::Sealed => {
-                    (payload.len() + secure::COUNTER_LEN + TAG_LEN).div_ceil(3) * 4 + 9
-                }
+                Mode::Sealed => (payload.len() + secure::COUNTER_LEN + TAG_LEN).div_ceil(3) * 4 + 9,
                 _ => payload.len(),
             };
             if wire_bytes > CONTROL_LINE_LIMIT {
@@ -871,29 +881,30 @@ impl ControlClient {
             if lock(&self.shared).terminal.is_none() {
                 fail(
                     &self.shared,
-                    &format!("control write error: {}", fmt_message(&self.shared, &message)),
+                    &format!(
+                        "control write error: {}",
+                        fmt_message(&self.shared, &message)
+                    ),
                 );
             }
         }
         match rx.recv() {
             Ok(result) => result,
             Err(_) => {
-                let terminal = lock(&self.shared)
-                    .terminal
-                    .clone()
-                    .unwrap_or_else(|| {
-                        ControlError::new(
-                            ControlErrorKind::Transport,
-                            "control connection closed",
-                        )
-                    });
+                let terminal = lock(&self.shared).terminal.clone().unwrap_or_else(|| {
+                    ControlError::new(ControlErrorKind::Transport, "control connection closed")
+                });
                 Err(terminal)
             }
         }
     }
 
     /// 콜백 없는 요청 편의 함수.
-    pub fn request_simple(&self, command: &str, args: Option<&Value>) -> Result<Value, ControlError> {
+    pub fn request_simple(
+        &self,
+        command: &str,
+        args: Option<&Value>,
+    ) -> Result<Value, ControlError> {
         self.request(command, args, None)
     }
 
@@ -931,7 +942,10 @@ pub fn connect(
         }
         ControlError::new(
             ControlErrorKind::Transport,
-            format!("control connection error: {}", format_error_message(&e.to_string(), &options.messages)),
+            format!(
+                "control connection error: {}",
+                format_error_message(&e.to_string(), &options.messages)
+            ),
         )
     })?;
     let writer = stream.writer();
@@ -942,7 +956,11 @@ pub fn connect(
         .and_then(b64::decode)
         .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
     let shared = Arc::new(EngineShared {
-        state: Mutex::new(EngineState::new(if secure { Mode::Handshake } else { Mode::Plain })),
+        state: Mutex::new(EngineState::new(if secure {
+            Mode::Handshake
+        } else {
+            Mode::Plain
+        })),
         wakeup: Condvar::new(),
         writer: Mutex::new(Some(writer)),
         options,
@@ -967,7 +985,10 @@ pub fn connect(
             write_wire(&shared, &wire).map_err(|message| {
                 ControlError::new(
                     ControlErrorKind::Transport,
-                    format!("secure handshake write error: {}", format_error_message(&message, &shared.options.messages)),
+                    format!(
+                        "secure handshake write error: {}",
+                        format_error_message(&message, &shared.options.messages)
+                    ),
                 )
             })
         })();
@@ -989,7 +1010,10 @@ pub fn connect(
         .name("viewer-control-rx".into())
         .spawn(move || reader_loop(reader_shared, stream))
         .map_err(|_| {
-            ControlError::new(ControlErrorKind::Transport, "control reader thread unavailable")
+            ControlError::new(
+                ControlErrorKind::Transport,
+                "control reader thread unavailable",
+            )
         })?;
     let watchdog_shared = Arc::clone(&shared);
     let _ = std::thread::Builder::new()
@@ -1004,7 +1028,12 @@ pub fn connect(
             break;
         }
         match connect_rx.recv_timeout(deadline - now) {
-            Ok(Ok(())) => return Ok(ControlClient { shared, id: client_id }),
+            Ok(Ok(())) => {
+                return Ok(ControlClient {
+                    shared,
+                    id: client_id,
+                })
+            }
             Ok(Err(e)) => {
                 // 확정 실패 — teardown이 이미 소켓을 정리했다.
                 return Err(e);
@@ -1041,7 +1070,10 @@ mod tests {
         assert_eq!(default_request_timeout_ms("getCatalog"), 15_000);
         assert_eq!(default_request_timeout_ms("sendFileChunk"), 30_000);
         assert_eq!(default_request_timeout_ms("fetchFileCancel"), 10_000);
-        assert_eq!(default_request_timeout_ms("pair"), DEFAULT_REQUEST_TIMEOUT_MS);
+        assert_eq!(
+            default_request_timeout_ms("pair"),
+            DEFAULT_REQUEST_TIMEOUT_MS
+        );
     }
 
     #[test]

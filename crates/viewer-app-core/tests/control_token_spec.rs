@@ -6,32 +6,35 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{
-    read_plain_request, wait_until, RecordingProvider, ScriptedTransport,
+use common::{read_plain_request, wait_until, RecordingProvider, ScriptedTransport};
+use viewer_app_core::control::records::{
+    preferred_capture_backend, CaptureBackendInfo, CatalogView,
 };
 use viewer_app_core::control::{
-    is_unauthorized_error, ConnectOptions, ControlErrorKind, ErrorMessages, format_error_message,
+    format_error_message, is_unauthorized_error, ConnectOptions, ControlErrorKind, ErrorMessages,
 };
-use viewer_app_core::control::records::{preferred_capture_backend, CaptureBackendInfo, CatalogView};
 use viewer_app_core::pairing::is_valid_issued_token;
 
 #[test]
 fn adds_the_provider_token_to_every_request_envelope() {
     let transport = ScriptedTransport::new();
-    let options = ConnectOptions::new()
-        .token_provider(RecordingProvider::with_token(Some("tok-123")));
+    let options =
+        ConnectOptions::new().token_provider(RecordingProvider::with_token(Some("tok-123")));
     let client = common::connect_plain(&transport, "127.0.0.1", options);
     let server = transport.last_server();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let client_for_thread = client.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(client_for_thread.request_simple(
-            "addNumbers",
-            Some(&serde_json::json!({"a": 1, "b": 2})),
-        ));
+        let _ = tx.send(
+            client_for_thread
+                .request_simple("addNumbers", Some(&serde_json::json!({"a": 1, "b": 2}))),
+        );
     });
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let (_command, envelope) = read_plain_request(&server);
     assert_eq!(
         envelope,
@@ -42,7 +45,10 @@ fn adds_the_provider_token_to_every_request_envelope() {
         })
     );
     server.send(&serde_json::json!({"ok": true, "result": {"n": 3}}).to_string());
-    let value = rx.recv_timeout(Duration::from_secs(5)).expect("settles").expect("ok");
+    let value = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("settles")
+        .expect("ok");
     assert_eq!(value, serde_json::json!({"n": 3}));
     client.close();
 }
@@ -59,14 +65,20 @@ fn omits_the_token_field_when_the_provider_returns_null() {
     std::thread::spawn(move || {
         let _ = tx.send(client_for_thread.request_simple("getCatalog", None));
     });
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let (_command, envelope) = read_plain_request(&server);
     assert_eq!(
         envelope,
         serde_json::json!({"command": "getCatalog", "args": {}})
     );
     server.send(&serde_json::json!({"ok": true, "result": {"displays": []}}).to_string());
-    let value = rx.recv_timeout(Duration::from_secs(5)).expect("settles").expect("ok");
+    let value = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("settles")
+        .expect("ok");
     assert_eq!(value, serde_json::json!({"displays": []}));
     client.close();
 }
@@ -85,15 +97,22 @@ fn sends_no_token_when_no_provider_is_given() {
             Some(&serde_json::json!({"offerId": "o", "code": "123456"})),
         ));
     });
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     let (_command, envelope) = read_plain_request(&server);
-    assert_eq!(envelope.get("command").and_then(|v| v.as_str()), Some("pair"));
+    assert_eq!(
+        envelope.get("command").and_then(|v| v.as_str()),
+        Some("pair")
+    );
     assert!(envelope.get("token").is_none());
     let issued_token = "a".repeat(64);
-    server.send(
-        &serde_json::json!({"ok": true, "result": {"token": issued_token}}).to_string(),
-    );
-    let value = rx.recv_timeout(Duration::from_secs(5)).expect("settles").expect("ok");
+    server.send(&serde_json::json!({"ok": true, "result": {"token": issued_token}}).to_string());
+    let value = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("settles")
+        .expect("ok");
     assert_eq!(value, serde_json::json!({"token": issued_token}));
     assert!(is_valid_issued_token(&issued_token));
     client.close();
@@ -102,7 +121,8 @@ fn sends_no_token_when_no_provider_is_given() {
 #[test]
 fn provider_failure_rejects_the_request_without_writing_anything() {
     let transport = ScriptedTransport::new();
-    let options = ConnectOptions::new().token_provider(RecordingProvider::failing("secure store unavailable"));
+    let options = ConnectOptions::new()
+        .token_provider(RecordingProvider::failing("secure store unavailable"));
     let client = common::connect_plain(&transport, "127.0.0.1", options);
     let server = transport.last_server();
 
@@ -123,29 +143,45 @@ fn caches_the_token_so_later_requests_skip_the_provider() {
     let server = transport.last_server();
 
     let probe = common::issue(&client, "getStatus");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     server.send(&serde_json::json!({"ok": true, "result": {"sessions": []}}).to_string());
-    probe.recv_timeout(Duration::from_secs(5)).expect("probe").expect("ok");
+    probe
+        .recv_timeout(Duration::from_secs(5))
+        .expect("probe")
+        .expect("ok");
 
     // 두 번째 요청은 provider를 다시 부르지 않는다(캐시).
     let start = common::issue(&client, "startStream");
-    assert!(wait_until(|| server.written_len() == 2, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 2,
+        Duration::from_secs(5)
+    ));
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     server.send(&serde_json::json!({"ok": true, "result": {"session": 1}}).to_string());
-    start.recv_timeout(Duration::from_secs(5)).expect("start").expect("ok");
+    start
+        .recv_timeout(Duration::from_secs(5))
+        .expect("start")
+        .expect("ok");
     client.close();
 }
 
 #[test]
 fn unauthorized_error_handling_kind_and_beats_the_close_event() {
     let transport = ScriptedTransport::new();
-    let options = ConnectOptions::new().token_provider(RecordingProvider::with_token(Some("bad-token")));
+    let options =
+        ConnectOptions::new().token_provider(RecordingProvider::with_token(Some("bad-token")));
     let client = common::connect_plain(&transport, "127.0.0.1", options);
     let server = transport.last_server();
 
     let promise = common::issue(&client, "getCatalog");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     // Host behavior: reply unauthorized, then close the connection.
     server.send(&serde_json::json!({"ok": false, "error": "unauthorized"}).to_string());
     server.close();
@@ -169,7 +205,10 @@ fn other_remote_errors_keep_the_remote_kind() {
     let server = transport.last_server();
 
     let promise = common::issue(&client, "nope");
-    assert!(wait_until(|| server.written_len() == 1, Duration::from_secs(5)));
+    assert!(wait_until(
+        || server.written_len() == 1,
+        Duration::from_secs(5)
+    ));
     server.send(&serde_json::json!({"ok": false, "error": "unknown command"}).to_string());
     let error = promise
         .recv_timeout(Duration::from_secs(5))
@@ -247,8 +286,16 @@ fn selects_host_capture_backends_like_the_ts_helper() {
 
     let catalog = CatalogView {
         capture_backends: vec![
-            CaptureBackendInfo { id: "screenCaptureKit".into(), label: "SCK".into(), hint: "default".into() },
-            CaptureBackendInfo { id: "cgDisplayStream".into(), label: "CGDS".into(), hint: "compat".into() },
+            CaptureBackendInfo {
+                id: "screenCaptureKit".into(),
+                label: "SCK".into(),
+                hint: "default".into(),
+            },
+            CaptureBackendInfo {
+                id: "cgDisplayStream".into(),
+                label: "CGDS".into(),
+                hint: "compat".into(),
+            },
         ],
         ..Default::default()
     };

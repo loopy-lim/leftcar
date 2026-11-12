@@ -135,7 +135,10 @@ mod tests {
                 frame
             };
             assert_eq!(owned.is_null(), capacity == 64);
-            assert_eq!(unikit_bridge::decode_frame_response(&response).unwrap(), &[84]);
+            assert_eq!(
+                unikit_bridge::decode_frame_response(&response).unwrap(),
+                &[84]
+            );
         }
     }
 }

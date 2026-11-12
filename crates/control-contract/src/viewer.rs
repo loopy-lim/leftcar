@@ -1,8 +1,8 @@
 //! Viewer control package (docs/04 §6).
 
 use crate::common::*;
-use unikit_bridge::prelude::*;
 use serde::{Deserialize, Serialize};
+use unikit_bridge::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -169,7 +169,9 @@ pub struct ViewerAddNumbersOutput {
 }
 
 #[command]
-fn viewer_add_numbers(input: ViewerAddNumbersInput) -> unikit_bridge::Result<ViewerAddNumbersOutput> {
+fn viewer_add_numbers(
+    input: ViewerAddNumbersInput,
+) -> unikit_bridge::Result<ViewerAddNumbersOutput> {
     Ok(ViewerAddNumbersOutput {
         value: input.a + input.b,
     })

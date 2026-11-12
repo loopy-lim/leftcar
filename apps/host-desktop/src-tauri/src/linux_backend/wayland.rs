@@ -16,7 +16,9 @@ use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
-use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::{self, ZwlrVirtualPointerV1};
+use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::{
+    self, ZwlrVirtualPointerV1,
+};
 
 // zwlr_virtual_keyboard is not in wayland-protocols yet; generate bindings
 // from the vendored upstream XML (wlroots MIT license, see protocols/).
@@ -60,8 +62,8 @@ impl GlobalAvailability {
 /// Probe the current compositor once: what can this host do?
 pub(crate) fn probe_globals() -> Result<GlobalAvailability, String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("Wayland connect: {e}"))?;
-    let (globals, mut queue) = registry_queue_init::<RegistryOnly>(&conn)
-        .map_err(|e| format!("Wayland registry: {e}"))?;
+    let (globals, mut queue) =
+        registry_queue_init::<RegistryOnly>(&conn).map_err(|e| format!("Wayland registry: {e}"))?;
     let mut state = RegistryOnly;
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
     let mut availability = GlobalAvailability::default();
@@ -119,8 +121,8 @@ pub(crate) struct OutputInfo {
 /// rule).
 pub(crate) fn list_outputs() -> Result<Vec<OutputInfo>, String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("Wayland connect: {e}"))?;
-    let (globals, mut queue) = registry_queue_init::<ScanState>(&conn)
-        .map_err(|e| format!("Wayland registry: {e}"))?;
+    let (globals, mut queue) =
+        registry_queue_init::<ScanState>(&conn).map_err(|e| format!("Wayland registry: {e}"))?;
     let mut state = ScanState::default();
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
 
@@ -312,8 +314,7 @@ impl ShmBuffer {
             let rows = self.height as usize;
             for row in 0..rows {
                 let src = (rows - 1 - row) * stride;
-                out[row * stride..(row + 1) * stride]
-                    .copy_from_slice(&mapped[src..src + stride]);
+                out[row * stride..(row + 1) * stride].copy_from_slice(&mapped[src..src + stride]);
             }
             out
         } else {
@@ -349,7 +350,6 @@ fn make_memfd(size: usize) -> Result<OwnedFd, String> {
 struct CaptureState {
     // (unsafe impl Send below: ShmBuffer owns a raw mapping used only from
     // the thread that owns the ScreenCopier.)
-
     manager: Option<ZwlrScreencopyManagerV1>,
     shm: Option<wl_shm::WlShm>,
     seat: Option<wl_seat::WlSeat>,
@@ -414,8 +414,7 @@ impl ScreenCopier {
                     state.shm = Some(globals.bind(&qh, 1..=1, ()).map_err(|e| e.to_string())?);
                 }
                 Bind::Screencopy => {
-                    state.manager =
-                        Some(globals.bind(&qh, 1..=3, ()).map_err(|e| e.to_string())?);
+                    state.manager = Some(globals.bind(&qh, 1..=3, ()).map_err(|e| e.to_string())?);
                 }
                 Bind::Seat => {
                     state.seat = Some(
@@ -439,11 +438,7 @@ impl ScreenCopier {
             return Err("compositor does not advertise wl_shm".into());
         }
 
-        let mut copier = Self {
-            conn,
-            queue,
-            state,
-        };
+        let mut copier = Self { conn, queue, state };
         copier.roundtrip()?;
         copier.roundtrip()?;
         copier.resolve_target(output_name)?;
@@ -637,7 +632,10 @@ impl Dispatch<wl_output::WlOutput, ()> for CaptureState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        let scan = state.output_pending.entry(output.id().protocol_id()).or_default();
+        let scan = state
+            .output_pending
+            .entry(output.id().protocol_id())
+            .or_default();
         if let wl_output::Event::Done = event {
             let scan = scan.clone();
             state.output_scans.insert(output.id().protocol_id(), scan);
@@ -792,11 +790,7 @@ impl VirtualInput {
                 .create_virtual_keyboard(&seat, &qh, ()),
         );
         state.start = Some(Instant::now());
-        let mut devices = Self {
-            conn,
-            queue,
-            state,
-        };
+        let mut devices = Self { conn, queue, state };
         devices.flush()?;
         Ok(devices)
     }
@@ -822,7 +816,13 @@ impl VirtualInput {
     }
 
     /// Absolute motion in the given coordinate extents, followed by a frame.
-    pub(crate) fn move_absolute(&mut self, x: u32, y: u32, extent_w: u32, extent_h: u32) -> Result<(), String> {
+    pub(crate) fn move_absolute(
+        &mut self,
+        x: u32,
+        y: u32,
+        extent_w: u32,
+        extent_h: u32,
+    ) -> Result<(), String> {
         let pointer = self.state.pointer.as_ref().ok_or("virtual pointer gone")?;
         let time = self.now_ms();
         pointer.motion_absolute(time, x, y, extent_w, extent_h);
@@ -848,7 +848,11 @@ impl VirtualInput {
 
     /// Wheel motion in lines; positive vertical means "scroll content up"
     /// (the wire's sign convention), Wayland's axis grows downward.
-    pub(crate) fn wheel(&mut self, vertical_lines: f64, horizontal_lines: f64) -> Result<(), String> {
+    pub(crate) fn wheel(
+        &mut self,
+        vertical_lines: f64,
+        horizontal_lines: f64,
+    ) -> Result<(), String> {
         const PIXELS_PER_LINE: f64 = 40.0;
         let pointer = self.state.pointer.as_ref().ok_or("virtual pointer gone")?;
         let time = self.now_ms();
@@ -877,7 +881,11 @@ impl VirtualInput {
     /// Upload a fresh xkb keymap (xkb_v1 text). Needed before any key event
     /// and whenever dynamically assigned unicode keycodes change.
     pub(crate) fn set_keymap(&mut self, keymap: &str) -> Result<(), String> {
-        let keyboard = self.state.keyboard.as_ref().ok_or("virtual keyboard gone")?;
+        let keyboard = self
+            .state
+            .keyboard
+            .as_ref()
+            .ok_or("virtual keyboard gone")?;
         let bytes = keymap.as_bytes();
         let fd = make_memfd(bytes.len())?;
         let mut written = 0usize;
@@ -907,7 +915,11 @@ impl VirtualInput {
     /// Press or release a key. `evdev_code` is the Linux input.h keycode;
     /// the wire-level XKB keycode is evdev + 8.
     pub(crate) fn key(&mut self, evdev_code: u16, pressed: bool) -> Result<(), String> {
-        let keyboard = self.state.keyboard.as_ref().ok_or("virtual keyboard gone")?;
+        let keyboard = self
+            .state
+            .keyboard
+            .as_ref()
+            .ok_or("virtual keyboard gone")?;
         let time = self.now_ms();
         // The wlr XML types `state` as a plain uint: 1 = pressed, 0 = released
         // (wl_keyboard.key_state values).

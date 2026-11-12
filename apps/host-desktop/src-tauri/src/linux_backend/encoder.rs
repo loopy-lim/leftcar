@@ -184,11 +184,8 @@ struct ISVCEncoderVtbl {
     initialize_ext: unsafe extern "C" fn(*mut EncoderHandle, *const SEncParamExt) -> i32,
     get_default_params: unsafe extern "C" fn(*mut EncoderHandle, *mut SEncParamExt) -> i32,
     uninitialize: unsafe extern "C" fn(*mut EncoderHandle) -> i32,
-    encode_frame: unsafe extern "C" fn(
-        *mut EncoderHandle,
-        *const SSourcePicture,
-        *mut SFrameBSInfo,
-    ) -> i32,
+    encode_frame:
+        unsafe extern "C" fn(*mut EncoderHandle, *const SSourcePicture, *mut SFrameBSInfo) -> i32,
     encode_parameter_sets: unsafe extern "C" fn(*mut EncoderHandle, *mut SFrameBSInfo) -> i32,
     force_intra_frame: unsafe extern "C" fn(*mut EncoderHandle, bool) -> i32,
     set_option: unsafe extern "C" fn(*mut EncoderHandle, i32, *mut std::ffi::c_void) -> i32,
@@ -312,7 +309,12 @@ pub(crate) fn create_video_encoder(
     create_video_encoder_with(preference, width, height, fps, bitrate, &nvenc_factory)
 }
 
-fn nvenc_factory(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Box<dyn VideoEncoder>, String> {
+fn nvenc_factory(
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u32,
+) -> Result<Box<dyn VideoEncoder>, String> {
     super::nvenc::NvencEncoder::new(width, height, fps, bitrate)
         .map(|encoder| Box::new(encoder) as Box<dyn VideoEncoder>)
 }
@@ -328,8 +330,8 @@ pub(crate) fn create_video_encoder_with(
     fps: u32,
     bitrate: u32,
     nvenc_factory: &(dyn Fn(u32, u32, u32, u32) -> Result<Box<dyn VideoEncoder>, String>
-             + Send
-             + Sync),
+          + Send
+          + Sync),
 ) -> Result<EncoderSelection, String> {
     match preference {
         EncoderPreference::Software => openh264_selection(width, height, fps, bitrate, None),
@@ -347,9 +349,7 @@ pub(crate) fn create_video_encoder_with(
                 encoder,
                 fallback_reason: None,
             }),
-            Err(reason) => {
-                openh264_selection(width, height, fps, bitrate, Some(reason))
-            }
+            Err(reason) => openh264_selection(width, height, fps, bitrate, Some(reason)),
         },
     }
 }
@@ -391,7 +391,9 @@ impl OpenH264Encoder {
     /// even-dimension rule the Windows encoder applies).
     pub(crate) fn new(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Self, String> {
         if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-            return Err(format!("encoder dimensions must be even and nonzero: {width}x{height}"));
+            return Err(format!(
+                "encoder dimensions must be even and nonzero: {width}x{height}"
+            ));
         }
         if fps == 0 {
             return Err("encoder fps must be positive".into());
@@ -527,9 +529,8 @@ impl OpenH264Encoder {
         // Reset output bookkeeping the encoder relies on.
         self.bs_info.iLayerNum = 0;
         self.bs_info.iFrameSizeInBytes = 0;
-        let status = unsafe {
-            (self.vtbl.encode_frame)(self.encoder, &picture, &mut *self.bs_info)
-        };
+        let status =
+            unsafe { (self.vtbl.encode_frame)(self.encoder, &picture, &mut *self.bs_info) };
         if status != CM_RESULT_SUCCESS {
             return Err(format!("EncodeFrame failed: {status}"));
         }
@@ -548,8 +549,7 @@ impl OpenH264Encoder {
         if base.is_null() {
             return Err("openh264 returned a null bitstream buffer".into());
         }
-        let keyframe =
-            self.bs_info.eFrameType == VIDEO_FRAME_TYPE_IDR;
+        let keyframe = self.bs_info.eFrameType == VIDEO_FRAME_TYPE_IDR;
         let data = unsafe { std::slice::from_raw_parts(base, size as usize).to_vec() };
         Ok(EncodedAu { data, keyframe })
     }
@@ -643,18 +643,13 @@ mod tests {
             println!("libopenh264 missing; skipping");
             return;
         }
-        let failing = |_w: u32, _h: u32, _f: u32, _b: u32| -> Result<Box<dyn VideoEncoder>, String> {
-            Err("no NVENC on this machine".into())
-        };
-        let selection = create_video_encoder_with(
-            EncoderPreference::Auto,
-            64,
-            64,
-            30,
-            200_000,
-            &failing,
-        )
-        .expect("auto must fall back to openh264");
+        let failing =
+            |_w: u32, _h: u32, _f: u32, _b: u32| -> Result<Box<dyn VideoEncoder>, String> {
+                Err("no NVENC on this machine".into())
+            };
+        let selection =
+            create_video_encoder_with(EncoderPreference::Auto, 64, 64, 30, 200_000, &failing)
+                .expect("auto must fall back to openh264");
         assert_eq!(selection.meta.id, "openh264");
         assert!(!selection.meta.hardware);
         assert_eq!(
@@ -665,19 +660,14 @@ mod tests {
 
     #[test]
     fn hardware_selection_propagates_nvenc_failure() {
-        let failing = |_w: u32, _h: u32, _f: u32, _b: u32| -> Result<Box<dyn VideoEncoder>, String> {
-            Err("no NVENC on this machine".into())
-        };
-        let error = create_video_encoder_with(
-            EncoderPreference::Hardware,
-            64,
-            64,
-            30,
-            200_000,
-            &failing,
-        )
-        .err()
-        .expect("hardware must fail when NVENC is unavailable");
+        let failing =
+            |_w: u32, _h: u32, _f: u32, _b: u32| -> Result<Box<dyn VideoEncoder>, String> {
+                Err("no NVENC on this machine".into())
+            };
+        let error =
+            create_video_encoder_with(EncoderPreference::Hardware, 64, 64, 30, 200_000, &failing)
+                .err()
+                .expect("hardware must fail when NVENC is unavailable");
         assert!(error.contains("no NVENC"), "unexpected error: {error}");
     }
 
@@ -690,22 +680,19 @@ mod tests {
             println!("libopenh264 missing; skipping");
             return;
         }
-        let selection = create_video_encoder_with(
-            EncoderPreference::Software,
-            64,
-            64,
-            30,
-            200_000,
-            &boom,
-        )
-        .expect("software selects openh264 directly");
+        let selection =
+            create_video_encoder_with(EncoderPreference::Software, 64, 64, 30, 200_000, &boom)
+                .expect("software selects openh264 directly");
         assert_eq!(selection.meta.id, "openh264");
         assert!(selection.fallback_reason.is_none());
     }
 
     #[test]
     fn preference_parsing_covers_env_values() {
-        assert!(matches!(parse_preference(None), Ok(EncoderPreference::Auto)));
+        assert!(matches!(
+            parse_preference(None),
+            Ok(EncoderPreference::Auto)
+        ));
         assert!(matches!(
             parse_preference(Some("")),
             Ok(EncoderPreference::Auto)
@@ -747,6 +734,9 @@ mod tests {
                 );
             }
         }
-        assert!(produced >= 3, "expected most frames to encode, got {produced}");
+        assert!(
+            produced >= 3,
+            "expected most frames to encode, got {produced}"
+        );
     }
 }

@@ -11,7 +11,9 @@
 //!   the app dir as cwd — from forking a second copy under the app.
 
 fn main() {
-    if let Some(dir) = std::env::var_os("UNIKIT_SCHEMA_OUT").or_else(|| std::env::var_os("RUSTRA_SCHEMA_OUT")) {
+    if let Some(dir) =
+        std::env::var_os("UNIKIT_SCHEMA_OUT").or_else(|| std::env::var_os("RUSTRA_SCHEMA_OUT"))
+    {
         host_schema_probe(dir);
         return;
     }

@@ -27,7 +27,9 @@ pub fn should_auto_reconnect(decision: &AutoReconnectDecision) -> bool {
     if decision.user_disconnected || decision.pairing_stale {
         return false;
     }
-    let min_interval = decision.min_interval_ms.unwrap_or(AUTO_RECONNECT_MIN_INTERVAL_MS);
+    let min_interval = decision
+        .min_interval_ms
+        .unwrap_or(AUTO_RECONNECT_MIN_INTERVAL_MS);
     if let Some(last_attempt_at) = decision.last_attempt_at {
         if decision.now.saturating_sub(last_attempt_at) < min_interval {
             return false;
@@ -102,7 +104,12 @@ impl AutoReconnectGate {
     }
 
     /// 뷰어 화면용 게이트 스냅숏 판정.
-    pub fn should_auto_reconnect_from_gate(&self, has_client: bool, has_recent_host: bool, now: u64) -> bool {
+    pub fn should_auto_reconnect_from_gate(
+        &self,
+        has_client: bool,
+        has_recent_host: bool,
+        now: u64,
+    ) -> bool {
         should_auto_reconnect(&AutoReconnectDecision {
             has_client,
             has_recent_host,
@@ -151,13 +158,19 @@ mod tests {
     #[test]
     fn never_attempts_while_a_client_exists_or_no_recent_host_is_known() {
         assert!(!should_auto_reconnect(&decision(|d| d.has_client = true)));
-        assert!(!should_auto_reconnect(&decision(|d| d.has_recent_host = false)));
+        assert!(!should_auto_reconnect(&decision(
+            |d| d.has_recent_host = false
+        )));
     }
 
     #[test]
     fn respects_explicit_disconnect_and_stale_pairing() {
-        assert!(!should_auto_reconnect(&decision(|d| d.user_disconnected = true)));
-        assert!(!should_auto_reconnect(&decision(|d| d.pairing_stale = true)));
+        assert!(!should_auto_reconnect(&decision(
+            |d| d.user_disconnected = true
+        )));
+        assert!(!should_auto_reconnect(
+            &decision(|d| d.pairing_stale = true)
+        ));
     }
 
     #[test]
@@ -212,22 +225,37 @@ mod tests {
 
     #[test]
     fn retained_context_is_reused_only_for_the_same_host_and_port() {
-        let context = ReconnectRouteTarget { host: "100.80.133.120".into(), port: 7777 };
+        let context = ReconnectRouteTarget {
+            host: "100.80.133.120".into(),
+            port: 7777,
+        };
         assert!(should_reconnect_retained_context(
             Some(&context),
-            Some(&ReconnectRouteTarget { host: "100.80.133.120".into(), port: 7777 })
+            Some(&ReconnectRouteTarget {
+                host: "100.80.133.120".into(),
+                port: 7777
+            })
         ));
         assert!(!should_reconnect_retained_context(
             Some(&context),
-            Some(&ReconnectRouteTarget { host: "100.80.133.121".into(), port: 7777 })
+            Some(&ReconnectRouteTarget {
+                host: "100.80.133.121".into(),
+                port: 7777
+            })
         ));
         assert!(!should_reconnect_retained_context(
             Some(&context),
-            Some(&ReconnectRouteTarget { host: "100.80.133.120".into(), port: 7778 })
+            Some(&ReconnectRouteTarget {
+                host: "100.80.133.120".into(),
+                port: 7778
+            })
         ));
         assert!(!should_reconnect_retained_context(
             None,
-            Some(&ReconnectRouteTarget { host: "10.0.0.1".into(), port: 7777 })
+            Some(&ReconnectRouteTarget {
+                host: "10.0.0.1".into(),
+                port: 7777
+            })
         ));
         assert!(!should_reconnect_retained_context(Some(&context), None));
         assert!(!should_reconnect_retained_context(None, None));

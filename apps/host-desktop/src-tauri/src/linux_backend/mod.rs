@@ -162,10 +162,14 @@ impl CaptureBackend for LinuxBackend {
         access: Option<&crate::source_grants::CaptureAccess>,
     ) -> Result<u32, String> {
         if media_transport != "udp" {
-            return Err("Linux backend supports Wi-Fi UDP media in v1 (USB/AOAP follows later)".into());
+            return Err(
+                "Linux backend supports Wi-Fi UDP media in v1 (USB/AOAP follows later)".into(),
+            );
         }
         if capture_backend != CAPTURE_BACKEND_ID {
-            return Err(format!("unsupported Linux capture backend: {capture_backend}"));
+            return Err(format!(
+                "unsupported Linux capture backend: {capture_backend}"
+            ));
         }
         let access = access.ok_or("Host source authorization is required")?;
         let _admission = access.lease.enter().ok_or("source authorization revoked")?;
@@ -227,16 +231,20 @@ impl CaptureBackend for LinuxBackend {
         let capture_thread = match std::thread::Builder::new()
             .name(format!("leftcar-linux-capture-{handle}"))
             .spawn(move || {
-                if let Err(error) =
-                    run_capture(sender, capture_session.clone(), &target_name, width, height, fps)
-                {
+                if let Err(error) = run_capture(
+                    sender,
+                    capture_session.clone(),
+                    &target_name,
+                    width,
+                    height,
+                    fps,
+                ) {
                     let mut stats = capture_session.stats.lock().unwrap();
                     stats.state = "error".into();
                     stats.error = Some(error);
                     capture_session.stop.store(true, Ordering::Release);
                 }
-            })
-        {
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 // Never leave the already-running input thread orphaned: stop
@@ -365,9 +373,7 @@ fn select_output(source_id: &str) -> Result<OutputInfo, String> {
         .strip_prefix("linux:output:")
         .ok_or("source display is unavailable")?;
     let outputs = wayland::list_outputs()?;
-    let mut matches = outputs
-        .into_iter()
-        .filter(|output| output.name == expected);
+    let mut matches = outputs.into_iter().filter(|output| output.name == expected);
     let output = matches.next().ok_or("source display is unavailable")?;
     if expected.is_empty() || matches.next().is_some() {
         return Err("source display identity is ambiguous".into());
@@ -683,7 +689,8 @@ fn run_capture(
                 encoder.force_keyframe()?;
             }
             let encode_started = Instant::now();
-            let source = convert::BgraFrame::new(&frame.bgra, frame.width, frame.height, frame.stride)?;
+            let source =
+                convert::BgraFrame::new(&frame.bgra, frame.width, frame.height, frame.stride)?;
             let output = encoder.encode(&source)?;
             let encode_us = encode_started.elapsed().as_micros() as u64;
             send_encoded_output(
@@ -962,9 +969,8 @@ impl DrainIo for LinuxDrain<'_> {
 }
 
 fn initial_stats(width: u32, height: u32, fps: u32) -> StatsInfo {
-    let bitrate =
-        ((u64::from(width) * u64::from(height) * u64::from(fps)) / 10).clamp(4_000_000, 50_000_000)
-            as u32;
+    let bitrate = ((u64::from(width) * u64::from(height) * u64::from(fps)) / 10)
+        .clamp(4_000_000, 50_000_000) as u32;
     StatsInfo {
         frames: 0,
         bytes: 0,
@@ -1100,10 +1106,8 @@ mod stream_smoke {
                     let mut state = viewer.lock().unwrap();
                     state.host_addr = Some(source);
                     if plaintext.starts_with(b"LCH1") {
-                        let _ = viewer_socket.send_to(
-                            &viewer_sealer.seal(&plaintext).expect("seal proof"),
-                            source,
-                        );
+                        let _ = viewer_socket
+                            .send_to(&viewer_sealer.seal(&plaintext).expect("seal proof"), source);
                         state.proof_done = true;
                     } else if plaintext.starts_with(b"CFG") {
                         state.cfg_count += 1;
@@ -1117,10 +1121,8 @@ mod stream_smoke {
                         }
                         state.fragments += 1;
                         if state.au_ids.len() >= state.bye_after_aus && !state.bye_sent {
-                            let _ = viewer_socket.send_to(
-                                &viewer_sealer.seal(b"BYE").expect("seal bye"),
-                                source,
-                            );
+                            let _ = viewer_socket
+                                .send_to(&viewer_sealer.seal(b"BYE").expect("seal bye"), source);
                             state.bye_sent = true;
                         }
                     }

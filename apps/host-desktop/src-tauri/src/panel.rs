@@ -140,9 +140,7 @@ enum LineError {
 fn read_capped_line(reader: &mut impl BufRead, out: &mut Vec<u8>) -> Result<usize, LineError> {
     out.clear();
     let mut limited = reader.take((MAX_REQUEST_BYTES + 1) as u64);
-    let read = limited
-        .read_until(b'\n', out)
-        .map_err(LineError::Io)?;
+    let read = limited.read_until(b'\n', out).map_err(LineError::Io)?;
     if out.len() > MAX_REQUEST_BYTES {
         return Err(LineError::TooLong);
     }
@@ -251,7 +249,8 @@ fn arg<T: serde::de::DeserializeOwned>(args: &serde_json::Value, key: &str) -> R
     let value = args
         .get(key)
         .ok_or_else(|| format!("missing argument: {key}"))?;
-    serde_json::from_value(value.clone()).map_err(|error| format!("invalid argument {key}: {error}"))
+    serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid argument {key}: {error}"))
 }
 
 fn opt_arg<T: serde::de::DeserializeOwned>(
@@ -463,7 +462,11 @@ pub fn dispatch(
                 handles
                     .runtime
                     .block_on(handles.server.resize_virtual_display(
-                        virtual_display::DisplayMode { width, height, scale },
+                        virtual_display::DisplayMode {
+                            width,
+                            height,
+                            scale,
+                        },
                     ))?,
             )
         }
@@ -596,24 +599,27 @@ pub fn dispatch(
                 settings::HostLanguage::Ko => "Leftcar — 파일 공유",
                 settings::HostLanguage::En => "Leftcar — File Sharing",
             };
-            let picked = handles
-                .runtime
-                .block_on(async move {
-                    tokio::task::spawn_blocking(move || {
-                        rfd::FileDialog::new()
-                            .set_title(dialog_title)
-                            .pick_files()
-                            .unwrap_or_default()
-                    })
-                    .await
-                    .map_err(|error| format!("file dialog failed: {error:?}"))
-                })?;
+            let picked = handles.runtime.block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    rfd::FileDialog::new()
+                        .set_title(dialog_title)
+                        .pick_files()
+                        .unwrap_or_default()
+                })
+                .await
+                .map_err(|error| format!("file dialog failed: {error:?}"))
+            })?;
             json(server.file_transfer_state().add_share_files(picked))
         }
         "list_share_queue" => json(handles.server.file_transfer_state().queue_entries()),
         "remove_share_file" => {
             let queue_id: String = arg(args, "queueId")?;
-            json(handles.server.file_transfer_state().remove_share_file(&queue_id))
+            json(
+                handles
+                    .server
+                    .file_transfer_state()
+                    .remove_share_file(&queue_id),
+            )
         }
         // 웹뷰(→Flutter)의 언어 토글을 네이티브 표면(트레이 메뉴·파일 대화상자)
         // 와 공유하기 위해 settings.json에 남긴다. 다음 기동 때 트레이가 이 값을 읽는다.
@@ -691,7 +697,9 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }],
-            encoder_experiment: std::sync::Mutex::new(control_contract::host::EncoderExperiment::Auto),
+            encoder_experiment: std::sync::Mutex::new(
+                control_contract::host::EncoderExperiment::Auto,
+            ),
             advertise_split_vertical: false,
             stops: std::sync::atomic::AtomicUsize::new(0),
             input_permission: true,
@@ -736,7 +744,7 @@ mod tests {
 
     fn connect(port: u16, token: &str) -> std::net::TcpStream {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(stream, "{token}\n").unwrap();
+        writeln!(stream, "{token}").unwrap();
         stream
     }
 
@@ -749,12 +757,20 @@ mod tests {
     }
 
     fn expect_ok(response: serde_json::Value) -> serde_json::Value {
-        assert_eq!(response["ok"], serde_json::json!(true), "response: {response}");
+        assert_eq!(
+            response["ok"],
+            serde_json::json!(true),
+            "response: {response}"
+        );
         response["result"].clone()
     }
 
     fn expect_error(response: serde_json::Value) -> String {
-        assert_eq!(response["ok"], serde_json::json!(false), "response: {response}");
+        assert_eq!(
+            response["ok"],
+            serde_json::json!(false),
+            "response: {response}"
+        );
         response["error"].as_str().unwrap().to_string()
     }
 
@@ -788,7 +804,10 @@ mod tests {
         let harness = harness();
         let (port, token) = spawn_server(&harness);
         let mut stream = connect(port, &token);
-        let response = round_trip(&mut stream, r#"{"id":"poll-42","command":"get_control_port"}"#);
+        let response = round_trip(
+            &mut stream,
+            r#"{"id":"poll-42","command":"get_control_port"}"#,
+        );
         assert_eq!(response["id"], serde_json::json!("poll-42"));
         assert_eq!(response["result"], serde_json::json!(7777));
         let response = round_trip(&mut stream, r#"{"id":99,"command":"get_control_port"}"#);
@@ -801,7 +820,10 @@ mod tests {
         let (port, token) = spawn_server(&harness);
         let mut stream = connect(port, &token);
         assert_eq!(
-            expect_ok(round_trip(&mut stream, r#"{"id":1,"command":"get_clipboard_share"}"#)),
+            expect_ok(round_trip(
+                &mut stream,
+                r#"{"id":1,"command":"get_clipboard_share"}"#
+            )),
             serde_json::json!(false)
         );
         assert_eq!(
@@ -812,7 +834,10 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(
-            expect_ok(round_trip(&mut stream, r#"{"id":3,"command":"get_clipboard_share"}"#)),
+            expect_ok(round_trip(
+                &mut stream,
+                r#"{"id":3,"command":"get_clipboard_share"}"#
+            )),
             serde_json::json!(true)
         );
     }
@@ -829,7 +854,10 @@ mod tests {
         assert_eq!(result["maxEncodeInFlight"], serde_json::json!(3));
         assert_eq!(result["frameTrace"], serde_json::json!(true));
         assert_eq!(
-            expect_ok(round_trip(&mut stream, r#"{"id":2,"command":"get_experiments"}"#)),
+            expect_ok(round_trip(
+                &mut stream,
+                r#"{"id":2,"command":"get_experiments"}"#
+            )),
             result,
             "저장된 실험 스위치가 폴링 조회와 같다"
         );
@@ -844,7 +872,10 @@ mod tests {
         let (port, token) = spawn_server(&harness);
         let mut stream = connect(port, &token);
         assert_eq!(
-            expect_ok(round_trip(&mut stream, r#"{"id":1,"command":"list_share_queue"}"#)),
+            expect_ok(round_trip(
+                &mut stream,
+                r#"{"id":1,"command":"list_share_queue"}"#
+            )),
             serde_json::json!([])
         );
     }
@@ -859,7 +890,10 @@ mod tests {
             r#"{"id":1,"command":"set_file_share","args":{"enabled":true}}"#,
         ));
         assert_eq!(
-            expect_ok(round_trip(&mut stream, r#"{"id":2,"command":"get_file_share"}"#)),
+            expect_ok(round_trip(
+                &mut stream,
+                r#"{"id":2,"command":"get_file_share"}"#
+            )),
             serde_json::json!(true)
         );
     }
@@ -873,7 +907,10 @@ mod tests {
             &mut stream,
             r#"{"id":1,"command":"set_language","args":{"language":"en"}}"#,
         ));
-        assert_eq!(harness.handles.settings.language(), settings::HostLanguage::En);
+        assert_eq!(
+            harness.handles.settings.language(),
+            settings::HostLanguage::En
+        );
         let error = expect_error(round_trip(
             &mut stream,
             r#"{"id":2,"command":"set_language","args":{"language":"fr"}}"#,
@@ -952,7 +989,10 @@ mod tests {
         let harness = harness();
         let (port, token) = spawn_server(&harness);
         let mut stream = connect(port, &token);
-        let oversized = format!("{{\"id\":1,\"command\":\"get_control_port\",\"pad\":\"{}\"}}", "x".repeat(MAX_REQUEST_BYTES + 10));
+        let oversized = format!(
+            "{{\"id\":1,\"command\":\"get_control_port\",\"pad\":\"{}\"}}",
+            "x".repeat(MAX_REQUEST_BYTES + 10)
+        );
         writeln!(stream, "{oversized}").unwrap();
         let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();

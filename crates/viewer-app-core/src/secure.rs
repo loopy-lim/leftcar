@@ -13,8 +13,8 @@ use zeroize::Zeroize;
 use crate::b64;
 
 pub use secure_channel::{
-    client_finish as raw_client_finish, derive_keys, COUNTER_LEN, HANDSHAKE_INFO, MAX_PLAINTEXT,
-    SIG_CONTEXT, StreamSealer, TAG_LEN,
+    client_finish as raw_client_finish, derive_keys, StreamSealer, COUNTER_LEN, HANDSHAKE_INFO,
+    MAX_PLAINTEXT, SIG_CONTEXT, TAG_LEN,
 };
 
 /// 결정적 랜덤 주입 지점. 운영 경로는 [`OsRandom`](OS CSPRNG), 테스트·임베딩은
@@ -96,9 +96,7 @@ pub fn parse_server_hello(line: &str) -> Result<ServerHello, ServerHelloParseErr
     let ns = into32(field("ns", 32)?);
     let xk = into32(field("xk", 32)?);
     let spk = into32(field("spk", 32)?);
-    let sig: [u8; 64] = field("sig", 64)?
-        .try_into()
-        .expect("64B checked above");
+    let sig: [u8; 64] = field("sig", 64)?.try_into().expect("64B checked above");
     Ok(ServerHello { ns, xk, spk, sig })
 }
 
@@ -194,7 +192,10 @@ mod tests {
         let line = encode_client_hello(&ephemeral.hello);
         let nc = b64::encode(&ephemeral.hello.nc);
         let xk = b64::encode(&ephemeral.hello.xk);
-        assert_eq!(line, format!("{{\"v\":1,\"hello\":\"c\",\"nc\":\"{nc}\",\"xk\":\"{xk}\"}}"));
+        assert_eq!(
+            line,
+            format!("{{\"v\":1,\"hello\":\"c\",\"nc\":\"{nc}\",\"xk\":\"{xk}\"}}")
+        );
     }
 
     #[test]
@@ -224,10 +225,15 @@ mod tests {
             Err(ServerHelloParseError::NotServerHello)
         ));
         assert!(matches!(
-            parse_server_hello("{\"hello\":\"s\",\"ns\":\"\",\"xk\":\"\",\"spk\":\"\",\"sig\":\"\"}"),
+            parse_server_hello(
+                "{\"hello\":\"s\",\"ns\":\"\",\"xk\":\"\",\"spk\":\"\",\"sig\":\"\"}"
+            ),
             Err(ServerHelloParseError::Malformed)
         ));
-        assert!(matches!(parse_server_hello("not json"), Err(ServerHelloParseError::Malformed)));
+        assert!(matches!(
+            parse_server_hello("not json"),
+            Err(ServerHelloParseError::Malformed)
+        ));
     }
 
     #[test]

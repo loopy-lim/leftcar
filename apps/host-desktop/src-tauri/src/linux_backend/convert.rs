@@ -60,12 +60,7 @@ impl<'a> BgraFrame<'a> {
 
 /// BGRA → I420 (planar Y, planar U, planar V), scaled to `dst_width` ×
 /// `dst_height`. `i420` must be exactly `dst_width * dst_height * 3 / 2`.
-pub(crate) fn bgra_to_i420(
-    i420: &mut [u8],
-    dst_width: u32,
-    dst_height: u32,
-    src: &BgraFrame,
-) {
+pub(crate) fn bgra_to_i420(i420: &mut [u8], dst_width: u32, dst_height: u32, src: &BgraFrame) {
     let dst_w = dst_width as usize;
     let dst_h = dst_height as usize;
     debug_assert_eq!(i420.len(), dst_w * dst_h * 3 / 2);
@@ -167,8 +162,8 @@ pub(crate) fn bgra_to_nv12(
                 }
                 for (cy, uv_row) in uv_stripe.chunks_mut(pitch).enumerate() {
                     let cy = cy_start + cy;
-                    let sy = (cy * 2 * src.height as usize / dst_h / 2 * 2)
-                        .min(src.height as usize - 2);
+                    let sy =
+                        (cy * 2 * src.height as usize / dst_h / 2 * 2).min(src.height as usize - 2);
                     let row0 = row_slice(src, sy);
                     let row1 = row_slice(src, sy + 1);
                     for cx in 0..dst_w / 2 {
@@ -279,7 +274,11 @@ mod tests {
         let src = frame_of(&pixels, 4, 4);
         let mut nv12 = vec![0u8; 4 * 4 * 3 / 2];
         bgra_to_nv12(&mut nv12, 4, 4, 4, &src);
-        assert!(nv12[..16].iter().all(|&y| y == 235), "Y plane: {:?}", &nv12[..16]);
+        assert!(
+            nv12[..16].iter().all(|&y| y == 235),
+            "Y plane: {:?}",
+            &nv12[..16]
+        );
         assert!(
             nv12[16..].iter().all(|&c| c == 128),
             "UV plane: {:?}",

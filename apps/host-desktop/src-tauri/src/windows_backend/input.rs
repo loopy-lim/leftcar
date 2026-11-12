@@ -59,7 +59,9 @@ impl InputInjector {
         }
         let buttons = self.pressed_buttons.drain().collect::<Vec<_>>();
         for button in buttons {
-            send_mouse(0, 0, 0, button_flag(button, false)?)?;
+            // Same injection path as button(): X buttons release through
+            // MOUSEEVENTF_XUP with the id in mouseData, not per-button flags.
+            send_button(button, false)?;
         }
         self.horizontal_remainder = 0;
         self.vertical_remainder = 0;
@@ -91,20 +93,7 @@ impl InputInjector {
     }
 
     fn button(&mut self, button: u8, down: bool) -> Result<(), String> {
-        if button == 8 || button == 16 {
-            // Android BUTTON_BACK/FORWARD: XBUTTON1 = back, XBUTTON2 =
-            // forward. X-button injection carries the button id in mouseData
-            // instead of a per-button flag.
-            let data: u32 = if button == 8 { 0x0001 } else { 0x0002 };
-            let flags = if down {
-                MOUSEEVENTF_XDOWN
-            } else {
-                MOUSEEVENTF_XUP
-            };
-            send_mouse(0, 0, data, flags)?;
-        } else {
-            send_mouse(0, 0, 0, button_flag(button, down)?)?;
-        }
+        send_button(button, down)?;
         if down {
             self.pressed_buttons.insert(button);
         } else {
@@ -168,6 +157,24 @@ impl InputInjector {
 impl Drop for InputInjector {
     fn drop(&mut self) {
         let _ = self.release_all();
+    }
+}
+
+/// Android BUTTON_BACK/FORWARD arrive as button masks 8/16: XBUTTON1 =
+/// back, XBUTTON2 = forward. X-button injection carries the button id in
+/// mouseData instead of a per-button flag, so the release path must mirror
+/// this branch or release_all aborts on the first held X button.
+fn send_button(button: u8, down: bool) -> Result<(), String> {
+    if button == 8 || button == 16 {
+        let data: u32 = if button == 8 { 0x0001 } else { 0x0002 };
+        let flags = if down {
+            MOUSEEVENTF_XDOWN
+        } else {
+            MOUSEEVENTF_XUP
+        };
+        send_mouse(0, 0, data, flags)
+    } else {
+        send_mouse(0, 0, 0, button_flag(button, down)?)
     }
 }
 

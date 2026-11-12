@@ -3,6 +3,7 @@
   "productName": "Leftcar Host",
   "version": "0.1.11",
   "identifier": "leftcar.ll3.kr",
+  "mainBinaryName": "leftcar-host-desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",

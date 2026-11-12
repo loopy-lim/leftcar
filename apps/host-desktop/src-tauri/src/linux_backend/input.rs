@@ -139,10 +139,10 @@ impl InputInjector {
         // of the Windows injector, which subtracts SM_XVIRTUALSCREEN).
         let absolute_x = (self.output_rel_x as i64
             + i64::from(x) * (self.output_w as i64 - 1) / 65_535)
-        .clamp(0, self.layout_w as i64 - 1) as u32;
+            .clamp(0, self.layout_w as i64 - 1) as u32;
         let absolute_y = (self.output_rel_y as i64
             + i64::from(y) * (self.output_h as i64 - 1) / 65_535)
-        .clamp(0, self.layout_h as i64 - 1) as u32;
+            .clamp(0, self.layout_h as i64 - 1) as u32;
         self.devices
             .move_absolute(absolute_x, absolute_y, self.layout_w, self.layout_h)
     }
@@ -443,7 +443,10 @@ mod tests {
         assert_eq!(evdev, DYNAMIC_XKB_BASE - 8);
         let text = keymap.render();
         assert!(text.contains("= 248;"), "keycodes section: {text}");
-        assert!(text.contains("key <LC00> { [ UAC00 ] };"), "symbols: {text}");
+        assert!(
+            text.contains("key <LC00> { [ UAC00 ] };"),
+            "symbols: {text}"
+        );
         assert!(text.contains("include \"pc+us\""));
         assert!(keymap.dirty());
     }

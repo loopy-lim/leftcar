@@ -366,9 +366,7 @@ pub fn run_exit_shutdown(
             );
         }
         None => {
-            eprintln!(
-                "virtual display release on exit timed out; relying on WindowServer reclaim"
-            );
+            eprintln!("virtual display release on exit timed out; relying on WindowServer reclaim");
             audit.log(
                 "virtual_display_release_failed",
                 serde_json::json!({

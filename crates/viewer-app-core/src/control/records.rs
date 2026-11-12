@@ -86,13 +86,25 @@ pub struct CatalogView {
     )]
     pub reconfigure_encoder_experiment: Option<bool>,
     /// reconfigureStream에 sourceIndex를 받는지(능력 플래그).
-    #[serde(rename = "reconfigureSource", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "reconfigureSource",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reconfigure_source: Option<bool>,
     /// 이 기기가 마지막으로 보고한 스트림 창 크기(px).
-    #[serde(rename = "windowSize", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "windowSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub window_size: Option<WindowSizeView>,
     /// 상시 원격 입력 허용 여부(기본 허용). 미인증 호출에는 필드가 없다.
-    #[serde(rename = "inputAllowed", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "inputAllowed",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub input_allowed: Option<bool>,
     /// 방금 제거 요청된 확장 화면의 sourceId(시스템 반영 최대 ~30s).
     #[serde(
@@ -122,7 +134,11 @@ pub struct CatalogView {
 // 고정하고 나머지는 `extra`로 흡수한다(호스트가 늘리는 진단 필드가 많다).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionView {
-    #[serde(rename = "deviceName", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "deviceName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub device_name: Option<String>,
     #[serde(default)]
     pub session: i64,
@@ -152,7 +168,11 @@ pub struct SessionView {
     pub quality_state: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_fps: Option<f64>,
-    #[serde(rename = "renderedFps", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "renderedFps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rendered_fps: Option<f64>,
     #[serde(default)]
     pub dropped: i64,
@@ -198,7 +218,11 @@ pub struct SessionView {
     pub pending_frame: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(rename = "receiverRttMs", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "receiverRttMs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub receiver_rtt_ms: Option<f64>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
@@ -230,16 +254,26 @@ pub struct ReconfigureStreamOutput {
         skip_serializing_if = "Option::is_none"
     )]
     pub encoder_experiment: Option<String>,
-    #[serde(rename = "sourceIndex", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "sourceIndex",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub source_index: Option<i64>,
-    #[serde(rename = "sourceName", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "sourceName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub source_name: Option<String>,
 }
 
 /// TS preferredCaptureBackend — 지원 목록에 있으면 현재 선택을 유지하고,
 /// 아니면 호스트가 나열한 첫 자동 백엔드, 없으면 macOS 기존 기본값.
 pub fn preferred_capture_backend(catalog: Option<&CatalogView>, current: Option<&str>) -> String {
-    let available = catalog.map(|c| c.capture_backends.as_slice()).unwrap_or(&[]);
+    let available = catalog
+        .map(|c| c.capture_backends.as_slice())
+        .unwrap_or(&[]);
     // TS `current &&` — 빈 문자열은 선택 없음과 같다.
     if let Some(current) = current.filter(|c| !c.is_empty()) {
         if available.iter().any(|backend| backend.id == current) {

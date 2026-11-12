@@ -40,10 +40,7 @@ pub enum PairingError {
 type Snapshot = (String, Option<String>);
 
 /// 저장값을 되돌린다. 일부라도 실패하면 RollbackFailed(TS rollbackValues).
-fn rollback_values(
-    ports: &CorePorts,
-    entries: &[Snapshot],
-) -> Result<(), PairingError> {
+fn rollback_values(ports: &CorePorts, entries: &[Snapshot]) -> Result<(), PairingError> {
     let mut failures = 0;
     for (key, value) in entries {
         let result = match value {
@@ -91,10 +88,7 @@ impl PairingAttempt {
 
     /// Predecessor rollback must finish before this run can mutate
     /// Host/storage — 커밋 이후에는 받지 않는다.
-    pub fn retain_rollback(
-        &self,
-        rollback: Arc<dyn Fn() -> Result<(), StoreError> + Send + Sync>,
-    ) {
+    pub fn retain_rollback(&self, rollback: Arc<dyn Fn() -> Result<(), StoreError> + Send + Sync>) {
         if self.committed.load(Ordering::SeqCst) {
             return;
         }
@@ -107,7 +101,10 @@ impl PairingAttempt {
     pub fn commit(&self) -> Result<(), PairingError> {
         self.throw_if_cancelled()?;
         self.committed.store(true, Ordering::SeqCst);
-        self.rollbacks.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        self.rollbacks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         Ok(())
     }
 
@@ -128,7 +125,10 @@ impl PairingAttempt {
 }
 
 /// 이 대상 호스트에 발급된 토큰을 읽는다(없으면 None).
-pub fn get_stored_token(ports: &CorePorts, target: &HostEndpoint) -> Result<Option<String>, StoreError> {
+pub fn get_stored_token(
+    ports: &CorePorts,
+    target: &HostEndpoint,
+) -> Result<Option<String>, StoreError> {
     ports.store.get(&token_key(&target.host, target.port))
 }
 
@@ -335,7 +335,9 @@ pub fn store_token(
         Ok(value) => value,
         Err(error) => {
             if host_key.is_some() {
-                ports.pins.restore(host, port, pin_before.flatten().as_deref());
+                ports
+                    .pins
+                    .restore(host, port, pin_before.flatten().as_deref());
             }
             let mut snapshots = before.clone();
             if host_key.is_some() {
@@ -361,14 +363,22 @@ pub fn store_token(
         let mut rollback: Vec<Snapshot> = Vec::new();
         for (key, previous) in &before {
             let current = store.get(key)?;
-            let expected = if *key == legacy_key { None } else { Some(token_owned.as_str()) };
+            let expected = if *key == legacy_key {
+                None
+            } else {
+                Some(token_owned.as_str())
+            };
             if current.as_deref() == expected {
                 rollback.push((key.clone(), previous.clone()));
             }
         }
         if host_key_owned.is_some() && store.get(&recent_key)? == recent_after {
             rollback.push((recent_key.clone(), recent_before_owned.clone()));
-            pins.restore(&host_owned, port, pin_before_owned.clone().flatten().as_deref());
+            pins.restore(
+                &host_owned,
+                port,
+                pin_before_owned.clone().flatten().as_deref(),
+            );
         }
         for (key, value) in &rollback {
             match value {
@@ -420,7 +430,9 @@ pub fn migrate_verified_credential(
         remember_pinned_host_key_locked(ports, &target.host, target.port, host_key, cancel)
     })();
     if let Err(error) = persist {
-        ports.pins.restore(&target.host, target.port, pin_before.as_deref());
+        ports
+            .pins
+            .restore(&target.host, target.port, pin_before.as_deref());
         rollback_values(
             ports,
             &[

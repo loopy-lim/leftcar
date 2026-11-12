@@ -143,7 +143,9 @@ fn pair_and_store(
     let result = (|| -> Result<String, PairingError> {
         options.throw_if_cancelled()?;
         let device_id = get_device_id(ports)?;
-        let (offer_id, secret) = offer.map(|(id, secret)| (Some(id), Some(secret))).unwrap_or((None, None));
+        let (offer_id, secret) = offer
+            .map(|(id, secret)| (Some(id), Some(secret)))
+            .unwrap_or((None, None));
         let args = PairArgs {
             offer_id,
             secret,

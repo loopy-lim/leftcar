@@ -29,7 +29,10 @@ impl PairingWorkflow {
     /// 같은 오퍼(승인 대기 중)의 되풀이 콜백은 살아 있는 실행을 재사용한다 —
     /// None이면 새로 만들 필요가 없다. 이전 실행의 rollback이 실패하면 오류를
     /// 돌려준다(TS는 run.ready await에서 같은 오류를 흘려보낸다).
-    pub fn begin_qr(&mut self, payload: &QrPayload) -> Result<Option<PairingWorkflowRun>, PairingError> {
+    pub fn begin_qr(
+        &mut self,
+        payload: &QrPayload,
+    ) -> Result<Option<PairingWorkflowRun>, PairingError> {
         let key = format!("qr:{}:{}:{}", payload.id, payload.secret, payload.host_key);
         if let Some((current_key, _)) = &self.current {
             if *current_key == key {
@@ -133,7 +136,10 @@ mod tests {
             port: 7777,
             ts: None,
         };
-        let run_a = workflow.begin_qr(&payload_a).expect("begin").expect("first run");
+        let run_a = workflow
+            .begin_qr(&payload_a)
+            .expect("begin")
+            .expect("first run");
         // 같은 오퍼의 되풀이 콜백은 None — 살아 있는 실행을 재사용한다.
         assert!(workflow.begin_qr(&payload_a).expect("begin").is_none());
         assert!(!run_a.attempt.signal().is_cancelled());
@@ -141,7 +147,10 @@ mod tests {
         // 다른 오퍼가 오면 이전 실행을 중단시키고 새 실행이 이긴다.
         let mut payload_b = payload_a.clone();
         payload_b.id = "offer-123e4567-e89b-42d3-a456-426614174001".into();
-        let run_b = workflow.begin_qr(&payload_b).expect("begin").expect("second run");
+        let run_b = workflow
+            .begin_qr(&payload_b)
+            .expect("begin")
+            .expect("second run");
         assert!(run_a.attempt.signal().is_cancelled());
         assert!(!run_b.attempt.signal().is_cancelled());
         // 옛 실행의 finish는 거짓이고 새 실행의 finish만 진짜다.

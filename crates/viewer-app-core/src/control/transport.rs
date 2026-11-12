@@ -8,8 +8,12 @@ use std::time::Duration;
 
 /// 제어 평면 연결 생성기. `timeout`은 소켓 연결(이름 풀이 포함)까지의 상한이다.
 pub trait ControlTransport: Send + Sync {
-    fn connect(&self, host: &str, port: u16, timeout: Duration)
-        -> io::Result<Box<dyn ControlStream>>;
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> io::Result<Box<dyn ControlStream>>;
 }
 
 /// 연결된 제어 소켓. 읽기는 엔진의 읽기 스레드가, 쓰기는 요청 스레드가
@@ -88,7 +92,10 @@ impl ControlStream for TcpControlStream {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         let Some(socket) = self.socket.as_mut() else {
-            return Err(io::Error::new(io::ErrorKind::NotConnected, "socket destroyed"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "socket destroyed",
+            ));
         };
         io::Write::write_all(socket, buf)
     }
@@ -114,7 +121,10 @@ impl ControlStream for TcpControlStream {
 impl ControlWriter for TcpControlWriter {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         let Some(socket) = self.socket.as_mut() else {
-            return Err(io::Error::new(io::ErrorKind::NotConnected, "socket destroyed"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "socket destroyed",
+            ));
         };
         io::Write::write_all(socket, buf)
     }
@@ -127,7 +137,12 @@ impl ControlWriter for TcpControlWriter {
 }
 
 impl ControlTransport for TcpTransport {
-    fn connect(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Box<dyn ControlStream>> {
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> io::Result<Box<dyn ControlStream>> {
         let mut last_err: Option<io::Error> = None;
         for addr in (host, port).to_socket_addrs()? {
             match TcpStream::connect_timeout(&addr, timeout) {
