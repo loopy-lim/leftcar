@@ -310,6 +310,7 @@ fn handle_connection(stream: std::net::TcpStream, token: &str, handles: Arc<Pane
                         "request line exceeds the {MAX_REQUEST_BYTES} byte limit"
                     )),
                 );
+                drain_remaining_input(&mut reader);
                 return;
             }
             Ok(_) => {}
@@ -358,6 +359,26 @@ fn write_response(
     writer.write_all(response.to_string().as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()
+}
+
+/// 닫기 직전 남은 수신 데이터를 버린다. 읽지 않은 데이터가 남은 소켓을
+/// close하면 커널은 FIN 대신 RST를 보내고, RST는 클라이언트 수신 큐에
+/// 이미 도착한 직전 응답까지 파기한다(과다 요청에 대한 byte-limit 오류가
+/// 느린 독자에게 전달되지 않는 실측 경합). 정직한 발신자는 유한하게 보내고
+/// 끝내므로 짧은 시간 안에 수신큐가 비워져 FIN으로 닫히고, 계속 붓는
+/// 발신자는 상한에서 끊는다.
+fn drain_remaining_input(reader: &mut std::io::BufReader<std::net::TcpStream>) {
+    const DRAIN_BUDGET: usize = 4 * MAX_REQUEST_BYTES;
+    const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+    let _ = reader.get_ref().set_read_timeout(Some(DRAIN_TIMEOUT));
+    let mut sink = [0u8; 16 * 1024];
+    let mut drained = 0usize;
+    while drained < DRAIN_BUDGET {
+        match reader.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(received) => drained += received,
+        }
+    }
 }
 
 fn json<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {

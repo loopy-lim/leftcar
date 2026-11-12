@@ -225,3 +225,30 @@ typecheck 체인(ui-theme·react-runtime·루트 tsc -b·viewer-expo·host-deskt
 검증: `cargo test -p viewer-app-core --test control_secure_spec` 9회 연속
 4/4 그린, rustfmt clean, clippy `-D warnings` 0. /simplify: 수치 확대라
 무변경 종료.
+
+---
+
+# 7차 라운드: 4f67e8e CI — panel 과다 요청 응답이 RST로 파기되는 실제 계약 경합
+
+6차 커밋(코드 수정 포함)의 CI(43205819803)에서 rust 잡이 다른 지점에서
+실패: host 크레이트 `panel::tests::oversized_request_line_is_rejected_and_
+closes_the_connection`이 첫 응답 읽기에서 `ConnectionReset(code 54)`.
+
+- **근원(코드 결함, 테스트 아님)**: `handle_connection`의 `TooLong` 처리가
+  byte-limit 오류 응답을 flush하고 즉시 `return`(close)한다. 1MiB 초과
+  페이로드가 수신 큐에 남은 채 close하면 커널은 FIN 대신 **RST**를 보내고,
+  RST는 클라이언트 수신 큐에 이미 도착한 오류 응답까지 파기한다. 느린
+  독자(부하 찬 러너의 테스트 스레드 포함, 정직한 실제 클라이언트도)는
+  byte-limit 응답을 못 받고 reset을 본다 — 직전 두 런에서 통과한 것은
+  클라이언트가 RST보다 빨리 읽었을 뿐인 타이밍이었다.
+- **수정**: `drain_remaining_input` — 닫기 전 잔여 수신을 버린다(상한
+  4×MAX_REQUEST_BYTES, 읽기 제한 250ms). 정직한 발신자는 유한하게 보내고
+  끝내므로 큐가 비워져 FIN으로 닫히고, 계속 붓는 발신자는 상한에서 끊는다.
+
+검증: host 크레이트 clippy `-D warnings` 0, oversized 테스트 10/10 그린,
+전체 447 passed / 0 failed(CI 동일 명령). /simplify: 단일 목적 헬퍼로 이미
+최소 — 무변경 종료.
+
+## 7차 커밋 경계
+
+`apps/host-desktop/src-tauri/src/panel.rs`(TooLong arm + 헬퍼), 이 문서.
