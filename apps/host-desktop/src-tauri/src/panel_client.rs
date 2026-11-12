@@ -16,12 +16,22 @@ use std::path::Path;
 /// 훨씬 밑돈다. 요청 상한(1MiB)과 별개 스코프다.
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
+/// 소켓 읽기·쓰기 제한시간(기본). 응답을 못 내주는 호스트에 CLI가 무기한
+/// 매달리는 일을 막는다 — 진단 도구는 빠른 실패가 유용하다.
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// 연결이 예고 없이 끊겼을 때의 안내 — 토큰 불일치와 호스트 재시작이
 /// 클라이언트에서는 구분되지 않는다.
 fn connection_closed() -> String {
     "패널이 연결을 닫았습니다 — 토큰 불일치이거나 호스트가 재시작됐습니다 \
      (panel-token 파일이 오래됐으면 호스트를 다시 띄우세요)"
         .to_string()
+}
+
+/// 제한시간 초과 공통 문구 — 호스트가 응답을 내주지 못하는 상태(처리 교찰
+/// 등)를 무기한 대기 대신 빠른 실패로 바꾼다.
+fn timed_out() -> String {
+    "패널 응답 대기 시간 초과 — 호스트가 응답하지 않습니다(호스트 로그 확인 권장)".to_string()
 }
 
 #[derive(Debug)]
@@ -42,6 +52,10 @@ impl PanelClient {
             )
         })?;
         let _ = stream.set_nodelay(true);
+        // SO_RCVTIMEO/SO_SNDTIMEO는 소켓 단위 옵션이라 복제 전에 걸면
+        // writer·reader 양쪽에 같이 적용된다.
+        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         let writer = stream
             .try_clone()
             .map_err(|error| format!("패널 스트림 복제 실패: {error}"))?;
@@ -80,6 +94,8 @@ impl PanelClient {
                 std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
                     connection_closed()
                 }
+                // 제한시간 초과(linux는 WouldBlock, windows는 TimedOut).
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => timed_out(),
                 _ => format!("패널 요청 전송 실패: {error}"),
             })?;
 
@@ -92,6 +108,9 @@ impl PanelClient {
                     crate::panel::LineError::Io(error) => match error.kind() {
                         std::io::ErrorKind::ConnectionReset
                         | std::io::ErrorKind::BrokenPipe => connection_closed(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                            timed_out()
+                        }
                         _ => format!("패널 응답 읽기 실패: {error}"),
                     },
                     crate::panel::LineError::TooLong => format!(
@@ -123,6 +142,15 @@ impl PanelClient {
     /// 인자 없는 편의 래퍼.
     pub fn call0(&mut self, command: &str) -> Result<serde_json::Value, String> {
         self.call(command, serde_json::Value::Null)
+    }
+
+    /// 소켓 읽기·쓰기 제한시간 재설정(테스트가 짧은 시간을 걸 때 쓴다).
+    /// reader와 writer는 같은 소켓의 복제라 reader 쪽 핸들로 걸어도 양
+    /// 방향에 적용된다.
+    pub fn set_io_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        let socket = self.reader.get_ref();
+        let _ = socket.set_read_timeout(timeout);
+        let _ = socket.set_write_timeout(timeout);
     }
 }
 
@@ -236,6 +264,29 @@ mod tests {
         let mut client = PanelClient::connect(port, "wrong").unwrap();
         let error = client.call0("get_status").unwrap_err();
         assert!(error.contains("연결을 닫았습니다"), "{error}");
+    }
+
+    /// 토큰은 받지만 응답을 절대 보내지 않는 가짜 패널 — 호스트가 응답을
+    /// 못 내주는 상태(처리 교찰 등)에서 CLI가 무기한 매달리지 않는지 확인.
+    #[test]
+    fn unresponsive_panel_times_out_instead_of_hanging() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::Builder::new()
+            .name("fake-panel-stuck".into())
+            .spawn(move || {
+                // 토큰 줄만 소비하고 연결을 열어 둔 채 잠든다.
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            })
+            .unwrap();
+        let mut client = PanelClient::connect(port, "tok").unwrap();
+        client.set_io_timeout(Some(std::time::Duration::from_millis(200)));
+        let error = client.call0("get_status").unwrap_err();
+        assert!(error.contains("시간 초과"), "{error}");
     }
 
     #[test]

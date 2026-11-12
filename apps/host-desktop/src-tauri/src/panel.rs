@@ -19,7 +19,9 @@
 //! 견고성: JSON 파싱 실패·알 수 없는 명령·인자 오류는 연결을 유지한 채
 //! `ok:false` 응답으로 답한다(폴링 클라이언트 사양 — 오탈자 한 번에 세션이
 //! 죽지 않는다). 다만 파서를 건너뛸 수 없는 초과 길이 줄(1MiB 상한)은 스트림
-//! 정합을 해치므로 `ok:false` 응답 후 연결을 끊는다.
+//! 정합을 해치므로 `ok:false` 응답 후 연결을 끊는다. 인증 전 첫 줄에는
+//! 10초 읽기 제한이 있어 미인증 유휴 연결이 스레드를 점유하지 못하게
+//! 한다(인증 뒤 요청 읽기는 폴링 공백을 위해 무제한).
 //!
 //! 동시성: 연결마다 스레드(`leftcar-panel-conn`), 한 연결 안에서는 요청을
 //! 순서대로 처리한다(폴링 클라이언트 의미론). 크레이트의 기존 패턴과 같은
@@ -266,6 +268,11 @@ fn trim_eol(bytes: &[u8]) -> &[u8] {
 
 fn handle_connection(stream: std::net::TcpStream, token: &str, handles: Arc<PanelHandles>) {
     let _ = stream.set_nodelay(true);
+    // 인증 전 첫 줄에만 읽기 제한시간을 둔다 — 토큰 줄을 끝내 보내지 않는
+    // 로컬 연결이 스레드를 영구 주차시키는 일을 막는다(정상 클라이언트는
+    // 연결 즉시 토큰을 보낸다).
+    const AUTH_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let _ = stream.set_read_timeout(Some(AUTH_READ_TIMEOUT));
     let mut writer = match stream.try_clone() {
         Ok(writer) => BufWriter::new(writer),
         Err(_) => return,
@@ -282,6 +289,11 @@ fn handle_connection(stream: std::net::TcpStream, token: &str, handles: Arc<Pane
     if trim_eol(&line) != token.as_bytes() {
         return;
     }
+    // 인증됐다 — 이후 요청 읽기는 무제한으로 돌린다. 대시보드 폴링
+    // 클라이언트는 한 연결을 유지한 채 요청 사이에 긴 공백을 둔다("느긋한
+    // 연결" 의미론). reader와 writer는 같은 소켓의 복제라 reader 쪽 핸들로
+    // 걸어도 양쪽에 적용된다.
+    let _ = reader.get_ref().set_read_timeout(None);
 
     loop {
         match read_capped_line(&mut reader, &mut line, MAX_REQUEST_BYTES) {
