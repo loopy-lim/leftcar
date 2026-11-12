@@ -228,7 +228,10 @@ mod tests {
     #[test]
     fn missing_token_flag_needs_xdg_runtime_dir() {
         let parsed = parse_args(args(&[])).unwrap();
-        // 두 환경에서 모두 결정적이어야 한다: XDG가 있으면 표준 경로, 없으면 오류.
+        // 모든 플랫폼에서 결정적이어야 한다: XDG가 있으면 그 아래 표준 경로,
+        // 없으면 플랫폼 폴백(TMPDIR·LOCALAPPDATA — Windows 러너는 항상
+        // LOCALAPPDATA가 있다), 그 어떤 것도 없어야 오류다(panel_dir_from_env
+        // 우선순위 그대로).
         match std::env::var("XDG_RUNTIME_DIR") {
             Ok(base) => {
                 let (token, _) = resolve_args(parsed).unwrap();
@@ -237,9 +240,16 @@ mod tests {
                     std::path::Path::new(&base).join("leftcar").join("panel-token")
                 );
             }
-            Err(_) => {
-                assert!(resolve_args(parsed).is_err());
-            }
+            Err(_) => match panel::default_token_path() {
+                Some(expected) => {
+                    let (token, _) = resolve_args(parsed)
+                        .expect("폴백 디렉터리가 있으면 생략 플래그도 허용돼야 한다");
+                    assert_eq!(token, expected);
+                }
+                None => {
+                    assert!(resolve_args(parsed).is_err());
+                }
+            },
         }
     }
 }

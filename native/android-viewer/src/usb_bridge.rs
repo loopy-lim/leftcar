@@ -29,6 +29,17 @@ const FRAGMENT_DATAGRAM_BYTES: usize = 1_400;
 const FRAGMENT_HEADER_BYTES: usize = 33;
 const FRAGMENT_PAYLOAD_BYTES: usize = FRAGMENT_DATAGRAM_BYTES - FRAGMENT_HEADER_BYTES;
 
+/// fd의 fstat 정체(dev, ino). fd 번호가 재사용돼도 새 소켓은 다른 inode를
+/// 가지므로 "같은 물리 소켓 재입장" 식별에 안전하다.
+fn socket_identity(fd: i32) -> Option<(u64, u64)> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: stat은 fd만 읽고 초기화된 출력 버퍼에 쓴다.
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    Some((stat.st_dev as u64, stat.st_ino as u64))
+}
+
 /// Split one whole access-unit frame (L2 logical layout: marker, AU id,
 /// "L2", capture/encode wall clocks, H.264 payload) into the shim's
 /// fragmented UDP datagram shape so the renderer's existing fragment
@@ -81,6 +92,9 @@ pub struct UsbBridge {
     route: Arc<Mutex<Option<MediaRoute>>>,
     generation: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
+    /// 최초 fd의 fstat 정체(dev, ino) — fd 번호 재사용과 무교차하며 같은
+    /// 소켓 재입장을 식별한다. None은 식별 불가(레거시 동작 유지).
+    socket_id: Option<(u64, u64)>,
 }
 
 /// Only this incarnation can consume media or send renderer feedback. The
@@ -109,6 +123,7 @@ impl UsbBridge {
         if duplicate < 0 {
             return Err(io::Error::last_os_error());
         }
+        let socket_id = socket_identity(duplicate);
         let file = unsafe { File::from_raw_fd(duplicate) };
         let writer = Arc::new(Mutex::new(file.try_clone()?));
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -162,7 +177,16 @@ impl UsbBridge {
             route,
             generation,
             worker: Some(worker),
+            socket_id,
         })
+    }
+
+    /// `fd`가 이 브리지가 최초에 점유한 것과 같은 물리 소켓인지(dev, ino
+    /// 정체로) 판별한다. fd 번호 재사용과 무관하다 — 새 액세서리는 언제나
+    /// 새 inode를 가진다.
+    pub fn owns_socket(&self, fd: i32) -> bool {
+        self.socket_id
+            .is_some_and(|id| socket_identity(fd) == Some(id))
     }
 
     pub fn prepare_media(self: &Arc<Self>, media_key: [u8; 32]) -> io::Result<UsbMediaLease> {

@@ -241,12 +241,18 @@ pub extern "C" fn leftcar_jni_prepare_usb(fd: i32, key: *const u8, key_len: usiz
             return LEFTCAR_ERR_INVALID;
         };
         let mut physical = USB_ACCESSORY_BRIDGE.lock().unwrap();
-        if physical
-            .as_ref()
-            .is_some_and(|bridge| !bridge.is_running() && !bridge.is_retired())
-        {
-            log_info!("previous USB accessory cleanup is incomplete; reconnect the accessory");
-            return LEFTCAR_ERR_STATE;
+        if let Some(bridge) = physical.as_ref().filter(|bridge| !bridge.is_running()) {
+            if !bridge.is_retired() {
+                log_info!("previous USB accessory cleanup is incomplete; reconnect the accessory");
+                return LEFTCAR_ERR_STATE;
+            }
+            // 정지된 브리지로의 같은 물리 소켓 재입장도 거부한다 — stop 관측과
+            // 워커 종료는 경합하므로(retired 여부는 타이밍에 의존) 정체(dev,
+            // ino)로 판정한다. 액세서리 재연결은 언제나 새 fd로 온다.
+            if bridge.owns_socket(fd) {
+                log_info!("stopped USB accessory socket re-entered; reconnect the accessory");
+                return LEFTCAR_ERR_STATE;
+            }
         }
         let bridge = match physical.as_ref().filter(|bridge| bridge.is_running()) {
             Some(bridge) => std::sync::Arc::clone(bridge),

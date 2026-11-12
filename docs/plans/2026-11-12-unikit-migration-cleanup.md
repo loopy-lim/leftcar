@@ -101,3 +101,34 @@ CI와 동일한 태스크(`:unikit-bridge_generated-react-native:externalNativeB
 
 `package.json`·`bun.lock`·`patches/@unikit-bridge%2F{ui@0.1.0,react-native@0.11.0}.patch`·
 이 문서. 사용자 진행 WIP(`apps/host-desktop/src-tauri/src/panel{,_client}.rs`)은 미포함.
+
+---
+
+# 3차 라운드: 93ed3e3 CI — ts·android 회복, rust·windows 새 실패 2건
+
+ts(Typecheck)·android(ninja)·device-evidence **초록 — 2차 패치 효과 확인.**
+rust·windows 실패는 모두 내 커밋이 아닌 원인:
+
+- **windows-host** `missing_token_flag_needs_xdg_runtime_dir`(leftcar-hostd):
+  사용자 커밋 904d478·faf7b3b는 그때까지 푸시되지 않아 93ed3e3 push가 CI에
+  처음 노출. 테스트는 "XDG 없으면 오류"만 가정했으나 Windows 러너는
+  LOCALAPPDATA 폴백(`panel_dir_from_env` 문서화 규칙)으로 항상 성공한다.
+  → 테스트가 우선순위 전체(XDG → 플랫폼 폴백 → 오류)를 반영하도록 수정.
+  Windows 규칙 자체는 panel.rs의 순수 근사 테스트가 이미 결정론적으로 커버.
+- **rust** `a_failed_accessory_owner_must_retire_before_another_reader_is_admitted`
+  (android-viewer, e186264 이후 불변 영역): stop 플래그 관측과 워커 스레드
+  종료(`is_retired`) 사이 창에 의존하는 경합 — CI 병렬 부하에서 창이 닫혀
+  같은 fd로 새 브리지가 입장(OK 반환). 로컬 10회 재현 불가(0.03s).
+  → `UsbBridge`가 최초 fd의 fstat 정체(dev, ino)를 기억하고, 정지된 브리지로의
+  **같은 물리 소켓 재입장을 타이밍과 무관하게 거부**(`owns_socket`). 새
+  액세서리는 언제나 새 fd/inode로 오므로 합법적 재연결 경로 보존(실행 중
+  브리지 재사용·retired+다른 fd 새 시작 그대로).
+
+검증: android-viewer fmt/clippy `-D warnings`/296 테스트 0, usb_ownership
+20회 연속 그린, 워크스페이스 전체 0 실패, hostd 테스트 XDG 있음/없음 양쪽 그린.
+
+## 3차 커밋 경계
+
+`native/android-viewer/src/{usb_bridge.rs,jni_exports.rs}`,
+`apps/host-desktop/src-tauri/src/bin/leftcar-hostd.rs`(테스트만), 이 문서.
+사용자 진행 WIP(`panel.rs`·`panel_client.rs`)은 미포함.
