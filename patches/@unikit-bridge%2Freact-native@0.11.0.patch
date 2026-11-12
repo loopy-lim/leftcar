@@ -1,0 +1,39 @@
+diff --git a/native/android/unikit-jsi-jni.cpp b/native/android/unikit-jsi-jni.cpp
+index e19c3719c9ac99caa2cb79e45c0a0d168acee9db..168e4260c354452601ea77b302de2cd196553ef1 100644
+--- a/native/android/unikit-jsi-jni.cpp
++++ b/native/android/unikit-jsi-jni.cpp
+@@ -7,6 +7,11 @@
+ #include <memory>
+ #include "UnikitJSIBridge.hpp"
+ 
++// 업스트림 0.11.0 결함: UnikitJSIBridge.hpp는 namespace unikit 로 개명됐으나
++// 이 파일의 호출부(install·invalidate·핫코어 API)는 아직 unikit_bridge 한정자를
++// 쓴다 — 소비측 패치로 별칭을 제공한다.
++namespace unikit_bridge = unikit;
++
+ #define LOG_TAG "UnikitBridge"
+ #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+ #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+diff --git a/native/cpp/UnikitJSIBridge.cpp b/native/cpp/UnikitJSIBridge.cpp
+index c32034356cb4256304c998ecb599596037284102..78f895716a8d3ac78a840a90d9dda93c12969bc0 100644
+--- a/native/cpp/UnikitJSIBridge.cpp
++++ b/native/cpp/UnikitJSIBridge.cpp
+@@ -149,11 +149,16 @@ static Value createArrayBuffer(Runtime& rt, const uint8_t* data, size_t size) {
+   }
+   return ab;
+ }
++}
+ 
+-Value generated::make_array_buffer(Runtime& rt, const uint8_t* data, size_t size) {
+-  return createArrayBuffer(rt, data, size);
++// 소비측 패치: unikit 블록 안에서는 형제 네임스페이스(unikit_bridge::generated)
++// 멤버를 정의할 수 없다(C++ 정의 위치 규칙) — 블록 밖에서 정의한다.
++facebook::jsi::Value unikit_bridge::generated::make_array_buffer(facebook::jsi::Runtime& rt, const uint8_t* data, size_t size) {
++  return unikit::createArrayBuffer(rt, data, size);
+ }
+ 
++namespace unikit {
++
+ /// Owns the exact `(ptr, len)` transferred by `unikit_ffi_invoke_buffer`.
+ /// Hermes keeps the shared MutableBuffer alive for the lifetime of the JS
+ /// ArrayBuffer, so the Rust allocation is exposed without another bulk copy.

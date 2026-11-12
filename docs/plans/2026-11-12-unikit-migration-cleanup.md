@@ -25,7 +25,13 @@ v0.1.11 산출 과정에서 로컬 `node_modules/@unikit-bridge/ui/src/bridge/we
 `ref as any`로 수 패치돼 있었고, 이것이 로컬 typecheck 통과·CI 실패의 "불일치"로
 보였다. 진품 npm 타르볼(0.1.0은 `ref as React.Ref<...>` 캐스트)로 복원하자
 로컬에서도 CI와 동일한 TS2322가 재현됐다 — 불일치는 존재하지 않았고 로컬 검증이
-패치에 의해 오염돼 있었다. 현재 node_modules은 lock 기준 전면 재구성(진품).
+패치에 의해 오염돼 있었다.
+
+**2차 정정(아래 라운드 참고):** 위 복원은 web.tsx에만 해당했다. `native.tsx`는
+같은 날짜(2026-11-10 02:35)의 손패치(`type PressableInstance = any;` 수제 별칭 +
+`ref as any`) 상태로 남아 1차 라운드의 typecheck·react-doctor "로컬 통과"를 만들
+먼 것으로 밝혀졌다. 1차 검증 기록 중 ui 패키지 소스에 의존한 항목은 오염
+노드베이스 기반이다.
 
 ## 검증 기록 (2026-11-12, 이 머신 — CI push 후 4잡 green으로 최종 확인 예정)
 
@@ -41,3 +47,57 @@ v0.1.11 산출 과정에서 로컬 `node_modules/@unikit-bridge/ui/src/bridge/we
 ## 커밋 경계
 
 마이그레이션 수정 14파일만 커밋. 사용자 미커밋 WIP(`apps/host-desktop/src-tauri/*` 6파일, `docs/dev-environment.md`)은 보존·미포함.
+
+---
+
+# 2차 라운드: ts·android 잔여 실패의 진짜 근원과 bun 패치 (같은 날 저녁)
+
+e186264 push 후 CI: **rust-fast·windows-host·device-evidence 회복**, ts(Typecheck)·
+android(ninja) 잔여 실패.
+
+## 규명: "CI가 맞았고 로컬이 틀렸다"
+
+- 신규 다운로드한 npm `@unikit-bridge/ui@0.1.0` 타르볼(sha512 == lock K3FO…)의
+  `native.tsx`는 **18–21줄 `type PressableInstance, …` react-native import** 버전 —
+  CI TS2305×4·(8bbd08b 시점의) 98줄 TS2322와 정확히 일치. **0.1.0은 출간 결함이
+  있는 그 자체**였고 0.2.0(latest)도 동일 결함(라인만 이동).
+- 로컬이 초록이었던 이유: node_modules의 native.tsx가 2026-11-10 02:35 손패치
+  (수제 별칭 + `ref as any`)였다. bun은 lock 불변 시 기존 폴더를 다시 풀지
+  않아 어떤 클린 재설치에서도 손패치가 살아남았고, 1차 라운드에서 `bun patch`
+  1차 시도가 이 오염 폴더를 diff 기반으로 삼으면서 `_patch_hash` 캐시
+  항목까지 오염됐다(2차 시도의 재오염 원인). 재현 시 `~/.bun/install/cache`
+  전량 파기가 필수였다.
+- android 잡도 같은 결함군: 순정 `@unikit-bridge/react-native@0.11.0`의
+  `UnikitJSIBridge.hpp`는 `namespace unikit`로 개명됐으나 `unikit-jsi-jni.cpp`
+  호출부 5곳은 `unikit_bridge::` 잔존(CI `use of undeclared identifier` 그대로).
+
+## 수정: 소비측 bun 패치 2건(저장소 기록·CI 결정론적)
+
+업스트림(UniKit 별도 저장소) 재출간은 불가(ENEEDAUTH) → 이 저장소 선례 방식
+(`react-native-tcp-socket@6.4.2`)대로 `patches/` + `patchedDependencies`.
+
+| 패치 | 내용 |
+| --- | --- |
+| `patches/@unikit-bridge%2Fui@0.1.0.patch` | `native.tsx`: 존재하지 않는 `*Instance` import 4개 제거 → `ElementRef<typeof RN*>` 로컬 별칭(`PressableInstance`만 `any` — RN Pressable 타입에서 안전 유도 불가). 98줄 캐스트는 순정 유지(`Ref<PressableInstance>`로 충분) |
+| `patches/@unikit-bridge%2Freact-native@0.11.0.patch` | ① `unikit-jsi-jni.cpp`: `namespace unikit_bridge = unikit;` 별칭. ② `UnikitJSIBridge.cpp`: `make_array_buffer` 정의를 `unikit` 블록 밖 전역으로 이동(C++ 규칙: 형제 네임스페이스 멤버를 블록 안 정의 불가) + `facebook::jsi::` 완전 한정자(블록 안 `using namespace` 사라짐) |
+
+②는 CI 로그에 없던 것 — CI는 jni.cpp에서 먼저 죽어 도달 못 했고, **로컬에서
+CI와 동일한 태스크(`:unikit-bridge_generated-react-native:externalNativeBuildDebug`)를
+실컴파일해야** 발견됐다(1차: `generated::` 미선언, 2차: 전역 스코프 `Value` 미선언,
+3차 통과).
+
+## 2차 검증 기록 (완전 클린: `~/.bun/install/cache` 파기 + 전 node_modules 삭제 + bun 1.4.1 frozen)
+
+- 클린 재설치 후 두 패치 적용 내용 byte 검증(별칭·splice·한정자 전부).
+- `:unikit-bridge_generated-react-native:externalNativeBuildDebug` **BUILD
+  SUCCESSFUL**(arm64-v8a, NDK 27.1) — CI 실패 지점 그대로 재현 통과.
+- typecheck 3종(루트 tsc -b·viewer-expo·host-desktop) 0 — 레지스트리 순정+패치
+  내용 기반 최초의 진짜 통과.
+- vitest 979/979, `test:contract` 0, react-doctor **100/100**,
+  `test:architecture` clean, `rustra:check`+`git diff --exit-code` clean.
+- cargo 경로: `PATH="$HOME/.cargo/bin:$PATH"` 필요(tools 빌드 테스트 spawnSync).
+
+## 2차 커밋 경계
+
+`package.json`·`bun.lock`·`patches/@unikit-bridge%2F{ui@0.1.0,react-native@0.11.0}.patch`·
+이 문서. 사용자 진행 WIP(`apps/host-desktop/src-tauri/src/panel{,_client}.rs`)은 미포함.
