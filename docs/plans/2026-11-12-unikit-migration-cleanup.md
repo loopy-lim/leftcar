@@ -205,3 +205,7 @@ typecheck 체인(ui-theme·react-runtime·루트 tsc -b·viewer-expo·host-deskt
 `package.json`·`bun.lock`·`apps/{host-desktop,viewer-expo}/package.json`
 (버전 0.1.0→0.2.0), `patches/@unikit-bridge%2Fui@0.2.0.patch`(신규,
 0.1.0 패치 삭제), 이 문서.
+
+**최종 확정:** 9f4d87a·940d2f8 연속 두 커밋 모두 CI 5잡 전원 초록
+(43199389965·43202008524). unikit-bridge 마이그레이션 부채·의존 최신화
+전부 종결.
