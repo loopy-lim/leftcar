@@ -1,0 +1,75 @@
+diff --git a/node_modules/@unikit-bridge/ui/.bun-tag-7b7b175d4ce10dda b/.bun-tag-7b7b175d4ce10dda
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/bridge/native.tsx b/src/bridge/native.tsx
+index c4695d83ddff3c1fe5b5fd12d4fe68b954c57dba..e35f7821efc6782fe7e5b48d444e541b36dc0db3 100644
+--- a/src/bridge/native.tsx
++++ b/src/bridge/native.tsx
+@@ -9,20 +9,15 @@
+  *   disabled(버튼)→ RN 표준 disabled · onChangeText는 RN 표준 그대로
+  * aria-* 프로퍼티는 RN 0.7x+가 네이티브 관용으로 지원한다.
+  */
+-import { forwardRef, type Ref } from "react";
++import { type ComponentProps, forwardRef, type ElementRef, type Ref } from "react";
+ import {
+   Image as RNImage,
+   Pressable as RNPressable,
+   Text as RNText,
+   TextInput as RNTextInput,
+   View as RNView,
+-  type ImageInstance,
+   type ImageStyle,
+-  type PressableInstance,
+-  type TextInstance,
+   type TextStyle,
+-  type TextInputInstance,
+-  type ViewInstance,
+   type ViewStyle,
+ } from "react-native";
+ import { Uniwind } from "uniwind";
+@@ -44,6 +39,18 @@ import type {
+ // 공유 타입 전량 재수출 — 소비자는 @unikit-bridge/ui/primitives에서 타입까지 한 번에 import
+ export type * from "./types";
+ 
++// react-native 0.86 공개 타입은 *Instance 이름을 수출하지 않는다(업스트림
++// 출간 결함) — 소비측 패치로 로컬 별칭을 제공한다.
++type ImageInstance = ElementRef<typeof RNImage>;
++type PressableInstance = any;
++type TextInstance = ElementRef<typeof RNText>;
++type TextInputInstance = ElementRef<typeof RNTextInput>;
++type ViewInstance = ElementRef<typeof RNView>;
++// RN 0.86의 AccessibilityRole은 닫힌 유니언이다(0.88+는 | string로 개방) —
++// BridgeRole의 웹 전용 역할(heading·tabpanel 등)은 여기서 좁혀 전달한다.
++// 알 수 없는 역할 문자열은 런타임에서 OS가 무시한다.
++type NativeAccessibilityRole = ComponentProps<typeof RNView>["accessibilityRole"];
++
+ // ---------------------------------------------------------------------------
+ // View — RN View 재노출(타입만 브리지 계약으로 좁힌다)
+ // ---------------------------------------------------------------------------
+@@ -66,7 +73,7 @@ const View = forwardRef<BridgeViewRef, ViewProps>(
+       ref={ref as Ref<ViewInstance>}
+       nativeID={nativeID}
+       testID={testID}
+-      accessibilityRole={accessibilityRole}
++      accessibilityRole={accessibilityRole as NativeAccessibilityRole}
+       accessibilityLabel={accessibilityLabel}
+       aria-hidden={ariaHidden}
+       accessibilityElementsHidden={ariaHidden}
+@@ -103,7 +110,7 @@ const Text = forwardRef<BridgeTextRef, TextProps>(
+       nativeID={nativeID}
+       testID={testID}
+       onPress={onPress}
+-      accessibilityRole={accessibilityRole}
++      accessibilityRole={accessibilityRole as NativeAccessibilityRole}
+       accessibilityLabel={accessibilityLabel}
+       className={className}
+       style={style as TextStyle}
+@@ -176,7 +183,7 @@ const Pressable = forwardRef<BridgePressableRef, PressableProps>(
+       onPress={onPress ? () => onPress() : undefined}
+       disabled={disabled}
+       accessibilityLabel={accessibilityLabel}
+-      accessibilityRole={accessibilityRole}
++      accessibilityRole={accessibilityRole as NativeAccessibilityRole}
+       aria-disabled={ariaDisabled}
+       aria-checked={ariaChecked}
+       aria-selected={ariaSelected}

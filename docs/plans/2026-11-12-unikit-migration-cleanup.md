@@ -160,3 +160,48 @@ ignored(해당 테스트 포함), `cargo clippy --manifest-path … --tests --lo
 ## 4차 커밋 경계
 
 `apps/host-desktop/src-tauri/src/tcp_media.rs`(테스트만)와 이 문서.
+
+---
+
+# 5차 라운드: CI 5잡 전량 초록(9f4d87a) + unikit 의존 최신화(ui 0.2.0)
+
+4차 커밋 9f4d87a에서 **rust 잡까지 통과해 5개 잡 전원 초록** — 마이그레이션
+부채로 시작한 CI 실패는 여기서 전량 해소됐다.
+
+이어 "unikit 업데이트 다 안되어 있어?" 점검 결과:
+
+- `@unikit-bridge/react-native@0.11.0`·`cli@0.13.0`·`types@0.13.0` —
+  **이미 레지스트리 latest**. 갱신 없음(패치 1건은 계속 필요).
+- `@unikit-bridge/ui` — 0.1.0(패치 사용) → **0.2.0(latest)** 이 유일한 차등.
+  0.2.0은 shadcn 계열 23종 신규 컴포넌트 + 브리지 접근성 prop·동적 style
+  패스스루가 추가된 기능 릴리스다.
+
+## ui 0.2.0의 출간 결함 2건(소비측 패치 연장)
+
+1. **0.1.0과 동일 결함이 5개로 확대**: `native.tsx`가 react-native에서
+   수출하지 않는 `type *Instance` import — 0.1.0의 4개에서 `ImageInstance`가
+   추가됐다. 패치 재작성(별칭 5개, 기존 방식 동일).
+2. **신규 결함 — `BridgeRole` × RN 0.86**: 브리지가 웹·네이티브 공통 역할
+   유니언(`BridgeRole`: heading·tabpanel·option·separator·listitem·status
+   포함)을 그대로 `accessibilityRole`에 전달한다. 업스트림 개발 의존 RN
+   0.88.1의 `AccessibilityRole`은 `| string`으로 열려 있어 통과하지만, 우리
+   RN 0.86.2는 닫힌 리터럴 유니언이라 TS2322. → 패치에서
+   `NativeAccessibilityRole`(`ComponentProps<typeof RNView>["accessibilityRole"]`)
+   로 좁혀 3개 할당 지점(View·Text·Pressable)에서 캐스팅. 알 수 없는 역할
+   문자열은 런타임에서 OS가 무시하므로 안전하다.
+
+uniwind peer 요구(>=1.13.0, 설치는 1.11.0)는 0.1.0부터 동일한 상태이며
+브리지가 쓰는 uniwind API는 `Uniwind` 하나뿐이라 영향 없음 — 이번 범위에서
+유지(불일치는 업스트림이 요구조건을 올린 것으로, 실사용 API엔 무관).
+
+## 5차 검증 (완전 클린: 캐시·node_modules 파기 + frozen 재설치로 패치 결정론 확인)
+
+typecheck 체인(ui-theme·react-runtime·루트 tsc -b·viewer-expo·host-desktop)
+0, vitest 979/979, contract 0, architecture clean, react-doctor **100/100**.
+패치 적용은 풀 파기+frozen 재설치로 바이트 검증(별칭·캐스팅 전부).
+
+## 5차 커밋 경계
+
+`package.json`·`bun.lock`·`apps/{host-desktop,viewer-expo}/package.json`
+(버전 0.1.0→0.2.0), `patches/@unikit-bridge%2Fui@0.2.0.patch`(신규,
+0.1.0 패치 삭제), 이 문서.

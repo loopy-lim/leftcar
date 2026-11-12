@@ -53,11 +53,11 @@
   },
   "patchedDependencies": {
     "react-native-tcp-socket@6.4.2": "patches/react-native-tcp-socket@6.4.2.patch",
-    "@unikit-bridge/ui@0.1.0": "patches/@unikit-bridge%2Fui@0.1.0.patch",
-    "@unikit-bridge/react-native@0.11.0": "patches/@unikit-bridge%2Freact-native@0.11.0.patch"
+    "@unikit-bridge/react-native@0.11.0": "patches/@unikit-bridge%2Freact-native@0.11.0.patch",
+    "@unikit-bridge/ui@0.2.0": "patches/@unikit-bridge%2Fui@0.2.0.patch"
   },
   "dependencies": {
-    "@unikit-bridge/ui": "0.1.0",
+    "@unikit-bridge/ui": "0.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.0.0"

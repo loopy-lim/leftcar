@@ -5,7 +5,7 @@
     "": {
       "name": "leftcar",
       "dependencies": {
-        "@unikit-bridge/ui": "0.1.0",
+        "@unikit-bridge/ui": "0.2.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "tailwind-merge": "^3.0.0",
@@ -31,7 +31,7 @@
       "dependencies": {
         "@leftcar/ui-tokens": "workspace:*",
         "@tauri-apps/api": "^2",
-        "@unikit-bridge/ui": "0.1.0",
+        "@unikit-bridge/ui": "0.2.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^1.33.0",
@@ -78,7 +78,7 @@
         "@unikit-bridge/generated-react-native": "workspace:*",
         "@unikit-bridge/react-native": "^0.11.0",
         "@unikit-bridge/types": "^0.13.0",
-        "@unikit-bridge/ui": "0.1.0",
+        "@unikit-bridge/ui": "0.2.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "expo": "~57.0.15",
@@ -130,7 +130,7 @@
   "patchedDependencies": {
     "@unikit-bridge/react-native@0.11.0": "patches/@unikit-bridge%2Freact-native@0.11.0.patch",
     "react-native-tcp-socket@6.4.2": "patches/react-native-tcp-socket@6.4.2.patch",
-    "@unikit-bridge/ui@0.1.0": "patches/@unikit-bridge%2Fui@0.1.0.patch",
+    "@unikit-bridge/ui@0.2.0": "patches/@unikit-bridge%2Fui@0.2.0.patch",
   },
   "overrides": {
     "brace-expansion": "5.0.12",
@@ -707,7 +707,7 @@
 
     "@unikit-bridge/types": ["@unikit-bridge/types@0.13.0", "", {}, "sha512-PRuCC81uIqUduhBDEap7R7xnoxcd7z+1AgPyc3N1/caka+wxh6Re2ltUorDvI7YGIYyF7Bh20NiiaEYP9raSUA=="],
 
-    "@unikit-bridge/ui": ["@unikit-bridge/ui@0.1.0", "", { "peerDependencies": { "class-variance-authority": "^0.7.0", "clsx": "^2.1.0", "react": "^18.0.0 || ^19.0.0", "react-native": ">=0.81.0", "tailwind-merge": "^3.0.0", "uniwind": ">=1.13.0" }, "optionalPeers": ["react-native", "uniwind"] }, "sha512-K3FOYykXHvxsghprFkKicPrnj6Kwrd2exulLgrsUa00j1FlutqCg97i0EDgLJ47qeHp2NubAJAsGBu+PBTCFqQ=="],
+    "@unikit-bridge/ui": ["@unikit-bridge/ui@0.2.0", "", { "peerDependencies": { "class-variance-authority": "^0.7.0", "clsx": "^2.1.0", "react": "^18.0.0 || ^19.0.0", "react-native": ">=0.81.0", "tailwind-merge": "^3.0.0", "uniwind": ">=1.13.0" }, "optionalPeers": ["react-native", "uniwind"] }, "sha512-Xtj342t95AiO1pvokgfXTq9ogQ5VWT6RQipL/lGSBB1wpC6lcsHLjBDrNKcuAnGJYKGrd83FuC7Aqu3ZZT6ghA=="],
 
     "@vitejs/plugin-react": ["@vitejs/plugin-react@4.7.0", "", { "dependencies": { "@babel/core": "7.29.7", "@babel/plugin-transform-react-jsx-self": "7.29.7", "@babel/plugin-transform-react-jsx-source": "7.29.7", "@rolldown/pluginutils": "1.0.0-beta.27", "@types/babel__core": "7.20.5", "react-refresh": "0.17.0" }, "peerDependencies": { "vite": "6.4.3" } }, "sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA=="],
 

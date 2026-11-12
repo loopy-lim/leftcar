@@ -29,7 +29,7 @@
     "@unikit-bridge/generated-react-native": "workspace:*",
     "@unikit-bridge/react-native": "^0.11.0",
     "@unikit-bridge/types": "^0.13.0",
-    "@unikit-bridge/ui": "0.1.0",
+    "@unikit-bridge/ui": "0.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "expo": "~57.0.15",
