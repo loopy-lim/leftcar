@@ -28,6 +28,7 @@ pub mod media_pacing;
 mod media_sender;
 pub mod pairing;
 pub mod panel;
+pub mod panel_client;
 pub mod settings;
 pub mod source_grants;
 mod state_profile;
@@ -261,6 +262,23 @@ pub fn run() {
                 )));
             let curtain_controller = make_curtain_controller(app.handle().clone());
             services.server.set_curtain_controller(curtain_controller);
+            // CLI(leftcar-cli)와 대시보드가 실행 중 호스트를 찾는 루프백
+            // 패널을 표준 위치(${XDG_RUNTIME_DIR}/leftcar)에 게시한다.
+            // 패널 실패는 호스트 본연의 기능을 죽이지 않는다 — 경고만 남긴다.
+            // services 필드의 소유권이 아래 app.manage들로 넘어가므로 이 시점에
+            // 패널 핸들을 먼저 조립해 둔다. 비동기 명령 완수용 런타임은 앱 전역
+            // 런타임(tauri::async_runtime — 프로세스 수명)의 핸들을 그대로
+            // 쓴다(사이드카만 자체 런타임을 만든다 — PanelHandles 문서 참고).
+            let panel_handles = std::sync::Arc::new(panel::PanelHandles {
+                server: services.server.clone(),
+                pairing: services.pairing.clone(),
+                audit: services.audit.clone(),
+                settings: services.settings.clone(),
+                virtual_display: services.virtual_display.clone(),
+                upnp: services.upnp.clone(),
+                control_port: services.control_port,
+                runtime: tauri::async_runtime::handle().inner().clone(),
+            });
             app.manage(services.server);
             app.manage(services.pairing);
             app.manage(services.audit);
@@ -279,6 +297,10 @@ pub fn run() {
             app.manage(ControlEndpoint {
                 port: services.control_port,
             });
+            match panel::publish_default_panel(panel_handles) {
+                Ok(port) => println!("panel on 127.0.0.1:{port}"),
+                Err(error) => eprintln!("panel unavailable: {error}"),
+            }
             #[cfg(unix)]
             {
                 // Updaters send SIGTERM when the ordinary quit request is

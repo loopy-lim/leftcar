@@ -4,8 +4,13 @@
 //! Flutter 데스크톱 UI가 폴링 클라이언트로 붙는 대상이다.
 //!
 //! 인자:
-//!   --panel-token-file <경로>   (필수) 기동 때 만든 0600 인증 토큰을 기록한다.
-//!   --panel-port-file <경로>    (선택) 바인딩된 루프백 포트를 기록한다.
+//!   --panel-token-file <경로>   (선택) 0600 인증 토큰 파일 경로. 생략하면
+//!                               표준 위치 ${XDG_RUNTIME_DIR}/leftcar/panel-token.
+//!   --panel-port-file <경로>    (선택) 바인딩된 루프백 포트 파일 경로. 생략하면
+//!                               표준 위치 ${XDG_RUNTIME_DIR}/leftcar/panel-port.
+//!
+//! 표준 위치는 Tauri 호스트와 같다 — `leftcar-cli`는 어떤 변형이 떠 있든
+//! 같은 파일로 호스트를 발견한다.
 //!
 //! 상태 프로필 잠금 때문에 같은 프로필에서는 Tauri 호스트와 동시에 뜰 수
 //! 없다(제어 평면 7777 단일 인스턴스 전제 — 설계 §2.3의 사용 규칙).
@@ -29,6 +34,10 @@ fn main() {
         eprintln!("leftcar-hostd: {message}\n{}", USAGE);
         std::process::exit(2);
     });
+    let (panel_token_file, panel_port_file) = resolve_args(args).unwrap_or_else(|message| {
+        eprintln!("leftcar-hostd: {message}\n{}", USAGE);
+        std::process::exit(2);
+    });
     let services = bootstrap::start_host_services().unwrap_or_else(|message| {
         eprintln!("leftcar-hostd startup failed: {message}");
         std::process::exit(1);
@@ -44,14 +53,12 @@ fn main() {
         .expect("virtual display recovery thread");
 
     let token = panel::generate_token();
-    panel::write_token_file(&args.panel_token_file, &token)
+    panel::write_token_file(&panel_token_file, &token)
         .unwrap_or_else(|message| fatal(message));
     let (listener, panel_port) =
         panel::bind_panel_listener().unwrap_or_else(|message| fatal(message));
-    if let Some(port_file) = &args.panel_port_file {
-        if let Err(error) = std::fs::write(port_file, panel_port.to_string()) {
-            fatal(format!("panel port file {}: {error}", port_file.display()));
-        }
+    if let Some(port_file) = &panel_port_file {
+        panel::write_port_file(port_file, panel_port).unwrap_or_else(|message| fatal(message));
     }
     println!("panel on 127.0.0.1:{panel_port}");
 
@@ -77,16 +84,32 @@ fn main() {
     panel::serve(listener, token, handles);
 }
 
-const USAGE: &str = "usage: leftcar-hostd --panel-token-file <path> [--panel-port-file <path>]";
+const USAGE: &str = "usage: leftcar-hostd [--panel-token-file <path>] [--panel-port-file <path>]";
 
 struct HostdArgs {
-    panel_token_file: std::path::PathBuf,
+    panel_token_file: Option<std::path::PathBuf>,
     panel_port_file: Option<std::path::PathBuf>,
+}
+
+/// 파싱 결과를 실제 기록 경로로 확정한다. 명시적 경로가 우선이고, 없으면
+/// 표준 위치(`${XDG_RUNTIME_DIR}/leftcar`). 토큰 파일은 필수 요소라
+/// 둘 다 없으면 실패한다. 포트 파일은 표준 위치조차 없으면(비 unix 세션
+/// 등) 기록을 생략한다 — 선택 요소다.
+fn resolve_args(
+    parsed: HostdArgs,
+) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
+    let token_file = match parsed.panel_token_file {
+        Some(path) => path,
+        None => panel::default_token_path()
+            .ok_or_else(|| "--panel-token-file omitted and XDG_RUNTIME_DIR is not set".to_string())?,
+    };
+    let port_file = parsed.panel_port_file.or_else(panel::default_port_path);
+    Ok((token_file, port_file))
 }
 
 fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<HostdArgs, String> {
     let mut parsed = HostdArgs {
-        panel_token_file: std::path::PathBuf::new(),
+        panel_token_file: None,
         panel_port_file: None,
     };
     while let Some(flag) = args.next() {
@@ -102,16 +125,13 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<HostdArgs, Stri
         };
         match flag.as_str() {
             "--panel-token-file" => {
-                parsed.panel_token_file = take_value("--panel-token-file")?.into();
+                parsed.panel_token_file = Some(take_value("--panel-token-file")?.into());
             }
             "--panel-port-file" => {
                 parsed.panel_port_file = Some(take_value("--panel-port-file")?.into());
             }
             other => return Err(format!("unknown argument: {other}")),
         }
-    }
-    if parsed.panel_token_file.as_os_str().is_empty() {
-        return Err("--panel-token-file is required".into());
     }
     Ok(parsed)
 }
@@ -178,4 +198,48 @@ fn spawn_sigterm_handler(services: &bootstrap::HostServices) {
             std::process::exit(0);
         })
         .expect("signal handler thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> std::vec::IntoIter<String> {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn explicit_paths_win_over_defaults() {
+        let parsed =
+            parse_args(args(&["--panel-token-file", "/tmp/t", "--panel-port-file=/tmp/p"])).unwrap();
+        let (token, port) = resolve_args(parsed).unwrap();
+        assert_eq!(token, std::path::PathBuf::from("/tmp/t"));
+        assert_eq!(port.as_deref(), Some(std::path::Path::new("/tmp/p")));
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert!(parse_args(args(&["--nope"])).is_err());
+    }
+
+    #[test]
+    fn missing_token_flag_needs_xdg_runtime_dir() {
+        let parsed = parse_args(args(&[])).unwrap();
+        // 두 환경에서 모두 결정적이어야 한다: XDG가 있으면 표준 경로, 없으면 오류.
+        match std::env::var("XDG_RUNTIME_DIR") {
+            Ok(base) => {
+                let (token, _) = resolve_args(parsed).unwrap();
+                assert_eq!(
+                    token,
+                    std::path::Path::new(&base).join("leftcar").join("panel-token")
+                );
+            }
+            Err(_) => {
+                assert!(resolve_args(parsed).is_err());
+            }
+        }
+    }
 }

@@ -3,6 +3,9 @@ name = "leftcar-host-desktop"
 version = "0.1.11"
 edition = "2021"
 license = "MIT"
+# `tauri dev`(= cargo run)가 GUI 바이너리를 선택한다. src/bin/leftcar-hostd가
+# 추가된 뒤 자동 탐지 바이너리가 둘이 되어 지정이 없으면 기동이 실패한다.
+default-run = "leftcar-host-desktop"
 
 [workspace]
 
@@ -22,6 +25,7 @@ libc = "0.2"
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "signal"] }
 nusb = "0.1"
 futures-lite = "2"

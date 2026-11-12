@@ -428,6 +428,17 @@ impl PairingServer {
         inner.offer_owner = None;
     }
 
+    /// The single live host-side offer id, if any. `begin_pairing_owned`
+    /// always leaves exactly one (it drains the set first); approve/reject/
+    /// cancel/consume each remove it. CLI QR re-display (`pair show`) uses
+    /// this to confirm a cached session is still the active one. Returns
+    /// only the id — the QR payload/secret is deliberately not retained
+    /// server-side.
+    pub fn active_offer_id(&self) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.live_offers.iter().next().cloned()
+    }
+
     /// Complete pairing: verify secret possession + human code, issue a
     /// 32-byte hex token, persist the device. Failures deliberately report a
     /// single generic message — an attacker must not learn which factor was
@@ -1663,6 +1674,26 @@ mod tests {
             "{}",
             view.code
         );
+    }
+
+    #[test]
+    fn active_offer_id_tracks_the_single_live_offer() {
+        let server = PairingServer::new([7u8; 32], None, Box::new(FileTokenStore::new(None)));
+        assert_eq!(server.active_offer_id(), None);
+
+        let first = server.begin_pairing("192.168.0.10", 7777);
+        assert_eq!(server.active_offer_id().as_deref(), Some(first.offer_id.as_str()));
+
+        // 두 번째 begin은 이전 offer를 무효화한다 — 활성 id도 대체된다.
+        let second = server.begin_pairing("192.168.0.10", 7777);
+        assert_eq!(
+            server.active_offer_id().as_deref(),
+            Some(second.offer_id.as_str())
+        );
+        assert_ne!(first.offer_id, second.offer_id);
+
+        server.cancel_active();
+        assert_eq!(server.active_offer_id(), None);
     }
 
     #[test]

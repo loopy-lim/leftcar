@@ -92,3 +92,33 @@ adb logcat -d -s Leftcar   # 스트리밍 세션 로그 덤프
   항상 위 특성은 컴포지터가 무시할 수 있다.
 - Hyprland 0.56의 `hyprctl dispatch`는 Lua 파서를 거치므로 구형 공백 인자 문법이
   실패한다. 스크립트는 IPC 소켓에 Lua 인자 형식(`dispatch name("arg")`)으로 보낸다.
+
+## 호스트 CLI: leftcar-cli (2026-11-12)
+
+- 실행 중 호스트(Tauri GUI `leftcar-host-desktop` 또는 사이드카 `leftcar-hostd`)는
+  루프백 패널 프로토콜로 제어한다. 표준 발견 경로는
+  `${XDG_RUNTIME_DIR}/leftcar/panel-token`(0600)·`panel-port` — 두 호스트 변형이
+  같은 위치에 기록하므로 CLI는 어느 쪽이 떠 있든 붙는다. GUI 호스트는 기동 시
+  자동 게시하고(`panel on 127.0.0.1:<port>` 로그), hostd는 인자 생략 시 같은
+  표준 위치를 쓴다(`--panel-token-file`로 재정의 가능).
+- **GUI 없이 헤드리스 기동**: `leftcar-hostd` 한 줄(인자 불필요)이 mDNS·제어
+  평면 7777·패널을 모두 띄운다(2026-11-12 리눅스 실측). CLI가 호스트를
+  시작하는 건 아니고 실행 중 호스트를 제어하는 역할 분담이다. 같은 프로필에선
+  GUI 호스트와 동시 실행이 불가하다(7777 단일 인스턴스).
+- 플랫폼별 표준 경로: 리눅스 `${XDG_RUNTIME_DIR}/leftcar`, macOS
+  `${TMPDIR}/leftcar`(유저별 /var/folders), Windows
+  `%LOCALAPPDATA%\leftcar`. 세 경로 모두 유저 전용 권한 범위다.
+  코드는 크레이트 전체가 플랫폼 독립(std만 사용)이며, 리눅스 네이티브
+  테스트·윈도우 `cargo check --target x86_64-pc-windows-msvc --bins`·
+  macOS CI(macos-latest에서 호스트 크레이트 clippy/테스트)로 검증된다.
+- 빌드: `cargo build --manifest-path apps/host-desktop/src-tauri/Cargo.toml --bin leftcar-cli`.
+- 주요 명령: `status`(플랫폼·LAN IP·제어 포트·세션·WAN 요약), `pair begin`
+  (6자리 코드 + 터미널 QR 출력 — 어두운 터미널 극성, 밝은 터미널에서는
+  `--json`의 `qr_payload`를 다른 QR 도구로), `pair show`(마지막 세션의 QR
+  다시 표시 — 기존 offer·대기 요청을 유지한 채 재출력. 서버가 QR 페이로드를
+  보관하지 않으므로 CLI가 토큰 파일 옆 `cli-last-pairing.json`(0600)에
+  캐시하고, 패널 확장 명령 `get_active_pairing`으로 활성 offer와 대조해
+  죽은 QR은 거부한다), `pair pending`/`approve`/`reject`/
+  `cancel`, `devices`/`devices revoke <id>`/`revoke-all`, `wan`/`wan on`/`wan off`,
+  `sources`, `session stop <id>`. `--json`은 원시 패널 응답을 그대로 출력한다.
+- 종료 코드: 0 성공, 1 호스트·프로토콜 오류, 2 사용법 오류.

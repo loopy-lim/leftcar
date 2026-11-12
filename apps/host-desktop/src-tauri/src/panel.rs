@@ -2,6 +2,8 @@
 //! JSON 요청·응답으로 미러한다 — Flutter 데스크톱 UI가 같은 서비스 계층을
 //! 폴링하기 위한 관리 채널이며, 미디어·제어 평면과 완전히 분리된다
 //! (docs/plans/2026-11-05-flutter-migration-design.md §2.2).
+//! `get_active_pairing`은 Tauri 표면에 없는 패널 전용 확장이다(CLI QR 재표시
+//! 검증용 — dispatch 참고).
 //!
 //! 신뢰 모델은 `control.rs` negotiate의 루프백 평문 선례와 같다: TCP는
 //! 127.0.0.1 에페머럴 포트로만 듣고, 기동 때 만든 32바이트 토큰을 0600 파일로
@@ -69,13 +71,15 @@ pub fn generate_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// 토큰 파일 기록. 부모 디렉터리를 만들고 unix에서는 생성 시점부터 0600으로
-/// 둔다(느슨한 모드 창을 남기지 않는다). 기존 파일이 더 느슨하게 만들어진
-/// 경우도 0600으로 되돌린다. non-unix는 베스트 에포트(모드 개념 부재).
-pub fn write_token_file(path: &std::path::Path, token: &str) -> Result<(), String> {
+/// 비밀 파일 기록(0600). 부모 디렉터리를 만들고 unix에서는 생성 시점부터
+/// 0600으로 둔다(느슨한 모드 창을 남기지 않는다). 기존 파일이 더 느슨하게
+/// 만들어진 경우도 0600으로 되돌린다. non-unix는 베스트 에포트(모드 개념
+/// 부재). 패널 토큰·포트 파일과 `leftcar-cli`의 페어링 재표시 캐시가 같은
+/// 규칙을 공유한다.
+pub fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|error| format!("panel token dir {}: {error}", parent.display()))?;
+            .map_err(|error| format!("secret file dir {}: {error}", parent.display()))?;
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -86,15 +90,114 @@ pub fn write_token_file(path: &std::path::Path, token: &str) -> Result<(), Strin
     }
     let mut file = options
         .open(path)
-        .map_err(|error| format!("panel token file {}: {error}", path.display()))?;
-    file.write_all(token.as_bytes())
-        .map_err(|error| format!("panel token write {}: {error}", path.display()))?;
+        .map_err(|error| format!("secret file {}: {error}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|error| format!("secret file write {}: {error}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+/// 토큰 파일 기록 — [`write_secret_file`]의 특수 케이스.
+pub fn write_token_file(path: &std::path::Path, token: &str) -> Result<(), String> {
+    write_secret_file(path, token)
+}
+
+/// 포트 파일 기록. 포트는 비밀이 아니지만 토큰 파일과 같은 0600으로 둔다 —
+/// 완만한 권한 차등이 관측·추측 지표가 되는 걸 피한다.
+pub fn write_port_file(path: &std::path::Path, port: u16) -> Result<(), String> {
+    write_secret_file(path, &port.to_string())
+}
+
+/// 실행 중 호스트의 패널 파일 표준 위치. 플랫폼별 유저 전용 디렉터리를
+/// 골라 그 아래 `leftcar/`를 만든다:
+///
+/// - 리눅스: `${XDG_RUNTIME_DIR}/leftcar` — 세션 수명이라 스테일 파일이
+///   재부팅 사이에 남지 않고 0700/유저 전용 권한이 보장된다.
+/// - macOS: `${TMPDIR}/leftcar` — 유저별 `/var/folders/…/T/` 디렉터리.
+///   XDG_RUNTIME_DIR이 있으면(개발 중 설정) 그것이 우선한다.
+/// - Windows: `%LOCALAPPDATA%\leftcar` — 유저 프로필 ACL로 보호되고
+///   TEMP와 달리 정리되지 않아 발견 파일이 안정적이다.
+pub fn default_panel_dir() -> Option<std::path::PathBuf> {
+    panel_dir_from_env(
+        HOST_PANEL_OS,
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        std::env::var_os("TMPDIR").as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )
+}
+
+/// [`default_panel_dir`]의 순수 결정 근사 — 어떤 OS에서 실행하든 세 플랫폼
+/// 규칙을 결정론적으로 테스트할 수 있게 env만 받는다.
+fn panel_dir_from_env(
+    os: PanelOs,
+    xdg_runtime_dir: Option<&std::ffi::OsStr>,
+    tmp_dir: Option<&std::ffi::OsStr>,
+    local_app_data: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    if let Some(base) = xdg_runtime_dir {
+        return Some(std::path::PathBuf::from(base).join("leftcar"));
+    }
+    match os {
+        PanelOs::Linux => None,
+        PanelOs::Mac => tmp_dir.map(|base| std::path::PathBuf::from(base).join("leftcar")),
+        PanelOs::Windows => local_app_data
+            .map(|base| std::path::PathBuf::from(base).join("leftcar")),
+    }
+}
+
+// 호스트 OS가 아닌 변형은 이 크레이트의 비(非)테스트 코드에서 만들어지지
+// 않는다 — 세 플랫폼 규칙을 한 OS에서 테스트하기 위한 값들이다.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelOs {
+    Linux,
+    Mac,
+    Windows,
+}
+
+#[cfg(target_os = "macos")]
+const HOST_PANEL_OS: PanelOs = PanelOs::Mac;
+#[cfg(target_os = "windows")]
+const HOST_PANEL_OS: PanelOs = PanelOs::Windows;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const HOST_PANEL_OS: PanelOs = PanelOs::Linux;
+
+/// 표준 토큰 파일 경로(`default_panel_dir`이 없으면 None).
+pub fn default_token_path() -> Option<std::path::PathBuf> {
+    default_panel_dir().map(|dir| dir.join("panel-token"))
+}
+
+/// 표준 포트 파일 경로(`default_panel_dir`이 없으면 None).
+pub fn default_port_path() -> Option<std::path::PathBuf> {
+    default_panel_dir().map(|dir| dir.join("panel-port"))
+}
+
+/// GUI 호스트(Tauri)가 기동 때 부르는 원스텝 패널 게시: 토큰 생성 → 표준
+/// 경로 기록 → 루프백 리스너 바인딩 → 서브 스레드로 `serve`. 성공 시 패널
+/// 포트를 돌려준다. 사이드카(leftcar-hostd)는 이 함수를 쓰지 않는다 —
+/// `--panel-token-file` 등 명시적 경로 재정의를 지원하고 기록 시점(토큰을
+/// 먼저 쓴다)과 serve 진입 방식(메인 스레드 블로킹)을 직접 통제한다.
+pub fn publish_default_panel(handles: Arc<PanelHandles>) -> Result<u16, String> {
+    // 두 파일은 항상 같은 표준 디렉터리에서 나온다 — env은 한 번만 읽는다.
+    let dir = default_panel_dir()
+        .ok_or_else(|| "XDG_RUNTIME_DIR is not set; cannot publish the panel files".to_string())?;
+    let token_path = dir.join("panel-token");
+    let port_path = dir.join("panel-port");
+    // 포트를 먼저 확정하고 파일을 쓴다 — CLI가 반쯤 쓰인 포트 파일을 읽는
+    // 창을 최소화한다. 토큰이 뒤바뀐 순간 이전 토큰은 어차피 무효다.
+    let (listener, port) = bind_panel_listener()?;
+    let token = generate_token();
+    write_token_file(&token_path, &token)?;
+    write_port_file(&port_path, port)?;
+    std::thread::Builder::new()
+        .name("leftcar-panel-serve".into())
+        .spawn(move || serve(listener, token, handles))
+        .map_err(|error| format!("panel serve thread: {error}"))?;
+    Ok(port)
 }
 
 /// 관리 채널은 루프백 에페머럴 포트 하나다 — UI는 포트 파일로 실제 포트를
@@ -130,18 +233,23 @@ pub fn serve(listener: std::net::TcpListener, token: String, handles: Arc<PanelH
     }
 }
 
-enum LineError {
+pub(crate) enum LineError {
     Io(std::io::Error),
     TooLong,
 }
 
 /// 개행 단위 읽기에 상한을 둔다. 상한을 넘는 줄은 파서를 건너뛸 방법이
-/// 없어 스트림 정합이 깨지므로 호출자가 연결을 닫는다.
-fn read_capped_line(reader: &mut impl BufRead, out: &mut Vec<u8>) -> Result<usize, LineError> {
+/// 없어 스트림 정합이 깨지므로 호출자가 연결을 닫는다. 패널 클라이언트
+/// ([`crate::panel_client`])가 같은 규칙으로 응답 줄을 읽는다 — 상한만 다르다.
+pub(crate) fn read_capped_line(
+    reader: &mut impl BufRead,
+    out: &mut Vec<u8>,
+    cap: usize,
+) -> Result<usize, LineError> {
     out.clear();
-    let mut limited = reader.take((MAX_REQUEST_BYTES + 1) as u64);
+    let mut limited = reader.take((cap + 1) as u64);
     let read = limited.read_until(b'\n', out).map_err(LineError::Io)?;
-    if out.len() > MAX_REQUEST_BYTES {
+    if out.len() > cap {
         return Err(LineError::TooLong);
     }
     Ok(read)
@@ -167,7 +275,7 @@ fn handle_connection(stream: std::net::TcpStream, token: &str, handles: Arc<Pane
 
     // 첫 줄은 반드시 토큰이다. 한 번이라도 틀리면 재시도 없이 끊는다 —
     // 루프백에서 무차별 대입을 막는 최소 방어다.
-    match read_capped_line(&mut reader, &mut line) {
+    match read_capped_line(&mut reader, &mut line, MAX_REQUEST_BYTES) {
         Ok(0) | Err(_) => return,
         Ok(_) => {}
     }
@@ -176,7 +284,7 @@ fn handle_connection(stream: std::net::TcpStream, token: &str, handles: Arc<Pane
     }
 
     loop {
-        match read_capped_line(&mut reader, &mut line) {
+        match read_capped_line(&mut reader, &mut line, MAX_REQUEST_BYTES) {
             Ok(0) => return,
             Err(LineError::Io(error)) => {
                 eprintln!("panel connection io error: {error}");
@@ -359,6 +467,10 @@ pub fn dispatch(
             json(handles.pairing.cancel_for_view(&offer_id, PANEL_VIEW))
         }
         "list_pending_pairings" => json(handles.pairing.list_pending_views()),
+        // 패널 전용 확장(Tauri 표면 밖): `leftcar-cli pair show`가 캐시한 QR이
+        // 아직 활성 offer인지 대조한다. id만 돌려준다 — QR 페이로드/시크릿은
+        // 서버가 보관하지 않는다(페어링 서버의 제로화 원칙).
+        "get_active_pairing" => json(handles.pairing.active_offer_id()),
         "approve_pending_pairing" => {
             let offer_id: String = arg(args, "offerId")?;
             let approved_device_id = handles
@@ -676,6 +788,47 @@ mod tests {
     use crate::backend::FakeBackend;
     use control_contract::host::DisplayInfo;
     use std::io::Write;
+
+    #[test]
+    fn panel_dir_prefers_xdg_runtime_dir_on_every_os() {
+        for os in [PanelOs::Linux, PanelOs::Mac, PanelOs::Windows] {
+            assert_eq!(
+                panel_dir_from_env(
+                    os,
+                    Some(std::ffi::OsStr::new("/run/user/1000")),
+                    Some(std::ffi::OsStr::new("/var/folders/T/")),
+                    Some(std::ffi::OsStr::new("C:\\Users\\u\\AppData\\Local")),
+                ),
+                Some(std::path::PathBuf::from("/run/user/1000").join("leftcar"))
+            );
+        }
+    }
+
+    #[test]
+    fn panel_dir_falls_back_per_platform() {
+        // 리눅스는 XDG가 없으면 발견 불가 — 명시적 경로를 쓰게 한다.
+        assert_eq!(
+            panel_dir_from_env(PanelOs::Linux, None, Some(std::ffi::OsStr::new("/tmp")), None),
+            None
+        );
+        // macOS는 유저별 TMPDIR로.
+        assert_eq!(
+            panel_dir_from_env(PanelOs::Mac, None, Some(std::ffi::OsStr::new("/var/folders/T/")), None),
+            Some(std::path::PathBuf::from("/var/folders/T/").join("leftcar"))
+        );
+        assert_eq!(panel_dir_from_env(PanelOs::Mac, None, None, None), None);
+        // Windows는 LOCALAPPDATA로.
+        assert_eq!(
+            panel_dir_from_env(
+                PanelOs::Windows,
+                None,
+                None,
+                Some(std::ffi::OsStr::new("C:\\Users\\u\\AppData\\Local")),
+            ),
+            Some(std::path::PathBuf::from("C:\\Users\\u\\AppData\\Local").join("leftcar"))
+        );
+        assert_eq!(panel_dir_from_env(PanelOs::Windows, None, None, None), None);
+    }
 
     /// 기존 테스트(control_e2e.rs)와 같은 조립: FakeBackend + 메모리 저장소.
     struct TestHarness {
