@@ -122,6 +122,9 @@ internal class StreamHudController(
     }
     private var renderedFpsSample: RenderedFpsSample? = null
     private var lastRenderedFrames: Long? = null
+    private var fpsBadgeState = HudFpsBadgeState()
+    private var lastLossTotal: Int? = null
+    private var lastStaleTotal: Int? = null
     private var terminationHandled = false
     private val terminationPollGate = TerminationPollGate()
     private val persistentFpsOverlay = PersistentFpsOverlay(activity)
@@ -549,6 +552,9 @@ internal class StreamHudController(
         if (packed == -1L) {
             lastRenderedFrames = null
             renderedFpsSample = null
+            fpsBadgeState = HudFpsBadgeState()
+            lastLossTotal = null
+            lastStaleTotal = null
             persistentFpsOverlay.update(null)
             statsView?.text = "FPS --  ENC --/--ms  DEC --ms  NET --/--ms  SKIP -  LOSS -"
             return
@@ -564,10 +570,19 @@ internal class StreamHudController(
         val inputDrops = (packed ushr 40) and 0xff
         val frameGaps = (packed ushr 48) and 0xff
         val feedMs = (packed ushr 56) and 0xff
+        val lossTotal = (inputDrops + frameGaps).toInt()
         val now = SystemClock.elapsedRealtime()
         renderedFpsSample = nextRenderedFpsSample(renderedFpsSample, rendered, now)
         val displayedFps = renderedFpsSample?.displayedFps
-        persistentFpsOverlay.update(displayedFps)
+        // 카운터가 줄면 세션이 리셋된 것이다 — 증가분 0으로 재동기화한다.
+        val lossDelta = lastLossTotal?.let { (lossTotal - it).coerceAtLeast(0) } ?: 0
+        val staleDelta = lastStaleTotal?.let { (stale.toInt() - it).coerceAtLeast(0) } ?: 0
+        lastLossTotal = lossTotal
+        lastStaleTotal = stale.toInt()
+        fpsBadgeState = nextHudFpsBadgeState(
+            fpsBadgeState, displayedFps, sourceFps, lossDelta, staleDelta, now,
+        )
+        persistentFpsOverlay.update(displayedFps, fpsBadgeState.mode)
         addLatencySample(networkLatencySamples, if (latency == -1L) 0xffff else latency and 0xffff)
         addLatencySample(surfaceReleaseLatencySamples, surfaceReleaseLatency.toLong())
         stats.text = "${persistentFpsText(displayedFps)}  " +

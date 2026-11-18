@@ -120,8 +120,8 @@ class PersistentFpsOverlayTest {
 
     @Test
     fun `fps 접근성 문구는 언어를 따라 영어로 바뀐다`() {
-        assertEquals("Actual render rate 41 FPS", persistentFpsContentDescription(40.6, "en"))
-        assertEquals("Actual render rate -- FPS", persistentFpsContentDescription(null, "en"))
+        assertEquals("Actual render rate 41 FPS", persistentFpsContentDescription(40.6, HudFpsBadgeMode.ACTIVE, "en"))
+        assertEquals("Actual render rate -- FPS", persistentFpsContentDescription(null, HudFpsBadgeMode.ACTIVE, "en"))
     }
 
     @Test

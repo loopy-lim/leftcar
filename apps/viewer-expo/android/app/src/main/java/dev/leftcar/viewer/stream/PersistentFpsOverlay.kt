@@ -58,6 +58,57 @@ internal fun nextRenderedFpsSample(
     return RenderedFpsSample(history, displayedFps)
 }
 
+/**
+ * HUD fps 배지의 유휴 판별 임계(docs/2026-11-18-macos-promotion-idle-capture-cadence.md).
+ * ProMotion 호스트는 정적 화면에서 컴포지터 cadence가 내려가 캡처 프레임 수
+ * 자체가 줄어든다(실측 41~52fps). 손실·갭 없이 fps만 낮은 상태를 "유휴"로
+ * 표시해 성능 저하와 구분한다. 진입 0.85/해제 0.93의 히스테리시스와 1.5케이
+ * 지속 조건으로 모션 직후 램프다운·램프업 경계의 플러터를 막는다.
+ */
+internal const val HUD_FPS_IDLE_ENTER_RATIO = 0.85
+internal const val HUD_FPS_IDLE_EXIT_RATIO = 0.93
+internal const val HUD_FPS_IDLE_HOLD_MS = 1_500L
+
+internal enum class HudFpsBadgeMode { ACTIVE, IDLE }
+
+internal data class HudFpsBadgeState(
+    val mode: HudFpsBadgeMode = HudFpsBadgeMode.ACTIVE,
+    val lowFpsSinceMs: Long? = null,
+)
+
+/**
+ * 순수 상태 전이: fps 저하가 손실(input drops + frame gaps)이나 스테일 프레임
+ * 증가 없이 [HUD_FPS_IDLE_HOLD_MS] 이상 지속되면 유휴로 판정한다. 저하의
+ * 증거가 하나라도 있으면 즉시 ACTIVE로 돌아간다 — 그 저하는 원본 cadence가
+ * 아니라 경로의 결함이다.
+ */
+internal fun nextHudFpsBadgeState(
+    previous: HudFpsBadgeState,
+    displayedFps: Double?,
+    sourceFps: Int,
+    lossDelta: Int,
+    staleDelta: Int,
+    nowMs: Long,
+): HudFpsBadgeState {
+    if (lossDelta > 0 || staleDelta > 0) {
+        return HudFpsBadgeState(HudFpsBadgeMode.ACTIVE)
+    }
+    if (displayedFps == null || sourceFps <= 0) {
+        return HudFpsBadgeState(HudFpsBadgeMode.ACTIVE)
+    }
+    return when {
+        displayedFps < sourceFps * HUD_FPS_IDLE_ENTER_RATIO -> {
+            val since = previous.lowFpsSinceMs ?: nowMs
+            val idle = previous.mode == HudFpsBadgeMode.IDLE || nowMs - since >= HUD_FPS_IDLE_HOLD_MS
+            HudFpsBadgeState(if (idle) HudFpsBadgeMode.IDLE else HudFpsBadgeMode.ACTIVE, since)
+        }
+        displayedFps >= sourceFps * HUD_FPS_IDLE_EXIT_RATIO ->
+            HudFpsBadgeState(HudFpsBadgeMode.ACTIVE)
+        // 진입/해제 임계 사이는 직전 상태를 유지한다(히스테리시스).
+        else -> previous
+    }
+}
+
 internal data class PersistentFpsOverlayPolicy(
     val textSizeSp: Float = StreamUiTokens.BODY_SP,
     val textColorAlpha: Int = 255,
@@ -79,13 +130,29 @@ internal val persistentFpsOverlayPolicy = PersistentFpsOverlayPolicy()
 internal fun persistentFpsText(displayedFps: Double?): String =
     displayedFps?.takeIf { it.isFinite() && it >= 0.0 }?.let { "${it.roundToInt()} FPS" } ?: "-- FPS"
 
+internal fun persistentFpsBadgeText(
+    displayedFps: Double?,
+    mode: HudFpsBadgeMode,
+    language: String = ViewerStrings.language,
+): String = when (mode) {
+    HudFpsBadgeMode.ACTIVE -> persistentFpsText(displayedFps)
+    HudFpsBadgeMode.IDLE ->
+        if (language == "en") "IDLE(${persistentFpsText(displayedFps)})"
+        else "유휴(${persistentFpsText(displayedFps)})"
+}
+
 internal fun persistentFpsContentDescription(
     displayedFps: Double?,
+    mode: HudFpsBadgeMode = HudFpsBadgeMode.ACTIVE,
     language: String = ViewerStrings.language,
-): String = if (language == "en") {
-    "Actual render rate ${persistentFpsText(displayedFps)}"
-} else {
-    "실제 렌더링 속도 ${persistentFpsText(displayedFps)}"
+): String {
+    val rate = persistentFpsText(displayedFps)
+    return when (mode) {
+        HudFpsBadgeMode.ACTIVE ->
+            if (language == "en") "Actual render rate $rate" else "실제 렌더링 속도 $rate"
+        HudFpsBadgeMode.IDLE ->
+            if (language == "en") "Screen idle, render rate $rate" else "화면 유휴, 렌더링 속도 $rate"
+    }
 }
 
 internal class PersistentFpsOverlay(private val activity: Activity) {
@@ -93,6 +160,7 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
     private var textView: TextView? = null
     private var decorView: View? = null
     private var displayedFps: Double? = null
+    private var badgeMode: HudFpsBadgeMode = HudFpsBadgeMode.ACTIVE
     private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { updateLocation() }
 
     fun show() {
@@ -115,8 +183,8 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
                 setStroke(dp(1), StreamUiTokens.OUTLINE)
             }
             elevation = 0f
-            text = persistentFpsText(displayedFps)
-            contentDescription = persistentFpsContentDescription(displayedFps)
+            text = persistentFpsBadgeText(displayedFps, badgeMode)
+            contentDescription = persistentFpsContentDescription(displayedFps, badgeMode)
         }
         val nextPopup = PopupWindow(
             view,
@@ -144,15 +212,16 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
         }
     }
 
-    fun update(displayedFps: Double?) {
+    fun update(displayedFps: Double?, mode: HudFpsBadgeMode = HudFpsBadgeMode.ACTIVE) {
         this.displayedFps = displayedFps
+        this.badgeMode = mode
         val view = textView ?: return
-        val nextText = persistentFpsText(displayedFps)
+        val nextText = persistentFpsBadgeText(displayedFps, mode)
         // 표시 값이 실제로 바뀔 때만 다시 그린다 — 250ms 폴링마다 동일 문자열을
         // set하지 않아 배지 레이아웃 패스와 깜빡임을 줄인다.
         if (view.text.toString() == nextText) return
         view.text = nextText
-        view.contentDescription = persistentFpsContentDescription(displayedFps)
+        view.contentDescription = persistentFpsContentDescription(displayedFps, mode)
     }
 
     fun stop() {
@@ -164,6 +233,7 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
         textView = null
         decorView = null
         displayedFps = null
+        badgeMode = HudFpsBadgeMode.ACTIVE
     }
 
     private fun updateLocation() {
