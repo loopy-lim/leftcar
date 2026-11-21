@@ -141,7 +141,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/assets"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --names macos-host-zip,windows-host-setup -D "$RUNNER_TEMP/assets"
+            --name macos-host-zip --name windows-host-setup -D "$RUNNER_TEMP/assets"
       - name: Compose release assets with checksums
         run: |
           mkdir -p "$RUNNER_TEMP/dist"
