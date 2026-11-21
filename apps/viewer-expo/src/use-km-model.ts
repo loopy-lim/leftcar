@@ -1,14 +1,29 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { AppState } from "react-native";
-import { useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { KmError, kmReasonIssue, type KmFailure, type KmIssue, type KmNativeStatus, type KmStartOptions } from "./km-session";
 import { controlTarget } from "./session";
 import { kmNative, kmSession, subscribeKmStatus } from "./km.native";
 
-interface PanelState { status: KmNativeStatus | null; options: KmStartOptions; busy: boolean; error: KmIssue | "refreshFailed" | null; failure: KmFailure | null }
+export type KmActionKind = "start" | "stop" | "shizuku" | "accessibility";
+interface PanelState {
+  status: KmNativeStatus | null;
+  options: KmStartOptions;
+  busy: boolean;
+  pendingAction: KmActionKind | null;
+  error: KmIssue | "refreshFailed" | null;
+  failure: KmFailure | null;
+}
 function reducePanel(state: PanelState, patch: Partial<PanelState>): PanelState { return { ...state, ...patch }; }
 export function useKmModel() {
-  const [state, update] = useReducer(reducePanel, { status: null, options: kmSession?.getOptions() ?? { arrangementSide: "right", macToAndroid: false, androidToMac: false }, busy: false, error: null, failure: null });
+  const [state, update] = useReducer(reducePanel, {
+    status: null,
+    options: kmSession?.getOptions() ?? { arrangementSide: "right", macToAndroid: false, androidToMac: false },
+    busy: false,
+    pendingAction: null,
+    error: null,
+    failure: null,
+  });
   const mounted = useRef(false);
   const running = useRef(false);
   const refresh = useCallback(async () => {
@@ -36,23 +51,24 @@ export function useKmModel() {
     return () => { mounted.current = false; unsubscribe(); lifecycle.remove(); kmSession?.cancelPending(); };
   }, [refresh]);
   useFocusEffect(useCallback(() => { void refresh(); return () => kmSession?.cancelPending(); }, [refresh]));
-  const action = async (operation: () => Promise<unknown>) => {
+  const action = async (kind: KmActionKind, operation: () => Promise<unknown>) => {
     if (running.current) return;
-    running.current = true; update({ busy: true, error: null, failure: null });
+    running.current = true; update({ busy: true, pendingAction: kind, error: null, failure: null });
     try { await operation(); await refresh(); }
     catch (cause) {
       if (mounted.current && !(cause instanceof Error && cause.name === "AbortError")) update({ error: cause instanceof KmError ? cause.issue : "startFailed",
         failure: cause instanceof KmError ? { issue: cause.issue, stage: cause.stage } : null });
-    } finally { running.current = false; if (mounted.current) update({ busy: false }); }
+    } finally { running.current = false; if (mounted.current) update({ busy: false, pendingAction: null }); }
   };
   return {
     ...state, available: !!kmNative, peerHost: kmSession?.getPeerHost() ?? controlTarget()?.host ?? null,
     setOptions: (options: KmStartOptions) => { kmSession?.setOptions(options); update({ options }); },
     refresh: () => void refresh(),
-    start: () => void action(async () => { if (kmSession) await kmSession.start(state.options); }),
+    start: () => void action("start", async () => { if (kmSession) await kmSession.start(state.options); }),
     cancelStart: () => kmSession?.cancelPending(),
-    stop: () => void action(async () => { if (kmSession) await kmSession.stop(); }),
-    requestShizuku: () => void action(async () => { await kmNative?.requestShizukuPermission(); }),
-    openAccessibility: () => void action(async () => { await kmNative?.openAccessibilitySettings(); }),
+    stop: () => void action("stop", async () => { if (kmSession) await kmSession.stop(); }),
+    requestShizuku: () => void action("shizuku", async () => { await kmNative?.requestShizukuPermission(); }),
+    openAccessibility: () => void action("accessibility", async () => { await kmNative?.openAccessibilitySettings(); }),
+    openHostPicker: () => router.push("/host"),
   };
 }

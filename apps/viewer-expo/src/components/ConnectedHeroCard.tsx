@@ -25,7 +25,14 @@ export function ConnectedHeroCard({
         <Label variant="code" tone="muted" selectable>
           {hostAddr}
         </Label>
-        <Label tone="muted">{t.viewer.connectedBadge}</Label>
+        <View className="flex-row items-center gap-2">
+          <View
+            className="h-2 w-2 rounded-full bg-live"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          />
+          <Label tone="muted">{t.viewer.connectedBadge}</Label>
+        </View>
       </View>
       <Action onPress={onOpenCatalog} label={t.viewer.btnViewDisplays} />
       <View className="flex-row flex-wrap gap-2">

@@ -1,4 +1,4 @@
-import { View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import type { TranslationSchema } from "../i18n";
 import type { RecentHostItem } from "../recent-hosts";
 import { RecentHostQuickConnect } from "./RecentHostQuickConnect";
@@ -38,13 +38,23 @@ export function StandbyHeroCard({
         ) : (
           <Label tone="muted">{t.viewer.standbyHeroDesc}</Label>
         )}
-        <Label tone="muted">{t.viewer.standbyBadge}</Label>
+        <View className="flex-row items-center gap-2">
+          <View
+            className="h-2 w-2 rounded-full bg-strong"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          />
+          <Label tone="muted">{t.viewer.standbyBadge}</Label>
+        </View>
       </View>
       {autoConnecting ? (
         <Notice>
-          <Label accessibilityLiveRegion="polite">
-            {t.viewer.connectingToHost}
-          </Label>
+          <View className="flex-row items-center gap-3">
+            <ActivityIndicator accessibilityElementsHidden />
+            <Label className="flex-1" accessibilityLiveRegion="polite">
+              {t.viewer.connectingToHost}
+            </Label>
+          </View>
           <Action
             variant="secondary"
             onPress={onCancelReconnect}

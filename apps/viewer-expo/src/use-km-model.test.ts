@@ -23,7 +23,10 @@ vi.mock("react", () => ({
   },
   useEffect: (effect: () => unknown) => { if (fixture.mounting) fixture.effects.push(effect); },
 }));
-vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => unknown) => { if (fixture.mounting) fixture.effects.push(effect); } }));
+vi.mock("expo-router", () => ({
+  router: { push: vi.fn(), replace: vi.fn() },
+  useFocusEffect: (effect: () => unknown) => { if (fixture.mounting) fixture.effects.push(effect); },
+}));
 vi.mock("react-native", () => ({ AppState: { addEventListener: () => ({ remove() {} }) } }));
 vi.mock("./session", () => ({ controlTarget: () => null }));
 vi.mock("./km.native", () => ({

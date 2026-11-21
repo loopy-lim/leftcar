@@ -1371,7 +1371,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (isFinishing || isDestroyed || closeConfirmation?.isShowing == true) return
         ViewerNative.releaseInput(instanceId)
         android.util.Log.i("LeftcarStream", "window retained: Back confirmation port=$port")
-        closeConfirmation = android.app.AlertDialog.Builder(this)
+        closeConfirmation = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(ViewerStrings.closeWindowTitle)
             .setMessage(ViewerStrings.closeWindowMessage)
             .setNegativeButton(ViewerStrings.continueViewing) { _, _ -> }

@@ -97,6 +97,19 @@ describe("catalogErrorMessage 언어 전환", () => {
     setCurrentLanguage("en");
     expect(catalogErrorMessage(new Error("host said no"))).toBe("host said no");
   });
+
+  it("전송 및 시간 초과 제어 오류를 사용자 친화적 문구로 번역한다", async () => {
+    const { ControlRequestError } = await import("./control");
+    setCurrentLanguage("ko");
+    expect(catalogErrorMessage(new ControlRequestError("control connection closed", "transport"))).toBe(
+      "컴퓨터와 연결할 수 없습니다. Leftcar가 실행 중인지 확인해 주세요.",
+    );
+    expect(catalogErrorMessage(new ControlRequestError("control request timeout: getCatalog", "timeout"))).toBe(
+      "컴퓨터가 응답하지 않습니다. 같은 네트워크인지 확인한 뒤 다시 시도해 주세요.",
+    );
+    setCurrentLanguage("en");
+    expect(catalogErrorMessage(new Error("pinned key mismatch"))).toContain("security key");
+  });
 });
 
 describe("requestWithReconnect 미연결 오류", () => {

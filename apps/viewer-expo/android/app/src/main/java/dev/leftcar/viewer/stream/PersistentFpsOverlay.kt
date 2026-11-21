@@ -166,21 +166,22 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
     fun show() {
         if (popup != null) return
         val policy = persistentFpsOverlayPolicy
+        val panelScale = StreamPanelDensity.scaleOf(activity)
         val view = TextView(activity).apply {
             setTextColor(StreamUiTokens.INK)
-            textSize = policy.textSizeSp
+            textSize = policy.textSizeSp * panelScale
             typeface = Typeface.MONOSPACE
             setPadding(
-                dp(policy.horizontalPaddingDp),
-                dp(policy.verticalPaddingDp),
-                dp(policy.horizontalPaddingDp),
-                dp(policy.verticalPaddingDp),
+                dp(policy.horizontalPaddingDp, panelScale),
+                dp(policy.verticalPaddingDp, panelScale),
+                dp(policy.horizontalPaddingDp, panelScale),
+                dp(policy.verticalPaddingDp, panelScale),
             )
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(policy.cornerRadiusDp).toFloat()
+                cornerRadius = dp(policy.cornerRadiusDp, panelScale).toFloat()
                 setColor(StreamUiTokens.SURFACE)
-                setStroke(dp(1), StreamUiTokens.OUTLINE)
+                setStroke(dp(1, panelScale), StreamUiTokens.OUTLINE)
             }
             elevation = 0f
             text = persistentFpsBadgeText(displayedFps, badgeMode)
@@ -246,6 +247,7 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
 
     private fun offsets(): Pair<Int, Int> {
         val decor = decorView ?: activity.window.decorView
+        val panelScale = StreamPanelDensity.scaleOf(activity)
         val bottomInset: Int
         val rightInset: Int
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -264,11 +266,11 @@ internal class PersistentFpsOverlay(private val activity: Activity) {
             }
         }
         return Pair(
-            dp(persistentFpsOverlayPolicy.edgeOffsetDp) + rightInset,
-            dp(persistentFpsOverlayPolicy.edgeOffsetDp) + bottomInset,
+            dp(persistentFpsOverlayPolicy.edgeOffsetDp, panelScale) + rightInset,
+            dp(persistentFpsOverlayPolicy.edgeOffsetDp, panelScale) + bottomInset,
         )
     }
 
-    private fun dp(value: Int): Int =
-        (value * activity.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+    private fun dp(value: Int, panelScale: Float = StreamPanelDensity.scaleOf(activity)): Int =
+        StreamPanelDensity.dp(value.toFloat(), activity.resources.displayMetrics.density, panelScale)
 }

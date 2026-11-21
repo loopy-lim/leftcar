@@ -28,10 +28,17 @@ function SharingFailure({ t, model }: KmPanelProps) {
   const issue = model.error ?? (model.status?.reason ? kmReasonIssue(model.status.reason) ?? "nativeStopped" : null);
   if (!issue) return null;
   const stage = model.failure?.stage;
+  const needsHost =
+    issue === "connectionRequired" ||
+    issue === "wifiRequired" ||
+    issue === "pairingRequired";
   return <Notice tone="error">
     {stage && <Label>{t.km[stage]}</Label>}
     <Label>{t.km[issue]}</Label>
     {stage && issue === "startFailed" && <Label>{t.km[`${stage}Recovery`]}</Label>}
+    {needsHost && typeof model.openHostPicker === "function" && (
+      <Action variant="secondary" label={t.viewer.btnFindHost} onPress={model.openHostPicker} />
+    )}
   </Notice>;
 }
 function SharingStatus({ t, model }: KmPanelProps) {
@@ -77,24 +84,46 @@ function ArrangementControls({ t, model, active }: KmControlsProps) {
     </View>
   </>;
 }
+function sessionActionState(model: KmModel, active: boolean) {
+  const { status, options, busy, pendingAction } = model;
+  const starting = pendingAction !== undefined ? pendingAction === "start" : busy;
+  const stopping = pendingAction !== undefined ? pendingAction === "stop" : busy;
+  const permissionReady =
+    Boolean(status?.shizukuRunning) &&
+    Boolean(status?.shizukuGranted) &&
+    Boolean(status?.accessibilityEnabled);
+  const startBlocked =
+    !model.available || !permissionReady || !options.macToAndroid || !options.androidToMac;
+  const isStopMode =
+    active || status?.state === "cleanupFailed" || model.error === "stopFailed";
+  return { starting, stopping, startBlocked, isStopMode, busy };
+}
+
 function SessionActions({ t, model, active }: KmControlsProps) {
-  const { status, options, busy } = model;
-  const permissionReady = !!status?.shizukuRunning && status.shizukuGranted && status.accessibilityEnabled;
-  const startBlocked = !model.available || !permissionReady || !options.macToAndroid || !options.androidToMac;
+  const { starting, stopping, startBlocked, isStopMode, busy } =
+    sessionActionState(model, active);
   return <>
-    {active || status?.state === "cleanupFailed" || model.error === "stopFailed" ? <Action label={t.km.stop} onPress={model.stop} busy={busy} />
-      : <Action label={busy ? t.km.startCheck : t.km.start} onPress={model.start} busy={busy} disabled={startBlocked} />}
-    {busy && !active && <Action variant="ghost" label={t.common.cancel} onPress={model.cancelStart} />}
-    {!active && !busy && <Label variant="caption" tone="muted">{t.km.unverified}</Label>}
+    {isStopMode ? (
+      <Action label={t.km.stop} onPress={model.stop} busy={stopping} disabled={busy} />
+    ) : (
+      <Action
+        label={starting ? t.km.startCheck : t.km.start}
+        onPress={model.start}
+        busy={starting}
+        disabled={busy || startBlocked}
+      />
+    )}
+    {starting && !active && <Action variant="ghost" label={t.common.cancel} onPress={model.cancelStart} />}
+    {!active && !starting && <Label variant="caption" tone="muted">{t.km.unverified}</Label>}
   </>;
 }
 function ShizukuPermission({ t, model }: KmPanelProps) {
-  const { status, busy } = model;
+  const { status, busy, pendingAction } = model;
   const granted = status ? status.shizukuRunning && status.shizukuGranted : null;
   return <>
     <Label>{t.km.shizuku}: {permissionLabel(granted, t)}</Label>
     {status && !status.shizukuRunning && <Label tone="muted">{t.km.shizukuSetup}</Label>}
-    {status?.shizukuRunning && !status.shizukuGranted && <Action variant="secondary" label={t.km.requestShizuku} onPress={model.requestShizuku} disabled={busy} />}
+    {status?.shizukuRunning && !status.shizukuGranted && <Action variant="secondary" label={t.km.requestShizuku} onPress={model.requestShizuku} busy={pendingAction === "shizuku"} disabled={busy} />}
   </>;
 }
 function AndroidPermissions({ t, model }: KmPanelProps) {
@@ -102,7 +131,7 @@ function AndroidPermissions({ t, model }: KmPanelProps) {
   return <Surface className="gap-3">
     <ShizukuPermission t={t} model={model} />
     <Label>{t.km.accessibility}: {permissionLabel(accessibilityGranted, t)}</Label>
-    <Action variant="secondary" label={t.km.openAccessibility} onPress={model.openAccessibility} disabled={model.busy || !model.available} />
+    <Action variant="secondary" label={t.km.openAccessibility} onPress={model.openAccessibility} busy={model.pendingAction === "accessibility"} disabled={model.busy || !model.available} />
     <Action variant="ghost" label={t.common.refresh} onPress={model.refresh} disabled={model.busy || !model.available} />
     <Label variant="caption" tone="muted">{t.km.emergency}</Label>
   </Surface>;

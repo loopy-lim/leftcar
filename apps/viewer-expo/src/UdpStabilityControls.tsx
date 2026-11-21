@@ -136,7 +136,15 @@ export function UdpStabilityControls({
           label={t.viewer.udpDetailToggle}
           accessibilityState={{ expanded }}
           onPress={() => setExpanded(!expanded)}
-        />
+        >
+          <Label
+            tone="muted"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            {expanded ? "▴" : "▾"}
+          </Label>
+        </Action>
       ) : null}
       {expanded ? (
         <View className="gap-3">

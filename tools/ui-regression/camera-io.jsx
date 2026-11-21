@@ -49,7 +49,8 @@ const box = tag => React.forwardRef(function Box({ children, onPress, accessibil
     type: tag === 'input' ? (secureTextEntry ? 'password' : 'text') : tag === 'button' ? 'button' : undefined,
     onChange: onChangeText ? e => onChangeText(e.target.value) : undefined }, tag === 'input' ? undefined : typeof children === 'function' ? children({ pressed: false }) : children);
 });
-export const View = box('div'), Text = box('span'), Pressable = box('button'), SafeAreaView = box('div'), TextInput = box('input');
+export const View = box('div'), Text = box('span'), Pressable = box('button'), SafeAreaView = box('div'), TextInput = box('input'), KeyboardAvoidingView = box('div');
+export const Keyboard = { dismiss() {} };
 export function ScrollView({ children, contentContainerClassName, contentContainerStyle, keyboardShouldPersistTaps, ...props }) {
   return <View {...props} style={[{ overflow: 'auto' }, props.style]}><View className={contentContainerClassName} style={contentContainerStyle}>{children}</View></View>;
 }

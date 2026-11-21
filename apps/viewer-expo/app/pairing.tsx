@@ -9,6 +9,7 @@ import {
 import {
   ActivityIndicator,
   AppState,
+  Keyboard,
   Pressable,
   ScrollView,
   TextInput,
@@ -128,14 +129,17 @@ function OtpPinInput({
     return deviceClipboardIo.readDeviceClipboard()
       .then((raw) => {
         if (request !== pasteRequest.current || !input.current) return;
-        const value = raw.replace(/[^0-9]/g, "").slice(0, 6);
+        const contiguous = raw
+          .match(/(?:^|\D)(\d{3}[\s-]?\d{3})(?:\D|$)/)?.[1]
+          ?.replace(/\D/g, "");
+        const value = contiguous ?? raw.replace(/[^0-9]/g, "").slice(0, 6);
         if (value.length !== 6) {
           setPasteError(t.viewer.invalidPinError);
           return;
         }
         setPasteError(null);
         onChangeCode(value);
-        input.current?.focus();
+        Keyboard.dismiss();
       })
       .catch((cause) => {
         if (request === pasteRequest.current)
@@ -169,25 +173,30 @@ function OtpPinInput({
         />
         <View
           pointerEvents="none"
-          className="flex-row gap-1.5"
+          className={cn(
+            "flex-row gap-1.5 rounded-lg p-1",
+            focused && "border border-focus",
+          )}
           importantForAccessibility="no-hide-descendants"
           accessibilityElementsHidden
         >
-          {Array.from({ length: 6 }, (_, index) => (
-            <View
-              key={index}
-              className={cn(
-                "h-14 min-w-0 flex-1 items-center justify-center rounded-md border bg-subtle",
-                focused && index === Math.min(code.length, 5)
-                  ? "border-ink"
-                  : "border-outline",
-              )}
-            >
-              <Label variant="heading" className="tabular-nums">
-                {code[index] || "·"}
-              </Label>
-            </View>
-          ))}
+          {Array.from({ length: 6 }, (_, index) => {
+            const activeSlot =
+              focused && index === code.length && code.length < 6;
+            return (
+              <View
+                key={index}
+                className={cn(
+                  "h-14 min-w-0 flex-1 items-center justify-center rounded-md border bg-subtle",
+                  activeSlot ? "border-2 border-focus" : "border-outline",
+                )}
+              >
+                <Label variant="heading" className="tabular-nums">
+                  {code[index] || "·"}
+                </Label>
+              </View>
+            );
+          })}
         </View>
       </Pressable>
       <Action
@@ -257,7 +266,7 @@ function PairingModeCard({
           </>
         ) : (
           <Action
-            onPress={() => router.push("/host")}
+            onPress={() => router.replace("/host")}
             label={t.viewer.btnFindHost}
           />
         )}
@@ -393,6 +402,7 @@ function usePairingWorkflow(routeEndpoint: string, t: TranslationSchema) {
         });
         return;
       }
+      Keyboard.dismiss();
       dispatch({
         type: "update",
         patch: {
@@ -634,7 +644,7 @@ export default function Pairing() {
         <View className="flex-row gap-2">
           <Action
             variant="secondary"
-            className="flex-1"
+            className={cn("flex-1", mode === "qr" && "border-strong bg-active")}
             accessibilityRole="tab"
             accessibilityState={{ selected: mode === "qr" }}
             onPress={() => void cancelPairing("qr")}
@@ -642,7 +652,7 @@ export default function Pairing() {
           />
           <Action
             variant="secondary"
-            className="flex-1"
+            className={cn("flex-1", mode === "code" && "border-strong bg-active")}
             accessibilityRole="tab"
             accessibilityState={{ selected: mode === "code" }}
             onPress={() => void cancelPairing("code")}

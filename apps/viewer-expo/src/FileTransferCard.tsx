@@ -42,6 +42,7 @@ function fileTransferErrorText(error: unknown): string {
 export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
   const { t } = useAppLanguage();
   const [busy, setBusy] = useState(false);
+  const [activeOp, setActiveOp] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [destination, setDestination] = useState<string | null>(null);
@@ -109,7 +110,10 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
   const finish = (action: TransferAction) => {
     if (actionRef.current === action) {
       actionRef.current = null;
-      if (mounted.current) setBusy(false);
+      if (mounted.current) {
+        setBusy(false);
+        setActiveOp(null);
+      }
     }
   };
   const failed = (action: TransferAction, cause: unknown) => {
@@ -125,6 +129,7 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
   const handleSend = async () => {
     const action = beginAction();
     if (!action) return;
+    setActiveOp("send");
     retryAction.current = handleSend;
     try {
       setStatus(t.viewer.fileChoosing);
@@ -158,6 +163,7 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
   const handleReceive = async () => {
     const action = beginAction();
     if (!action) return;
+    setActiveOp("list");
     retryAction.current = handleReceive;
     try {
       setStatus(t.viewer.fileLoading);
@@ -184,6 +190,7 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
     }
     const action = beginAction();
     if (!action) return;
+    setActiveOp(entry.queueId);
     retryAction.current = () => handleFetchEntry(entry);
     try {
       setStatus(`${t.viewer.fileReceiving}: ${entry.name}`);
@@ -230,7 +237,8 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
         <Action
           variant="secondary"
           className="grow"
-          label={t.viewer.fileReceive}
+          label={t.viewer.fileRefreshQueue}
+          busy={activeOp === "list"}
           disabled={busy}
           onPress={() => void handleReceive()}
         />
@@ -238,6 +246,7 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
           variant="secondary"
           className="grow"
           label={t.viewer.fileSend}
+          busy={activeOp === "send"}
           disabled={busy}
           onPress={() => void handleSend()}
         />
@@ -287,8 +296,9 @@ export function FileTransferCard({ colors: _colors }: { colors: ThemeTokens }) {
           </Label>
           <Action
             variant="secondary"
-            label={t.viewer.fileReceive}
-            accessibilityLabel={`${t.viewer.fileReceive}: ${entry.name}`}
+            label={t.viewer.fileDownload}
+            accessibilityLabel={`${t.viewer.fileDownload}: ${entry.name}`}
+            busy={activeOp === entry.queueId}
             disabled={busy}
             onPress={() => void handleFetchEntry(entry)}
           />

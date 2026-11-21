@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useAppTheme } from "../src/theme";
+import { useAppTheme, typography } from "../src/theme";
 import { LanguageProvider, useAppLanguage } from "../src/i18n";
 import { initializeRustra } from "../src/rustra";
 import { diagnosticsRecorder } from "../src/diagnostics-recorder";
@@ -35,8 +35,8 @@ function NavigationStack() {
           },
           headerTintColor: colors.textPrimary,
           headerTitleStyle: {
-            fontWeight: "700",
-            fontSize: 15,
+            fontWeight: typography.fontWeight.semibold,
+            fontSize: typography.fontSize.base,
           },
           headerShadowVisible: false,
           contentStyle: {
@@ -69,6 +69,13 @@ function NavigationStack() {
           name="pairing"
           options={{
             title: t.viewer.navPairing,
+            headerBackTitle: t.common.back,
+          }}
+        />
+        <Stack.Screen
+          name="rustra-proof"
+          options={{
+            title: "UniKit Bridge",
             headerBackTitle: t.common.back,
           }}
         />

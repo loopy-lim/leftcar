@@ -107,6 +107,11 @@ export function catalogMediaHost(
 
 export function catalogErrorMessage(error: unknown): string {
   if (error instanceof LocalizedError) return error.format();
+  if (error instanceof ControlRequestError) {
+    if (error.kind === "timeout") return new LocalizedError("errHostTimeout").format();
+    if (error.kind === "unauthorized") return new LocalizedError("errUnauthorized").format();
+    if (error.kind === "transport") return new LocalizedError("errConnectFailed").format();
+  }
   const message = String(error instanceof Error ? error.message : error);
   if (/source_(access_denied|refresh_required|unavailable)/.test(message)) {
     return new LocalizedError("errSourceAccess").format();
@@ -116,6 +121,23 @@ export function catalogErrorMessage(error: unknown): string {
   }
   if (message.includes("screen-recording permission")) {
     return new LocalizedError("errCatalogScreenPermission").format();
+  }
+  const normalized = message.toLowerCase();
+  if (normalized.includes("pinned key")) {
+    return new LocalizedError("errHostKeyMismatch").format();
+  }
+  if (normalized.includes("unauthorized")) {
+    return new LocalizedError("errUnauthorized").format();
+  }
+  if (normalized.includes("timeout")) {
+    return new LocalizedError("errHostTimeout").format();
+  }
+  if (
+    normalized.includes("connection closed") ||
+    normalized.includes("connection error") ||
+    normalized.includes("econn")
+  ) {
+    return new LocalizedError("errConnectFailed").format();
   }
   return message;
 }

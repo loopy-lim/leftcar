@@ -3,6 +3,7 @@ import { View } from "react-native";
 import { cn } from "@leftcar/ui-tokens";
 import { displaySizePresets, normalizeCustomSize } from "./display-size";
 import type { ActiveStream } from "./catalog-model-types";
+import { formatErrorMessage } from "./control";
 import type { ThemeTokens } from "./theme";
 import { useAppLanguage } from "./i18n";
 import { Action, Field, Label, Notice, Surface } from "./ui/primitives";
@@ -62,11 +63,11 @@ export function DisplaySizeCard({
       if (accepted) setApplied(true);
       else setError(t.viewer.resolutionFailed);
     } catch (cause) {
-      setError(String(cause instanceof Error ? cause.message : cause));
+      setError(formatErrorMessage(cause));
     }
   };
   const changeDimension = (setter: (value: string) => void, value: string) => {
-    setter(value);
+    setter(value.replace(/[^0-9]/g, ""));
     setError(null);
     setApplied(false);
   };
@@ -125,6 +126,10 @@ export function DisplaySizeCard({
             value={width}
             invalid={Boolean(error)}
             editable={!resizing}
+            placeholder="640–4096"
+            maxLength={4}
+            returnKeyType="done"
+            onSubmitEditing={() => void apply()}
             onChangeText={(value) => changeDimension(setWidth, value)}
             keyboardType="number-pad"
             accessibilityLabel={t.viewer.customWidthA11y}
@@ -137,6 +142,10 @@ export function DisplaySizeCard({
             value={height}
             invalid={Boolean(error)}
             editable={!resizing}
+            placeholder="480–4096"
+            maxLength={4}
+            returnKeyType="done"
+            onSubmitEditing={() => void apply()}
             onChangeText={(value) => changeDimension(setHeight, value)}
             keyboardType="number-pad"
             accessibilityLabel={t.viewer.customHeightA11y}

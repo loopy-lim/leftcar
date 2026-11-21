@@ -183,14 +183,17 @@ export function Label({
 
 type FieldProps = TextInputProps & { invalid?: boolean; className?: string };
 export const Field = forwardRef<TextInput, FieldProps>(function Field(
-  { invalid = false, className, placeholderTextColor, ...props },
+  { invalid = false, className, placeholderTextColor, style, ...props },
   ref,
 ) {
   const { colors } = useAppTheme();
+  const scaledStyle = useScaledTextStyle(BASE_TEXT_VARIANT, style);
   return (
     <TextInput
       {...props}
       ref={ref}
+      style={scaledStyle}
+      aria-invalid={invalid || undefined}
       placeholderTextColor={placeholderTextColor ?? colors.textMuted}
       className={cn(inputVariants({ invalid }), "focus:outline-2 focus:outline-offset-2 focus:outline-focus", className)}
     />

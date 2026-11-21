@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   NativeEventEmitter,
   NativeModules,
   ScrollView,
@@ -15,6 +16,7 @@ import {
   type SessionRequestContext,
   captureRequestContext,
   connectHost,
+  controlHost,
   controlTarget,
   disconnectHost,
 } from "../src/session";
@@ -207,18 +209,33 @@ function useHostModel() {
     },
     [deleting],
   );
-  const handleClearAllRecent = useCallback(async () => {
+  const handleClearAllRecent = useCallback(() => {
     if (deleting) return;
-    setDeleting(true);
-    try {
-      await clearRecentHosts();
-      setRecentHosts([]);
-    } catch (cause) {
-      setError(formatErrorMessage(cause));
-    } finally {
-      setDeleting(false);
-    }
-  }, [deleting]);
+    Alert.alert(
+      t.viewer.clearRecentAlertTitle,
+      t.viewer.clearRecentAlertDesc,
+      [
+        { text: t.common.cancel, style: "cancel" },
+        {
+          text: t.viewer.deleteHost,
+          style: "destructive",
+          onPress: () => {
+            setDeleting(true);
+            void clearRecentHosts()
+              .then(() => {
+                setRecentHosts([]);
+              })
+              .catch((cause) => {
+                setError(formatErrorMessage(cause));
+              })
+              .finally(() => {
+                setDeleting(false);
+              });
+          },
+        },
+      ],
+    );
+  }, [deleting, t]);
 
   useFocusEffect(
     useCallback(() => {
@@ -351,11 +368,13 @@ function useHostModel() {
   });
 
   const connectManual = useCallback(() => {
-    const endpoint = parseHostEndpoint(ip);
+    const cleaned = ip.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    const endpoint = parseHostEndpoint(cleaned);
     if (!endpoint) {
       setError(t.viewer.invalidHostError);
       return;
     }
+    Keyboard.dismiss();
     void doConnect(endpoint.host, endpoint.port);
   }, [doConnect, ip, t]);
 
@@ -581,7 +600,15 @@ function ManualSection({ model }: { model: HostModel }) {
         accessibilityState={{ expanded: manualOpen }}
         onPress={() => setManualOpen(!manualOpen)}
         label={t.viewer.manualTitle}
-      />
+      >
+        <Label
+          tone="muted"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {manualOpen ? "▴" : "▾"}
+        </Label>
+      </Action>
       {manualOpen ? (
         <View className="gap-3">
           <Label tone="muted">{t.viewer.manualDesc}</Label>
@@ -629,7 +656,15 @@ function ConnectionHelp({ model }: { model: HostModel }) {
         accessibilityState={{ expanded: showTroubleshoot }}
         onPress={() => setShowTroubleshoot(!showTroubleshoot)}
         label={t.viewer.troubleshootTitle}
-      />
+      >
+        <Label
+          tone="muted"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {showTroubleshoot ? "▴" : "▾"}
+        </Label>
+      </Action>
       {showTroubleshoot ? (
         <View className="gap-4">
           {[
@@ -656,6 +691,7 @@ function ConnectionHelp({ model }: { model: HostModel }) {
 export default function Host() {
   const model = useHostModel();
   const { t } = model;
+  const currentHost = controlHost();
   return (
     <SafeArea className="flex-1 bg-canvas" edges={["left", "right", "bottom"]}>
       <ScrollView
@@ -695,6 +731,11 @@ export default function Host() {
         {model.hasStoredToken ? (
           <Surface className="gap-2">
             <Label variant="title">{t.viewer.rememberTitle}</Label>
+            {currentHost ? (
+              <Label variant="code" tone="muted" selectable>
+                {currentHost}
+              </Label>
+            ) : null}
             <Action
               variant="ghost"
               onPress={model.handleClearToken}

@@ -28,6 +28,7 @@ function ExtensionSettings({
   status,
   exists,
   busy,
+  operation,
   onOpen,
   onResize,
   onArrange,
@@ -41,6 +42,8 @@ function ExtensionSettings({
     String(initial?.logicalHeight ?? status?.suggested?.height ?? 800),
   );
   const [scale, setScale] = useState(initial?.scale ?? 2);
+  const [selectedPosition, setSelectedPosition] =
+    useState<ExtendedDisplayPosition | null>(null);
   const [invalid, setInvalid] = useState(false);
   const mode = { width: Number(width), height: Number(height), scale };
   const apply = () => {
@@ -76,10 +79,18 @@ function ExtensionSettings({
               <Action
                 key={position}
                 variant="secondary"
-                className="grow"
+                className={cn(
+                  "grow",
+                  selectedPosition === position && "border-strong bg-active",
+                )}
                 label={label}
+                busy={busy && operation === "arrange" && selectedPosition === position}
                 disabled={busy}
-                onPress={() => onArrange(position)}
+                accessibilityState={{ selected: selectedPosition === position }}
+                onPress={() => {
+                  setSelectedPosition(position);
+                  onArrange(position);
+                }}
               />
             ))}
           </View>
@@ -123,11 +134,15 @@ function ExtensionSettings({
           <Field
             accessibilityLabel={t.host.extDisplayWidth}
             keyboardType="number-pad"
+            placeholder="640–4096"
+            maxLength={4}
+            returnKeyType="done"
+            onSubmitEditing={apply}
             value={width}
             editable={!busy}
             invalid={invalid}
             onChangeText={(value) => {
-              setWidth(value);
+              setWidth(value.replace(/[^0-9]/g, ""));
               setInvalid(false);
             }}
           />
@@ -138,11 +153,15 @@ function ExtensionSettings({
           <Field
             accessibilityLabel={t.host.extDisplayHeight}
             keyboardType="number-pad"
+            placeholder="480–4096"
+            maxLength={4}
+            returnKeyType="done"
+            onSubmitEditing={apply}
             value={height}
             editable={!busy}
             invalid={invalid}
             onChangeText={(value) => {
-              setHeight(value);
+              setHeight(value.replace(/[^0-9]/g, ""));
               setInvalid(false);
             }}
           />
@@ -164,6 +183,7 @@ function ExtensionSettings({
       <Action
         variant="secondary"
         label={exists ? t.viewer.extApplySize : t.viewer.extCreateButton}
+        busy={busy && (operation === "resize" || (!exists && operation === "open"))}
         disabled={busy}
         onPress={apply}
       />
@@ -171,6 +191,7 @@ function ExtensionSettings({
         <Action
           variant="ghost"
           label={t.viewer.extRemoveButton}
+          busy={busy && operation === "remove"}
           disabled={busy}
           onPress={onRemove}
         />
@@ -207,7 +228,15 @@ export function ExtensionDisplayCard(props: Props) {
           disabled={busy}
           accessibilityState={{ expanded: settings }}
           onPress={() => setSettings(!settings)}
-        />
+        >
+          <Label
+            tone="muted"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            {settings ? "▴" : "▾"}
+          </Label>
+        </Action>
       ) : null}
       {settings && !pending ? (
         <ExtensionSettings

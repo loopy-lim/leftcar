@@ -8,7 +8,10 @@ import {
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
+  Pressable,
   RefreshControl,
   ScrollView,
   Switch,
@@ -80,10 +83,20 @@ function Sheet({
       transparent
       onRequestClose={onClose}
     >
-      <View className="flex-1 justify-end bg-scrim">
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        className="relative flex-1 justify-end bg-scrim"
+      >
+        <Pressable
+          className="absolute inset-0"
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          onPress={onClose}
+        />
         <Surface
           variant="card"
-          className="max-h-[88%] w-full rounded-t-xl bg-canvas"
+          className="relative z-10 mx-auto max-h-[88%] w-full max-w-3xl rounded-t-xl bg-canvas"
           accessibilityViewIsModal
           style={{ paddingBottom: Math.max(16, insets.bottom) }}
         >
@@ -106,7 +119,7 @@ function Sheet({
             {children}
           </ScrollView>
         </Surface>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -322,7 +335,15 @@ function AdvancedOptions({ model }: { model: CatalogModel }) {
         label={t.viewer.expertSettingsToggle}
         accessibilityState={{ expanded: open }}
         onPress={() => setManualOpen(!open)}
-      />
+      >
+        <Label
+          tone="muted"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {open ? "▴" : "▾"}
+        </Label>
+      </Action>
       {open ? (
         <View className="gap-4">
           <Option
@@ -476,7 +497,11 @@ function DiagnosticsControls() {
   return (
     <Surface className="gap-2">
       <Label variant="title">{t.viewer.diagnosticsTitle}</Label>
-      <Notice>{t.viewer.diagnosticsNote}</Notice>
+      <Notice>
+        <Label variant="caption" tone="muted">
+          {t.viewer.diagnosticsNote}
+        </Label>
+      </Notice>
       {summary ? (
         <Label variant="caption" tone="muted">
           {t.viewer.diagnosticsSummaryLabel}: {summary}
@@ -613,6 +638,7 @@ function DisplayMiniature({ display }: { display: DisplayInfo }) {
         className="rounded border border-strong bg-subtle"
         style={{ width, height }}
       />
+      <View className="mt-1 h-0.5 w-4 rounded-full bg-strong" />
     </View>
   );
 }
@@ -666,7 +692,11 @@ function DisplayRow({
         <Label tone="muted">{t.viewer.currentlyStreaming}</Label>
       ) : (
         <Action
-          variant="secondary"
+          variant={
+            display.index === 0 && model.streams.length === 0
+              ? "primary"
+              : "secondary"
+          }
           busy={launching}
           disabled={model.launchingIndex !== null || switching}
           accessibilityLabel={`${t.common.open}: ${display.name}`}
@@ -776,6 +806,74 @@ function ActiveStreamCard({
   );
 }
 
+function CatalogSettingsNotice({
+  model,
+  openSettings,
+}: {
+  model: CatalogModel;
+  openSettings: () => void;
+}) {
+  const { t } = useAppLanguage();
+  const settingsAttention =
+    Boolean(model.preferencePersistenceIssue) ||
+    model.nativeSettingsFailures.length > 0;
+  const udpReconnectNotice = model.udpSettingsDirty && model.streams.length > 0;
+  if (!settingsAttention && !udpReconnectNotice) return null;
+  return (
+    <Notice>
+      <Label>
+        {settingsAttention
+          ? t.viewer.settingsNeedAttention
+          : t.viewer.encoderReconnectNotice}
+      </Label>
+      {settingsAttention ? (
+        <Action
+          variant="secondary"
+          size="compact"
+          onPress={openSettings}
+          label={t.viewer.settingsTitle}
+        />
+      ) : (
+        <Action
+          variant="secondary"
+          size="compact"
+          busy={model.udpReconnecting}
+          onPress={model.handleApplyUdpStability}
+          label={
+            model.udpReconnecting
+              ? t.viewer.udpReconnecting
+              : t.viewer.udpApplyReconnect
+          }
+        />
+      )}
+    </Notice>
+  );
+}
+
+function CatalogErrorNotice({ model }: { model: CatalogModel }) {
+  const { t } = useAppLanguage();
+  if (!model.visibleError) return null;
+  return (
+    <Notice tone="error">
+      <Label>{model.visibleError}</Label>
+      {model.host ? (
+        <Action
+          variant="secondary"
+          busy={model.refreshing}
+          onPress={model.handleRefresh}
+          label={t.common.retry}
+        />
+      ) : (
+        <Action
+          variant="secondary"
+          onPress={() => router.replace("/host")}
+          label={t.viewer.btnFindHost}
+        />
+      )}
+    </Notice>
+  );
+}
+
 function CatalogHeader({
   model,
   openSettings,
@@ -784,19 +882,38 @@ function CatalogHeader({
   openSettings: () => void;
 }) {
   const { t } = useAppLanguage();
-  const settingsNotice =
-    model.preferencePersistenceIssue ||
-    model.nativeSettingsFailures.length > 0 ||
-    (model.udpSettingsDirty && model.streams.length > 0);
   return (
     <>
       <View className="gap-3">
-        <Label variant="caption" tone="muted">
-          {model.host ? t.viewer.connectedHostLabel : t.viewer.standbyBadge}
-        </Label>
-        <Label variant="code" selectable>
-          {model.host || "—"}
-        </Label>
+        <View className="flex-row items-center justify-between gap-2">
+          <View className="min-w-0 flex-1 gap-0.5">
+            <View className="flex-row items-center gap-2">
+              <View
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  model.host ? "bg-live" : "bg-strong",
+                )}
+                accessibilityElementsHidden
+                importantForAccessibility="no-hide-descendants"
+              />
+              <Label variant="caption" tone="muted">
+                {model.host
+                  ? t.viewer.connectedHostLabel.replace(/:\s*$/, "")
+                  : t.viewer.standbyBadge}
+              </Label>
+            </View>
+            <Label variant="code" selectable>
+              {model.host || "—"}
+            </Label>
+          </View>
+          <Action
+            variant="ghost"
+            size="compact"
+            className="shrink-0"
+            onPress={() => router.push("/host")}
+            label={t.viewer.btnChangeHost}
+          />
+        </View>
         <View className="flex-row flex-wrap gap-2">
           <Action
             variant="secondary"
@@ -804,35 +921,18 @@ function CatalogHeader({
             onPress={openSettings}
             label={t.viewer.btnSettings}
           />
-          {model.host && <Action variant="secondary" className="grow" onPress={() => router.push("/input-sharing")} label={t.km.title} />}
-          <Action
-            variant="ghost"
-            className="grow"
-            onPress={() => router.push("/host")}
-            label={t.viewer.btnChangeHost}
-          />
+          {model.host && (
+            <Action
+              variant="secondary"
+              className="grow"
+              onPress={() => router.push("/input-sharing")}
+              label={t.km.title}
+            />
+          )}
         </View>
       </View>
-      {settingsNotice ? (
-        <Notice>
-          <Label>
-            {model.preferencePersistenceIssue || model.nativeSettingsFailures.length > 0
-              ? t.viewer.settingsNeedAttention
-              : t.viewer.udpApplyReconnect}
-          </Label>
-        </Notice>
-      ) : null}
-      {model.visibleError ? (
-        <Notice tone="error">
-          <Label>{model.visibleError}</Label>
-          <Action
-            variant="secondary"
-            busy={model.refreshing}
-            onPress={model.handleRefresh}
-            label={t.common.retry}
-          />
-        </Notice>
-      ) : null}
+      <CatalogSettingsNotice model={model} openSettings={openSettings} />
+      <CatalogErrorNotice model={model} />
     </>
   );
 }
@@ -855,7 +955,6 @@ function DisplayListHeader({ model }: { model: CatalogModel }) {
 }
 function DisplayListEmpty({ model }: { model: CatalogModel }) {
   const { t } = useAppLanguage();
-  if (model.visibleError) return null;
   return (
     <Surface variant="card" className="gap-3 py-6">
       {model.loading ? (
@@ -867,12 +966,14 @@ function DisplayListEmpty({ model }: { model: CatalogModel }) {
         </>
       ) : (
         <>
-          <Label>{t.viewer.emptyDisplays}</Label>
-          <Action
-            variant="secondary"
-            onPress={model.handleRefresh}
-            label={t.common.retry}
-          />
+          <Label tone="muted">{t.viewer.emptyDisplays}</Label>
+          {!model.visibleError ? (
+            <Action
+              variant="secondary"
+              onPress={model.handleRefresh}
+              label={t.common.retry}
+            />
+          ) : null}
         </>
       )}
     </Surface>
@@ -980,6 +1081,7 @@ export default function Catalog() {
       <FlatList
         className="flex-1"
         contentContainerClassName="mx-auto w-full max-w-3xl gap-5 px-4 pb-8 pt-4"
+        keyboardShouldPersistTaps="handled"
         data={model.displays}
         keyExtractor={(display) => String(display.sourceId || display.index)}
         renderItem={renderDisplay}
