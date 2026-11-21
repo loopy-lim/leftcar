@@ -26,6 +26,12 @@ export const sourceExclusions = [
   /^apps\/viewer-expo\/(?:dist|\.expo|android\/(?:build|\.gradle|app\/build))\//,
   /^apps\/viewer-expo\/android\/app\/libs\//,
   /^native\/macos-capture-shim\/libleftcar_capture\.dylib$/,
+  // CI scaffolding, not a build input of this repository: the sibling
+  // unikit-bridge checkout (nested git repo) that ci.yml/release.yml link to
+  // ../rustra for path dependencies. `git ls-files --others` surfaces it as a
+  // single trailing-slash entry which fails path validation; its content is
+  // pinned by the tracked workflow refs instead.
+  /^unikit-bridge-sibling(\/|$)/,
 ];
 export async function sourceSnapshot(root) {
   const git = args => execFileSync('git', ['-C', root, ...args], { encoding:'utf8' });

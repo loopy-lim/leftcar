@@ -1,6 +1,6 @@
 import type { ViewerAddNumbersInput, ViewerAddNumbersOutput } from './types.js';
-import { createGeneratedFields2, invokeGenerated } from '@unikit-bridge/types';
-import type { InvokeOptions as CoreInvokeOptions } from '@unikit-bridge/types';
+import { createGeneratedFields2, invokeGenerated } from '@unikit-bridge/rustra/types';
+import type { InvokeOptions as CoreInvokeOptions } from '@unikit-bridge/rustra/types';
 
 /**
  * 이 패키지 생성 명령의 호출 옵션 — 모든 생성 함수의 마지막 파라미터.
@@ -15,7 +15,7 @@ import type { InvokeOptions as CoreInvokeOptions } from '@unikit-bridge/types';
  * 시도가 반영되지 않았음을 확인한 뒤에만 하세요.
  *
  * 전체 의미론은 docs/compatibility-matrix.md "Signal semantics in detail" 및
- * 원본 타입(`InvokeOptions`(@unikit-bridge/types)) 문서를 참고하세요.
+ * 원본 타입(`InvokeOptions`(@unikit-bridge/rustra/types)) 문서를 참고하세요.
  */
 export type InvokeOptions = CoreInvokeOptions;
 

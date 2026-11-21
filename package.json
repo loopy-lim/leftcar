@@ -37,6 +37,7 @@
     "@types/node": "^26.6.6",
     "@types/react": "~19.2.4",
     "@unikit-bridge/cli": "^0.13.0",
+    "@unikit-bridge/rustra": "^0.13.0",
     "@unikit-bridge/types": "^0.13.0",
     "@xmldom/xmldom": "0.9.12",
     "playwright-core": "1.63.0",
