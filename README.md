@@ -4,7 +4,13 @@
 
 Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에서 빠르게 보고, 필요할 때 키보드와 포인터로 조작하는 다중 화면 뷰어다. 컴퓨터마다 Leftcar를 실행하고, Viewer 앱에서 원하는 화면을 별도 창으로 열 수 있다.
 
-2026-10-13 GitHub Releases 조회 기준 최신 공개 릴리스는 [v0.1.10](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.10)이다. Android APK와 macOS arm64 ZIP을 제공하며 Windows 파일은 없다. 이번 성능·안전성 개선과 Rustra 업데이트는 개발 소스의 변경으로, 해당 공개 파일에 포함됐다는 뜻이 아니다. 지원·호환성·서명 상태는 [지원 범위와 완료 기준](docs/completion-and-support.md), [버전·업데이트 안내](docs/versioning.md)를 확인한다.
+2026-11-21 GitHub Releases 조회 기준 최신 공개 릴리스는 [v0.1.13](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.13)이다. macOS arm64 ZIP, Windows x64 NSIS 설치 파일, Android APK를 공개 저장소의 무료 GitHub Actions 러너에서 같은 커밋의 소스로 만들어 올린다. 지원·호환성·서명 상태는 [지원 범위와 완료 기준](docs/completion-and-support.md), [버전·업데이트 안내](docs/versioning.md)를 확인한다.
+
+## 배포 파일 서명 안내
+
+릴리스 파일은 아직 유료 코드 서명 인증서가 없는 상태에서 만든다(2026-11-21 기준). macOS는 ad-hoc 서명, Windows는 미서명이라 첫 실행 때 Gatekeeper·SmartScreen 운영체제 경고가 뜰 수 있다. 파일이 변조돼서가 아니라 상용 서명·공증이 없어서 나오는 표준 절차이며, 무결성은 릴리스마다 함께 올리는 `SHA256SUMS.txt`로 확인할 수 있고 우회 설치 절차는 각 릴리스 안내에 적어 둔다. Android APK는 기존 내부 디버그 키로 서명해서 이전 설치 위에 그대로 덮어쓸 수 있다.
+
+서명이 없는 이유는 Apple Developer Program의 Developer ID 공증과 Windows 코드 서명 인증서라는 유료 경로를 아직 등록하지 않았기 때문이다. 배포 워크플로(`.github/workflows/release.yml`)에는 공증·코드 서명 단계가 이미 장착돼 있어, 서명 비밀을 저장소 시크릿에 넣는 즉시 자동으로 켜지고 경고 없이 배포된다. 추후 등록해 추가할 계획이다.
 
 ## 한 문장 정의
 
