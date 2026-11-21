@@ -23,6 +23,10 @@ export const sourceExclusions = [
   /(^|\/)node_modules\//,
   /^target\//,
   /^apps\/host-desktop\/(?:dist|src-tauri\/target)\//,
+  // tauri regenerates gen/schemas (acl/capability/platform schemas) on every
+  // platform build; the macOS schema is rewritten by `tauri build --config
+  // tauri.macos.conf.json`, so it is a derived output, not a build input.
+  /^apps\/host-desktop\/src-tauri\/gen\//,
   /^apps\/viewer-expo\/(?:dist|\.expo|android\/(?:build|\.gradle|app\/build))\//,
   /^apps\/viewer-expo\/android\/app\/libs\//,
   /^native\/macos-capture-shim\/libleftcar_capture\.dylib$/,
