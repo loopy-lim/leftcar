@@ -256,7 +256,17 @@ jobs:
         env:
           LEFTCAR_BUILD_RECEIPTS: ${{ runner.temp }}/leftcar-receipts
           LEFTCAR_INTERNAL_DEBUG_KEYSTORE: ${{ runner.temp }}/debug.keystore
-        run: bun run build android-internal
+        run: |
+          set +e
+          bun run build android-internal
+          status=$?
+          echo "=== BEGIN source-mutation diagnostic (temporary) ==="
+          git status --porcelain -uall
+          echo "=== tracked diffs ==="
+          git diff --stat
+          git diff | head -120
+          echo "=== END diagnostic; build exit=$status ==="
+          exit $status
       - name: Stage the APK under its release name
         run: |
           manifest="$(find "$RUNNER_TEMP/leftcar-receipts" -name android-internal-manifest.json | head -1)"
