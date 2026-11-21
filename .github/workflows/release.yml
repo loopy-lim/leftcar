@@ -1,0 +1,170 @@
+name: Release
+
+# 무료 러너(public repo)로 배포 산출물을 만든다. macOS는 검증된 내부 빌드
+# 파이프라인(bun run build host-macos-internal: 소스 스냅샷·매니페스트·심볼
+# 검증 포함)을 그대로 실행하고, Windows는 ci.yml windows-host와 동일한
+# NSIS 번들을 만든다. tag push(v*)일 때만 GitHub Release를 만들어 올리고,
+# workflow_dispatch는 빌드 산출물을 워크플로 아티팩트로만 남긴다(릴리즈
+# 리허설용). 서명 없는 빌드의 설치 안내는 publish 잡의 notes에 고정된다.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: macOS Host (ad-hoc app bundle)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Root Cargo.toml depends on the sibling unikit-bridge repo via
+      # ../rustra/crates/unikit-bridge (path dep, unpublished on crates.io).
+      # Keep this ref in lockstep with the pins in ci.yml and the root
+      # Cargo.toml dependency; bump them together.
+      - name: Checkout unikit-bridge sibling repo (path dependency)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: loopy-lim/unikit-bridge
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
+          path: unikit-bridge-sibling
+          persist-credentials: false
+      - name: Link sibling checkout to ../rustra for path dependencies
+        run: ln -s "$GITHUB_WORKSPACE/unikit-bridge-sibling" "$GITHUB_WORKSPACE/../rustra"
+      - name: Tag must match the Host bundle version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "${GITHUB_REF_NAME#v}" = "$(jq -r .version apps/host-desktop/src-tauri/tauri.conf.json)"
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: apps/host-desktop/src-tauri
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.21.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
+      - run: bun install --frozen-lockfile
+      - name: Verified internal Host packaging (shim, bundle, manifest)
+        env:
+          LEFTCAR_BUILD_RECEIPTS: ${{ runner.temp }}/leftcar-receipts
+        run: bun run build host-macos-internal
+      - name: Zip the .app bundle preserving the ad-hoc seal
+        run: |
+          manifest="$(find "$RUNNER_TEMP/leftcar-receipts" -name host-macos-internal-manifest.json | head -1)"
+          app="$(jq -r '.artifactBuildPaths[] | select(.role=="host-bundle") | .buildPath' "$manifest")"
+          version="$(jq -r .version apps/host-desktop/src-tauri/tauri.conf.json)"
+          zip="Leftcar-Host-${version}-macOS-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/$zip"
+          # Receipt provenance travels with the workflow run, not the release.
+          cp "$manifest" "$RUNNER_TEMP/host-macos-internal-manifest.json"
+          echo "ZIP=$RUNNER_TEMP/$zip" >> "$GITHUB_ENV"
+          echo "MANIFEST=$RUNNER_TEMP/host-macos-internal-manifest.json" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-host-zip
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: host-macos-internal-manifest
+          path: ${{ env.MANIFEST }}
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows Host (unsigned NSIS)
+    runs-on: windows-latest
+    env:
+      CARGO_HOME: C:\c
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.21.1
+      - name: Enable long paths for Git dependencies
+        run: git config --global core.longpaths true
+      # See build-macos: sibling path dependency, junctioned to ..\rustra.
+      - name: Checkout unikit-bridge sibling repo (path dependency)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: loopy-lim/unikit-bridge
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
+          path: unikit-bridge-sibling
+          persist-credentials: false
+      - name: Junction sibling checkout to ..\rustra for path dependencies
+        shell: pwsh
+        run: cmd /c mklink /J (Join-Path (Split-Path $env:GITHUB_WORKSPACE -Parent) 'rustra') (Join-Path $env:GITHUB_WORKSPACE 'unikit-bridge-sibling')
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: apps/host-desktop/src-tauri
+      - run: bun install --frozen-lockfile
+      - name: Build unsigned current-user NSIS installer
+        run: bun run --cwd apps/host-desktop tauri build -- --locked
+      - name: Stage NSIS asset under its release name
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/host-desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $setup = Get-ChildItem apps/host-desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\asset" | Out-Null
+          Copy-Item $setup.FullName "$env:RUNNER_TEMP\asset\Leftcar.Host_${version}_x64-setup.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-host-setup
+          path: ${{ runner.temp }}\asset\*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Download build artifacts from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --names macos-host-zip,windows-host-setup -D "$RUNNER_TEMP/assets"
+      - name: Compose release assets with checksums
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          find "$RUNNER_TEMP/assets" -type f -exec cp {} "$RUNNER_TEMP/dist/" \;
+          (cd "$RUNNER_TEMP/dist" && shasum -a 256 * | tee SHA256SUMS.txt)
+      - name: Compose release notes (tag annotation + install guidance)
+        run: |
+          git fetch --force --tags origin '+refs/tags/*:refs/tags/*'
+          tag_notes="$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
+          {
+            if [ -n "$tag_notes" ]; then printf '%s\n\n' "$tag_notes"; fi
+            cat .github/release-notes/install-guidance.md
+          } > "$RUNNER_TEMP/notes.md"
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/dist"/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/dist"/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Leftcar $GITHUB_REF_NAME" \
+              --latest \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi
