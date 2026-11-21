@@ -202,7 +202,10 @@ extension CaptureSession {
         )
         let pacingRateMultiplier = udpPacingRateMultiplier(
             profile: appliedUdpStability.profile,
-            burstDatagrams: effectiveBurstDatagrams
+            burstDatagrams: effectiveBurstDatagrams,
+            localLan: isLocalLanPeer(
+                ipv4HostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr)
+            )
         )
         stateLock.unlock()
         // Pace at the configured media rate, with a small floor to avoid

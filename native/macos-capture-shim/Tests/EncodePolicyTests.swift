@@ -339,7 +339,7 @@ struct EncodePolicyTests {
         precondition(captureMinimumFrameTimeSeconds(fps: 60) == 1.0 / 62.0)
         precondition(captureMinimumFrameTimeSeconds(fps: 30) == 1.0 / 30.0)
         precondition(captureMinimumFrameTimeSeconds(fps: 0) == 1.0)
-        precondition(captureQueueDepth(experiment: .auto) == 3)
+        precondition(captureQueueDepth(experiment: .auto) == 8)
         precondition(captureQueueDepth(experiment: .splitVertical) == 8)
         precondition(shouldOffloadEncodedSample(width: 3_840, height: 2_160))
         precondition(shouldOffloadEncodedSample(width: 2_560, height: 1_440))
@@ -2338,10 +2338,22 @@ struct EncodePolicyTests {
         )
         precondition(
             udpPacingRateMultiplier(
+                profile: .responsive,
+                burstDatagrams: 8,
+                localLan: true
+            ) == 2
+        )
+        precondition(
+            udpPacingRateMultiplier(
                 profile: .custom,
                 burstDatagrams: 16
             ) == 2
         )
+        precondition(isLocalLanPeer(ipv4HostOrder: 0x0a00_0000))
+        precondition(isLocalLanPeer(ipv4HostOrder: 0xc0a8_0102))
+        precondition(isLocalLanPeer(ipv4HostOrder: 0x7f00_0001))
+        precondition(!isLocalLanPeer(ipv4HostOrder: 0x0808_0808))
+        precondition(!isLocalLanPeer(ipv4HostOrder: 0x6464_0a01))
         let standardDeltaInterval = udpDatagramIntervalUs(
             bytes: 16 * udpMediaDatagramBytes,
             isKeyframe: false,

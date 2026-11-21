@@ -14,6 +14,15 @@ const DRAIN_DEADLINE: Duration = Duration::from_secs(1);
 /// 초과)는 여전히 Deadline로 종료된다.
 const MAX_DEADLINE_EXTENSION: Duration = Duration::from_secs(4);
 
+/// 배출 예산의 여유 배율. 인코더 비트레이트에서 유도한 예산은 정상 상태를
+/// 정확히 커버할 뿐 60fps 프레임 예산(16.7ms) 안에 여유가 0이라, IDR 버스트나
+/// CBR 오버슈트가 오면 캡처 스레드 안의 drain이 잠들어 프레임 레이트가
+/// 부드럽게 60→~40fps로 내려앉았다. 2배면 평균 AU가 프레임 예산의 절반에
+/// 배출된다. 버스트 상한(MAX_BURST_*)은 그대로고 지속 와이어 레이트는
+/// 인코더가 결정하므로, 링크는 같은 마이크로버스트와 같은 평균을 본다 —
+/// 프레임 레이트를 깎는 페이싱 자체가 사라진다.
+const PACING_HEADROOM: u64 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum DrainError {
     Cancelled,
@@ -102,10 +111,11 @@ impl MediaPacer {
         let fragments = payload_rate.div_ceil(payload_limit as u64) + frames;
         let parity_count = fragments.div_ceil(8) * fec_core::parity_count(8) as u64 + frames;
         let parity_wire = payload_limit + 2 + crate::wire::PARITY_HEADER + overhead;
-        let bytes_per_second = payload_rate
-            + fragments * (crate::wire::FRAME_HEADER_V1_LEN + overhead) as u64
-            + parity_count * parity_wire as u64
-            + frames * (plaintext_limit + overhead) as u64;
+        let bytes_per_second = PACING_HEADROOM
+            * (payload_rate
+                + fragments * (crate::wire::FRAME_HEADER_V1_LEN + overhead) as u64
+                + parity_count * parity_wire as u64
+                + frames * (plaintext_limit + overhead) as u64);
         Self {
             metrics: DrainMetrics::default(),
             bytes_per_second: bytes_per_second as f64,
@@ -387,12 +397,13 @@ mod tests {
             pacer.drain(&[config], false, &mut io).unwrap();
             let cost = 65_536 + 24 + if tcp { 4 } else { 0 };
             // Independent wire budget: payload500000; ceil(payload/1367)+60=426
-            // fragments; ceil(426/8)*2+60=168 parity; plus60CFGs.
+            // fragments; ceil(426/8)*2+60=168 parity; plus60CFGs; ×2 headroom.
             let overhead = 24 + if tcp { 4 } else { 0 };
-            let rate = 500_000
-                + 426 * (17 + overhead)
-                + 168 * (1367 + 2 + 19 + overhead)
-                + 60 * (1400 + overhead);
+            let rate = PACING_HEADROOM
+                * (500_000
+                    + 426 * (17 + overhead)
+                    + 168 * (1367 + 2 + 19 + overhead)
+                    + 60 * (1400 + overhead));
             let expected = (cost as f64 - 11_424.0) / rate as f64;
             assert!((io.now.as_secs_f64() - expected).abs() < 0.000001);
             assert!(
@@ -425,21 +436,48 @@ mod tests {
         assert!(io.sent.is_empty());
     }
     #[test]
-    fn config_above_sealer_limit_and_config_deadline_fail_before_submission() {
-        for (size, bitrate, expected) in [
-            (65_537, 4_000_000, DrainError::Submission),
-            (65_536, 1, DrainError::Deadline),
-        ] {
-            let mut io = FakeIo::new(true);
-            let mut pacer = MediaPacer::new(bitrate, 1, true, io.now);
-            let mut config = vec![0; size];
-            config[..3].copy_from_slice(b"CFG");
-            assert_eq!(pacer.drain(&[config], false, &mut io), Err(expected));
-            assert!(io.sent.is_empty());
-            assert_eq!(pacer.metrics().completed_aus, 0);
-            // bitrate=1bps 예산은 마감 확장 상한(4s)까지 늘어나지만 결국 Deadline.
-            assert!(io.now <= Duration::from_secs(5));
-        }
+    fn config_above_sealer_limit_fails_before_submission() {
+        // 상한 초과 CFG는 제출 전에 Submission으로 거부된다.
+        let mut io = FakeIo::new(true);
+        let mut pacer = MediaPacer::new(4_000_000, 1, true, io.now);
+        let mut config = vec![0; 65_537];
+        config[..3].copy_from_slice(b"CFG");
+        assert_eq!(
+            pacer.drain(&[config], false, &mut io),
+            Err(DrainError::Submission)
+        );
+        assert!(io.sent.is_empty());
+        assert_eq!(pacer.metrics().completed_aus, 0);
+    }
+
+    #[test]
+    fn at_limit_config_with_absurd_budget_drains_within_the_capped_deadline() {
+        // bitrate=1bps 예산으로도 64KiB 상한 CFG는 2배 여유 예산이면 마감 확장
+        // 상한(1s+4s) 안에 상환되어 완전히 배출된다 — 매달리지 않는 유계 드레인.
+        let mut io = FakeIo::new(true);
+        let mut pacer = MediaPacer::new(1, 1, true, io.now);
+        let mut config = vec![0; 65_536];
+        config[..3].copy_from_slice(b"CFG");
+        pacer.drain(&[config], false, &mut io).unwrap();
+        assert_eq!(io.sent.len(), 1);
+        assert_eq!(pacer.metrics().completed_aus, 0);
+        assert!(io.now > Duration::from_secs(4));
+        assert!(io.now <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn oversized_au_with_absurd_budget_terminates_at_the_deadline() {
+        // 단일 CFG와 달리 AU는 여러 패킷이 버스트 상한을 반복히 넘기므로
+        // bitrate=1bps 예산으로는 마감(확장 포함 5s) 안에 끝나지 못해 Deadline.
+        let mut io = FakeIo::new(false);
+        let mut pacer = MediaPacer::new(1, 1, false, io.now);
+        assert_eq!(
+            pacer.drain(&au(100_000), true, &mut io),
+            Err(DrainError::Deadline)
+        );
+        assert!(io.now <= Duration::from_secs(5));
+        assert_eq!(pacer.metrics().deadline_drains, 1);
+        assert_eq!(pacer.metrics().completed_aus, 0);
     }
 
     #[test]

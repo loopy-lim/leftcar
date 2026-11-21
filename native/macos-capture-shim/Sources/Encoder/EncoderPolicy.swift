@@ -240,13 +240,17 @@ func captureMinimumFrameTimeSeconds(fps: UInt32) -> Double {
 }
 
 func captureQueueDepth(experiment: EncoderExperiment) -> Int {
-    // A split frame remains backed by the ScreenCaptureKit IOSurface until
-    // both hardware encoders have accepted their tile. Three framework
-    // surfaces are not enough for two app-pending frames plus the measured
-    // 2-3 encoder submissions in flight, which makes replayd throttle capture
-    // to roughly 40 fps. Eight is ScreenCaptureKit's practical upper cushion;
-    // the app queue remains bounded to two and latest-wins on overflow.
-    experiment == .splitVertical ? 8 : 3
+    // A frame remains backed by the ScreenCaptureKit IOSurface until every
+    // encoder has accepted it. Three framework surfaces are not enough for the
+    // app-pending frames plus the measured 2-3 encoder submissions in flight,
+    // which makes replayd throttle capture to roughly 40 fps (measured on the
+    // split path). The single-stream path holds one app-pending frame plus two
+    // in-flight encodes and starves the same way, so both paths take the
+    // measured fix: eight, ScreenCaptureKit's practical upper cushion. The app
+    // queue stays bounded (latest-wins on overflow) so the extra cushion
+    // absorbs jitter without turning into playback latency.
+    _ = experiment // 시그니처 유지(호출처 가독성); 경로 무관 동일 깊이
+    return 8
 }
 
 func encoderQualityPolicy(

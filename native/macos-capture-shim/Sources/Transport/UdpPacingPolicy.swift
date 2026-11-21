@@ -25,6 +25,13 @@ func udpMediaPlaintextLimit(ipv4HostOrder address: UInt32) -> Int {
     return isLocalLan ? udpMediaDatagramBytes : 1_200
 }
 
+/// True when the viewer peer is on the local LAN — the same classification
+/// that permits the full 1,400-byte datagram. Address is IPv4 host byte order,
+/// matching `udpMediaPlaintextLimit` callers.
+func isLocalLanPeer(ipv4HostOrder address: UInt32) -> Bool {
+    udpMediaPlaintextLimit(ipv4HostOrder: address) == udpMediaDatagramBytes
+}
+
 /// The wall-clock budget for one frame at the requested stream rate. Round up
 /// so a 60fps budget is never reported as shorter than the actual 16.67ms
 /// interval.
@@ -54,15 +61,23 @@ func udpPacingBurstRanges(
     return ranges
 }
 
-/// The explicitly selected 16-datagram custom profile is the clean-LAN
-/// latency experiment. It drains ordinary delta access units at twice the
-/// encoded media rate while preserving the bounded recovery-keyframe path.
-/// Smaller and canonical profiles retain the established pacing rate.
+/// Ordinary delta pacing drains at twice the encoded media rate so an average
+/// access unit finishes in half a frame budget — pacing then never becomes the
+/// frame-rate binder when an IDR burst or a Wi-Fi scheduling pause leaves
+/// backlog behind it. The 16-datagram custom profile established this on
+/// clean-LAN measurements; local-LAN peers (the same classification that
+/// permits the full 1,400-byte datagram) get it as the default. WAN/tunnel
+/// peers keep the conservative 1× rate. The multiplier only shortens the gaps
+/// between the same bounded microbursts: the sustained wire rate stays
+/// encoder-bound and the burst grouping (8 datagrams) is unchanged, so the
+/// link sees no new peak load. Recovery keyframes keep their own budget path.
 func udpPacingRateMultiplier(
     profile: UdpStabilityProfile,
-    burstDatagrams: Int
+    burstDatagrams: Int,
+    localLan: Bool = false
 ) -> Int {
-    profile == .custom && burstDatagrams >= 16 ? 2 : 1
+    if profile == .custom && burstDatagrams >= 16 { return 2 }
+    return localLan ? 2 : 1
 }
 
 /// Derive a two-frame recovery target from the observed AU while preserving a

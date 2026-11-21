@@ -229,7 +229,10 @@ extension CaptureSession {
         )
         let reportedUdpPacingRateMultiplier = udpPacingRateMultiplier(
             profile: appliedUdpStability.profile,
-            burstDatagrams: activeUdpBurstDatagrams
+            burstDatagrams: activeUdpBurstDatagrams,
+            localLan: isLocalLanPeer(
+                ipv4HostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr)
+            )
         )
         let reportedUdpFecParityShards = activeUdpFecParityShards
         let reportedUdpBurstReason = activeUdpBurstReason
