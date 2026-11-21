@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getTranslation, type SupportedLanguage } from "@leftcar/ui-tokens";
 import { formatHostAddress } from "./hostState";
 import PairingPanel from "./PairingPanel";
 import Indicator from "./Indicator";
+import PendingApprovalSection, {
+  type PendingPairingView,
+} from "./pairing/PendingApprovalSection";
 import {
   Curtain,
   useClipboardShare,
@@ -60,7 +63,7 @@ function useIndicatorWindow(isStreaming: boolean) {
   }, [isStreaming]);
 }
 
-function Dashboard() {
+function useDashboardLanguage() {
   const [language, setLanguage] = useState<SupportedLanguage>(() => {
     const saved = localStorage.getItem(
       "leftcar_lang",
@@ -80,6 +83,177 @@ function Dashboard() {
     setLanguage((prev) => (prev === "ko" ? "en" : "ko"));
   }, []);
 
+  return { language, toggleLanguage };
+}
+
+function useDashboardTheme() {
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+    localStorage.setItem("leftcar_theme", theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      if (prev === "system") return "light";
+      if (prev === "light") return "dark";
+      return "system";
+    });
+  }, []);
+
+  return { theme, toggleTheme };
+}
+
+function useCopyToast() {
+  const [copiedToast, setCopiedToast] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
+
+  const copyText = useCallback((text: string, onError: () => void) => {
+    navigator.clipboard.writeText(text).then(
+      () => {
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+        setCopiedToast(true);
+        copiedTimerRef.current = setTimeout(() => {
+          setCopiedToast(false);
+          copiedTimerRef.current = null;
+        }, 2000);
+      },
+      onError,
+    );
+  }, []);
+
+  return { copiedToast, copyText };
+}
+
+function useDashboardPendingPairings({
+  ready,
+  paused,
+  onApproved,
+  onError,
+}: {
+  ready: boolean;
+  paused: boolean;
+  onApproved: () => void;
+  onError: () => void;
+}) {
+  const [pendingPairings, setPendingPairings] = useState<PendingPairingView[]>(
+    [],
+  );
+  const [pendingDecidingId, setPendingDecidingId] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!ready || paused) return;
+    let active = true;
+    let inFlight = false;
+    const poll = () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      void invoke<PendingPairingView[]>("list_pending_pairings")
+        .then((list) => {
+          if (active) setPendingPairings(Array.isArray(list) ? list : []);
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [ready, paused]);
+
+  const decidePendingPairing = useCallback(
+    async (
+      command: "approve_pending_pairing" | "reject_pending_pairing",
+      offerId: string,
+    ) => {
+      if (pendingDecidingId !== null) return;
+      setPendingDecidingId(offerId);
+      try {
+        await invoke(command, { offerId });
+        setPendingPairings((current) =>
+          current.filter((request) => request.offer_id !== offerId),
+        );
+        if (command === "approve_pending_pairing") onApproved();
+      } catch {
+        onError();
+      } finally {
+        setPendingDecidingId(null);
+      }
+    },
+    [pendingDecidingId, onApproved, onError],
+  );
+
+  return { pendingPairings, pendingDecidingId, decidePendingPairing };
+}
+
+function useDashboardShortcuts({
+  disabled,
+  onTogglePairing,
+  onToggleHelp,
+  onToggleSettings,
+  onRefresh,
+}: {
+  disabled: boolean;
+  onTogglePairing: () => void;
+  onToggleHelp: () => void;
+  onToggleSettings: () => void;
+  onRefresh: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (disabled) return;
+      if (
+        e.target instanceof HTMLElement &&
+        (e.target.tagName === "INPUT" ||
+          e.target.tagName === "SELECT" ||
+          e.target.tagName === "TEXTAREA" ||
+          e.target.isContentEditable)
+      ) {
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        onTogglePairing();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        onToggleHelp();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        onRefresh();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        onToggleSettings();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [disabled, onTogglePairing, onToggleHelp, onToggleSettings, onRefresh]);
+}
+
+function Dashboard() {
+  const { language, toggleLanguage } = useDashboardLanguage();
+  const { theme, toggleTheme } = useDashboardTheme();
+  const { copiedToast, copyText } = useCopyToast();
   const t = getTranslation(language);
 
   const {
@@ -95,7 +269,7 @@ function Dashboard() {
     controlPort,
     lanIp,
     refresh,
-  } = useHostStatus(t);
+  } = useHostStatus(t, language);
 
   const {
     inputActionError,
@@ -119,10 +293,21 @@ function Dashboard() {
   const [showPairingModal, setShowPairingModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [copiedToast, setCopiedToast] = useState(false);
-  const [theme, setTheme] = useState<ThemeMode>(() => {
-    return (localStorage.getItem("leftcar_theme") as ThemeMode) || "system";
-  });
+
+  const onPendingApproved = useCallback(() => {
+    void refresh();
+  }, [refresh]);
+  const onPendingError = useCallback(() => {
+    setInputActionError(t.host.connectionCheckError);
+  }, [setInputActionError, t.host.connectionCheckError]);
+
+  const { pendingPairings, pendingDecidingId, decidePendingPairing } =
+    useDashboardPendingPairings({
+      ready,
+      paused: showPairingModal,
+      onApproved: onPendingApproved,
+      onError: onPendingError,
+    });
 
   const isStreaming = sessions.length > 0;
   useIndicatorWindow(isStreaming);
@@ -160,52 +345,37 @@ function Dashboard() {
     retryWan,
   } = useWanAccess();
 
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === "system") {
-      root.removeAttribute("data-theme");
-    } else {
-      root.setAttribute("data-theme", theme);
-    }
-    localStorage.setItem("leftcar_theme", theme);
-  }, [theme]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
-        e.preventDefault();
-        setShowPairingModal((prev) => !prev);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "h") {
-        e.preventDefault();
-        setShowHelpModal((prev) => !prev);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
-        e.preventDefault();
-        void refresh();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
-        e.preventDefault();
-        setShowSettingsModal((prev) => !prev);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+  const togglePairingModal = useCallback(() => {
+    setShowHelpModal(false);
+    setShowSettingsModal(false);
+    setShowPairingModal((prev) => !prev);
+  }, []);
+  const toggleHelpModal = useCallback(() => {
+    setShowPairingModal(false);
+    setShowSettingsModal(false);
+    setShowHelpModal((prev) => !prev);
+  }, []);
+  const toggleSettingsModal = useCallback(() => {
+    setShowPairingModal(false);
+    setShowHelpModal(false);
+    setShowSettingsModal((prev) => !prev);
+  }, []);
+  const handleShortcutRefresh = useCallback(() => {
+    void refresh();
   }, [refresh]);
 
-  const copyAddressInfo = () => {
-    navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
-      () => {
-        setCopiedToast(true);
-        setTimeout(() => setCopiedToast(false), 2000);
-      },
-      () => setInputActionError(t.host.copyFailed),
-    );
-  };
+  useDashboardShortcuts({
+    disabled: pendingStopSession !== null,
+    onTogglePairing: togglePairingModal,
+    onToggleHelp: toggleHelpModal,
+    onToggleSettings: toggleSettingsModal,
+    onRefresh: handleShortcutRefresh,
+  });
 
-  const toggleTheme = () => {
-    setTheme((prev) => {
-      if (prev === "system") return "light";
-      if (prev === "light") return "dark";
-      return "system";
-    });
+  const copyAddressInfo = () => {
+    copyText(formatHostAddress(lanIp, controlPort), () =>
+      setInputActionError(t.host.copyFailed),
+    );
   };
 
   const themeLabel = {
@@ -227,6 +397,7 @@ function Dashboard() {
         onTheme={toggleTheme}
         onToggleLanguage={toggleLanguage}
         onOpenSettings={() => setShowSettingsModal(true)}
+        onOpenPairing={() => setShowPairingModal(true)}
       />
 
       <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden p-4">
@@ -241,7 +412,10 @@ function Dashboard() {
 
         <SystemAlertBanners
           ready={ready}
-          onRefresh={() => void refresh()}
+          onRefresh={() => {
+            setInputActionError(null);
+            void refresh();
+          }}
           error={error}
           inputActionError={inputActionError}
           inputPermission={inputPermission}
@@ -252,6 +426,20 @@ function Dashboard() {
           onRequestPermission={requestInputPermission}
           onOpenAccessibility={openAccessibilitySettings}
         />
+
+        {!showPairingModal && pendingPairings.length > 0 && (
+          <PendingApprovalSection
+            requests={pendingPairings}
+            busyId={pendingDecidingId}
+            onApprove={(offerId) =>
+              void decidePendingPairing("approve_pending_pairing", offerId)
+            }
+            onDeny={(offerId) =>
+              void decidePendingPairing("reject_pending_pairing", offerId)
+            }
+            t={t}
+          />
+        )}
 
         {isStreaming ? (
           <StreamsListView

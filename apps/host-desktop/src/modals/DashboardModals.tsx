@@ -166,8 +166,18 @@ export function HostSettingsModal(props: HostSettingsModalProps) {
               ))}
             </Surface>
           </section>
-          <ExtendedDisplayCard t={t} />
-          <FileShareCard t={t} />
+          <section className="space-y-2" aria-label={t.host.extDisplaySection}>
+            <h3 className="text-caption text-muted font-semibold">
+              {t.host.extDisplaySection}
+            </h3>
+            <ExtendedDisplayCard t={t} hideHeading />
+          </section>
+          <section className="space-y-2" aria-label={t.host.fileShareSection}>
+            <h3 className="text-caption text-muted font-semibold">
+              {t.host.fileShareSection}
+            </h3>
+            <FileShareCard t={t} hideHeading />
+          </section>
           <ExperimentsSection t={t} />
         </div>
       </DialogPanel>
@@ -193,44 +203,46 @@ export function TroubleshootingModal({
         closeLabel={t.host.troubleshootCloseAria}
         onClose={onClose}
       >
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          {(
-            [
-              {
-                icon: Wifi,
-                title: t.host.troubleshootWifi,
-                desc: t.host.troubleshootWifiDesc,
-              },
-              {
-                icon: AlertTriangle,
-                title: t.host.troubleshootAp,
-                desc: t.host.troubleshootApDesc,
-              },
-              {
-                icon: ShieldCheck,
-                title: t.host.troubleshootFirewall,
-                desc: t.host.troubleshootFirewallDesc,
-              },
-              {
-                icon: Monitor,
-                title: t.host.troubleshootPerm,
-                desc: t.host.troubleshootPermDesc,
-              },
-              {
-                icon: AppWindow,
-                title: t.host.troubleshootHiddenWindow,
-                desc: t.host.troubleshootHiddenWindowDesc,
-              },
-            ] as const
-          ).map(({ icon: Icon, title, desc }) => (
-            <Surface variant="card" key={title} className="space-y-2">
-              <h3 className="text-body text-ink flex items-center gap-2 font-semibold">
-                <Icon size={16} className="shrink-0" />
-                {title}
-              </h3>
-              <p className="text-caption text-muted">{desc}</p>
-            </Surface>
-          ))}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <Surface variant="card" className="divide-y divide-outline p-0">
+            {(
+              [
+                {
+                  icon: Wifi,
+                  title: t.host.troubleshootWifi,
+                  desc: t.host.troubleshootWifiDesc,
+                },
+                {
+                  icon: AlertTriangle,
+                  title: t.host.troubleshootAp,
+                  desc: t.host.troubleshootApDesc,
+                },
+                {
+                  icon: ShieldCheck,
+                  title: t.host.troubleshootFirewall,
+                  desc: t.host.troubleshootFirewallDesc,
+                },
+                {
+                  icon: Monitor,
+                  title: t.host.troubleshootPerm,
+                  desc: t.host.troubleshootPermDesc,
+                },
+                {
+                  icon: AppWindow,
+                  title: t.host.troubleshootHiddenWindow,
+                  desc: t.host.troubleshootHiddenWindowDesc,
+                },
+              ] as const
+            ).map(({ icon: Icon, title, desc }) => (
+              <div key={title} className="space-y-1.5 p-4">
+                <h3 className="text-body text-ink flex items-center gap-2 font-semibold">
+                  <Icon size={16} className="shrink-0" />
+                  {title}
+                </h3>
+                <p className="text-caption text-muted">{desc}</p>
+              </div>
+            ))}
+          </Surface>
         </div>
       </DialogPanel>
     </Modal>

@@ -67,11 +67,9 @@ function PairingNetworkCard({
             {copiedIp ? <Check size={16} /> : <Copy size={16} />}
             {copiedIp ? t.host.copied : t.host.copyAddress}
           </Button>
-          {copiedIp && (
-            <Text variant="caption" role="status">
-              {t.host.copied}
-            </Text>
-          )}
+          <span className="sr-only" role="status">
+            {copiedIp ? t.host.copied : ""}
+          </span>
         </div>
       )}
     </Surface>

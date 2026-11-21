@@ -4,7 +4,14 @@ import type { TranslationSchema } from "@leftcar/ui-tokens";
 import { Button, Notice, Surface, Text, Toggle } from "../ui/primitives";
 import { loadKmDevice, saveKmDeviceConsent, type KmDeviceConsent, type KmDeviceStatus } from "./km-consent";
 
-interface KmPanelState { consent: KmDeviceConsent | null; status: KmDeviceStatus | null; busy: boolean; error: "refreshFailed" | "saveFailed" | null }
+interface KmPanelState {
+  consent: KmDeviceConsent | null;
+  status: KmDeviceStatus | null;
+  busy: boolean;
+  error?: "refreshFailed" | "saveFailed" | null;
+  loadError?: "refreshFailed" | null;
+  actionError?: "refreshFailed" | "saveFailed" | null;
+}
 function reducePanel(state: KmPanelState, patch: Partial<KmPanelState>) { return { ...state, ...patch }; }
 interface KmConsentViewProps extends KmPanelState {
   t: TranslationSchema;
@@ -36,10 +43,10 @@ interface MacPermissionProps {
   onSettings: KmConsentViewProps["onSettings"];
 }
 function MacPermission({ granted, label, settingsLabel, pane, t, onSettings }: MacPermissionProps) {
-  return <>
-    <Text variant="caption" className="block">{label}: {granted ? t.km.ready : t.km.required}</Text>
+  return <div className="flex flex-wrap items-center justify-between gap-2">
+    <Text variant="caption">{label}: {granted ? t.km.ready : t.km.required}</Text>
     {!granted && <Button variant="secondary" size="compact" onClick={() => onSettings(pane)}>{settingsLabel}</Button>}
-  </>;
+  </div>;
 }
 function MacPermissions({ t, status, onSettings }: Pick<KmConsentViewProps, "t" | "status" | "onSettings">) {
   if (!status) return null;
@@ -50,20 +57,23 @@ function MacPermissions({ t, status, onSettings }: Pick<KmConsentViewProps, "t" 
       settingsLabel={t.km.openMacAccessibility} pane="accessibility" onSettings={onSettings} />
   </div>;
 }
-export function KmConsentView({ t, consent, status, busy, error, onToggle, onRefresh, onSettings }: KmConsentViewProps) {
+export function KmConsentView({ t, consent, status, busy, error, loadError, actionError, onToggle, onRefresh, onSettings }: KmConsentViewProps) {
+  const visibleError = error ?? actionError ?? loadError ?? null;
   return <Surface variant="inset" className="w-full space-y-3">
-    <Text className="block font-semibold">{t.km.hostConsent}</Text>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <Text className="font-semibold">{t.km.hostConsent}</Text>
+      <Button variant="ghost" size="compact" disabled={busy} onClick={onRefresh}>{t.common.refresh}</Button>
+    </div>
     <Text role="status" className="block">{hostStateLabel(status, t)}</Text>
     <DirectionApprovals t={t} consent={consent} busy={busy} onToggle={onToggle} />
-    {error && <Notice tone="error">{t.km[error]}</Notice>}
+    {visibleError && <Notice tone="error">{t.km[visibleError]}</Notice>}
     {status?.blockedReason && <Notice>{t.km.hostBlocked}</Notice>}
     <MacPermissions t={t} status={status} onSettings={onSettings} />
-    <Button variant="ghost" size="compact" disabled={busy} onClick={onRefresh}>{t.common.refresh}</Button>
     <Text variant="caption" tone="muted" className="block">{t.km.emergency}</Text>
   </Surface>;
 }
 export default function KmConsentPanel({ deviceId, t }: { deviceId: string; t: TranslationSchema }) {
-  const [state, update] = useReducer(reducePanel, { consent: null, status: null, busy: false, error: null });
+  const [state, update] = useReducer(reducePanel, { consent: null, status: null, busy: false, loadError: null, actionError: null });
   const mounted = useRef(false);
   const running = useRef(false);
   const revision = useRef(0);
@@ -71,8 +81,8 @@ export default function KmConsentPanel({ deviceId, t }: { deviceId: string; t: T
     const requestRevision = ++revision.current;
     try {
       const data = await loadKmDevice(deviceId);
-      if (mounted.current && requestRevision === revision.current) update({ ...data, error: null });
-    } catch { if (mounted.current && requestRevision === revision.current) update({ consent: null, status: null, error: "refreshFailed" }); }
+      if (mounted.current && requestRevision === revision.current) update({ ...data, loadError: null });
+    } catch { if (mounted.current && requestRevision === revision.current) update({ consent: null, status: null, loadError: "refreshFailed" }); }
   }, [deviceId]);
   useEffect(() => {
     mounted.current = true;
@@ -82,17 +92,21 @@ export default function KmConsentPanel({ deviceId, t }: { deviceId: string; t: T
   }, [refresh]);
   const toggle = async (direction: keyof KmDeviceConsent) => {
     if (!state.consent || running.current) return;
-    running.current = true; revision.current += 1; update({ busy: true, error: null });
+    running.current = true; revision.current += 1; update({ busy: true, actionError: null });
     try {
       const consent = await saveKmDeviceConsent(deviceId, { ...state.consent, [direction]: !state.consent[direction] });
       if (mounted.current) update({ consent });
       await refresh();
-    } catch { if (mounted.current) update({ error: "saveFailed" }); }
+    } catch { if (mounted.current) update({ actionError: "saveFailed" }); }
     finally { running.current = false; if (mounted.current) update({ busy: false }); }
   };
   const settings = async (pane: "inputMonitoring" | "accessibility") => {
     try { await invoke("open_system_settings", { pane }); }
-    catch { if (mounted.current) update({ error: "refreshFailed" }); }
+    catch { if (mounted.current) update({ actionError: "refreshFailed" }); }
   };
-  return <KmConsentView {...state} t={t} onToggle={direction => void toggle(direction)} onRefresh={() => void refresh()} onSettings={pane => void settings(pane)} />;
+  const manualRefresh = () => {
+    update({ actionError: null });
+    void refresh();
+  };
+  return <KmConsentView {...state} t={t} onToggle={direction => void toggle(direction)} onRefresh={manualRefresh} onSettings={pane => void settings(pane)} />;
 }

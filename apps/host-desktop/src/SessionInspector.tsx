@@ -25,13 +25,11 @@ export default function SessionInspector({
         <h4 className="text-caption text-muted font-semibold">
           {t.pipelineMetricsTitle}
         </h4>
-        <div className="grid grid-cols-2 gap-3 min-[768px]:grid-cols-3">
-          <SessionPipelineDiagnostics
-            session={session}
-            transportLabel={transportLabel}
-            language={language}
-          />
-        </div>
+        <SessionPipelineDiagnostics
+          session={session}
+          transportLabel={transportLabel}
+          language={language}
+        />
       </section>
       <section
         className="space-y-3 border-t border-outline pt-4"

@@ -51,17 +51,26 @@ export default function Modal({
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog || !closeOnOverlayClick) return;
-    const handleOverlayClick = (event: MouseEvent) => {
-      if (event.target === dialog) onCloseRef.current();
+    let startedOnBackdrop = false;
+    const handlePointerDown = (event: PointerEvent) => {
+      startedOnBackdrop = event.target === dialog;
     };
+    const handleOverlayClick = (event: MouseEvent) => {
+      if (startedOnBackdrop && event.target === dialog) onCloseRef.current();
+      startedOnBackdrop = false;
+    };
+    dialog.addEventListener("pointerdown", handlePointerDown);
     dialog.addEventListener("click", handleOverlayClick);
-    return () => dialog.removeEventListener("click", handleOverlayClick);
+    return () => {
+      dialog.removeEventListener("pointerdown", handlePointerDown);
+      dialog.removeEventListener("click", handleOverlayClick);
+    };
   }, [closeOnOverlayClick]);
 
   return (
     <dialog
       ref={dialogRef}
-      className="fixed inset-0 m-0 flex h-full max-h-none w-full max-w-none items-center justify-center border-0 bg-transparent p-4 text-ink backdrop:bg-black/40"
+      className="fixed inset-0 m-0 flex h-full max-h-none w-full max-w-none items-center justify-center border-0 bg-transparent p-4 text-ink backdrop:bg-scrim"
       aria-labelledby={labelledBy}
       aria-label={ariaLabel}
       onCancel={(event) => {

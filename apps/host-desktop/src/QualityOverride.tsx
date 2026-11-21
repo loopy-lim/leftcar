@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   getTranslation,
   interpolate,
@@ -24,6 +25,7 @@ export default function QualityOverride({
   onSetQuality,
   language: propLanguage,
 }: Props) {
+  const [draftPercent, setDraftPercent] = useState<number | null>(null);
   const language =
     propLanguage ??
     (typeof localStorage !== "undefined" &&
@@ -32,6 +34,13 @@ export default function QualityOverride({
       : "ko");
   const t = getTranslation(language).host.inspector;
   const { qualityBasis } = encoderDiagnosticsView(session, language);
+  const activePercent = draftPercent ?? qualityPercent;
+  const commit = (nextPercent: number) => {
+    setDraftPercent(null);
+    if (nextPercent !== qualityPercent) {
+      void onSetQuality(session, nextPercent / 100);
+    }
+  };
   return (
     <div className="space-y-2" aria-busy={qualityBusy}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -39,8 +48,8 @@ export default function QualityOverride({
           {t.manualQualityCeilingLabel}
         </Text>
         <Text variant="code" tone="muted">
-          {session.qualityOverride != null
-            ? interpolate(t.fixedQualityPercent, { percent: qualityPercent })
+          {session.qualityOverride != null || draftPercent !== null
+            ? interpolate(t.fixedQualityPercent, { percent: activePercent })
             : t.auto}
           {qualityBasis !== null ? ` · ${qualityBasis}` : null}
         </Text>
@@ -54,18 +63,40 @@ export default function QualityOverride({
           min="25"
           max="50"
           step="5"
-          value={Math.max(25, Math.min(50, qualityPercent))}
+          value={Math.max(25, Math.min(50, activePercent))}
           disabled={
             !qualitySupported || session.state !== "running" || qualityBusy || blocked
           }
           aria-label={t.manualQualityCeilingLabel}
           aria-valuetext={interpolate(t.fixedQualityPercent, {
-            percent: qualityPercent,
+            percent: activePercent,
           })}
-          className="h-11 min-w-28 flex-1 accent-action focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          className="h-11 min-w-28 flex-1 cursor-pointer accent-action focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-default"
           onChange={(event) =>
-            void onSetQuality(session, Number(event.currentTarget.value) / 100)
+            setDraftPercent(Number(event.currentTarget.value))
           }
+          onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+          onKeyUp={(event) => {
+            if (
+              [
+                "ArrowLeft",
+                "ArrowRight",
+                "ArrowUp",
+                "ArrowDown",
+                "Home",
+                "End",
+                "PageUp",
+                "PageDown",
+              ].includes(event.key)
+            ) {
+              commit(Number(event.currentTarget.value));
+            }
+          }}
+          onBlur={(event) => {
+            if (draftPercent !== null) {
+              commit(Number(event.currentTarget.value));
+            }
+          }}
         />
         <Text variant="caption" tone="muted">
           {t.defaultEndpoint}

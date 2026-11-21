@@ -3,7 +3,7 @@ import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import type { SessionRow } from "../sessionTypes";
 import QualityOverride from "../QualityOverride";
 import SessionInspector from "../SessionInspector";
-import { Badge, Button, Notice, Text } from "../ui/primitives";
+import { Button, Notice, Text } from "../ui/primitives";
 export interface SessionCardProps {
   session: SessionRow;
   inputPermission: boolean;
@@ -34,16 +34,13 @@ function SessionIdentity({
 }: Pick<SessionCardProps, "session" | "t">) {
   return (
     <div className="min-w-0 flex-1 space-y-1">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-baseline gap-2">
         <h3 className="text-title text-ink break-words font-semibold">
           {session.sourceName}
         </h3>
-        <Badge
-          variant={session.mediaTransport === "usb" ? "secondary" : "outline"}
-          className="text-xs"
-        >
-          {sessionTransportLabel(session, t)}
-        </Badge>
+        <Text variant="code" tone="muted">
+          · {sessionTransportLabel(session, t)}
+        </Text>
       </div>
       {session.deviceName && (
         <Text tone="muted" className="block break-words">
@@ -52,6 +49,19 @@ function SessionIdentity({
       )}
       <Text variant="code" tone="muted" className="block break-all">
         {interpolate(t.host.connectedDevice, { addr: session.viewerAddr })}
+      </Text>
+      <Text variant="code" tone="muted" className="block tabular-nums">
+        {session.fps > 0
+          ? `${session.fps.toFixed(1)} FPS`
+          : t.host.statusChecking}
+        {` · ${(session.kbps / 1000).toFixed(1)} Mbps · `}
+        {(session.dropped ?? 0) > 0 ? (
+          <span className="text-warning font-semibold">
+            {interpolate(t.host.droppedFrames, { count: session.dropped ?? 0 })}
+          </span>
+        ) : (
+          t.host.stabilityStable
+        )}
       </Text>
     </div>
   );
@@ -84,14 +94,17 @@ function SessionActions({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {inputRequested && !session.inputEnabled && (
-        <Text variant="caption" role="status" className="font-semibold">
+        <Text
+          variant="caption"
+          role="status"
+          className="inline-flex items-center gap-1.5 rounded-md border border-warning bg-warning-subtle px-2.5 py-1 font-semibold text-ink"
+        >
           {t.host.remoteInputRequestedBadge}
         </Text>
       )}
       <Button
         variant={session.inputEnabled ? "primary" : "secondary"}
         size="compact"
-        aria-pressed={session.inputEnabled}
         busy={inputBusy}
         disabled={
           (!inputPermission && !session.inputEnabled) ||
@@ -153,39 +166,6 @@ function SessionActionError({
   );
 }
 
-function SessionDetails({
-  session,
-  busy,
-  qualityBusy,
-  t,
-  onSetQuality,
-}: Pick<SessionCardProps, "session" | "t" | "onSetQuality" | "qualityBusy"> & {
-  busy: boolean;
-}) {
-  const qualitySupported = session.qualityHint != null;
-  const qualityPercent = Math.round(
-    (session.qualityOverride ?? session.qualityHint ?? 0.5) * 100,
-  );
-  return (
-    <div className="space-y-4 border-t border-outline pt-4">
-      {qualitySupported && (
-        <QualityOverride
-          session={session}
-          qualitySupported={qualitySupported}
-          qualityPercent={qualityPercent}
-          qualityBusy={qualityBusy}
-          blocked={busy}
-          onSetQuality={onSetQuality}
-        />
-      )}
-      <SessionInspector
-        session={session}
-        transportLabel={sessionTransportLabel(session, t)}
-      />
-    </div>
-  );
-}
-
 export function SessionCard({
   session,
   inputPermission,
@@ -202,6 +182,10 @@ export function SessionCard({
   onForceStop,
 }: SessionCardProps) {
   const busy = inputBusy || qualityBusy || stopping;
+  const qualitySupported = session.qualityHint != null;
+  const qualityPercent = Math.round(
+    (session.qualityOverride ?? session.qualityHint ?? 0.5) * 100,
+  );
   return (
     <article
       className="space-y-3 border-t border-outline py-4 first:border-0"
@@ -222,7 +206,7 @@ export function SessionCard({
       </div>
       {!inputPermission && !session.inputEnabled && (
         <Text variant="caption" tone="muted" className="block">
-          {t.host.inputOptionalHint}
+          {t.host.inputDisabledPermHint}
         </Text>
       )}
       {session.state !== "running" && <Notice>{t.host.statusChecking}</Notice>}
@@ -232,14 +216,25 @@ export function SessionCard({
         busy={busy}
         t={t}
       />
+      {qualitySupported && (
+        <div className="border-t border-outline pt-3">
+          <QualityOverride
+            session={session}
+            qualitySupported={qualitySupported}
+            qualityPercent={qualityPercent}
+            qualityBusy={qualityBusy}
+            blocked={busy}
+            onSetQuality={onSetQuality}
+          />
+        </div>
+      )}
       {showInspector && (
-        <SessionDetails
-          session={session}
-          qualityBusy={qualityBusy}
-          busy={busy}
-          t={t}
-          onSetQuality={onSetQuality}
-        />
+        <div className="border-t border-outline pt-4">
+          <SessionInspector
+            session={session}
+            transportLabel={sessionTransportLabel(session, t)}
+          />
+        </div>
       )}
     </article>
   );

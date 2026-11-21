@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
-import type { TranslationSchema } from "@leftcar/ui-tokens";
+import { cn, type TranslationSchema } from "@leftcar/ui-tokens";
 import { Button, Notice, Surface, Text, Toggle } from "../ui/primitives";
 
 interface ShareQueueEntryView {
@@ -37,15 +37,14 @@ function formatShareFileSize(size: number): string {
   return `${size} B`;
 }
 
-export function FileShareCard({ t }: { t: TranslationSchema }) {
+function useFileShareState(t: TranslationSchema) {
   const [enabled, setEnabled] = useState(false);
   const [entries, setEntries] = useState<ShareQueueEntryView[]>([]);
   const [ready, setReady] = useState(false);
+  const readyRef = useRef(false);
   const [phase, setPhase] = useState<"checking" | "ready" | "saving">(
     "checking",
   );
-  const loading = phase === "checking";
-  const busy = phase === "saving";
   const [loadError, setLoadError] = useState<string | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<RejectedShareFile[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -54,7 +53,7 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
   const retryAction = useRef<ShareAction | null>(null);
 
   const refresh = useCallback(async () => {
-    setPhase("checking");
+    if (!readyRef.current) setPhase("checking");
     try {
       const [shareEnabled, queue] = await Promise.all([
         invoke<boolean>("get_file_share"),
@@ -63,10 +62,12 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
       if (!mounted.current) return;
       setEnabled(shareEnabled);
       setEntries(queue);
+      readyRef.current = true;
       setReady(true);
       setLoadError(null);
     } catch (cause) {
       if (mounted.current) {
+        readyRef.current = false;
         setReady(false);
         setLoadError(
           `${t.host.settingsLoadError} ${String(cause instanceof Error ? cause.message : cause)}`,
@@ -91,6 +92,9 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
     retryAction.current = action;
     setPhase("saving");
     setActionError(null);
+    if (action.kind === "toggle" && !action.enabled) {
+      setRejectedFiles([]);
+    }
     try {
       const outcome = await executeShareAction(action);
       if (mounted.current && outcome)
@@ -112,6 +116,132 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
     }
   };
 
+  return {
+    enabled,
+    entries,
+    ready,
+    loading: phase === "checking",
+    busy: phase === "saving",
+    loadError,
+    rejectedFiles,
+    actionError,
+    clearRejected: () => setRejectedFiles([]),
+    refresh,
+    runShareAction,
+    retryLastAction: () => {
+      if (retryAction.current) void runShareAction(retryAction.current);
+    },
+  };
+}
+
+function RejectedShareFilesNotice({
+  rejectedFiles,
+  t,
+  onDismiss,
+}: {
+  rejectedFiles: RejectedShareFile[];
+  t: TranslationSchema;
+  onDismiss: () => void;
+}) {
+  if (rejectedFiles.length === 0) return null;
+  return (
+    <Notice tone="error" className="space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <Text variant="caption" className="font-semibold">
+          {t.host.fileShareRejected}
+        </Text>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onDismiss}
+          aria-label={t.common.close}
+        >
+          <X size={16} />
+        </Button>
+      </div>
+      <ul className="space-y-1">
+        {rejectedFiles.map((file) => (
+          <li key={file.id} className="text-caption text-ink break-words">
+            {file.name}: {file.reason}
+          </li>
+        ))}
+      </ul>
+    </Notice>
+  );
+}
+
+function ShareQueueList({
+  entries,
+  busy,
+  loading,
+  t,
+  onRemove,
+}: {
+  entries: ShareQueueEntryView[];
+  busy: boolean;
+  loading: boolean;
+  t: TranslationSchema;
+  onRemove: (queueId: string) => void;
+}) {
+  if (entries.length === 0) {
+    return (
+      <Text variant="caption" tone="muted">
+        {t.host.fileShareEmpty}
+      </Text>
+    );
+  }
+  return (
+    <ul className="space-y-2">
+      {entries.map((entry) => (
+        <li
+          key={entry.queueId}
+          className="flex min-w-0 items-center gap-2 border-b border-outline pb-2 last:border-0 last:pb-0"
+        >
+          <div className="min-w-0 flex-1">
+            <Text variant="caption" className="block break-all">
+              {entry.name}
+            </Text>
+            <Text variant="caption" tone="muted" className="tabular-nums">
+              {formatShareFileSize(entry.size)}
+            </Text>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={busy || loading}
+            onClick={() => onRemove(entry.queueId)}
+            aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
+          >
+            <X size={16} />
+          </Button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function FileShareCard({
+  t,
+  hideHeading = false,
+}: {
+  t: TranslationSchema;
+  hideHeading?: boolean;
+}) {
+  const {
+    enabled,
+    entries,
+    ready,
+    loading,
+    busy,
+    loadError,
+    rejectedFiles,
+    actionError,
+    clearRejected,
+    refresh,
+    runShareAction,
+    retryLastAction,
+  } = useFileShareState(t);
+
   return (
     <Surface
       variant="card"
@@ -121,8 +251,14 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <Text className="block font-semibold">{t.host.fileShareSection}</Text>
-          <Text variant="caption" tone="muted" className="block mt-1">
+          {!hideHeading && (
+            <Text className="block font-semibold">{t.host.fileShareSection}</Text>
+          )}
+          <Text
+            variant="caption"
+            tone="muted"
+            className={cn("block", !hideHeading && "mt-1")}
+          >
             {t.host.fileShareHint}
           </Text>
         </div>
@@ -174,18 +310,11 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
           </Button>
         </Notice>
       )}
-      {rejectedFiles.length > 0 && (
-        <Notice tone="error" className="space-y-2">
-          <Text variant="caption">{t.host.fileShareRejected}</Text>
-          <ul className="space-y-1">
-            {rejectedFiles.map((file) => (
-              <li key={file.id} className="text-caption text-ink break-words">
-                {file.name}: {file.reason}
-              </li>
-            ))}
-          </ul>
-        </Notice>
-      )}
+      <RejectedShareFilesNotice
+        rejectedFiles={rejectedFiles}
+        t={t}
+        onDismiss={clearRejected}
+      />
       {actionError && (
         <Notice
           tone="error"
@@ -196,53 +325,21 @@ export function FileShareCard({ t }: { t: TranslationSchema }) {
             variant="secondary"
             size="compact"
             disabled={busy || !ready}
-            onClick={() => {
-              if (retryAction.current) void runShareAction(retryAction.current);
-            }}
+            onClick={retryLastAction}
           >
             {t.common.retry}
           </Button>
         </Notice>
       )}
-      {ready &&
-        enabled &&
-        (entries.length === 0 ? (
-          <Text variant="caption" tone="muted">
-            {t.host.fileShareEmpty}
-          </Text>
-        ) : (
-          <ul className="space-y-2">
-            {entries.map((entry) => (
-              <li
-                key={entry.queueId}
-                className="flex min-w-0 items-center gap-2 border-b border-outline pb-2 last:border-0 last:pb-0"
-              >
-                <div className="min-w-0 flex-1">
-                  <Text variant="caption" className="block break-all">
-                    {entry.name}
-                  </Text>
-                  <Text variant="caption" tone="muted" className="tabular-nums">
-                    {formatShareFileSize(entry.size)}
-                  </Text>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={busy || loading}
-                  onClick={() =>
-                    void runShareAction({
-                      kind: "remove",
-                      queueId: entry.queueId,
-                    })
-                  }
-                  aria-label={`${t.host.fileShareRemoveAria}: ${entry.name}`}
-                >
-                  <X size={16} />
-                </Button>
-              </li>
-            ))}
-          </ul>
-        ))}
+      {ready && enabled && (
+        <ShareQueueList
+          entries={entries}
+          busy={busy}
+          loading={loading}
+          t={t}
+          onRemove={(queueId) => void runShareAction({ kind: "remove", queueId })}
+        />
+      )}
     </Surface>
   );
 }

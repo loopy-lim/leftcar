@@ -25,12 +25,14 @@ function indicatorLanguage(): SupportedLanguage {
 
 export default function Indicator() {
   const [connectedCount, setConnectedCount] = useState(0);
-  const t = getTranslation(indicatorLanguage());
+  const [language, setLanguage] = useState<SupportedLanguage>(indicatorLanguage);
+  const t = getTranslation(language);
 
   useEffect(() => {
     const indicatorWindow = getCurrentWindow();
     let cancelled = false;
     const refresh = async () => {
+      if (!cancelled) setLanguage(indicatorLanguage());
       try {
         // 배지 스위치가 꺼져 있으면 세션 수와 무관하게 숨긴다 — 개인 기기
         // 조합의 기본값이며, 설정은 settings.json에 영속된다.
@@ -74,7 +76,7 @@ export default function Indicator() {
     <div className="flex h-dvh w-full select-none items-center gap-2 overflow-hidden rounded-md bg-curtain px-3 text-curtain-ink">
       <span
         aria-hidden="true"
-        className="h-2 w-2 shrink-0 rounded-full bg-curtain-ink"
+        className="h-2 w-2 shrink-0 rounded-full bg-live"
       />
       <Text
         variant="caption"

@@ -11,9 +11,9 @@ export function IdleStudioView({
   screenReady = true,
 }: IdleStudioViewProps) {
   return (
-    <div className="flex min-h-60 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
-      <div className="flex w-full max-w-md flex-col items-center gap-4">
-        <div className="space-y-2">
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-2 text-center">
+      <div className="flex w-full max-w-md flex-col items-center gap-3">
+        <div className="space-y-1">
           <h2 className="text-heading text-ink font-semibold">
             {t.host.idleTitle}
           </h2>
@@ -22,12 +22,12 @@ export function IdleStudioView({
         <Button
           variant={screenReady ? "primary" : "secondary"}
           onClick={onOpenPairing}
-          title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})}`}
+          title={`${t.host.btnCreatePairing} (${t.host.shortcutPair})`}
         >
           {t.host.btnCreatePairing}
         </Button>
         <Text variant="caption" tone="muted">
-          {t.host.setupPairStep}
+          {screenReady ? t.host.idleHint : t.host.setupPairStep}
         </Text>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
+import { cn } from "@leftcar/ui-tokens";
 import { Text } from "./ui/primitives";
 export function DiagnosticMetric({
   label,
@@ -15,11 +16,14 @@ export function DiagnosticMetric({
       <Text variant="caption" tone="muted" className="block">
         {label}
       </Text>
-      <Text variant="code" className="block break-words">
+      <Text
+        variant="code"
+        className={cn("block break-words", tone === "active" && "text-live")}
+      >
         {tone === "warning" && (
           <AlertTriangle
             size={14}
-            className="mr-1 inline-block align-text-bottom"
+            className="text-warning mr-1 inline-block align-text-bottom"
             aria-hidden="true"
           />
         )}

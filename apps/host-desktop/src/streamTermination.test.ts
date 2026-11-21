@@ -75,4 +75,20 @@ describe("stream termination presentation", () => {
     expect(notice.detail).toContain("화면 녹화 권한");
     expect(notice.tone).toBe("danger");
   });
+
+  it("localizes termination notices in English when requested", () => {
+    const notice = createTerminationNotice(
+      {
+        ...baseSession,
+        state: "error",
+        error: "viewer connection lost (feedback timeout)",
+      },
+      new Date(),
+      "en",
+    );
+
+    expect(notice.title).toBe("Automatically stopped because the device stopped responding");
+    expect(notice.detail).toContain("6 seconds");
+    expect(notice.tone).toBe("warning");
+  });
 });

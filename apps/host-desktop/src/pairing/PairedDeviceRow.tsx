@@ -1,13 +1,14 @@
 import { useId, useState } from "react";
 import KmConsentPanel from "./KmConsentPanel";
-import { Laptop, Smartphone } from "lucide-react";
+import { ChevronDown, Laptop, Smartphone } from "lucide-react";
 import {
+  cn,
   interpolate,
   type SupportedLanguage,
   type TranslationSchema,
 } from "@leftcar/ui-tokens";
 import type { PairedDevice } from "../paired-device-state";
-import { Button, Text } from "../ui/primitives";
+import { Button, Notice, Text } from "../ui/primitives";
 function formatPairedAt(pairedAt: string, language: SupportedLanguage): string {
   const secs = Number(pairedAt.replace(/^unix:/, ""));
   if (!Number.isFinite(secs) || secs <= 0) return pairedAt;
@@ -81,7 +82,19 @@ export default function PairedDeviceRow({
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
-        <Button variant="secondary" size="compact" aria-expanded={showInputSharing} aria-controls={inputPanelId} onClick={() => setShowInputSharing(previous => !previous)}>{t.km.title}</Button>
+        <Button
+          variant="secondary"
+          size="compact"
+          aria-expanded={showInputSharing}
+          aria-controls={inputPanelId}
+          onClick={() => setShowInputSharing((previous) => !previous)}
+        >
+          {t.km.title}
+          <ChevronDown
+            size={16}
+            className={cn(showInputSharing && "rotate-180")}
+          />
+        </Button>
         {device.source_grants.reviewRequired && (
           <Button
             variant="secondary"
@@ -110,6 +123,11 @@ export default function PairedDeviceRow({
             : t.host.revoke}
         </Button>
       </div>
+      {device.source_grants.persistenceError && (
+        <Notice tone="error" className="w-full">
+          <Text variant="caption">{device.source_grants.persistenceError}</Text>
+        </Notice>
+      )}
       {showInputSharing && <div id={inputPanelId} className="w-full"><KmConsentPanel deviceId={device.device_id} t={t} /></div>}
     </li>
   );

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { TranslationSchema } from "@leftcar/ui-tokens";
+import type { SupportedLanguage, TranslationSchema } from "@leftcar/ui-tokens";
 import { trayStatus, type HostSnapshotView } from "../hostState";
 import type { SessionRow } from "../sessionTypes";
 import {
@@ -57,7 +57,10 @@ export interface InputRequestRow {
   ageMs: number;
 }
 
-export function useHostStatus(t: TranslationSchema) {
+export function useHostStatus(
+  t: TranslationSchema,
+  language: SupportedLanguage = "ko",
+) {
   const [banner, setBanner] = useState("Leftcar");
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [inputRequests, setInputRequests] = useState<InputRequestRow[]>([]);
@@ -108,7 +111,11 @@ export function useHostStatus(t: TranslationSchema) {
       let nextTerminationNotice: TerminationNotice | null = null;
 
       for (const terminalSession of statusSessions.filter(isTerminalSession)) {
-        const notice = createTerminationNotice(terminalSession);
+        const notice = createTerminationNotice(
+          terminalSession,
+          new Date(),
+          language,
+        );
         if (!seenTerminations.current.has(notice.key)) {
           seenTerminations.current.add(notice.key);
           nextTerminationNotice = notice;
@@ -121,11 +128,15 @@ export function useHostStatus(t: TranslationSchema) {
         );
         for (const priorSession of priorActiveSessions.current.values()) {
           if (reportedSessionIds.has(priorSession.session)) continue;
-          const notice = createTerminationNotice({
-            ...priorSession,
-            state: "stopped",
-            error: null,
-          });
+          const notice = createTerminationNotice(
+            {
+              ...priorSession,
+              state: "stopped",
+              error: null,
+            },
+            new Date(),
+            language,
+          );
           if (!seenTerminations.current.has(notice.key)) {
             seenTerminations.current.add(notice.key);
             nextTerminationNotice = notice;
@@ -159,7 +170,7 @@ export function useHostStatus(t: TranslationSchema) {
       if (mounted.current && revision === refreshRevision.current)
         setError(hostErrorView(cause, t));
     }
-  }, [t]);
+  }, [language, t]);
 
   useEffect(() => {
     mounted.current = true;

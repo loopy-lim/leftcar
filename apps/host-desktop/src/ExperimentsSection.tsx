@@ -100,6 +100,103 @@ function ExperimentNumberRow({
   );
 }
 
+function hasExperimentOverrides(experiments: ViewerExperiments | null): boolean {
+  if (!experiments) return false;
+  return (
+    experiments.maxEncodeInFlight !== null ||
+    experiments.queueMaxAgeMs !== null ||
+    experiments.sndbufBytes !== null ||
+    experiments.drlWindowMs !== null ||
+    experiments.pacingBudgetPct !== null ||
+    experiments.frameTrace
+  );
+}
+
+function ExperimentsExpandedPanel({
+  panelId,
+  t,
+  experiments,
+  error,
+  saving,
+  hasOverrides,
+  numericRows,
+  onUpdate,
+  onResetDefaults,
+}: {
+  panelId: string;
+  t: TranslationSchema;
+  experiments: ViewerExperiments | null;
+  error: { operation: "load" | "save"; detail: string } | null;
+  saving: boolean;
+  hasOverrides: boolean;
+  numericRows: NumericRowSpec[];
+  onUpdate: (patch: Partial<ViewerExperiments>) => void;
+  onResetDefaults: () => void;
+}) {
+  return (
+    <div id={panelId} className="space-y-2">
+      {!experiments && !error && <Notice>{t.host.checkingSettings}</Notice>}
+      {experiments && (
+        <>
+          {hasOverrides && (
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                size="compact"
+                busy={saving}
+                onClick={onResetDefaults}
+              >
+                {t.host.experimentResetDefaults}
+              </Button>
+            </div>
+          )}
+          <Surface variant="card" className="divide-y divide-outline p-0">
+            {numericRows.map(({ key, ...spec }) => (
+              <ExperimentNumberRow
+                key={`${key}:${experiments[key] ?? "default"}`}
+                {...spec}
+                value={experiments[key]}
+                disabled={saving}
+                validationMessage={interpolate(t.host.experimentValueError, {
+                  min: spec.min,
+                  max: spec.max,
+                })}
+                onCommit={(next) => onUpdate({ [key]: next })}
+              />
+            ))}
+            <div className="flex items-start gap-3 p-4">
+              <div className="min-w-0 flex-1">
+                <Text className="block font-semibold">
+                  {t.host.experimentTraceLabel}
+                </Text>
+                <p className="text-caption text-muted mt-1">
+                  {t.host.experimentTraceDesc}
+                </p>
+              </div>
+              <Toggle
+                checked={experiments.frameTrace}
+                busy={saving}
+                aria-label={t.host.experimentTraceLabel}
+                onClick={() =>
+                  onUpdate({ frameTrace: !experiments.frameTrace })
+                }
+              />
+            </div>
+          </Surface>
+        </>
+      )}
+      <Text variant="caption" tone="muted">
+        {t.host.experimentApplyHint}
+      </Text>
+      {saving && (
+        <Text variant="caption" tone="muted" role="status">
+          {t.host.savingSettings}
+        </Text>
+      )}
+    </div>
+  );
+}
+
 export function ExperimentsSection({ t }: { t: TranslationSchema }) {
   const { experiments, error, saving, retry, save } = useExperiments();
   const [expanded, setExpanded] = useState(false);
@@ -147,15 +244,35 @@ export function ExperimentsSection({ t }: { t: TranslationSchema }) {
     },
   ];
 
+  const hasOverrides = hasExperimentOverrides(experiments);
   const update = (patch: Partial<ViewerExperiments>) => {
     if (experiments && !saving) void save({ ...experiments, ...patch });
+  };
+  const resetDefaults = () => {
+    if (experiments && !saving) {
+      void save({
+        maxEncodeInFlight: null,
+        queueMaxAgeMs: null,
+        sndbufBytes: null,
+        drlWindowMs: null,
+        pacingBudgetPct: null,
+        frameTrace: false,
+      });
+    }
   };
   return (
     <section className="space-y-2" aria-label={t.host.experimentSection}>
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-caption text-muted font-semibold">
-          {t.host.experimentSection}
-        </h3>
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="text-caption text-muted font-semibold">
+            {t.host.experimentSection}
+          </h3>
+          {hasOverrides && (
+            <Text variant="caption" className="text-warning font-semibold">
+              {t.host.experimentActiveBadge}
+            </Text>
+          )}
+        </div>
         <Button
           variant="ghost"
           size="compact"
@@ -174,52 +291,17 @@ export function ExperimentsSection({ t }: { t: TranslationSchema }) {
         </Button>
       </div>
       {expanded && (
-        <div id={panelId} className="space-y-2">
-          {!experiments && !error && <Notice>{t.host.checkingSettings}</Notice>}
-          {experiments && (
-            <Surface variant="card" className="divide-y divide-outline p-0">
-              {numericRows.map(({ key, ...spec }) => (
-                <ExperimentNumberRow
-                  key={`${key}:${experiments[key] ?? "default"}`}
-                  {...spec}
-                  value={experiments[key]}
-                  disabled={saving}
-                  validationMessage={interpolate(t.host.experimentValueError, {
-                    min: spec.min,
-                    max: spec.max,
-                  })}
-                  onCommit={(next) => update({ [key]: next })}
-                />
-              ))}
-              <div className="flex items-start gap-3 p-4">
-                <div className="min-w-0 flex-1">
-                  <Text className="block font-semibold">
-                    {t.host.experimentTraceLabel}
-                  </Text>
-                  <p className="text-caption text-muted mt-1">
-                    {t.host.experimentTraceDesc}
-                  </p>
-                </div>
-                <Toggle
-                  checked={experiments.frameTrace}
-                  busy={saving}
-                  aria-label={t.host.experimentTraceLabel}
-                  onClick={() =>
-                    update({ frameTrace: !experiments.frameTrace })
-                  }
-                />
-              </div>
-            </Surface>
-          )}
-          <Text variant="caption" tone="muted">
-            {t.host.experimentApplyHint}
-          </Text>
-          {saving && (
-            <Text variant="caption" tone="muted" role="status">
-              {t.host.savingSettings}
-            </Text>
-          )}
-        </div>
+        <ExperimentsExpandedPanel
+          panelId={panelId}
+          t={t}
+          experiments={experiments}
+          error={error}
+          saving={saving}
+          hasOverrides={hasOverrides}
+          numericRows={numericRows}
+          onUpdate={update}
+          onResetDefaults={resetDefaults}
+        />
       )}
       {error && (
         <Notice

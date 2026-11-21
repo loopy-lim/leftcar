@@ -79,6 +79,8 @@ export function usePairingModel(language: SupportedLanguage) {
   );
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedIp, setCopiedIp] = useState(false);
+  const copiedCodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copiedIpTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [controlPort, setControlPort] = useState(7777);
   const [now, setNow] = useState(Date.now());
@@ -184,8 +186,12 @@ export function usePairingModel(language: SupportedLanguage) {
     if (!session) return;
     navigator.clipboard.writeText(session.code).then(
       () => {
+        if (copiedCodeTimer.current) clearTimeout(copiedCodeTimer.current);
         setCopiedCode(true);
-        setTimeout(() => setCopiedCode(false), 2000);
+        copiedCodeTimer.current = setTimeout(() => {
+          setCopiedCode(false);
+          copiedCodeTimer.current = null;
+        }, 2000);
       },
       () => setError(t.host.copyFailed),
     );
@@ -195,8 +201,12 @@ export function usePairingModel(language: SupportedLanguage) {
     if (!lanIp) return;
     navigator.clipboard.writeText(formatHostAddress(lanIp, controlPort)).then(
       () => {
+        if (copiedIpTimer.current) clearTimeout(copiedIpTimer.current);
         setCopiedIp(true);
-        setTimeout(() => setCopiedIp(false), 2000);
+        copiedIpTimer.current = setTimeout(() => {
+          setCopiedIp(false);
+          copiedIpTimer.current = null;
+        }, 2000);
       },
       () => setError(t.host.copyFailed),
     );
@@ -349,6 +359,8 @@ export function usePairingModel(language: SupportedLanguage) {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (copiedCodeTimer.current) clearTimeout(copiedCodeTimer.current);
+      if (copiedIpTimer.current) clearTimeout(copiedIpTimer.current);
       const offerId = ownedOffer.current;
       ownedOffer.current = null;
       if (offerId) void invoke("cancel_pairing", { offerId }).catch(() => {});

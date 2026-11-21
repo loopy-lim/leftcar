@@ -1,4 +1,3 @@
-import { useId } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { interpolate, type TranslationSchema } from "@leftcar/ui-tokens";
 import type { SessionRow } from "../sessionTypes";
@@ -38,7 +37,6 @@ export function StreamsListView({
   onForceStop,
 }: StreamsListViewProps) {
   const requestedSessions = new Set(inputRequestSessions);
-  const panelId = useId();
   return (
     <section
       className="space-y-3"
@@ -55,13 +53,12 @@ export function StreamsListView({
           size="compact"
           onClick={onToggleInspector}
           aria-expanded={showInspector}
-          aria-controls={panelId}
         >
           {showInspector ? t.host.hideMetrics : t.host.showMetrics}
           {showInspector ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </Button>
       </div>
-      <div id={panelId}>
+      <div>
         {sessions.map((session) => (
           <SessionCard
             key={session.session}

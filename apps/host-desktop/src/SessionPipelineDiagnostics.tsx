@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   getTranslation,
   interpolate,
@@ -314,6 +315,23 @@ function EncoderTarget({
   );
 }
 
+function StageGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-2 border-t border-outline pt-3 first:border-0 first:pt-0">
+      <h5 className="text-caption text-muted font-medium">{title}</h5>
+      <div className="grid grid-cols-2 gap-3 min-[768px]:grid-cols-3">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function SessionPipelineDiagnostics({
   session,
   transportLabel,
@@ -325,20 +343,31 @@ export default function SessionPipelineDiagnostics({
 }) {
   const t = getTranslation(language).host.inspector;
   const diagnostics = encoderDiagnosticsView(session, language);
+  const isKo = language !== "en";
   return (
-    <>
-      <PipelineRates session={session} diagnostics={diagnostics} t={t} />
-      <TimingDiagnostics session={session} t={t} />
-      <TransportDiagnostics
-        session={session}
-        transportLabel={transportLabel}
-        t={t}
-      />
-      <QueueDiagnostics session={session} t={t} />
-      <FecDiagnostics session={session} t={t} />
-      <RecoveryDiagnostics session={session} t={t} />
-      <TailTimingDiagnostics session={session} t={t} />
-      <EncoderTarget session={session} t={t} />
-    </>
+    <div className="space-y-3">
+      <StageGroup title={isKo ? "프레임 · 출력" : "Frame Rates"}>
+        <PipelineRates session={session} diagnostics={diagnostics} t={t} />
+      </StageGroup>
+      <StageGroup title={isKo ? "지연 · 타이밍" : "Stage Timing"}>
+        <TimingDiagnostics session={session} t={t} />
+        <TailTimingDiagnostics session={session} t={t} />
+      </StageGroup>
+      <StageGroup title={isKo ? "전송 · 네트워크" : "Transport"}>
+        <TransportDiagnostics
+          session={session}
+          transportLabel={transportLabel}
+          t={t}
+        />
+      </StageGroup>
+      <StageGroup title={isKo ? "큐 · FEC" : "Queue & FEC"}>
+        <QueueDiagnostics session={session} t={t} />
+        <FecDiagnostics session={session} t={t} />
+      </StageGroup>
+      <StageGroup title={isKo ? "복구 · 목표 비트레이트" : "Recovery & Target"}>
+        <RecoveryDiagnostics session={session} t={t} />
+        <EncoderTarget session={session} t={t} />
+      </StageGroup>
+    </div>
   );
 }

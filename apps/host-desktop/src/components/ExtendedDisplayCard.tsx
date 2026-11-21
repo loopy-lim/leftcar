@@ -59,7 +59,23 @@ function DisplayModeForm({
   busy: boolean;
   onApply: (mode: Mode) => void;
 }) {
-  const [choice, setChoice] = useState(live ? "custom" : "auto");
+  const [choice, setChoice] = useState(() => {
+    if (!live) return "auto";
+    if (
+      live.logicalWidth === suggested.width &&
+      live.logicalHeight === suggested.height &&
+      live.scale === suggested.scale
+    ) {
+      return "auto";
+    }
+    const presetIndex = PRESETS.findIndex(
+      (preset) =>
+        preset.width === live.logicalWidth &&
+        preset.height === live.logicalHeight &&
+        preset.scale === live.scale,
+    );
+    return presetIndex >= 0 ? String(presetIndex) : "custom";
+  });
   const [width, setWidth] = useState(
     String(live?.logicalWidth ?? suggested.width),
   );
@@ -304,7 +320,13 @@ function DisplayContents({
     </>
   );
 }
-export function ExtendedDisplayCard({ t }: { t: TranslationSchema }) {
+export function ExtendedDisplayCard({
+  t,
+  hideHeading = false,
+}: {
+  t: TranslationSchema;
+  hideHeading?: boolean;
+}) {
   const [status, setStatus] = useState<VirtualDisplayStatus | null>(null);
   const [phase, setPhase] = useState<"idle" | "updating">("idle");
   const busy = phase === "updating";
@@ -368,8 +390,14 @@ export function ExtendedDisplayCard({ t }: { t: TranslationSchema }) {
       className="space-y-3"
     >
       <div>
-        <Text className="block font-semibold">{t.host.extDisplaySection}</Text>
-        <Text variant="caption" tone="muted" className="block mt-1">
+        {!hideHeading && (
+          <Text className="block font-semibold">{t.host.extDisplaySection}</Text>
+        )}
+        <Text
+          variant="caption"
+          tone="muted"
+          className={cn("block", !hideHeading && "mt-1")}
+        >
           {t.host.extDisplayHint}
         </Text>
       </div>

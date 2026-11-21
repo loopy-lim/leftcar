@@ -3,6 +3,18 @@
 @source "../../../packages/ui-tokens/src";
 
 @layer base {
+  :root {
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
   html, body, #root {
     height: 100%;
     width: 100%;

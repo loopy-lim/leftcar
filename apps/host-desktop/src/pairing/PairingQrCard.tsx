@@ -42,9 +42,9 @@ function PairingIdleCard({
       className="flex flex-col items-center gap-3 py-6 text-center"
     >
       <Icon size={24} className="text-muted" />
-      <Text variant="title">
-        {expired ? t.host.pairingExpiredTitle : t.host.btnPair}
-      </Text>
+      {expired && (
+        <Text variant="title">{t.host.pairingExpiredTitle}</Text>
+      )}
       <Text tone="muted" className="max-w-sm">
         {expired ? t.host.pairingExpiredSub : t.host.idleHint}
       </Text>
@@ -99,18 +99,17 @@ function ActivePairingCard({
           {session.code.replace(/(\d{3})(\d{3})/, "$1 $2")}
         </Text>
         <Button
-          variant="ghost"
-          size="icon"
+          variant="secondary"
+          size="compact"
           onClick={onCopyCode}
           aria-label={t.host.copyCode}
         >
           {copiedCode ? <Check size={16} /> : <Copy size={16} />}
+          {copiedCode ? t.host.copied : t.host.copyCode}
         </Button>
-        {copiedCode && (
-          <Text variant="caption" role="status">
-            {t.host.copied}
-          </Text>
-        )}
+        <span className="sr-only" role="status">
+          {copiedCode ? t.host.copied : ""}
+        </span>
       </div>
       <Text variant="caption" tone="muted">
         {t.host.pairingQrScanHint}
