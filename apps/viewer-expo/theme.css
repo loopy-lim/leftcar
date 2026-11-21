@@ -38,6 +38,13 @@
     --color-qr: #FFFFFF;
     --color-active: #D4D4D8;
     --color-scrim: rgba(0, 0, 0, 0.48);
+    --color-live: #059669;
+    --color-live-subtle: #ECFDF5;
+    --color-live-border: #A7F3D0;
+    --color-warning: #D97706;
+    --color-warning-subtle: #FFFBEB;
+    --color-danger: #DC2626;
+    --color-danger-subtle: #FEF2F2;
 }
 @layer theme {
   :root {
@@ -59,6 +66,13 @@
     --color-qr: #FFFFFF;
     --color-active: #D4D4D8;
     --color-scrim: rgba(0, 0, 0, 0.48);
+    --color-live: #059669;
+    --color-live-subtle: #ECFDF5;
+    --color-live-border: #A7F3D0;
+    --color-warning: #D97706;
+    --color-warning-subtle: #FFFBEB;
+    --color-danger: #DC2626;
+    --color-danger-subtle: #FEF2F2;
     }
     @variant dark {
     --color-canvas: #09090B;
@@ -78,6 +92,13 @@
     --color-qr: #FFFFFF;
     --color-active: #3F3F46;
     --color-scrim: rgba(0, 0, 0, 0.48);
+    --color-live: #10B981;
+    --color-live-subtle: rgba(16, 185, 129, 0.14);
+    --color-live-border: rgba(16, 185, 129, 0.3);
+    --color-warning: #F59E0B;
+    --color-warning-subtle: rgba(245, 158, 11, 0.14);
+    --color-danger: #EF4444;
+    --color-danger-subtle: rgba(239, 68, 68, 0.15);
     }
   }
 }

@@ -7,7 +7,7 @@ export const actionVariants = cva("flex flex-row items-center justify-center gap
       primary: "bg-action text-action-ink",
       secondary: "bg-subtle text-ink border-outline",
       ghost: "bg-transparent text-ink",
-      danger: "bg-subtle text-ink border-strong",
+      danger: "bg-danger-subtle text-ink border-danger",
     },
     size: {
       default: "min-h-12 min-w-11 px-4 py-3",
@@ -50,11 +50,11 @@ export const surfaceVariants = cva("gap-3", {
 export type SurfaceVariantProps = VariantProps<typeof surfaceVariants>;
 
 export const inputVariants = cva("min-h-11 rounded-md border bg-surface px-3 py-2 text-body text-ink", {
-  variants: { invalid: { true: "border-strong", false: "border-outline" } },
+  variants: { invalid: { true: "border-danger", false: "border-outline" } },
   defaultVariants: { invalid: false },
 });
 
 export const noticeVariants = cva("gap-2 rounded-md border bg-subtle p-3", {
-  variants: { tone: { info: "border-outline", error: "border-strong" } },
+  variants: { tone: { info: "border-outline", error: "border-danger bg-danger-subtle" } },
   defaultVariants: { tone: "info" },
 });

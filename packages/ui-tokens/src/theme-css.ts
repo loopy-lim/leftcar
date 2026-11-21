@@ -8,6 +8,13 @@ const roleKeys = {
   curtain: "curtain", "curtain-ink": "curtainInk",
   qr: "qr",
   active: "bgActive", scrim: "scrim",
+  live: "statusLive",
+  "live-subtle": "statusLiveSubtle",
+  "live-border": "statusLiveBorder",
+  warning: "statusWarning",
+  "warning-subtle": "statusWarningSubtle",
+  danger: "statusDanger",
+  "danger-subtle": "statusDangerSubtle",
 } satisfies Record<string, keyof ThemeTokens>;
 
 function declarations(palette: ThemeTokens, prefix: string): string {
