@@ -218,7 +218,9 @@ jobs:
         run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' apps/viewer-expo/android/app/build.gradle | head -1)"
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
-          targets: aarch64-linux-android
+          # rustra-bridge의 buildRustAndroid는 reactNativeArchitectures와 무관하게
+          # aarch64/x86_64 두 ABI를 모두 빌드하므로 두 target이 다 필요하다.
+          targets: aarch64-linux-android,x86_64-linux-android
       - name: Install pinned cargo-ndk for the generated Rustra bridge
         run: cargo install cargo-ndk --version 4.1.2 --locked
       - name: Install Android NDK
