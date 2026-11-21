@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "leftcar-host-desktop"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "arboard",
  "base64 0.22.1",

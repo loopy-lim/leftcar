@@ -4,19 +4,19 @@
 
 | 위치 | 현재 값 | 역할 |
 | --- | --- | --- |
-| `apps/viewer-expo/android/app/build.gradle` `versionName` | `0.1.10` | Viewer Android 릴리스 기준 |
-| `apps/viewer-expo/android/app/build.gradle` `versionCode` | `16` | Viewer Android 설치 판별 값 |
+| `apps/viewer-expo/android/app/build.gradle` `versionName` | `0.1.13` | Viewer Android 릴리스 기준 |
+| `apps/viewer-expo/android/app/build.gradle` `versionCode` | `17` | Viewer Android 설치 판별 값 |
 | `apps/viewer-expo/app.config.ts` `version` | `0.1.6` | Expo 앱 표시 버전 |
 | `apps/viewer-expo/package.json` `version` | `0.1.6` | 개발 트래킹용 |
-| `apps/host-desktop/src-tauri/Cargo.toml` `version` | `0.1.12` | macOS/Windows Host 빌드 버전 |
-| `apps/host-desktop/src-tauri/tauri.conf.json` `version` | `0.1.12` | 실제 Host 번들 버전, Cargo 버전과 일치 확인 |
+| `apps/host-desktop/src-tauri/Cargo.toml` `version` | `0.1.13` | macOS/Windows Host 빌드 버전 |
+| `apps/host-desktop/src-tauri/tauri.conf.json` `version` | `0.1.13` | 실제 Host 번들 버전, Cargo 버전과 일치 확인 |
 | Host capture shim 시작 ABI | `leftcar_capture_start_v9` | 현재 Host가 요구하는 capture entry point |
 
 ## 공개 파일과 개발 후보
 
 GitHub API `/repos/loopy-lim/leftcar/releases/latest` 조회 기준 최신 공개판은 [v0.1.10](https://github.com/loopy-lim/leftcar/releases/tag/v0.1.10)(2026-09-21 공개)이며, `Leftcar-Viewer-0.1.10.apk`(25,744,586 bytes)와 `Leftcar-Host-0.1.10-macOS-arm64.zip`(3,158,146 bytes)을 제공한다. Windows 파일은 없다. 이번에는 릴리스 metadata만 조회했으며 해당 파일의 다운로드·서명·설치·업데이트를 재검증하지 않았다.
 
-현재 Host 소스는 0.1.12이고 Viewer Android 설정은 여전히 0.1.10/16이다. 같은 버전 표시가 이번 변경의 공개를 뜻하지 않는다. 2026-11-21부터 Host 릴리스 산출은 `.github/workflows/release.yml`이 공개 저장소의 무료 러너(macOS/Windows)에서 `bun run build host-macos-internal` 검증 파이프라인으로 만들어 GitHub Release에 올린다(서명 없는 ad-hoc/unsigned 산출, 설치 안내는 `.github/release-notes/install-guidance.md`). 뷰어 APK는 기존 설치와의 서명 호환을 위해 로컬 `bun run build android-internal`을 유지한다.
+현재 Host 소스는 0.1.13이고 Viewer Android 설정도 0.1.13/17로 함께 올랐다(릴리즈 태그가 Host 버전과 Viewer versionName 양쪽과 일치해야 release.yml이 통과한다). 2026-11-21부터 릴리스 산출은 `.github/workflows/release.yml`이 공개 저장소의 무료 러너(macOS/Windows/Linux)에서 만들어 GitHub Release에 올린다. macOS는 `bun run build host-macos-internal`, 뷰어는 `bun run build android-internal` 검증 파이프라인을 그대로 실행하며, APK는 기존 설치와 같은 내부 디버그 키로 서명한다. 키 파일은 저장소에 두지 않고 GitHub Actions 시크릿 `LEFTCAR_INTERNAL_DEBUG_KEYSTORE_BASE64`로만 전달한다. Apple/Windows 상용 서명 시크릿을 넣으면 공증/코드 서명 단계가 자동으로 켜진다(없으면 ad-hoc/unsigned 산출 + 설치 안내, `.github/release-notes/install-guidance.md`).
 
 과거 2026-09-13 **v0.1.4 파일 검사 기록**: 당시 APK를 내려받아 `aapt2 dump badging`과 `apksigner verify --print-certs`로 확인한 값은 package `leftcar.ll3.kr`, versionCode `3`, versionName `0.1.4`, 인증서 DN `CN=Android Debug, O=Android, C=US`다. APK SHA-256은 `3dade6eb378b54a60ca674335dd8d260fe5ecc8b0195ce9ba238dd99939e96fe`, 공개 인증서 SHA-256은 `dd0f47dc0791450eac89ac2d304930d642ff32ad888a618a1992a6225f3b9655`다. 파일 검사만 수행했으며 설치·업데이트는 실행하지 않았다.
 

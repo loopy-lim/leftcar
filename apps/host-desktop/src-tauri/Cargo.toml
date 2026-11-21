@@ -1,6 +1,6 @@
 [package]
 name = "leftcar-host-desktop"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 license = "MIT"
 # `tauri dev`(= cargo run)가 GUI 바이너리를 선택한다. src/bin/leftcar-hostd가

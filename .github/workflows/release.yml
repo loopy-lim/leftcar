@@ -3,9 +3,14 @@ name: Release
 # 무료 러너(public repo)로 배포 산출물을 만든다. macOS는 검증된 내부 빌드
 # 파이프라인(bun run build host-macos-internal: 소스 스냅샷·매니페스트·심볼
 # 검증 포함)을 그대로 실행하고, Windows는 ci.yml windows-host와 동일한
-# NSIS 번들을 만든다. tag push(v*)일 때만 GitHub Release를 만들어 올리고,
+# NSIS 번들, Android는 bun run build android-internal로 기존 내부 디버그
+# 키(LEFTCAR_INTERNAL_DEBUG_KEYSTORE_BASE64 시크릿)로 서명된 APK를
+# 만든다. tag push(v*)일 때만 GitHub Release를 만들어 올리고,
 # workflow_dispatch는 빌드 산출물을 워크플로 아티팩트로만 남긴다(릴리즈
 # 리허설용). 서명 없는 빌드의 설치 안내는 publish 잡의 notes에 고정된다.
+#
+# macOS 공증/Windows 코드 서명은 대응 시크릿이 있을 때만 켜진다(해당 단계
+# 참고). 시크릿이 없는 현재는 ad-hoc/unsigned 산출 + 설치 안내로 배포한다.
 
 on:
   push:
@@ -20,7 +25,7 @@ env:
 
 jobs:
   build-macos:
-    name: macOS Host (ad-hoc app bundle)
+    name: macOS Host (app bundle)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -55,17 +60,62 @@ jobs:
         env:
           LEFTCAR_BUILD_RECEIPTS: ${{ runner.temp }}/leftcar-receipts
         run: bun run build host-macos-internal
-      - name: Zip the .app bundle preserving the ad-hoc seal
+      - name: Locate the built .app bundle
         run: |
           manifest="$(find "$RUNNER_TEMP/leftcar-receipts" -name host-macos-internal-manifest.json | head -1)"
           app="$(jq -r '.artifactBuildPaths[] | select(.role=="host-bundle") | .buildPath' "$manifest")"
           version="$(jq -r .version apps/host-desktop/src-tauri/tauri.conf.json)"
-          zip="Leftcar-Host-${version}-macOS-arm64.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/$zip"
           # Receipt provenance travels with the workflow run, not the release.
           cp "$manifest" "$RUNNER_TEMP/host-macos-internal-manifest.json"
-          echo "ZIP=$RUNNER_TEMP/$zip" >> "$GITHUB_ENV"
-          echo "MANIFEST=$RUNNER_TEMP/host-macos-internal-manifest.json" >> "$GITHUB_ENV"
+          {
+            echo "APP=$app"
+            echo "ZIP=$RUNNER_TEMP/Leftcar-Host-${version}-macOS-arm64.zip"
+            echo "MANIFEST=$RUNNER_TEMP/host-macos-internal-manifest.json"
+          } >> "$GITHUB_ENV"
+      # Distribution signing: replaces the verified ad-hoc seal with a Developer
+      # ID Application seal, notarizes via App Store Connect API key, staples the
+      # ticket, then zips. Requires ALL of these repository secrets (Apple
+      # Developer Program, $99/yr): APPLE_CERTIFICATE_BASE64 (Developer ID
+      # Application .p12, base64), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY
+      # (e.g. "Developer ID Application: Name (TEAMID)"), APPLE_API_KEY_BASE64
+      # (App Store Connect .p8, base64), APPLE_API_KEY_ID, APPLE_API_ISSUER.
+      # build.mjs deliberately strips signing envs for internal packaging, so
+      # notarization happens here in the workflow, after the verified build.
+      - name: Developer ID re-sign and notarize (only with Apple signing secrets)
+        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euxo pipefail
+          keychain=leftcar-build.keychain
+          security create-keychain -p ci "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p ci "$keychain"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$keychain"
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$APP"
+          /usr/bin/codesign --verify --deep --strict "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          keyfile="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -d > "$keyfile"
+          xcrun notarytool store-credentials leftcar-notary \
+            --key "$keyfile" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --force
+          xcrun notarytool submit "$ZIP" --keychain-profile leftcar-notary --wait
+          xcrun stapler staple "$APP"
+          # Re-zip so the release asset carries the stapled ticket.
+          rm "$ZIP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+      - name: Zip the .app bundle preserving the ad-hoc seal
+        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 == '' }}
+        run: ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-host-zip
@@ -78,7 +128,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    name: Windows Host (unsigned NSIS)
+    name: Windows Host (NSIS installer)
     runs-on: windows-latest
     env:
       CARGO_HOME: C:\c
@@ -118,15 +168,112 @@ jobs:
           $setup = Get-ChildItem apps/host-desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\asset" | Out-Null
           Copy-Item $setup.FullName "$env:RUNNER_TEMP\asset\Leftcar.Host_${version}_x64-setup.exe"
+      # Distribution signing: requires Windows signing repository secrets —
+      # WINDOWS_CERTIFICATE_BASE64 (code signing certificate .pfx, base64) and
+      # WINDOWS_CERTIFICATE_PASSWORD — from any CA (e.g. Certum open-source,
+      # SSL.com eSigner, Azure Trusted Signing via exported certificate).
+      # Without them the installer stays unsigned (SmartScreen "추가 정보 → 실행").
+      - name: Code-sign the installer (only with Windows signing secrets)
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1).FullName
+          $setup = Get-ChildItem "$env:RUNNER_TEMP\asset\*-setup.exe" | Select-Object -First 1
+          & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            /f "$env:RUNNER_TEMP\cert.pfx" /p "$env:WINDOWS_CERTIFICATE_PASSWORD" $setup.FullName
+          & $signtool verify /pa /all $setup.FullName
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-host-setup
           path: ${{ runner.temp }}\asset\*-setup.exe
           if-no-files-found: error
 
+  build-android:
+    name: Android Viewer (internal debug-key APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # See build-macos: sibling path dependency, linked to ../rustra.
+      - name: Checkout unikit-bridge sibling repo (path dependency)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: loopy-lim/unikit-bridge
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
+          path: unikit-bridge-sibling
+          persist-credentials: false
+      - name: Link sibling checkout to ../rustra for path dependencies
+        run: ln -s "$GITHUB_WORKSPACE/unikit-bridge-sibling" "$GITHUB_WORKSPACE/../rustra"
+      - name: Tag must match the Viewer versionName
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' apps/viewer-expo/android/app/build.gradle | head -1)"
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        with:
+          targets: aarch64-linux-android
+      - name: Install pinned cargo-ndk for the generated Rustra bridge
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Install Android NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" >/dev/null
+      - name: Put NDK toolchain on PATH
+        run: |
+          echo "$ANDROID_HOME/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.21.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
+      - run: bun install --frozen-lockfile
+      # The real internal debug keystore (same key as existing local installs, so
+      # release APKs overwrite-install cleanly) never enters the repository; it
+      # is decoded from the Actions secret to a path outside the checkout.
+      - name: Restore the internal debug keystore from the Actions secret
+        env:
+          LEFTCAR_INTERNAL_DEBUG_KEYSTORE_BASE64: ${{ secrets.LEFTCAR_INTERNAL_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$LEFTCAR_INTERNAL_DEBUG_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/debug.keystore"
+          chmod 600 "$RUNNER_TEMP/debug.keystore"
+          keytool -list -keystore "$RUNNER_TEMP/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+      - name: Verified internal Viewer packaging (APK, manifest)
+        env:
+          LEFTCAR_BUILD_RECEIPTS: ${{ runner.temp }}/leftcar-receipts
+          LEFTCAR_INTERNAL_DEBUG_KEYSTORE: ${{ runner.temp }}/debug.keystore
+        run: bun run build android-internal
+      - name: Stage the APK under its release name
+        run: |
+          manifest="$(find "$RUNNER_TEMP/leftcar-receipts" -name android-internal-manifest.json | head -1)"
+          apk="$(jq -r '.artifactBuildPaths[] | select(.role=="viewer-apk") | .buildPath' "$manifest")"
+          version="$(jq -r .artifactMetadata.version "$manifest")"
+          test "$version" != null
+          mkdir -p "$RUNNER_TEMP/asset"
+          cp "$apk" "$RUNNER_TEMP/asset/Leftcar-Viewer-${version}.apk"
+          # Receipt provenance travels with the workflow run, not the release.
+          cp "$manifest" "$RUNNER_TEMP/android-internal-manifest.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-viewer-apk
+          path: ${{ runner.temp }}/asset/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-internal-manifest
+          path: ${{ runner.temp }}/android-internal-manifest.json
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -141,7 +288,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/assets"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name macos-host-zip --name windows-host-setup -D "$RUNNER_TEMP/assets"
+            --name macos-host-zip --name windows-host-setup --name android-viewer-apk \
+            -D "$RUNNER_TEMP/assets"
       - name: Compose release assets with checksums
         run: |
           mkdir -p "$RUNNER_TEMP/dist"
