@@ -27,13 +27,13 @@ jobs:
       # it out inside and link it to ../rustra. Pin the FULL 40-char commit
       # SHA — actions/checkout resolves short refs as branch/tag names.
       # Bump the ref together with the root Cargo.toml dependency when the
-      # sibling changes (current pin: PR #112, merged into unikit-bridge
+      # sibling changes (current pin: PR #116, merged into unikit-bridge
       # origin/main; the head branch was deleted after merge).
       - name: Checkout unikit-bridge sibling repo (path dependency)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: loopy-lim/unikit-bridge
-          ref: aea88a8f96909783bc658d538e7aab28b51eb9fe
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
           path: unikit-bridge-sibling
           persist-credentials: false
       - name: Link sibling checkout to ../rustra for path dependencies
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: loopy-lim/unikit-bridge
-          ref: aea88a8f96909783bc658d538e7aab28b51eb9fe
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
           path: unikit-bridge-sibling
           persist-credentials: false
       - name: Link sibling checkout to ../rustra for path dependencies
@@ -148,7 +148,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: loopy-lim/unikit-bridge
-          ref: aea88a8f96909783bc658d538e7aab28b51eb9fe
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
           path: unikit-bridge-sibling
           persist-credentials: false
       - name: Link sibling checkout to ../rustra for path dependencies
@@ -222,7 +222,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: loopy-lim/unikit-bridge
-          ref: aea88a8f96909783bc658d538e7aab28b51eb9fe
+          ref: bb7f2df9119378afda57b5973ed8eaa6961d8fe4
           path: unikit-bridge-sibling
           persist-credentials: false
       - name: Junction sibling checkout to ..\rustra for path dependencies
