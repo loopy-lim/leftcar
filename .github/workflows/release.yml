@@ -27,6 +27,9 @@ jobs:
   build-macos:
     name: macOS Host (app bundle)
     runs-on: macos-latest
+    # steps.if cannot reference the secrets context; indirect through job env.
+    env:
+      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Root Cargo.toml depends on the sibling unikit-bridge repo via
@@ -82,7 +85,7 @@ jobs:
       # build.mjs deliberately strips signing envs for internal packaging, so
       # notarization happens here in the workflow, after the verified build.
       - name: Developer ID re-sign and notarize (only with Apple signing secrets)
-        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        if: env.HAS_APPLE_SIGNING == 'true'
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -114,7 +117,7 @@ jobs:
           rm "$ZIP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
       - name: Zip the .app bundle preserving the ad-hoc seal
-        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 == '' }}
+        if: env.HAS_APPLE_SIGNING != 'true'
         run: ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -133,6 +136,8 @@ jobs:
     env:
       CARGO_HOME: C:\c
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      # steps.if cannot reference the secrets context; indirect through job env.
+      HAS_WINDOWS_SIGNING: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -174,7 +179,7 @@ jobs:
       # SSL.com eSigner, Azure Trusted Signing via exported certificate).
       # Without them the installer stays unsigned (SmartScreen "추가 정보 → 실행").
       - name: Code-sign the installer (only with Windows signing secrets)
-        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        if: env.HAS_WINDOWS_SIGNING == 'true'
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
