@@ -54,7 +54,15 @@ jobs:
       - name: Verified internal Host packaging (shim, bundle, manifest)
         env:
           LEFTCAR_BUILD_RECEIPTS: ${{ runner.temp }}/leftcar-receipts
-        run: bun run build host-macos-internal
+        run: |
+          set +e
+          bun run build host-macos-internal
+          status=$?
+          echo "=== repository changes made during the build (git status) ==="
+          git status --porcelain | head -40
+          echo "=== tracked modifications (git diff --stat) ==="
+          git diff --stat | head -20
+          exit $status
       - name: Zip the .app bundle preserving the ad-hoc seal
         run: |
           manifest="$(find "$RUNNER_TEMP/leftcar-receipts" -name host-macos-internal-manifest.json | head -1)"
