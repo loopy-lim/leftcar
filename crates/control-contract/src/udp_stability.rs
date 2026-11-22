@@ -9,6 +9,8 @@ pub const SPLIT_FEEDBACK_V2_BYTES: u16 = 120;
 pub enum UdpStabilityProfile {
     Auto,
     Responsive,
+    // Balanced·Custom은 현재 뷰어가 선택지로 제공하지 않지만(2026-11-22 단순화),
+    // 구버전 뷰어의 저장된 선택 협상과 자동 모드 폴백 대상이라 계약에 유지한다.
     Balanced,
     Stable,
     Custom,
@@ -92,14 +94,18 @@ pub fn resolve_udp_stability(
     host: &UdpStabilityCapabilities,
 ) -> Result<AppliedUdpStability, String> {
     let Some(request) = request else {
-        return Ok(AppliedUdpStability {
-            requested: UdpStabilityProfile::Responsive,
-            applied: UdpStabilityProfile::Responsive,
-            burst_datagrams: 8,
-            fec_parity_shards: 2,
-            adaptive_pacing: false,
-            fallback_reason: None,
-        });
+        // 값 생략(기능 이전 뷰어)도 자동 모드 요청으로 취급한다. viewer caps가
+        // 없으므로 아래 자동 게이트가 feedback v2 폴백(Balanced)으로 내려간다.
+        // 적응 페이싱은 수신 측 feedback v2 카운터를 소비하므로 caps 없는
+        // 뷰어에게 강제로 켜지 않는다.
+        let auto_request = UdpStabilityRequest {
+            profile: UdpStabilityProfile::Auto,
+            burst_datagrams: None,
+            fec_parity_shards: None,
+            adaptive_pacing: None,
+            viewer: None,
+        };
+        return resolve_udp_stability(Some(&auto_request), host);
     };
 
     if request.profile == UdpStabilityProfile::Custom {

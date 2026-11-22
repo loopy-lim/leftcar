@@ -50,16 +50,18 @@ fn viewer_udp_capabilities(max_fec_parity_shards: u8) -> ViewerUdpCapabilities {
 }
 
 #[test]
-fn udp_stability_legacy_omission_preserves_current_wire_policy() {
+fn udp_stability_legacy_omission_requests_auto_with_feedback_fallback() {
+    // 값 생략(기능 이전 뷰어)은 자동 모드 요청으로 취급되고, viewer caps가
+    // 없으므로 feedback v2 폴백으로 Balanced가 적용된다(2026-11-22 변경).
     assert_eq!(
         resolve_udp_stability(None, &udp_capabilities()).unwrap(),
         AppliedUdpStability {
-            requested: UdpStabilityProfile::Responsive,
-            applied: UdpStabilityProfile::Responsive,
-            burst_datagrams: 8,
+            requested: UdpStabilityProfile::Auto,
+            applied: UdpStabilityProfile::Balanced,
+            burst_datagrams: 4,
             fec_parity_shards: 2,
             adaptive_pacing: false,
-            fallback_reason: None,
+            fallback_reason: Some("양쪽이 feedback v2 자동 조절을 지원하지 않습니다".into()),
         }
     );
 }
