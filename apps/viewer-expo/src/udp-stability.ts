@@ -1,25 +1,11 @@
-export type UdpStabilityProfileId =
-  | "auto"
-  | "responsive"
-  | "balanced"
-  | "stable"
-  | "custom";
-
-export type UdpBurstDatagrams = 2 | 4 | 8 | 16;
-export type UdpFecParityShards = 2 | 4;
+export type UdpStabilityProfileId = "auto" | "responsive" | "stable";
 
 export interface UdpStabilitySelection {
   profile: UdpStabilityProfileId;
-  burstDatagrams?: UdpBurstDatagrams;
-  fecParityShards?: UdpFecParityShards;
-  adaptivePacing?: boolean;
 }
 
 export interface UdpStabilityOptions {
-  profiles: Exclude<UdpStabilityProfileId, "custom">[];
-  burstDatagrams: UdpBurstDatagrams[];
-  fecParityShards: UdpFecParityShards[];
-  adaptivePacing: boolean;
+  profiles: UdpStabilityProfileId[];
   requiresReconnect: boolean;
 }
 
@@ -29,21 +15,14 @@ export const VIEWER_UDP_CAPABILITIES = {
   splitFeedbackBytes: 120,
 } as const;
 
-const PRESET_IDS = ["auto", "responsive", "balanced", "stable"] as const;
-const BURST_OPTIONS = [2, 4, 8, 16] as const;
-const PARITY_OPTIONS = [2, 4] as const;
+// 2026-11-22 단순화: 뷰어가 제공하는 선택지는 자동/저지연/안정 세 가지다.
+// 'balanced'는 자동과 값이 사실상 같은 중복이라 걷어냈고(호스트 계약에는
+// 구버전 협상·자동 폴백용으로 유지), 세부 수동 조정(custom)도 auto 적응
+// 사다리가 대신하면서 제거했다.
+const SELECTABLE_PROFILE_IDS = ["auto", "responsive", "stable"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function intersectNumbers<T extends number>(
-  advertised: unknown,
-  supported: readonly T[],
-): T[] {
-  if (!Array.isArray(advertised)) return [];
-  const advertisedSet = new Set(advertised);
-  return supported.filter((candidate) => advertisedSet.has(candidate));
 }
 
 export function availableUdpStabilityOptions(
@@ -53,28 +32,19 @@ export function availableUdpStabilityOptions(
   const advertisedProfiles = advertised.profiles;
   if (!Array.isArray(advertisedProfiles)) return null;
 
-  const burstDatagrams = intersectNumbers(
-    advertised.burstDatagramOptions,
-    BURST_OPTIONS,
+  const fecParitySet = new Set<number>(
+    Array.isArray(advertised.fecParityOptions)
+      ? advertised.fecParityOptions
+      : [],
   );
-  const fecParityShards = intersectNumbers(
-    advertised.fecParityOptions,
-    PARITY_OPTIONS,
-  );
-  if (burstDatagrams.length === 0 || fecParityShards.length === 0) return null;
-
   const advertisedProfileSet = new Set(advertisedProfiles);
-  const fecParitySet = new Set(fecParityShards);
-  const profiles = PRESET_IDS.filter((profile) =>
+  const profiles = SELECTABLE_PROFILE_IDS.filter((profile) =>
     advertisedProfileSet.has(profile),
   ).filter((profile) => profile !== "stable" || fecParitySet.has(4));
   if (profiles.length === 0) return null;
 
   return {
     profiles,
-    burstDatagrams,
-    fecParityShards,
-    adaptivePacing: advertised.adaptivePacing === true,
     requiresReconnect: advertised.requiresReconnect === true,
   };
 }
@@ -85,63 +55,50 @@ export function resolveUdpStabilitySelection(
 ): UdpStabilitySelection | null {
   const options = availableUdpStabilityOptions(advertised);
   if (!options) return null;
-
-  if (selection.profile !== "custom") {
-    return options.profiles.includes(selection.profile)
-      ? { profile: selection.profile }
-      : null;
-  }
-
-  const { burstDatagrams, fecParityShards, adaptivePacing } = selection;
-  if (
-    burstDatagrams === undefined
-    || fecParityShards === undefined
-    || adaptivePacing === undefined
-    || !options.burstDatagrams.includes(burstDatagrams)
-    || !options.fecParityShards.includes(fecParityShards)
-    || (adaptivePacing && !options.adaptivePacing)
-  ) {
-    return null;
-  }
-  return {
-    profile: "custom",
-    burstDatagrams,
-    fecParityShards,
-    adaptivePacing,
-  };
+  return options.profiles.includes(selection.profile)
+    ? { profile: selection.profile }
+    : null;
 }
 
-export const UDP_STABILITY_KEY = "leftcar.udpStability";
+export const UDP_STABILITY_KEY = "leftcar.udpStability.v2";
+// 2026-11-22 이전 키. 세부 수동 조정·중복 프리셋이 사라지며 저장값 전부를
+// 한 번 auto로 초기화한다(키 회전 — pairing.ts LEGACY_TOKEN_KEY 패턴).
+// 실패해도 읽기 결과에 영향을 주지 않는 best-effort 삭제만 한다.
+export const LEGACY_UDP_STABILITY_KEY = "leftcar.udpStability";
 
 interface UdpStabilityStore {
   getItemAsync(key: string): Promise<string | null>;
   setItemAsync(key: string, value: string): Promise<void>;
+  deleteItemAsync(key: string): Promise<void>;
 }
 
 function parseUdpStabilitySelection(raw: string | null): UdpStabilitySelection {
   if (raw === null) return { profile: "auto" };
   const parsed: unknown = JSON.parse(raw);
   if (!isRecord(parsed)) throw new Error("Invalid UDP preference");
-  const profile = PRESET_IDS.find((candidate) => candidate === parsed.profile)
-    ?? (parsed.profile === "custom" ? "custom" : null);
+  const profile = SELECTABLE_PROFILE_IDS.find(
+    (candidate) => candidate === parsed.profile,
+  );
   if (!profile) throw new Error("Invalid UDP preference");
-  if (profile !== "custom") return { profile };
-  const burstDatagrams = BURST_OPTIONS.find((candidate) => candidate === parsed.burstDatagrams);
-  const fecParityShards = PARITY_OPTIONS.find((candidate) => candidate === parsed.fecParityShards);
-  if (!burstDatagrams || !fecParityShards || typeof parsed.adaptivePacing !== "boolean") {
-    throw new Error("Invalid UDP preference");
-  }
-  return { profile, burstDatagrams, fecParityShards, adaptivePacing: parsed.adaptivePacing };
+  return { profile };
 }
 
 /**
  * UDP 안정성 선택을 저장해 다음 세션에서 그대로 쓴다. 호스트가 지원하지
  * 않는 조합은 effectiveUdpStability의 광고 교집합에서 안전하게 강등된다.
+ * 새 키에 값이 없으면(마이그레이션 직후) auto로 시작하고 레거시 키를
+ * 지워 되살아나지 않게 한다.
  */
 export async function readUdpStabilitySelection(
   store: UdpStabilityStore,
 ): Promise<UdpStabilitySelection> {
-  return parseUdpStabilitySelection(await store.getItemAsync(UDP_STABILITY_KEY));
+  const raw = await store.getItemAsync(UDP_STABILITY_KEY);
+  try {
+    await store.deleteItemAsync(LEGACY_UDP_STABILITY_KEY);
+  } catch {
+    // 레거시 키 삭제 실패는 남은 고립 값일 뿐 무시한다.
+  }
+  return parseUdpStabilitySelection(raw);
 }
 
 export async function writeUdpStabilitySelection(

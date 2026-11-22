@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  LEGACY_UDP_STABILITY_KEY,
+  UDP_STABILITY_KEY,
   VIEWER_UDP_CAPABILITIES,
   availableUdpStabilityOptions,
   readUdpStabilitySelection,
@@ -23,19 +25,18 @@ describe("UDP stability capability intersection", () => {
     expect(availableUdpStabilityOptions({ version: "1" })).toBeNull();
   });
 
-  it("normalizes, intersects, and deduplicates discrete options", () => {
+  it("normalizes and deduplicates selectable presets only", () => {
+    // 2026-11-22 단순화: balanced(중복)와 custom(세부 조정)은 선택지에서
+    // 제외되고, 나머지 광고 항목은 교집합 규칙을 그대로 따른다.
     expect(
       availableUdpStabilityOptions({
         ...advertised,
-        profiles: ["auto", "stable", "stable", "future"],
+        profiles: ["auto", "stable", "stable", "future", "balanced"],
         burstDatagramOptions: [16, 8, 4, 4, 6, 2],
         fecParityOptions: [4, 2, 4, 8],
       }),
     ).toEqual({
       profiles: ["auto", "stable"],
-      burstDatagrams: [2, 4, 8, 16],
-      fecParityShards: [2, 4],
-      adaptivePacing: true,
       requiresReconnect: true,
     });
   });
@@ -46,53 +47,23 @@ describe("UDP stability capability intersection", () => {
         ...advertised,
         fecParityOptions: [2],
       })?.profiles,
-    ).toEqual(["auto", "responsive", "balanced"]);
+    ).toEqual(["auto", "responsive"]);
   });
 
-  it("accepts only advertised preset and custom values", () => {
+  it("accepts only advertised selectable presets", () => {
     expect(resolveUdpStabilitySelection({ profile: "stable" }, advertised)).toEqual({
       profile: "stable",
     });
     expect(
       resolveUdpStabilitySelection(
-        {
-          profile: "custom",
-          burstDatagrams: 16,
-          fecParityShards: 2,
-          adaptivePacing: false,
-        },
-        advertised,
+        { profile: "stable" },
+        { ...advertised, profiles: ["auto", "responsive"] },
       ),
-    ).toEqual({
-      profile: "custom",
-      burstDatagrams: 16,
-      fecParityShards: 2,
-      adaptivePacing: false,
-    });
+    ).toBeNull();
+    // 뷰어가 더 이상 제공하지 않는 프로파일은 호스트가 광고해도 거절한다.
     expect(
       resolveUdpStabilitySelection(
-        {
-          profile: "custom",
-          burstDatagrams: 2,
-          fecParityShards: 4,
-          adaptivePacing: false,
-        },
-        advertised,
-      ),
-    ).toEqual({
-      profile: "custom",
-      burstDatagrams: 2,
-      fecParityShards: 4,
-      adaptivePacing: false,
-    });
-    expect(
-      resolveUdpStabilitySelection(
-        {
-          profile: "custom",
-          burstDatagrams: 8,
-          fecParityShards: 8 as 4,
-          adaptivePacing: false,
-        },
+        { profile: "balanced" as "stable" },
         advertised,
       ),
     ).toBeNull();
@@ -117,12 +88,13 @@ describe("UDP preference persistence", () => {
         return raw;
       },
       async setItemAsync(_key: string, value: string) { raw = value; },
+      async deleteItemAsync() { undefined; },
     };
     const controller = new PreferencePersistenceController({
       initialValue: { profile: "auto" } as const,
       load: () => readUdpStabilitySelection(store),
       save: (value) => writeUdpStabilitySelection(store, value),
-      storageKey: "leftcar.udpStability",
+      storageKey: UDP_STABILITY_KEY,
       storageOwner: store,
     });
 
@@ -136,13 +108,47 @@ describe("UDP preference persistence", () => {
     expect(raw).toBe('{"profile":"stable"}');
   });
 
-  it.each(["broken", "[]", '{"profile":"unknown"}', '{"profile":"custom","burstDatagrams":3}'])(
+  it.each(["broken", "[]", '{"profile":"unknown"}', '{"profile":"custom","burstDatagrams":3}', '{"profile":"balanced"}'])(
     "reports malformed saved UDP preference instead of accepting a replacement default: %s",
     async (raw) => {
       await expect(readUdpStabilitySelection({
         getItemAsync: async () => raw,
         setItemAsync: async () => undefined,
+        deleteItemAsync: async () => undefined,
       })).rejects.toThrow();
     },
   );
+
+  it("migrates by key rotation: a missing new key starts at auto and deletes the legacy key", async () => {
+    const deleted: string[] = [];
+    const selection = await readUdpStabilitySelection({
+      getItemAsync: async (key) =>
+        key === UDP_STABILITY_KEY ? null : '{"profile":"stable"}',
+      setItemAsync: async () => undefined,
+      deleteItemAsync: async (key) => { deleted.push(key); },
+    });
+    expect(selection).toEqual({ profile: "auto" });
+    expect(deleted).toEqual([LEGACY_UDP_STABILITY_KEY]);
+  });
+
+  it("keeps a valid stored selection under the new key and still clears the legacy key", async () => {
+    const deleted: string[] = [];
+    const selection = await readUdpStabilitySelection({
+      getItemAsync: async (key) =>
+        key === UDP_STABILITY_KEY ? '{"profile":"responsive"}' : null,
+      setItemAsync: async () => undefined,
+      deleteItemAsync: async (key) => { deleted.push(key); },
+    });
+    expect(selection).toEqual({ profile: "responsive" });
+    expect(deleted).toEqual([LEGACY_UDP_STABILITY_KEY]);
+  });
+
+  it("ignores a failed legacy key deletion", async () => {
+    const selection = await readUdpStabilitySelection({
+      getItemAsync: async () => '{"profile":"auto"}',
+      setItemAsync: async () => undefined,
+      deleteItemAsync: async () => { throw new Error("locked"); },
+    });
+    expect(selection).toEqual({ profile: "auto" });
+  });
 });
