@@ -2460,6 +2460,98 @@ struct EncodePolicyTests {
                 recoveryBoundarySent: false
             )).fecParityShards == 2
         )
+        // 연결 적응 사다리(2026-11-22): 반복 유실 에피소드는 보호를 단계적으로
+        // 올리고(escalated), 클린 5s마다 한 단계씩 내린다(standingDown).
+        // tier 3(burst 2 + parity 4)은 hold 동안만 유지된다.
+        var ladderBurst = UdpBurstPolicyState(applied: autoUdp)
+        var ladderDecision = ladderBurst.observe(.init(
+            nowNs: 1_000_000_000,
+            incompleteAccessUnits: 1,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .receiverLoss)
+        precondition(ladderDecision.burstDatagrams == 4)
+        precondition(ladderDecision.fecParityShards == 3)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 7_000_000_000,
+            incompleteAccessUnits: 2,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .escalated)
+        precondition(ladderDecision.burstDatagrams == 4)
+        precondition(ladderDecision.fecParityShards == 4)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 13_000_000_000,
+            incompleteAccessUnits: 3,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .escalated)
+        precondition(ladderDecision.burstDatagrams == 2)
+        precondition(ladderDecision.fecParityShards == 4)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 14_000_000_000,
+            incompleteAccessUnits: 3,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .recoveryHold)
+        precondition(ladderDecision.burstDatagrams == 2)
+        precondition(ladderDecision.fecParityShards == 4)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 20_000_000_001,
+            incompleteAccessUnits: 3,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .standingDown)
+        precondition(ladderDecision.burstDatagrams == 4)
+        precondition(ladderDecision.fecParityShards == 4)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 25_000_000_002,
+            incompleteAccessUnits: 3,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .standingDown)
+        precondition(ladderDecision.fecParityShards == 3)
+        ladderDecision = ladderBurst.observe(.init(
+            nowNs: 30_000_000_003,
+            incompleteAccessUnits: 3,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(ladderDecision.reason == .standingDown)
+        precondition(ladderDecision.burstDatagrams == 4)
+        precondition(ladderDecision.fecParityShards == 2)
+        // 에피소드 창(15s) 밖의 유실은 누적하지 않고 다시 tier 1부터 시작한다.
+        var episodeResetBurst = UdpBurstPolicyState(applied: autoUdp)
+        _ = episodeResetBurst.observe(.init(
+            nowNs: 1_000_000_000,
+            incompleteAccessUnits: 1,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        let episodeResetDecision = episodeResetBurst.observe(.init(
+            nowNs: 40_000_000_000,
+            incompleteAccessUnits: 2,
+            oneFrameGapEvents: 0,
+            multiFrameGapEvents: 0,
+            recoveryBoundarySent: false
+        ))
+        precondition(episodeResetDecision.reason == .receiverLoss)
+        precondition(episodeResetDecision.fecParityShards == 3)
+        precondition(episodeResetDecision.burstDatagrams == 4)
         var oneFrameLossBurst = UdpBurstPolicyState(applied: autoUdp)
         let oneFrameLossDecision = oneFrameLossBurst.observe(.init(
             nowNs: 1_000,
