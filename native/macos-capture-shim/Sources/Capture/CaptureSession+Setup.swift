@@ -136,6 +136,45 @@ extension CaptureSession {
         )
     }
 
+    /// Control-plane variant of `send`: a refused datagram (EAGAIN on the
+    /// full media send buffer) is reported distinctly so the caller can retry
+    /// it (see controlSendRetryDelayMs) instead of losing the viewer's only
+    /// copy of a probe reply. Every attempt seals afresh, so a retry never
+    /// replays a nonce.
+    func sendControlDatagram(
+        _ data: Data,
+        fd: Int32,
+        to addr: inout sockaddr_in
+    ) -> ControlSendOutcome {
+        guard sourceAuthorization?.begin() ?? true else { return .failed }
+        defer { sourceAuthorization?.end() }
+        guard let sealed = mediaCrypto.seal(data) else { return .failed }
+        var sendErrno: Int32 = 0
+        let result = sealed.withUnsafeBytes { raw in
+            guard let baseAddress = raw.baseAddress else {
+                sendErrno = EINVAL
+                return -1
+            }
+            return withUnsafePointer(to: &addr) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    let sent = sendto(
+                        fd,
+                        baseAddress,
+                        raw.count,
+                        0,
+                        socketAddress,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                    sendErrno = errno
+                    return sent
+                }
+            }
+        }
+        if result == sealed.count { return .sent }
+        if sendErrno == EAGAIN || sendErrno == EWOULDBLOCK { return .wouldBlock }
+        return .failed
+    }
+
     /// A non-blocking UDP socket can transiently report EAGAIN/ENOBUFS during
     /// a Wi-Fi scheduling pause. This is an intentional loss-tolerant media
     /// path: never wait for the kernel to drain because the wait would hold
@@ -200,13 +239,24 @@ extension CaptureSession {
                 at: DispatchTime.now().uptimeNanoseconds
             )
         )
-        let pacingRateMultiplier = udpPacingRateMultiplier(
-            profile: appliedUdpStability.profile,
-            burstDatagrams: effectiveBurstDatagrams,
-            localLan: isLocalLanPeer(
-                ipv4HostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr)
+        // The 2× local-LAN multiplier pushes an on-target AU at ~2.5× its wire
+        // rate (frame-budget 1.25× × 2). Against the 64KiB send buffer that
+        // overflows whenever the link drains below roughly 65Mbps, so a 4K
+        // video AU (≈100KB) aborted on every send even on a link that carried
+        // its 48Mbps average fine — each abort requested an IDR and the
+        // recovery storm followed. While the link is degraded (10s after an
+        // abort or a >8ms sendto) deltas pace at the wire rate instead: the AU
+        // then spans at most one frame budget, which the size-aware send
+        // deadline already allows, and the overflow threshold drops to ≈26Mbps.
+        let pacingRateMultiplier = linkDegraded
+            ? 1
+            : udpPacingRateMultiplier(
+                profile: appliedUdpStability.profile,
+                burstDatagrams: effectiveBurstDatagrams,
+                localLan: isLocalLanPeer(
+                    ipv4HostOrder: UInt32(bigEndian: targetAddr.sin_addr.s_addr)
+                )
             )
-        )
         stateLock.unlock()
         // Pace at the configured media rate, with a small floor to avoid
         // recreating a burst for tiny tail fragments. The deadline is shared

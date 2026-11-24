@@ -45,6 +45,16 @@ extension CaptureSession {
         let congestionDrops = max(0, framesDropped - recoveryFramesDropped) + captureQueueDropped
         let newDrops = congestionDrops - lastAdaptedDropped
         lastAdaptedDropped = congestionDrops
+        // A refused media datagram (EAGAIN on the full 64KiB send buffer) or
+        // an AU that overran its send deadline is the kernel saying the link
+        // cannot drain even the current rate. Unlike queue-chain discards it
+        // is never recovery machinery churn, so it needs no grace and no
+        // second window: a 4K video start that overshoots the link must be cut
+        // inside one window, not confirmed two seconds later while the
+        // recovery storm it triggers starves the viewer's watchdog.
+        let newSendFailures = max(0, udpSendFailures - lastAdaptedSendFailures)
+        lastAdaptedSendFailures = udpSendFailures
+        let hardCongestion = newSendFailures > 0
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let feedbackFresh = receiverFeedbackNs > 0
             && nowNs &- receiverFeedbackNs <= 3_000_000_000
@@ -117,7 +127,7 @@ extension CaptureSession {
         // and governed by the same two-consecutive-windows rule, so a single
         // transient elsewhere can only confirm the second window — it can
         // never cut on its own.
-        let congested = ownCongested || peerCongested
+        let congested = ownCongested || peerCongested || hardCongestion
         let current = currentAverageBitrate
         let qualityHintForBitrate = manualQualityHint ?? currentQualityHint
         let highMotion = adaptiveMotionState.mode(at: nowNs) == .video
@@ -155,8 +165,10 @@ extension CaptureSession {
         let ceilingCleanStreakSnapshot = adaptiveCeilingCleanStreak
         // Only treat sustained congestion (two consecutive windows) as real.
         // A single lost datagram or one RTT spike is normal Wi-Fi behavior
-        // and must not cut the bitrate.
-        let congestionConfirmed = consecutiveCongestedWindows >= 2
+        // and must not cut the bitrate. A refused send is not a lost datagram
+        // — it is the socket buffer refusing the rate itself — so it
+        // confirms on its own.
+        let congestionConfirmed = consecutiveCongestedWindows >= 2 || hardCongestion
         // R5: while the recovery ramp has an accelerated raise pending it
         // takes precedence over the normal ladder for this window.
         let canRaise = !congested && stableBitrateWindows >= 3 && !rampRaiseEligible
@@ -252,7 +264,8 @@ extension CaptureSession {
             target = adaptiveCongestionCutTarget(
                 currentBitrate: current,
                 floorBitrate: floorBitrate,
-                activeCount: activeCount
+                activeCount: activeCount,
+                retainFraction: hardCongestion ? 0.60 : 0.80
             )
             stateLock.lock()
             adaptiveRaiseCeilingBitrate = adaptiveRaiseCeilingAfterCongestion(
@@ -288,22 +301,14 @@ extension CaptureSession {
                     target
                 )
             }
-        } else if highMotion {
-            // Raise the budget as soon as a sustained high-change scene is
-            // observed. This avoids waiting through eight stable windows,
-            // which is too slow for the first seconds of a video. The
-            // congestion-cut ceiling still applies: high motion must not push
-            // the stream back into a level that just collapsed the link.
-            let ultraHd = isUltraHdDimensions(width: outWidth, height: outHeight)
-            let motionFloor = ultraHd
-                ? (activeCount > 1 ? 36_000_000 : 48_000_000)
-                : (activeCount > 1 ? 10_000_000 : 14_000_000)
-            target = highMotionBitrateTarget(
-                current: current,
-                floor: floorBitrate,
-                ceiling: effectiveCeiling,
-                motionFloor: min(motionFloor, effectiveCeiling)
-            )
+        } else if congested {
+            // A window that voted congested but is not confirmed yet HOLDS.
+            // The high-motion branch used to raise straight to the motion floor
+            // from here, and the post-cut ramp could step up into the very next
+            // congested window, so a 4K video start sawtoothed cut → one
+            // grace-calm window → raise to 90% of the failing rate → collapse
+            // until the viewer's watchdog ended the session.
+            return
         } else if rampRaiseEligible {
             // R5 bounded recovery ramp: two clean windows after the cut armed
             // at most three accelerated raises of +30% per clean window. The
@@ -318,15 +323,34 @@ extension CaptureSession {
             guard capped > current else { return }
             target = capped
         } else if canRaise {
-            // Accelerating recovery: 4% → 8% → 16% per stable window so a
-            // ratchet-down to the floor recovers in a few seconds while an
-            // early overshoot is still corrected by the next cut. The
-            // three-clean-window ladder above arms this within ~3s of clean
-            // air instead of the old eight.
-            let raiseFactor = min(0.04 * pow(2.0, Double(min(consecutiveRaiseSteps - 1, 5))), 0.30)
-            let capped = min(effectiveCeiling, Int(Double(current) * (1.0 + raiseFactor)))
-            guard capped > current else { return }
-            target = capped
+            if highMotion {
+                // Raise the budget as soon as a sustained high-change scene is
+                // observed — but only on a link that is clean now and has
+                // been for the three-window ladder (a link that just cut
+                // climbs through the ramp above instead). The congestion-cut
+                // ceiling still applies: high motion must not push the stream
+                // back into a level that just collapsed the link.
+                let ultraHd = isUltraHdDimensions(width: outWidth, height: outHeight)
+                let motionFloor = ultraHd
+                    ? (activeCount > 1 ? 36_000_000 : 48_000_000)
+                    : (activeCount > 1 ? 10_000_000 : 14_000_000)
+                target = highMotionBitrateTarget(
+                    current: current,
+                    floor: floorBitrate,
+                    ceiling: effectiveCeiling,
+                    motionFloor: min(motionFloor, effectiveCeiling)
+                )
+            } else {
+                // Accelerating recovery: 4% → 8% → 16% per stable window so a
+                // ratchet-down to the floor recovers in a few seconds while an
+                // early overshoot is still corrected by the next cut. The
+                // three-clean-window ladder above arms this within ~3s of clean
+                // air instead of the old eight.
+                let raiseFactor = min(0.04 * pow(2.0, Double(min(consecutiveRaiseSteps - 1, 5))), 0.30)
+                let capped = min(effectiveCeiling, Int(Double(current) * (1.0 + raiseFactor)))
+                guard capped > current else { return }
+                target = capped
+            }
         } else {
             return
         }

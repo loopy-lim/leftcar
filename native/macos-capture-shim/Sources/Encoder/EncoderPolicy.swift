@@ -443,13 +443,22 @@ func adaptiveRaiseCeilingAfterCongestion(failingBitrate: Int) -> Int {
 /// FPS oscillating 0–54 with the bitrate frozen at exactly 8Mbps for hours).
 /// The survival floor trades sharpness for a draining queue; the raise ladder
 /// climbs back once the link proves clean.
+///
+/// `retainFraction` 0.60 is the hard-evidence cut: the kernel refused a media
+/// datagram (EAGAIN on the full send buffer) or an AU overran its send
+/// deadline, so the link cannot drain even the current rate. Ten −20% steps
+/// (≥10s) let a 4K video start collapse into a recovery storm long before the
+/// rate fit; three −40% steps reach the same level inside three windows, and
+/// the ramp plus the 90% raise ceiling bound the climb back.
 func adaptiveCongestionCutTarget(
     currentBitrate: Int,
     floorBitrate: Int,
-    activeCount: Int
+    activeCount: Int,
+    retainFraction: Double = 0.80
 ) -> Int {
     let current = max(1, currentBitrate)
-    let cut = Int(Double(current) * 0.80)
+    let boundedRetain = min(0.80, max(0.10, retainFraction))
+    let cut = Int((Double(current) * boundedRetain).rounded())
     let atFloor = Double(current) <= Double(max(1, floorBitrate)) * 1.10
     if !atFloor {
         return max(floorBitrate, cut)

@@ -37,7 +37,9 @@ extension CaptureSession {
             return .handled
         }
         if message == Data("LCL?".utf8) {
-            _ = sendControlPayload(Data([0x4c, 0x43, 0x4c, 0x31, 1]), fd: fd, destination: destination)
+            _ = sendControlPayload(
+                Data([0x4c, 0x43, 0x4c, 0x31, 1]), fd: fd, destination: destination, retryWhenBlocked: true
+            )
             return .handled
         }
         if message == Data("BYE".utf8) {
@@ -607,19 +609,51 @@ extension CaptureSession {
         withUnsafeBytes(of: &hostReceiveBE) { response.append(contentsOf: $0) }
         var hostSendBE = UInt64(Date().timeIntervalSince1970 * 1000.0).bigEndian
         withUnsafeBytes(of: &hostSendBE) { response.append(contentsOf: $0) }
-        _ = sendControlPayload(response, fd: fd, destination: destination)
+        _ = sendControlPayload(response, fd: fd, destination: destination, retryWhenBlocked: true)
     }
 
      func sendControlPayload(
         _ data: Data,
         fd: Int32,
-        destination: sockaddr_in? = nil
+        destination: sockaddr_in? = nil,
+        retryWhenBlocked: Bool = false,
+        retryAttempt: Int = 0
     ) -> Int {
         if mediaTransport.usesTCP {
             return sendTCPFrame(data, fd: fd)
         }
         guard var destination else { return -1 }
-        return send(data, fd: fd, to: &destination)
+        switch sendControlDatagram(data, fd: fd, to: &destination) {
+        case .sent:
+            return data.count
+        case .failed:
+            return -1
+        case .wouldBlock:
+            // A full media send buffer must not cost the viewer its only
+            // probe reply (see controlSendRetryDelayMs). Zero means deferred;
+            // every caller discards the result. Only liveness replies opt in:
+            // a delayed cursor position arriving after its successor would
+            // drag the pointer backwards.
+            guard retryWhenBlocked,
+                  let delayMs = controlSendRetryDelayMs(attempt: retryAttempt) else { return -1 }
+            let replyDestination = destination
+            inputQueue.asyncAfter(deadline: .now() + .milliseconds(Int(delayMs))) { [weak self] in
+                guard let self = self, self.controlSendContextAlive(fd: fd) else { return }
+                _ = self.sendControlPayload(
+                    data, fd: fd, destination: replyDestination,
+                    retryWhenBlocked: true, retryAttempt: retryAttempt + 1
+                )
+            }
+            return 0
+        }
+    }
+
+    /// A retry scheduled before stop() must never touch a closed — or worse,
+    /// reused — descriptor.
+    func controlSendContextAlive(fd: Int32) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running && !stopRequested && fd >= 0 && sock == fd
     }
 
      func sendInputAck(
@@ -634,6 +668,6 @@ extension CaptureSession {
         let enabled = inputEnabled
         inputLock.unlock()
         ack.append(enabled ? 1 : 0)
-        _ = sendControlPayload(ack, fd: fd, destination: destination)
+        _ = sendControlPayload(ack, fd: fd, destination: destination, retryWhenBlocked: true)
     }
 }

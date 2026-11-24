@@ -375,6 +375,7 @@ final class CaptureSession {
      var qualityAdaptationLastQueueP95Us: UInt64 = 0
      var qualityAdaptationLastReceiverLoss: UInt64 = 0
      var lastAdaptedDropped: Int64 = 0
+     var lastAdaptedSendFailures: Int64 = 0
      var receiverFrameGaps: UInt32 = 0
      var receiverInputDrops: UInt32 = 0
      var receiverIncompleteAUs: UInt32 = 0

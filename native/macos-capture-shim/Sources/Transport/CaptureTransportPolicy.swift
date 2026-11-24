@@ -100,3 +100,26 @@ func captureTransportPolicy(
     guard placeholder || validated != nil else { return nil }
     return .legacy
 }
+
+enum ControlSendOutcome: Equatable {
+    case sent
+    case wouldBlock
+    case failed
+}
+
+/// Host→viewer control datagrams (probe replies, input acks) share the media
+/// socket, whose send buffer is deliberately small (64KiB) so stale video never
+/// survives a Wi-Fi pause behind the app's latest-frame queue. While the
+/// network queue drains an AU burst that buffer is full and the non-blocking
+/// sendto fails with EAGAIN. Losing the datagram is harmless for media — the
+/// next IDR re-establishes the chain — but the viewer counts missed probe
+/// replies and terminates as "host unreachable" after three in a row one
+/// second apart, so a congested yet alive host was killed by its own burst
+/// pattern. Retry on the serialized input queue with a bounded doubling backoff
+/// instead: ~380ms of coverage stays inside one probe interval and never
+/// blocks the network queue. Nil once the retry budget is spent.
+func controlSendRetryDelayMs(attempt: Int) -> UInt32? {
+    let delays: [UInt32] = [3, 6, 12, 24, 48, 96, 192]
+    guard attempt >= 0, attempt < delays.count else { return nil }
+    return delays[attempt]
+}
