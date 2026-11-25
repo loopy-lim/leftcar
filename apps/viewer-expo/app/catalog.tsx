@@ -955,6 +955,7 @@ function DisplayListHeader({ model }: { model: CatalogModel }) {
 }
 function DisplayListEmpty({ model }: { model: CatalogModel }) {
   const { t } = useAppLanguage();
+  if (!model.loading && model.visibleError) return null;
   return (
     <Surface variant="card" className="gap-3 py-6">
       {model.loading ? (
@@ -967,13 +968,11 @@ function DisplayListEmpty({ model }: { model: CatalogModel }) {
       ) : (
         <>
           <Label tone="muted">{t.viewer.emptyDisplays}</Label>
-          {!model.visibleError ? (
-            <Action
-              variant="secondary"
-              onPress={model.handleRefresh}
-              label={t.common.retry}
-            />
-          ) : null}
+          <Action
+            variant="secondary"
+            onPress={model.handleRefresh}
+            label={t.common.retry}
+          />
         </>
       )}
     </Surface>

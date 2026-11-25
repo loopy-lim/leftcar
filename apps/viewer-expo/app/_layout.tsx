@@ -31,7 +31,7 @@ function NavigationStack() {
       <Stack
         screenOptions={{
           headerStyle: {
-            backgroundColor: colors.bgSurface,
+            backgroundColor: colors.bgCanvas,
           },
           headerTintColor: colors.textPrimary,
           headerTitleStyle: {
