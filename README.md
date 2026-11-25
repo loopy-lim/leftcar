@@ -63,6 +63,7 @@ Leftcar는 Mac 또는 Windows PC의 화면을 Android 휴대폰과 태블릿에�
 - 두 번째 대상 호스트: Windows (구현 있음; 이번 변경의 Windows 빌드·실기 수용 미검증)
 - Linux Host: 개발 후보 (2026-11-01). Wayland(wlroots 계열, Hyprland 실측) wlr-screencopy 캡처 + NVENC 하드웨어 H.264(2026-11-02, 소프트웨어 OpenH264 자동 폴백) + wlr 가상 포인터/키보드 입력. 1080p60 인코더 스루풋 실측 avg 5.4ms(예산 16.6ms 이내). 실기기 Viewer 수용은 미실행 — [구현 계획](docs/plans/2026-11-01-linux-host.md), [NVENC 계획](docs/plans/2026-11-02-linux-nvenc-60fps.md)
 - 우선 대상 뷰어: arm64 Android 휴대폰, 태블릿 및 대화면 기기
+- Viewer NSH 재구성(프로토타입, 2026-11-24): `apps/viewer-nsh/`에 NSH 0.6.1 TSX 앱으로 카탈로그 화면(첫 조각)을 넣었다. 토큰과 문구는 `bun tools/generate-ui-theme.ts`가 `theme.json`·`copy.ts`로 만들고 `bun run check:ui-theme`이 드리프트를 막는다. 데이터는 고정 픽스처이다(임베딩 호스트가 있으면 `catalog.load`·`catalog.open`·`catalog.stop`을 호출). 실제 연결과 스트림 실행은 아직 없다. 앱 디렉터리에서 `nsh check .`, `nsh build .`, `nsh test .`로 검사하고, 기기 캡처는 `nsh test screens.test.tsx --target android`로 찍는다. 이 앱에는 `package.json`이 없어 React Doctor와 vitest가 검사하지 않는다. 설치본은 `bun run package:viewer-nsh`가 `apps/viewer-nsh/.nsh/out/Leftcar NSH.apk`(arm64, 디버그 키 서명, id `dev.leftcar.viewer.nsh`)로 만들고 `adb install`로 설치한다 — RN 뷰어(`leftcar.ll3.kr`)와 id가 달라 나란히 설치된다. 저장소 안에서 패키징하면 저장소의 `rust-toolchain.toml`(Rust 1.99.1)이 nsh 런타임 빌드에 적용돼 섹션 제목 굵기가 빠지므로(nsh 0.6.1, 2026-11-24 실측), 스크립트는 앱을 저장소 밖에 스테이징해 패키징한다. `ANDROID_HOME`과 `JAVA_HOME`이 필요하다. 릴리스 서명은 `KEYSTORE=키스토어 KEY_ALIAS=별칭 bun run package:viewer-nsh`로 하고, 비밀번호는 `NSH_KEYSTORE_PASSWORD`로 넘긴다. macOS `.app`은 맥에서 앱 디렉터리 안에서 `nsh package --target macos .`로 만든다(애드혹 서명).
 
 ## 보안(요약)
 

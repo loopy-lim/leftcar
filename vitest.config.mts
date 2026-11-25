@@ -13,6 +13,8 @@ export default defineConfig({
       // CI checks the unikit-bridge sibling repo out into the workspace so
       // Cargo path deps resolve; its own test suite is not ours to run.
       "**/unikit-bridge-sibling/**",
+      // The NSH viewer has its own JSX runtime and test runner (`nsh test`).
+      "**/apps/viewer-nsh/**",
     ],
   },
 });

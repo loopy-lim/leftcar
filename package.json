@@ -12,6 +12,7 @@
     "dev:host:macos": "zsh tools/dev-host-macos.zsh",
     "check:react-runtime": "bun tools/check-react-runtime-versions.mjs",
     "check:ui-theme": "bun tools/generate-ui-theme.ts --check",
+    "package:viewer-nsh": "tools/package-viewer-nsh.sh",
     "typecheck": "bun run check:ui-theme && bun run check:react-runtime && tsc -b && bun run --cwd apps/viewer-expo typecheck && bun run --cwd apps/host-desktop typecheck",
     "test": "vitest run",
     "test:contract": "vitest run -c vitest.contract.config.mts",

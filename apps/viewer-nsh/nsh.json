@@ -1,0 +1,12 @@
+{
+  "name": "Leftcar NSH",
+  "id": "dev.leftcar.viewer.nsh",
+  "version": "0.1.0",
+  "build": 1,
+  "icon": "icon.png",
+  "theme": "./theme.json",
+  "capabilities": {
+    "host": ["catalog.load", "catalog.open", "catalog.stop"],
+    "statusBar": true
+  }
+}
