@@ -1,14 +1,18 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderNshCopy } from "../packages/ui-tokens/src/copy-nsh";
 import { renderStreamUiTokens } from "../packages/ui-tokens/src/theme-kotlin";
 import { renderThemeCss } from "../packages/ui-tokens/src/theme-css";
+import { renderNshTheme } from "../packages/ui-tokens/src/theme-nsh";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 for (const [path, expected] of [
   ["apps/host-desktop/src/theme.css", renderThemeCss("host")],
   ["apps/viewer-expo/theme.css", renderThemeCss("viewer")],
   ["apps/viewer-expo/android/app/src/main/java/dev/leftcar/viewer/stream/StreamUiTokens.kt", renderStreamUiTokens()],
+  ["apps/viewer-nsh/theme.json", renderNshTheme()],
+  ["apps/viewer-nsh/copy.ts", renderNshCopy()],
 ] as const) {
   const file = resolve(root, path);
   if (process.argv.includes("--check")) {

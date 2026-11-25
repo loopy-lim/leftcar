@@ -1,6 +1,6 @@
 import { colors, typography, radii, spacing, type ThemeTokens } from "./tokens";
 
-const roleKeys = {
+export const colorRoles = {
   canvas: "bgCanvas", surface: "bgSurface", subtle: "bgSubtle", hover: "bgHover",
   ink: "textPrimary", muted: "textMuted", secondary: "textSecondary",
   outline: "borderCard", strong: "borderStrong", focus: "borderFocus",
@@ -18,7 +18,7 @@ const roleKeys = {
 } satisfies Record<string, keyof ThemeTokens>;
 
 function declarations(palette: ThemeTokens, prefix: string): string {
-  return Object.entries(roleKeys).map(([role, key]) => `    --${prefix}${role}: ${palette[key]};`).join("\n");
+  return Object.entries(colorRoles).map(([role, key]) => `    --${prefix}${role}: ${palette[key]};`).join("\n");
 }
 
 /**
@@ -51,6 +51,6 @@ export function renderThemeCss(platform: "host" | "viewer"): string {
   if (platform === "viewer") {
     return `${heading}@theme {\n${scale()}\n${declarations(colors.light, "color-")}\n}\n@layer theme {\n  :root {\n    @variant light {\n${declarations(colors.light, "color-")}\n    }\n    @variant dark {\n${declarations(colors.dark, "color-")}\n    }\n  }\n}\n`;
   }
-  const aliases = Object.keys(roleKeys).map((role) => `  --color-${role}: var(--ui-${role});`).join("\n");
+  const aliases = Object.keys(colorRoles).map((role) => `  --color-${role}: var(--ui-${role});`).join("\n");
   return `${heading}@theme {\n${scale()}\n}\n@theme inline {\n${aliases}\n}\n:root {\n${declarations(colors.light, "ui-")}\n}\n@media (prefers-color-scheme: dark) {\n  :root:not([data-theme=\"light\"]) {\n${declarations(colors.dark, "ui-")}\n  }\n}\n:root[data-theme=\"dark\"] {\n${declarations(colors.dark, "ui-")}\n}\n`;
 }
